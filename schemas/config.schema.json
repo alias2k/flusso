@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "pg_sync_rs Config",
+  "type": "object",
+  "required": ["source"],
+  "additionalProperties": false,
+  "properties": {
+    "source": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["postgres"]
+        }
+      }
+    },
+    "sinks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["opensearch", "stdout"]
+          }
+        }
+      }
+    },
+    "index": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "schema", "enabled"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the index"
+          },
+          "schema": {
+            "type": "string",
+            "description": "Path to the index schema YAML file starting from the config location",
+            "format": "uri-reference",
+            "pattern": "^[^/][^:]*\\.ya?ml$"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,61 @@
+[workspace]
+members = [
+  "libs/0-core",
+  "libs/0-schema",
+  # "libs/1-checkpoints/*",
+  # "libs/1-sinks/*",
+  # "libs/1-sources/*",
+  "libs/2-engine",
+  "apps/*",
+]
+resolver = "3"
+
+[workspace.lints.rust]
+# Turn ALL warnings from rustc into errors.
+warnings = "deny"
+
+# Forbid unsafe code unless explicitly allowed at the module/fn level.
+unsafe_code = "deny"
+
+# Enforce that all public types implement Debug.
+# This is invaluable for your Jaeger tracing setup.
+missing_debug_implementations = "deny"
+
+# Enforce standard Rust naming conventions.
+non_snake_case = "deny"
+non_camel_case_types = "deny"
+non_upper_case_globals = "deny"
+# Find code that can never be reached.
+unreachable_patterns = "deny"
+unreachable_pub = "deny"
+# Find unused variables, imports, etc.
+unused_variables = "deny"
+unused_imports = "deny"
+unused_mut = "deny"
+# Find unused imports
+unused_crate_dependencies = "warn"
+
+[workspace.lints.clippy]
+# Instead, we'll deny the 'recommended' set and add specific high-impact lints.
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+
+# Forbid .unwrap() and force proper Result handling.
+unwrap_used = "deny"
+# Forbid .expect() as well. Panics are not enterprise-grade error handling.
+expect_used = "deny"
+
+# Force devs to use your 'tracing' stack instead of println!.
+print_stdout = "deny"
+print_stderr = "deny"
+
+# Prevent indexing operations that could panic.
+indexing_slicing = "deny"
+
+# Prefer `is_empty()` over `len() == 0`.
+len_zero = "deny"
+# Enforce writing `match` statements in a clearer way.
+match_bool = "deny"
+iter_next_slice = "allow"
+
+[workspace.dependencies]

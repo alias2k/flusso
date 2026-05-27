@@ -1,0 +1,135 @@
+# yaml-language-server: $schema=../../../schemas/index.schema.yml
+
+version: 1
+
+# Root table
+table: users
+schema: public # optional, default "public"
+primary_key: id # optional, auto-detected
+doc_id: id # optional, defaults to primary_key
+
+# Soft-delete: rows with deleted_at IS NOT NULL are treated as deletes
+soft_delete:
+  field: archived
+  when:
+    - { column: "archived_at", op: is_null }
+
+# As an alternative, which does the same:
+# soft_delete:
+#   column: archived_at
+
+fields:
+  # Short form: field name = column name, type inferred
+  - id
+  - email
+
+  # Rename column → field
+  - field: createdAt
+    column: created_at
+    mapping: { type: date }
+
+  - field: email
+    mapping: { type: keyword }
+    transforms:
+      - lowercase
+      - trim
+
+  - field: bio
+    mapping:
+      type: text
+      analyzer: english
+    default: ""
+
+  - field: displayName
+    column: name
+    mapping: { type: keyword }
+    transforms:
+      - trim
+    default: "anonymous"
+
+  # Embedded object (one-to-one)
+  - field: address
+    join:
+      table: addresses
+      type: one_to_one
+      foreign_key: user_id
+    mapping: { type: object }
+    fields:
+      - street
+      - field: city
+        transforms:
+          - trim
+      - country
+
+  # Nested array (one-to-many) with order_by + limit
+  - field: orders
+    join:
+      table: orders
+      type: one_to_many
+      foreign_key: user_id
+      order_by:
+        - { column: created_at, direction: desc }
+      limit: 5
+    mapping: { type: nested }
+    fields:
+      - id
+      - total
+      - field: status
+        column: status
+        mapping: { type: keyword }
+
+      # Nested deeper
+      - field: items
+        join:
+          table: order_items
+          type: one_to_many
+          foreign_key: order_id
+        mapping: { type: nested }
+        fields: [id, sku, quantity, price]
+
+  # Flat array via join table (many-to-many)
+  - field: tags
+    join:
+      table: tags
+      type: many_to_many
+      through:
+        table: user_tags
+        left_key: user_id
+        right_key: tag_id
+    mapping: { type: keyword }
+    fields: [name]
+
+  - field: tagCount
+    aggregate:
+      table: tags
+      op: count
+      through:
+        table: user_tags
+        left_key: user_id
+        right_key: tag_id
+    mapping: { type: integer }
+
+  - field: totalOrders
+    aggregate:
+      table: orders
+      foreign_key: user_id
+      op: count
+    mapping: { type: integer }
+
+  - field: totalOrdersFulfilled
+    aggregate:
+      table: orders
+      foreign_key: user_id
+      op: count
+      filters:
+        - { column: "status", op: "eq", value: "fulfilled" }
+    mapping: { type: integer }
+
+  - field: totalOrdersPending
+    aggregate:
+      table: orders
+      foreign_key: user_id
+      op: count
+      filters:
+        - { column: "status", op: "eq", value: "pending" }
+    mapping: { type: integer }

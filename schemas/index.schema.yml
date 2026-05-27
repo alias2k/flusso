@@ -1,0 +1,187 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: pg_sync_rs Index Schema
+type: object
+required: [version, table, fields]
+additionalProperties: false
+properties:
+  version:
+    type: integer
+    enum: [1]
+  table:
+    type: string
+  schema:
+    type: string
+    default: public
+  primary_key:
+    type: string
+  doc_id:
+    type: string
+  soft_delete:
+    oneOf:
+      - type: object
+        required: [field]
+        additionalProperties: false
+        properties:
+          field:
+            type: string
+          when:
+            $ref: "#/definitions/filters"
+      - type: object
+        required: [column]
+        additionalProperties: false
+        properties:
+          column:
+            type: string
+          when:
+            $ref: "#/definitions/filters"
+  fields:
+    type: array
+    items:
+      $ref: "#/definitions/field"
+
+definitions:
+  field:
+    oneOf:
+      - type: string
+      - type: object
+        required: [field]
+        additionalProperties: false
+        properties:
+          field:
+            type: string
+          column:
+            type: string
+          mapping:
+            $ref: "#/definitions/mapping"
+          join:
+            $ref: "#/definitions/join"
+          aggregate:
+            $ref: "#/definitions/aggregate"
+          transforms:
+            $ref: "#/definitions/transforms"
+          default: {}
+          fields:
+            type: array
+            items:
+              $ref: "#/definitions/field"
+
+  mapping:
+    type: object
+    required: [type]
+    properties:
+      type:
+        type: string
+    additionalProperties: true
+
+  transforms:
+    type: array
+    items:
+      type: string
+      enum: [lowercase, trim]
+
+  filter:
+    oneOf:
+      - type: object
+        required: [raw]
+        additionalProperties: false
+        properties:
+          raw:
+            type: string
+      - type: object
+        required: [column, op]
+        additionalProperties: false
+        properties:
+          column:
+            type: string
+          op:
+            type: string
+            enum: [is_null, is_not_null]
+      - type: object
+        required: [column, op]
+        additionalProperties: false
+        properties:
+          column:
+            type: string
+          op:
+            type: string
+            enum: [eq, neq, lt, lte, gt, gte, in, not_in, like, ilike, between]
+          value: {}
+
+  filters:
+    type: array
+    items:
+      $ref: "#/definitions/filter"
+
+  order_by:
+    type: array
+    items:
+      type: object
+      required: [column]
+      additionalProperties: false
+      properties:
+        column:
+          type: string
+        direction:
+          type: string
+          enum: [asc, desc]
+
+  through:
+    type: object
+    required: [table, left_key, right_key]
+    additionalProperties: false
+    properties:
+      table:
+        type: string
+      left_key:
+        type: string
+      right_key:
+        type: string
+
+  join:
+    type: object
+    required: [table, type]
+    additionalProperties: false
+    properties:
+      table:
+        type: string
+      type:
+        type: string
+        enum: [one_to_one, one_to_many, many_to_many]
+      foreign_key:
+        type: string
+      through:
+        $ref: "#/definitions/through"
+      filters:
+        $ref: "#/definitions/filters"
+      order_by:
+        $ref: "#/definitions/order_by"
+      limit:
+        type: integer
+        minimum: 1
+    if:
+      properties:
+        type:
+          const: many_to_many
+    then:
+      required: [through]
+    else:
+      required: [foreign_key]
+
+  aggregate:
+    type: object
+    required: [table, op]
+    additionalProperties: false
+    properties:
+      table:
+        type: string
+      op:
+        type: string
+        enum: [count, sum, avg, min, max]
+      column:
+        type: string
+      foreign_key:
+        type: string
+      through:
+        $ref: "#/definitions/through"
+      filters:
+        $ref: "#/definitions/filters"

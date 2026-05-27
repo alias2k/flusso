@@ -1,0 +1,13 @@
+[source]
+type = "postgres"
+
+[sinks.primary]
+type = "opensearch"
+
+[sinks.audit]
+type = "stdout"
+
+[[index]]
+name = "branches"
+schema = "branch.schema.yml"
+enabled = true
