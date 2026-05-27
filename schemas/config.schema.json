@@ -4,6 +4,13 @@
   "type": "object",
   "required": ["source"],
   "additionalProperties": false,
+  "definitions": {
+    "pg_identifier": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*$",
+      "maxLength": 63
+    }
+  },
   "properties": {
     "source": {
       "type": "object",
@@ -18,6 +25,9 @@
     },
     "sinks": {
       "type": "object",
+      "propertyNames": {
+        "$ref": "#/definitions/pg_identifier"
+      },
       "additionalProperties": {
         "type": "object",
         "required": ["type"],
@@ -38,7 +48,7 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "type": "string",
+            "$ref": "#/definitions/pg_identifier",
             "description": "Name of the index"
           },
           "schema": {

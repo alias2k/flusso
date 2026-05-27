@@ -4,7 +4,10 @@ use nutype::nutype;
 
 #[nutype(
     sanitize(trim, lowercase),
-    validate(not_empty),
+    validate(
+        len_char_max = 63,
+        regex = r"^[a-z_][a-z0-9_]*$"
+    ),
     derive(
         Debug,
         Clone,
@@ -43,7 +46,10 @@ impl AsRef<std::path::Path> for SchemaPath {
 
 #[nutype(
     sanitize(trim, lowercase),
-    validate(not_empty),
+    validate(
+        len_char_max = 63,
+        regex = r"^[a-z_][a-z0-9_]*$"
+    ),
     derive(
         Debug,
         Clone,
@@ -62,7 +68,10 @@ pub struct SinkName(String);
 
 #[nutype(
     sanitize(trim),
-    validate(not_empty),
+    validate(
+        len_char_max = 63,
+        regex = r"^[a-zA-Z_][a-zA-Z0-9_]*$"
+    ),
     derive(
         Debug,
         Clone,
@@ -80,8 +89,11 @@ pub struct SinkName(String);
 pub struct FieldName(String);
 
 #[nutype(
-    sanitize(trim),
-    validate(not_empty),
+    sanitize(trim, lowercase),
+    validate(
+        len_char_max = 63,
+        regex = r"^[a-z_][a-z0-9_]*$"
+    ),
     derive(
         Debug,
         Clone,
@@ -99,8 +111,11 @@ pub struct FieldName(String);
 pub struct ColumnName(String);
 
 #[nutype(
-    sanitize(trim),
-    validate(not_empty, len_char_min = 4),
+    sanitize(trim, lowercase),
+    validate(
+        len_char_max = 63,
+        regex = r"^[a-z_][a-z0-9_]*$"
+    ),
     derive(
         Debug,
         Clone,

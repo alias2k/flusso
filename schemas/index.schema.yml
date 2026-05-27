@@ -8,12 +8,12 @@ properties:
     type: integer
     enum: [1]
   table:
-    type: string
+    $ref: "#/definitions/pg_identifier"
   schema:
-    type: string
+    $ref: "#/definitions/pg_identifier"
     default: public
   primary_key:
-    type: string
+    $ref: "#/definitions/pg_identifier"
   doc_id:
     type: string
   soft_delete:
@@ -23,7 +23,7 @@ properties:
         additionalProperties: false
         properties:
           field:
-            type: string
+            $ref: "#/definitions/field_name"
           when:
             $ref: "#/definitions/filters"
       - type: object
@@ -31,7 +31,7 @@ properties:
         additionalProperties: false
         properties:
           column:
-            type: string
+            $ref: "#/definitions/pg_identifier"
           when:
             $ref: "#/definitions/filters"
   fields:
@@ -40,17 +40,27 @@ properties:
       $ref: "#/definitions/field"
 
 definitions:
+  pg_identifier:
+    type: string
+    pattern: "^[a-z_][a-z0-9_]*$"
+    maxLength: 63
+
+  field_name:
+    type: string
+    pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$"
+    maxLength: 63
+
   field:
     oneOf:
-      - type: string
+      - $ref: "#/definitions/field_name"
       - type: object
         required: [field]
         additionalProperties: false
         properties:
           field:
-            type: string
+            $ref: "#/definitions/field_name"
           column:
-            type: string
+            $ref: "#/definitions/pg_identifier"
           mapping:
             $ref: "#/definitions/mapping"
           join:
@@ -92,7 +102,7 @@ definitions:
         additionalProperties: false
         properties:
           column:
-            type: string
+            $ref: "#/definitions/pg_identifier"
           op:
             type: string
             enum: [is_null, is_not_null]
@@ -101,7 +111,7 @@ definitions:
         additionalProperties: false
         properties:
           column:
-            type: string
+            $ref: "#/definitions/pg_identifier"
           op:
             type: string
             enum: [eq, neq, lt, lte, gt, gte, in, not_in, like, ilike, between]
@@ -120,7 +130,7 @@ definitions:
       additionalProperties: false
       properties:
         column:
-          type: string
+          $ref: "#/definitions/pg_identifier"
         direction:
           type: string
           enum: [asc, desc]
@@ -131,11 +141,11 @@ definitions:
     additionalProperties: false
     properties:
       table:
-        type: string
+        $ref: "#/definitions/pg_identifier"
       left_key:
-        type: string
+        $ref: "#/definitions/pg_identifier"
       right_key:
-        type: string
+        $ref: "#/definitions/pg_identifier"
 
   join:
     type: object
@@ -143,12 +153,12 @@ definitions:
     additionalProperties: false
     properties:
       table:
-        type: string
+        $ref: "#/definitions/pg_identifier"
       type:
         type: string
         enum: [one_to_one, one_to_many, many_to_many]
       foreign_key:
-        type: string
+        $ref: "#/definitions/pg_identifier"
       through:
         $ref: "#/definitions/through"
       filters:
@@ -173,14 +183,14 @@ definitions:
     additionalProperties: false
     properties:
       table:
-        type: string
+        $ref: "#/definitions/pg_identifier"
       op:
         type: string
         enum: [count, sum, avg, min, max]
       column:
-        type: string
+        $ref: "#/definitions/pg_identifier"
       foreign_key:
-        type: string
+        $ref: "#/definitions/pg_identifier"
       through:
         $ref: "#/definitions/through"
       filters:

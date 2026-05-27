@@ -12,3 +12,4 @@ serde_yaml.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 nutype.workspace = true
+regex.workspace = true
