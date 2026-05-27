@@ -8,6 +8,6 @@ type = "opensearch"
 type = "stdout"
 
 [[index]]
-name = "branches"
-schema = "branch.schema.yml"
+name = "users"
+schema = "user.schema.yml"
 enabled = true

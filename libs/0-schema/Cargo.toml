@@ -5,3 +5,10 @@ edition = "2024"
 
 [lints]
 workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+nutype.workspace = true

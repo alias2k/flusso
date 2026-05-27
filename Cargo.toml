@@ -59,3 +59,9 @@ match_bool = "deny"
 iter_next_slice = "allow"
 
 [workspace.dependencies]
+serde = { version = "1.0.*", features = ["derive"] }
+serde_yaml = { version = "0.9.*" }
+thiserror = { version = "2.0.*" }
+anyhow = { version = "1.0.*", features = ["backtrace"] }
+toml = { version = "1.1.*", features = ["preserve_order"] }
+nutype = { version = "0.7.*", features = ["serde"] }
