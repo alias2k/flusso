@@ -1,152 +1,19 @@
-use std::path::PathBuf;
+mod column_name;
+mod field_name;
+mod index_name;
+mod raw_filter_value;
+mod schema_path;
+mod sink_name;
+mod sink_type;
+mod source_type;
+mod table_name;
 
-use nutype::nutype;
-
-#[nutype(
-    sanitize(trim, lowercase),
-    validate(
-        len_char_max = 63,
-        regex = r"^[a-z_][a-z0-9_]*$"
-    ),
-    derive(
-        Debug,
-        Clone,
-        Display,
-        AsRef,
-        Deref,
-        Clone,
-        Hash,
-        Eq,
-        PartialEq,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct IndexName(String);
-
-#[nutype(derive(
-    Debug,
-    Clone,
-    AsRef,
-    Deref,
-    Clone,
-    Hash,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize
-))]
-pub struct SchemaPath(PathBuf);
-
-impl AsRef<std::path::Path> for SchemaPath {
-    fn as_ref(&self) -> &std::path::Path {
-        (&self).as_path()
-    }
-}
-
-#[nutype(
-    sanitize(trim, lowercase),
-    validate(
-        len_char_max = 63,
-        regex = r"^[a-z_][a-z0-9_]*$"
-    ),
-    derive(
-        Debug,
-        Clone,
-        Display,
-        AsRef,
-        Deref,
-        Clone,
-        Hash,
-        Eq,
-        PartialEq,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct SinkName(String);
-
-#[nutype(
-    sanitize(trim),
-    validate(
-        len_char_max = 63,
-        regex = r"^[a-zA-Z_][a-zA-Z0-9_]*$"
-    ),
-    derive(
-        Debug,
-        Clone,
-        Display,
-        AsRef,
-        Deref,
-        Clone,
-        Hash,
-        Eq,
-        PartialEq,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct FieldName(String);
-
-#[nutype(
-    sanitize(trim, lowercase),
-    validate(
-        len_char_max = 63,
-        regex = r"^[a-z_][a-z0-9_]*$"
-    ),
-    derive(
-        Debug,
-        Clone,
-        Display,
-        AsRef,
-        Deref,
-        Clone,
-        Hash,
-        Eq,
-        PartialEq,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct ColumnName(String);
-
-#[nutype(
-    sanitize(trim, lowercase),
-    validate(
-        len_char_max = 63,
-        regex = r"^[a-z_][a-z0-9_]*$"
-    ),
-    derive(
-        Debug,
-        Clone,
-        Display,
-        AsRef,
-        Deref,
-        Clone,
-        Hash,
-        Eq,
-        PartialEq,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct TableName(String);
-
-#[nutype(
-    sanitize(trim),
-    validate(not_empty),
-    derive(
-        Debug,
-        Clone,
-        Display,
-        AsRef,
-        Deref,
-        Clone,
-        Hash,
-        Eq,
-        PartialEq,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct RawFilterValue(String);
+pub use column_name::*;
+pub use field_name::*;
+pub use index_name::*;
+pub use raw_filter_value::*;
+pub use schema_path::*;
+pub use sink_name::*;
+pub use sink_type::*;
+pub use source_type::*;
+pub use table_name::*;
