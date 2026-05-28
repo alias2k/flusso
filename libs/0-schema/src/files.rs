@@ -1,2 +1,2 @@
-pub mod config_file;
-pub mod schema_file;
+pub mod config_toml;
+pub mod schema_yaml;

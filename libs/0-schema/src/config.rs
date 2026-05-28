@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::common;
-use crate::files::config_file::{ConfigFile, Sink, Source};
-use crate::files::schema_file::{Field, IndexSchemaFile, SoftDelete};
+use crate::files::config_toml::{ConfigFile, Sink, Source};
+use crate::files::schema_yaml::{Field, IndexSchemaFile, SoftDelete};
 use crate::traits::ParseFrom;
 
 #[derive(Debug, Clone)]
@@ -36,12 +36,12 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("failed to parse config: {0}")]
-    Config(#[from] crate::files::config_file::ParseError),
+    Config(#[from] crate::files::config_toml::ParseError),
     #[error("failed to parse index schema '{name}': {source}")]
     IndexSchema {
         name: common::IndexName,
         #[source]
-        source: crate::files::schema_file::ParseError,
+        source: crate::files::schema_yaml::ParseError,
     },
 }
 

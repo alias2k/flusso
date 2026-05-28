@@ -5,7 +5,7 @@ const CONFIG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/config.tom
 
 #[test]
 fn parse_config() {
-    use schema::files::config_file::ConfigFile;
+    use schema::files::config_toml::ConfigFile;
 
     const FILE: &str = include_str!("config.toml");
 
@@ -14,7 +14,7 @@ fn parse_config() {
 
 #[test]
 fn parse_index_schema() {
-    use schema::files::schema_file::IndexSchemaFile;
+    use schema::files::schema_yaml::IndexSchemaFile;
 
     const FILE: &str = include_str!("user.schema.yml");
 
@@ -25,7 +25,7 @@ fn parse_index_schema() {
 fn load_config() {
     use schema::common::SinkName;
     use schema::config::Config;
-    use schema::files::config_file::{SinkType, SourceType};
+    use schema::files::config_toml::{SinkType, SourceType};
 
     let config = Config::try_from_path(CONFIG_PATH).unwrap();
 
