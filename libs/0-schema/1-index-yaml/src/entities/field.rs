@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common;
+use schema_core::common;
 
 use super::{Aggregate, Join, Transform};
 

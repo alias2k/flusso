@@ -28,7 +28,7 @@ pub struct FieldDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transforms: Option<Vec<Transform>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<serde_yaml::Value>,
+    pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<Field>>,
 }
@@ -39,5 +39,5 @@ pub struct Mapping {
     #[serde(rename = "type")]
     pub mapping_type: String,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yaml::Value>,
+    pub extra: HashMap<String, String>,
 }

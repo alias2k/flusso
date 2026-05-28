@@ -1,4 +1,4 @@
-use crate::traits::ParseFrom;
+use schema_core::ParseFrom;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseError {

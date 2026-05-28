@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::common;
+use schema_core::common;
 
 use super::Filter;
 

@@ -1,0 +1,13 @@
+[package]
+name = "schema-index-yaml"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+schema-core.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true

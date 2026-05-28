@@ -1,5 +1,5 @@
 [package]
-name = "schema"
+name = "schema-core"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,9 +8,6 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
-serde_yaml.workspace = true
-thiserror.workspace = true
-toml.workspace = true
 nutype.workspace = true
 regex.workspace = true
 bon.workspace = true

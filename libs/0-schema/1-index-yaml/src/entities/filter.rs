@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::common;
+use schema_core::common;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]

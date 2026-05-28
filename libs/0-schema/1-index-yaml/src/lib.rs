@@ -23,7 +23,7 @@ pub struct SchemaYaml {
     pub fields: Vec<Field>,
 }
 
-impl From<SchemaYaml> for crate::config::IndexSchema {
+impl From<SchemaYaml> for schema_core::IndexSchema {
     fn from(_value: SchemaYaml) -> Self {
         todo!()
     }

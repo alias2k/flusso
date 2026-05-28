@@ -1,7 +1,7 @@
 [workspace]
 members = [
   "libs/0-core",
-  "libs/0-schema",
+  "libs/0-schema/*",
   # "libs/1-checkpoints/*",
   # "libs/1-sinks/*",
   # "libs/1-sources/*",
@@ -67,3 +67,5 @@ toml = { version = "1.1.*", features = ["preserve_order"] }
 nutype = { version = "0.7.*", features = ["serde", "regex"] }
 regex = { version = "1.12.*" }
 bon = { version = "3.*" }
+
+schema-core = { path = "libs/0-schema/0-core" }

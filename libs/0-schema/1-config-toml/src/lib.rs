@@ -7,10 +7,10 @@ pub use parser::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::common;
-use crate::files::config_toml::entities::IndexEntry;
-use crate::files::config_toml::entities::Sink;
-use crate::files::config_toml::entities::Source;
+use entities::IndexEntry;
+use entities::Sink;
+use entities::Source;
+use schema_core::common;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,7 +22,7 @@ pub struct ConfigToml {
     pub index: Option<Vec<IndexEntry>>,
 }
 
-impl From<ConfigToml> for crate::config::Config {
+impl From<ConfigToml> for schema_core::Config {
     fn from(_value: ConfigToml) -> Self {
         todo!()
     }
