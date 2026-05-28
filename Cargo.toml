@@ -69,3 +69,5 @@ regex = { version = "1.12.*" }
 bon = { version = "3.*" }
 
 schema-core = { path = "libs/0-schema/0-core" }
+schema-config-toml = { path = "libs/0-schema/0-config-toml" }
+schema-index-yaml = { path = "libs/0-schema/0-index-yaml" }
