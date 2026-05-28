@@ -28,12 +28,11 @@ use crate::common;
 pub struct Config {
     pub source: Source,
     pub sinks: BTreeMap<common::SinkName, Sink>,
-    pub indexes: Vec<Index>,
+    pub indexes: BTreeMap<common::IndexName, Index>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Index {
-    pub name: common::IndexName,
     pub enabled: bool,
     pub schema: IndexSchema,
 }

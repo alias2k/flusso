@@ -19,12 +19,21 @@ pub struct NullCheckFilter {
     pub op: NullOp,
 }
 
-/// All other filter ops — value operand required.
+/// All other filter ops — value operand matches the operator's arity.
 #[derive(Debug, Clone, Hash)]
 pub struct ValueOpFilter {
     pub column: common::ColumnName,
     pub op: FilterOp,
-    pub value: Option<String>,
+    pub value: FilterValue,
+}
+
+/// Typed filter value — arity matches the operator.
+/// `In`/`NotIn` → `List`, `Between` → `Range`, everything else → `Single`.
+#[derive(Debug, Clone, Hash)]
+pub enum FilterValue {
+    Single(String),
+    List(Vec<String>),
+    Range(String, String),
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]

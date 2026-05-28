@@ -6,11 +6,17 @@ use super::Filter;
 pub struct Join {
     pub table: common::TableName,
     pub join_type: JoinType,
-    pub foreign_key: Option<common::ColumnName>,
-    pub through: Option<Through>,
+    pub key: JoinKey,
     pub filters: Option<Vec<Filter>>,
     pub order_by: Option<Vec<OrderBy>>,
     pub limit: Option<u64>,
+}
+
+/// How the join condition is expressed — direct FK or through a junction table.
+#[derive(Debug, Clone, Hash)]
+pub enum JoinKey {
+    Direct(common::ColumnName),
+    Through(Through),
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]

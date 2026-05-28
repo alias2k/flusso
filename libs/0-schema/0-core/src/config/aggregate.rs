@@ -1,22 +1,20 @@
 use crate::common;
 
-use super::{Filter, Through};
+use super::{Filter, JoinKey};
 
 #[derive(Debug, Clone, Hash)]
 pub struct Aggregate {
     pub table: common::TableName,
     pub op: AggregateOp,
-    pub column: Option<common::ColumnName>,
-    pub foreign_key: Option<common::ColumnName>,
-    pub through: Option<Through>,
+    pub key: JoinKey,
     pub filters: Option<Vec<Filter>>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash)]
 pub enum AggregateOp {
     Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
+    Sum(common::ColumnName),
+    Avg(common::ColumnName),
+    Min(common::ColumnName),
+    Max(common::ColumnName),
 }

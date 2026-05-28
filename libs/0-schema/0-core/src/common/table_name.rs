@@ -9,7 +9,6 @@ use nutype::nutype;
         Display,
         AsRef,
         Deref,
-        Clone,
         Hash,
         Eq,
         PartialEq,

@@ -6,8 +6,7 @@ pub enum Sink {
 
 #[derive(Debug, Clone)]
 pub struct OpensearchSink {
-    /// Cluster endpoint, e.g. `https://localhost:9200`
-    pub url: String,
+    pub url: crate::common::HttpUrl,
     pub username: Option<String>,
     pub password: Option<String>,
     /// Verify TLS certificates. Set false for local dev. Default: true.

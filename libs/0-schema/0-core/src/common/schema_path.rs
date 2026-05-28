@@ -6,7 +6,6 @@ use std::path::PathBuf;
     Clone,
     AsRef,
     Deref,
-    Clone,
     Hash,
     Eq,
     PartialEq,

@@ -21,9 +21,29 @@ pub enum FieldRelation {
     Aggregate(Aggregate),
 }
 
-/// OpenSearch mapping. `type` is required; all other properties are passed through as-is.
+/// OpenSearch mapping. `mapping_type` is required; all other properties are passed through as-is.
 #[derive(Debug, Clone, Hash)]
 pub struct Mapping {
-    pub mapping_type: String,
+    pub mapping_type: MappingType,
     pub extra: BTreeMap<String, common::GenericValue>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum MappingType {
+    Text,
+    Keyword,
+    Boolean,
+    Byte,
+    Short,
+    Integer,
+    Long,
+    Float,
+    Double,
+    HalfFloat,
+    ScaledFloat,
+    Date,
+    Object,
+    Nested,
+    /// Any mapping type not covered above.
+    Other(String),
 }

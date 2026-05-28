@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GenericValue {
+    Null,
     Bool(bool),
     Int(i64),
     Decimal(Decimal),

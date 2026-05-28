@@ -2,7 +2,7 @@ use nutype::nutype;
 
 #[nutype(
     sanitize(trim),
-    validate(len_char_max = 63, regex = r"^[a-zA-Z_][a-zA-Z0-9_]*$"),
+    validate(regex = r"^https?://\S+$"),
     derive(
         Debug,
         Clone,
@@ -16,4 +16,4 @@ use nutype::nutype;
         Deserialize
     )
 )]
-pub struct FieldName(String);
+pub struct HttpUrl(String);
