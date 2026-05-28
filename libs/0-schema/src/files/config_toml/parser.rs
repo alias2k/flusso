@@ -6,7 +6,7 @@ pub enum ParseError {
     Serde(#[from] toml::de::Error),
 }
 
-impl<T: AsRef<str>> ParseFrom<T> for super::ConfigFile {
+impl<T: AsRef<str>> ParseFrom<T> for super::ConfigToml {
     type Error = ParseError;
 
     fn try_parse(value: T) -> Result<Self, Self::Error> {

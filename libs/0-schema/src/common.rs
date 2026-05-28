@@ -1,4 +1,5 @@
 mod column_name;
+mod connection_url;
 mod field_name;
 mod index_name;
 mod raw_filter_value;
@@ -9,6 +10,7 @@ mod source_type;
 mod table_name;
 
 pub use column_name::*;
+pub use connection_url::*;
 pub use field_name::*;
 pub use index_name::*;
 pub use raw_filter_value::*;

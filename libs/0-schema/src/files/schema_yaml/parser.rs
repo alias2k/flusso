@@ -6,7 +6,7 @@ pub enum ParseError {
     Serde(#[from] serde_yaml::Error),
 }
 
-impl<T: AsRef<str>> ParseFrom<T> for super::IndexSchemaFile {
+impl<T: AsRef<str>> ParseFrom<T> for super::SchemaYaml {
     type Error = ParseError;
 
     fn try_parse(value: T) -> Result<Self, Self::Error> {

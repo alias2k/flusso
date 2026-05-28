@@ -66,3 +66,4 @@ anyhow = { version = "1.0.*", features = ["backtrace"] }
 toml = { version = "1.1.*", features = ["preserve_order"] }
 nutype = { version = "0.7.*", features = ["serde", "regex"] }
 regex = { version = "1.12.*" }
+bon = { version = "3.*" }

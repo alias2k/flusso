@@ -15,13 +15,62 @@
     "source": {
       "type": "object",
       "required": ["type"],
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": ["postgres"]
+      "oneOf": [
+        {
+          "title": "Postgres",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "postgres"
+            },
+            "connection_url": {
+              "description": "How to connect to the source database. Either a full URL or individual connection parts.",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(postgresql|postgres)://\\S+$",
+                  "description": "Full connection URL, e.g. postgresql://user:pass@localhost:5432/mydb"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["database"],
+                  "description": "Individual connection parts",
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "default": "127.0.0.1",
+                      "description": "Database host"
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535,
+                      "default": 5432,
+                      "description": "Database port"
+                    },
+                    "user": {
+                      "type": "string",
+                      "default": "postgres",
+                      "description": "Database user"
+                    },
+                    "password": {
+                      "type": "string",
+                      "description": "Database password"
+                    },
+                    "database": {
+                      "type": "string",
+                      "description": "Database name"
+                    }
+                  }
+                }
+              ]
+            }
+          }
         }
-      }
+      ]
     },
     "sinks": {
       "type": "object",
