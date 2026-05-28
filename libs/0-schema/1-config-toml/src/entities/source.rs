@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::common;
+use crate::EnvOrValue;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -17,7 +17,7 @@ pub struct PostgresSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConnectionUrl {
-    Url(common::ConnectionUrl),
+    Url(EnvOrValue),
     Parts {
         #[serde(default = "default_host")]
         host: String,
@@ -25,7 +25,7 @@ pub enum ConnectionUrl {
         port: u16,
         #[serde(default = "default_user")]
         user: String,
-        password: Option<String>,
+        password: Option<EnvOrValue>,
         database: String,
     },
 }

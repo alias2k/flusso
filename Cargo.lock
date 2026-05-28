@@ -603,6 +603,7 @@ dependencies = [
 name = "schema-index-yaml"
 version = "0.1.0"
 dependencies = [
+ "rust_decimal",
  "schema-core",
  "serde",
  "serde_yaml",

@@ -11,3 +11,4 @@ schema-core.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
+rust_decimal.workspace = true

@@ -3,6 +3,7 @@ type = "postgres"
 
 [sinks.primary]
 type = "opensearch"
+url = "https://localhost:9200"
 
 [sinks.audit]
 type = "stdout"
