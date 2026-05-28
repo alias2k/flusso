@@ -2,7 +2,7 @@ use crate::common;
 
 use super::{Filter, Through};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct Aggregate {
     pub table: common::TableName,
     pub op: AggregateOp,
@@ -12,7 +12,7 @@ pub struct Aggregate {
     pub filters: Option<Vec<Filter>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum AggregateOp {
     Count,
     Sum,

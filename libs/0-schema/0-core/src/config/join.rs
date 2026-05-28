@@ -2,7 +2,7 @@ use crate::common;
 
 use super::Filter;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct Join {
     pub table: common::TableName,
     pub join_type: JoinType,
@@ -13,27 +13,27 @@ pub struct Join {
     pub limit: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum JoinType {
     OneToOne,
     OneToMany,
     ManyToMany,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct Through {
     pub table: common::TableName,
     pub left_key: common::ColumnName,
     pub right_key: common::ColumnName,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct OrderBy {
     pub column: common::ColumnName,
     pub direction: Option<Direction>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum Direction {
     Asc,
     Desc,

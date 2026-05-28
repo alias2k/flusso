@@ -1,39 +1,39 @@
 use crate::common;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub enum Filter {
     Raw(RawFilter),
     NullCheck(NullCheckFilter),
     ValueOp(ValueOpFilter),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct RawFilter {
     pub raw: common::RawFilterValue,
 }
 
 /// `is_null` / `is_not_null` — no value operand.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct NullCheckFilter {
     pub column: common::ColumnName,
     pub op: NullOp,
 }
 
 /// All other filter ops — value operand required.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct ValueOpFilter {
     pub column: common::ColumnName,
     pub op: FilterOp,
     pub value: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum NullOp {
     IsNull,
     IsNotNull,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum FilterOp {
     Eq,
     Neq,

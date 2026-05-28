@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -39,5 +39,5 @@ pub struct Mapping {
     #[serde(rename = "type")]
     pub mapping_type: String,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yaml::Value>,
+    pub extra: BTreeMap<String, serde_yaml::Value>,
 }

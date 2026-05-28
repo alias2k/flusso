@@ -7,16 +7,15 @@ use nutype::nutype;
         Debug,
         Clone,
         Display,
+        Default,
         AsRef,
         Deref,
-        Clone,
         Hash,
         Eq,
         PartialEq,
-        Ord,
-        PartialOrd,
         Serialize,
         Deserialize
-    )
+    ),
+    default = "public"
 )]
-pub struct SinkName(String);
+pub struct DatabaseSchema(String);

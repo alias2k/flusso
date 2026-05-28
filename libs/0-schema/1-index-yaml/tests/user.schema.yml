@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../../../schemas/index.schema.yml
+# yaml-language-server: $schema=../../../../schemas/index.schema.yml
 
 version: 1
 

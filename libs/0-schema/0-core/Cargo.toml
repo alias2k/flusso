@@ -11,3 +11,4 @@ serde.workspace = true
 nutype.workspace = true
 regex.workspace = true
 bon.workspace = true
+rust_decimal.workspace = true

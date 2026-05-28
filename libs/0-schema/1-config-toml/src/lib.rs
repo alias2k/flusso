@@ -5,7 +5,7 @@ mod parser;
 pub use parser::*;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use entities::IndexEntry;
 use entities::Sink;
@@ -17,7 +17,7 @@ use schema_core::common;
 pub struct ConfigToml {
     pub source: Source,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sinks: Option<HashMap<common::SinkName, Sink>>,
+    pub sinks: Option<BTreeMap<common::SinkName, Sink>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<Vec<IndexEntry>>,
 }

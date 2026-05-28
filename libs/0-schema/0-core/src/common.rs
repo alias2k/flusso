@@ -1,6 +1,7 @@
 mod column_name;
 mod connection_url;
 mod field_name;
+mod generic_value;
 mod index_name;
 mod raw_filter_value;
 mod schema_path;
@@ -12,6 +13,7 @@ mod table_name;
 pub use column_name::*;
 pub use connection_url::*;
 pub use field_name::*;
+pub use generic_value::*;
 pub use index_name::*;
 pub use raw_filter_value::*;
 pub use schema_path::*;
