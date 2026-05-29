@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-/// Confirms that one [`Change`](crate::Change) was durably processed downstream
+/// Confirms that one [`Change`](super::Change) was durably processed downstream
 /// — written to the sink and checkpointed. Returned inside every change.
 ///
 /// Each change carries a monotonically increasing sequence number. The

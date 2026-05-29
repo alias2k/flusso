@@ -1,8 +1,10 @@
-use schema_core::{ColumnName, GenericValue, TableName};
+use schema_core::TableName;
 
-use crate::Ack;
+use crate::RowKey;
 
-/// One item emitted by a [`ChangeCapture`](crate::ChangeCapture) stream: a
+use super::Ack;
+
+/// One item emitted by a [`ChangeCapture`](super::ChangeCapture) stream: a
 /// change paired with the [`Ack`] that confirms it was durably processed.
 ///
 /// Dropping the `ack` without calling [`Ack::confirm`] leaves the change
@@ -25,7 +27,7 @@ pub struct Change {
 ///
 /// Note that the mechanism reports *raw per-table* changes. Mapping a change in
 /// a joined or junction table back to the parent documents that must be rebuilt
-/// is the engine's job, driven by the schema — not something the source knows.
+/// is the document layer's job — not something this layer knows.
 #[derive(Debug, Clone)]
 pub enum ChangeEvent {
     /// A row seen during the initial backfill at the head of the stream.
@@ -44,10 +46,3 @@ pub enum ChangeEvent {
     /// A row was deleted.
     Delete { table: TableName, key: RowKey },
 }
-
-/// The primary key of a changed row.
-///
-/// A list of column/value pairs so composite keys are represented naturally;
-/// values reuse [`GenericValue`] from the schema model.
-#[derive(Debug, Clone)]
-pub struct RowKey(pub Vec<(ColumnName, GenericValue)>);

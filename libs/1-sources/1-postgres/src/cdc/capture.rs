@@ -1,16 +1,17 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use pgwire_replication::{ReplicationClient, ReplicationConfig};
-use sources_core::{Change, ChangeCapture, Result, SourceError};
+use sources_core::cdc::{Change, ChangeCapture};
+use sources_core::{Result, SourceError};
 
-use crate::stream;
+use super::stream;
 
 /// Postgres change capture over logical replication (pgoutput).
 ///
 /// Connects to a replication slot and streams committed row changes as thin
 /// [`Change`]s. Resume is handled by the slot itself: its `confirmed_flush_lsn`
 /// is the durable cursor on the server, advanced as the engine confirms changes
-/// (see [`Ack`](sources_core::Ack)).
+/// (see [`Ack`](sources_core::cdc::Ack)).
 ///
 /// # Prerequisites
 ///
@@ -24,7 +25,7 @@ use crate::stream;
 /// Initial backfill. A consistent snapshot of existing rows requires a normal
 /// SQL query connection tied to the slot's exported snapshot, which is a
 /// separate piece. Until then [`start`](Self::start) emits
-/// [`ChangeEvent::SnapshotComplete`](sources_core::ChangeEvent::SnapshotComplete)
+/// [`ChangeEvent::SnapshotComplete`](sources_core::cdc::ChangeEvent::SnapshotComplete)
 /// immediately and streams only live changes — correct when resuming an
 /// existing slot, but it will not seed a brand-new index.
 #[derive(Debug, Clone)]

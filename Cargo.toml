@@ -76,6 +76,14 @@ pgwire-replication = { version = "0.3.*" }
 async-trait = { version = "0.1.*" }
 futures = { version = "0.3.*" }
 tracing = { version = "0.1.*" }
+sea-query = { version = "0.32.*" }
+sea-query-binder = { version = "0.7.*", features = ["sqlx-postgres", "with-rust_decimal"] }
+sqlx = { version = "0.8.*", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "postgres",
+  "rust_decimal",
+] }
 
 schema-core = { path = "libs/0-schema/0-core" }
 schema-config-toml = { path = "libs/0-schema/1-config-toml" }

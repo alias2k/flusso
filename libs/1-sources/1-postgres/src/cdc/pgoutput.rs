@@ -5,7 +5,7 @@
 //! bytes inside [`ReplicationEvent::XLogData`]. This module decodes the ones we
 //! care about — `Relation`, `Insert`, `Update`, `Delete`, `Truncate` — far
 //! enough to recover a row's primary key. Column *values* are not needed:
-//! events are thin (see [`sources_core::ChangeEvent`]), so we only extract the
+//! events are thin (see [`sources_core::cdc::ChangeEvent`]), so we only extract the
 //! key columns the [`Relation`] marks.
 //!
 //! [`ReplicationEvent::XLogData`]: pgwire_replication::ReplicationEvent::XLogData

@@ -1,41 +1,31 @@
-//! The source abstraction for `pg_sync_rs`.
+//! The source abstractions for `pg_sync_rs`.
 //!
-//! A *source* answers one question for the engine — *what changed?* — as a
-//! single async stream. Everything downstream of that stream (re-reading rows,
-//! assembling documents, writing to sinks, recording checkpoints) belongs to
-//! the engine, not here.
+//! A source has two **independent** responsibilities, each its own module.
+//! Neither module references the other; the engine is the only thing that
+//! bridges them.
 //!
-//! - [`ChangeCapture`] is the one trait that varies by mechanism. Logical
-//!   replication (WAL) is the first implementation; polling or trigger-based
-//!   capture can follow without the engine knowing the difference.
-//! - [`Change`] is what the stream yields: a thin [`ChangeEvent`] — table and
-//!   primary key, never row contents — paired with an [`Ack`].
-//! - [`Ack`] / [`AckSink`] carry confirmation back to the mechanism so it can
-//!   advance its own durable resume point. Delivery is at-least-once.
+//! - [`cdc`] — *what changed?* A pluggable change-capture mechanism that yields
+//!   a stream of thin [`Change`](cdc::Change)s and confirms progress via an
+//!   [`Ack`](cdc::Ack). Logical replication (WAL) is the first mechanism;
+//!   polling or triggers can follow.
+//! - [`document`] — *what to build?* Turns a changed row (named by table and
+//!   key) into the target documents it affects, and assembles each one.
 //!
-//! The design rests on three decisions:
+//! Both build on two shared, mechanism-neutral primitives that belong to
+//! neither concern:
 //!
-//! 1. **Resume is internal.** No position or cursor crosses this API. Each
-//!    mechanism owns its resume state — trivially so for WAL, where the
-//!    replication slot is durable on the server.
-//! 2. **Backfill is the head of the stream.** [`ChangeCapture::start`] emits
-//!    the initial snapshot first, then transitions to live changes as one
-//!    continuous stream, with a consistent boundary between the two.
-//! 3. **Events are thin.** A change names a row; it does not carry its data.
-//!    The engine re-reads the current row at assembly time, so every mechanism
-//!    looks identical and nothing depends on `REPLICA IDENTITY`.
+//! - [`RowKey`] — a row's primary key as ordered column/value pairs.
+//! - [`SourceError`] / [`Result`] — the common error type.
 //!
-//! Reading rows — the initial scan and per-document join/aggregate resolution —
-//! is deliberately *not* part of this trait. It is plain SQL, the same whatever
-//! the capture mechanism is, and lives as a concrete reader in the source
-//! implementation crate.
+//! Keeping the two abstractions apart means a deployment can mix any change
+//! mechanism with any document builder, and either can be implemented, tested,
+//! or replaced without touching the other.
 
-mod ack;
-mod capture;
-mod change;
 mod error;
+mod row_key;
 
-pub use ack::*;
-pub use capture::*;
-pub use change::*;
+pub mod cdc;
+pub mod document;
+
 pub use error::*;
+pub use row_key::*;

@@ -1,7 +1,7 @@
 //! Progress tracking that turns per-event confirmations into a single LSN the
 //! slot can advance to.
 //!
-//! The engine confirms each [`Change`](sources_core::Change) independently and
+//! The engine confirms each [`Change`](sources_core::cdc::Change) independently and
 //! possibly out of order. The replication slot, though, can only safely advance
 //! to a point where *everything before it* is durably processed. So we track a
 //! contiguous watermark: each emitted change gets a monotonically increasing
@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use sources_core::AckSink;
+use sources_core::cdc::AckSink;
 
 /// Shared, lock-guarded progress. Written from the stream task (registering
 /// emitted changes, reading the watermark) and from the engine (confirming).
@@ -99,7 +99,7 @@ impl AckShared {
     }
 }
 
-/// The [`AckSink`] handed to every [`Ack`](sources_core::Ack). Forwards
+/// The [`AckSink`] handed to every [`Ack`](sources_core::cdc::Ack). Forwards
 /// confirmations to the shared watermark; the stream task does the actual
 /// reporting to the server when it next reads the watermark.
 #[derive(Debug)]

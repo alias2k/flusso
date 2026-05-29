@@ -12,10 +12,11 @@ use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationEvent};
-use sources_core::{Ack, AckSink, Change, ChangeEvent, Result, SourceError};
+use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
+use sources_core::{Result, SourceError};
 
-use crate::ack::{AckShared, WalAckSink};
-use crate::pgoutput::{self, Decoded, Relation};
+use super::ack::{AckShared, WalAckSink};
+use super::pgoutput::{self, Decoded, Relation};
 
 /// Everything the unfold loop carries between polls.
 struct State {
@@ -33,7 +34,10 @@ struct State {
 }
 
 /// Build the [`Change`] stream from a connected client and its starting LSN.
-pub(crate) fn build(client: ReplicationClient, start_lsn: Lsn) -> BoxStream<'static, Result<Change>> {
+pub(crate) fn build(
+    client: ReplicationClient,
+    start_lsn: Lsn,
+) -> BoxStream<'static, Result<Change>> {
     let ack = Arc::new(AckShared::new(start_lsn.as_u64()));
     let sink: Arc<dyn AckSink> = Arc::new(WalAckSink::new(Arc::clone(&ack)));
 

@@ -1,0 +1,62 @@
+use async_trait::async_trait;
+use schema_core::{GenericValue, IndexName, TableName};
+
+use crate::{Result, RowKey};
+
+/// Addresses one document in a target index: which index, and the root row's
+/// key within it. The same source row can map to documents in several indexes,
+/// so the [`index`](Self::index) is part of the identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocumentId {
+    pub index: IndexName,
+    /// The root table's primary key — the natural identifier of the document.
+    pub key: RowKey,
+}
+
+/// The result of assembling a document: a body to upsert into the index, or a
+/// tombstone when the root row is gone (or soft-deleted).
+#[derive(Debug, Clone)]
+pub enum Document {
+    /// Upsert the assembled body under [`id`](Self::Upsert::id).
+    Upsert { id: DocumentId, body: GenericValue },
+    /// Remove the document from the index.
+    Delete { id: DocumentId },
+}
+
+impl Document {
+    /// The id this outcome addresses, whichever variant it is.
+    pub fn id(&self) -> &DocumentId {
+        match self {
+            Document::Upsert { id, .. } | Document::Delete { id } => id,
+        }
+    }
+}
+
+/// Turns changed rows into target documents — the read half of a source.
+///
+/// Used in two steps so the engine can deduplicate between them:
+///
+/// 1. [`resolve`](Self::resolve) maps a changed row — given only its `table`
+///    and `key` — to the ids of every document it affects. A change on a
+///    document's own root table resolves to that one id; a change on a
+///    *related* table (one folded in by a join or aggregate) is a reverse
+///    lookup whose result size is not known until queried.
+/// 2. [`build`](Self::build) assembles one document by id — the root row plus
+///    its joins and aggregates — or reports it deleted.
+///
+/// The engine resolves every change in a batch, deduplicates the ids (the same
+/// document is often touched by several changes in one transaction), and builds
+/// each unique id once.
+///
+/// Note that `resolve` takes the table and key as plain values rather than a
+/// capture event: document construction is independent of how the change was
+/// captured.
+#[async_trait]
+pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
+    /// The documents the changed row affects. Empty if it touches nothing any
+    /// index cares about.
+    async fn resolve(&self, table: &TableName, key: &RowKey) -> Result<Vec<DocumentId>>;
+
+    /// Assemble one document, or report it deleted if its root row is absent.
+    async fn build(&self, id: &DocumentId) -> Result<Document>;
+}

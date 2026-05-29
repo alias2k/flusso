@@ -28,4 +28,13 @@ pub enum SourceError {
     /// A raw change could not be decoded into a [`Change`](crate::Change).
     #[error("decode error: {0}")]
     Decode(String),
+
+    /// A query against the source failed (assembling or resolving a document).
+    #[error("query error: {0}")]
+    Query(String),
+
+    /// The configuration uses a feature the active source implementation does
+    /// not support yet.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
