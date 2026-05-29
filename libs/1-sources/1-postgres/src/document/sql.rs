@@ -9,7 +9,7 @@ use sea_query::extension::postgres::PgExpr;
 use sea_query::{Alias, Expr, Func, Order, Query, SelectStatement, SimpleExpr};
 use schema_core::{
     Aggregate, AggregateOp, ColumnName, DatabaseSchema, Direction, Filter, FilterOp, FilterValue,
-    GenericValue, Join, NullOp, TableName,
+    GenericValue, Join, NullOp, TableName, Through,
 };
 use sources_core::SourceError;
 
@@ -79,7 +79,7 @@ pub(crate) fn join_select(
     }
     query.and_where(key_eq(foreign_key, root_pk)?);
     if let Some(filters) = &join.filters {
-        apply_filters(&mut query, filters)?;
+        apply_filters(&mut query, filters, None)?;
     }
     if let Some(order_by) = &join.order_by {
         for ob in order_by {
@@ -112,37 +112,138 @@ pub(crate) fn aggregate_select(
     query.expr(func);
     query.and_where(key_eq(foreign_key, root_pk)?);
     if let Some(filters) = &aggregate.filters {
-        apply_filters(&mut query, filters)?;
+        apply_filters(&mut query, filters, None)?;
     }
     Ok(query)
 }
 
-fn apply_filters(query: &mut SelectStatement, filters: &[Filter]) -> Result<(), SourceError> {
+/// `SELECT <far>.<sub-columns> FROM <schema>.<far> INNER JOIN <schema>.<junction>
+/// ON junction.right_key = far.<far pk> WHERE junction.left_key = <root pk>`,
+/// plus the far table's filters, ordering, and limit — a many-to-many relation
+/// folded in through its junction table.
+pub(crate) fn through_select(
+    schema: &DatabaseSchema,
+    join: &Join,
+    through: &Through,
+    far_primary_key: &ColumnName,
+    sub_columns: &[ColumnName],
+    root_pk: &GenericValue,
+) -> Result<SelectStatement, SourceError> {
+    let far = &join.table;
+    let junction = &through.table;
+
+    let mut query = Query::select();
+    query.from(table_ref(schema, far));
+    for c in sub_columns {
+        query.column((Alias::new(far.as_ref()), Alias::new(c.as_ref())));
+    }
+    query.inner_join(
+        table_ref(schema, junction),
+        Expr::col((Alias::new(junction.as_ref()), Alias::new(through.right_key.as_ref())))
+            .equals((Alias::new(far.as_ref()), Alias::new(far_primary_key.as_ref()))),
+    );
+    query.and_where(
+        Expr::col((Alias::new(junction.as_ref()), Alias::new(through.left_key.as_ref())))
+            .eq(Expr::val(to_sea_value(root_pk)?)),
+    );
+    if let Some(filters) = &join.filters {
+        apply_filters(&mut query, filters, Some(far))?;
+    }
+    if let Some(order_by) = &join.order_by {
+        for ob in order_by {
+            query.order_by(
+                (Alias::new(far.as_ref()), Alias::new(ob.column.as_ref())),
+                order_of(ob.direction),
+            );
+        }
+    }
+    if let Some(limit) = join.limit {
+        query.limit(limit);
+    }
+    Ok(query)
+}
+
+/// Like [`aggregate_select`], but the aggregated table is reached through a
+/// junction: `SELECT <agg>(far.…) FROM far INNER JOIN junction
+/// ON junction.right_key = far.<far pk> WHERE junction.left_key = <root pk>`.
+pub(crate) fn through_aggregate_select(
+    schema: &DatabaseSchema,
+    aggregate: &Aggregate,
+    through: &Through,
+    far_primary_key: &ColumnName,
+    root_pk: &GenericValue,
+) -> Result<SelectStatement, SourceError> {
+    let far = &aggregate.table;
+    let junction = &through.table;
+
+    let mut query = Query::select();
+    query.from(table_ref(schema, far));
+    let func = match &aggregate.op {
+        AggregateOp::Count => Func::count(qualified_col(Some(far), far_primary_key)),
+        AggregateOp::Sum(c) => Func::sum(qualified_col(Some(far), c)),
+        AggregateOp::Avg(c) => Func::avg(qualified_col(Some(far), c)),
+        AggregateOp::Min(c) => Func::min(qualified_col(Some(far), c)),
+        AggregateOp::Max(c) => Func::max(qualified_col(Some(far), c)),
+    };
+    query.expr(func);
+    query.inner_join(
+        table_ref(schema, junction),
+        Expr::col((Alias::new(junction.as_ref()), Alias::new(through.right_key.as_ref())))
+            .equals((Alias::new(far.as_ref()), Alias::new(far_primary_key.as_ref()))),
+    );
+    query.and_where(
+        Expr::col((Alias::new(junction.as_ref()), Alias::new(through.left_key.as_ref())))
+            .eq(Expr::val(to_sea_value(root_pk)?)),
+    );
+    if let Some(filters) = &aggregate.filters {
+        apply_filters(&mut query, filters, Some(far))?;
+    }
+    Ok(query)
+}
+
+/// Apply filters, optionally qualifying each column with a table (needed when
+/// the statement joins more than one table, as in [`through_select`]).
+fn apply_filters(
+    query: &mut SelectStatement,
+    filters: &[Filter],
+    qualifier: Option<&TableName>,
+) -> Result<(), SourceError> {
     for filter in filters {
-        query.and_where(filter_expr(filter)?);
+        query.and_where(filter_expr(filter, qualifier)?);
     }
     Ok(())
 }
 
-fn filter_expr(filter: &Filter) -> Result<SimpleExpr, SourceError> {
+fn filter_expr(filter: &Filter, qualifier: Option<&TableName>) -> Result<SimpleExpr, SourceError> {
     match filter {
         Filter::Raw(raw) => Ok(Expr::cust(raw.raw.as_ref())),
         Filter::NullCheck(check) => {
-            let column = Expr::col(col(&check.column));
+            let column = qualified_col(qualifier, &check.column);
             Ok(match check.op {
                 NullOp::IsNull => column.is_null(),
                 NullOp::IsNotNull => column.is_not_null(),
             })
         }
-        Filter::ValueOp(op) => value_op_expr(op),
+        Filter::ValueOp(op) => value_op_expr(op, qualifier),
+    }
+}
+
+/// A column expression, optionally qualified with its table.
+fn qualified_col(qualifier: Option<&TableName>, column: &ColumnName) -> Expr {
+    match qualifier {
+        Some(table) => Expr::col((Alias::new(table.as_ref()), Alias::new(column.as_ref()))),
+        None => Expr::col(col(column)),
     }
 }
 
 /// Build a comparison. Filter operands are configured as strings and bound as
 /// text; comparisons against non-text columns may need a `Raw` filter until
 /// typed filter values are supported.
-fn value_op_expr(filter: &schema_core::ValueOpFilter) -> Result<SimpleExpr, SourceError> {
-    let column = Expr::col(col(&filter.column));
+fn value_op_expr(
+    filter: &schema_core::ValueOpFilter,
+    qualifier: Option<&TableName>,
+) -> Result<SimpleExpr, SourceError> {
+    let column = qualified_col(qualifier, &filter.column);
     let single = |value: &String| Expr::val(value.clone());
 
     let expr = match (&filter.op, &filter.value) {
@@ -177,7 +278,7 @@ fn order_of(direction: Option<Direction>) -> Order {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use schema_core::{JoinType, OrderBy};
+    use schema_core::{JoinKey, JoinType, OrderBy};
     use sea_query::PostgresQueryBuilder;
     use sea_query_binder::SqlxBinder;
 
@@ -250,6 +351,60 @@ mod tests {
         assert_eq!(
             sql,
             r#"SELECT "id", "total" FROM "public"."orders" WHERE "user_id" = $1 ORDER BY "created_at" DESC LIMIT $2"#
+        );
+    }
+
+    #[test]
+    fn through_select_joins_via_junction() {
+        let through = Through {
+            table: table("user_tags"),
+            left_key: column("user_id"),
+            right_key: column("tag_id"),
+        };
+        let join = Join {
+            table: table("tags"),
+            join_type: JoinType::ManyToMany,
+            key: JoinKey::Through(through.clone()),
+            filters: None,
+            order_by: None,
+            limit: None,
+        };
+        let (sql, _) = through_select(
+            &db(),
+            &join,
+            &through,
+            &column("id"),
+            &[column("name")],
+            &GenericValue::Int(1),
+        )
+        .unwrap()
+        .build_sqlx(PostgresQueryBuilder);
+        assert_eq!(
+            sql,
+            r#"SELECT "tags"."name" FROM "public"."tags" INNER JOIN "public"."user_tags" ON "user_tags"."tag_id" = "tags"."id" WHERE "user_tags"."user_id" = $1"#
+        );
+    }
+
+    #[test]
+    fn through_aggregate_sums_far_column() {
+        let through = Through {
+            table: table("user_tags"),
+            left_key: column("user_id"),
+            right_key: column("tag_id"),
+        };
+        let aggregate = Aggregate {
+            table: table("tags"),
+            op: AggregateOp::Sum(column("weight")),
+            key: JoinKey::Through(through.clone()),
+            filters: None,
+        };
+        let (sql, _) =
+            through_aggregate_select(&db(), &aggregate, &through, &column("id"), &GenericValue::Int(1))
+                .unwrap()
+                .build_sqlx(PostgresQueryBuilder);
+        assert_eq!(
+            sql,
+            r#"SELECT SUM("tags"."weight") FROM "public"."tags" INNER JOIN "public"."user_tags" ON "user_tags"."tag_id" = "tags"."id" WHERE "user_tags"."user_id" = $1"#
         );
     }
 

@@ -83,7 +83,13 @@ sqlx = { version = "0.8.*", default-features = false, features = [
   "tls-rustls",
   "postgres",
   "rust_decimal",
+  "chrono",
+  "uuid",
+  "json",
 ] }
+chrono = { version = "0.4.*", default-features = false, features = ["std"] }
+uuid = { version = "1.*" }
+serde_json = { version = "1.*" }
 
 schema-core = { path = "libs/0-schema/0-core" }
 schema-config-toml = { path = "libs/0-schema/1-config-toml" }

@@ -25,7 +25,3 @@ mod pgoutput;
 mod stream;
 
 pub use capture::WalChangeCapture;
-
-// Re-exported so callers can build a capture without depending on
-// `pgwire-replication` directly.
-pub use pgwire_replication::{Lsn, ReplicationConfig, SslMode, TlsConfig};

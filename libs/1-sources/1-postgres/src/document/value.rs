@@ -53,10 +53,67 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
         "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "CITEXT" => {
             finish(row.try_get::<Option<String>, _>(idx), GenericValue::String, name)
         }
+        // Types without a native GenericValue are carried as their text form.
+        "TIMESTAMP" => finish(
+            row.try_get::<Option<chrono::NaiveDateTime>, _>(idx),
+            |v| GenericValue::String(v.to_string()),
+            name,
+        ),
+        "TIMESTAMPTZ" => finish(
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(idx),
+            |v| GenericValue::String(v.to_rfc3339()),
+            name,
+        ),
+        "DATE" => finish(
+            row.try_get::<Option<chrono::NaiveDate>, _>(idx),
+            |v| GenericValue::String(v.to_string()),
+            name,
+        ),
+        "TIME" => finish(
+            row.try_get::<Option<chrono::NaiveTime>, _>(idx),
+            |v| GenericValue::String(v.to_string()),
+            name,
+        ),
+        "UUID" => finish(
+            row.try_get::<Option<uuid::Uuid>, _>(idx),
+            |v| GenericValue::String(v.to_string()),
+            name,
+        ),
+        // JSON maps straight onto the value tree.
+        "JSON" | "JSONB" => finish(
+            row.try_get::<Option<serde_json::Value>, _>(idx),
+            json_to_generic,
+            name,
+        ),
         other => {
             tracing::warn!(column = %name, r#type = %other, "unsupported column type; treating as null");
             GenericValue::Null
         }
+    }
+}
+
+/// Convert decoded JSON into the schema's value tree.
+fn json_to_generic(value: serde_json::Value) -> GenericValue {
+    match value {
+        serde_json::Value::Null => GenericValue::Null,
+        serde_json::Value::Bool(b) => GenericValue::Bool(b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => GenericValue::Int(i),
+            None => n.as_f64().map_or_else(
+                || GenericValue::String(n.to_string()),
+                float,
+            ),
+        },
+        serde_json::Value::String(s) => GenericValue::String(s),
+        serde_json::Value::Array(items) => {
+            GenericValue::Array(items.into_iter().map(json_to_generic).collect())
+        }
+        serde_json::Value::Object(fields) => GenericValue::Map(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k, json_to_generic(v)))
+                .collect(),
+        ),
     }
 }
 
