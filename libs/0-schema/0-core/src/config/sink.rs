@@ -1,3 +1,5 @@
+/// A destination for built documents: an OpenSearch cluster, or `stdout` for
+/// inspecting output during development.
 #[derive(Debug, Clone)]
 pub enum Sink {
     Opensearch(OpensearchSink),

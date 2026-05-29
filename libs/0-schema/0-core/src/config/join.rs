@@ -2,6 +2,9 @@ use crate::common;
 
 use super::Filter;
 
+/// Folds rows from a related `table` into the document. The `key` says how the
+/// tables connect; `filters`, `order_by`, and `limit` narrow and shape the
+/// rows that come back.
 #[derive(Debug, Clone, Hash)]
 pub struct Join {
     pub table: common::TableName,
@@ -26,6 +29,7 @@ pub enum JoinType {
     ManyToMany,
 }
 
+/// A junction table linking two sides of a many-to-many relation.
 #[derive(Debug, Clone, Hash)]
 pub struct Through {
     pub table: common::TableName,

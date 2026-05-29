@@ -1,5 +1,8 @@
 use crate::common;
 
+/// A condition on which rows a join or aggregate sees. Either a structured
+/// comparison ([`NullCheckFilter`], [`ValueOpFilter`]) or a [`RawFilter`] of
+/// verbatim SQL for cases the structured forms don't cover.
 #[derive(Debug, Clone, Hash)]
 pub enum Filter {
     Raw(RawFilter),

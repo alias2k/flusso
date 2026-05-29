@@ -1,3 +1,19 @@
+//! Parse `config.toml` into the core [`Config`](schema_core::Config) model.
+//!
+//! A config file declares the Postgres source, the sinks documents are written
+//! to, and the indexes to build. Parsing happens in two stages:
+//!
+//! 1. [`ConfigToml`] deserializes the file verbatim, rejecting unknown fields.
+//! 2. `TryFrom<ConfigToml>` converts it into [`Config`](schema_core::Config),
+//!    resolving [`EnvOrValue`] secrets and validating connection and sink URLs.
+//!
+//! Any string value may be given literally or as `{ env = "VAR" }`, which reads
+//! it from the environment at convert time and keeps credentials out of the file.
+//!
+//! The `index` entries are left untouched here — the conversion yields an empty
+//! index map, which the `schema` crate's loader fills in by reading each
+//! referenced YAML schema. This crate owns only the source and sinks.
+
 mod conversion;
 mod entities;
 mod env_value;

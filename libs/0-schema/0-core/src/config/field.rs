@@ -4,6 +4,10 @@ use crate::common;
 
 use super::{Aggregate, Join, Transform};
 
+/// One field of a document. In its simplest form it maps to a column; it can
+/// also pull in a related table ([`relation`](Self::relation)), carry nested
+/// [`fields`](Self::fields), apply [`transforms`](Self::transforms), and
+/// override the inferred OpenSearch mapping.
 #[derive(Debug, Clone, Hash)]
 pub struct Field {
     pub field: common::FieldName,
@@ -15,6 +19,8 @@ pub struct Field {
     pub fields: Option<Vec<Field>>,
 }
 
+/// How a field draws on a related table: either folding its rows in as nested
+/// documents ([`Join`]) or reducing them to a single value ([`Aggregate`]).
 #[derive(Debug, Clone, Hash)]
 pub enum FieldRelation {
     Join(Join),

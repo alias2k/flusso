@@ -2,6 +2,8 @@ use crate::common;
 
 use super::{Filter, JoinKey};
 
+/// Reduces rows from a related `table` to a single value — a count, sum, or
+/// extreme. The `key` connects the tables; `filters` restrict which rows count.
 #[derive(Debug, Clone, Hash)]
 pub struct Aggregate {
     pub table: common::TableName,
