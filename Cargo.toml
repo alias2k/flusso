@@ -7,7 +7,8 @@ members = [
   "libs/0-schema",
   # "libs/1-checkpoints/*",
   # "libs/1-sinks/*",
-  # "libs/1-sources/*",
+  "libs/1-sources/0-core",
+  "libs/1-sources/1-postgres",
   "libs/2-engine",
   "apps/*",
 ]
@@ -71,7 +72,14 @@ nutype = { version = "0.7.*", features = ["serde", "regex"] }
 regex = { version = "1.12.*" }
 bon = { version = "3.*" }
 rust_decimal = { version = "1.*", features = ["serde-with-str"] }
+pgwire-replication = { version = "0.3.*" }
+async-trait = { version = "0.1.*" }
+futures = { version = "0.3.*" }
+tracing = { version = "0.1.*" }
 
 schema-core = { path = "libs/0-schema/0-core" }
 schema-config-toml = { path = "libs/0-schema/1-config-toml" }
 schema-index-yaml = { path = "libs/0-schema/1-index-yaml" }
+
+sources-core = { path = "libs/1-sources/0-core" }
+sources-postgres = { path = "libs/1-sources/1-postgres" }

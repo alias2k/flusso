@@ -1,0 +1,15 @@
+[package]
+name = "sources-postgres"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+sources-core.workspace = true
+schema-core.workspace = true
+pgwire-replication.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tracing.workspace = true

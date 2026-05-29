@@ -1,0 +1,13 @@
+[package]
+name = "sources-core"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+schema-core.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
