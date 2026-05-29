@@ -4,6 +4,7 @@ members = [
   "libs/0-schema/0-core",
   "libs/0-schema/1-config-toml",
   "libs/0-schema/1-index-yaml",
+  "libs/0-schema",
   # "libs/1-checkpoints/*",
   # "libs/1-sinks/*",
   # "libs/1-sources/*",
@@ -72,5 +73,5 @@ bon = { version = "3.*" }
 rust_decimal = { version = "1.*", features = ["serde-with-str"] }
 
 schema-core = { path = "libs/0-schema/0-core" }
-schema-config-toml = { path = "libs/0-schema/0-config-toml" }
-schema-index-yaml = { path = "libs/0-schema/0-index-yaml" }
+schema-config-toml = { path = "libs/0-schema/1-config-toml" }
+schema-index-yaml = { path = "libs/0-schema/1-index-yaml" }

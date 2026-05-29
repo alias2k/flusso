@@ -12,6 +12,8 @@ use nutype::nutype;
         Hash,
         Eq,
         PartialEq,
+        Ord,
+        PartialOrd,
         Serialize,
         Deserialize
     )

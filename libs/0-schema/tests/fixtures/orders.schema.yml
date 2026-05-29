@@ -1,0 +1,6 @@
+version: 1
+table: orders
+primary_key: id
+fields:
+  - id
+  - total

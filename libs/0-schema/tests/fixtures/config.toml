@@ -1,0 +1,17 @@
+[source]
+type = "postgres"
+connection_url = "postgres://app@localhost/mydb"
+
+[sinks.primary]
+type = "opensearch"
+url = "https://localhost:9200"
+
+[[index]]
+name = "users"
+schema = "users.schema.yml"
+enabled = true
+
+[[index]]
+name = "orders"
+schema = "orders.schema.yml"
+enabled = false

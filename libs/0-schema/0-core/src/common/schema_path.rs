@@ -16,6 +16,6 @@ pub struct SchemaPath(PathBuf);
 
 impl AsRef<std::path::Path> for SchemaPath {
     fn as_ref(&self) -> &std::path::Path {
-        (&self).as_path()
+        self.as_path()
     }
 }

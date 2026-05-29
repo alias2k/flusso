@@ -30,10 +30,10 @@ pub enum ConversionError {
 #[serde(deny_unknown_fields)]
 pub struct ConfigToml {
     pub source: Source,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sinks: Option<BTreeMap<common::SinkName, Sink>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<Vec<IndexEntry>>,
+    #[serde(default)]
+    pub sinks: BTreeMap<common::SinkName, Sink>,
+    #[serde(default)]
+    pub index: Vec<IndexEntry>,
 }
 
 /// Converts source and sinks. `indexes` is left empty — the loader populates
@@ -45,7 +45,6 @@ impl TryFrom<ConfigToml> for schema_core::Config {
         let source = conversion::convert_source(toml.source)?;
         let sinks = toml
             .sinks
-            .unwrap_or_default()
             .into_iter()
             .map(|(name, sink)| conversion::convert_sink(sink).map(|s| (name, s)))
             .collect::<Result<_, _>>()?;

@@ -1,0 +1,11 @@
+version: 1
+table: users
+schema: public
+primary_key: id
+fields:
+  - id
+  - field: email
+    mapping: { type: keyword }
+    transforms:
+      - lowercase
+      - trim
