@@ -1,34 +1,15 @@
-//! Conversions between Postgres values and the schema's [`GenericValue`].
-//!
-//! Two directions: [`to_sea_value`] binds a key/filter scalar into a query, and
-//! [`row_to_map`] decodes a fetched row into a name→value map the assembler
-//! reads from.
+//! Decoding Postgres results into the schema's [`GenericValue`]: whole rows
+//! (for reverse-resolution lookups) and JSON documents (assembled server-side).
 
 use std::collections::HashMap;
 
 use rust_decimal::Decimal;
 use schema_core::GenericValue;
-use sea_query::Value as SeaValue;
-use sources_core::SourceError;
 use sqlx::postgres::{PgColumn, PgRow};
 use sqlx::{Column, Row, TypeInfo};
 
-/// Bind a scalar as a query parameter. Only the types that occur in primary
-/// keys and filters are accepted; null/array/map cannot be a key or operand.
-pub(crate) fn to_sea_value(value: &GenericValue) -> Result<SeaValue, SourceError> {
-    match value {
-        GenericValue::Int(i) => Ok(SeaValue::BigInt(Some(*i))),
-        GenericValue::Bool(b) => Ok(SeaValue::Bool(Some(*b))),
-        GenericValue::Decimal(d) => Ok(SeaValue::Decimal(Some(Box::new(*d)))),
-        GenericValue::String(s) => Ok(SeaValue::String(Some(Box::new(s.clone())))),
-        GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => Err(
-            SourceError::Query("cannot bind null, array, or map as a key or filter value".into()),
-        ),
-    }
-}
-
 /// Decode every column of a row into a name→value map.
-pub(crate) fn row_to_map(row: &PgRow) -> HashMap<String, GenericValue> {
+pub(super) fn row_to_map(row: &PgRow) -> HashMap<String, GenericValue> {
     let mut map = HashMap::with_capacity(row.columns().len());
     for col in row.columns() {
         map.insert(col.name().to_owned(), decode_column(row, col));
@@ -92,8 +73,8 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
     }
 }
 
-/// Convert decoded JSON into the schema's value tree.
-fn json_to_generic(value: serde_json::Value) -> GenericValue {
+/// Convert a JSON value (e.g. a server-assembled document) into the value tree.
+pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
     match value {
         serde_json::Value::Null => GenericValue::Null,
         serde_json::Value::Bool(b) => GenericValue::Bool(b),

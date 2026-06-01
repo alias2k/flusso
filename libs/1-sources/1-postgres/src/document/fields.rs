@@ -1,11 +1,8 @@
-//! Pure traversal of an index's field tree: finding relation paths, the columns
-//! to select, and resolving a field name back to its column. No I/O.
+//! Pure traversal of an index's field tree: finding relation paths (for reverse
+//! resolution), collecting relation tables (to pre-resolve their primary keys),
+//! and resolving a field name back to its column. No I/O.
 
-use schema_core::{
-    ColumnName, Field, FieldName, FieldRelation, IndexSchema, JoinKey, SoftDelete, TableName,
-};
-
-use super::push_unique;
+use schema_core::{ColumnName, Field, FieldName, FieldRelation, JoinKey, TableName};
 
 /// The target table and key of a relation.
 pub(super) fn relation_target(relation: &FieldRelation) -> (&TableName, &JoinKey) {
@@ -48,49 +45,15 @@ pub(super) fn find_paths<'a>(
     }
 }
 
-/// Whether any relation appears among these fields (or their same-row groups).
-pub(super) fn contains_relation(fields: &[Field]) -> bool {
-    fields.iter().any(|field| {
-        field.relation.is_some()
-            || matches!(&field.fields, Some(nested) if field.relation.is_none() && contains_relation(nested))
-    })
-}
-
-/// The root-table columns the document reads: primary key, doc id, soft-delete
-/// column, and every column-backed field (including same-row nested groups).
-pub(super) fn root_columns(schema: &IndexSchema) -> Vec<ColumnName> {
-    let mut columns = Vec::new();
-    if let Some(pk) = &schema.primary_key {
-        push_unique(&mut columns, pk);
-    }
-    if let Some(doc_id) = &schema.doc_id {
-        push_unique(&mut columns, doc_id);
-    }
-    match &schema.soft_delete {
-        Some(SoftDelete::Column(c)) => push_unique(&mut columns, &c.column),
-        Some(SoftDelete::Field(f)) => {
-            if let Some(column) = field_column(&schema.fields, &f.field) {
-                push_unique(&mut columns, column);
-            }
-        }
-        None => {}
-    }
-    collect_column_fields(&schema.fields, &mut columns);
-    columns
-}
-
-/// Collect the columns of column-backed fields (recursing into same-row groups,
-/// skipping relations — those are fetched by their own queries).
-pub(super) fn collect_column_fields(fields: &[Field], out: &mut Vec<ColumnName>) {
+/// Collect the target table of every relation at any depth — the tables whose
+/// primary keys the document query needs (to correlate and join through).
+pub(super) fn collect_relation_tables(fields: &[Field], out: &mut Vec<TableName>) {
     for field in fields {
-        if field.relation.is_some() {
-            continue;
-        }
-        if let Some(column) = &field.column {
-            push_unique(out, column);
+        if let Some(relation) = &field.relation {
+            out.push(relation_target(relation).0.clone());
         }
         if let Some(nested) = &field.fields {
-            collect_column_fields(nested, out);
+            collect_relation_tables(nested, out);
         }
     }
 }

@@ -6,12 +6,10 @@ use std::collections::HashSet;
 use schema_core::{
     ColumnName, DatabaseSchema, FieldRelation, GenericValue, IndexSchema, JoinKey, TableName,
 };
-use sea_query::{PostgresQueryBuilder, SelectStatement};
-use sea_query_binder::SqlxBinder;
 use sources_core::{Result, RowKey, SourceError};
 
 use super::fields::relation_target;
-use super::{PgDocumentBuilder, query_err, sql, value};
+use super::{PgDocumentBuilder, query, query_err, value};
 
 impl PgDocumentBuilder {
     /// Resolve one path (root → … → changed table) back to root key values, by
@@ -112,8 +110,8 @@ impl PgDocumentBuilder {
         foreign_key: &ColumnName,
         child_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
-        let query = sql::reverse_select(schema, child, foreign_key, &child_key.0)?;
-        self.run_reverse(query, foreign_key.as_ref()).await
+        let (sql, params) = query::reverse_query(schema, child, foreign_key, &child_key.0)?;
+        self.run_reverse(sql, params, foreign_key.as_ref()).await
     }
 
     /// Many-to-many, key in the far table: it matches `right_key` in the
@@ -127,8 +125,9 @@ impl PgDocumentBuilder {
         far_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
         let far_pk = single_far_key(far_key)?.clone();
-        let query = sql::reverse_select(schema, junction, left_key, &[(right_key.clone(), far_pk)])?;
-        self.run_reverse(query, left_key.as_ref()).await
+        let (sql, params) =
+            query::reverse_query(schema, junction, left_key, &[(right_key.clone(), far_pk)])?;
+        self.run_reverse(sql, params, left_key.as_ref()).await
     }
 
     /// Many-to-many, change on the junction itself: if the key already carries
@@ -144,22 +143,23 @@ impl PgDocumentBuilder {
         if let Some((_, value)) = junction_key.0.iter().find(|(column, _)| column == left_key) {
             return Ok(vec![value.clone()]);
         }
-        let query = sql::reverse_select(schema, junction, left_key, &junction_key.0)?;
-        self.run_reverse(query, left_key.as_ref()).await
+        let (sql, params) = query::reverse_query(schema, junction, left_key, &junction_key.0)?;
+        self.run_reverse(sql, params, left_key.as_ref()).await
     }
 
-    /// Run a reverse-resolution query and collect the distinct, non-null values
-    /// of its single selected column.
+    /// Run a reverse query and collect the distinct, non-null values of its
+    /// single selected column.
     async fn run_reverse(
         &self,
-        query: SelectStatement,
+        sql: String,
+        params: Vec<GenericValue>,
         result_column: &str,
     ) -> Result<Vec<GenericValue>> {
-        let (statement, values) = query.build_sqlx(PostgresQueryBuilder);
-        let rows = sqlx::query_with(&statement, values)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(query_err)?;
+        let mut query = sqlx::query(&sql);
+        for param in &params {
+            query = query::bind_param(query, param)?;
+        }
+        let rows = query.fetch_all(&self.pool).await.map_err(query_err)?;
 
         let mut seen = HashSet::new();
         let mut roots = Vec::new();

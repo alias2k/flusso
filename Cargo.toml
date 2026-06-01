@@ -6,7 +6,8 @@ members = [
   "libs/0-schema/1-index-yaml",
   "libs/0-schema",
   # "libs/1-checkpoints/*",
-  # "libs/1-sinks/*",
+  "libs/1-sinks/0-core",
+  "libs/1-sinks/1-stdout",
   "libs/1-sources/0-core",
   "libs/1-sources/1-postgres",
   "libs/2-engine",
@@ -76,8 +77,6 @@ pgwire-replication = { version = "0.3.*" }
 async-trait = { version = "0.1.*" }
 futures = { version = "0.3.*" }
 tracing = { version = "0.1.*" }
-sea-query = { version = "0.32.*" }
-sea-query-binder = { version = "0.7.*", features = ["sqlx-postgres", "with-rust_decimal"] }
 sqlx = { version = "0.8.*", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls",
@@ -97,3 +96,6 @@ schema-index-yaml = { path = "libs/0-schema/1-index-yaml" }
 
 sources-core = { path = "libs/1-sources/0-core" }
 sources-postgres = { path = "libs/1-sources/1-postgres" }
+
+sinks-core = { path = "libs/1-sinks/0-core" }
+sinks-stdout = { path = "libs/1-sinks/1-stdout" }

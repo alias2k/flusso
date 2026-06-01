@@ -1,25 +1,32 @@
 //! [`PgDocumentBuilder`] — the read half of the Postgres source.
 //!
 //! Resolves which documents a changed row affects and assembles them from the
-//! schema with sea-query + sqlx. The work is split across this module:
+//! schema. The work is split across this module:
 //!
 //! - [`fields`] — pure traversal of the index's field tree.
 //! - [`resolve`] — reverse resolution: changed row → affected document keys.
-//! - [`assemble`] — building a document body from a root row and its relations.
-//! - [`soft_delete`] — deciding when a row counts as deleted.
-//! - [`sql`] / [`value`] — query building and Postgres ↔ value conversion.
+//! - [`query`] — SQL generation (the server-side document query, reverse
+//!   queries, parameter binding).
+//! - [`value`] — decoding Postgres results into the value tree.
+//!
+//! ## Assembly happens in Postgres
+//!
+//! [`build`](PgDocumentBuilder::build) issues **one** query per document: the
+//! whole nested document is assembled server-side with `json_build_object` /
+//! `json_agg` and correlated subqueries (see [`query`]). Nested relations don't
+//! trigger extra round-trips, so there is no N+1. Existence and soft-delete
+//! fold into the query's `WHERE`, so a missing or deleted row simply returns no
+//! row → a tombstone.
 //!
 //! ## Coverage
 //!
 //! - Resolution: root table; direct foreign-key relations; many-to-many
 //!   (`through`) relations on either the far or junction table; and tables
-//!   reachable through *multiple* hops of nesting, chained back to the root.
+//!   reachable through multiple hops of nesting, chained back to the root.
 //! - Assembly: column fields (transforms, defaults); one-to-one / one-to-many /
 //!   many-to-many joins (filters, ordering, limit); joins nested inside joins;
 //!   aggregates, including over a junction; boolean and timestamp soft-delete
-//!   with optional `when` filters; tombstones for missing rows.
-//! - Decoding covers the common scalar types plus timestamps, dates, UUIDs, and
-//!   JSON (carried as text / value trees).
+//!   with optional `when` filters.
 //!
 //! Relation targets are matched on each table's real primary key, looked up
 //! from the Postgres catalog and cached (see [`PgDocumentBuilder::table_primary_key`]).
@@ -27,33 +34,25 @@
 //!
 //! ## Remaining limits
 //!
-//! - A child-row *delete* on a related table can't be reverse-resolved from a
-//!   key-only change (the row is already gone); this follows from the thin-event
-//!   CDC design.
-//! - Nested joins and multi-hop resolution issue one query per parent row / hop
-//!   (N+1). `Raw` soft-delete `when` filters are not evaluated (logged and
-//!   skipped); `LIKE`/`ILIKE` in `when` filters are matched approximately.
+//! A child-row *delete* on a related table can't be reverse-resolved from a
+//! key-only change (the row is already gone); this follows from the thin-event
+//! CDC design. Multi-hop reverse resolution issues one query per hop.
 
-mod assemble;
 mod fields;
+mod query;
 mod resolve;
-mod soft_delete;
-mod sql;
 mod value;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use schema_core::{ColumnName, Config, DatabaseSchema, GenericValue, TableName};
-use sea_query::PostgresQueryBuilder;
-use sea_query_binder::SqlxBinder;
+use schema_core::{ColumnName, Config, DatabaseSchema, TableName};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
 use sources_core::{Result, RowKey, SourceError};
 use sqlx::{PgPool, Row};
 
-use fields::{find_paths, root_columns};
-use soft_delete::is_soft_deleted;
+use fields::find_paths;
 
 /// Builds index documents from a Postgres database, driven by the loaded
 /// [`Config`]. Cheap to clone — the pool, config, and primary-key cache are
@@ -137,6 +136,25 @@ impl PgDocumentBuilder {
         }
         Ok(columns)
     }
+
+    /// Resolve every relation table's primary key up front (cached), so the
+    /// document query can correlate and join through them.
+    async fn relation_pks(
+        &self,
+        schema: &schema_core::IndexSchema,
+    ) -> Result<HashMap<String, ColumnName>> {
+        let mut tables = Vec::new();
+        fields::collect_relation_tables(&schema.fields, &mut tables);
+        let unique: HashSet<&TableName> = tables.iter().collect();
+        let mut pks = HashMap::new();
+        for table in unique {
+            pks.insert(
+                table.to_string(),
+                self.table_primary_key(&schema.db_schema, table).await?,
+            );
+        }
+        Ok(pks)
+    }
 }
 
 #[async_trait]
@@ -196,56 +214,30 @@ impl DocumentBuilder for PgDocumentBuilder {
             .ok_or_else(|| SourceError::Query(format!("unknown index `{}`", id.index)))?;
         let schema = &index.schema;
 
-        let mut columns = root_columns(schema);
-        for (column, _) in &id.key.0 {
-            push_unique(&mut columns, column);
-        }
+        let pks = self.relation_pks(schema).await?;
+        let (sql, params) = query::document_query(schema, &id.key.0, &pks)?;
 
-        let query = sql::root_select(&schema.db_schema, &schema.table, &columns, &id.key.0)?;
-        let (statement, values) = query.build_sqlx(PostgresQueryBuilder);
-        let row = sqlx::query_with(&statement, values)
+        let mut statement = sqlx::query(&sql);
+        for param in &params {
+            statement = query::bind_param(statement, param)?;
+        }
+        let row = statement
             .fetch_optional(&self.pool)
             .await
             .map_err(query_err)?;
 
-        // No root row, or it is soft-deleted → the document should not exist.
-        let Some(row) = row else {
-            return Ok(Document::Delete { id: id.clone() });
-        };
-        let root = value::row_to_map(&row);
-        if is_soft_deleted(schema, &root) {
-            return Ok(Document::Delete { id: id.clone() });
+        // No row means the root is absent or soft-deleted (both folded into the
+        // query's WHERE) → the document should not exist.
+        match row {
+            None => Ok(Document::Delete { id: id.clone() }),
+            Some(row) => {
+                let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
+                Ok(Document::Upsert {
+                    id: id.clone(),
+                    body: value::json_to_generic(document),
+                })
+            }
         }
-
-        // The root's primary-key value keys any top-level relations.
-        let root_pk = match &schema.primary_key {
-            Some(pk) => primary_key_value(&id.key, pk)?.clone(),
-            None => GenericValue::Null,
-        };
-        let body = self.assemble_row(&schema.db_schema, &schema.fields, &root, &root_pk).await?;
-        Ok(Document::Upsert {
-            id: id.clone(),
-            body: GenericValue::Map(body),
-        })
-    }
-}
-
-/// The value of the index's primary-key column within a document key. Supports
-/// composite keys: relations match on the declared primary key.
-fn primary_key_value<'a>(key: &'a RowKey, primary_key: &ColumnName) -> Result<&'a GenericValue> {
-    key.0
-        .iter()
-        .find(|(column, _)| column == primary_key)
-        .map(|(_, value)| value)
-        .ok_or_else(|| {
-            SourceError::Query(format!("document key is missing primary key column `{primary_key}`"))
-        })
-}
-
-/// Push a column only if it isn't already present (preserves order).
-pub(super) fn push_unique(columns: &mut Vec<ColumnName>, column: &ColumnName) {
-    if !columns.iter().any(|c| c == column) {
-        columns.push(column.clone());
     }
 }
 
