@@ -1,0 +1,11 @@
+[package]
+name = "queue-core"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true

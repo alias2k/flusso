@@ -6,6 +6,8 @@ members = [
   "libs/0-schema/1-index-yaml",
   "libs/0-schema",
   # "libs/1-checkpoints/*",
+  "libs/1-queue/0-core",
+  "libs/1-queue/1-channel",
   "libs/1-sinks/0-core",
   "libs/1-sinks/1-stdout",
   "libs/1-sources/0-core",
@@ -77,6 +79,7 @@ pgwire-replication = { version = "0.3.*" }
 async-trait = { version = "0.1.*" }
 futures = { version = "0.3.*" }
 tracing = { version = "0.1.*" }
+tokio = { version = "1.*", default-features = false }
 sqlx = { version = "0.8.*", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls",
@@ -99,3 +102,6 @@ sources-postgres = { path = "libs/1-sources/1-postgres" }
 
 sinks-core = { path = "libs/1-sinks/0-core" }
 sinks-stdout = { path = "libs/1-sinks/1-stdout" }
+
+queue-core = { path = "libs/1-queue/0-core" }
+queue-channel = { path = "libs/1-queue/1-channel" }

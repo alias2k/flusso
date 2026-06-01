@@ -1,0 +1,15 @@
+[package]
+name = "queue-channel"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+queue-core.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
