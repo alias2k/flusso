@@ -3,5 +3,21 @@ name = "pgsync-rs-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "pg_sync"
+path = "src/main.rs"
+
 [lints]
 workspace = true
+
+[dependencies]
+schema.workspace = true
+engine.workspace = true
+sources-postgres.workspace = true
+sinks-stdout.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

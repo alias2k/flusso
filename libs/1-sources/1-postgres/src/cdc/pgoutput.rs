@@ -45,6 +45,8 @@ pub(crate) struct Column {
     pub(crate) name: ColumnName,
     /// Part of the replica-identity key (the `flags & 1` bit).
     pub(crate) is_key: bool,
+    /// The column's Postgres type OID, used to type its (text-encoded) value.
+    pub(crate) type_oid: u32,
 }
 
 /// A row's column values, in `Relation` column order.
@@ -63,8 +65,10 @@ pub(crate) enum Cell {
 
 /// Build a [`RowKey`] from a relation's key columns and a tuple.
 ///
-/// Values are carried as [`GenericValue::String`] — the pgoutput text form.
-/// The engine, which knows each column's type from the schema, interprets them.
+/// pgoutput sends every value as text; we type each key value by its column's
+/// OID (integer, boolean, …) so it binds against the real column type when the
+/// document is re-read — a text-encoded `"1"` against an `integer` key would
+/// otherwise be an `operator does not exist: integer = text` error.
 ///
 /// Errors if the relation declares no key columns, which means the table's
 /// `REPLICA IDENTITY` is `NOTHING` (or otherwise keyless) and changes cannot be
@@ -74,7 +78,7 @@ pub(crate) fn row_key(rel: &Relation, tuple: &Tuple) -> Result<RowKey, SourceErr
     for (col, cell) in rel.columns.iter().zip(tuple.iter()) {
         if col.is_key {
             let value = match cell {
-                Cell::Text(text) => GenericValue::String(text.clone()),
+                Cell::Text(text) => typed_value(text, col.type_oid),
                 Cell::Null | Cell::Unchanged => GenericValue::Null,
             };
             pairs.push((col.name.clone(), value));
@@ -87,6 +91,28 @@ pub(crate) fn row_key(rel: &Relation, tuple: &Tuple) -> Result<RowKey, SourceErr
         )));
     }
     Ok(RowKey(pairs))
+}
+
+/// Interpret a pgoutput text value by its Postgres type OID. Unknown or
+/// unparseable types fall back to the text itself.
+fn typed_value(text: &str, type_oid: u32) -> GenericValue {
+    match type_oid {
+        // bool
+        16 => match text {
+            "t" => GenericValue::Bool(true),
+            "f" => GenericValue::Bool(false),
+            _ => GenericValue::String(text.to_owned()),
+        },
+        // int2 / int4 / int8 / oid
+        21 | 23 | 20 | 26 => text
+            .parse::<i64>()
+            .map_or_else(|_| GenericValue::String(text.to_owned()), GenericValue::Int),
+        // float4 / float8 / numeric
+        700 | 701 | 1700 => rust_decimal::Decimal::from_str_exact(text)
+            .map_or_else(|_| GenericValue::String(text.to_owned()), GenericValue::Decimal),
+        // everything else (text, varchar, uuid, timestamps, …) stays text
+        _ => GenericValue::String(text.to_owned()),
+    }
 }
 
 /// Decode one raw pgoutput message.
@@ -165,7 +191,7 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
     for _ in 0..ncols {
         let flags = cur.u8()?;
         let colname = cur.cstring()?;
-        let _type_oid = cur.u32()?;
+        let type_oid = cur.u32()?;
         let _type_modifier = cur.u32()?;
         let name = ColumnName::try_new(colname.clone()).map_err(|e| {
             SourceError::Decode(format!("pgoutput relation: invalid column {colname:?}: {e}"))
@@ -173,6 +199,7 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
         columns.push(Column {
             name,
             is_key: (flags & 1) != 0,
+            type_oid,
         });
     }
     Ok(Decoded::Relation(Relation {
@@ -354,7 +381,7 @@ mod tests {
         let key = row_key(&rel, &new).unwrap();
         assert_eq!(key.0.len(), 1);
         assert_eq!(key.0[0].0.as_ref(), "id");
-        assert_eq!(key.0[0].1, GenericValue::String("42".into()));
+        assert_eq!(key.0[0].1, GenericValue::Int(42)); // id is int4 (oid 23)
     }
 
     #[test]
@@ -374,7 +401,7 @@ mod tests {
             panic!("expected Delete");
         };
         let key = row_key(&rel, &old).unwrap();
-        assert_eq!(key.0[0].1, GenericValue::String("42".into()));
+        assert_eq!(key.0[0].1, GenericValue::Int(42)); // id is int4 (oid 23)
     }
 
     #[test]

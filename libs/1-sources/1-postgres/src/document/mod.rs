@@ -75,6 +75,15 @@ impl PgDocumentBuilder {
         }
     }
 
+    /// Connect a pool from a Postgres connection URL and build over it.
+    pub async fn connect(connection_url: &str, config: Arc<Config>) -> Result<Self> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(connection_url)
+            .await
+            .map_err(|e| SourceError::Connection(e.to_string()))?;
+        Ok(Self::new(pool, config))
+    }
+
     /// The single-column primary key of a table, from the Postgres catalog
     /// (cached). Relations match against this, so a composite or missing
     /// primary key is an error.

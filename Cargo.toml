@@ -75,11 +75,14 @@ nutype = { version = "0.7.*", features = ["serde", "regex"] }
 regex = { version = "1.12.*" }
 bon = { version = "3.*" }
 rust_decimal = { version = "1.*", features = ["serde-with-str"] }
-pgwire-replication = { version = "0.3.*" }
+pgwire-replication = { version = "0.3.*", features = ["md5"] }
 async-trait = { version = "0.1.*" }
 futures = { version = "0.3.*" }
 tracing = { version = "0.1.*" }
 tokio = { version = "1.*", default-features = false }
+clap = { version = "4.*", features = ["derive"] }
+tracing-subscriber = { version = "0.3.*", features = ["env-filter"] }
+url = { version = "2.*" }
 sqlx = { version = "0.8.*", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls",
@@ -93,9 +96,12 @@ chrono = { version = "0.4.*", default-features = false, features = ["std"] }
 uuid = { version = "1.*" }
 serde_json = { version = "1.*" }
 
+schema = { path = "libs/0-schema" }
 schema-core = { path = "libs/0-schema/0-core" }
 schema-config-toml = { path = "libs/0-schema/1-config-toml" }
 schema-index-yaml = { path = "libs/0-schema/1-index-yaml" }
+
+engine = { path = "libs/2-engine" }
 
 sources-core = { path = "libs/1-sources/0-core" }
 sources-postgres = { path = "libs/1-sources/1-postgres" }

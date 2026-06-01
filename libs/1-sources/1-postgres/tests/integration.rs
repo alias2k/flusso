@@ -1,0 +1,164 @@
+//! End-to-end tests for the Postgres document builder against a real database
+//! in a container. These exercise the server-side document SQL and reverse
+//! resolution that unit tests can only check by generated-string assertion.
+//!
+//! Requires Docker. Ignored by default; run with:
+//!
+//! ```text
+//! cargo test -p sources-postgres --test integration -- --ignored
+//! ```
+
+#![allow(clippy::unwrap_used, unused_crate_dependencies)]
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use schema_core::{
+    ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, FieldRelation, GenericValue,
+    Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Source, SourceType, SoftDelete,
+    SoftDeleteColumn, TableName,
+};
+use sources_core::RowKey;
+use sources_core::document::{Document, DocumentBuilder, DocumentId};
+use sources_postgres::PgDocumentBuilder;
+use sqlx::postgres::PgPoolOptions;
+use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn assembles_documents_resolves_and_tombstones() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    // Seed schema + data.
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text, deleted boolean NOT NULL DEFAULT false)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL, total numeric NOT NULL)",
+        "INSERT INTO users (id, email) VALUES (1, 'ada@x.io')",
+        "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 19.99), (11, 1, 5.00)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(users_config(&url)))
+        .await
+        .unwrap();
+
+    // build: the root row plus its nested one-to-many orders.
+    let document = builder.build(&document_id(1)).await.unwrap();
+    let Document::Upsert { body, .. } = document else {
+        panic!("expected an upsert");
+    };
+    let GenericValue::Map(map) = body else {
+        panic!("expected a document object");
+    };
+    assert_eq!(map.get("email"), Some(&GenericValue::String("ada@x.io".into())));
+    let Some(GenericValue::Array(orders)) = map.get("orders") else {
+        panic!("expected an orders array");
+    };
+    assert_eq!(orders.len(), 2, "both orders should be nested in");
+
+    // resolve: a change to an order reverse-resolves to its user document.
+    let affected = builder
+        .resolve(&table("orders"), &row_key(10))
+        .await
+        .unwrap();
+    assert_eq!(affected, vec![document_id(1)]);
+
+    // soft-delete: the document becomes a tombstone.
+    sqlx::query("UPDATE users SET deleted = true WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let document = builder.build(&document_id(1)).await.unwrap();
+    assert!(
+        matches!(document, Document::Delete { .. }),
+        "a soft-deleted root yields a tombstone",
+    );
+
+    // a missing root row is also a tombstone.
+    let missing = builder.build(&document_id(999)).await.unwrap();
+    assert!(matches!(missing, Document::Delete { .. }));
+}
+
+fn users_config(connection_url: &str) -> Config {
+    let orders = Field {
+        field: field("orders"),
+        column: None,
+        mapping: None,
+        relation: Some(FieldRelation::Join(Join {
+            table: table("orders"),
+            join_type: JoinType::OneToMany,
+            key: JoinKey::Direct(column("user_id")),
+            filters: None,
+            order_by: None,
+            limit: None,
+        })),
+        transforms: None,
+        default: None,
+        fields: Some(vec![column_field("id", "id"), column_field("total", "total")]),
+    };
+    let schema = IndexSchema {
+        version: 1,
+        table: table("users"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: Some(SoftDelete::Column(SoftDeleteColumn {
+            column: column("deleted"),
+            when: None,
+        })),
+        fields: vec![
+            column_field("id", "id"),
+            column_field("email", "email"),
+            orders,
+        ],
+    };
+    Config {
+        source: Source {
+            source_type: SourceType::Postgres,
+            connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
+        },
+        sinks: BTreeMap::new(),
+        indexes: BTreeMap::from([(index_name("users"), Index { enabled: true, schema })]),
+    }
+}
+
+fn column_field(name: &str, col: &str) -> Field {
+    Field {
+        field: field(name),
+        column: Some(column(col)),
+        mapping: None,
+        relation: None,
+        transforms: None,
+        default: None,
+        fields: None,
+    }
+}
+
+fn document_id(id: i64) -> DocumentId {
+    DocumentId {
+        index: index_name("users"),
+        key: row_key(id),
+    }
+}
+
+fn row_key(id: i64) -> RowKey {
+    RowKey(vec![(column("id"), GenericValue::Int(id))])
+}
+
+fn field(name: &str) -> FieldName {
+    FieldName::try_new(name).unwrap()
+}
+fn column(name: &str) -> ColumnName {
+    ColumnName::try_new(name).unwrap()
+}
+fn table(name: &str) -> TableName {
+    TableName::try_new(name).unwrap()
+}
+fn index_name(name: &str) -> IndexName {
+    IndexName::try_new(name).unwrap()
+}
