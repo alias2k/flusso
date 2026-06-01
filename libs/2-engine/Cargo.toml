@@ -5,3 +5,18 @@ edition = "2024"
 
 [lints]
 workspace = true
+
+[dependencies]
+sources-core.workspace = true
+sinks-core.workspace = true
+queue-core.workspace = true
+queue-channel.workspace = true
+schema-core.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }

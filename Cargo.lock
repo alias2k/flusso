@@ -447,6 +447,18 @@ dependencies = [
 [[package]]
 name = "engine"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "queue-channel",
+ "queue-core",
+ "schema-core",
+ "sinks-core",
+ "sources-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "equivalent"
