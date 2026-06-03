@@ -85,6 +85,7 @@ fn sink(base_url: &str, batch_size: u32) -> sinks_opensearch::OpensearchSink {
         password: None,
         tls_verify: false,
         batch_size,
+        max_bytes: 10 * 1024 * 1024,
         timeout_secs: 30,
         max_retries: 3,
         pipeline: None,

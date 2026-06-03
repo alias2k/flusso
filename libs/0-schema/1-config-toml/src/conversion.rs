@@ -44,6 +44,7 @@ pub(crate) fn convert_sink(sink: entities::Sink) -> Result<Sink, ConversionError
             password: s.password.map(|p| p.resolve()).transpose()?,
             tls_verify: s.tls_verify,
             batch_size: s.batch_size,
+            max_bytes: s.max_bytes,
             timeout_secs: s.timeout_secs,
             max_retries: s.max_retries,
             pipeline: s.pipeline,

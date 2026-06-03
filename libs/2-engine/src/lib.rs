@@ -8,11 +8,20 @@
 //!
 //! A **capture** task drains the source's change stream into a bounded
 //! in-process [`queue`](queue_channel) (back-pressure: capture blocks when the
-//! queue is full). A **worker** pulls each change and, for the row it names,
+//! queue is full). A **worker** pulls changes and, for the row each names,
 //! resolves the affected document ids, assembles each one, and writes it to the
-//! [`Sink`]. Once the change's documents are flushed, the source ack is
-//! confirmed so the replication slot can advance — making delivery
-//! at-least-once: a change is only forgotten after it has landed in the sink.
+//! [`Sink`]'s buffer.
+//!
+//! Writes are **batched**: the worker groups up to [`BatchPolicy::max_changes`]
+//! changes (or whatever arrives within [`BatchPolicy::max_delay`], whichever
+//! comes first) into a single [`flush`](Sink::flush), turning N changes into
+//! ⌈N / max_changes⌉ bulk round-trips instead of N. The source acks for a batch
+//! are confirmed **only after** the flush that persisted their documents, so the
+//! replication slot advances past a change exactly when its documents are
+//! durable downstream — preserving at-least-once delivery: a crash before the
+//! flush leaves the whole batch unconfirmed, so it is redelivered on restart and
+//! re-applied idempotently (documents are rebuilt from the current row and
+//! written by deterministic id).
 //!
 //! Stopping on any error is therefore safe: unconfirmed changes are redelivered
 //! when the run restarts.
@@ -46,19 +55,49 @@ pub use error::*;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use queue_channel::{ChannelConsumer, channel};
-use queue_core::{Consumer, Producer};
+use queue_core::{AckHandle, Consumer, Delivery, Producer};
 use schema_core::{GenericValue, IndexName, TableName};
 use sinks_core::Sink;
-use sources_core::cdc::{Change, ChangeCapture, ChangeEvent};
+use sources_core::cdc::{Ack, Change, ChangeCapture, ChangeEvent};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
 use sources_core::{RowKey, SnapshotTable};
+use tokio::time::{Instant, timeout_at};
 
 /// Pending changes buffered between capture and the worker.
 const DEFAULT_QUEUE_CAPACITY: usize = 1024;
+
+/// How the worker groups changes into one sink flush.
+///
+/// Batching trades a little latency for far fewer round-trips: up to
+/// `max_changes` changes (or whatever has arrived after `max_delay`, whichever
+/// comes first) are buffered and flushed together. `max_changes: 1` reproduces
+/// the original flush-per-change behavior.
+///
+/// Acks respect the batch boundary — see the [module docs](crate). The source
+/// ack for a change is confirmed only after the flush that made its documents
+/// durable, so at-least-once delivery holds regardless of batch size.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchPolicy {
+    /// Flush once this many changes have accumulated. Clamped to at least 1.
+    pub max_changes: usize,
+    /// Flush a partial batch this long after its first change, so a trickle of
+    /// changes still lands promptly instead of waiting for a full batch.
+    pub max_delay: Duration,
+}
+
+impl Default for BatchPolicy {
+    fn default() -> Self {
+        Self {
+            max_changes: 256,
+            max_delay: Duration::from_millis(50),
+        }
+    }
+}
 
 /// Drives changes from a source through to a sink.
 #[derive(Debug)]
@@ -67,6 +106,7 @@ pub struct Engine {
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
     queue_capacity: usize,
+    batch: BatchPolicy,
     skip_backfill: bool,
 }
 
@@ -82,6 +122,7 @@ impl Engine {
             documents,
             sink,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            batch: BatchPolicy::default(),
             skip_backfill: false,
         }
     }
@@ -89,6 +130,16 @@ impl Engine {
     /// Set how many changes may buffer between capture and the worker.
     pub fn with_queue_capacity(mut self, capacity: usize) -> Self {
         self.queue_capacity = capacity.max(1);
+        self
+    }
+
+    /// Set how the worker groups changes into one sink flush (see
+    /// [`BatchPolicy`]). `max_changes` is clamped to at least 1.
+    pub fn with_batch(mut self, batch: BatchPolicy) -> Self {
+        self.batch = BatchPolicy {
+            max_changes: batch.max_changes.max(1),
+            ..batch
+        };
         self
     }
 
@@ -110,6 +161,7 @@ impl Engine {
             documents,
             sink,
             queue_capacity,
+            batch,
             skip_backfill,
         } = self;
 
@@ -127,12 +179,13 @@ impl Engine {
                 documents.as_ref(),
                 sink.as_ref(),
                 queue_capacity,
+                batch,
             )
             .await?;
         }
 
         let stream = source.live().await?;
-        pump(stream, documents.as_ref(), sink.as_ref(), queue_capacity, None).await
+        pump(stream, documents.as_ref(), sink.as_ref(), queue_capacity, batch, None).await
     }
 }
 
@@ -148,6 +201,7 @@ async fn backfill(
     documents: &dyn DocumentBuilder,
     sink: &dyn Sink,
     queue_capacity: usize,
+    batch: BatchPolicy,
 ) -> Result<()> {
     let mut seeding: HashSet<IndexName> = HashSet::new();
     let mut tables: Vec<SnapshotTable> = Vec::new();
@@ -166,7 +220,7 @@ async fn backfill(
 
     tracing::info!(indexes = seeding.len(), tables = tables.len(), "seeding indexes");
     let stream = source.snapshot(&tables).await?;
-    pump(stream, documents, sink, queue_capacity, Some(&seeding)).await?;
+    pump(stream, documents, sink, queue_capacity, batch, Some(&seeding)).await?;
 
     // The snapshot is fully applied and flushed once `pump` returns; record each
     // index as seeded so a later run skips it.
@@ -186,6 +240,7 @@ async fn pump(
     documents: &dyn DocumentBuilder,
     sink: &dyn Sink,
     queue_capacity: usize,
+    batch: BatchPolicy,
     filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
     let (producer, mut consumer) = channel::<Change>(queue_capacity);
@@ -193,7 +248,7 @@ async fn pump(
     // Capture runs concurrently with the worker; the worker borrows the shared
     // builder and sink.
     let capture = tokio::spawn(capture(stream, producer));
-    let worker = work(&mut consumer, documents, sink, filter).await;
+    let worker = work(&mut consumer, documents, sink, batch, filter).await;
 
     capture.abort();
     let captured = capture.await;
@@ -217,38 +272,114 @@ async fn capture(
     Ok(())
 }
 
-/// Pull changes and apply each one, confirming its ack when done.
+/// Pull changes, buffer a batch of them into the sink, flush once, then confirm
+/// the whole batch — see [`BatchPolicy`] and the [module docs](crate).
+///
+/// A batch starts when the first change arrives (the worker blocks for it, so an
+/// idle stream costs nothing) and closes when `max_changes` are buffered, when
+/// `max_delay` elapses since that first change, or when the stream ends.
 async fn work(
     consumer: &mut ChannelConsumer<Change>,
     documents: &dyn DocumentBuilder,
     sink: &dyn Sink,
+    batch: BatchPolicy,
     filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
-    while let Some(delivery) = consumer.recv().await? {
-        let (change, ack) = delivery.into_parts();
-        apply(change, documents, sink, filter).await?;
-        ack.ack().await?;
+    // Source acks and queue handles for changes whose documents are buffered in
+    // the sink but not yet flushed. Confirmed/acked only after the flush below.
+    let mut pending: Batch = Batch::with_capacity(batch.max_changes);
+
+    'batches: loop {
+        // Block for the batch's first change (no busy-wait on an idle stream).
+        let Some(delivery) = consumer.recv().await? else {
+            break;
+        };
+        buffer(delivery, documents, sink, filter, &mut pending).await?;
+
+        // Fill the batch until it is full or its time window closes. `recv` is
+        // cancel-safe, so dropping it on timeout never drops a queued change.
+        let deadline = Instant::now() + batch.max_delay;
+        while pending.len() < batch.max_changes {
+            match timeout_at(deadline, consumer.recv()).await {
+                Err(_elapsed) => break,                 // window closed: flush a partial batch
+                Ok(Ok(Some(delivery))) => {
+                    buffer(delivery, documents, sink, filter, &mut pending).await?;
+                }
+                Ok(Ok(None)) => {
+                    // Stream ended: flush what we have, then stop.
+                    commit(sink, &mut pending).await?;
+                    break 'batches;
+                }
+                Ok(Err(queue_err)) => return Err(queue_err.into()),
+            }
+        }
+        commit(sink, &mut pending).await?;
     }
-    Ok(())
+    // A batch left buffered when the stream ended mid-fill.
+    commit(sink, &mut pending).await
 }
 
-/// Apply one change: rebuild every document it affects, flush, then confirm the
-/// source ack so the slot can advance.
-async fn apply(
-    change: Change,
+/// Acks owed for the documents currently buffered in the sink: the source acks
+/// (which advance the replication slot) and the queue delivery handles.
+#[derive(Debug)]
+struct Batch {
+    source: Vec<Ack>,
+    handles: Vec<Box<dyn AckHandle>>,
+}
+
+impl Batch {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            source: Vec::with_capacity(capacity),
+            handles: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.source.len()
+    }
+}
+
+/// Buffer one change's documents into the sink — no flush, no ack yet. The acks
+/// are retained until the batch is committed.
+async fn buffer(
+    delivery: Delivery<Change>,
     documents: &dyn DocumentBuilder,
     sink: &dyn Sink,
     filter: Option<&HashSet<IndexName>>,
+    pending: &mut Batch,
 ) -> Result<()> {
+    let (change, handle) = delivery.into_parts();
     match &change.event {
         ChangeEvent::Upsert { table, key } | ChangeEvent::Delete { table, key } => {
             apply_row(table, key, documents, sink, filter).await?;
         }
     }
-    // Flush per change keeps it simple and correct; a batching sink would flush
-    // less often and only confirm acks up to the flushed point.
+    pending.source.push(change.ack);
+    pending.handles.push(handle);
+    Ok(())
+}
+
+/// Close a batch: one [`flush`](Sink::flush) makes its documents durable, then
+/// every ack is confirmed. The ordering is the at-least-once guarantee — a crash
+/// before the flush leaves the whole batch unconfirmed and redelivered;
+/// confirming after it means the slot only advances over durable changes.
+///
+/// Source acks confirm out of order safely — the mechanism advances its resume
+/// point only to the highest *contiguous* confirmed sequence (see
+/// [`Ack`](sources_core::cdc::Ack)) — so confirming a batch advances the slot to
+/// the batch's last change and no further.
+async fn commit(sink: &dyn Sink, pending: &mut Batch) -> Result<()> {
+    if pending.len() == 0 {
+        return Ok(());
+    }
     sink.flush().await?;
-    change.ack.confirm();
+    for ack in pending.source.drain(..) {
+        ack.confirm();
+    }
+    for handle in pending.handles.drain(..) {
+        handle.ack().await?;
+    }
     Ok(())
 }
 
@@ -304,6 +435,7 @@ fn value_to_string(value: &GenericValue) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -457,6 +589,180 @@ mod tests {
         );
         // Every change is confirmed.
         assert_eq!(acks.load(Ordering::SeqCst), 2);
+    }
+
+    /// Records every upsert/delete and each flush boundary in one ordered log,
+    /// so a test can see how changes group into flushes.
+    #[derive(Debug, Default)]
+    struct FlushLogSink {
+        ops: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Sink for FlushLogSink {
+        async fn upsert(
+            &self,
+            index: &IndexName,
+            id: &str,
+            _document: &GenericValue,
+        ) -> sinks_core::Result<()> {
+            self.ops.lock().unwrap().push(format!("upsert {} {id}", index.as_ref()));
+            Ok(())
+        }
+
+        async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+            self.ops.lock().unwrap().push(format!("delete {} {id}", index.as_ref()));
+            Ok(())
+        }
+
+        async fn flush(&self) -> sinks_core::Result<()> {
+            self.ops.lock().unwrap().push("flush".to_owned());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn batches_changes_into_a_single_flush() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        let changes = (0..5)
+            .map(|i| upsert_change(10 + i as i64, i, &acks))
+            .collect::<Vec<_>>();
+
+        Engine::new(
+            Box::new(MockSource {
+                changes: Mutex::new(Some(changes)),
+            }),
+            Arc::new(MockDocuments),
+            Arc::new(FlushLogSink {
+                ops: Arc::clone(&ops),
+            }),
+        )
+        // A wide window and a high cap so all five buffer into one batch; the
+        // finite stream ends long before the delay could fire.
+        .with_batch(BatchPolicy {
+            max_changes: 256,
+            max_delay: Duration::from_secs(10),
+        })
+        .skip_backfill(true)
+        .run()
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec![
+                "upsert users 10".to_owned(),
+                "upsert users 11".to_owned(),
+                "upsert users 12".to_owned(),
+                "upsert users 13".to_owned(),
+                "upsert users 14".to_owned(),
+                "flush".to_owned(),
+            ],
+            "all five changes batch into exactly one flush, after every upsert",
+        );
+        assert_eq!(acks.load(Ordering::SeqCst), 5, "the whole batch is confirmed");
+    }
+
+    /// Counts flushes; shares its counter with [`OrderingAck`] so a test can
+    /// observe how many flushes had happened at the moment a seq was confirmed.
+    #[derive(Debug)]
+    struct FlushCountSink {
+        flushes: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl Sink for FlushCountSink {
+        async fn upsert(
+            &self,
+            _index: &IndexName,
+            _id: &str,
+            _document: &GenericValue,
+        ) -> sinks_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _index: &IndexName, _id: &str) -> sinks_core::Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> sinks_core::Result<()> {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// On confirm, records the flush count observed at that instant — so a test
+    /// can assert no change is confirmed before the flush that persisted it.
+    #[derive(Debug)]
+    struct OrderingAck {
+        flushes: Arc<AtomicU64>,
+        observed: Arc<Mutex<BTreeMap<u64, u64>>>,
+    }
+
+    impl AckSink for OrderingAck {
+        fn confirm(&self, seq: u64) {
+            let flushes_so_far = self.flushes.load(Ordering::SeqCst);
+            self.observed.lock().unwrap().insert(seq, flushes_so_far);
+        }
+    }
+
+    fn ordering_change(
+        seq: u64,
+        flushes: &Arc<AtomicU64>,
+        observed: &Arc<Mutex<BTreeMap<u64, u64>>>,
+    ) -> Change {
+        let table = TableName::try_new("users").unwrap();
+        let key = RowKey(vec![(
+            ColumnName::try_new("id").unwrap(),
+            GenericValue::Int(seq as i64 + 100),
+        )]);
+        Change {
+            event: ChangeEvent::Upsert { table, key },
+            ack: Ack::new(
+                seq,
+                Arc::new(OrderingAck {
+                    flushes: Arc::clone(flushes),
+                    observed: Arc::clone(observed),
+                }),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn confirms_no_ack_before_its_flush() {
+        let flushes = Arc::new(AtomicU64::new(0));
+        let observed = Arc::new(Mutex::new(BTreeMap::new()));
+        let changes = (0..4)
+            .map(|seq| ordering_change(seq, &flushes, &observed))
+            .collect::<Vec<_>>();
+
+        Engine::new(
+            Box::new(MockSource {
+                changes: Mutex::new(Some(changes)),
+            }),
+            Arc::new(MockDocuments),
+            Arc::new(FlushCountSink {
+                flushes: Arc::clone(&flushes),
+            }),
+        )
+        // Two per flush → two batches over four changes; the wide delay never
+        // fires, so the split is deterministic.
+        .with_batch(BatchPolicy {
+            max_changes: 2,
+            max_delay: Duration::from_secs(10),
+        })
+        .skip_backfill(true)
+        .run()
+        .await
+        .unwrap();
+
+        assert_eq!(flushes.load(Ordering::SeqCst), 2, "four changes → two flushes of two");
+        let observed = observed.lock().unwrap();
+        // A change in batch k (0-indexed) is confirmed only after k+1 flushes —
+        // i.e. never before the flush that made its own documents durable.
+        assert_eq!(observed.get(&0), Some(&1), "seq 0 confirmed after flush 1");
+        assert_eq!(observed.get(&1), Some(&1), "seq 1 confirmed after flush 1");
+        assert_eq!(observed.get(&2), Some(&2), "seq 2 confirmed after flush 2");
+        assert_eq!(observed.get(&3), Some(&2), "seq 3 confirmed after flush 2");
     }
 
     /// A source whose `live` stream is empty (so `run` returns) and whose

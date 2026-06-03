@@ -21,6 +21,8 @@ pub struct OpensearchSink {
     pub tls_verify: bool,
     #[serde(default = "default_batch_size")]
     pub batch_size: u32,
+    #[serde(default = "default_max_bytes")]
+    pub max_bytes: u64,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_max_retries")]
@@ -42,6 +44,12 @@ fn default_tls_verify() -> bool {
 
 fn default_batch_size() -> u32 {
     1000
+}
+
+/// 10 MiB — within OpenSearch's recommended 5–15 MB bulk range and well under
+/// the 100 MB `http.max_content_length` default.
+fn default_max_bytes() -> u64 {
+    10 * 1024 * 1024
 }
 
 fn default_timeout_secs() -> u64 {

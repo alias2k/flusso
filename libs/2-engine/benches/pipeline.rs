@@ -37,6 +37,13 @@
 //!   resolve → build → sink → flush path, assembling every complex document.
 //!   `live` is stubbed to an empty stream so `run` terminates after seeding;
 //!   that tail is the only thing not exercised, and not what we measure.
+//! - `change_burst`: the steady-state path under volume. A burst of changes is
+//!   drained through the real [`Engine::run`] live loop at different
+//!   [`BatchPolicy::max_changes`] values, so the curve shows what the engine's
+//!   flush-batching buys: `max_changes = 1` is the old flush-per-change cost,
+//!   larger values collapse the burst into ⌈N / max_changes⌉ bulk flushes. This
+//!   is where the batching win actually shows up (a single change cannot
+//!   benefit from batching — only volume can).
 //!
 //! Requires Docker. Run with:
 //!
@@ -56,8 +63,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use engine::Engine;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use engine::{BatchPolicy, Engine};
 use futures::stream::{self, BoxStream};
 use schema_core::{
     Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Direction,
@@ -67,7 +74,7 @@ use schema_core::{
 };
 use sinks_core::{Result as SinkResult, Sink};
 use sinks_opensearch::OpensearchSink;
-use sources_core::cdc::{Change, ChangeCapture};
+use sources_core::cdc::{Ack, AckSink, Change, ChangeCapture, ChangeEvent};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
 use sources_core::{Result as SourceResult, RowKey, SnapshotTable};
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
@@ -89,6 +96,10 @@ const ITEMS_PER_ORDER: usize = 4;
 const TAG_COUNT: usize = 8;
 /// Tags linked to each user.
 const TAGS_PER_USER: usize = 4;
+
+/// Changes drained per `change_burst` iteration — one per seeded user, so each
+/// resolves to a distinct document (no buffer-collapsing on a shared id).
+const BURST: usize = USER_COUNT;
 
 /// An `order_items` row that exists (user 1, first order, first item), used by
 /// the `change` bench to drive a multi-hop reverse resolution. Its id follows
@@ -144,6 +155,43 @@ impl Sink for AlwaysUnseeded {
     }
     // `is_seeded` / `mark_seeded` deliberately keep the trait defaults
     // (`false` / no-op) so the backfill runs on every iteration.
+}
+
+/// A capture whose `live` stream yields a fixed burst of `count` upsert changes
+/// (one per user, ids `1..=count`) and then ends, so `Engine::run` drains the
+/// burst and returns. This is the steady-state path under volume — exactly where
+/// the engine's flush-batching pays off. `snapshot` keeps the default empty
+/// stream; the burst bench skips backfill anyway.
+#[derive(Debug)]
+struct BurstCapture {
+    count: usize,
+}
+
+#[async_trait]
+impl ChangeCapture for BurstCapture {
+    async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
+        let ack_sink: Arc<dyn AckSink> = Arc::new(NoopAck);
+        let changes: Vec<SourceResult<Change>> = (1..=self.count as i64)
+            .map(|id| {
+                Ok(Change {
+                    event: ChangeEvent::Upsert {
+                        table: table("users"),
+                        key: row_key(id),
+                    },
+                    ack: Ack::new(id as u64, Arc::clone(&ack_sink)),
+                })
+            })
+            .collect();
+        Ok(Box::pin(stream::iter(changes)))
+    }
+}
+
+/// A no-op ack endpoint — the burst bench measures throughput, not durability.
+#[derive(Debug)]
+struct NoopAck;
+
+impl AckSink for NoopAck {
+    fn confirm(&self, _seq: u64) {}
 }
 
 /// Everything held alive for the benchmark's duration.
@@ -318,6 +366,7 @@ async fn setup() -> Services {
         password: None,
         tls_verify: false,
         batch_size: 1000,
+        max_bytes: 10 * 1024 * 1024,
         timeout_secs: 30,
         max_retries: 3,
         pipeline: None,
@@ -407,6 +456,43 @@ fn bench(c: &mut Criterion) {
             services.sink.flush().await.unwrap();
         });
     });
+    group.finish();
+
+    // Live-path throughput under volume: a burst of `BURST` changes drained
+    // through the real `Engine::run` live loop, at several batch sizes.
+    // `max_changes = 1` is flush-per-change (the pre-batching cost); larger
+    // values collapse the burst into ⌈BURST / max_changes⌉ bulk flushes. The
+    // wide `max_delay` never fires — the burst is already queued, so batches
+    // fill on count, not time.
+    let mut group = c.benchmark_group("change_burst");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(25));
+    group.throughput(Throughput::Elements(BURST as u64));
+    for &max_changes in &[1usize, 16, 256] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(max_changes),
+            &max_changes,
+            |b, &max_changes| {
+                let documents = Arc::clone(&services.documents);
+                let sink = Arc::clone(&services.sink);
+                b.to_async(&rt).iter(|| {
+                    let documents = Arc::clone(&documents);
+                    let sink = Arc::clone(&sink);
+                    async move {
+                        Engine::new(Box::new(BurstCapture { count: BURST }), documents, sink)
+                            .with_batch(BatchPolicy {
+                                max_changes,
+                                max_delay: Duration::from_secs(10),
+                            })
+                            .skip_backfill(true)
+                            .run()
+                            .await
+                            .unwrap();
+                    }
+                });
+            },
+        );
+    }
     group.finish();
 
     // Backfill: the real `Engine::run` seeding every complex document through

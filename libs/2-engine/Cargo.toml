@@ -15,7 +15,7 @@ schema-core.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "time"] }
 
 [dev-dependencies]
 async-trait.workspace = true

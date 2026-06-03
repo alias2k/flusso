@@ -67,6 +67,10 @@ pub struct OpensearchSink {
     base_url: String,
     auth: Option<(String, String)>,
     batch_size: usize,
+    /// Maximum serialized bytes per bulk request — a flush is split so no
+    /// request exceeds this, keeping it under OpenSearch's
+    /// `http.max_content_length`.
+    max_bytes: usize,
     max_retries: u32,
     pipeline: Option<String>,
     /// In-flight operations, shared across clones.
@@ -104,6 +108,9 @@ impl OpensearchSink {
             // `chunks(0)` panics, so a zero batch size would crash the first
             // non-empty flush; clamp it to at least one document per request.
             batch_size: (config.batch_size as usize).max(1),
+            // At least one byte so the byte cap can never wedge a flush; a doc
+            // larger than the cap is still sent (alone, with a warning).
+            max_bytes: (config.max_bytes as usize).max(1),
             max_retries: config.max_retries,
             pipeline: config.pipeline.clone(),
             buffer: Arc::new(Mutex::new(Vec::new())),
@@ -132,7 +139,9 @@ impl OpensearchSink {
             .unwrap_or_else(|| logical.to_owned())
     }
 
-    /// Send a slice of bulk actions as a single request.
+    /// Send one prebuilt NDJSON `body` (`count` actions) as a single bulk
+    /// request. The caller (`flush`) is responsible for keeping `body` within
+    /// the count and byte caps; this just transmits it.
     ///
     /// When `refresh` is `true`, appends `?refresh=true` to the URL so
     /// OpenSearch performs a segment refresh after the request completes and
@@ -140,12 +149,11 @@ impl OpensearchSink {
     /// intermediate chunks; the final chunk in a flush carries the refresh.
     ///
     /// Retries on transient failures with exponential backoff.
-    async fn send_bulk_chunk(&self, actions: &[BulkAction], refresh: bool) -> Result<()> {
-        if actions.is_empty() {
+    async fn send_bulk_chunk(&self, body: &str, count: usize, refresh: bool) -> Result<()> {
+        if count == 0 {
             return Ok(());
         }
 
-        let body = build_bulk_body(actions)?;
         let url = build_bulk_url(&self.base_url, self.pipeline.as_deref(), refresh);
 
         let mut last_err: Option<SinkError> = None;
@@ -162,7 +170,7 @@ impl OpensearchSink {
                 .client
                 .post(&url)
                 .header("Content-Type", "application/x-ndjson")
-                .body(body.clone());
+                .body(body.to_owned());
 
             match self.maybe_auth(req).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -177,7 +185,7 @@ impl OpensearchSink {
                         continue;
                     }
 
-                    debug!(count = actions.len(), refresh, "bulk request succeeded");
+                    debug!(count, refresh, "bulk request succeeded");
                     return Ok(());
                 }
                 Ok(resp) => {
@@ -400,9 +408,15 @@ impl Sink for OpensearchSink {
 
     /// Drain the buffer and send all buffered operations to OpenSearch.
     ///
-    /// Large batches are split into `batch_size` chunks. No refresh is forced:
-    /// visibility is governed by the index's refresh interval — disabled during
-    /// backfill and automatic in steady state (see the module docs).
+    /// The drained operations are split into bulk requests bounded by **both**
+    /// caps: at most `batch_size` documents *and* at most `max_bytes` serialized
+    /// bytes per request, so a few large documents can't push a request past
+    /// OpenSearch's `http.max_content_length`. A single document larger than
+    /// `max_bytes` is sent on its own (it can't be split) with a warning.
+    ///
+    /// No refresh is forced: visibility is governed by the index's refresh
+    /// interval — disabled during backfill and automatic in steady state (see
+    /// the module docs).
     async fn flush(&self) -> Result<()> {
         let actions = {
             let mut buf = self.buffer.lock().await;
@@ -413,8 +427,33 @@ impl Sink for OpensearchSink {
             return Ok(());
         }
 
-        for chunk in actions.chunks(self.batch_size) {
-            self.send_bulk_chunk(chunk, false).await?;
+        // Serialize each action's NDJSON fragment once, then group fragments
+        // into requests honoring the count and byte caps (see `plan_chunks`).
+        let mut fragments = Vec::with_capacity(actions.len());
+        for action in &actions {
+            let fragment = bulk_action_fragment(action)?;
+            if fragment.len() > self.max_bytes {
+                warn!(
+                    bytes = fragment.len(),
+                    max_bytes = self.max_bytes,
+                    "a single document exceeds the bulk byte cap; sending it in its own request",
+                );
+            }
+            fragments.push(fragment);
+        }
+
+        let sizes: Vec<usize> = fragments.iter().map(String::len).collect();
+        let plan = plan_chunks(&sizes, self.batch_size, self.max_bytes);
+
+        let mut fragments = fragments.into_iter();
+        for &count in &plan {
+            let mut body = String::new();
+            for _ in 0..count {
+                if let Some(fragment) = fragments.next() {
+                    body.push_str(&fragment);
+                }
+            }
+            self.send_bulk_chunk(&body, count, false).await?;
         }
 
         Ok(())
@@ -526,32 +565,70 @@ fn build_bulk_url(base_url: &str, pipeline: Option<&str>, refresh: bool) -> Stri
     }
 }
 
-/// Serialize a slice of [`BulkAction`]s into an NDJSON bulk request body.
+/// Serialize a slice of [`BulkAction`]s into one NDJSON bulk body. Production
+/// code builds bodies fragment-by-fragment in [`flush`](OpensearchSink::flush)
+/// (to honor the byte cap), so this whole-slice form is now a test convenience.
+#[cfg(test)]
 fn build_bulk_body(actions: &[BulkAction]) -> Result<String> {
     let mut body = String::new();
     for action in actions {
-        match action {
-            BulkAction::Index { index, id, doc } => {
-                let meta =
-                    serde_json::to_string(&json!({ "index": { "_index": index, "_id": id } }))
-                        .map_err(|e| SinkError::Serialize(e.to_string()))?;
-                let source = serde_json::to_string(doc)
-                    .map_err(|e| SinkError::Serialize(e.to_string()))?;
-                body.push_str(&meta);
-                body.push('\n');
-                body.push_str(&source);
-                body.push('\n');
-            }
-            BulkAction::Delete { index, id } => {
-                let meta =
-                    serde_json::to_string(&json!({ "delete": { "_index": index, "_id": id } }))
-                        .map_err(|e| SinkError::Serialize(e.to_string()))?;
-                body.push_str(&meta);
-                body.push('\n');
-            }
-        }
+        body.push_str(&bulk_action_fragment(action)?);
     }
     Ok(body)
+}
+
+/// Serialize one [`BulkAction`] into its NDJSON fragment — the metadata line
+/// and, for an index op, the source line, each newline-terminated. This is the
+/// single place the bulk wire format is produced; [`build_bulk_body`] and the
+/// byte-aware chunking in [`flush`](OpensearchSink::flush) both go through it.
+fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
+    let mut fragment = String::new();
+    match action {
+        BulkAction::Index { index, id, doc } => {
+            let meta = serde_json::to_string(&json!({ "index": { "_index": index, "_id": id } }))
+                .map_err(|e| SinkError::Serialize(e.to_string()))?;
+            let source =
+                serde_json::to_string(doc).map_err(|e| SinkError::Serialize(e.to_string()))?;
+            fragment.push_str(&meta);
+            fragment.push('\n');
+            fragment.push_str(&source);
+            fragment.push('\n');
+        }
+        BulkAction::Delete { index, id } => {
+            let meta = serde_json::to_string(&json!({ "delete": { "_index": index, "_id": id } }))
+                .map_err(|e| SinkError::Serialize(e.to_string()))?;
+            fragment.push_str(&meta);
+            fragment.push('\n');
+        }
+    }
+    Ok(fragment)
+}
+
+/// Group action `sizes` (serialized NDJSON byte lengths, in order) into bulk
+/// requests, returning the action count for each request. A new request starts
+/// before an action that would push the current one past **either** cap:
+/// `batch_size` documents or `max_bytes` bytes.
+///
+/// An action larger than `max_bytes` lands in a request of its own — a bulk
+/// action is atomic and can't be split — so the byte cap is best-effort for a
+/// single oversized document (the caller warns when that happens).
+fn plan_chunks(sizes: &[usize], batch_size: usize, max_bytes: usize) -> Vec<usize> {
+    let mut chunks = Vec::new();
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for &size in sizes {
+        if count > 0 && (count >= batch_size || bytes.saturating_add(size) > max_bytes) {
+            chunks.push(count);
+            count = 0;
+            bytes = 0;
+        }
+        count += 1;
+        bytes = bytes.saturating_add(size);
+    }
+    if count > 0 {
+        chunks.push(count);
+    }
+    chunks
 }
 
 /// Returns `true` if the bulk response indicates at least one item-level error
@@ -760,5 +837,40 @@ mod tests {
     fn build_bulk_body_is_empty_for_no_actions() {
         let body = build_bulk_body(&[]).unwrap();
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn plan_chunks_splits_on_the_count_cap() {
+        // 5 small actions, cap of 2 per request → 2 + 2 + 1.
+        let sizes = [10, 10, 10, 10, 10];
+        assert_eq!(plan_chunks(&sizes, 2, 1_000), vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn plan_chunks_splits_on_the_byte_cap_before_the_count_cap() {
+        // Count cap is generous (100), but 30 bytes per request fits only two
+        // 12-byte actions; the third would reach 36 > 30, so it starts a new one.
+        let sizes = [12, 12, 12, 12];
+        assert_eq!(plan_chunks(&sizes, 100, 30), vec![2, 2]);
+    }
+
+    #[test]
+    fn plan_chunks_isolates_an_oversized_action() {
+        // The 50-byte action exceeds the 30-byte cap: it can't be split, so it
+        // gets its own request, and the neighbors pack around it.
+        let sizes = [10, 50, 10, 10];
+        assert_eq!(plan_chunks(&sizes, 100, 30), vec![1, 1, 2]);
+    }
+
+    #[test]
+    fn plan_chunks_applies_whichever_cap_is_hit_first() {
+        // Count cap 3 and byte cap 100: the byte cap bites first at 40+40+40.
+        let sizes = [40, 40, 40, 5, 5];
+        assert_eq!(plan_chunks(&sizes, 3, 100), vec![2, 3]);
+    }
+
+    #[test]
+    fn plan_chunks_of_nothing_is_no_requests() {
+        assert!(plan_chunks(&[], 10, 100).is_empty());
     }
 }
