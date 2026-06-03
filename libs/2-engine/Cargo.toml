@@ -19,4 +19,19 @@ tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 async-trait.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+# Concrete source + sink, exercised together only here — the engine is the one
+# component that legitimately spans both halves of the pipeline.
+sources-postgres.workspace = true
+sinks-opensearch.workspace = true
+sqlx.workspace = true
+rust_decimal.workspace = true
+testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
+criterion.workspace = true
+
+# Full pipeline benchmark: real Postgres -> the engine -> real OpenSearch.
+# The backfill scenario drives the real `Engine::run()`. Spins up both
+# containers, so requires Docker. Run with `cargo bench`.
+[[bench]]
+name = "pipeline"
+harness = false

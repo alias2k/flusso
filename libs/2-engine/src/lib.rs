@@ -35,6 +35,11 @@
 //! backend choices (WAL vs polling, stdout vs OpenSearch, channel vs a durable
 //! broker) are swappable without touching this loop.
 
+// The pipeline benchmark (in `benches/`) pulls a concrete source and sink as
+// dev-dependencies the unit-test build doesn't touch; allow that only under
+// `cfg(test)` — the normal build still enforces unused dependencies.
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
 mod error;
 
 pub use error::*;

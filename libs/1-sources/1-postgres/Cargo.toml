@@ -23,22 +23,15 @@ serde_json.workspace = true
 sources-core.workspace = true
 schema-core.workspace = true
 sinks-core.workspace = true
-sinks-opensearch.workspace = true
 engine.workspace = true
 sqlx.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
+testcontainers-modules = { workspace = true, features = ["postgres"] }
 criterion.workspace = true
 
-# Real-service benchmarks: document assembly against a live Postgres.
+# Real-service benchmark: document assembly against a live Postgres.
 # Spins up Postgres in a container, so requires Docker. Run with `cargo bench`.
 [[bench]]
 name = "postgres"
-harness = false
-
-# Full pipeline benchmark: real Postgres -> resolve+build -> real OpenSearch.
-# Spins up both containers, so requires Docker. Run with `cargo bench`.
-[[bench]]
-name = "pipeline"
 harness = false

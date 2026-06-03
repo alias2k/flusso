@@ -163,9 +163,13 @@ fn bench(c: &mut Criterion) {
     });
 
     // Throughput of flushing N documents at the default batch size of 1000.
+    // n=1 is the per-request floor: one bulk round-trip with a single doc, the
+    // fixed cost every flush pays before any per-document work.
     let mut group = c.benchmark_group("bulk_index");
     group.sample_size(20);
-    for &n in &[100usize, 1_000, 5_000] {
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(15));
+    for &n in &[1usize, 100, 1_000, 5_000] {
         let docs: Vec<(String, GenericValue)> =
             (0..n).map(|i| (i.to_string(), document(i))).collect();
         let sink = sink(&base_url, 1000);
@@ -179,6 +183,8 @@ fn bench(c: &mut Criterion) {
     // Effect of bulk chunk size: a fixed 5000-document flush, varied batch size.
     let mut group = c.benchmark_group("batch_size");
     group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(20));
     let docs: Vec<(String, GenericValue)> =
         (0..5_000usize).map(|i| (i.to_string(), document(i))).collect();
     for &batch in &[100u32, 500, 1_000, 5_000] {

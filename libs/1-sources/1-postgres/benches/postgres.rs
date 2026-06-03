@@ -27,6 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use schema_core::{
@@ -55,10 +56,14 @@ fn runtime() -> Runtime {
 }
 
 /// Start Postgres, create the `users`/`orders` schema, and seed one user per
-/// entry in [`USERS`] with that many orders. Returns the running container and
-/// a connected, ready-to-query [`PgDocumentBuilder`].
-async fn setup()
--> (testcontainers_modules::testcontainers::ContainerAsync<Postgres>, PgDocumentBuilder) {
+/// entry in [`USERS`] with that many orders. Returns the running container, a
+/// connected, ready-to-query [`PgDocumentBuilder`], and a raw pool (used by the
+/// round-trip baseline).
+async fn setup() -> (
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    PgDocumentBuilder,
+    sqlx::PgPool,
+) {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
@@ -98,7 +103,7 @@ async fn setup()
     let builder = PgDocumentBuilder::connect(&url, Arc::new(config(&url)))
         .await
         .unwrap();
-    (container, builder)
+    (container, builder, pool)
 }
 
 fn bench(c: &mut Criterion) {
@@ -106,7 +111,7 @@ fn bench(c: &mut Criterion) {
     // Keep the runtime entered for the whole scope so the container's async
     // teardown (testcontainers drops it via the reactor) has one to run on.
     let _guard = rt.enter();
-    let (_container, builder) = rt.block_on(setup());
+    let (_container, builder, pool) = rt.block_on(setup());
 
     // Warm the catalog caches (primary keys, column types) so the first sample
     // doesn't pay a one-off cost the rest don't — we measure steady-state SQL.
@@ -115,8 +120,31 @@ fn bench(c: &mut Criterion) {
         builder.resolve(&table("orders"), &row_key(4000)).await.unwrap();
     });
 
+    // baseline: the fixed costs to subtract from the figures below, so the
+    // marginal cost of flusso's work is readable rather than buried.
+    let mut group = c.benchmark_group("baseline");
+    group.measurement_time(Duration::from_secs(10));
+    // The Postgres round-trip floor: parse/plan/execute of the cheapest possible
+    // query. `build`/`resolve` cannot beat this — subtract it to see real work.
+    group.bench_function("select_1", |b| {
+        b.to_async(&rt).iter(|| async {
+            sqlx::query("SELECT 1").fetch_one(&pool).await.unwrap();
+        });
+    });
+    // A change on a table no index references: pure in-memory dispatch, zero
+    // queries — the framework overhead floor for `resolve`.
+    group.bench_function("resolve_unrelated", |b| {
+        let key = row_key(1);
+        b.to_async(&rt).iter(|| async {
+            builder.resolve(&table("products"), &key).await.unwrap();
+        });
+    });
+    group.finish();
+
     // build: server-side document assembly across nesting depth.
     let mut group = c.benchmark_group("build");
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(15));
     for &(user_id, order_count) in USERS {
         let id = document_id(user_id);
         group.bench_with_input(
@@ -133,7 +161,9 @@ fn bench(c: &mut Criterion) {
 
     // resolve: changed row -> affected document ids.
     let mut group = c.benchmark_group("resolve");
-    // A change on the document's own root table — the one-id fast path.
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(15));
+    // A change on the document's own root table — the one-id fast path (no I/O).
     group.bench_function("root_table", |b| {
         let key = row_key(4);
         b.to_async(&rt).iter(|| async {
