@@ -2671,6 +2671,7 @@ name = "sinks-stdout"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "schema-core",
  "serde_json",
