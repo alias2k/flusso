@@ -2,13 +2,43 @@
 //! resolution), collecting relation tables (to pre-resolve their primary keys),
 //! and resolving a field name back to its column. No I/O.
 
-use schema_core::{ColumnName, Field, FieldName, FieldRelation, JoinKey, TableName};
+use schema_core::{ColumnName, Field, FieldName, FieldRelation, Filter, JoinKey, TableName};
 
 /// The target table and key of a relation.
 pub(super) fn relation_target(relation: &FieldRelation) -> (&TableName, &JoinKey) {
     match relation {
         FieldRelation::Join(join) => (&join.table, &join.key),
         FieldRelation::Aggregate(aggregate) => (&aggregate.table, &aggregate.key),
+    }
+}
+
+/// Collect every `(table, column)` a value filter compares against, at any
+/// depth. A relation's filters run against its own target table, so each
+/// [`ValueOpFilter`](schema_core::ValueOpFilter)'s column is paired with the
+/// relation's table — the document query later casts the operand to that
+/// column's real type. Null-check and raw filters carry no typed operand and
+/// are skipped.
+pub(super) fn collect_filter_columns<'a>(
+    fields: &'a [Field],
+    out: &mut Vec<(&'a TableName, &'a ColumnName)>,
+) {
+    for field in fields {
+        if let Some(relation) = &field.relation {
+            let (table, filters) = match relation {
+                FieldRelation::Join(join) => (&join.table, join.filters.as_deref()),
+                FieldRelation::Aggregate(aggregate) => {
+                    (&aggregate.table, aggregate.filters.as_deref())
+                }
+            };
+            for filter in filters.unwrap_or_default() {
+                if let Filter::ValueOp(value_op) = filter {
+                    out.push((table, &value_op.column));
+                }
+            }
+        }
+        if let Some(nested) = &field.fields {
+            collect_filter_columns(nested, out);
+        }
     }
 }
 

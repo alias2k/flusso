@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Newer pushes to the same ref supersede in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: clippy + tests
+    runs-on: ubuntu-latest
+    # GitHub-hosted ubuntu runners ship a running Docker daemon, which the
+    # Postgres e2e tests (testcontainers) need.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # `--all-targets` is intentionally omitted: several test crates use
+      # `.unwrap()`, which the workspace lints deny on non-test targets.
+      - name: Clippy
+        run: cargo clippy --workspace
+
+      # `--run-ignored all` includes the `#[ignore]`d container-backed e2e
+      # tests; the `ci` profile gives them retries and a longer timeout.
+      - name: Test (unit + integration + e2e)
+        run: cargo nextest run --profile ci --workspace --run-ignored all
+
+      # nextest does not run doctests; run them separately.
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore

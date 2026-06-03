@@ -83,7 +83,7 @@ tokio = { version = "1.*", default-features = false }
 clap = { version = "4.*", features = ["derive"] }
 tracing-subscriber = { version = "0.3.*", features = ["env-filter"] }
 url = { version = "2.*" }
-sqlx = { version = "0.8.*", default-features = false, features = [
+sqlx = { version = "0.9.*", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls",
   "postgres",
@@ -95,6 +95,7 @@ sqlx = { version = "0.8.*", default-features = false, features = [
 chrono = { version = "0.4.*", default-features = false, features = ["std"] }
 uuid = { version = "1.*" }
 serde_json = { version = "1.*" }
+testcontainers-modules = { version = "0.15.*" }
 
 schema = { path = "libs/0-schema" }
 schema-core = { path = "libs/0-schema/0-core" }

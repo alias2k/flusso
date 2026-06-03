@@ -27,6 +27,38 @@ type PgQuery<'q> = sqlx::query::Query<'q, Postgres, PgArguments>;
 
 const ROOT: &str = "root";
 
+/// SQL assembled by this module's query builder, ready to hand to
+/// [`sqlx::query`].
+///
+/// Since sqlx 0.9, [`sqlx::query`] only accepts strings that implement
+/// [`SqlSafeStr`](sqlx::SqlSafeStr) — natively just `&'static str` — to stop
+/// dynamic data being interpolated into SQL. Everything we build here is
+/// dynamic, so wrapping it in this type is the single audit point: a value of
+/// `SqlString` asserts that the SQL was assembled the safe way — identifiers
+/// come from `nutype`-validated schema types (so quoting them is
+/// injection-safe) and every data value is a bound `$n` parameter, never
+/// formatted into the string. Construct it only from query-builder output.
+#[derive(Debug, Clone)]
+pub(super) struct SqlString(String);
+
+impl SqlString {
+    fn new(sql: String) -> Self {
+        Self(sql)
+    }
+
+    #[cfg(test)]
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl sqlx::SqlSafeStr for SqlString {
+    fn into_sql_str(self) -> sqlx::SqlStr {
+        // Safe by construction — see the type's documentation.
+        sqlx::AssertSqlSafe(self.0).into_sql_str()
+    }
+}
+
 /// Bind a scalar parameter onto a query, in `params` order.
 pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result<PgQuery<'q>> {
     Ok(match value {
@@ -48,10 +80,12 @@ pub(super) fn document_query(
     schema: &IndexSchema,
     key: &[(ColumnName, GenericValue)],
     pks: &HashMap<String, ColumnName>,
-) -> Result<(String, Vec<GenericValue>)> {
+    col_types: &HashMap<(String, String), String>,
+) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
         db: &schema.db_schema,
         pks,
+        col_types,
         params: Vec::new(),
         seq: 0,
     };
@@ -75,7 +109,7 @@ pub(super) fn document_query(
         qtable(&schema.db_schema, &schema.table),
         conditions.join(" AND "),
     );
-    Ok((sql, builder.params))
+    Ok((SqlString::new(sql), builder.params))
 }
 
 /// Build a reverse-resolution query: one column from a table, filtered by a key.
@@ -84,7 +118,7 @@ pub(super) fn reverse_query(
     table: &TableName,
     select_column: &ColumnName,
     key: &[(ColumnName, GenericValue)],
-) -> Result<(String, Vec<GenericValue>)> {
+) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut params = Vec::new();
     let mut conditions = Vec::new();
     for (column, value) in key {
@@ -108,13 +142,15 @@ pub(super) fn reverse_query(
         qtable(db, table),
         conditions.join(" AND "),
     );
-    Ok((sql, params))
+    Ok((SqlString::new(sql), params))
 }
 
 /// Accumulates parameters and unique aliases while building a document query.
 struct Builder<'a> {
     db: &'a DatabaseSchema,
     pks: &'a HashMap<String, ColumnName>,
+    /// `(table, column)` → SQL type, for casting filter operands.
+    col_types: &'a HashMap<(String, String), String>,
     params: Vec<GenericValue>,
     seq: usize,
 }
@@ -204,7 +240,7 @@ impl Builder<'_> {
                     JoinType::OneToOne => {
                         let alias = self.alias();
                         let object = self.object(sub, &alias, Some(&child_pk))?;
-                        let filters = self.filters(join.filters.as_deref(), &alias)?;
+                        let filters = self.filters(join.filters.as_deref(), &alias, child)?;
                         let order = order_clause(join.order_by.as_deref(), &alias);
                         Ok(format!(
                             "(SELECT {object} FROM {} AS {} WHERE {} = {}{filters}{order} LIMIT 1)",
@@ -218,7 +254,7 @@ impl Builder<'_> {
                         let derived = self.alias();
                         let object = self.object(sub, &derived, Some(&child_pk))?;
                         let inner = self.alias();
-                        let filters = self.filters(join.filters.as_deref(), &inner)?;
+                        let filters = self.filters(join.filters.as_deref(), &inner, child)?;
                         let inner_sql = format!(
                             "SELECT {ia}.* FROM {} AS {ia} WHERE {} = {}{filters}{}{}",
                             qtable(self.db, child),
@@ -244,7 +280,7 @@ impl Builder<'_> {
                 let object = self.object(sub, &derived, Some(&far_pk))?;
                 let far_alias = self.alias();
                 let junction_alias = self.alias();
-                let filters = self.filters(join.filters.as_deref(), &far_alias)?;
+                let filters = self.filters(join.filters.as_deref(), &far_alias, far)?;
                 let inner_sql = format!(
                     "SELECT {fa}.* FROM {} AS {fa} JOIN {} AS {ja} ON {} = {} WHERE {} = {}{filters}{}{}",
                     qtable(self.db, far),
@@ -279,7 +315,7 @@ impl Builder<'_> {
             JoinKey::Direct(foreign_key) => {
                 let alias = self.alias();
                 let function = agg_function(&aggregate.op, &alias);
-                let filters = self.filters(aggregate.filters.as_deref(), &alias)?;
+                let filters = self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
                 Ok(format!(
                     "(SELECT {function} FROM {} AS {} WHERE {} = {}{filters})",
                     qtable(self.db, &aggregate.table),
@@ -293,7 +329,7 @@ impl Builder<'_> {
                 let alias = self.alias();
                 let junction_alias = self.alias();
                 let function = agg_function(&aggregate.op, &alias);
-                let filters = self.filters(aggregate.filters.as_deref(), &alias)?;
+                let filters = self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
                 Ok(format!(
                     "(SELECT {function} FROM {} AS {fa} JOIN {} AS {ja} ON {} = {} WHERE {} = {}{filters})",
                     qtable(self.db, &aggregate.table),
@@ -309,12 +345,18 @@ impl Builder<'_> {
         }
     }
 
-    /// `… AND (cond)` for each filter, qualified to `alias`.
-    fn filters(&mut self, filters: Option<&[Filter]>, alias: &str) -> Result<String> {
+    /// `… AND (cond)` for each filter, qualified to `alias`; `table` names the
+    /// relation being filtered, so operands cast to their column's real type.
+    fn filters(
+        &mut self,
+        filters: Option<&[Filter]>,
+        alias: &str,
+        table: &TableName,
+    ) -> Result<String> {
         let mut out = String::new();
         if let Some(filters) = filters {
             for filter in filters {
-                let condition = self.filter(filter, alias)?;
+                let condition = self.filter(filter, alias, table)?;
                 out.push_str(" AND (");
                 out.push_str(&condition);
                 out.push(')');
@@ -323,7 +365,7 @@ impl Builder<'_> {
         Ok(out)
     }
 
-    fn filter(&mut self, filter: &Filter, alias: &str) -> Result<String> {
+    fn filter(&mut self, filter: &Filter, alias: &str, table: &TableName) -> Result<String> {
         match filter {
             Filter::Raw(raw) => Ok(raw.raw.as_ref().to_owned()),
             Filter::NullCheck(check) => Ok(format!(
@@ -334,30 +376,49 @@ impl Builder<'_> {
                     NullOp::IsNotNull => "NOT NULL",
                 },
             )),
-            Filter::ValueOp(op) => self.value_op(op, alias),
+            Filter::ValueOp(op) => self.value_op(op, alias, table),
         }
     }
 
-    fn value_op(&mut self, filter: &ValueOpFilter, alias: &str) -> Result<String> {
+    fn value_op(&mut self, filter: &ValueOpFilter, alias: &str, table: &TableName) -> Result<String> {
         let column = qcol(alias, &filter.column);
+        let target = &filter.column;
         let expr = match (&filter.op, &filter.value) {
-            (FilterOp::Eq, FilterValue::Single(v)) => format!("{column} = {}", self.text_param(v)?),
-            (FilterOp::Neq, FilterValue::Single(v)) => format!("{column} <> {}", self.text_param(v)?),
-            (FilterOp::Lt, FilterValue::Single(v)) => format!("{column} < {}", self.text_param(v)?),
-            (FilterOp::Lte, FilterValue::Single(v)) => format!("{column} <= {}", self.text_param(v)?),
-            (FilterOp::Gt, FilterValue::Single(v)) => format!("{column} > {}", self.text_param(v)?),
-            (FilterOp::Gte, FilterValue::Single(v)) => format!("{column} >= {}", self.text_param(v)?),
-            (FilterOp::Like, FilterValue::Single(v)) => format!("{column} LIKE {}", self.text_param(v)?),
+            (FilterOp::Eq, FilterValue::Single(v)) => {
+                format!("{column} = {}", self.typed_param(v, table, target)?)
+            }
+            (FilterOp::Neq, FilterValue::Single(v)) => {
+                format!("{column} <> {}", self.typed_param(v, table, target)?)
+            }
+            (FilterOp::Lt, FilterValue::Single(v)) => {
+                format!("{column} < {}", self.typed_param(v, table, target)?)
+            }
+            (FilterOp::Lte, FilterValue::Single(v)) => {
+                format!("{column} <= {}", self.typed_param(v, table, target)?)
+            }
+            (FilterOp::Gt, FilterValue::Single(v)) => {
+                format!("{column} > {}", self.typed_param(v, table, target)?)
+            }
+            (FilterOp::Gte, FilterValue::Single(v)) => {
+                format!("{column} >= {}", self.typed_param(v, table, target)?)
+            }
+            (FilterOp::Like, FilterValue::Single(v)) => {
+                format!("{column} LIKE {}", self.typed_param(v, table, target)?)
+            }
             (FilterOp::Ilike, FilterValue::Single(v)) => {
-                format!("{column} ILIKE {}", self.text_param(v)?)
+                format!("{column} ILIKE {}", self.typed_param(v, table, target)?)
             }
-            (FilterOp::In, FilterValue::List(vs)) => format!("{column} IN ({})", self.text_params(vs)?),
+            (FilterOp::In, FilterValue::List(vs)) => {
+                format!("{column} IN ({})", self.typed_params(vs, table, target)?)
+            }
             (FilterOp::NotIn, FilterValue::List(vs)) => {
-                format!("{column} NOT IN ({})", self.text_params(vs)?)
+                format!("{column} NOT IN ({})", self.typed_params(vs, table, target)?)
             }
-            (FilterOp::Between, FilterValue::Range(lo, hi)) => {
-                format!("{column} BETWEEN {} AND {}", self.text_param(lo)?, self.text_param(hi)?)
-            }
+            (FilterOp::Between, FilterValue::Range(lo, hi)) => format!(
+                "{column} BETWEEN {} AND {}",
+                self.typed_param(lo, table, target)?,
+                self.typed_param(hi, table, target)?,
+            ),
             (op, _) => {
                 return Err(SourceError::Query(format!(
                     "filter operator {op:?} does not match its value's arity"
@@ -367,14 +428,32 @@ impl Builder<'_> {
         Ok(expr)
     }
 
-    fn text_param(&mut self, value: &str) -> Result<String> {
-        self.placeholder(GenericValue::String(value.to_owned()))
+    /// A bound operand cast to its column's SQL type — `$n::<type>` — so a
+    /// `numeric` column compares numerically, a `date` as a date, and so on,
+    /// rather than everything degrading to text. The type was resolved from the
+    /// catalog before query building (see
+    /// [`PgDocumentBuilder::column_type`](super::PgDocumentBuilder::column_type)).
+    fn typed_param(&mut self, value: &str, table: &TableName, column: &ColumnName) -> Result<String> {
+        let sql_type = self
+            .col_types
+            .get(&(table.to_string(), column.to_string()))
+            .ok_or_else(|| {
+                SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
+            })?
+            .clone();
+        let placeholder = self.placeholder(GenericValue::String(value.to_owned()))?;
+        Ok(format!("{placeholder}::{sql_type}"))
     }
 
-    fn text_params(&mut self, values: &[String]) -> Result<String> {
+    fn typed_params(
+        &mut self,
+        values: &[String],
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
         let mut placeholders = Vec::with_capacity(values.len());
         for value in values {
-            placeholders.push(self.text_param(value)?);
+            placeholders.push(self.typed_param(value, table, column)?);
         }
         Ok(placeholders.join(", "))
     }
@@ -392,12 +471,17 @@ impl Builder<'_> {
             },
         };
         let marker = qcol(ROOT, &column);
+        // The cast goes through `text` so the expression plans for any marker
+        // type (timestamp, text, …); Postgres type-checks every CASE branch up
+        // front, and a direct `{marker}::boolean` would be rejected at plan
+        // time for a non-boolean column even though the guard makes that branch
+        // unreachable at runtime.
         let truthy = format!(
             "CASE WHEN {marker} IS NULL THEN false \
-             WHEN pg_typeof({marker}) = 'boolean'::regtype THEN {marker}::boolean \
+             WHEN pg_typeof({marker}) = 'boolean'::regtype THEN {marker}::text::boolean \
              ELSE true END"
         );
-        let when_sql = self.filters(when, ROOT)?;
+        let when_sql = self.filters(when, ROOT, &schema.table)?;
         Ok(Some(format!("({truthy}){when_sql}")))
     }
 }
@@ -559,9 +643,9 @@ mod tests {
     fn columns_only() {
         let schema = index(Some("id"), None, vec![col_field("id", "id"), col_field("email", "email")]);
         let (sql, params) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(7))], &HashMap::new()).unwrap();
+            document_query(&schema, &[(c("id"), GenericValue::Int(7))], &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(
-            sql,
+            sql.as_str(),
             r#"SELECT json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
         );
         assert_eq!(params, vec![GenericValue::Int(7)]);
@@ -592,9 +676,9 @@ mod tests {
         let mut pks = HashMap::new();
         pks.insert("orders".to_owned(), c("id"));
         let (sql, _) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &pks).unwrap();
+            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &pks, &HashMap::new()).unwrap();
         assert_eq!(
-            sql,
+            sql.as_str(),
             r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('id', "rel1"."id", 'total', "rel1"."total") ORDER BY "rel1"."created_at" DESC), '[]'::json) FROM (SELECT "rel2".* FROM "public"."orders" AS "rel2" WHERE "rel2"."user_id" = "root"."id" ORDER BY "rel2"."created_at" DESC LIMIT 5) AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
         );
     }
@@ -617,9 +701,9 @@ mod tests {
         };
         let schema = index(Some("id"), None, vec![count]);
         let (sql, _) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &HashMap::new()).unwrap();
+            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(
-            sql,
+            sql.as_str(),
             r#"SELECT json_build_object('order_count', (SELECT count(*) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
         );
     }
@@ -635,9 +719,9 @@ mod tests {
             vec![col_field("id", "id")],
         );
         let (sql, _) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &HashMap::new()).unwrap();
-        assert!(sql.contains(
-            r#"WHERE "root"."id" = $1 AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::boolean ELSE true END))"#
+            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &HashMap::new(), &HashMap::new()).unwrap();
+        assert!(sql.as_str().contains(
+            r#"WHERE "root"."id" = $1 AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
         ));
     }
 
@@ -645,7 +729,7 @@ mod tests {
     fn reverse_query_selects_foreign_key() {
         let (sql, params) =
             reverse_query(&db(), &t("orders"), &c("user_id"), &[(c("id"), GenericValue::Int(9))]).unwrap();
-        assert_eq!(sql, r#"SELECT "user_id" FROM "public"."orders" WHERE "id" = $1"#);
+        assert_eq!(sql.as_str(), r#"SELECT "user_id" FROM "public"."orders" WHERE "id" = $1"#);
         assert_eq!(params, vec![GenericValue::Int(9)]);
     }
 }

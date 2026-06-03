@@ -151,11 +151,11 @@ impl PgDocumentBuilder {
     /// single selected column.
     async fn run_reverse(
         &self,
-        sql: String,
+        sql: query::SqlString,
         params: Vec<GenericValue>,
         result_column: &str,
     ) -> Result<Vec<GenericValue>> {
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sql);
         for param in &params {
             query = query::bind_param(query, param)?;
         }

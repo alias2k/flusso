@@ -99,6 +99,30 @@ from the model the rest of the system relies on:
    join and aggregate arity, filter value shapes, and environment-variable
    resolution for secrets.
 
+## Testing
+
+Tests run with [`cargo-nextest`](https://nexte.st). Install it with
+`cargo install cargo-nextest --locked` (or a prebuilt binary from the site).
+
+```sh
+# Fast tests — unit + parsing/conversion. No external dependencies.
+cargo nextest run
+
+# Everything, including the Postgres e2e tests. These are #[ignore]d by
+# default and need a running Docker daemon (they spin up Postgres via
+# testcontainers).
+cargo nextest run --run-ignored all
+
+# Doctests — nextest does not run these, so run them separately.
+cargo test --doc
+```
+
+Configuration lives in `.config/nextest.toml`. The container-backed e2e tests
+(`sources-postgres`'s `integration`, `wal`, and `config_coverage` binaries) are
+grouped so only a few of their Postgres containers come up at once, and they
+retry transient failures. CI uses the `ci` profile
+(`cargo nextest run --profile ci --run-ignored all`).
+
 ## Editor support
 
 `schemas/config.schema.json` and `schemas/index.schema.yml` are JSON Schemas for

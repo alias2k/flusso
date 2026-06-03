@@ -1,0 +1,44 @@
+# cargo-nextest configuration — https://nexte.st/docs/configuration/
+#
+# Why nextest here:
+#   * Each test runs in its own process, so the env-var mutation in the
+#     config-toml tests can't race across tests.
+#   * The Postgres e2e tests (testcontainers) get their own concurrency cap and
+#     retries — container startup is occasionally flaky and legitimately slow.
+#
+# Note: nextest does not run doctests. Run those separately with
+# `cargo test --doc` (there are none today, but don't let that change silently).
+
+[profile.default]
+# Flag a test that runs long, but don't kill it — spinning up a container is
+# slow, and the per-test overrides below give the e2e tests real headroom.
+slow-timeout = { period = "30s" }
+retries = 0
+
+# The container-backed e2e tests. Capping the thread count bounds how many
+# Postgres containers come up at once instead of one per core.
+[test-groups.docker]
+max-threads = 4
+
+# The Postgres e2e tests live in these integration-test binaries and are
+# `#[ignore]`d by default (run with `--run-ignored all`). Put them in the
+# `docker` group, retry transient failures, and allow a slow startup.
+[[profile.default.overrides]]
+filter = 'package(sources-postgres) & binary(integration) | package(sources-postgres) & binary(wal) | package(sources-postgres) & binary(config_coverage)'
+test-group = 'docker'
+retries = 2
+slow-timeout = { period = "90s", terminate-after = 4 }
+
+# CI: don't stop at the first failure, and emit JUnit for the runner to surface.
+[profile.ci]
+retries = 0
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[[profile.ci.overrides]]
+filter = 'package(sources-postgres) & binary(integration) | package(sources-postgres) & binary(wal) | package(sources-postgres) & binary(config_coverage)'
+test-group = 'docker'
+retries = 2
+slow-timeout = { period = "120s", terminate-after = 5 }

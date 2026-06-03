@@ -47,12 +47,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use schema_core::{ColumnName, Config, DatabaseSchema, TableName};
+use schema_core::{ColumnName, Config, DatabaseSchema, Filter, IndexSchema, SoftDelete, TableName};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
 use sources_core::{Result, RowKey, SourceError};
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
+
+/// Cache of each `(schema, table, column)`'s SQL type.
+type ColTypeCache = HashMap<(String, String, String), String>;
 
 /// Builds index documents from a Postgres database, driven by the loaded
 /// [`Config`]. Cheap to clone — the pool, config, and primary-key cache are
@@ -63,6 +66,9 @@ pub struct PgDocumentBuilder {
     config: Arc<Config>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
+    /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
+    /// operands to the column's real type rather than comparing as text.
+    col_type_cache: Arc<Mutex<ColTypeCache>>,
 }
 
 impl PgDocumentBuilder {
@@ -72,6 +78,7 @@ impl PgDocumentBuilder {
             pool,
             config,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
+            col_type_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -164,6 +171,88 @@ impl PgDocumentBuilder {
         }
         Ok(pks)
     }
+
+    /// The SQL type of a column, as a cast-ready name from the Postgres catalog
+    /// (e.g. `numeric`, `integer`, `timestamp with time zone`), cached. An
+    /// unknown column is an error — a filter naming a column that does not
+    /// exist is a misconfiguration.
+    pub(super) async fn column_type(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        let cache_key = (schema.to_string(), table.to_string(), column.to_string());
+        {
+            let cache = self
+                .col_type_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(sql_type) = cache.get(&cache_key) {
+                return Ok(sql_type.clone());
+            }
+        }
+        // `format_type` yields a canonical, re-parseable type name, so it can be
+        // dropped straight into a `$n::<type>` cast.
+        let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type \
+                   FROM pg_attribute a \
+                   WHERE a.attrelid = $1::regclass AND a.attname = $2 \
+                     AND a.attnum > 0 AND NOT a.attisdropped";
+        let row = sqlx::query(sql)
+            .bind(format!("{schema}.{table}"))
+            .bind(column.as_ref().to_owned())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(query_err)?;
+        let sql_type: String = match row {
+            Some(row) => row.try_get("sql_type").map_err(query_err)?,
+            None => {
+                return Err(SourceError::Query(format!(
+                    "filter references unknown column `{schema}.{table}.{column}`"
+                )));
+            }
+        };
+        self.col_type_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(cache_key, sql_type.clone());
+        Ok(sql_type)
+    }
+
+    /// Resolve the SQL type of every column a value filter compares against,
+    /// keyed by `(table, column)`, so the document query can cast each operand
+    /// to its column's type. Covers relation filters at any depth and the
+    /// root-table columns named by a soft-delete `when`.
+    async fn filter_column_types(
+        &self,
+        schema: &IndexSchema,
+    ) -> Result<HashMap<(String, String), String>> {
+        let mut columns = Vec::new();
+        fields::collect_filter_columns(&schema.fields, &mut columns);
+
+        // Soft-delete `when` filters run against the root table.
+        let when = match &schema.soft_delete {
+            Some(SoftDelete::Column(c)) => c.when.as_deref(),
+            Some(SoftDelete::Field(f)) => f.when.as_deref(),
+            None => None,
+        };
+        for filter in when.unwrap_or_default() {
+            if let Filter::ValueOp(value_op) = filter {
+                columns.push((&schema.table, &value_op.column));
+            }
+        }
+
+        let mut types = HashMap::new();
+        for (table, column) in columns {
+            let key = (table.to_string(), column.to_string());
+            if types.contains_key(&key) {
+                continue;
+            }
+            let sql_type = self.column_type(&schema.db_schema, table, column).await?;
+            types.insert(key, sql_type);
+        }
+        Ok(types)
+    }
 }
 
 #[async_trait]
@@ -224,9 +313,10 @@ impl DocumentBuilder for PgDocumentBuilder {
         let schema = &index.schema;
 
         let pks = self.relation_pks(schema).await?;
-        let (sql, params) = query::document_query(schema, &id.key.0, &pks)?;
+        let col_types = self.filter_column_types(schema).await?;
+        let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types)?;
 
-        let mut statement = sqlx::query(&sql);
+        let mut statement = sqlx::query(sql);
         for param in &params {
             statement = query::bind_param(statement, param)?;
         }
