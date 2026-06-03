@@ -48,8 +48,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use schema_core::{ColumnName, Config, DatabaseSchema, Filter, IndexSchema, SoftDelete, TableName};
-use sources_core::document::{Document, DocumentBuilder, DocumentId};
-use sources_core::{Result, RowKey, SourceError};
+use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
+use sources_core::{Result, RowKey, SnapshotTable, SourceError};
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
@@ -337,6 +337,23 @@ impl DocumentBuilder for PgDocumentBuilder {
                 })
             }
         }
+    }
+
+    fn backfill_scopes(&self) -> Vec<IndexScope> {
+        // A document is keyed by its root row, so the root table alone seeds the
+        // whole index — `build` assembles the joins and aggregates per root row.
+        self.config
+            .indexes
+            .iter()
+            .filter(|(_, index)| index.enabled)
+            .map(|(name, index)| IndexScope {
+                index: name.clone(),
+                root: SnapshotTable {
+                    db_schema: index.schema.db_schema.clone(),
+                    table: index.schema.table.clone(),
+                },
+            })
+            .collect()
     }
 }
 

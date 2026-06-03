@@ -1,4 +1,4 @@
--- Schema for the storno dev environment.
+-- Schema for the flusso dev environment.
 --
 -- A `users` root table with a one-to-many `orders` child. `users.deleted` is a
 -- soft-delete flag — flipping it to true turns the document into a tombstone.
@@ -20,5 +20,5 @@ CREATE TABLE orders (
 CREATE INDEX orders_user_id_idx ON orders (user_id);
 
 -- REPLICA IDENTITY defaults to the primary key, which both tables have. That is
--- enough for storno to recover row keys on UPDATE/DELETE and reverse-resolve
+-- enough for flusso to recover row keys on UPDATE/DELETE and reverse-resolve
 -- order changes back to the owning user document.

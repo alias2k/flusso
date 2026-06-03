@@ -10,9 +10,11 @@
 //! 1. **Resume is internal.** No position or cursor crosses this API. Each
 //!    mechanism owns its resume state — trivially so for WAL, where the
 //!    replication slot is durable on the server.
-//! 2. **Backfill is the head of the stream.** [`ChangeCapture::start`] emits
-//!    the initial snapshot first, then transitions to live changes as one
-//!    continuous stream, with a consistent boundary between the two.
+//! 2. **Live and snapshot are separate capabilities.**
+//!    [`ChangeCapture::live`] streams ongoing changes;
+//!    [`ChangeCapture::snapshot`] reads current rows for a backfill. The engine
+//!    decides whether a backfill is needed (by asking the sink) and orchestrates
+//!    the two — the mechanism just exposes the capabilities.
 //! 3. **Events are thin.** A change names a row; it does not carry its data, so
 //!    every mechanism looks identical and nothing depends on `REPLICA IDENTITY`.
 

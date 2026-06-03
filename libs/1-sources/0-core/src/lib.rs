@@ -1,4 +1,4 @@
-//! The source abstractions for `storno`.
+//! The source abstractions for `flusso`.
 //!
 //! A source has two **independent** responsibilities, each its own module.
 //! Neither module references the other; the engine is the only thing that
@@ -15,6 +15,8 @@
 //! neither concern:
 //!
 //! - [`RowKey`] — a row's primary key as ordered column/value pairs.
+//! - [`SnapshotTable`] — a schema-qualified table the engine asks a mechanism
+//!   to snapshot when seeding an index.
 //! - [`SourceError`] / [`Result`] — the common error type.
 //!
 //! Keeping the two abstractions apart means a deployment can mix any change
@@ -23,9 +25,11 @@
 
 mod error;
 mod row_key;
+mod snapshot_table;
 
 pub mod cdc;
 pub mod document;
 
 pub use error::*;
 pub use row_key::*;
+pub use snapshot_table::*;

@@ -1,35 +1,35 @@
-//! The initial backfill: a one-time seed of the rows that already exist in the
-//! source before live capture takes over.
+//! The snapshot capability: reads the *current* rows of a set of tables, the
+//! data an initial backfill seeds an index with.
 //!
 //! `pgwire-replication` is a pure replication consumer — it neither creates the
 //! slot nor exports its snapshot — so there is no slot-tied snapshot to read
 //! from. Instead this reads existing rows over an ordinary SQL connection inside
-//! a `REPEATABLE READ` transaction (a single, self-consistent view) and emits a
-//! [`ChangeEvent::Snapshot`] per row, then a [`ChangeEvent::SnapshotComplete`].
+//! a `REPEATABLE READ` transaction (a single, self-consistent view) and emits an
+//! [`ChangeEvent::Upsert`] per row. The stream simply ends when every table is
+//! drained; the engine knows it is seeding from *which stream* it is draining,
+//! so there is no in-band boundary marker.
 //!
-//! That this is not perfectly fused to the slot's start position is fine: events
-//! are *thin* (table + key), the engine re-reads each row at assembly time, and
-//! delivery is at-least-once and idempotent. A row touched between the slot's
-//! confirmed position and the snapshot is simply re-applied as a live change —
-//! same row, same document, no harm. Backfill rows therefore register against
-//! the shared ack watermark at `start_lsn`, so confirming them never advances
-//! the slot past where live replay must begin.
+//! That this is not fused to the slot's live position is fine: events are *thin*
+//! (table + key), the engine re-reads each row at assembly time, and delivery is
+//! at-least-once and idempotent. A row touched between the snapshot and where
+//! live capture resumes is simply re-applied as a live change — same row, same
+//! document, no harm. Snapshot changes therefore carry a no-op ack: a backfill
+//! that crashes part-way is just re-run, it does not advance any cursor.
 //!
-//! ## What gets backfilled
+//! ## Scope
 //!
-//! Every table in the configured **publication** — exactly the set of tables the
-//! live stream reports changes for — keeping this layer free of any index
-//! knowledge (mapping rows to documents is the engine's job). A `FOR ALL TABLES`
-//! publication therefore backfills everything it covers. Tables without a single
-//! usable primary key are skipped with a warning rather than aborting the run;
-//! logical replication can't address keyless rows anyway.
+//! The engine passes exactly the tables to read — the **root table** of each
+//! index it is seeding (a document is identified by its root row, so the nested
+//! joins and aggregates are pulled in by `build`, not snapshotted here). Tables
+//! without a single usable primary key are skipped with a warning rather than
+//! aborting; logical replication can't address keyless rows anyway.
 //!
 //! ## Cost
 //!
-//! The `REPEATABLE READ` transaction is held open for the whole backfill, which
+//! The `REPEATABLE READ` transaction is held open for the whole snapshot, which
 //! holds back the source's vacuum horizon until it finishes — the usual,
-//! expected cost of a consistent initial load. Rows stream through a server-side
-//! cursor, so memory stays bounded regardless of table size.
+//! expected cost of a consistent read. Rows stream through a server-side cursor,
+//! so memory stays bounded regardless of table size.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -37,24 +37,40 @@ use std::sync::Arc;
 use futures::stream::{self, BoxStream};
 use schema_core::{ColumnName, TableName};
 use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
-use sources_core::{Result, RowKey, SourceError};
+use sources_core::{Result, RowKey, SnapshotTable, SourceError};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, Row};
 
-use super::ack::AckShared;
 use crate::document::value;
 
-/// Name of the single server-side cursor reused across tables. The backfill owns
+/// Name of the single server-side cursor reused across tables. The snapshot owns
 /// its own connection for its whole lifetime, so a fixed name never collides.
-const CURSOR: &str = "storno_backfill_cursor";
+const CURSOR: &str = "flusso_backfill_cursor";
 
 /// How many keys to pull from the cursor per round-trip.
-const FETCH_SQL: &str = "FETCH FORWARD 1024 FROM storno_backfill_cursor";
+const FETCH_SQL: &str = "FETCH FORWARD 1024 FROM flusso_backfill_cursor";
 
-/// One publication table to backfill, with its identifiers pre-quoted for the
-/// cursor's `SELECT` and the validated names used to build [`Change`]s.
-pub(crate) struct BackfillTable {
+/// Connect a query connection and stream the current rows of `tables` as
+/// `Upsert` changes. Returns an empty stream when nothing is in scope.
+pub(crate) async fn snapshot(
+    connection_url: &str,
+    tables: &[SnapshotTable],
+) -> Result<BoxStream<'static, Result<Change>>> {
+    // A tiny pool: the snapshot checks out exactly one connection and holds it
+    // (its snapshot transaction) for the duration.
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(connection_url)
+        .await
+        .map_err(|e| SourceError::Connection(e.to_string()))?;
+    let tables = resolve_tables(&pool, tables).await?;
+    Ok(build_stream(pool, tables))
+}
+
+/// One table to snapshot, with its identifiers pre-quoted for the cursor's
+/// `SELECT` and the validated names used to build [`Change`]s.
+struct BackfillTable {
     /// `"schema"."table"`, quoted and ready to interpolate.
     qualified: String,
     /// `"pk"`, quoted and ready to interpolate.
@@ -65,67 +81,29 @@ pub(crate) struct BackfillTable {
     pk: ColumnName,
 }
 
-/// Connect a query pool and resolve the publication's backfillable tables.
-///
-/// Done eagerly (before streaming) so a misconfigured publication or connection
-/// surfaces at startup rather than mid-stream.
-pub(crate) async fn prepare(
-    connection_url: &str,
-    publication: &str,
-) -> Result<(PgPool, Vec<BackfillTable>)> {
-    // A tiny pool: the backfill checks out exactly one connection and holds it
-    // (its snapshot transaction) for the duration; `plan` returns its borrow.
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(connection_url)
-        .await
-        .map_err(|e| SourceError::Connection(e.to_string()))?;
-    let tables = plan(&pool, publication).await?;
-    Ok((pool, tables))
-}
-
-/// The publication's tables, each paired with its single-column primary key.
-async fn plan(pool: &PgPool, publication: &str) -> Result<Vec<BackfillTable>> {
-    let rows = sqlx::query(
-        "SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = $1 \
-         ORDER BY schemaname, tablename",
-    )
-    .bind(publication)
-    .fetch_all(pool)
-    .await
-    .map_err(query_err)?;
-
-    if rows.is_empty() {
-        tracing::warn!(
-            %publication,
-            "backfill found no tables for the publication; seeding nothing"
-        );
-    }
-
-    let mut tables = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let schema: String = row.try_get("schemaname").map_err(query_err)?;
-        let name: String = row.try_get("tablename").map_err(query_err)?;
-        let Ok(table) = TableName::try_new(&name) else {
-            tracing::warn!(table = %name, "skipping backfill: not a valid table identifier");
-            continue;
-        };
-        let Some(pk) = primary_key(pool, &schema, &name).await? else {
+/// Pair each requested table with its single-column primary key, skipping (with
+/// a warning) any table that lacks one — neither it nor logical replication can
+/// address keyless rows.
+async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<BackfillTable>> {
+    let mut out = Vec::with_capacity(tables.len());
+    for table in tables {
+        let schema = table.db_schema.as_ref();
+        let name = table.table.as_ref();
+        let Some(pk) = primary_key(pool, schema, name).await? else {
             continue; // reason already logged
         };
-        tables.push(BackfillTable {
-            qualified: format!("{}.{}", quote_ident(&schema), quote_ident(&name)),
+        out.push(BackfillTable {
+            qualified: format!("{}.{}", quote_ident(schema), quote_ident(name)),
             pk_quoted: quote_ident(pk.as_ref()),
-            table,
+            table: table.table.clone(),
             pk,
         });
     }
-    Ok(tables)
+    Ok(out)
 }
 
 /// The single-column primary key of a table from the catalog, or `None` (with a
-/// warning) if it has no primary key or a composite one — neither of which the
-/// rest of the system can address.
+/// warning) if it has no primary key or a composite one.
 async fn primary_key(pool: &PgPool, schema: &str, table: &str) -> Result<Option<ColumnName>> {
     let sql = "SELECT a.attname AS name \
                FROM pg_index i \
@@ -161,44 +139,27 @@ async fn primary_key(pool: &PgPool, schema: &str, table: &str) -> Result<Option<
     }
 }
 
-/// Build the backfill [`Change`] stream: a `Snapshot` per existing row across
-/// `tables`, followed by `SnapshotComplete`. With no tables it is just the
-/// `SnapshotComplete` boundary — the correct shape when there is nothing to seed
-/// (or backfill is disabled), so the live phase still gets its clean start.
-pub(crate) fn stream(
-    pool: Option<PgPool>,
-    tables: Vec<BackfillTable>,
-    ack: Arc<AckShared>,
-    sink: Arc<dyn AckSink>,
-    start_lsn: u64,
-) -> BoxStream<'static, Result<Change>> {
+/// Build the snapshot stream: an `Upsert` per existing row across `tables`, then
+/// end. With no tables it ends immediately.
+fn build_stream(pool: PgPool, tables: Vec<BackfillTable>) -> BoxStream<'static, Result<Change>> {
     let phase = if tables.is_empty() {
-        Phase::Completing
+        Phase::Done
     } else {
         Phase::Pending {
             tables: tables.into(),
         }
     };
-    let state = Backfill {
-        ack,
-        sink,
-        start_lsn,
-        pool,
-        phase,
-    };
+    let state = Backfill { pool, phase };
     Box::pin(stream::unfold(state, |mut state| async move {
         state.step().await.map(|item| (item, state))
     }))
 }
 
-/// Carries the backfill across `unfold` polls.
+/// Carries the snapshot across `unfold` polls.
 struct Backfill {
-    ack: Arc<AckShared>,
-    sink: Arc<dyn AckSink>,
-    start_lsn: u64,
-    /// Kept alive for the whole backfill so the checked-out connection stays
+    /// Kept alive for the whole snapshot so the checked-out connection stays
     /// valid; the connection itself lives in [`Phase::Reading`].
-    pool: Option<PgPool>,
+    pool: PgPool,
     phase: Phase,
 }
 
@@ -212,14 +173,12 @@ enum Phase {
         remaining: VecDeque<BackfillTable>,
         buf: VecDeque<RowKey>,
     },
-    /// All rows emitted (or none to emit): emit the `SnapshotComplete` boundary.
-    Completing,
     /// Stream exhausted.
     Done,
 }
 
 impl Backfill {
-    /// Produce the next item, or `None` once the backfill is exhausted. Drives
+    /// Produce the next item, or `None` once the snapshot is exhausted. Drives
     /// the phase machine, doing one unit of DB work per loop turn between yields.
     async fn step(&mut self) -> Option<Result<Change>> {
         loop {
@@ -227,24 +186,16 @@ impl Backfill {
             // don't fight over a borrow of `self.phase`.
             match std::mem::replace(&mut self.phase, Phase::Done) {
                 Phase::Pending { mut tables } => {
-                    let Some(pool) = &self.pool else {
-                        return Some(Err(SourceError::Setup(
-                            "backfill: connection pool missing".into(),
-                        )));
-                    };
-                    let mut conn = match pool.acquire().await {
+                    let mut conn = match self.pool.acquire().await {
                         Ok(conn) => conn,
                         Err(e) => return Some(Err(SourceError::Connection(e.to_string()))),
                     };
                     if let Err(e) = begin_snapshot(&mut conn).await {
                         return Some(Err(e));
                     }
-                    // `tables` is non-empty here (the empty case starts in
-                    // `Completing`), but stay total rather than unwrap.
-                    let Some(current) = tables.pop_front() else {
-                        self.phase = Phase::Completing;
-                        continue;
-                    };
+                    // `tables` is non-empty here (the empty case starts `Done`);
+                    // `?` is a total fallback that just ends the stream otherwise.
+                    let current = tables.pop_front()?;
                     if let Err(e) = declare_cursor(&mut conn, &current).await {
                         return Some(Err(e));
                     }
@@ -262,10 +213,7 @@ impl Backfill {
                     mut buf,
                 } => {
                     if let Some(key) = buf.pop_front() {
-                        let change = self.make_change(ChangeEvent::Snapshot {
-                            table: current.table.clone(),
-                            key,
-                        });
+                        let change = upsert_change(current.table.clone(), key);
                         self.phase = Phase::Reading {
                             conn,
                             current,
@@ -289,7 +237,7 @@ impl Backfill {
                                 if let Err(e) = commit(&mut conn).await {
                                     return Some(Err(e));
                                 }
-                                self.phase = Phase::Completing;
+                                return None;
                             }
                             Some(next) => {
                                 if let Err(e) = declare_cursor(&mut conn, &next).await {
@@ -316,24 +264,28 @@ impl Backfill {
                         };
                     }
                 }
-                Phase::Completing => {
-                    self.phase = Phase::Done;
-                    return Some(Ok(self.make_change(ChangeEvent::SnapshotComplete)));
-                }
                 Phase::Done => return None,
             }
         }
     }
+}
 
-    /// Wrap an event in a [`Change`] whose ack registers at `start_lsn`, so
-    /// confirming backfill rows holds the slot at its resume point.
-    fn make_change(&self, event: ChangeEvent) -> Change {
-        let seq = self.ack.register(self.start_lsn);
-        Change {
-            event,
-            ack: Ack::new(seq, Arc::clone(&self.sink)),
-        }
+/// A snapshot row as an [`Upsert`](ChangeEvent::Upsert) change. Its ack is a
+/// no-op: the snapshot is not resumable, so confirming a row moves no cursor.
+fn upsert_change(table: TableName, key: RowKey) -> Change {
+    Change {
+        event: ChangeEvent::Upsert { table, key },
+        ack: Ack::new(0, Arc::new(NoopAck)),
     }
+}
+
+/// An [`AckSink`] that discards confirmations — for snapshot changes, which have
+/// no durable cursor to advance.
+#[derive(Debug)]
+struct NoopAck;
+
+impl AckSink for NoopAck {
+    fn confirm(&self, _seq: u64) {}
 }
 
 /// Open the read-only, single-snapshot transaction the cursors read within.
@@ -370,7 +322,7 @@ async fn fetch_batch(conn: &mut PoolConnection<Postgres>) -> Result<Vec<PgRow>> 
 }
 
 async fn close_cursor(conn: &mut PoolConnection<Postgres>) -> Result<()> {
-    sqlx::query("CLOSE storno_backfill_cursor")
+    sqlx::query("CLOSE flusso_backfill_cursor")
         .execute(&mut **conn)
         .await
         .map_err(query_err)?;

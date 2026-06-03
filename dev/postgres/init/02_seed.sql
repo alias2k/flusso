@@ -1,4 +1,4 @@
--- Initial fixtures. storno is a CDC consumer: it streams *changes* from the
+-- Initial fixtures. flusso is a CDC consumer: it streams *changes* from the
 -- replication slot, not a snapshot of pre-existing rows. So this seed data
 -- exists mainly to make the build SQL produce interesting documents once a
 -- change touches a row. Use dev/changes.sql to emit live changes.

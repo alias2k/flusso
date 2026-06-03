@@ -28,18 +28,13 @@ pub struct Change {
 /// Note that the mechanism reports *raw per-table* changes. Mapping a change in
 /// a joined or junction table back to the parent documents that must be rebuilt
 /// is the document layer's job — not something this layer knows.
+///
+/// There is no distinct "snapshot" variant: an initial backfill is a separate
+/// finite stream of [`Upsert`](Self::Upsert)s (see
+/// [`ChangeCapture::snapshot`](super::ChangeCapture::snapshot)), so the engine
+/// knows it is seeding from *which stream* it is draining, not from the event.
 #[derive(Debug, Clone)]
 pub enum ChangeEvent {
-    /// A row seen during the initial backfill at the head of the stream.
-    ///
-    /// Identical in effect to [`Upsert`](Self::Upsert), but kept distinct so
-    /// the engine can recognise backfill — for example to defer checkpointing
-    /// or batch differently until the snapshot completes.
-    Snapshot { table: TableName, key: RowKey },
-
-    /// The backfill is finished. Every change after this is a live change.
-    SnapshotComplete,
-
     /// A row was inserted or updated.
     Upsert { table: TableName, key: RowKey },
 

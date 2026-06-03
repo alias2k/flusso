@@ -1,5 +1,5 @@
 $schema: "http://json-schema.org/draft-07/schema#"
-title: storno Index Schema
+title: flusso Index Schema
 type: object
 required: [version, table, fields]
 additionalProperties: false

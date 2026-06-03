@@ -1,23 +1,23 @@
-# Local dev environment for storno.
+# Local dev environment for flusso.
 #
 # Brings up a Postgres configured for logical replication, pre-seeded with a
-# `users` + `orders` dataset and the replication slot + publication that storno
-# expects to already exist (storno is a pure consumer — it creates neither).
+# `users` + `orders` dataset and the replication slot + publication that flusso
+# expects to already exist (flusso is a pure consumer — it creates neither).
 #
 #   docker compose up -d          # start postgres
 #   cargo run -p cli -- --config dev/config.toml --pretty
-#   psql "postgres://postgres:postgres@127.0.0.1:5432/storno" -f dev/changes.sql
+#   psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
 #
 # See dev/README.md for the full walk-through.
 
 services:
   postgres:
     image: postgres:17
-    container_name: storno-postgres
+    container_name: flusso-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: storno
+      POSTGRES_DB: flusso
     # wal_level=logical is required for logical replication. The slot and
     # publication are created by the init scripts below, on first boot.
     command:
@@ -33,22 +33,22 @@ services:
     volumes:
       # *.sql here run once, in alphabetical order, on a fresh data dir.
       - ./dev/postgres/init:/docker-entrypoint-initdb.d:ro
-      - storno-pgdata:/var/lib/postgresql/data
+      - flusso-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d storno"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d flusso"]
       interval: 2s
       timeout: 3s
       retries: 30
 
   # ─── OpenSearch (later) ─────────────────────────────────────────────────────
-  # storno currently writes to stdout. When the OpenSearch sink lands, switch
+  # flusso currently writes to stdout. When the OpenSearch sink lands, switch
   # the sink in dev/config.toml to `type = "opensearch"` and start this with:
   #
   #   docker compose --profile opensearch up -d
   #
   # opensearch:
   #   image: opensearchproject/opensearch:2.17.1
-  #   container_name: storno-opensearch
+  #   container_name: flusso-opensearch
   #   profiles: ["opensearch"]
   #   environment:
   #     discovery.type: single-node
@@ -64,4 +64,4 @@ services:
   #     retries: 30
 
 volumes:
-  storno-pgdata:
+  flusso-pgdata:

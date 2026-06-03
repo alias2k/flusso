@@ -1,4 +1,4 @@
-//! `storno` — run the Postgres → sink pipeline from a config file.
+//! `flusso` — run the Postgres → sink pipeline from a config file.
 //!
 //! Loads a `config.toml`, connects to the source's Postgres, and streams
 //! changes through the engine to stdout. Logs go to stderr, so stdout stays
@@ -18,18 +18,18 @@ use url::Url;
 
 /// Stream Postgres changes into a sink, driven by a config file.
 #[derive(Debug, Parser)]
-#[command(name = "storno", version, about)]
+#[command(name = "flusso", version, about)]
 struct Cli {
     /// Path to the configuration file.
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
 
     /// Logical replication slot to consume. Must already exist.
-    #[arg(long, default_value = "storno")]
+    #[arg(long, default_value = "flusso")]
     slot: String,
 
     /// Publication to subscribe to. Must already exist and cover the tables.
-    #[arg(long, default_value = "storno")]
+    #[arg(long, default_value = "flusso")]
     publication: String,
 
     /// Skip the initial backfill and resume live capture only. Use after the
@@ -69,9 +69,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let config = Arc::new(config);
-    let source = Box::new(
-        WalChangeCapture::new(replication, connection_url.clone()).with_backfill(!cli.skip_backfill),
-    );
+    let source = Box::new(WalChangeCapture::new(replication, connection_url.clone()));
     let documents = Arc::new(
         PgDocumentBuilder::connect(&connection_url, Arc::clone(&config))
             .await
@@ -81,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     Engine::new(source, documents, sink)
         .with_queue_capacity(cli.queue_capacity)
+        .skip_backfill(cli.skip_backfill)
         .run()
         .await
         .context("sync engine stopped")?;
@@ -96,24 +95,19 @@ fn replication_config(
     publication: &str,
 ) -> anyhow::Result<ReplicationConfig> {
     let url = Url::parse(connection_url).context("parsing connection URL")?;
-    let host = url.host_str().context("connection URL has no host")?.to_owned();
+    let host = url
+        .host_str()
+        .context("connection URL has no host")?
+        .to_owned();
     let port = url.port().unwrap_or(5432);
     let user = url.username();
     ensure!(!user.is_empty(), "connection URL has no user");
-    let password = url.password().unwrap_or_default().to_owned();
+    let password = url.password().unwrap_or_default();
     let database = url.path().trim_start_matches('/');
     // Postgres defaults the database to the user when the URL omits it.
     let database = if database.is_empty() { user } else { database };
 
-    Ok(ReplicationConfig::new(
-        host,
-        user.to_owned(),
-        password,
-        database.to_owned(),
-        slot.to_owned(),
-        publication.to_owned(),
-    )
-    .with_port(port))
+    Ok(ReplicationConfig::new(host, user, password, database, slot, publication).with_port(port))
 }
 
 /// Log to stderr (stdout is reserved for the document stream). Honors `RUST_LOG`.

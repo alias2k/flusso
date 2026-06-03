@@ -1,4 +1,4 @@
-//! The validated domain model for `storno`.
+//! The validated domain model for `flusso`.
 //!
 //! Every other crate produces or consumes these types. They are the canonical
 //! shape of a configuration: already validated, carrying no trace of the file

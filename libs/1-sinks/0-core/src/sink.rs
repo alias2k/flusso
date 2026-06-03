@@ -22,4 +22,23 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
 
     /// Flush any buffered writes so everything written so far is durable.
     async fn flush(&self) -> Result<()>;
+
+    /// Whether `index` has already been seeded — its initial backfill completed
+    /// and durably applied here. The engine asks this at startup and skips the
+    /// backfill for indexes that report `true`.
+    ///
+    /// Seeded-state is destination knowledge, so it belongs to the sink: only
+    /// the sink knows whether its target already holds the data. The default is
+    /// `false` (never seeded) — correct for sinks that can't persist this, which
+    /// then re-seed on every run. Sinks that can store it (a metadata document,
+    /// a row, a sidecar) should override both methods.
+    async fn is_seeded(&self, _: &IndexName) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Record that `index` has been seeded, so a later run skips its backfill.
+    /// The default is a no-op (paired with `is_seeded` returning `false`).
+    async fn mark_seeded(&self, _: &IndexName) -> Result<()> {
+        Ok(())
+    }
 }

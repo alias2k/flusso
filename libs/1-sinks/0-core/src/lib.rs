@@ -1,4 +1,4 @@
-//! The sink abstraction for `storno`.
+//! The sink abstraction for `flusso`.
 //!
 //! A *sink* is where assembled documents go. It consumes neutral values — an
 //! [`IndexName`](schema_core::IndexName), a string id, and a document

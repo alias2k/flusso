@@ -1,4 +1,4 @@
-//! The `storno` sync engine.
+//! The `flusso` sync engine.
 //!
 //! Wires the pluggable edges together and runs the pipeline:
 //!
@@ -17,6 +17,14 @@
 //! Stopping on any error is therefore safe: unconfirmed changes are redelivered
 //! when the run restarts.
 //!
+//! Before live capture, the engine runs an optional **backfill** phase. It asks
+//! the [`DocumentBuilder`] which indexes exist and the sink whether each is
+//! already seeded; for those that aren't, it asks the source to
+//! [`snapshot`](ChangeCapture::snapshot) their root tables and drives that
+//! finite stream through the same queue → resolve → build → sink path (scoped to
+//! just the unseeded indexes), then records each as seeded. So "is a backfill
+//! needed?" is the destination's call, not the source's.
+//!
 //! The queue, source, sink, and document builder are all trait objects, so the
 //! backend choices (WAL vs polling, stdout vs OpenSearch, channel vs a durable
 //! broker) are swappable without touching this loop.
@@ -25,17 +33,18 @@ mod error;
 
 pub use error::*;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use queue_channel::{ChannelConsumer, channel};
 use queue_core::{Consumer, Producer};
-use schema_core::{GenericValue, TableName};
+use schema_core::{GenericValue, IndexName, TableName};
 use sinks_core::Sink;
-use sources_core::RowKey;
 use sources_core::cdc::{Change, ChangeCapture, ChangeEvent};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
+use sources_core::{RowKey, SnapshotTable};
 
 /// Pending changes buffered between capture and the worker.
 const DEFAULT_QUEUE_CAPACITY: usize = 1024;
@@ -47,6 +56,7 @@ pub struct Engine {
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
     queue_capacity: usize,
+    skip_backfill: bool,
 }
 
 impl Engine {
@@ -61,6 +71,7 @@ impl Engine {
             documents,
             sink,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            skip_backfill: false,
         }
     }
 
@@ -70,33 +81,108 @@ impl Engine {
         self
     }
 
-    /// Run until the change stream ends or an error stops the pipeline.
+    /// Force-skip the backfill phase entirely, regardless of what the sink
+    /// reports. An escape hatch for sinks that can't persist seeded-state (so
+    /// they would otherwise re-seed every run) or to resume without re-checking.
+    pub fn skip_backfill(mut self, skip: bool) -> Self {
+        self.skip_backfill = skip;
+        self
+    }
+
+    /// Run until the live change stream ends or an error stops the pipeline.
+    ///
+    /// First seeds any unseeded index (unless [`skip_backfill`](Self::skip_backfill)
+    /// is set), then follows live changes.
     pub async fn run(self) -> Result<()> {
         let Engine {
             source,
             documents,
             sink,
             queue_capacity,
+            skip_backfill,
         } = self;
 
-        let stream = source.start().await?;
-        let (producer, mut consumer) = channel::<Change>(queue_capacity);
-
-        // Capture runs concurrently with the worker; the worker borrows the
-        // shared builder and sink.
-        let capture = tokio::spawn(capture(stream, producer));
-        let worker = work(&mut consumer, documents.as_ref(), sink.as_ref()).await;
-
-        // Stop capture if it is still running, then fold the outcomes — a worker
-        // failure takes priority, otherwise surface a capture failure.
-        capture.abort();
-        let captured = capture.await;
-        worker?;
-        match captured {
-            Ok(result) => result,
-            Err(join) if join.is_cancelled() => Ok(()),
-            Err(join) => Err(EngineError::Task(join.to_string())),
+        if !skip_backfill {
+            backfill(
+                source.as_ref(),
+                documents.as_ref(),
+                sink.as_ref(),
+                queue_capacity,
+            )
+            .await?;
         }
+
+        let stream = source.live().await?;
+        pump(stream, documents.as_ref(), sink.as_ref(), queue_capacity, None).await
+    }
+}
+
+/// Seed every index the sink reports as unseeded, then mark them seeded.
+///
+/// The decision "does this index need a backfill?" is the **sink**'s — the
+/// destination is what knows whether it already holds the data. For the indexes
+/// that do, the source snapshots their root tables and the snapshot is applied
+/// scoped to just those indexes, so an already-seeded index sharing a table is
+/// never rewritten.
+async fn backfill(
+    source: &dyn ChangeCapture,
+    documents: &dyn DocumentBuilder,
+    sink: &dyn Sink,
+    queue_capacity: usize,
+) -> Result<()> {
+    let mut seeding: HashSet<IndexName> = HashSet::new();
+    let mut tables: Vec<SnapshotTable> = Vec::new();
+    for scope in documents.backfill_scopes() {
+        if sink.is_seeded(&scope.index).await? {
+            continue;
+        }
+        if !tables.contains(&scope.root) {
+            tables.push(scope.root);
+        }
+        seeding.insert(scope.index);
+    }
+    if seeding.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(indexes = seeding.len(), tables = tables.len(), "seeding indexes");
+    let stream = source.snapshot(&tables).await?;
+    pump(stream, documents, sink, queue_capacity, Some(&seeding)).await?;
+
+    // The snapshot is fully applied and flushed once `pump` returns; record each
+    // index as seeded so a later run skips it.
+    for index in &seeding {
+        sink.mark_seeded(index).await?;
+    }
+    Ok(())
+}
+
+/// Drain one change stream through the queue to the sink: spawn a capture task,
+/// run the worker, then fold the outcomes (a worker failure takes priority).
+///
+/// `filter`, when set, restricts which indexes a change may write to — used by
+/// the backfill so a snapshot only seeds the indexes being backfilled.
+async fn pump(
+    stream: BoxStream<'static, sources_core::Result<Change>>,
+    documents: &dyn DocumentBuilder,
+    sink: &dyn Sink,
+    queue_capacity: usize,
+    filter: Option<&HashSet<IndexName>>,
+) -> Result<()> {
+    let (producer, mut consumer) = channel::<Change>(queue_capacity);
+
+    // Capture runs concurrently with the worker; the worker borrows the shared
+    // builder and sink.
+    let capture = tokio::spawn(capture(stream, producer));
+    let worker = work(&mut consumer, documents, sink, filter).await;
+
+    capture.abort();
+    let captured = capture.await;
+    worker?;
+    match captured {
+        Ok(result) => result,
+        Err(join) if join.is_cancelled() => Ok(()),
+        Err(join) => Err(EngineError::Task(join.to_string())),
     }
 }
 
@@ -117,10 +203,11 @@ async fn work(
     consumer: &mut ChannelConsumer<Change>,
     documents: &dyn DocumentBuilder,
     sink: &dyn Sink,
+    filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
     while let Some(delivery) = consumer.recv().await? {
         let (change, ack) = delivery.into_parts();
-        apply(change, documents, sink).await?;
+        apply(change, documents, sink, filter).await?;
         ack.ack().await?;
     }
     Ok(())
@@ -128,15 +215,15 @@ async fn work(
 
 /// Apply one change: rebuild every document it affects, flush, then confirm the
 /// source ack so the slot can advance.
-async fn apply(change: Change, documents: &dyn DocumentBuilder, sink: &dyn Sink) -> Result<()> {
+async fn apply(
+    change: Change,
+    documents: &dyn DocumentBuilder,
+    sink: &dyn Sink,
+    filter: Option<&HashSet<IndexName>>,
+) -> Result<()> {
     match &change.event {
-        ChangeEvent::SnapshotComplete => {
-            tracing::info!("backfill complete; following live changes");
-        }
-        ChangeEvent::Snapshot { table, key }
-        | ChangeEvent::Upsert { table, key }
-        | ChangeEvent::Delete { table, key } => {
-            apply_row(table, key, documents, sink).await?;
+        ChangeEvent::Upsert { table, key } | ChangeEvent::Delete { table, key } => {
+            apply_row(table, key, documents, sink, filter).await?;
         }
     }
     // Flush per change keeps it simple and correct; a batching sink would flush
@@ -146,14 +233,20 @@ async fn apply(change: Change, documents: &dyn DocumentBuilder, sink: &dyn Sink)
     Ok(())
 }
 
-/// Rebuild and write every document affected by a change to one row.
+/// Rebuild and write every document affected by a change to one row. When
+/// `filter` is set, documents in indexes outside it are skipped (the backfill
+/// seeds only the indexes it is responsible for).
 async fn apply_row(
     table: &TableName,
     key: &RowKey,
     documents: &dyn DocumentBuilder,
     sink: &dyn Sink,
+    filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
     for id in documents.resolve(table, key).await? {
+        if filter.is_some_and(|filter| !filter.contains(&id.index)) {
+            continue;
+        }
         match documents.build(&id).await? {
             Document::Upsert { id, body } => {
                 sink.upsert(&id.index, &document_id(&id), &body).await?;
@@ -193,7 +286,7 @@ fn value_to_string(value: &GenericValue) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use async_trait::async_trait;
     use futures::stream;
@@ -208,7 +301,7 @@ mod tests {
 
     #[async_trait]
     impl ChangeCapture for MockSource {
-        async fn start(
+        async fn live(
             &self,
         ) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
             let changes = self.changes.lock().unwrap().take().unwrap_or_default();
@@ -255,6 +348,16 @@ mod tests {
                     body: GenericValue::Map(Default::default()),
                 }
             })
+        }
+
+        fn backfill_scopes(&self) -> Vec<sources_core::document::IndexScope> {
+            vec![sources_core::document::IndexScope {
+                index: IndexName::try_new("users").unwrap(),
+                root: SnapshotTable {
+                    db_schema: schema_core::DatabaseSchema::try_new("public").unwrap(),
+                    table: TableName::try_new("users").unwrap(),
+                },
+            }]
         }
     }
 
@@ -316,14 +419,7 @@ mod tests {
         let acks = Arc::new(AtomicU64::new(0));
         let ops = Arc::new(Mutex::new(Vec::new()));
 
-        let changes = vec![
-            upsert_change(1, 0, &acks),
-            delete_change(2, 1, &acks),
-            Change {
-                event: ChangeEvent::SnapshotComplete,
-                ack: Ack::new(2, Arc::new(CountingAck(Arc::clone(&acks)))),
-            },
-        ];
+        let changes = vec![upsert_change(1, 0, &acks), delete_change(2, 1, &acks)];
 
         let engine = Engine::new(
             Box::new(MockSource {
@@ -340,7 +436,167 @@ mod tests {
             *ops.lock().unwrap(),
             vec!["upsert users 1".to_owned(), "delete users 2".to_owned()]
         );
-        // Every change — including SnapshotComplete — is confirmed.
-        assert_eq!(acks.load(Ordering::SeqCst), 3);
+        // Every change is confirmed.
+        assert_eq!(acks.load(Ordering::SeqCst), 2);
+    }
+
+    /// A source whose `live` stream is empty (so `run` returns) and whose
+    /// `snapshot` records that it was called, with what tables, and replays a
+    /// fixed set of rows.
+    #[derive(Debug)]
+    struct SeedSource {
+        rows: Mutex<Option<Vec<Change>>>,
+        called: Arc<AtomicBool>,
+        tables: Arc<Mutex<Vec<SnapshotTable>>>,
+    }
+
+    impl SeedSource {
+        fn new(rows: Vec<Change>) -> Self {
+            Self {
+                rows: Mutex::new(Some(rows)),
+                called: Arc::new(AtomicBool::new(false)),
+                tables: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChangeCapture for SeedSource {
+        async fn live(
+            &self,
+        ) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn snapshot(
+            &self,
+            tables: &[SnapshotTable],
+        ) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
+            self.called.store(true, Ordering::SeqCst);
+            *self.tables.lock().unwrap() = tables.to_vec();
+            let rows = self.rows.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(stream::iter(
+                rows.into_iter().map(Ok::<Change, sources_core::SourceError>),
+            )))
+        }
+    }
+
+    /// A sink that reports a fixed seeded-state, records `mark_seeded` calls, and
+    /// records the upserts it receives.
+    #[derive(Debug)]
+    struct SeedSink {
+        seeded: bool,
+        marked: Arc<Mutex<Vec<String>>>,
+        ops: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Sink for SeedSink {
+        async fn upsert(
+            &self,
+            index: &IndexName,
+            id: &str,
+            _document: &GenericValue,
+        ) -> sinks_core::Result<()> {
+            self.ops.lock().unwrap().push(format!("upsert {} {id}", index.as_ref()));
+            Ok(())
+        }
+
+        async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+            self.ops.lock().unwrap().push(format!("delete {} {id}", index.as_ref()));
+            Ok(())
+        }
+
+        async fn flush(&self) -> sinks_core::Result<()> {
+            Ok(())
+        }
+
+        async fn is_seeded(&self, _index: &IndexName) -> sinks_core::Result<bool> {
+            Ok(self.seeded)
+        }
+
+        async fn mark_seeded(&self, index: &IndexName) -> sinks_core::Result<()> {
+            self.marked.lock().unwrap().push(index.as_ref().to_owned());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn seeds_an_unseeded_index_then_marks_it() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let source = SeedSource::new(vec![upsert_change(1, 0, &acks), upsert_change(3, 1, &acks)]);
+        let called = Arc::clone(&source.called);
+        let tables = Arc::clone(&source.tables);
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        let marked = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(SeedSink {
+            seeded: false,
+            marked: Arc::clone(&marked),
+            ops: Arc::clone(&ops),
+        });
+
+        Engine::new(Box::new(source), Arc::new(MockDocuments), sink)
+            .run()
+            .await
+            .unwrap();
+
+        assert!(called.load(Ordering::SeqCst), "snapshot should be requested");
+        // The index's root table is what gets snapshotted.
+        let tables = tables.lock().unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables.first().unwrap().table.as_ref(), "users");
+        // Snapshot rows are applied, and the index is marked seeded afterwards.
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
+        );
+        assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn skips_backfill_when_the_sink_reports_seeded() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let source = SeedSource::new(vec![upsert_change(1, 0, &acks)]);
+        let called = Arc::clone(&source.called);
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        let marked = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(SeedSink {
+            seeded: true,
+            marked: Arc::clone(&marked),
+            ops: Arc::clone(&ops),
+        });
+
+        Engine::new(Box::new(source), Arc::new(MockDocuments), sink)
+            .run()
+            .await
+            .unwrap();
+
+        assert!(!called.load(Ordering::SeqCst), "a seeded index is not snapshotted");
+        assert!(ops.lock().unwrap().is_empty());
+        assert!(marked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn skip_backfill_flag_overrides_an_unseeded_index() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let source = SeedSource::new(vec![upsert_change(1, 0, &acks)]);
+        let called = Arc::clone(&source.called);
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        let marked = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(SeedSink {
+            seeded: false,
+            marked: Arc::clone(&marked),
+            ops: Arc::clone(&ops),
+        });
+
+        Engine::new(Box::new(source), Arc::new(MockDocuments), sink)
+            .skip_backfill(true)
+            .run()
+            .await
+            .unwrap();
+
+        assert!(!called.load(Ordering::SeqCst), "skip_backfill suppresses the snapshot");
+        assert!(ops.lock().unwrap().is_empty());
+        assert!(marked.lock().unwrap().is_empty());
     }
 }

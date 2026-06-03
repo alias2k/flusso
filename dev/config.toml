@@ -1,4 +1,4 @@
-# storno dev config — points at the docker-compose Postgres and prints rebuilt
+# flusso dev config — points at the docker-compose Postgres and prints rebuilt
 # documents to stdout. Run with:
 #
 #   cargo run -p cli -- --config dev/config.toml --pretty
@@ -7,7 +7,7 @@
 
 [source]
 type = "postgres"
-connection_url = "postgres://postgres:postgres@127.0.0.1:5432/storno"
+connection_url = "postgres://postgres:postgres@127.0.0.1:5432/flusso"
 
 [sinks.primary]
 type = "stdout"

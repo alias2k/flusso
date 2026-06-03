@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use schema_core::{GenericValue, IndexName, TableName};
 
-use crate::{Result, RowKey};
+use crate::{Result, RowKey, SnapshotTable};
 
 /// Addresses one document in a target index: which index, and the root row's
 /// key within it. The same source row can map to documents in several indexes,
@@ -32,6 +32,17 @@ impl Document {
     }
 }
 
+/// What an index needs in order to be seeded: its name and the source table to
+/// snapshot for it. A document is identified by its root row, so snapshotting
+/// the **root table** alone seeds the whole index — `build` pulls in every join
+/// and aggregate server-side when each root row is assembled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexScope {
+    pub index: IndexName,
+    /// The index's root table — the one whose rows map one-to-one to documents.
+    pub root: SnapshotTable,
+}
+
 /// Turns changed rows into target documents — the read half of a source.
 ///
 /// Used in two steps so the engine can deduplicate between them:
@@ -59,4 +70,12 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
 
     /// Assemble one document, or report it deleted if its root row is absent.
     async fn build(&self, id: &DocumentId) -> Result<Document>;
+
+    /// The enabled indexes this builder serves, each with the root table to
+    /// snapshot when seeding it. The engine uses this to scope an initial
+    /// backfill per index. The default is empty — a builder with no backfillable
+    /// indexes, which the engine simply never seeds.
+    fn backfill_scopes(&self) -> Vec<IndexScope> {
+        Vec::new()
+    }
 }

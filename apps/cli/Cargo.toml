@@ -1,10 +1,10 @@
 [package]
-name = "storno-cli"
+name = "flusso-cli"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "storno"
+name = "flusso"
 path = "src/main.rs"
 
 [lints]

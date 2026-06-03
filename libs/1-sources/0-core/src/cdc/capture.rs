@@ -1,35 +1,52 @@
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use futures::stream::{self, BoxStream};
 
-use crate::Result;
+use crate::{Result, SnapshotTable};
 
 use super::Change;
 
 /// A pluggable change-capture mechanism — logical replication (WAL) today,
 /// polling or trigger-based capture later.
 ///
-/// Implementations own their own resume state: no position is threaded through
-/// this API. [`start`](Self::start) reconnects, ensures whatever setup the
-/// mechanism needs (a replication slot and publication, a poll cursor, …), and
-/// resumes from where it last left off.
+/// The mechanism exposes two independent capabilities; the engine decides when
+/// to use each:
 ///
-/// The returned stream begins with the initial backfill — a run of
-/// [`ChangeEvent::Snapshot`](super::ChangeEvent::Snapshot) events terminated by
-/// a single [`ChangeEvent::SnapshotComplete`](super::ChangeEvent::SnapshotComplete)
-/// — and then continues with live changes, all as one continuous stream. The
-/// snapshot is taken at a point consistent with where live capture begins, so
-/// no change is missed or duplicated across the boundary.
+/// - [`live`](Self::live) streams ongoing changes, resuming from the
+///   mechanism's own durable position (a replication slot's
+///   `confirmed_flush_lsn`, a poll cursor, …). No position is threaded through
+///   this API — resume state is the mechanism's to own.
+/// - [`snapshot`](Self::snapshot) reads the *current* rows of a set of tables as
+///   a finite stream — the data an initial backfill needs. Whether a backfill
+///   is *needed* is not the mechanism's call: the engine asks the **sink**
+///   whether a target is already seeded and only then requests a snapshot. A
+///   mechanism that cannot snapshot keeps the default (an empty stream).
 ///
-/// Each emitted [`Change`] carries an [`Ack`](super::Ack); the mechanism only
-/// advances its durable resume point once changes are confirmed, which makes
-/// delivery at-least-once across restarts.
+/// Each emitted [`Change`] carries an [`Ack`](super::Ack); for `live`, the
+/// mechanism only advances its durable resume point once changes are confirmed,
+/// which makes delivery at-least-once across restarts. Snapshot changes are not
+/// resumable (a crashed backfill simply re-runs, idempotently), so their acks
+/// need not move any cursor.
 ///
-/// The stream is `'static` and `Send`: an implementation moves whatever it
-/// needs (its connection, its [`AckSink`](super::AckSink)) into the stream
+/// Returned streams are `'static` and `Send`: an implementation moves whatever
+/// it needs (its connection, its [`AckSink`](super::AckSink)) into the stream
 /// rather than borrowing from `self`.
 #[async_trait]
 pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
-    /// Connect, ensure setup, resume from the last confirmed point, and begin
-    /// emitting changes — backfill first, then live changes.
-    async fn start(&self) -> Result<BoxStream<'static, Result<Change>>>;
+    /// Connect, ensure setup, resume from the last confirmed point, and stream
+    /// live changes.
+    async fn live(&self) -> Result<BoxStream<'static, Result<Change>>>;
+
+    /// Snapshot the current rows of `tables` as a finite stream of
+    /// [`Upsert`](super::ChangeEvent::Upsert) changes — the rows to seed an
+    /// index with. The stream ends when the snapshot is complete; there is no
+    /// in-band boundary marker.
+    ///
+    /// The default is an empty stream, for mechanisms that cannot snapshot.
+    async fn snapshot(
+        &self,
+        tables: &[SnapshotTable],
+    ) -> Result<BoxStream<'static, Result<Change>>> {
+        let _ = tables;
+        Ok(Box::pin(stream::empty()))
+    }
 }

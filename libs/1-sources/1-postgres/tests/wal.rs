@@ -76,11 +76,11 @@ async fn wal_changes_flow_through_the_engine() {
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
         "CREATE TABLE users (id int PRIMARY KEY, email text)",
-        "CREATE PUBLICATION storno FOR TABLE users",
+        "CREATE PUBLICATION flusso FOR TABLE users",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
-    sqlx::query("SELECT pg_create_logical_replication_slot('storno', 'pgoutput')")
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
         .execute(&pool)
         .await
         .unwrap();
@@ -91,8 +91,8 @@ async fn wal_changes_flow_through_the_engine() {
         "postgres",
         "postgres",
         "postgres",
-        "storno",
-        "storno",
+        "flusso",
+        "flusso",
     )
     .with_port(port);
     let documents = Arc::new(
@@ -151,14 +151,14 @@ async fn backfill_seeds_preexisting_rows() {
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
         "CREATE TABLE users (id int PRIMARY KEY, email text)",
-        "CREATE PUBLICATION storno FOR TABLE users",
+        "CREATE PUBLICATION flusso FOR TABLE users",
         // Rows that exist *before* the slot — only a backfill can surface them,
         // since they are behind the slot's confirmed position in the WAL.
         "INSERT INTO users (id, email) VALUES (1, 'ada@x.io'), (2, 'grace@x.io')",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
-    sqlx::query("SELECT pg_create_logical_replication_slot('storno', 'pgoutput')")
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
         .execute(&pool)
         .await
         .unwrap();
@@ -168,8 +168,8 @@ async fn backfill_seeds_preexisting_rows() {
         "postgres",
         "postgres",
         "postgres",
-        "storno",
-        "storno",
+        "flusso",
+        "flusso",
     )
     .with_port(port);
     let documents = Arc::new(

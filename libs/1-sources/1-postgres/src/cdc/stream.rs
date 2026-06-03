@@ -35,11 +35,11 @@ struct State {
 
 /// Build the live-changes [`Change`] stream from a connected client.
 ///
-/// The backfill phase runs ahead of this (see [`super::backfill`]) and emits the
-/// `SnapshotComplete` boundary, so this stream carries only live changes. It
-/// shares the backfill's [`AckShared`] watermark and [`AckSink`] so the slot
-/// advances over the whole sequence — backfill rows first, then live changes —
-/// as a single contiguous run.
+/// This carries only live changes; an initial backfill, when needed, is a
+/// separate snapshot stream the engine drives first (see [`super::backfill`]).
+/// Each emitted change registers against `ack` and reports through `sink`, so
+/// the slot's `confirmed_flush_lsn` advances only as far as the engine has
+/// durably confirmed.
 pub(crate) fn build(
     client: ReplicationClient,
     ack: Arc<AckShared>,

@@ -1,10 +1,10 @@
--- Sample changes to watch storno react in real time.
+-- Sample changes to watch flusso react in real time.
 --
--- With storno running, apply these in another terminal:
+-- With flusso running, apply these in another terminal:
 --
---   psql "postgres://postgres:postgres@127.0.0.1:5432/storno" -f dev/changes.sql
+--   psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
 --
--- Each statement below should produce one document on storno's stdout.
+-- Each statement below should produce one document on flusso's stdout.
 
 -- 1. New user → upsert for user 4 (no orders yet).
 INSERT INTO users (id, email, name) VALUES (4, 'Edsger@Example.com', 'Edsger Dijkstra');
