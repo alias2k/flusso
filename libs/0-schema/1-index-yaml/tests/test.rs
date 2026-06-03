@@ -1,6 +1,6 @@
 #![allow(unused_crate_dependencies)]
 
-use schema_core::{FieldRelation, Filter, FilterValue, IndexSchema, JoinKey, ParseFrom};
+use schema_core::{Filter, FilterValue, IndexSchema, JoinKey, ParseFrom, Relation};
 use schema_index_yaml::{ConversionError, ParseError, SchemaYaml};
 
 fn parse(yaml: &str) -> Result<SchemaYaml, ParseError> {
@@ -274,8 +274,8 @@ fields:
     .unwrap();
 
     let field = &schema.fields[0];
-    match field.relation.as_ref().unwrap() {
-        FieldRelation::Join(j) => match &j.key {
+    match field.relation().unwrap() {
+        Relation::Join { join, .. } => match &join.key {
             JoinKey::Direct(col) => assert_eq!(col.as_ref(), "user_id"),
             JoinKey::Through(_) => panic!("expected direct key"),
         },
@@ -302,8 +302,8 @@ fields:
     .unwrap();
 
     let field = &schema.fields[0];
-    match field.relation.as_ref().unwrap() {
-        FieldRelation::Join(j) => match &j.key {
+    match field.relation().unwrap() {
+        Relation::Join { join, .. } => match &join.key {
             JoinKey::Through(t) => {
                 assert_eq!(t.table.as_ref(), "user_tags");
                 assert_eq!(t.left_key.as_ref(), "user_id");
@@ -330,8 +330,8 @@ fields:
     .unwrap();
 
     let field = &schema.fields[0];
-    match field.relation.as_ref().unwrap() {
-        FieldRelation::Aggregate(a) => {
+    match field.relation().unwrap() {
+        Relation::Aggregate(a) => {
             assert!(matches!(a.op, schema_core::AggregateOp::Count))
         }
         _ => panic!("expected aggregate relation"),
@@ -354,8 +354,8 @@ fields:
     .unwrap();
 
     let field = &schema.fields[0];
-    match field.relation.as_ref().unwrap() {
-        FieldRelation::Aggregate(a) => match &a.op {
+    match field.relation().unwrap() {
+        Relation::Aggregate(a) => match &a.op {
             schema_core::AggregateOp::Sum(col) => assert_eq!(col.as_ref(), "amount"),
             _ => panic!("expected sum op"),
         },
@@ -381,8 +381,8 @@ fields:
     .unwrap();
 
     let field = &schema.fields[0];
-    let join = match field.relation.as_ref().unwrap() {
-        FieldRelation::Join(j) => j,
+    let join = match field.relation().unwrap() {
+        Relation::Join { join, .. } => join,
         _ => panic!("expected join"),
     };
     let filter = &join.filters.as_ref().unwrap()[0];
@@ -412,8 +412,8 @@ fields:
     .unwrap();
 
     let field = &schema.fields[0];
-    let join = match field.relation.as_ref().unwrap() {
-        FieldRelation::Join(j) => j,
+    let join = match field.relation().unwrap() {
+        Relation::Join { join, .. } => join,
         _ => panic!("expected join"),
     };
     let filter = &join.filters.as_ref().unwrap()[0];
@@ -443,8 +443,8 @@ fields:
     .unwrap();
 
     let field = &schema.fields[0];
-    let join = match field.relation.as_ref().unwrap() {
-        FieldRelation::Join(j) => j,
+    let join = match field.relation().unwrap() {
+        Relation::Join { join, .. } => join,
         _ => panic!("expected join"),
     };
     let filter = &join.filters.as_ref().unwrap()[0];

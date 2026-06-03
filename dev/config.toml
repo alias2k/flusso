@@ -1,0 +1,26 @@
+# storno dev config — points at the docker-compose Postgres and prints rebuilt
+# documents to stdout. Run with:
+#
+#   cargo run -p cli -- --config dev/config.toml --pretty
+#
+# Schema paths below are resolved relative to this file's directory.
+
+[source]
+type = "postgres"
+connection_url = "postgres://postgres:postgres@127.0.0.1:5432/storno"
+
+[sinks.primary]
+type = "stdout"
+pretty = true
+
+# When the OpenSearch sink is ready, swap the sink above for:
+#
+# [sinks.primary]
+# type = "opensearch"
+# url = "http://127.0.0.1:9200"
+# tls_verify = false
+
+[[index]]
+name = "users"
+schema = "users.schema.yml"
+enabled = true

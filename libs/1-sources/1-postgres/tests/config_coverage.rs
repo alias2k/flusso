@@ -22,11 +22,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use schema_core::{
-    Aggregate, AggregateOp, ColumnName, Config, ConnectionUrl, DatabaseSchema, Direction, Field,
-    FieldName, FieldRelation, Filter, FilterOp, FilterValue, GenericValue, Index, IndexName,
+    Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Direction,
+    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, GenericValue, Index, IndexName,
     IndexSchema, Join, JoinKey, JoinType, NullCheckFilter, NullOp, OrderBy, RawFilter,
-    RawFilterValue, SoftDelete, SoftDeleteColumn, SoftDeleteField, Source, SourceType, TableName,
-    Through, Transform, ValueOpFilter,
+    RawFilterValue, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Source, SourceType,
+    TableName, Through, Transform, ValueOpFilter,
 };
 use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
@@ -486,16 +486,24 @@ async fn transforms_and_defaults_apply() {
     let (_pg, url) = start_seeded().await;
 
     let email = Field {
-        transforms: Some(vec![Transform::Trim, Transform::Lowercase]),
-        ..col("email", "email")
+        source: FieldSource::Column(Column {
+            column: column("email"),
+            transforms: vec![Transform::Trim, Transform::Lowercase],
+            default: None,
+        }),
+        ..base("email")
     };
     let bio = Field {
-        default: Some(GenericValue::String("(no bio)".into())),
-        ..col("bio", "bio")
+        source: FieldSource::Column(Column {
+            column: column("bio"),
+            transforms: Vec::new(),
+            default: Some(GenericValue::String("(no bio)".into())),
+        }),
+        ..base("bio")
     };
-    // A field with no column and a default renders the literal directly.
+    // A constant field with no database source renders the literal directly.
     let source = Field {
-        default: Some(GenericValue::String("seed".into())),
+        source: FieldSource::Constant(GenericValue::String("seed".into())),
         ..base("source")
     };
 
@@ -799,35 +807,36 @@ fn users_schema(fields: Vec<Field>, soft_delete: Option<SoftDelete>) -> IndexSch
 }
 
 fn base(name: &str) -> Field {
+    // A field with no database source — a literal-null constant unless the
+    // caller overrides `source`.
     Field {
         field: field(name),
-        column: None,
         mapping: None,
-        relation: None,
-        transforms: None,
-        default: None,
-        fields: None,
+        source: FieldSource::Constant(GenericValue::Null),
     }
 }
 
 fn col(name: &str, source_column: &str) -> Field {
     Field {
-        column: Some(column(source_column)),
+        source: FieldSource::Column(Column {
+            column: column(source_column),
+            transforms: Vec::new(),
+            default: None,
+        }),
         ..base(name)
     }
 }
 
 fn join_field(name: &str, join: Join, sub: Vec<Field>) -> Field {
     Field {
-        relation: Some(FieldRelation::Join(join)),
-        fields: Some(sub),
+        source: FieldSource::Relation(Relation::Join { join, fields: sub }),
         ..base(name)
     }
 }
 
 fn agg_field(name: &str, aggregate: Aggregate) -> Field {
     Field {
-        relation: Some(FieldRelation::Aggregate(aggregate)),
+        source: FieldSource::Relation(Relation::Aggregate(aggregate)),
         ..base(name)
     }
 }

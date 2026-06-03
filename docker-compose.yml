@@ -1,0 +1,67 @@
+# Local dev environment for storno.
+#
+# Brings up a Postgres configured for logical replication, pre-seeded with a
+# `users` + `orders` dataset and the replication slot + publication that storno
+# expects to already exist (storno is a pure consumer — it creates neither).
+#
+#   docker compose up -d          # start postgres
+#   cargo run -p cli -- --config dev/config.toml --pretty
+#   psql "postgres://postgres:postgres@127.0.0.1:5432/storno" -f dev/changes.sql
+#
+# See dev/README.md for the full walk-through.
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: storno-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: storno
+    # wal_level=logical is required for logical replication. The slot and
+    # publication are created by the init scripts below, on first boot.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    ports:
+      - "5432:5432"
+    volumes:
+      # *.sql here run once, in alphabetical order, on a fresh data dir.
+      - ./dev/postgres/init:/docker-entrypoint-initdb.d:ro
+      - storno-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d storno"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # ─── OpenSearch (later) ─────────────────────────────────────────────────────
+  # storno currently writes to stdout. When the OpenSearch sink lands, switch
+  # the sink in dev/config.toml to `type = "opensearch"` and start this with:
+  #
+  #   docker compose --profile opensearch up -d
+  #
+  # opensearch:
+  #   image: opensearchproject/opensearch:2.17.1
+  #   container_name: storno-opensearch
+  #   profiles: ["opensearch"]
+  #   environment:
+  #     discovery.type: single-node
+  #     plugins.security.disabled: "true"
+  #     OPENSEARCH_INITIAL_ADMIN_PASSWORD: "Storno-dev-1!"
+  #     OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+  #   ports:
+  #     - "9200:9200"
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 30
+
+volumes:
+  storno-pgdata:

@@ -2,14 +2,11 @@
 //! resolution), collecting relation tables (to pre-resolve their primary keys),
 //! and resolving a field name back to its column. No I/O.
 
-use schema_core::{ColumnName, Field, FieldName, FieldRelation, Filter, JoinKey, TableName};
+use schema_core::{ColumnName, Field, FieldName, Filter, JoinKey, Relation, TableName};
 
 /// The target table and key of a relation.
-pub(super) fn relation_target(relation: &FieldRelation) -> (&TableName, &JoinKey) {
-    match relation {
-        FieldRelation::Join(join) => (&join.table, &join.key),
-        FieldRelation::Aggregate(aggregate) => (&aggregate.table, &aggregate.key),
-    }
+pub(super) fn relation_target(relation: &Relation) -> (&TableName, &JoinKey) {
+    (relation.table(), relation.key())
 }
 
 /// Collect every `(table, column)` a value filter compares against, at any
@@ -23,22 +20,14 @@ pub(super) fn collect_filter_columns<'a>(
     out: &mut Vec<(&'a TableName, &'a ColumnName)>,
 ) {
     for field in fields {
-        if let Some(relation) = &field.relation {
-            let (table, filters) = match relation {
-                FieldRelation::Join(join) => (&join.table, join.filters.as_deref()),
-                FieldRelation::Aggregate(aggregate) => {
-                    (&aggregate.table, aggregate.filters.as_deref())
-                }
-            };
-            for filter in filters.unwrap_or_default() {
+        if let Some(relation) = field.relation() {
+            for filter in relation.filters().unwrap_or_default() {
                 if let Filter::ValueOp(value_op) = filter {
-                    out.push((table, &value_op.column));
+                    out.push((relation.table(), &value_op.column));
                 }
             }
         }
-        if let Some(nested) = &field.fields {
-            collect_filter_columns(nested, out);
-        }
+        collect_filter_columns(field.children(), out);
     }
 }
 
@@ -48,11 +37,11 @@ pub(super) fn collect_filter_columns<'a>(
 pub(super) fn find_paths<'a>(
     fields: &'a [Field],
     table: &TableName,
-    prefix: &mut Vec<&'a FieldRelation>,
-    out: &mut Vec<Vec<&'a FieldRelation>>,
+    prefix: &mut Vec<&'a Relation>,
+    out: &mut Vec<Vec<&'a Relation>>,
 ) {
     for field in fields {
-        match &field.relation {
+        match field.relation() {
             Some(relation) => {
                 prefix.push(relation);
                 let (target, key) = relation_target(relation);
@@ -61,16 +50,10 @@ pub(super) fn find_paths<'a>(
                 if hit {
                     out.push(prefix.clone());
                 }
-                if let Some(nested) = &field.fields {
-                    find_paths(nested, table, prefix, out);
-                }
+                find_paths(field.children(), table, prefix, out);
                 prefix.pop();
             }
-            None => {
-                if let Some(nested) = &field.fields {
-                    find_paths(nested, table, prefix, out);
-                }
-            }
+            None => find_paths(field.children(), table, prefix, out),
         }
     }
 }
@@ -79,12 +62,10 @@ pub(super) fn find_paths<'a>(
 /// primary keys the document query needs (to correlate and join through).
 pub(super) fn collect_relation_tables(fields: &[Field], out: &mut Vec<TableName>) {
     for field in fields {
-        if let Some(relation) = &field.relation {
-            out.push(relation_target(relation).0.clone());
+        if let Some(relation) = field.relation() {
+            out.push(relation.table().clone());
         }
-        if let Some(nested) = &field.fields {
-            collect_relation_tables(nested, out);
-        }
+        collect_relation_tables(field.children(), out);
     }
 }
 
@@ -92,11 +73,9 @@ pub(super) fn collect_relation_tables(fields: &[Field], out: &mut Vec<TableName>
 pub(super) fn field_column<'a>(fields: &'a [Field], name: &FieldName) -> Option<&'a ColumnName> {
     for field in fields {
         if &field.field == name {
-            return field.column.as_ref();
+            return field.column();
         }
-        if let Some(nested) = &field.fields
-            && let Some(column) = field_column(nested, name)
-        {
+        if let Some(column) = field_column(field.children(), name) {
             return Some(column);
         }
     }

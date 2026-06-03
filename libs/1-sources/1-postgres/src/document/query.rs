@@ -13,13 +13,13 @@
 use std::collections::HashMap;
 
 use schema_core::{
-    Aggregate, AggregateOp, ColumnName, DatabaseSchema, Direction, Field, FieldRelation, Filter,
+    Aggregate, AggregateOp, ColumnName, DatabaseSchema, Direction, Field, FieldSource, Filter,
     FilterOp, FilterValue, GenericValue, IndexSchema, Join, JoinKey, JoinType, NullOp, OrderBy,
-    SoftDelete, TableName, Transform, ValueOpFilter,
+    Relation, SoftDelete, TableName, Transform, ValueOpFilter,
 };
 use sources_core::{Result, SourceError};
-use sqlx::postgres::PgArguments;
 use sqlx::Postgres;
+use sqlx::postgres::PgArguments;
 
 use super::fields::field_column;
 
@@ -175,10 +175,9 @@ impl Builder<'_> {
     }
 
     fn pk_of(&self, table: &TableName) -> Result<ColumnName> {
-        self.pks
-            .get(&table.to_string())
-            .cloned()
-            .ok_or_else(|| SourceError::Query(format!("internal: missing primary key for `{table}`")))
+        self.pks.get(&table.to_string()).cloned().ok_or_else(|| {
+            SourceError::Query(format!("internal: missing primary key for `{table}`"))
+        })
     }
 
     /// `json_build_object('field', <expr>, …)` over a set of fields, where
@@ -203,34 +202,33 @@ impl Builder<'_> {
         parent_alias: &str,
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
-        match &field.relation {
-            Some(FieldRelation::Join(join)) => self.join_value(field, join, parent_alias, parent_pk),
-            Some(FieldRelation::Aggregate(aggregate)) => {
+        match &field.source {
+            FieldSource::Relation(Relation::Join { join, fields }) => {
+                self.join_value(join, fields, parent_alias, parent_pk)
+            }
+            FieldSource::Relation(Relation::Aggregate(aggregate)) => {
                 self.aggregate_value(aggregate, parent_alias, parent_pk)
             }
-            None => match (&field.column, &field.fields) {
-                (Some(column), _) => Ok(column_value(
-                    column,
-                    field.transforms.as_deref(),
-                    field.default.as_ref(),
-                    parent_alias,
-                )),
-                // Same-row nested group: same row, same key.
-                (None, Some(nested)) => self.object(nested, parent_alias, parent_pk),
-                (None, None) => Ok(literal_or_null(field.default.as_ref())),
-            },
+            FieldSource::Column(column) => Ok(column_value(
+                &column.column,
+                &column.transforms,
+                column.default.as_ref(),
+                parent_alias,
+            )),
+            // Same-row nested group: same row, same key.
+            FieldSource::Group(nested) => self.object(nested, parent_alias, parent_pk),
+            FieldSource::Constant(value) => Ok(literal_or_null(value)),
         }
     }
 
     fn join_value(
         &mut self,
-        field: &Field,
         join: &Join,
+        sub: &[Field],
         parent_alias: &str,
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
         let parent_pk = require_pk(parent_pk)?;
-        let sub = field.fields.as_deref().unwrap_or_default();
 
         match &join.key {
             JoinKey::Direct(foreign_key) => {
@@ -315,7 +313,8 @@ impl Builder<'_> {
             JoinKey::Direct(foreign_key) => {
                 let alias = self.alias();
                 let function = agg_function(&aggregate.op, &alias);
-                let filters = self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
+                let filters =
+                    self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
                 Ok(format!(
                     "(SELECT {function} FROM {} AS {} WHERE {} = {}{filters})",
                     qtable(self.db, &aggregate.table),
@@ -329,7 +328,8 @@ impl Builder<'_> {
                 let alias = self.alias();
                 let junction_alias = self.alias();
                 let function = agg_function(&aggregate.op, &alias);
-                let filters = self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
+                let filters =
+                    self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
                 Ok(format!(
                     "(SELECT {function} FROM {} AS {fa} JOIN {} AS {ja} ON {} = {} WHERE {} = {}{filters})",
                     qtable(self.db, &aggregate.table),
@@ -380,7 +380,12 @@ impl Builder<'_> {
         }
     }
 
-    fn value_op(&mut self, filter: &ValueOpFilter, alias: &str, table: &TableName) -> Result<String> {
+    fn value_op(
+        &mut self,
+        filter: &ValueOpFilter,
+        alias: &str,
+        table: &TableName,
+    ) -> Result<String> {
         let column = qcol(alias, &filter.column);
         let target = &filter.column;
         let expr = match (&filter.op, &filter.value) {
@@ -412,7 +417,10 @@ impl Builder<'_> {
                 format!("{column} IN ({})", self.typed_params(vs, table, target)?)
             }
             (FilterOp::NotIn, FilterValue::List(vs)) => {
-                format!("{column} NOT IN ({})", self.typed_params(vs, table, target)?)
+                format!(
+                    "{column} NOT IN ({})",
+                    self.typed_params(vs, table, target)?
+                )
             }
             (FilterOp::Between, FilterValue::Range(lo, hi)) => format!(
                 "{column} BETWEEN {} AND {}",
@@ -433,7 +441,12 @@ impl Builder<'_> {
     /// rather than everything degrading to text. The type was resolved from the
     /// catalog before query building (see
     /// [`PgDocumentBuilder::column_type`](super::PgDocumentBuilder::column_type)).
-    fn typed_param(&mut self, value: &str, table: &TableName, column: &ColumnName) -> Result<String> {
+    fn typed_param(
+        &mut self,
+        value: &str,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
         let sql_type = self
             .col_types
             .get(&(table.to_string(), column.to_string()))
@@ -509,18 +522,16 @@ fn json_agg_subquery(object: &str, inner: &str, derived: &str, agg_order: String
 /// to the column's type.
 fn column_value(
     column: &ColumnName,
-    transforms: Option<&[Transform]>,
+    transforms: &[Transform],
     default: Option<&GenericValue>,
     alias: &str,
 ) -> String {
     let mut expr = qcol(alias, column);
-    if let Some(transforms) = transforms {
-        for transform in transforms {
-            expr = match transform {
-                Transform::Lowercase => format!("lower({expr})"),
-                Transform::Trim => format!("trim({expr})"),
-            };
-        }
+    for transform in transforms {
+        expr = match transform {
+            Transform::Lowercase => format!("lower({expr})"),
+            Transform::Trim => format!("trim({expr})"),
+        };
     }
     if let Some(literal) = default.and_then(scalar_literal) {
         expr = format!("coalesce({expr}, {literal})");
@@ -539,8 +550,9 @@ fn scalar_literal(value: &GenericValue) -> Option<String> {
     Some(sql_string(&text))
 }
 
-fn literal_or_null(default: Option<&GenericValue>) -> String {
-    default.and_then(scalar_literal).unwrap_or_else(|| "null".to_owned())
+/// A scalar value as a SQL literal, or `null` for a null or non-scalar value.
+fn literal_or_null(value: &GenericValue) -> String {
+    scalar_literal(value).unwrap_or_else(|| "null".to_owned())
 }
 
 fn json_key(name: &str) -> String {
@@ -619,15 +631,19 @@ mod tests {
     fn col_field(name: &str, column: &str) -> Field {
         Field {
             field: f(name),
-            column: Some(c(column)),
             mapping: None,
-            relation: None,
-            transforms: None,
-            default: None,
-            fields: None,
+            source: FieldSource::Column(schema_core::Column {
+                column: c(column),
+                transforms: Vec::new(),
+                default: None,
+            }),
         }
     }
-    fn index(primary_key: Option<&str>, soft_delete: Option<SoftDelete>, fields: Vec<Field>) -> IndexSchema {
+    fn index(
+        primary_key: Option<&str>,
+        soft_delete: Option<SoftDelete>,
+        fields: Vec<Field>,
+    ) -> IndexSchema {
         IndexSchema {
             version: 1,
             table: t("users"),
@@ -641,9 +657,18 @@ mod tests {
 
     #[test]
     fn columns_only() {
-        let schema = index(Some("id"), None, vec![col_field("id", "id"), col_field("email", "email")]);
-        let (sql, params) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(7))], &HashMap::new(), &HashMap::new()).unwrap();
+        let schema = index(
+            Some("id"),
+            None,
+            vec![col_field("id", "id"), col_field("email", "email")],
+        );
+        let (sql, params) = document_query(
+            &schema,
+            &[(c("id"), GenericValue::Int(7))],
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(
             sql.as_str(),
             r#"SELECT json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
@@ -655,28 +680,32 @@ mod tests {
     fn one_to_many_with_order_and_limit() {
         let orders = Field {
             field: f("orders"),
-            column: None,
             mapping: None,
-            relation: Some(FieldRelation::Join(Join {
-                table: t("orders"),
-                join_type: JoinType::OneToMany,
-                key: JoinKey::Direct(c("user_id")),
-                filters: None,
-                order_by: Some(vec![OrderBy {
-                    column: c("created_at"),
-                    direction: Some(Direction::Desc),
-                }]),
-                limit: Some(5),
-            })),
-            transforms: None,
-            default: None,
-            fields: Some(vec![col_field("id", "id"), col_field("total", "total")]),
+            source: FieldSource::Relation(Relation::Join {
+                join: Join {
+                    table: t("orders"),
+                    join_type: JoinType::OneToMany,
+                    key: JoinKey::Direct(c("user_id")),
+                    filters: None,
+                    order_by: Some(vec![OrderBy {
+                        column: c("created_at"),
+                        direction: Some(Direction::Desc),
+                    }]),
+                    limit: Some(5),
+                },
+                fields: vec![col_field("id", "id"), col_field("total", "total")],
+            }),
         };
         let schema = index(Some("id"), None, vec![orders]);
         let mut pks = HashMap::new();
         pks.insert("orders".to_owned(), c("id"));
-        let (sql, _) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &pks, &HashMap::new()).unwrap();
+        let (sql, _) = document_query(
+            &schema,
+            &[(c("id"), GenericValue::Int(1))],
+            &pks,
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(
             sql.as_str(),
             r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('id', "rel1"."id", 'total', "rel1"."total") ORDER BY "rel1"."created_at" DESC), '[]'::json) FROM (SELECT "rel2".* FROM "public"."orders" AS "rel2" WHERE "rel2"."user_id" = "root"."id" ORDER BY "rel2"."created_at" DESC LIMIT 5) AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
@@ -687,21 +716,22 @@ mod tests {
     fn aggregate_count() {
         let count = Field {
             field: f("order_count"),
-            column: None,
             mapping: None,
-            relation: Some(FieldRelation::Aggregate(Aggregate {
+            source: FieldSource::Relation(Relation::Aggregate(Aggregate {
                 table: t("orders"),
                 op: AggregateOp::Count,
                 key: JoinKey::Direct(c("user_id")),
                 filters: None,
             })),
-            transforms: None,
-            default: None,
-            fields: None,
         };
         let schema = index(Some("id"), None, vec![count]);
-        let (sql, _) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &HashMap::new(), &HashMap::new()).unwrap();
+        let (sql, _) = document_query(
+            &schema,
+            &[(c("id"), GenericValue::Int(1))],
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(
             sql.as_str(),
             r#"SELECT json_build_object('order_count', (SELECT count(*) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
@@ -718,8 +748,13 @@ mod tests {
             })),
             vec![col_field("id", "id")],
         );
-        let (sql, _) =
-            document_query(&schema, &[(c("id"), GenericValue::Int(1))], &HashMap::new(), &HashMap::new()).unwrap();
+        let (sql, _) = document_query(
+            &schema,
+            &[(c("id"), GenericValue::Int(1))],
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!(sql.as_str().contains(
             r#"WHERE "root"."id" = $1 AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
         ));
@@ -727,9 +762,17 @@ mod tests {
 
     #[test]
     fn reverse_query_selects_foreign_key() {
-        let (sql, params) =
-            reverse_query(&db(), &t("orders"), &c("user_id"), &[(c("id"), GenericValue::Int(9))]).unwrap();
-        assert_eq!(sql.as_str(), r#"SELECT "user_id" FROM "public"."orders" WHERE "id" = $1"#);
+        let (sql, params) = reverse_query(
+            &db(),
+            &t("orders"),
+            &c("user_id"),
+            &[(c("id"), GenericValue::Int(9))],
+        )
+        .unwrap();
+        assert_eq!(
+            sql.as_str(),
+            r#"SELECT "user_id" FROM "public"."orders" WHERE "id" = $1"#
+        );
         assert_eq!(params, vec![GenericValue::Int(9)]);
     }
 }

@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use schema_core::{
-    ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, FieldRelation, GenericValue,
-    Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Source, SourceType, SoftDelete,
-    SoftDeleteColumn, TableName,
+    Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, FieldSource,
+    GenericValue, Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Relation, Source,
+    SourceType, SoftDelete, SoftDeleteColumn, TableName,
 };
 use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
@@ -87,19 +87,18 @@ async fn assembles_documents_resolves_and_tombstones() {
 fn users_config(connection_url: &str) -> Config {
     let orders = Field {
         field: field("orders"),
-        column: None,
         mapping: None,
-        relation: Some(FieldRelation::Join(Join {
-            table: table("orders"),
-            join_type: JoinType::OneToMany,
-            key: JoinKey::Direct(column("user_id")),
-            filters: None,
-            order_by: None,
-            limit: None,
-        })),
-        transforms: None,
-        default: None,
-        fields: Some(vec![column_field("id", "id"), column_field("total", "total")]),
+        source: FieldSource::Relation(Relation::Join {
+            join: Join {
+                table: table("orders"),
+                join_type: JoinType::OneToMany,
+                key: JoinKey::Direct(column("user_id")),
+                filters: None,
+                order_by: None,
+                limit: None,
+            },
+            fields: vec![column_field("id", "id"), column_field("total", "total")],
+        }),
     };
     let schema = IndexSchema {
         version: 1,
@@ -130,12 +129,12 @@ fn users_config(connection_url: &str) -> Config {
 fn column_field(name: &str, col: &str) -> Field {
     Field {
         field: field(name),
-        column: Some(column(col)),
         mapping: None,
-        relation: None,
-        transforms: None,
-        default: None,
-        fields: None,
+        source: FieldSource::Column(Column {
+            column: column(col),
+            transforms: Vec::new(),
+            default: None,
+        }),
     }
 }
 

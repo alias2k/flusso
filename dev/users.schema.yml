@@ -1,0 +1,35 @@
+# The `users` search document: a user with their orders nested in.
+#
+# A change to a user OR to one of their orders rebuilds and re-emits the whole
+# document. Setting users.deleted = true emits a tombstone (delete) instead.
+
+version: 1
+table: users
+schema: public
+primary_key: id
+
+soft_delete:
+  column: deleted
+
+fields:
+  - id
+  - field: email
+    mapping: { type: keyword }
+    transforms:
+      - lowercase
+      - trim
+  - field: name
+    mapping: { type: text }
+  - field: orders
+    mapping: { type: nested }
+    join:
+      table: orders
+      type: one_to_many
+      foreign_key: user_id
+      order_by:
+        - column: id
+          direction: asc
+    fields:
+      - id
+      - total
+      - status

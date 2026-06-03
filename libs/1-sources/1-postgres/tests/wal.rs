@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use engine::Engine;
 use schema_core::{
-    ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, GenericValue, Index,
-    IndexName, IndexSchema, Source, SourceType, TableName,
+    Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, FieldSource,
+    GenericValue, Index, IndexName, IndexSchema, Source, SourceType, TableName,
 };
 use sinks_core::{Result as SinkResult, Sink};
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
@@ -176,12 +176,12 @@ fn users_config(connection_url: &str) -> Config {
 fn column_field(name: &str, col: &str) -> Field {
     Field {
         field: field(name),
-        column: Some(column(col)),
         mapping: None,
-        relation: None,
-        transforms: None,
-        default: None,
-        fields: None,
+        source: FieldSource::Column(Column {
+            column: column(col),
+            transforms: Vec::new(),
+            default: None,
+        }),
     }
 }
 

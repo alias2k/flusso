@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use schema_core::{
-    ColumnName, DatabaseSchema, FieldRelation, GenericValue, IndexSchema, JoinKey, TableName,
+    ColumnName, DatabaseSchema, GenericValue, IndexSchema, JoinKey, Relation, TableName,
 };
 use sources_core::{Result, RowKey, SourceError};
 
@@ -19,7 +19,7 @@ impl PgDocumentBuilder {
         schema: &IndexSchema,
         changed_table: &TableName,
         change_key: &RowKey,
-        path: &[&FieldRelation],
+        path: &[&Relation],
     ) -> Result<Vec<GenericValue>> {
         let mut current_keys = vec![change_key.clone()];
         let mut current_table = changed_table.clone();
@@ -73,7 +73,7 @@ impl PgDocumentBuilder {
     async fn reverse_hop(
         &self,
         schema: &DatabaseSchema,
-        relation: &FieldRelation,
+        relation: &Relation,
         current_table: &TableName,
         key: &RowKey,
     ) -> Result<Vec<GenericValue>> {

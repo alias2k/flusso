@@ -2,49 +2,102 @@ use std::str::FromStr;
 
 use rust_decimal::Decimal;
 use schema_core::{
-    Aggregate, AggregateOp, Direction, Field, FieldRelation, Filter, FilterOp, FilterValue,
-    GenericValue, Join, JoinKey, JoinType, Mapping, MappingType, NullCheckFilter, NullOp,
-    OrderBy, RawFilter, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through, Transform,
-    ValueOpFilter,
+    Aggregate, AggregateOp, Column, ColumnName, Direction, Field, FieldSource, Filter, FilterOp,
+    FilterValue, GenericValue, Join, JoinKey, JoinType, Mapping, MappingType, NullCheckFilter,
+    NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
+    Transform, ValueOpFilter,
 };
 
-use crate::entities;
 use crate::ConversionError;
+use crate::entities;
 
 pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError> {
     match f {
-        entities::Field::Short(name) => Ok(Field {
-            field: name,
-            column: None,
-            mapping: None,
-            relation: None,
-            transforms: None,
-            default: None,
-            fields: None,
-        }),
+        entities::Field::Short(name) => {
+            // Shorthand `- foo` is a scalar field backed by a column of the
+            // same name.
+            let source = FieldSource::Column(Column {
+                column: default_column(&name)?,
+                transforms: Vec::new(),
+                default: None,
+            });
+            Ok(Field {
+                field: name,
+                mapping: None,
+                source,
+            })
+        }
         entities::Field::Full(def) => {
-            let relation = match (def.join, def.aggregate) {
-                (Some(j), None) => Some(FieldRelation::Join(convert_join(j)?)),
-                (None, Some(a)) => Some(FieldRelation::Aggregate(convert_aggregate(a)?)),
-                (None, None) => None,
-                (Some(_), Some(_)) => return Err(ConversionError::ConflictingRelation),
-            };
+            let def = *def;
+            let mapping = def.mapping.map(convert_mapping);
+            let nested = def
+                .fields
+                .map(|fs| fs.into_iter().map(convert_field).collect::<Result<_, _>>())
+                .transpose()?;
+            let source = field_source(
+                &def.field,
+                def.column,
+                def.join,
+                def.aggregate,
+                def.transforms,
+                def.default,
+                nested,
+            )?;
             Ok(Field {
                 field: def.field,
-                column: def.column,
-                mapping: def.mapping.map(convert_mapping),
-                relation,
-                transforms: def
-                    .transforms
-                    .map(|ts| ts.into_iter().map(convert_transform).collect()),
-                default: def.default.map(yaml_to_generic),
-                fields: def
-                    .fields
-                    .map(|fs| fs.into_iter().map(convert_field).collect::<Result<_, _>>())
-                    .transpose()?,
+                mapping,
+                source,
             })
         }
     }
+}
+
+/// Resolve a full field definition's parts into exactly one [`FieldSource`].
+///
+/// A relation (`join`/`aggregate`) wins; then a same-row group (nested fields
+/// with no column); otherwise a column field, defaulting the column to the
+/// field name when omitted so `field: email` shorthand just works.
+#[allow(clippy::too_many_arguments)]
+fn field_source(
+    field: &schema_core::FieldName,
+    column: Option<ColumnName>,
+    join: Option<entities::Join>,
+    aggregate: Option<entities::Aggregate>,
+    transforms: Option<Vec<entities::Transform>>,
+    default: Option<serde_yaml::Value>,
+    nested: Option<Vec<Field>>,
+) -> Result<FieldSource, ConversionError> {
+    match (join, aggregate) {
+        (Some(_), Some(_)) => Err(ConversionError::ConflictingRelation),
+        (Some(j), None) => Ok(FieldSource::Relation(Relation::Join {
+            join: convert_join(j)?,
+            fields: nested.unwrap_or_default(),
+        })),
+        (None, Some(a)) => Ok(FieldSource::Relation(Relation::Aggregate(
+            convert_aggregate(a)?,
+        ))),
+        (None, None) => match (column, nested) {
+            (None, Some(fields)) => Ok(FieldSource::Group(fields)),
+            (column, _) => Ok(FieldSource::Column(Column {
+                column: match column {
+                    Some(column) => column,
+                    None => default_column(field)?,
+                },
+                transforms: transforms
+                    .map(|ts| ts.into_iter().map(convert_transform).collect())
+                    .unwrap_or_default(),
+                default: default.map(yaml_to_generic),
+            })),
+        },
+    }
+}
+
+/// The column a field reads from when none is given: the field name itself.
+/// `ColumnName` lowercases, matching Postgres's folding of unquoted identifiers;
+/// a field name that isn't a valid column identifier must set `column`
+/// explicitly.
+fn default_column(field: &schema_core::FieldName) -> Result<ColumnName, ConversionError> {
+    Ok(ColumnName::try_new(field.as_ref())?)
 }
 
 fn convert_mapping(m: entities::Mapping) -> Mapping {
@@ -161,12 +214,8 @@ fn convert_filter_value(
         entities::FilterOp::Between => match v {
             serde_yaml::Value::Sequence(seq) if seq.len() == 2 => {
                 let mut iter = seq.into_iter();
-                let lower = yaml_scalar_to_string(
-                    iter.next().unwrap_or(serde_yaml::Value::Null),
-                );
-                let upper = yaml_scalar_to_string(
-                    iter.next().unwrap_or(serde_yaml::Value::Null),
-                );
+                let lower = yaml_scalar_to_string(iter.next().unwrap_or(serde_yaml::Value::Null));
+                let upper = yaml_scalar_to_string(iter.next().unwrap_or(serde_yaml::Value::Null));
                 Ok(FilterValue::Range(lower, upper))
             }
             serde_yaml::Value::Sequence(seq) => {
@@ -281,18 +330,22 @@ fn convert_order_by(ob: entities::OrderBy) -> OrderBy {
 pub(crate) fn convert_aggregate(a: entities::Aggregate) -> Result<Aggregate, ConversionError> {
     let op = match a.op {
         entities::AggregateOp::Count => AggregateOp::Count,
-        entities::AggregateOp::Sum => {
-            AggregateOp::Sum(a.column.ok_or(ConversionError::MissingAggregateColumn { op: "sum" })?)
-        }
-        entities::AggregateOp::Avg => {
-            AggregateOp::Avg(a.column.ok_or(ConversionError::MissingAggregateColumn { op: "avg" })?)
-        }
-        entities::AggregateOp::Min => {
-            AggregateOp::Min(a.column.ok_or(ConversionError::MissingAggregateColumn { op: "min" })?)
-        }
-        entities::AggregateOp::Max => {
-            AggregateOp::Max(a.column.ok_or(ConversionError::MissingAggregateColumn { op: "max" })?)
-        }
+        entities::AggregateOp::Sum => AggregateOp::Sum(
+            a.column
+                .ok_or(ConversionError::MissingAggregateColumn { op: "sum" })?,
+        ),
+        entities::AggregateOp::Avg => AggregateOp::Avg(
+            a.column
+                .ok_or(ConversionError::MissingAggregateColumn { op: "avg" })?,
+        ),
+        entities::AggregateOp::Min => AggregateOp::Min(
+            a.column
+                .ok_or(ConversionError::MissingAggregateColumn { op: "min" })?,
+        ),
+        entities::AggregateOp::Max => AggregateOp::Max(
+            a.column
+                .ok_or(ConversionError::MissingAggregateColumn { op: "max" })?,
+        ),
     };
     let key = match (a.foreign_key, a.through) {
         (Some(fk), None) => JoinKey::Direct(fk),
