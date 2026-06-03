@@ -99,6 +99,7 @@ uuid = { version = "1.*" }
 serde_json = { version = "1.*" }
 reqwest = { version = "0.12.*", default-features = false }
 testcontainers-modules = { version = "0.15.*" }
+criterion = { version = "0.5.*", features = ["async_tokio"] }
 
 schema = { path = "libs/0-schema" }
 schema-core = { path = "libs/0-schema/0-core" }

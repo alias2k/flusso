@@ -27,6 +27,11 @@
 //! Seeding state is persisted in a hidden `flusso_meta` index so restarts skip
 //! a completed backfill.
 
+// Benchmarks (in `benches/`) pull dev-dependencies the unit-test build doesn't
+// touch; allow that only under `cfg(test)` — the normal build still enforces
+// unused dependencies.
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
 use std::time::Duration;
