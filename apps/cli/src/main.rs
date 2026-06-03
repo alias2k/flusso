@@ -32,6 +32,11 @@ struct Cli {
     #[arg(long, default_value = "storno")]
     publication: String,
 
+    /// Skip the initial backfill and resume live capture only. Use after the
+    /// index has already been seeded, to avoid re-reading every existing row.
+    #[arg(long)]
+    skip_backfill: bool,
+
     /// Pretty-print documents instead of compact one-per-line JSON.
     #[arg(long)]
     pretty: bool,
@@ -64,7 +69,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let config = Arc::new(config);
-    let source = Box::new(WalChangeCapture::new(replication));
+    let source = Box::new(
+        WalChangeCapture::new(replication, connection_url.clone()).with_backfill(!cli.skip_backfill),
+    );
     let documents = Arc::new(
         PgDocumentBuilder::connect(&connection_url, Arc::clone(&config))
             .await

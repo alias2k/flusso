@@ -104,7 +104,11 @@ async fn wal_changes_flow_through_the_engine() {
     let sink = Arc::new(RecordingSink {
         ops: Arc::clone(&recorded),
     });
-    let engine = Engine::new(Box::new(WalChangeCapture::new(replication)), documents, sink);
+    let engine = Engine::new(
+        Box::new(WalChangeCapture::new(replication, url.clone())),
+        documents,
+        sink,
+    );
 
     let mut engine = tokio::spawn(engine.run());
 
@@ -120,6 +124,74 @@ async fn wal_changes_flow_through_the_engine() {
         .await
         .unwrap();
     expect_op(&mut engine, &recorded, "delete users 1").await;
+
+    engine.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn backfill_seeds_preexisting_rows() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text)",
+        "CREATE PUBLICATION storno FOR TABLE users",
+        // Rows that exist *before* the slot — only a backfill can surface them,
+        // since they are behind the slot's confirmed position in the WAL.
+        "INSERT INTO users (id, email) VALUES (1, 'ada@x.io'), (2, 'grace@x.io')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('storno', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "storno",
+        "storno",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(users_config(&url)))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink {
+        ops: Arc::clone(&recorded),
+    });
+    let engine = Engine::new(
+        Box::new(WalChangeCapture::new(replication, url.clone())),
+        documents,
+        sink,
+    );
+
+    let mut engine = tokio::spawn(engine.run());
+
+    // Both pre-existing rows are seeded by the backfill.
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+    expect_op(&mut engine, &recorded, "upsert users 2").await;
 
     engine.abort();
 }

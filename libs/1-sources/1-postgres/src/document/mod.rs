@@ -41,7 +41,7 @@
 mod fields;
 mod query;
 mod resolve;
-mod value;
+pub(crate) mod value;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};

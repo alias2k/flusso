@@ -15,7 +15,7 @@ use pgwire_replication::{Lsn, ReplicationClient, ReplicationEvent};
 use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
 use sources_core::{Result, SourceError};
 
-use super::ack::{AckShared, WalAckSink};
+use super::ack::AckShared;
 use super::pgoutput::{self, Decoded, Relation};
 
 /// Everything the unfold loop carries between polls.
@@ -33,26 +33,23 @@ struct State {
     done: bool,
 }
 
-/// Build the [`Change`] stream from a connected client and its starting LSN.
+/// Build the live-changes [`Change`] stream from a connected client.
+///
+/// The backfill phase runs ahead of this (see [`super::backfill`]) and emits the
+/// `SnapshotComplete` boundary, so this stream carries only live changes. It
+/// shares the backfill's [`AckShared`] watermark and [`AckSink`] so the slot
+/// advances over the whole sequence — backfill rows first, then live changes —
+/// as a single contiguous run.
 pub(crate) fn build(
     client: ReplicationClient,
-    start_lsn: Lsn,
+    ack: Arc<AckShared>,
+    sink: Arc<dyn AckSink>,
 ) -> BoxStream<'static, Result<Change>> {
-    let ack = Arc::new(AckShared::new(start_lsn.as_u64()));
-    let sink: Arc<dyn AckSink> = Arc::new(WalAckSink::new(Arc::clone(&ack)));
-
-    // The backfill phase is currently empty: pgwire-replication is a pure
-    // consumer, so an initial consistent snapshot needs a separate SQL query
-    // client we haven't wired yet. Emitting SnapshotComplete first keeps the
-    // contract shape — backfill (none), then live changes.
-    let mut pending = VecDeque::new();
-    pending.push_back((ChangeEvent::SnapshotComplete, start_lsn.as_u64()));
-
     let state = State {
         client,
         relations: HashMap::new(),
         open_txn: Vec::new(),
-        pending,
+        pending: VecDeque::new(),
         ack,
         sink,
         done: false,

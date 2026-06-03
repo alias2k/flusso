@@ -73,6 +73,18 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
     }
 }
 
+/// Decode the first column of a single-column row into a [`GenericValue`],
+/// using the same per-type decoding as the rest of the read path. The initial
+/// backfill selects one primary-key column per row and turns it into a
+/// [`RowKey`](sources_core::RowKey) value this way, so a snapshotted key matches
+/// what a live change would produce.
+pub(crate) fn first_column_to_generic(row: &PgRow) -> GenericValue {
+    match row.columns().first() {
+        Some(col) => decode_column(row, col),
+        None => GenericValue::Null,
+    }
+}
+
 /// Convert a JSON value (e.g. a server-assembled document) into the value tree.
 pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
     match value {
