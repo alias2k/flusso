@@ -1,4 +1,4 @@
-//! The validated domain model for `pg_sync_rs`.
+//! The validated domain model for `storno`.
 //!
 //! Every other crate produces or consumes these types. They are the canonical
 //! shape of a configuration: already validated, carrying no trace of the file

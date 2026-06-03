@@ -15,6 +15,7 @@ members = [
   "libs/2-engine",
   "apps/*",
 ]
+default-members = ["apps/cli"]
 resolver = "3"
 
 [workspace.lints.rust]

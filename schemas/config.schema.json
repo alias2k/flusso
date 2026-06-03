@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "pg_sync_rs Config",
+  "title": "storno Config",
   "type": "object",
   "required": ["source"],
   "additionalProperties": false,

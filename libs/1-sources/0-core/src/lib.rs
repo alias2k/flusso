@@ -1,4 +1,4 @@
-//! The source abstractions for `pg_sync_rs`.
+//! The source abstractions for `storno`.
 //!
 //! A source has two **independent** responsibilities, each its own module.
 //! Neither module references the other; the engine is the only thing that

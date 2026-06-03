@@ -76,11 +76,11 @@ async fn wal_changes_flow_through_the_engine() {
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
         "CREATE TABLE users (id int PRIMARY KEY, email text)",
-        "CREATE PUBLICATION pg_sync FOR TABLE users",
+        "CREATE PUBLICATION storno FOR TABLE users",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
-    sqlx::query("SELECT pg_create_logical_replication_slot('pg_sync', 'pgoutput')")
+    sqlx::query("SELECT pg_create_logical_replication_slot('storno', 'pgoutput')")
         .execute(&pool)
         .await
         .unwrap();
@@ -91,8 +91,8 @@ async fn wal_changes_flow_through_the_engine() {
         "postgres",
         "postgres",
         "postgres",
-        "pg_sync",
-        "pg_sync",
+        "storno",
+        "storno",
     )
     .with_port(port);
     let documents = Arc::new(

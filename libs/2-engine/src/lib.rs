@@ -1,4 +1,4 @@
-//! The `pg_sync_rs` sync engine.
+//! The `storno` sync engine.
 //!
 //! Wires the pluggable edges together and runs the pipeline:
 //!

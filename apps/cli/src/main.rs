@@ -1,4 +1,4 @@
-//! `pg_sync` — run the Postgres → sink pipeline from a config file.
+//! `storno` — run the Postgres → sink pipeline from a config file.
 //!
 //! Loads a `config.toml`, connects to the source's Postgres, and streams
 //! changes through the engine to stdout. Logs go to stderr, so stdout stays
@@ -18,18 +18,18 @@ use url::Url;
 
 /// Stream Postgres changes into a sink, driven by a config file.
 #[derive(Debug, Parser)]
-#[command(name = "pg_sync", version, about)]
+#[command(name = "storno", version, about)]
 struct Cli {
     /// Path to the configuration file.
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
 
     /// Logical replication slot to consume. Must already exist.
-    #[arg(long, default_value = "pg_sync")]
+    #[arg(long, default_value = "storno")]
     slot: String,
 
     /// Publication to subscribe to. Must already exist and cover the tables.
-    #[arg(long, default_value = "pg_sync")]
+    #[arg(long, default_value = "storno")]
     publication: String,
 
     /// Pretty-print documents instead of compact one-per-line JSON.

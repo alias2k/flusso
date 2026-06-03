@@ -1,10 +1,10 @@
 [package]
-name = "pgsync-rs-cli"
+name = "storno-cli"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "pg_sync"
+name = "storno"
 path = "src/main.rs"
 
 [lints]

@@ -1,4 +1,4 @@
-//! The sink abstraction for `pg_sync_rs`.
+//! The sink abstraction for `storno`.
 //!
 //! A *sink* is where assembled documents go. It consumes neutral values — an
 //! [`IndexName`](schema_core::IndexName), a string id, and a document

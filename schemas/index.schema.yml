@@ -1,5 +1,5 @@
 $schema: "http://json-schema.org/draft-07/schema#"
-title: pg_sync_rs Index Schema
+title: storno Index Schema
 type: object
 required: [version, table, fields]
 additionalProperties: false

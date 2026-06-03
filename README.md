@@ -1,4 +1,4 @@
-# pg_sync_rs
+# storno
 
 Keep Postgres tables in sync with OpenSearch, driven by declarative config.
 
@@ -85,7 +85,7 @@ layer — a crate only depends on lower-numbered ones.
 | `schema-index-yaml` | `libs/0-schema/1-index-yaml` | Parses `*.schema.yml` and converts it into core types. |
 | `engine` | `libs/2-engine` | The sync engine. Not yet implemented. |
 | `core` | `libs/0-core` | Shared primitives. Not yet implemented. |
-| `pgsync-rs-cli` | `apps/cli` | Command-line binary. Not yet implemented. |
+| `storno-cli` | `apps/cli` | Command-line binary. Not yet implemented. |
 
 ## Parsing
 

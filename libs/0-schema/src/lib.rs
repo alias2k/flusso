@@ -1,4 +1,4 @@
-//! Load a `pg_sync_rs` configuration into a validated model.
+//! Load a `storno` configuration into a validated model.
 //!
 //! This is the front door to the configuration layer. [`load`] takes the path
 //! to a `config.toml`, reads the source and sinks from it, resolves and parses
