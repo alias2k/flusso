@@ -1,11 +1,12 @@
 # Local dev environment for flusso.
 #
-# Brings up a Postgres configured for logical replication, pre-seeded with a
-# `users` + `orders` dataset and the replication slot + publication that flusso
-# expects to already exist (flusso is a pure consumer — it creates neither).
+# Brings up Postgres (configured for logical replication) and OpenSearch.
+# Postgres is pre-seeded with a `users` + `orders` dataset and the replication
+# slot + publication that flusso expects to already exist (flusso is a pure
+# consumer — it creates neither).
 #
-#   docker compose up -d          # start postgres
-#   cargo run -p cli -- --config dev/config.toml --pretty
+#   docker compose up -d
+#   cargo run -- --config dev/config.toml
 #   psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
 #
 # See dev/README.md for the full walk-through.
@@ -40,28 +41,48 @@ services:
       timeout: 3s
       retries: 30
 
-  # ─── OpenSearch (later) ─────────────────────────────────────────────────────
-  # flusso currently writes to stdout. When the OpenSearch sink lands, switch
-  # the sink in dev/config.toml to `type = "opensearch"` and start this with:
-  #
-  #   docker compose --profile opensearch up -d
-  #
-  # opensearch:
-  #   image: opensearchproject/opensearch:2.17.1
-  #   container_name: flusso-opensearch
-  #   profiles: ["opensearch"]
-  #   environment:
-  #     discovery.type: single-node
-  #     plugins.security.disabled: "true"
-  #     OPENSEARCH_INITIAL_ADMIN_PASSWORD: "Storno-dev-1!"
-  #     OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-  #   ports:
-  #     - "9200:9200"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 30
+  opensearch:
+    image: opensearchproject/opensearch:2
+    container_name: flusso-opensearch
+    environment:
+      # Single-node dev cluster with the security plugin disabled, so flusso can
+      # talk plain HTTP on 9200 with no credentials (see dev/config.toml).
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # Skip the bootstrap memory-lock / file-descriptor checks for local dev.
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - flusso-osdata:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2
+    container_name: flusso-opensearch-dashboards
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      # Match the cluster: no security plugin, so disable it in Dashboards too.
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
 
 volumes:
   flusso-pgdata:
+  flusso-osdata:

@@ -9,6 +9,93 @@
       "type": "string",
       "pattern": "^[a-z_][a-z0-9_]*$",
       "maxLength": 63
+    },
+    "env_or_value": {
+      "description": "A literal string value or a reference to an environment variable.",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "required": ["env"],
+          "additionalProperties": false,
+          "properties": {
+            "env": {
+              "type": "string",
+              "description": "Name of the environment variable to read at runtime"
+            }
+          }
+        }
+      ]
+    },
+    "opensearch_sink": {
+      "type": "object",
+      "title": "OpenSearch",
+      "required": ["type", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "opensearch"
+        },
+        "url": {
+          "$ref": "#/definitions/env_or_value",
+          "description": "Base URL of the OpenSearch cluster, e.g. https://search.example.com:9200"
+        },
+        "username": {
+          "$ref": "#/definitions/env_or_value",
+          "description": "HTTP Basic Auth username"
+        },
+        "password": {
+          "$ref": "#/definitions/env_or_value",
+          "description": "HTTP Basic Auth password"
+        },
+        "tls_verify": {
+          "type": "boolean",
+          "default": true,
+          "description": "Verify TLS certificates. Set false only for local development."
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1000,
+          "description": "Maximum number of documents per bulk request chunk"
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30,
+          "description": "HTTP request timeout in seconds"
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3,
+          "description": "Number of additional retry attempts on transient failures (exponential backoff)"
+        },
+        "pipeline": {
+          "type": "string",
+          "description": "Optional OpenSearch ingest pipeline name to apply on every index operation"
+        }
+      }
+    },
+    "stdout_sink": {
+      "type": "object",
+      "title": "Stdout",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "stdout"
+        },
+        "pretty": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit pretty-printed JSON instead of compact NDJSON"
+        }
+      }
     }
   },
   "properties": {
@@ -74,19 +161,15 @@
     },
     "sinks": {
       "type": "object",
+      "description": "Named sink destinations. Each key is the sink name; multiple sinks can be defined.",
       "propertyNames": {
         "$ref": "#/definitions/pg_identifier"
       },
       "additionalProperties": {
-        "type": "object",
-        "required": ["type"],
-        "additionalProperties": false,
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["opensearch", "stdout"]
-          }
-        }
+        "oneOf": [
+          { "$ref": "#/definitions/opensearch_sink" },
+          { "$ref": "#/definitions/stdout_sink" }
+        ]
       }
     },
     "index": {

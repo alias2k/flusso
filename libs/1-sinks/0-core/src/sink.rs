@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use schema_core::{GenericValue, IndexName};
+use schema_core::{GenericValue, IndexMapping, IndexName};
 
 use crate::Result;
 
@@ -14,6 +14,15 @@ use crate::Result;
 /// `_id`); the engine derives it from the document's key.
 #[async_trait]
 pub trait Sink: std::fmt::Debug + Send + Sync {
+    /// Ensure the destination index exists, creating it from `mapping` if it is
+    /// absent. The engine calls this once per index at startup, before any
+    /// writes, so a sink that owns its index can pin field types up front
+    /// instead of letting the destination guess them. The default is a no-op —
+    /// correct for sinks with no schema-bound index (e.g. stdout).
+    async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<()> {
+        Ok(())
+    }
+
     /// Index (insert or replace) `document` under `id` in `index`.
     async fn upsert(&self, index: &IndexName, id: &str, document: &GenericValue) -> Result<()>;
 

@@ -17,6 +17,12 @@
 //! Stopping on any error is therefore safe: unconfirmed changes are redelivered
 //! when the run restarts.
 //!
+//! Before anything else, the engine asks the [`DocumentBuilder`] for each
+//! index's resolved mapping and tells the sink to create it
+//! ([`ensure_index`](Sink::ensure_index)) — so the destination uses the
+//! configured field types instead of guessing. This is idempotent, so it runs
+//! on every start, including resumes.
+//!
 //! Before live capture, the engine runs an optional **backfill** phase. It asks
 //! the [`DocumentBuilder`] which indexes exist and the sink whether each is
 //! already seeded; for those that aren't, it asks the source to
@@ -101,6 +107,14 @@ impl Engine {
             queue_capacity,
             skip_backfill,
         } = self;
+
+        // Create every target index up front from its resolved mapping, so the
+        // destination uses the configured field types rather than guessing on
+        // first write. Idempotent (create-if-absent), so it runs regardless of
+        // backfill — including resumes.
+        for mapping in documents.index_mappings().await? {
+            sink.ensure_index(&mapping).await?;
+        }
 
         if !skip_backfill {
             backfill(

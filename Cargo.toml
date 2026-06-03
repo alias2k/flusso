@@ -10,6 +10,7 @@ members = [
   "libs/1-queue/1-channel",
   "libs/1-sinks/0-core",
   "libs/1-sinks/1-stdout",
+  "libs/1-sinks/2-opensearch",
   "libs/1-sources/0-core",
   "libs/1-sources/1-postgres",
   "libs/2-engine",
@@ -96,6 +97,7 @@ sqlx = { version = "0.9.*", default-features = false, features = [
 chrono = { version = "0.4.*", default-features = false, features = ["std"] }
 uuid = { version = "1.*" }
 serde_json = { version = "1.*" }
+reqwest = { version = "0.12.*", default-features = false }
 testcontainers-modules = { version = "0.15.*" }
 
 schema = { path = "libs/0-schema" }
@@ -110,6 +112,7 @@ sources-postgres = { path = "libs/1-sources/1-postgres" }
 
 sinks-core = { path = "libs/1-sinks/0-core" }
 sinks-stdout = { path = "libs/1-sinks/1-stdout" }
+sinks-opensearch = { path = "libs/1-sinks/2-opensearch" }
 
 queue-core = { path = "libs/1-queue/0-core" }
 queue-channel = { path = "libs/1-queue/1-channel" }

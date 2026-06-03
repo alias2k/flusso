@@ -10,15 +10,13 @@ type = "postgres"
 connection_url = "postgres://postgres:postgres@127.0.0.1:5432/flusso"
 
 [sinks.primary]
+type = "opensearch"
+url = "http://127.0.0.1:9200"
+tls_verify = false
+
+[sinks.audit]
 type = "stdout"
 pretty = true
-
-# When the OpenSearch sink is ready, swap the sink above for:
-#
-# [sinks.primary]
-# type = "opensearch"
-# url = "http://127.0.0.1:9200"
-# tls_verify = false
 
 [[index]]
 name = "users"

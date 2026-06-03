@@ -39,20 +39,28 @@
 //! CDC design. Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
+mod mapping;
 mod query;
 mod resolve;
 pub(crate) mod value;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use schema_core::{ColumnName, Config, DatabaseSchema, Filter, IndexSchema, SoftDelete, TableName};
+use schema_core::{
+    AggregateOp, ColumnName, Config, ContentHash, DatabaseSchema, Field, FieldSource, Filter,
+    GenericValue, IndexMapping, IndexSchema, JoinType, Mapping, MappingType, Relation,
+    ResolvedField, SoftDelete, TableName,
+};
 use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use sources_core::{Result, RowKey, SnapshotTable, SourceError};
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
+use mapping::pg_type_to_mapping;
 
 /// Cache of each `(schema, table, column)`'s SQL type.
 type ColTypeCache = HashMap<(String, String, String), String>;
@@ -253,6 +261,110 @@ impl PgDocumentBuilder {
         }
         Ok(types)
     }
+
+    /// Resolve a list of fields under `table` into typed mapping fields,
+    /// recursing into groups (same table) and joins (the related table).
+    ///
+    /// Boxed because the recursion is through an `async fn`; the tree is
+    /// shallow (field nesting), so a heap allocation per level is negligible.
+    fn resolve_fields<'a>(
+        &'a self,
+        db_schema: &'a DatabaseSchema,
+        table: &'a TableName,
+        fields: &'a [Field],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResolvedField>>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(fields.len());
+            for field in fields {
+                out.push(self.resolve_field(db_schema, table, field).await?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Resolve one field: its children (if any) and its mapping. An explicit
+    /// `mapping` in the config always wins; otherwise the type is inferred from
+    /// where the value comes from — a column's database type, an aggregate's
+    /// operation, a join's cardinality, or a constant's shape.
+    async fn resolve_field(
+        &self,
+        db_schema: &DatabaseSchema,
+        table: &TableName,
+        field: &Field,
+    ) -> Result<ResolvedField> {
+        // Children, and the table whose columns they read.
+        let (child_table, child_fields): (&TableName, &[Field]) = match &field.source {
+            FieldSource::Relation(Relation::Join { join, fields }) => (&join.table, fields),
+            FieldSource::Group(fields) => (table, fields),
+            _ => (table, &[]),
+        };
+        let children = if child_fields.is_empty() {
+            Vec::new()
+        } else {
+            self.resolve_fields(db_schema, child_table, child_fields)
+                .await?
+        };
+
+        let mapping = match &field.mapping {
+            Some(mapping) => mapping.clone(),
+            None => Mapping {
+                mapping_type: self.infer_mapping_type(db_schema, table, &field.source).await?,
+                extra: BTreeMap::new(),
+            },
+        };
+
+        Ok(ResolvedField {
+            name: field.field.clone(),
+            mapping,
+            children,
+        })
+    }
+
+    /// Infer a field's mapping type from its source when the config gives none.
+    async fn infer_mapping_type(
+        &self,
+        db_schema: &DatabaseSchema,
+        table: &TableName,
+        source: &FieldSource,
+    ) -> Result<MappingType> {
+        Ok(match source {
+            FieldSource::Column(column) => {
+                let sql_type = self.column_type(db_schema, table, &column.column).await?;
+                pg_type_to_mapping(&sql_type)
+            }
+            FieldSource::Group(_) => MappingType::Object,
+            FieldSource::Constant(value) => constant_mapping_type(value),
+            FieldSource::Relation(Relation::Join { join, .. }) => match join.join_type {
+                JoinType::OneToOne => MappingType::Object,
+                JoinType::OneToMany | JoinType::ManyToMany => MappingType::Nested,
+            },
+            FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
+                AggregateOp::Count => MappingType::Long,
+                AggregateOp::Avg(_) => MappingType::Double,
+                AggregateOp::Sum(column)
+                | AggregateOp::Min(column)
+                | AggregateOp::Max(column) => {
+                    let sql_type = self.column_type(db_schema, &aggregate.table, column).await?;
+                    pg_type_to_mapping(&sql_type)
+                }
+            },
+        })
+    }
+}
+
+/// The mapping type a constant value's shape implies.
+fn constant_mapping_type(value: &GenericValue) -> MappingType {
+    match value {
+        GenericValue::Bool(_) => MappingType::Boolean,
+        GenericValue::Int(_) => MappingType::Long,
+        GenericValue::Decimal(_) => MappingType::Double,
+        GenericValue::Array(items) => items
+            .first()
+            .map(constant_mapping_type)
+            .unwrap_or(MappingType::Keyword),
+        GenericValue::Map(_) => MappingType::Object,
+        GenericValue::String(_) | GenericValue::Null => MappingType::Keyword,
+    }
 }
 
 #[async_trait]
@@ -354,6 +466,27 @@ impl DocumentBuilder for PgDocumentBuilder {
                 },
             })
             .collect()
+    }
+
+    async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {
+        let mut mappings = Vec::new();
+        for (name, index) in &self.config.indexes {
+            if !index.enabled {
+                continue;
+            }
+            let schema = &index.schema;
+            let fields = self
+                .resolve_fields(&schema.db_schema, &schema.table, &schema.fields)
+                .await?;
+            mappings.push(IndexMapping {
+                index: name.clone(),
+                // Hash the parsed schema, not the file: structural changes flip
+                // the hash; cosmetic file changes (whitespace, comments) do not.
+                hash: ContentHash::of(schema),
+                fields,
+            });
+        }
+        Ok(mappings)
     }
 }
 

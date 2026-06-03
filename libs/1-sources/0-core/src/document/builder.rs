@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use schema_core::{GenericValue, IndexName, TableName};
+use schema_core::{GenericValue, IndexMapping, IndexName, TableName};
 
 use crate::{Result, RowKey, SnapshotTable};
 
@@ -77,5 +77,14 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
     /// indexes, which the engine simply never seeds.
     fn backfill_scopes(&self) -> Vec<IndexScope> {
         Vec::new()
+    }
+
+    /// The resolved mapping of every index this builder serves: each field
+    /// typed from the schema's explicit `mapping` where one is given, and from
+    /// the source's own column types otherwise. Sinks that own their index use
+    /// this to create it up front. The default is empty — a builder that leaves
+    /// index creation to whatever the sink does on first write.
+    async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {
+        Ok(Vec::new())
     }
 }

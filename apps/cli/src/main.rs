@@ -1,8 +1,8 @@
 //! `flusso` — run the Postgres → sink pipeline from a config file.
 //!
 //! Loads a `config.toml`, connects to the source's Postgres, and streams
-//! changes through the engine to stdout. Logs go to stderr, so stdout stays
-//! clean NDJSON you can pipe into `jq`.
+//! changes through the engine to the configured sink(s). The replication slot
+//! is created automatically if it does not exist. Logs go to stderr.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +10,9 @@ use std::sync::Arc;
 use anyhow::{Context, ensure};
 use clap::Parser;
 use engine::Engine;
-use schema::SourceType;
+use schema::{Sink as SinkConfig, SourceType};
+use sinks_core::{FanOutSink, Sink};
+use sinks_opensearch::OpensearchSink;
 use sinks_stdout::StdoutSink;
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use tracing_subscriber::EnvFilter;
@@ -75,7 +77,22 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("connecting to Postgres")?,
     );
-    let sink = Arc::new(StdoutSink::new(cli.pretty));
+    let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
+    for (name, config) in &config.sinks {
+        let sink: Arc<dyn Sink> = match config {
+            SinkConfig::Opensearch(os) => Arc::new(
+                OpensearchSink::from_config(os)
+                    .with_context(|| format!("building OpenSearch sink '{name}'"))?,
+            ),
+            SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(s)),
+        };
+        sinks.push(sink);
+    }
+    let sink: Arc<dyn Sink> = match sinks.len() {
+        0 => Arc::new(StdoutSink::new(cli.pretty)),
+        1 => sinks.into_iter().next().unwrap_or_else(|| Arc::new(StdoutSink::new(false))),
+        _ => Arc::new(FanOutSink::new(sinks)),
+    };
 
     Engine::new(source, documents, sink)
         .with_queue_capacity(cli.queue_capacity)
