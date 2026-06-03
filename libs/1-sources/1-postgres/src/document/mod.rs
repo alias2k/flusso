@@ -91,11 +91,13 @@ impl PgDocumentBuilder {
     }
 
     /// Connect a pool from a Postgres connection URL and build over it.
+    #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, config: Arc<Config>) -> Result<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect(connection_url)
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
+        tracing::info!(indexes = config.indexes.len(), "connected to Postgres");
         Ok(Self::new(pool, config))
     }
 
@@ -369,6 +371,13 @@ fn constant_mapping_type(value: &GenericValue) -> MappingType {
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {
+    #[tracing::instrument(
+        name = "pg.resolve",
+        level = "debug",
+        skip_all,
+        fields(table = table.as_ref()),
+        err,
+    )]
     async fn resolve(&self, table: &TableName, key: &RowKey) -> Result<Vec<DocumentId>> {
         let mut ids = Vec::new();
         for (name, index) in &self.config.indexes {
@@ -413,9 +422,17 @@ impl DocumentBuilder for PgDocumentBuilder {
                 }
             }
         }
+        tracing::trace!(documents = ids.len(), "resolved affected documents");
         Ok(ids)
     }
 
+    #[tracing::instrument(
+        name = "pg.build",
+        level = "debug",
+        skip_all,
+        fields(index = id.index.as_ref()),
+        err,
+    )]
     async fn build(&self, id: &DocumentId) -> Result<Document> {
         let index = self
             .config

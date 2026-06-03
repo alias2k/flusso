@@ -105,6 +105,7 @@ impl WalChangeCapture {
 
 #[async_trait]
 impl ChangeCapture for WalChangeCapture {
+    #[tracing::instrument(name = "wal.live", skip_all, err)]
     async fn live(&self) -> Result<BoxStream<'static, Result<Change>>> {
         self.ensure_slot().await?;
 
@@ -114,13 +115,16 @@ impl ChangeCapture for WalChangeCapture {
 
         let ack = Arc::new(AckShared::new(self.config.start_lsn.as_u64()));
         let sink: Arc<dyn AckSink> = Arc::new(WalAckSink::new(Arc::clone(&ack)));
+        tracing::info!(start_lsn = self.config.start_lsn.as_u64(), "opened replication stream");
         Ok(stream::build(client, ack, sink))
     }
 
+    #[tracing::instrument(name = "wal.snapshot", skip_all, fields(tables = tables.len()), err)]
     async fn snapshot(
         &self,
         tables: &[SnapshotTable],
     ) -> Result<BoxStream<'static, Result<Change>>> {
+        tracing::info!(tables = tables.len(), "starting snapshot");
         backfill::snapshot(&self.connection_url, tables).await
     }
 }

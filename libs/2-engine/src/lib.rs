@@ -155,6 +155,16 @@ impl Engine {
     ///
     /// First seeds any unseeded index (unless [`skip_backfill`](Self::skip_backfill)
     /// is set), then follows live changes.
+    #[tracing::instrument(
+        name = "engine.run",
+        skip_all,
+        fields(
+            skip_backfill = self.skip_backfill,
+            queue_capacity = self.queue_capacity,
+            max_changes = self.batch.max_changes,
+            max_delay_ms = self.batch.max_delay.as_millis() as u64,
+        ),
+    )]
     pub async fn run(self) -> Result<()> {
         let Engine {
             source,
@@ -169,11 +179,15 @@ impl Engine {
         // destination uses the configured field types rather than guessing on
         // first write. Idempotent (create-if-absent), so it runs regardless of
         // backfill — including resumes.
-        for mapping in documents.index_mappings().await? {
-            sink.ensure_index(&mapping).await?;
+        let mappings = documents.index_mappings().await?;
+        tracing::info!(indexes = mappings.len(), "ensuring target indexes");
+        for mapping in &mappings {
+            sink.ensure_index(mapping).await?;
         }
 
-        if !skip_backfill {
+        if skip_backfill {
+            tracing::info!("skipping backfill (skip_backfill set)");
+        } else {
             backfill(
                 source.as_ref(),
                 documents.as_ref(),
@@ -185,7 +199,13 @@ impl Engine {
         }
 
         let stream = source.live().await?;
-        pump(stream, documents.as_ref(), sink.as_ref(), queue_capacity, batch, None).await
+        tracing::info!("following live changes");
+        let result = pump(stream, documents.as_ref(), sink.as_ref(), queue_capacity, batch, None).await;
+        match &result {
+            Ok(()) => tracing::info!("pipeline stopped: live stream ended"),
+            Err(error) => tracing::error!(%error, "pipeline stopped on error"),
+        }
+        result
     }
 }
 
@@ -196,6 +216,7 @@ impl Engine {
 /// that do, the source snapshots their root tables and the snapshot is applied
 /// scoped to just those indexes, so an already-seeded index sharing a table is
 /// never rewritten.
+#[tracing::instrument(name = "backfill", skip_all)]
 async fn backfill(
     source: &dyn ChangeCapture,
     documents: &dyn DocumentBuilder,
@@ -215,6 +236,7 @@ async fn backfill(
         seeding.insert(scope.index);
     }
     if seeding.is_empty() {
+        tracing::info!("no unseeded indexes; skipping backfill");
         return Ok(());
     }
 
@@ -227,6 +249,7 @@ async fn backfill(
     for index in &seeding {
         sink.mark_seeded(index).await?;
     }
+    tracing::info!(indexes = seeding.len(), "backfill complete");
     Ok(())
 }
 
@@ -235,6 +258,7 @@ async fn backfill(
 ///
 /// `filter`, when set, restricts which indexes a change may write to — used by
 /// the backfill so a snapshot only seeds the indexes being backfilled.
+#[tracing::instrument(name = "pump", skip_all)]
 async fn pump(
     stream: BoxStream<'static, sources_core::Result<Change>>,
     documents: &dyn DocumentBuilder,
@@ -262,13 +286,17 @@ async fn pump(
 
 /// Drain the change stream into the queue. Ends (closing the queue) when the
 /// stream is exhausted.
+#[tracing::instrument(name = "capture", skip_all)]
 async fn capture(
     mut stream: BoxStream<'static, sources_core::Result<Change>>,
     producer: queue_channel::ChannelProducer<Change>,
 ) -> Result<()> {
+    let mut captured = 0u64;
     while let Some(change) = stream.next().await {
         producer.publish(change?).await?;
+        captured += 1;
     }
+    tracing::debug!(captured, "capture stream ended");
     Ok(())
 }
 
@@ -278,6 +306,7 @@ async fn capture(
 /// A batch starts when the first change arrives (the worker blocks for it, so an
 /// idle stream costs nothing) and closes when `max_changes` are buffered, when
 /// `max_delay` elapses since that first change, or when the stream ends.
+#[tracing::instrument(name = "worker", skip_all, fields(max_changes = batch.max_changes))]
 async fn work(
     consumer: &mut ChannelConsumer<Change>,
     documents: &dyn DocumentBuilder,
@@ -369,6 +398,7 @@ async fn buffer(
 /// point only to the highest *contiguous* confirmed sequence (see
 /// [`Ack`](sources_core::cdc::Ack)) — so confirming a batch advances the slot to
 /// the batch's last change and no further.
+#[tracing::instrument(name = "commit", level = "debug", skip_all, fields(changes = pending.len()))]
 async fn commit(sink: &dyn Sink, pending: &mut Batch) -> Result<()> {
     if pending.len() == 0 {
         return Ok(());
@@ -380,12 +410,14 @@ async fn commit(sink: &dyn Sink, pending: &mut Batch) -> Result<()> {
     for handle in pending.handles.drain(..) {
         handle.ack().await?;
     }
+    tracing::debug!("batch flushed and acked");
     Ok(())
 }
 
 /// Rebuild and write every document affected by a change to one row. When
 /// `filter` is set, documents in indexes outside it are skipped (the backfill
 /// seeds only the indexes it is responsible for).
+#[tracing::instrument(level = "debug", skip_all, fields(table = table.as_ref()))]
 async fn apply_row(
     table: &TableName,
     key: &RowKey,
@@ -393,7 +425,9 @@ async fn apply_row(
     sink: &dyn Sink,
     filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
-    for id in documents.resolve(table, key).await? {
+    let affected = documents.resolve(table, key).await?;
+    tracing::trace!(documents = affected.len(), "change resolved to documents");
+    for id in affected {
         if filter.is_some_and(|filter| !filter.contains(&id.index)) {
             continue;
         }

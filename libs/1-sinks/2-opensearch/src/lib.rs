@@ -149,6 +149,13 @@ impl OpensearchSink {
     /// intermediate chunks; the final chunk in a flush carries the refresh.
     ///
     /// Retries on transient failures with exponential backoff.
+    #[tracing::instrument(
+        name = "os.bulk",
+        level = "debug",
+        skip_all,
+        fields(count, bytes = body.len(), refresh),
+        err,
+    )]
     async fn send_bulk_chunk(&self, body: &str, count: usize, refresh: bool) -> Result<()> {
         if count == 0 {
             return Ok(());
@@ -343,6 +350,12 @@ impl Sink for OpensearchSink {
     /// seeding — [`mark_seeded`](Self::mark_seeded) restores automatic refresh
     /// once the backfill completes. An existing index is left untouched, so its
     /// mapping is never silently rewritten.
+    #[tracing::instrument(
+        name = "os.ensure_index",
+        skip_all,
+        fields(index = mapping.index.as_ref()),
+        err,
+    )]
     async fn ensure_index(&self, mapping: &IndexMapping) -> Result<()> {
         let logical = mapping.index.as_ref();
         // Physical name = logical name + schema hash, so a structural schema
@@ -417,6 +430,7 @@ impl Sink for OpensearchSink {
     /// No refresh is forced: visibility is governed by the index's refresh
     /// interval — disabled during backfill and automatic in steady state (see
     /// the module docs).
+    #[tracing::instrument(name = "os.flush", skip_all, err)]
     async fn flush(&self) -> Result<()> {
         let actions = {
             let mut buf = self.buffer.lock().await;
@@ -443,7 +457,14 @@ impl Sink for OpensearchSink {
         }
 
         let sizes: Vec<usize> = fragments.iter().map(String::len).collect();
+        let total_bytes: usize = sizes.iter().sum();
         let plan = plan_chunks(&sizes, self.batch_size, self.max_bytes);
+        debug!(
+            documents = actions.len(),
+            requests = plan.len(),
+            bytes = total_bytes,
+            "flushing buffered operations",
+        );
 
         let mut fragments = fragments.into_iter();
         for &count in &plan {
