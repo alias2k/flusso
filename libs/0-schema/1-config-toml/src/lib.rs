@@ -10,6 +10,20 @@
 //! Any string value may be given literally or as `{ env = "VAR" }`, which reads
 //! it from the environment at convert time and keeps credentials out of the file.
 //!
+//! On top of that, a set of **reserved environment variables** act as a
+//! deployment override layer, so the same config file works across environments
+//! without edits:
+//!
+//! - `DATABASE_URL` — the source connection URL.
+//! - `<SINK>_OPENSEARCH_URL` / `_USERNAME` / `_PASSWORD` — per-OpenSearch-sink
+//!   credentials, where `<SINK>` is the uppercased sink name (so `[sinks.primary]`
+//!   reads `PRIMARY_OPENSEARCH_URL`, etc.).
+//!
+//! A reserved variable, when set, **wins over** a literal written in the file
+//! (the override is logged, never silent) and **fills** an omitted value — but
+//! an explicit `{ env = "X" }` reference names its own source and is never
+//! overridden.
+//!
 //! The `index` entries are left untouched here — the conversion yields an empty
 //! index map, which the `schema` crate's loader fills in by reading each
 //! referenced YAML schema. This crate owns only the source and sinks.
@@ -62,7 +76,7 @@ impl TryFrom<ConfigToml> for schema_core::Config {
         let sinks = toml
             .sinks
             .into_iter()
-            .map(|(name, sink)| conversion::convert_sink(sink).map(|s| (name, s)))
+            .map(|(name, sink)| conversion::convert_sink(&name, sink).map(|s| (name, s)))
             .collect::<Result<_, _>>()?;
 
         Ok(schema_core::Config {

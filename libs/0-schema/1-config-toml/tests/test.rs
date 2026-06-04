@@ -281,6 +281,7 @@ fn parse_unknown_field_in_opensearch_sink_fails() {
 
 #[test]
 fn convert_source_direct_url() {
+    unsetenv("DATABASE_URL");
     let config = convert(
         r#"
         [source]
@@ -317,6 +318,7 @@ fn convert_source_env_url() {
 
 #[test]
 fn convert_source_parts() {
+    unsetenv("DATABASE_URL");
     let config = convert(r#"
         [source]
         type = "postgres"
@@ -332,6 +334,7 @@ fn convert_source_parts() {
 
 #[test]
 fn convert_source_parts_env_password() {
+    unsetenv("DATABASE_URL");
     setenv("TEST_CONV_PG_PASS", "s3cr3t");
     let result = convert(
         r#"
@@ -347,6 +350,10 @@ fn convert_source_parts_env_password() {
 
 #[test]
 fn convert_opensearch_sink_direct_url() {
+    unsetenv("DATABASE_URL");
+    unsetenv("PRIMARY_OPENSEARCH_URL");
+    unsetenv("PRIMARY_OPENSEARCH_USERNAME");
+    unsetenv("PRIMARY_OPENSEARCH_PASSWORD");
     let config = convert(
         r#"
         [source]
@@ -393,6 +400,7 @@ fn convert_opensearch_sink_env_url() {
 
 #[test]
 fn convert_empty_sinks_is_ok() {
+    unsetenv("DATABASE_URL");
     let config = convert(
         r#"
         [source]
@@ -409,6 +417,7 @@ fn convert_empty_sinks_is_ok() {
 
 #[test]
 fn convert_source_missing_connection_url_fails() {
+    unsetenv("DATABASE_URL");
     let toml = ConfigToml::try_parse(
         r#"
         [source]
@@ -440,6 +449,7 @@ fn convert_source_env_url_not_set_fails() {
 
 #[test]
 fn convert_source_invalid_url_fails() {
+    unsetenv("DATABASE_URL");
     let toml = ConfigToml::try_parse(
         r#"
         [source]
@@ -476,6 +486,8 @@ fn convert_opensearch_env_url_not_set_fails() {
 
 #[test]
 fn convert_opensearch_invalid_url_fails() {
+    unsetenv("DATABASE_URL");
+    unsetenv("ES_OPENSEARCH_URL");
     let toml = ConfigToml::try_parse(
         r#"
         [source]
@@ -491,4 +503,191 @@ fn convert_opensearch_invalid_url_fails() {
 
     let err = Config::try_from(toml).unwrap_err();
     assert!(matches!(err, ConversionError::HttpUrl(_)));
+}
+
+// ── reserved env-var overrides ───────────────────────────────────────────────
+
+#[test]
+fn database_url_overrides_literal_source_url() {
+    setenv("DATABASE_URL", "postgres://env@envhost/envdb");
+    let result = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgres://file@filehost/filedb"
+    "#,
+    );
+    unsetenv("DATABASE_URL");
+
+    // The reserved var wins over the value written in the file.
+    let url = result.unwrap().source.connection_url;
+    assert!(url.as_ref().contains("envhost"));
+    assert!(!url.as_ref().contains("filehost"));
+}
+
+#[test]
+fn database_url_fills_omitted_source_url() {
+    setenv("DATABASE_URL", "postgres://env@envhost/envdb");
+    let result = convert(
+        r#"
+        [source]
+        type = "postgres"
+    "#,
+    );
+    unsetenv("DATABASE_URL");
+
+    // No connection_url in the file, but DATABASE_URL fills it — no error.
+    assert!(
+        result
+            .unwrap()
+            .source
+            .connection_url
+            .as_ref()
+            .contains("envhost")
+    );
+}
+
+#[test]
+fn explicit_env_ref_beats_database_url_for_source() {
+    setenv("DATABASE_URL", "postgres://reserved@reservedhost/db");
+    setenv(
+        "TEST_EXPLICIT_PG_URL",
+        "postgres://explicit@explicithost/db",
+    );
+    let result = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = { env = "TEST_EXPLICIT_PG_URL" }
+    "#,
+    );
+    unsetenv("DATABASE_URL");
+    unsetenv("TEST_EXPLICIT_PG_URL");
+
+    // The explicit `{ env }` reference names its own source and is not
+    // overridden by the reserved DATABASE_URL.
+    let url = result.unwrap().source.connection_url;
+    assert!(url.as_ref().contains("explicithost"));
+    assert!(!url.as_ref().contains("reservedhost"));
+}
+
+#[test]
+fn derived_var_overrides_literal_opensearch_url() {
+    unsetenv("DATABASE_URL");
+    setenv("PRIMARY_OPENSEARCH_URL", "https://env.example:9200");
+    let result = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgres://user@localhost/mydb"
+
+        [sinks.primary]
+        type = "opensearch"
+        url = "https://file.example:9200"
+    "#,
+    );
+    unsetenv("PRIMARY_OPENSEARCH_URL");
+
+    let config = result.unwrap();
+    let (_, sink) = config.sinks.iter().next().unwrap();
+    match sink {
+        Sink::Opensearch(os) => assert_eq!(os.url.as_ref(), "https://env.example:9200"),
+        _ => panic!("expected opensearch sink"),
+    }
+}
+
+#[test]
+fn derived_vars_fill_omitted_opensearch_credentials() {
+    unsetenv("DATABASE_URL");
+    unsetenv("PRIMARY_OPENSEARCH_URL");
+    setenv("PRIMARY_OPENSEARCH_USERNAME", "svc");
+    setenv("PRIMARY_OPENSEARCH_PASSWORD", "hunter2");
+    let result = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgres://user@localhost/mydb"
+
+        [sinks.primary]
+        type = "opensearch"
+        url = "https://file.example:9200"
+    "#,
+    );
+    unsetenv("PRIMARY_OPENSEARCH_USERNAME");
+    unsetenv("PRIMARY_OPENSEARCH_PASSWORD");
+
+    let config = result.unwrap();
+    let (_, sink) = config.sinks.iter().next().unwrap();
+    match sink {
+        Sink::Opensearch(os) => {
+            assert_eq!(os.username.as_deref(), Some("svc"));
+            assert_eq!(os.password.as_deref(), Some("hunter2"));
+        }
+        _ => panic!("expected opensearch sink"),
+    }
+}
+
+#[test]
+fn derived_var_is_namespaced_per_sink() {
+    unsetenv("DATABASE_URL");
+    // Only `secondary`'s var is set — it must not bleed into `primary`.
+    unsetenv("PRIMARY_OPENSEARCH_URL");
+    setenv("SECONDARY_OPENSEARCH_URL", "https://secondary.env:9200");
+    let result = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgres://user@localhost/mydb"
+
+        [sinks.primary]
+        type = "opensearch"
+        url = "https://primary.file:9200"
+
+        [sinks.secondary]
+        type = "opensearch"
+        url = "https://secondary.file:9200"
+    "#,
+    );
+    unsetenv("SECONDARY_OPENSEARCH_URL");
+
+    let config = result.unwrap();
+    let url_of = |name: &str| match config
+        .sinks
+        .iter()
+        .find(|(n, _)| n.as_ref() == name)
+        .map(|(_, s)| s)
+    {
+        Some(Sink::Opensearch(os)) => os.url.as_ref().to_owned(),
+        _ => panic!("expected opensearch sink `{name}`"),
+    };
+    // primary keeps its file value; secondary is overridden by its own var.
+    assert_eq!(url_of("primary"), "https://primary.file:9200");
+    assert_eq!(url_of("secondary"), "https://secondary.env:9200");
+}
+
+#[test]
+fn explicit_env_ref_beats_derived_var_for_opensearch() {
+    unsetenv("DATABASE_URL");
+    setenv("PRIMARY_OPENSEARCH_URL", "https://reserved.example:9200");
+    setenv("TEST_EXPLICIT_OS_URL", "https://explicit.example:9200");
+    let result = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgres://user@localhost/mydb"
+
+        [sinks.primary]
+        type = "opensearch"
+        url = { env = "TEST_EXPLICIT_OS_URL" }
+    "#,
+    );
+    unsetenv("PRIMARY_OPENSEARCH_URL");
+    unsetenv("TEST_EXPLICIT_OS_URL");
+
+    let config = result.unwrap();
+    let (_, sink) = config.sinks.iter().next().unwrap();
+    match sink {
+        Sink::Opensearch(os) => assert_eq!(os.url.as_ref(), "https://explicit.example:9200"),
+        _ => panic!("expected opensearch sink"),
+    }
 }

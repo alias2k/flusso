@@ -84,8 +84,9 @@ A change to a user — *or* to one of their orders — rebuilds the whole `users
 document and re-emits it. flusso resolves which documents a changed row affects,
 reassembles each, and writes it to the configured sink(s) by a deterministic id.
 
-For the full configuration format — every key, sink option, join/aggregate/filter
-shape, and validation rule — see [`SCHEMA.md`](SCHEMA.md).
+For the full configuration format — every key, join/aggregate/filter shape, and
+validation rule — see [`SCHEMA.md`](SCHEMA.md). For the supported source and sink
+types and their options, see [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md).
 
 ## The pipeline
 
@@ -224,5 +225,6 @@ the two formats. Point an editor at them for completion and inline validation;
 the bundled example schemas already reference them through a
 `yaml-language-server` modeline.
 
-For the prose reference — every key, sink option, and join/aggregate/filter
-shape, with examples and validation rules — see [`SCHEMA.md`](SCHEMA.md).
+For the prose reference — every key and join/aggregate/filter shape, with
+examples and validation rules — see [`SCHEMA.md`](SCHEMA.md), and
+[`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md) for the source and sink types.

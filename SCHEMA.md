@@ -12,6 +12,11 @@ A deployment is described by two kinds of file:
 validates both layers, and returns one fully-validated `Config`. Schema paths in
 `config.toml` are resolved **relative to the config file's directory**.
 
+The supported source and sink **types** — their connection options and behavior
+— are documented separately in
+[**Sources and sinks**](SOURCES_AND_SINKS.md). This file covers the config
+structure and the index document format.
+
 > Two JSON Schemas ship alongside this reference and are the machine-readable
 > source of truth for the file formats:
 > [`schemas/config.schema.json`](schemas/config.schema.json) and
@@ -48,6 +53,47 @@ password = { env = "OS_PASSWORD" }   # read from $OS_PASSWORD at load time
 
 If the named variable is unset, loading fails with a clear error.
 
+### Reserved environment variables
+
+On top of the explicit `{ env = … }` form, a set of **reserved variables** act
+as a deployment override layer, so the same `config.toml` works across
+environments without edits (the 12-factor pattern). When set, they take
+**priority over** the config file:
+
+| Variable | Supplies | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | the source connection URL | The source is a singleton, so one well-known name is unambiguous. |
+| `<SINK>_OPENSEARCH_URL` | a sink's `url` | `<SINK>` is the **uppercased sink name** — `[sinks.primary]` → `PRIMARY_OPENSEARCH_URL`. |
+| `<SINK>_OPENSEARCH_USERNAME` | a sink's `username` | Same naming. |
+| `<SINK>_OPENSEARCH_PASSWORD` | a sink's `password` | Same naming. |
+
+Per-sink namespacing means multiple OpenSearch sinks never collide — each reads
+its own `PRIMARY_…`, `SECONDARY_…`, etc.
+
+**Precedence**, highest to lowest:
+
+1. An explicit `{ env = "X" }` reference in the config — it names its own source
+   and is **never** overridden by a reserved variable. (If `X` is unset, that's
+   an error.)
+2. The reserved variable, if set — it **overrides** a literal written in the
+   file (the override is logged at startup, never silent) and **fills** a value
+   omitted from the file.
+3. The literal value in the config.
+4. else → error, for required values (the source URL, a sink `url`).
+
+```toml
+# config.toml ships a default; the deployment overrides via env.
+[source]
+type = "postgres"
+connection_url = "postgres://localhost/dev"   # overridden by $DATABASE_URL if set
+
+[sinks.primary]
+type = "opensearch"
+url = "https://localhost:9200"                 # overridden by $PRIMARY_OPENSEARCH_URL
+# username / password omitted here — supplied by
+# $PRIMARY_OPENSEARCH_USERNAME / $PRIMARY_OPENSEARCH_PASSWORD
+```
+
 ---
 
 ## `config.toml`
@@ -62,7 +108,12 @@ Top-level table. Only `[source]` is required.
 
 ### `[source]`
 
-The only `type` today is `postgres`.
+The database documents are read from — one per deployment. `type` selects the
+kind:
+
+| `type` | Reference |
+| --- | --- |
+| `postgres` | [Postgres source](SOURCES_AND_SINKS.md#postgres) |
 
 ```toml
 [source]
@@ -70,76 +121,35 @@ type = "postgres"
 connection_url = "postgresql://user:pass@localhost:5432/mydb"
 ```
 
-`connection_url` takes one of two shapes:
-
-**A full URL** (string or `env_or_value`). Must match
-`^(postgresql|postgres)://…`:
-
-```toml
-connection_url = { env = "DATABASE_URL" }
-```
-
-**Individual parts** (a table). `database` is required; the rest default:
-
-```toml
-[source.connection_url]
-host     = "127.0.0.1"   # default 127.0.0.1
-port     = 5432          # default 5432
-user     = "postgres"    # default postgres
-password = "secret"      # optional
-database = "mydb"        # required
-```
+Connection options (the full-URL and individual-parts forms, the `DATABASE_URL`
+override) and capture behavior live in
+[**Sources and sinks**](SOURCES_AND_SINKS.md#sources).
 
 ### `[sinks.<name>]`
 
-Each entry under `[sinks]` is a named destination; its `type` selects the kind.
-Define more than one and flusso **fans out** — every document is written to all
-of them. If no sinks are defined, the CLI falls back to a stdout sink.
+Named destinations; each key is a sink name (a Postgres identifier) and `type`
+selects the kind. Define more than one and flusso **fans out** — every document
+is written to all of them. If no sinks are defined, the CLI falls back to a
+stdout sink.
 
-#### `type = "opensearch"`
-
-Writes documents to an OpenSearch cluster via the bulk API.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `url` | `env_or_value` | — (**required**) | Base URL of the cluster, e.g. `https://search.example.com:9200`. |
-| `username` | `env_or_value` | — | HTTP Basic Auth username. |
-| `password` | `env_or_value` | — | HTTP Basic Auth password. |
-| `tls_verify` | bool | `true` | Verify TLS certificates. Set `false` only for local development. |
-| `batch_size` | int ≥ 1 | `1000` | Maximum documents per bulk-request chunk. |
-| `max_bytes` | int | `10485760` (10 MiB) | Maximum bytes per bulk chunk; within OpenSearch's recommended 5–15 MB range. |
-| `timeout_secs` | int ≥ 1 | `30` | HTTP request timeout, in seconds. |
-| `max_retries` | int ≥ 0 | `3` | Additional retry attempts on transient failures (exponential backoff). |
-| `pipeline` | string | — | Optional OpenSearch ingest pipeline to apply on every index operation. |
+| `type` | Reference |
+| --- | --- |
+| `opensearch` | [OpenSearch sink](SOURCES_AND_SINKS.md#opensearch) |
+| `stdout` | [Stdout sink](SOURCES_AND_SINKS.md#stdout) |
 
 ```toml
 [sinks.primary]
 type = "opensearch"
 url = "https://localhost:9200"
 password = { env = "OS_PASSWORD" }
-batch_size = 2000
-```
 
-The OpenSearch sink owns each index: it creates it up front from the resolved,
-fully-typed mapping (`dynamic: strict`), and the physical index is named
-`{logical}_{hash}` where the hash derives from the parsed schema — so a
-structural schema change writes to a fresh index rather than into a mismatched
-shape.
-
-#### `type = "stdout"`
-
-Writes each operation to standard output as a JSON envelope — handy for
-development and for piping into `jq`.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `pretty` | bool | `false` | Pretty-print JSON instead of compact one-line NDJSON. |
-
-```toml
 [sinks.audit]
 type = "stdout"
 pretty = true
 ```
+
+Each type's full option set and behavior is documented in
+[**Sources and sinks**](SOURCES_AND_SINKS.md#sinks).
 
 ### `[[index]]`
 
