@@ -1,6 +1,5 @@
 [workspace]
 members = [
-  "libs/0-core",
   "libs/0-schema/0-core",
   "libs/0-schema/1-config-toml",
   "libs/0-schema/1-index-yaml",

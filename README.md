@@ -1,5 +1,9 @@
 # flusso
 
+> **Note:** Generative AI was used in this project to produce boilerplate and
+> documentation. Every line of code has been manually reviewed and revised by a
+> human software developer.
+
 Keep OpenSearch in sync with Postgres, driven by declarative config.
 
 You describe what a search document should look like — its columns, the related
@@ -157,7 +161,6 @@ layer — a crate only depends on lower-numbered ones.
 | `schema-core` | `libs/0-schema/0-core` | The validated domain model — the types every other crate produces and consumes. |
 | `schema-config-toml` | `libs/0-schema/1-config-toml` | Parses `config.toml` and converts it into core types. |
 | `schema-index-yaml` | `libs/0-schema/1-index-yaml` | Parses `*.schema.yml` and converts it into core types. |
-| `core` | `libs/0-core` | Shared primitives. Reserved; not yet populated. |
 | `queue-core` | `libs/1-queue/0-core` | The work-queue abstraction (`Producer` / `Consumer` / `AckHandle`), generic over the payload. |
 | `queue-channel` | `libs/1-queue/1-channel` | In-process queue over a bounded `tokio` mpsc channel (back-pressure; ack is a no-op). |
 | `sources-core` | `libs/1-sources/0-core` | Source abstractions: `cdc` (*what changed?*) and `document` (*what to build?*). |
