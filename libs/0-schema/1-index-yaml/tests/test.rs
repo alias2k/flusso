@@ -26,7 +26,8 @@ fn parse_minimal_schema() {
 
 #[test]
 fn parse_with_optional_fields() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 schema: public
@@ -35,13 +36,15 @@ doc_id: id
 fields:
   - id
   - email
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_join_foreign_key() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -52,13 +55,15 @@ fields:
       foreign_key: user_id
     mapping: { type: nested }
     fields: [id, total]
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_join_through() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -72,13 +77,15 @@ fields:
         right_key: tag_id
     mapping: { type: keyword }
     fields: [name]
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_aggregate_count() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -87,13 +94,15 @@ fields:
       table: orders
       op: count
       foreign_key: user_id
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_aggregate_sum() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -103,13 +112,15 @@ fields:
       op: sum
       column: total
       foreign_key: user_id
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_value_filters() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -123,13 +134,15 @@ fields:
         - { column: total, op: between, value: [10, 1000] }
         - { column: tag, op: in, value: [a, b, c] }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_null_check_filter() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -141,13 +154,15 @@ fields:
       filters:
         - { column: deleted_at, op: is_null }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_raw_filter() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -159,13 +174,15 @@ fields:
       filters:
         - raw: "status != 'cancelled'"
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_soft_delete_field_form() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 soft_delete:
@@ -174,20 +191,23 @@ soft_delete:
     - { column: archived_at, op: is_not_null }
 fields:
   - id
-"#)
+"#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_soft_delete_column_form() {
-    parse(r#"
+    parse(
+        r#"
 version: 1
 table: users
 soft_delete:
   column: deleted_at
 fields:
   - id
-"#)
+"#,
+    )
     .unwrap();
 }
 
@@ -196,7 +216,10 @@ fields:
 #[test]
 fn parse_unsupported_version_fails() {
     let err = parse("version: 99\ntable: users\nfields:\n  - id").unwrap_err();
-    assert!(matches!(err, ParseError::UnsupportedVersion { got: 99, .. }));
+    assert!(matches!(
+        err,
+        ParseError::UnsupportedVersion { got: 99, .. }
+    ));
 }
 
 #[test]
@@ -216,14 +239,18 @@ fn parse_missing_fields_fails() {
 
 #[test]
 fn parse_unknown_field_fails() {
-    assert!(parse(r#"
+    assert!(
+        parse(
+            r#"
 version: 1
 table: users
 unknown_field: oops
 fields:
   - id
-"#)
-    .is_err());
+"#
+        )
+        .is_err()
+    );
 }
 
 // ── conversion: valid ────────────────────────────────────────────────────────
@@ -247,20 +274,23 @@ fn convert_default_db_schema_is_public() {
 
 #[test]
 fn convert_explicit_db_schema() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 schema: analytics
 fields:
   - id
-"#)
+"#,
+    )
     .unwrap();
     assert_eq!(schema.db_schema.as_ref(), "analytics");
 }
 
 #[test]
 fn convert_join_foreign_key_becomes_direct() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 fields:
@@ -270,7 +300,8 @@ fields:
       type: one_to_many
       foreign_key: user_id
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
 
     let field = &schema.fields[0];
@@ -285,7 +316,8 @@ fields:
 
 #[test]
 fn convert_join_through_becomes_through() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 fields:
@@ -298,7 +330,8 @@ fields:
         left_key: user_id
         right_key: tag_id
     fields: [name]
-"#)
+"#,
+    )
     .unwrap();
 
     let field = &schema.fields[0];
@@ -317,7 +350,8 @@ fields:
 
 #[test]
 fn convert_aggregate_count_no_column_needed() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 fields:
@@ -326,7 +360,8 @@ fields:
       table: orders
       op: count
       foreign_key: user_id
-"#)
+"#,
+    )
     .unwrap();
 
     let field = &schema.fields[0];
@@ -340,7 +375,8 @@ fields:
 
 #[test]
 fn convert_aggregate_sum_with_column() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 fields:
@@ -350,7 +386,8 @@ fields:
       op: sum
       column: amount
       foreign_key: user_id
-"#)
+"#,
+    )
     .unwrap();
 
     let field = &schema.fields[0];
@@ -365,7 +402,8 @@ fields:
 
 #[test]
 fn convert_filter_in_becomes_list() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 fields:
@@ -377,7 +415,8 @@ fields:
       filters:
         - { column: status, op: in, value: [active, pending] }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
 
     let field = &schema.fields[0];
@@ -396,7 +435,8 @@ fields:
 
 #[test]
 fn convert_filter_between_becomes_range() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 fields:
@@ -408,7 +448,8 @@ fields:
       filters:
         - { column: total, op: between, value: [10, 500] }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
 
     let field = &schema.fields[0];
@@ -427,7 +468,8 @@ fields:
 
 #[test]
 fn convert_filter_eq_becomes_single() {
-    let schema = convert(r#"
+    let schema = convert(
+        r#"
 version: 1
 table: users
 fields:
@@ -439,7 +481,8 @@ fields:
       filters:
         - { column: status, op: eq, value: "active" }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
 
     let field = &schema.fields[0];
@@ -467,7 +510,8 @@ fn convert_invalid_table_name_fails() {
 
 #[test]
 fn convert_join_both_keys_fails() {
-    let schema = parse(r#"
+    let schema = parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -481,7 +525,8 @@ fields:
         left_key: user_id
         right_key: order_id
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
     let err = IndexSchema::try_from(schema).unwrap_err();
     assert!(matches!(err, ConversionError::InvalidJoinKey));
@@ -489,7 +534,8 @@ fields:
 
 #[test]
 fn convert_join_no_key_fails() {
-    let schema = parse(r#"
+    let schema = parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -498,7 +544,8 @@ fields:
       table: orders
       type: one_to_many
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
     let err = IndexSchema::try_from(schema).unwrap_err();
     assert!(matches!(err, ConversionError::InvalidJoinKey));
@@ -506,7 +553,8 @@ fields:
 
 #[test]
 fn convert_aggregate_sum_no_column_fails() {
-    let schema = parse(r#"
+    let schema = parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -515,15 +563,20 @@ fields:
       table: orders
       op: sum
       foreign_key: user_id
-"#)
+"#,
+    )
     .unwrap();
     let err = IndexSchema::try_from(schema).unwrap_err();
-    assert!(matches!(err, ConversionError::MissingAggregateColumn { op: "sum" }));
+    assert!(matches!(
+        err,
+        ConversionError::MissingAggregateColumn { op: "sum" }
+    ));
 }
 
 #[test]
 fn convert_filter_in_non_sequence_fails() {
-    let schema = parse(r#"
+    let schema = parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -535,15 +588,20 @@ fields:
       filters:
         - { column: status, op: in, value: "active" }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
     let err = IndexSchema::try_from(schema).unwrap_err();
-    assert!(matches!(err, ConversionError::ExpectedListValue { op: "in" }));
+    assert!(matches!(
+        err,
+        ConversionError::ExpectedListValue { op: "in" }
+    ));
 }
 
 #[test]
 fn convert_filter_between_wrong_arity_fails() {
-    let schema = parse(r#"
+    let schema = parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -555,15 +613,20 @@ fields:
       filters:
         - { column: total, op: between, value: [10] }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
     let err = IndexSchema::try_from(schema).unwrap_err();
-    assert!(matches!(err, ConversionError::InvalidBetweenArity { got: 1 }));
+    assert!(matches!(
+        err,
+        ConversionError::InvalidBetweenArity { got: 1 }
+    ));
 }
 
 #[test]
 fn convert_filter_eq_missing_value_fails() {
-    let schema = parse(r#"
+    let schema = parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -575,15 +638,20 @@ fields:
       filters:
         - { column: status, op: eq }
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
     let err = IndexSchema::try_from(schema).unwrap_err();
-    assert!(matches!(err, ConversionError::MissingFilterValue { op: "eq" }));
+    assert!(matches!(
+        err,
+        ConversionError::MissingFilterValue { op: "eq" }
+    ));
 }
 
 #[test]
 fn convert_field_conflicting_relation_fails() {
-    let schema = parse(r#"
+    let schema = parse(
+        r#"
 version: 1
 table: users
 fields:
@@ -597,7 +665,8 @@ fields:
       op: count
       foreign_key: user_id
     fields: [id]
-"#)
+"#,
+    )
     .unwrap();
     let err = IndexSchema::try_from(schema).unwrap_err();
     assert!(matches!(err, ConversionError::ConflictingRelation));

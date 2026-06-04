@@ -30,31 +30,37 @@ fn parse_fixture() {
 
 #[test]
 fn parse_source_direct_url() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_source_env_url() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = { env = "DATABASE_URL" }
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_source_parts() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = { host = "localhost", user = "app", database = "mydb" }
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
@@ -70,7 +76,8 @@ fn parse_source_parts_env_password() {
 
 #[test]
 fn parse_opensearch_sink_direct_url() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -78,13 +85,15 @@ fn parse_opensearch_sink_direct_url() {
         [sinks.es]
         type = "opensearch"
         url = "https://localhost:9200"
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_opensearch_sink_env_url() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -92,13 +101,15 @@ fn parse_opensearch_sink_env_url() {
         [sinks.es]
         type = "opensearch"
         url = { env = "OPENSEARCH_URL" }
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_opensearch_sink_env_credentials() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -108,13 +119,15 @@ fn parse_opensearch_sink_env_credentials() {
         url = "https://localhost:9200"
         username = { env = "OPENSEARCH_USER" }
         password = { env = "OPENSEARCH_PASS" }
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_stdout_sink() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -122,13 +135,15 @@ fn parse_stdout_sink() {
         [sinks.out]
         type = "stdout"
         pretty = true
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_multiple_sinks() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -139,13 +154,15 @@ fn parse_multiple_sinks() {
 
         [sinks.debug]
         type = "stdout"
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
 #[test]
 fn parse_with_index_entries() {
-    parse(r#"
+    parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -159,7 +176,8 @@ fn parse_with_index_entries() {
         name = "orders"
         schema = "orders.schema.yml"
         enabled = false
-    "#)
+    "#,
+    )
     .unwrap();
 }
 
@@ -167,62 +185,84 @@ fn parse_with_index_entries() {
 
 #[test]
 fn parse_missing_source_fails() {
-    assert!(parse(r#"
+    assert!(
+        parse(
+            r#"
         [sinks.out]
         type = "stdout"
-    "#)
-    .is_err());
+    "#
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn parse_unknown_source_type_fails() {
-    assert!(parse(r#"
+    assert!(
+        parse(
+            r#"
         [source]
         type = "mysql"
-    "#)
-    .is_err());
+    "#
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn parse_unknown_field_in_source_fails() {
-    assert!(parse(r#"
+    assert!(
+        parse(
+            r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
         extra_field = "oops"
-    "#)
-    .is_err());
+    "#
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn parse_unknown_sink_type_fails() {
-    assert!(parse(r#"
+    assert!(
+        parse(
+            r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
 
         [sinks.bad]
         type = "kafka"
-    "#)
-    .is_err());
+    "#
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn parse_opensearch_missing_url_fails() {
-    assert!(parse(r#"
+    assert!(
+        parse(
+            r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
 
         [sinks.es]
         type = "opensearch"
-    "#)
-    .is_err());
+    "#
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn parse_unknown_field_in_opensearch_sink_fails() {
-    assert!(parse(r#"
+    assert!(
+        parse(
+            r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -231,32 +271,44 @@ fn parse_unknown_field_in_opensearch_sink_fails() {
         type = "opensearch"
         url = "https://localhost:9200"
         unknown_option = true
-    "#)
-    .is_err());
+    "#
+        )
+        .is_err()
+    );
 }
 
 // ── conversion: valid ────────────────────────────────────────────────────────
 
 #[test]
 fn convert_source_direct_url() {
-    let config = convert(r#"
+    let config = convert(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://app@db.internal/mydb"
-    "#)
+    "#,
+    )
     .unwrap();
 
-    assert!(config.source.connection_url.as_ref().contains("db.internal"));
+    assert!(
+        config
+            .source
+            .connection_url
+            .as_ref()
+            .contains("db.internal")
+    );
 }
 
 #[test]
 fn convert_source_env_url() {
     setenv("TEST_CONV_PG_URL", "postgres://admin@envhost/envdb");
-    let result = convert(r#"
+    let result = convert(
+        r#"
         [source]
         type = "postgres"
         connection_url = { env = "TEST_CONV_PG_URL" }
-    "#);
+    "#,
+    );
     unsetenv("TEST_CONV_PG_URL");
 
     let config = result.unwrap();
@@ -281,11 +333,13 @@ fn convert_source_parts() {
 #[test]
 fn convert_source_parts_env_password() {
     setenv("TEST_CONV_PG_PASS", "s3cr3t");
-    let result = convert(r#"
+    let result = convert(
+        r#"
         [source]
         type = "postgres"
         connection_url = { host = "localhost", user = "app", database = "mydb", password = { env = "TEST_CONV_PG_PASS" } }
-    "#);
+    "#,
+    );
     unsetenv("TEST_CONV_PG_PASS");
 
     assert!(result.is_ok());
@@ -293,7 +347,8 @@ fn convert_source_parts_env_password() {
 
 #[test]
 fn convert_opensearch_sink_direct_url() {
-    let config = convert(r#"
+    let config = convert(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -301,7 +356,8 @@ fn convert_opensearch_sink_direct_url() {
         [sinks.primary]
         type = "opensearch"
         url = "https://search.internal:9200"
-    "#)
+    "#,
+    )
     .unwrap();
 
     let (_, sink) = config.sinks.iter().next().unwrap();
@@ -314,7 +370,8 @@ fn convert_opensearch_sink_direct_url() {
 #[test]
 fn convert_opensearch_sink_env_url() {
     setenv("TEST_CONV_OS_URL", "https://search.env:9200");
-    let result = convert(r#"
+    let result = convert(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -322,7 +379,8 @@ fn convert_opensearch_sink_env_url() {
         [sinks.primary]
         type = "opensearch"
         url = { env = "TEST_CONV_OS_URL" }
-    "#);
+    "#,
+    );
     unsetenv("TEST_CONV_OS_URL");
 
     let config = result.unwrap();
@@ -335,11 +393,13 @@ fn convert_opensearch_sink_env_url() {
 
 #[test]
 fn convert_empty_sinks_is_ok() {
-    let config = convert(r#"
+    let config = convert(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
-    "#)
+    "#,
+    )
     .unwrap();
 
     assert!(config.sinks.is_empty());
@@ -349,10 +409,12 @@ fn convert_empty_sinks_is_ok() {
 
 #[test]
 fn convert_source_missing_connection_url_fails() {
-    let toml = ConfigToml::try_parse(r#"
+    let toml = ConfigToml::try_parse(
+        r#"
         [source]
         type = "postgres"
-    "#)
+    "#,
+    )
     .unwrap();
 
     let err = Config::try_from(toml).unwrap_err();
@@ -363,11 +425,13 @@ fn convert_source_missing_connection_url_fails() {
 fn convert_source_env_url_not_set_fails() {
     unsetenv("TEST_CONV_UNSET_PG_URL_XYZ");
 
-    let toml = ConfigToml::try_parse(r#"
+    let toml = ConfigToml::try_parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = { env = "TEST_CONV_UNSET_PG_URL_XYZ" }
-    "#)
+    "#,
+    )
     .unwrap();
 
     let err = Config::try_from(toml).unwrap_err();
@@ -376,11 +440,13 @@ fn convert_source_env_url_not_set_fails() {
 
 #[test]
 fn convert_source_invalid_url_fails() {
-    let toml = ConfigToml::try_parse(r#"
+    let toml = ConfigToml::try_parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "not_a_valid_url"
-    "#)
+    "#,
+    )
     .unwrap();
 
     let err = Config::try_from(toml).unwrap_err();
@@ -391,7 +457,8 @@ fn convert_source_invalid_url_fails() {
 fn convert_opensearch_env_url_not_set_fails() {
     unsetenv("TEST_CONV_UNSET_OS_URL_XYZ");
 
-    let toml = ConfigToml::try_parse(r#"
+    let toml = ConfigToml::try_parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -399,7 +466,8 @@ fn convert_opensearch_env_url_not_set_fails() {
         [sinks.es]
         type = "opensearch"
         url = { env = "TEST_CONV_UNSET_OS_URL_XYZ" }
-    "#)
+    "#,
+    )
     .unwrap();
 
     let err = Config::try_from(toml).unwrap_err();
@@ -408,7 +476,8 @@ fn convert_opensearch_env_url_not_set_fails() {
 
 #[test]
 fn convert_opensearch_invalid_url_fails() {
-    let toml = ConfigToml::try_parse(r#"
+    let toml = ConfigToml::try_parse(
+        r#"
         [source]
         type = "postgres"
         connection_url = "postgres://user@localhost/mydb"
@@ -416,7 +485,8 @@ fn convert_opensearch_invalid_url_fails() {
         [sinks.es]
         type = "opensearch"
         url = "ftp://not-http-or-https"
-    "#)
+    "#,
+    )
     .unwrap();
 
     let err = Config::try_from(toml).unwrap_err();

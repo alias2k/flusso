@@ -19,7 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // nested one-to-many relation.
     let document = GenericValue::Map(BTreeMap::from([
         ("id".to_owned(), GenericValue::Int(42)),
-        ("email".to_owned(), GenericValue::String("ada@example.io".to_owned())),
+        (
+            "email".to_owned(),
+            GenericValue::String("ada@example.io".to_owned()),
+        ),
         (
             "orders".to_owned(),
             GenericValue::Array(vec![GenericValue::Map(BTreeMap::from([

@@ -18,16 +18,24 @@ use sources_core::{RowKey, SourceError};
 pub(crate) enum Decoded {
     /// Table metadata. Must be seen before any DML referencing its OID.
     Relation(Relation),
-    Insert { rel: u32, new: Tuple },
+    Insert {
+        rel: u32,
+        new: Tuple,
+    },
     Update {
         rel: u32,
         /// Old tuple, present only when `REPLICA IDENTITY` sends it (key or full).
         old: Option<Tuple>,
         new: Tuple,
     },
-    Delete { rel: u32, old: Tuple },
+    Delete {
+        rel: u32,
+        old: Tuple,
+    },
     /// `TRUNCATE` of the listed relation OIDs.
-    Truncate { rels: Vec<u32> },
+    Truncate {
+        rels: Vec<u32>,
+    },
     /// A message we don't act on (`Type`, `Origin`, …).
     Other,
 }
@@ -108,8 +116,10 @@ fn typed_value(text: &str, type_oid: u32) -> GenericValue {
             .parse::<i64>()
             .map_or_else(|_| GenericValue::String(text.to_owned()), GenericValue::Int),
         // float4 / float8 / numeric
-        700 | 701 | 1700 => rust_decimal::Decimal::from_str_exact(text)
-            .map_or_else(|_| GenericValue::String(text.to_owned()), GenericValue::Decimal),
+        700 | 701 | 1700 => rust_decimal::Decimal::from_str_exact(text).map_or_else(
+            |_| GenericValue::String(text.to_owned()),
+            GenericValue::Decimal,
+        ),
         // everything else (text, varchar, uuid, timestamps, …) stays text
         _ => GenericValue::String(text.to_owned()),
     }
@@ -183,8 +193,9 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
     let oid = cur.u32()?;
     let _namespace = cur.cstring()?;
     let relname = cur.cstring()?;
-    let table = TableName::try_new(relname.clone())
-        .map_err(|e| SourceError::Decode(format!("pgoutput relation: invalid table {relname:?}: {e}")))?;
+    let table = TableName::try_new(relname.clone()).map_err(|e| {
+        SourceError::Decode(format!("pgoutput relation: invalid table {relname:?}: {e}"))
+    })?;
     let _replica_identity = cur.u8()?;
     let ncols = cur.i16_count()?;
     let mut columns = Vec::with_capacity(ncols);
@@ -194,7 +205,9 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
         let type_oid = cur.u32()?;
         let _type_modifier = cur.u32()?;
         let name = ColumnName::try_new(colname.clone()).map_err(|e| {
-            SourceError::Decode(format!("pgoutput relation: invalid column {colname:?}: {e}"))
+            SourceError::Decode(format!(
+                "pgoutput relation: invalid column {colname:?}: {e}"
+            ))
         })?;
         columns.push(Column {
             name,
@@ -262,44 +275,45 @@ impl<'a> Cursor<'a> {
             .pos
             .checked_add(n)
             .ok_or_else(|| truncated("length overflow"))?;
-        let slice = self.buf.get(self.pos..end).ok_or_else(|| truncated("bytes"))?;
+        let slice = self
+            .buf
+            .get(self.pos..end)
+            .ok_or_else(|| truncated("bytes"))?;
         self.pos = end;
         Ok(slice)
     }
 
     fn u8(&mut self) -> Result<u8, SourceError> {
-        let byte = self.buf.get(self.pos).copied().ok_or_else(|| truncated("u8"))?;
+        let byte = self
+            .buf
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| truncated("u8"))?;
         self.pos += 1;
         Ok(byte)
     }
 
     fn u32(&mut self) -> Result<u32, SourceError> {
-        let arr: [u8; 4] = self
-            .take(4)?
-            .try_into()
-            .map_err(|_| truncated("u32"))?;
+        let arr: [u8; 4] = self.take(4)?.try_into().map_err(|_| truncated("u32"))?;
         Ok(u32::from_be_bytes(arr))
     }
 
     fn i32_len(&mut self) -> Result<usize, SourceError> {
-        let arr: [u8; 4] = self
-            .take(4)?
-            .try_into()
-            .map_err(|_| truncated("i32"))?;
+        let arr: [u8; 4] = self.take(4)?.try_into().map_err(|_| truncated("i32"))?;
         Ok(i32::from_be_bytes(arr).max(0) as usize)
     }
 
     /// Read an `Int16` element count, clamped to a non-negative `usize`.
     fn i16_count(&mut self) -> Result<usize, SourceError> {
-        let arr: [u8; 2] = self
-            .take(2)?
-            .try_into()
-            .map_err(|_| truncated("i16"))?;
+        let arr: [u8; 2] = self.take(2)?.try_into().map_err(|_| truncated("i16"))?;
         Ok(i16::from_be_bytes(arr).max(0) as usize)
     }
 
     fn cstring(&mut self) -> Result<String, SourceError> {
-        let rest = self.buf.get(self.pos..).ok_or_else(|| truncated("cstring"))?;
+        let rest = self
+            .buf
+            .get(self.pos..)
+            .ok_or_else(|| truncated("cstring"))?;
         let nul = rest
             .iter()
             .position(|&b| b == 0)

@@ -46,13 +46,17 @@ impl PgDocumentBuilder {
                     )
                 })?
             } else {
-                self.table_primary_key(&schema.db_schema, &parent_table).await?
+                self.table_primary_key(&schema.db_schema, &parent_table)
+                    .await?
             };
 
             let mut next = Vec::new();
             let mut seen = HashSet::new();
             for key in &current_keys {
-                for value in self.reverse_hop(&schema.db_schema, relation, &current_table, key).await? {
+                for value in self
+                    .reverse_hop(&schema.db_schema, relation, &current_table, key)
+                    .await?
+                {
                     if seen.insert(value.clone()) {
                         next.push(RowKey(vec![(parent_pk.clone(), value)]));
                     }

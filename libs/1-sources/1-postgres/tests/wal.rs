@@ -35,13 +35,24 @@ struct RecordingSink {
 
 #[async_trait]
 impl Sink for RecordingSink {
-    async fn upsert(&self, index: &IndexName, id: &str, _document: &GenericValue) -> SinkResult<()> {
-        self.ops.lock().unwrap().push(format!("upsert {} {id}", index.as_ref()));
+    async fn upsert(
+        &self,
+        index: &IndexName,
+        id: &str,
+        _document: &GenericValue,
+    ) -> SinkResult<()> {
+        self.ops
+            .lock()
+            .unwrap()
+            .push(format!("upsert {} {id}", index.as_ref()));
         Ok(())
     }
 
     async fn delete(&self, index: &IndexName, id: &str) -> SinkResult<()> {
-        self.ops.lock().unwrap().push(format!("delete {} {id}", index.as_ref()));
+        self.ops
+            .lock()
+            .unwrap()
+            .push(format!("delete {} {id}", index.as_ref()));
         Ok(())
     }
 
@@ -212,7 +223,12 @@ async fn expect_op(
 async fn poll_for(recorded: &Arc<Mutex<Vec<String>>>, op: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if recorded.lock().unwrap().iter().any(|recorded_op| recorded_op == op) {
+        if recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|recorded_op| recorded_op == op)
+        {
             return;
         }
         if Instant::now() >= deadline {
@@ -241,7 +257,13 @@ fn users_config(connection_url: &str) -> Config {
             connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
         },
         sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(index_name("users"), Index { enabled: true, schema })]),
+        indexes: BTreeMap::from([(
+            index_name("users"),
+            Index {
+                enabled: true,
+                schema,
+            },
+        )]),
     }
 }
 

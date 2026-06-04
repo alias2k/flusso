@@ -1,18 +1,16 @@
 use schema_core::{
-    common::{ConnectionUrl, HttpUrl, SourceType},
     OpensearchSink, Sink, Source, StdoutSink,
+    common::{ConnectionUrl, HttpUrl, SourceType},
 };
 
-use crate::entities;
 use crate::ConversionError;
+use crate::entities;
 
 pub(crate) fn convert_source(source: entities::Source) -> Result<Source, ConversionError> {
     match source {
         entities::Source::Postgres(pg) => {
             let connection_url = match pg.connection_url {
-                Some(entities::ConnectionUrl::Url(ev)) => {
-                    ConnectionUrl::try_new(ev.resolve()?)?
-                }
+                Some(entities::ConnectionUrl::Url(ev)) => ConnectionUrl::try_new(ev.resolve()?)?,
                 Some(entities::ConnectionUrl::Parts {
                     host,
                     port,

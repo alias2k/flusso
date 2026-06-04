@@ -96,7 +96,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let sink: Arc<dyn Sink> = match sinks.len() {
         0 => Arc::new(StdoutSink::new(cli.pretty)),
-        1 => sinks.into_iter().next().unwrap_or_else(|| Arc::new(StdoutSink::new(false))),
+        1 => sinks
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Arc::new(StdoutSink::new(false))),
         _ => Arc::new(FanOutSink::new(sinks)),
     };
 
@@ -109,10 +112,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Flush any buffered spans to the collector before exiting, on success or
     // error alike — otherwise the last batch of traces is lost.
-    if let Some(provider) = tracer_provider {
-        if let Err(error) = provider.shutdown() {
-            tracing::warn!(%error, "failed to flush OTLP tracer on shutdown");
-        }
+    if let Some(provider) = tracer_provider
+        && let Err(error) = provider.shutdown()
+    {
+        tracing::warn!(%error, "failed to flush OTLP tracer on shutdown");
     }
 
     result
@@ -162,7 +165,11 @@ fn init_tracing() -> Option<SdkTracerProvider> {
         .map(|value| value.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
     let fmt_layer: Box<dyn Layer<Registry> + Send + Sync> = if json {
-        Box::new(tracing_subscriber::fmt::layer().json().with_writer(std::io::stderr))
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(std::io::stderr),
+        )
     } else {
         Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
     };

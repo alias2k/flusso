@@ -62,13 +62,11 @@ impl WalChangeCapture {
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
 
-        let row = sqlx::query(
-            "SELECT plugin FROM pg_replication_slots WHERE slot_name = $1",
-        )
-        .bind(&self.config.slot)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| SourceError::Query(e.to_string()))?;
+        let row = sqlx::query("SELECT plugin FROM pg_replication_slots WHERE slot_name = $1")
+            .bind(&self.config.slot)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| SourceError::Query(e.to_string()))?;
 
         match row {
             Some(row) => {
@@ -84,16 +82,16 @@ impl WalChangeCapture {
                 tracing::debug!(slot = %self.config.slot, "replication slot already exists");
             }
             None => {
-                sqlx::query(
-                    "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
-                )
-                .bind(&self.config.slot)
-                .execute(&pool)
-                .await
-                .map_err(|e| SourceError::Connection(format!(
-                    "failed to create replication slot '{}': {e}",
-                    self.config.slot,
-                )))?;
+                sqlx::query("SELECT pg_create_logical_replication_slot($1, 'pgoutput')")
+                    .bind(&self.config.slot)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| {
+                        SourceError::Connection(format!(
+                            "failed to create replication slot '{}': {e}",
+                            self.config.slot,
+                        ))
+                    })?;
                 tracing::info!(slot = %self.config.slot, "created replication slot");
             }
         }
@@ -115,7 +113,10 @@ impl ChangeCapture for WalChangeCapture {
 
         let ack = Arc::new(AckShared::new(self.config.start_lsn.as_u64()));
         let sink: Arc<dyn AckSink> = Arc::new(WalAckSink::new(Arc::clone(&ack)));
-        tracing::info!(start_lsn = self.config.start_lsn.as_u64(), "opened replication stream");
+        tracing::info!(
+            start_lsn = self.config.start_lsn.as_u64(),
+            "opened replication stream"
+        );
         Ok(stream::build(client, ack, sink))
     }
 

@@ -49,8 +49,15 @@ const META_INDEX: &str = "flusso_meta";
 /// A buffered write destined for OpenSearch.
 #[derive(Debug)]
 enum BulkAction {
-    Index { index: String, id: String, doc: Value },
-    Delete { index: String, id: String },
+    Index {
+        index: String,
+        id: String,
+        doc: Value,
+    },
+    Delete {
+        index: String,
+        id: String,
+    },
 }
 
 /// Writes document operations to an OpenSearch cluster using the bulk API.
@@ -167,8 +174,7 @@ impl OpensearchSink {
 
         for attempt in 0..=self.max_retries {
             if attempt > 0 {
-                let backoff =
-                    Duration::from_millis(200u64.saturating_mul(1u64 << (attempt - 1)));
+                let backoff = Duration::from_millis(200u64.saturating_mul(1u64 << (attempt - 1)));
                 tokio::time::sleep(backoff).await;
                 warn!(attempt, "retrying OpenSearch bulk request");
             }
@@ -327,9 +333,10 @@ impl OpensearchSink {
         }
 
         if resp.status().is_success() {
-            let body: Value = resp.json().await.map_err(|e| {
-                SinkError::Write(format!("failed to parse meta response: {e}"))
-            })?;
+            let body: Value = resp
+                .json()
+                .await
+                .map_err(|e| SinkError::Write(format!("failed to parse meta response: {e}")))?;
             Ok(Some(body))
         } else {
             let status = resp.status();
@@ -748,7 +755,10 @@ mod tests {
 
     #[test]
     fn other_mapping_type_uses_its_raw_name() {
-        assert_eq!(opensearch_type(&MappingType::Other("binary".to_owned())), "binary");
+        assert_eq!(
+            opensearch_type(&MappingType::Other("binary".to_owned())),
+            "binary"
+        );
     }
 
     #[test]
@@ -811,7 +821,10 @@ mod tests {
 
     #[test]
     fn bulk_url_no_pipeline_no_refresh() {
-        assert_eq!(build_bulk_url("http://localhost:9200", None, false), "http://localhost:9200/_bulk");
+        assert_eq!(
+            build_bulk_url("http://localhost:9200", None, false),
+            "http://localhost:9200/_bulk"
+        );
     }
 
     #[test]

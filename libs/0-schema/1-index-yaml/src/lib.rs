@@ -72,16 +72,14 @@ impl TryFrom<SchemaYaml> for schema_core::IndexSchema {
             Some(s) => schema_core::DatabaseSchema::try_new(s)?,
             None => schema_core::DatabaseSchema::default(),
         };
-        let primary_key = yaml.primary_key
-            .map(ColumnName::try_new)
-            .transpose()?;
-        let doc_id = yaml.doc_id
-            .map(ColumnName::try_new)
-            .transpose()?;
-        let soft_delete = yaml.soft_delete
+        let primary_key = yaml.primary_key.map(ColumnName::try_new).transpose()?;
+        let doc_id = yaml.doc_id.map(ColumnName::try_new).transpose()?;
+        let soft_delete = yaml
+            .soft_delete
             .map(conversion::convert_soft_delete)
             .transpose()?;
-        let fields = yaml.fields
+        let fields = yaml
+            .fields
             .into_iter()
             .map(conversion::convert_field)
             .collect::<Result<_, _>>()?;

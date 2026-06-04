@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use schema_core::{
     Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, FieldSource,
-    GenericValue, Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Relation, Source,
-    SourceType, SoftDelete, SoftDeleteColumn, TableName,
+    GenericValue, Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Relation, SoftDelete,
+    SoftDeleteColumn, Source, SourceType, TableName,
 };
 use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
@@ -55,7 +55,10 @@ async fn assembles_documents_resolves_and_tombstones() {
     let GenericValue::Map(map) = body else {
         panic!("expected a document object");
     };
-    assert_eq!(map.get("email"), Some(&GenericValue::String("ada@x.io".into())));
+    assert_eq!(
+        map.get("email"),
+        Some(&GenericValue::String("ada@x.io".into()))
+    );
     let Some(GenericValue::Array(orders)) = map.get("orders") else {
         panic!("expected an orders array");
     };
@@ -122,7 +125,13 @@ fn users_config(connection_url: &str) -> Config {
             connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
         },
         sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(index_name("users"), Index { enabled: true, schema })]),
+        indexes: BTreeMap::from([(
+            index_name("users"),
+            Index {
+                enabled: true,
+                schema,
+            },
+        )]),
     }
 }
 

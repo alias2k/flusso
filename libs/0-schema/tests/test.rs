@@ -25,12 +25,18 @@ fn loads_config_with_indexes() {
     // Both index entries are loaded from their YAML files, keyed by name.
     assert_eq!(config.indexes.len(), 2);
 
-    let users = config.indexes.get(&index_name("users")).expect("users index");
+    let users = config
+        .indexes
+        .get(&index_name("users"))
+        .expect("users index");
     assert!(users.enabled);
     assert_eq!(users.schema.table.as_ref(), "users");
     assert_eq!(users.schema.fields.len(), 2);
 
-    let orders = config.indexes.get(&index_name("orders")).expect("orders index");
+    let orders = config
+        .indexes
+        .get(&index_name("orders"))
+        .expect("orders index");
     assert!(!orders.enabled);
     assert_eq!(orders.schema.table.as_ref(), "orders");
 }

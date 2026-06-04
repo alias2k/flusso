@@ -4,8 +4,8 @@
 //! which is not what a sink wants to emit. This maps it to plain JSON instead —
 //! numbers as numbers, strings as strings, maps as objects.
 
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use schema_core::GenericValue;
 use serde_json::{Number, Value};
 
@@ -18,9 +18,12 @@ pub fn to_json(value: &GenericValue) -> Value {
         GenericValue::Decimal(d) => decimal_to_json(d),
         GenericValue::String(s) => Value::String(s.clone()),
         GenericValue::Array(items) => Value::Array(items.iter().map(to_json).collect()),
-        GenericValue::Map(fields) => {
-            Value::Object(fields.iter().map(|(k, v)| (k.clone(), to_json(v))).collect())
-        }
+        GenericValue::Map(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), to_json(v)))
+                .collect(),
+        ),
     }
 }
 

@@ -111,7 +111,13 @@ fn now() -> String {
 
 /// Provenance fields common to every envelope: which sink and version produced
 /// it, when, and in what order.
-fn header(seq: u64, ts: &str, index: &IndexName, op: &str, id: &str) -> serde_json::Map<String, Value> {
+fn header(
+    seq: u64,
+    ts: &str,
+    index: &IndexName,
+    op: &str,
+    id: &str,
+) -> serde_json::Map<String, Value> {
     json!({
         "sink": SINK_NAME,
         "version": VERSION,
@@ -135,7 +141,13 @@ fn document_meta(document: &Value) -> Value {
     })
 }
 
-fn upsert_envelope(seq: u64, ts: &str, index: &IndexName, id: &str, document: &GenericValue) -> Value {
+fn upsert_envelope(
+    seq: u64,
+    ts: &str,
+    index: &IndexName,
+    id: &str,
+    document: &GenericValue,
+) -> Value {
     let document = to_json(document);
     let mut envelope = header(seq, ts, index, "upsert", id);
     envelope.insert("meta".to_owned(), document_meta(&document));

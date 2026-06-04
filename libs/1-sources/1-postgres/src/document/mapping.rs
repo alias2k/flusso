@@ -62,7 +62,10 @@ mod tests {
     #[test]
     fn strings_default_to_keyword() {
         assert_eq!(pg_type_to_mapping("text"), MappingType::Keyword);
-        assert_eq!(pg_type_to_mapping("character varying(255)"), MappingType::Keyword);
+        assert_eq!(
+            pg_type_to_mapping("character varying(255)"),
+            MappingType::Keyword
+        );
         assert_eq!(pg_type_to_mapping("uuid"), MappingType::Keyword);
     }
 
@@ -74,7 +77,10 @@ mod tests {
 
     #[test]
     fn temporal_types_are_date() {
-        assert_eq!(pg_type_to_mapping("timestamp with time zone"), MappingType::Date);
+        assert_eq!(
+            pg_type_to_mapping("timestamp with time zone"),
+            MappingType::Date
+        );
         assert_eq!(pg_type_to_mapping("date"), MappingType::Date);
     }
 
@@ -86,7 +92,10 @@ mod tests {
 
     #[test]
     fn bytea_is_binary() {
-        assert_eq!(pg_type_to_mapping("bytea"), MappingType::Other("binary".to_owned()));
+        assert_eq!(
+            pg_type_to_mapping("bytea"),
+            MappingType::Other("binary".to_owned())
+        );
     }
 
     #[test]

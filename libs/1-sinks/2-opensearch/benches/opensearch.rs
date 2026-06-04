@@ -33,8 +33,8 @@ use schema_core::{
     ResolvedField,
 };
 use sinks_core::Sink;
-use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
+use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{GenericImage, ImageExt};
 use tokio::runtime::Runtime;
@@ -53,8 +53,10 @@ fn runtime() -> Runtime {
 /// Start a single-node OpenSearch 2 cluster with security disabled, mirroring
 /// the dev `docker-compose.yml`. Returns the running container (kept alive by
 /// the caller) and its `http://host:port` base URL.
-async fn start_opensearch()
--> (testcontainers_modules::testcontainers::ContainerAsync<GenericImage>, String) {
+async fn start_opensearch() -> (
+    testcontainers_modules::testcontainers::ContainerAsync<GenericImage>,
+    String,
+) {
     let container = GenericImage::new("opensearchproject/opensearch", "2")
         .with_exposed_port(9200.tcp())
         .with_wait_for(WaitFor::http(
@@ -129,10 +131,7 @@ fn document(i: usize) -> GenericValue {
         GenericValue::String(format!("Customer Number {i}")),
     );
     map.insert("active".to_owned(), GenericValue::Bool(i % 2 == 0));
-    map.insert(
-        "score".to_owned(),
-        GenericValue::Decimal((i as i64).into()),
-    );
+    map.insert("score".to_owned(), GenericValue::Decimal((i as i64).into()));
     GenericValue::Map(map)
 }
 
@@ -160,7 +159,10 @@ fn bench(c: &mut Criterion) {
 
     // Create the index once with auto-refresh disabled (the seeding path).
     rt.block_on(async {
-        sink(&base_url, 1000).ensure_index(&mapping()).await.unwrap();
+        sink(&base_url, 1000)
+            .ensure_index(&mapping())
+            .await
+            .unwrap();
     });
 
     // Throughput of flushing N documents at the default batch size of 1000.
@@ -186,8 +188,9 @@ fn bench(c: &mut Criterion) {
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(5));
     group.measurement_time(Duration::from_secs(20));
-    let docs: Vec<(String, GenericValue)> =
-        (0..5_000usize).map(|i| (i.to_string(), document(i))).collect();
+    let docs: Vec<(String, GenericValue)> = (0..5_000usize)
+        .map(|i| (i.to_string(), document(i)))
+        .collect();
     for &batch in &[100u32, 500, 1_000, 5_000] {
         let sink = sink(&base_url, batch);
         group.throughput(Throughput::Elements(5_000));

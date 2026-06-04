@@ -68,8 +68,8 @@ use engine::{BatchPolicy, Engine};
 use futures::stream::{self, BoxStream};
 use schema_core::{
     Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Direction,
-    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, GenericValue, Index, IndexMapping,
-    IndexName, IndexSchema, Join, JoinKey, JoinType, OrderBy, Relation, SoftDelete,
+    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, GenericValue, Index,
+    IndexMapping, IndexName, IndexSchema, Join, JoinKey, JoinType, OrderBy, Relation, SoftDelete,
     SoftDeleteColumn, Source, SourceType, TableName, Through, Transform, ValueOpFilter,
 };
 use sinks_core::{Result as SinkResult, Sink};
@@ -382,9 +382,15 @@ async fn setup() -> Services {
 
     // Used only to build a fresh `BackfillOnly` capture per backfill iteration;
     // `live` is stubbed, so these replication values are never connected with.
-    let replication =
-        ReplicationConfig::new("127.0.0.1", "postgres", "postgres", "postgres", "flusso", "flusso")
-            .with_port(pg_port);
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(pg_port);
 
     Services {
         _postgres: postgres,
@@ -405,10 +411,18 @@ async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
     for id in &ids {
         match services.documents.build(id).await.unwrap() {
             Document::Upsert { id, body } => {
-                services.sink.upsert(&id.index, &doc_id_string(&id), &body).await.unwrap();
+                services
+                    .sink
+                    .upsert(&id.index, &doc_id_string(&id), &body)
+                    .await
+                    .unwrap();
             }
             Document::Delete { id } => {
-                services.sink.delete(&id.index, &doc_id_string(&id)).await.unwrap();
+                services
+                    .sink
+                    .delete(&id.index, &doc_id_string(&id))
+                    .await
+                    .unwrap();
             }
         }
     }
@@ -427,7 +441,10 @@ fn bench(c: &mut Criterion) {
     // Postgres round-trip floor (resolve + build each pay at least this).
     group.bench_function("pg_select_1", |b| {
         b.to_async(&rt).iter(|| async {
-            sqlx::query("SELECT 1").fetch_one(&services.pool).await.unwrap();
+            sqlx::query("SELECT 1")
+                .fetch_one(&services.pool)
+                .await
+                .unwrap();
         });
     });
     // OpenSearch bulk round-trip floor: a single-document upsert + flush.
@@ -437,7 +454,11 @@ fn bench(c: &mut Criterion) {
         body.insert("id".to_owned(), GenericValue::Int(1));
         let body = GenericValue::Map(body);
         b.to_async(&rt).iter(|| async {
-            services.sink.upsert(&index, "baseline", &body).await.unwrap();
+            services
+                .sink
+                .upsert(&index, "baseline", &body)
+                .await
+                .unwrap();
             services.sink.flush().await.unwrap();
         });
     });
@@ -608,16 +629,33 @@ fn config(connection_url: &str) -> Config {
     let fields = vec![
         col("id", "id"),
         col("name", "name"),
-        col_full("bio", "bio", Vec::new(), Some(GenericValue::String("(no bio)".into()))),
+        col_full(
+            "bio",
+            "bio",
+            Vec::new(),
+            Some(GenericValue::String("(no bio)".into())),
+        ),
         contact,
         profile,
         orders,
         tags,
         agg_field("order_count", orders_agg(AggregateOp::Count, None)),
-        agg_field("total_spent", orders_agg(AggregateOp::Sum(column("total")), None)),
-        agg_field("avg_order", orders_agg(AggregateOp::Avg(column("total")), None)),
-        agg_field("min_order", orders_agg(AggregateOp::Min(column("total")), None)),
-        agg_field("max_order", orders_agg(AggregateOp::Max(column("total")), None)),
+        agg_field(
+            "total_spent",
+            orders_agg(AggregateOp::Sum(column("total")), None),
+        ),
+        agg_field(
+            "avg_order",
+            orders_agg(AggregateOp::Avg(column("total")), None),
+        ),
+        agg_field(
+            "min_order",
+            orders_agg(AggregateOp::Min(column("total")), None),
+        ),
+        agg_field(
+            "max_order",
+            orders_agg(AggregateOp::Max(column("total")), None),
+        ),
         agg_field(
             "fulfilled_orders",
             orders_agg(
@@ -662,7 +700,13 @@ fn config(connection_url: &str) -> Config {
             connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
         },
         sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(index_name("users"), Index { enabled: true, schema })]),
+        indexes: BTreeMap::from([(
+            index_name("users"),
+            Index {
+                enabled: true,
+                schema,
+            },
+        )]),
     }
 }
 

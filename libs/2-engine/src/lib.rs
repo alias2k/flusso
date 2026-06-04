@@ -200,7 +200,15 @@ impl Engine {
 
         let stream = source.live().await?;
         tracing::info!("following live changes");
-        let result = pump(stream, documents.as_ref(), sink.as_ref(), queue_capacity, batch, None).await;
+        let result = pump(
+            stream,
+            documents.as_ref(),
+            sink.as_ref(),
+            queue_capacity,
+            batch,
+            None,
+        )
+        .await;
         match &result {
             Ok(()) => tracing::info!("pipeline stopped: live stream ended"),
             Err(error) => tracing::error!(%error, "pipeline stopped on error"),
@@ -240,9 +248,21 @@ async fn backfill(
         return Ok(());
     }
 
-    tracing::info!(indexes = seeding.len(), tables = tables.len(), "seeding indexes");
+    tracing::info!(
+        indexes = seeding.len(),
+        tables = tables.len(),
+        "seeding indexes"
+    );
     let stream = source.snapshot(&tables).await?;
-    pump(stream, documents, sink, queue_capacity, batch, Some(&seeding)).await?;
+    pump(
+        stream,
+        documents,
+        sink,
+        queue_capacity,
+        batch,
+        Some(&seeding),
+    )
+    .await?;
 
     // The snapshot is fully applied and flushed once `pump` returns; record each
     // index as seeded so a later run skips it.
@@ -330,7 +350,7 @@ async fn work(
         let deadline = Instant::now() + batch.max_delay;
         while pending.len() < batch.max_changes {
             match timeout_at(deadline, consumer.recv()).await {
-                Err(_elapsed) => break,                 // window closed: flush a partial batch
+                Err(_elapsed) => break, // window closed: flush a partial batch
                 Ok(Ok(Some(delivery))) => {
                     buffer(delivery, documents, sink, filter, &mut pending).await?;
                 }
@@ -491,7 +511,9 @@ mod tests {
         ) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
             let changes = self.changes.lock().unwrap().take().unwrap_or_default();
             Ok(Box::pin(stream::iter(
-                changes.into_iter().map(Ok::<Change, sources_core::SourceError>),
+                changes
+                    .into_iter()
+                    .map(Ok::<Change, sources_core::SourceError>),
             )))
         }
     }
@@ -560,12 +582,18 @@ mod tests {
             id: &str,
             _document: &GenericValue,
         ) -> sinks_core::Result<()> {
-            self.ops.lock().unwrap().push(format!("upsert {} {id}", index.as_ref()));
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("upsert {} {id}", index.as_ref()));
             Ok(())
         }
 
         async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
-            self.ops.lock().unwrap().push(format!("delete {} {id}", index.as_ref()));
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("delete {} {id}", index.as_ref()));
             Ok(())
         }
 
@@ -640,12 +668,18 @@ mod tests {
             id: &str,
             _document: &GenericValue,
         ) -> sinks_core::Result<()> {
-            self.ops.lock().unwrap().push(format!("upsert {} {id}", index.as_ref()));
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("upsert {} {id}", index.as_ref()));
             Ok(())
         }
 
         async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
-            self.ops.lock().unwrap().push(format!("delete {} {id}", index.as_ref()));
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("delete {} {id}", index.as_ref()));
             Ok(())
         }
 
@@ -695,7 +729,11 @@ mod tests {
             ],
             "all five changes batch into exactly one flush, after every upsert",
         );
-        assert_eq!(acks.load(Ordering::SeqCst), 5, "the whole batch is confirmed");
+        assert_eq!(
+            acks.load(Ordering::SeqCst),
+            5,
+            "the whole batch is confirmed"
+        );
     }
 
     /// Counts flushes; shares its counter with [`OrderingAck`] so a test can
@@ -789,7 +827,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(flushes.load(Ordering::SeqCst), 2, "four changes → two flushes of two");
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            2,
+            "four changes → two flushes of two"
+        );
         let observed = observed.lock().unwrap();
         // A change in batch k (0-indexed) is confirmed only after k+1 flushes —
         // i.e. never before the flush that made its own documents durable.
@@ -835,7 +877,8 @@ mod tests {
             *self.tables.lock().unwrap() = tables.to_vec();
             let rows = self.rows.lock().unwrap().take().unwrap_or_default();
             Ok(Box::pin(stream::iter(
-                rows.into_iter().map(Ok::<Change, sources_core::SourceError>),
+                rows.into_iter()
+                    .map(Ok::<Change, sources_core::SourceError>),
             )))
         }
     }
@@ -857,12 +900,18 @@ mod tests {
             id: &str,
             _document: &GenericValue,
         ) -> sinks_core::Result<()> {
-            self.ops.lock().unwrap().push(format!("upsert {} {id}", index.as_ref()));
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("upsert {} {id}", index.as_ref()));
             Ok(())
         }
 
         async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
-            self.ops.lock().unwrap().push(format!("delete {} {id}", index.as_ref()));
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("delete {} {id}", index.as_ref()));
             Ok(())
         }
 
@@ -899,7 +948,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(called.load(Ordering::SeqCst), "snapshot should be requested");
+        assert!(
+            called.load(Ordering::SeqCst),
+            "snapshot should be requested"
+        );
         // The index's root table is what gets snapshotted.
         let tables = tables.lock().unwrap();
         assert_eq!(tables.len(), 1);
@@ -930,7 +982,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!called.load(Ordering::SeqCst), "a seeded index is not snapshotted");
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "a seeded index is not snapshotted"
+        );
         assert!(ops.lock().unwrap().is_empty());
         assert!(marked.lock().unwrap().is_empty());
     }
@@ -954,7 +1009,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!called.load(Ordering::SeqCst), "skip_backfill suppresses the snapshot");
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "skip_backfill suppresses the snapshot"
+        );
         assert!(ops.lock().unwrap().is_empty());
         assert!(marked.lock().unwrap().is_empty());
     }

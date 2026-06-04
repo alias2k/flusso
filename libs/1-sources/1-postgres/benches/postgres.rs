@@ -117,7 +117,10 @@ fn bench(c: &mut Criterion) {
     // doesn't pay a one-off cost the rest don't — we measure steady-state SQL.
     rt.block_on(async {
         builder.build(&document_id(4)).await.unwrap();
-        builder.resolve(&table("orders"), &row_key(4000)).await.unwrap();
+        builder
+            .resolve(&table("orders"), &row_key(4000))
+            .await
+            .unwrap();
     });
 
     // baseline: the fixed costs to subtract from the figures below, so the
@@ -147,15 +150,11 @@ fn bench(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(15));
     for &(user_id, order_count) in USERS {
         let id = document_id(user_id);
-        group.bench_with_input(
-            BenchmarkId::from_parameter(order_count),
-            &id,
-            |b, id| {
-                b.to_async(&rt).iter(|| async {
-                    builder.build(id).await.unwrap();
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(order_count), &id, |b, id| {
+            b.to_async(&rt).iter(|| async {
+                builder.build(id).await.unwrap();
+            });
+        });
     }
     group.finish();
 
@@ -226,7 +225,13 @@ fn config(connection_url: &str) -> Config {
             connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
         },
         sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(index_name("users"), Index { enabled: true, schema })]),
+        indexes: BTreeMap::from([(
+            index_name("users"),
+            Index {
+                enabled: true,
+                schema,
+            },
+        )]),
     }
 }
 

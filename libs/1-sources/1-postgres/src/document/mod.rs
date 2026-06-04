@@ -310,7 +310,9 @@ impl PgDocumentBuilder {
         let mapping = match &field.mapping {
             Some(mapping) => mapping.clone(),
             None => Mapping {
-                mapping_type: self.infer_mapping_type(db_schema, table, &field.source).await?,
+                mapping_type: self
+                    .infer_mapping_type(db_schema, table, &field.source)
+                    .await?,
                 extra: BTreeMap::new(),
             },
         };
@@ -343,10 +345,10 @@ impl PgDocumentBuilder {
             FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
                 AggregateOp::Count => MappingType::Long,
                 AggregateOp::Avg(_) => MappingType::Double,
-                AggregateOp::Sum(column)
-                | AggregateOp::Min(column)
-                | AggregateOp::Max(column) => {
-                    let sql_type = self.column_type(db_schema, &aggregate.table, column).await?;
+                AggregateOp::Sum(column) | AggregateOp::Min(column) | AggregateOp::Max(column) => {
+                    let sql_type = self
+                        .column_type(db_schema, &aggregate.table, column)
+                        .await?;
                     pg_type_to_mapping(&sql_type)
                 }
             },

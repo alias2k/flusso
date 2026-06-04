@@ -24,16 +24,38 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
     let idx = col.ordinal();
     let name = col.name();
     match col.type_info().name() {
-        "INT2" => finish(row.try_get::<Option<i16>, _>(idx), |v| GenericValue::Int(v.into()), name),
-        "INT4" => finish(row.try_get::<Option<i32>, _>(idx), |v| GenericValue::Int(v.into()), name),
+        "INT2" => finish(
+            row.try_get::<Option<i16>, _>(idx),
+            |v| GenericValue::Int(v.into()),
+            name,
+        ),
+        "INT4" => finish(
+            row.try_get::<Option<i32>, _>(idx),
+            |v| GenericValue::Int(v.into()),
+            name,
+        ),
         "INT8" => finish(row.try_get::<Option<i64>, _>(idx), GenericValue::Int, name),
-        "BOOL" => finish(row.try_get::<Option<bool>, _>(idx), GenericValue::Bool, name),
-        "FLOAT4" => finish(row.try_get::<Option<f32>, _>(idx), |v| float(v.into()), name),
+        "BOOL" => finish(
+            row.try_get::<Option<bool>, _>(idx),
+            GenericValue::Bool,
+            name,
+        ),
+        "FLOAT4" => finish(
+            row.try_get::<Option<f32>, _>(idx),
+            |v| float(v.into()),
+            name,
+        ),
         "FLOAT8" => finish(row.try_get::<Option<f64>, _>(idx), float, name),
-        "NUMERIC" => finish(row.try_get::<Option<Decimal>, _>(idx), GenericValue::Decimal, name),
-        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "CITEXT" => {
-            finish(row.try_get::<Option<String>, _>(idx), GenericValue::String, name)
-        }
+        "NUMERIC" => finish(
+            row.try_get::<Option<Decimal>, _>(idx),
+            GenericValue::Decimal,
+            name,
+        ),
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "CITEXT" => finish(
+            row.try_get::<Option<String>, _>(idx),
+            GenericValue::String,
+            name,
+        ),
         // Types without a native GenericValue are carried as their text form.
         "TIMESTAMP" => finish(
             row.try_get::<Option<chrono::NaiveDateTime>, _>(idx),
@@ -92,10 +114,9 @@ pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
         serde_json::Value::Bool(b) => GenericValue::Bool(b),
         serde_json::Value::Number(n) => match n.as_i64() {
             Some(i) => GenericValue::Int(i),
-            None => n.as_f64().map_or_else(
-                || GenericValue::String(n.to_string()),
-                float,
-            ),
+            None => n
+                .as_f64()
+                .map_or_else(|| GenericValue::String(n.to_string()), float),
         },
         serde_json::Value::String(s) => GenericValue::String(s),
         serde_json::Value::Array(items) => {
