@@ -77,6 +77,28 @@
         "pipeline": {
           "type": "string",
           "description": "Optional OpenSearch ingest pipeline name to apply on every index operation"
+        },
+        "number_of_shards": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Primary shards for each created index"
+        },
+        "number_of_replicas": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1,
+          "description": "Replica shards for each created index"
+        },
+        "text_analysis": {
+          "enum": ["builtin", "icu"],
+          "default": "builtin",
+          "description": "Analysis backend for the flusso_* analyzers. 'icu' requires the analysis-icu plugin installed on every node."
+        },
+        "auto_subfields": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-enrich text/keyword fields with a good analyzer and the keyword/keyword_lowercase/text subfields. A field's explicit mapping always wins."
         }
       }
     },

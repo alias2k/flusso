@@ -125,6 +125,10 @@ Writes documents to an OpenSearch cluster via the bulk API.
 | `timeout_secs` | int ≥ 1 | `30` | HTTP request timeout, in seconds. |
 | `max_retries` | int ≥ 0 | `3` | Additional retry attempts on transient failures (exponential backoff). |
 | `pipeline` | string | — | Optional OpenSearch ingest pipeline applied on every index operation. |
+| `number_of_shards` | int ≥ 1 | `1` | Primary shards for each created index. |
+| `number_of_replicas` | int ≥ 0 | `1` | Replica shards for each created index. |
+| `text_analysis` | `builtin` \| `icu` | `builtin` | Analysis backend for the `flusso_*` analyzers (see [below](#index-analysis--subfields)). `icu` requires the `analysis-icu` plugin on every node. |
+| `auto_subfields` | bool | `true` | Auto-enrich `text`/`keyword` fields with a good analyzer and subfields. A field's explicit `mapping` always wins; set `false` to emit fields bare. |
 
 `url`, `username`, and `password` can also be supplied or overridden per sink via
 the reserved `<SINK>_OPENSEARCH_URL` / `_USERNAME` / `_PASSWORD` environment
@@ -146,8 +150,52 @@ variables (for `[sinks.primary]`, that's `PRIMARY_OPENSEARCH_*`). See
   (`refresh_interval: -1`) for fast bulk seeding; on seeding completion the index
   is refreshed once and handed back to the cluster's default interval. In steady
   state, visibility is automatic — `flush` does not force a refresh.
+- **Production-ready defaults.** Created indexes ship a tuned `analysis` block
+  and, unless `auto_subfields` is off, well-shaped `text`/`keyword` fields — see
+  [Index analysis & subfields](#index-analysis--subfields).
 - **Seeding markers.** Seeded state is persisted in a hidden `flusso_meta` index,
   so a restart skips a completed backfill.
+
+#### Index analysis & subfields
+
+The sink creates every index with a good search setup out of the box. flusso
+owns the **index** (mapping + analyzers + subfields); your application owns the
+**queries** — the notes below say which subfield to target for each job.
+
+**Analyzers** (always defined, named `flusso_*`):
+
+| Name | What it does |
+| --- | --- |
+| `flusso_code` | Default for `text`. Splits on punctuation, case, and letter↔digit boundaries, then lowercases and folds accents. `C-01234` indexes as `c-01234`, `c01234`, `c`, `01234`, so it's found by `C01234`, `c-01234`, or `01234` — but **not** by a fuzzy `c1234` (add `fuzziness` on the query side if you want that). Tuned for identifier-like short text. |
+| `flusso_text` | Prose (`kind: prose`). Plain tokenize + lowercase + accent fold, no code-splitting. |
+| `flusso_lowercase` | A normalizer (single token, no splitting) for case- and accent-insensitive exact match and sort. |
+
+With `text_analysis = "icu"` the folding/tokenizing swaps to the `analysis-icu`
+plugin (`icu_tokenizer` / `icu_folding` / `icu_normalizer`) for stronger
+multilingual handling — proper CJK/Thai segmentation and folding across every
+script. **The plugin must be installed on every node** (`opensearch-plugin
+install analysis-icu`) or index creation fails; `builtin` (the default) needs no
+plugins.
+
+**Default subfields** (when `auto_subfields` is on — the default):
+
+| Field type | Shape | Query each subfield for… |
+| --- | --- | --- |
+| `text` | `analyzer: flusso_code` + `.keyword` + `.keyword_lowercase` | the field itself → full-text search; `.keyword` → exact filter / aggregation / exact sort; `.keyword_lowercase` → case-insensitive sort & exact lookup. |
+| `keyword` | `.text` (`flusso_code`) + `.keyword_lowercase` | the field itself → exact term / aggregation; `.text` → full-text search; `.keyword_lowercase` → case-insensitive sort. |
+
+`keyword` subfields cap at `ignore_above: 256`. Other types (`long`, `date`,
+`boolean`, …) and the `object`/`nested` containers are emitted as-is. Any key you
+set in a field's `mapping` overrides the auto default for that field — e.g.
+supplying your own `analyzer` replaces `flusso_code`, and supplying `fields`
+replaces the auto subfields wholesale.
+
+Example query against a `text` field `name`, precise (all terms must match) and
+case/punctuation-insensitive:
+
+```json
+{ "query": { "match": { "name": { "query": "C-01234", "operator": "and" } } } }
+```
 
 ### Stdout
 

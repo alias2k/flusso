@@ -21,6 +21,10 @@ pub struct FieldDef {
     pub column: Option<common::ColumnName>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mapping: Option<Mapping>,
+    /// Shorthand for full-text text fields. Sugar for setting
+    /// `mapping: { type: text, analyzer: flusso_code | flusso_text }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<FieldKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join: Option<Join>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,6 +35,15 @@ pub struct FieldDef {
     pub default: Option<serde_yaml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<Field>>,
+}
+
+/// Full-text shorthand for a text field: `code` (the `flusso_code` analyzer,
+/// for identifier-like short text) or `prose` (the `flusso_text` analyzer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldKind {
+    Code,
+    Prose,
 }
 
 /// OpenSearch mapping. `type` is required; all other properties are passed through as-is.

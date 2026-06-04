@@ -129,11 +129,15 @@ data, and a matching config and schema.
 docker compose up -d
 docker compose ps                         # wait for both to be "healthy"
 
-# 2. Start flusso: it creates the replication slot if needed, backfills
-#    OpenSearch, then follows live changes. Logs go to stderr.
-cargo run -- --config dev/config.toml
+# 2. Validate the config and schemas first — that every table, column, and key
+#    the schemas name resolves against the database. Prints the resolved mapping.
+cargo run -- check --config dev/config.toml
 
-# 3. In another terminal, make changes and watch them stream through.
+# 3. Start flusso: it creates the replication slot if needed, backfills
+#    OpenSearch, then follows live changes. Logs go to stderr.
+cargo run -- run --config dev/config.toml
+
+# 4. In another terminal, make changes and watch them stream through.
 psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
 curl -s http://localhost:9200/users/_search?pretty
 ```
@@ -142,14 +146,22 @@ See [`dev/README.md`](dev/README.md) for the full walk-through (resetting state,
 inspecting the slot/publication, OpenSearch Dashboards at
 http://localhost:5601).
 
-The binary takes the source connection from the config; the replication slot and
-publication names, queue capacity, backfill skip, and output formatting are CLI
-flags:
+The CLI has two subcommands:
+
+- `flusso check` validates the config and every schema it references — the file
+  format, and (unless `--offline`) that the tables, columns, and keys they name
+  resolve against the live database. It prints the fully-resolved mapping —
+  each field's type and nullability — and exits without touching the sinks.
+- `flusso run` streams changes through the engine. It takes the source
+  connection from the config; the replication slot and publication names, queue
+  capacity, backfill skip, and output formatting are flags.
 
 ```sh
 flusso --help
-flusso --config config.toml --slot flusso --publication flusso
-flusso --config config.toml --skip-backfill   # resume live capture only
+flusso check --config config.toml                 # validate against the database
+flusso check --config config.toml --offline       # validate the files only
+flusso run --config config.toml --slot flusso --publication flusso
+flusso run --config config.toml --skip-backfill    # resume live capture only
 ```
 
 Logging honors `RUST_LOG` (default `info`). Set `FLUSSO_LOG_FORMAT=json` for

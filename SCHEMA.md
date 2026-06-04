@@ -238,6 +238,7 @@ the rest are optional and which ones you set determines the field's *source*:
 | `field` | field name | **Required.** The key this field lands under in the document. |
 | `column` | Postgres identifier | The source column. Defaults to `field` when omitted. |
 | `mapping` | object | The OpenSearch mapping for this field. See [Mappings](#mappings). |
+| `kind` | `code` \| `prose` | Full-text shorthand for a text field. See [Field kinds](#field-kinds). |
 | `transforms` | list | Value transforms to apply. See [Transforms](#transforms). |
 | `default` | any | Value to coalesce a `null` column to. |
 | `join` | object | Fold a related table in as nested documents. See [Joins](#joins). |
@@ -299,6 +300,36 @@ Recognized `type` values (any other string is passed through verbatim):
 
 Where a field has no explicit `mapping`, the source infers the type from the
 database column. Use `object` for groups and `nested` for one-to-many joins.
+
+> **Production-ready defaults.** The OpenSearch sink does **not** emit your
+> `text`/`keyword` fields bare. By default it attaches a strong analyzer and a
+> set of subfields (`keyword`, `keyword_lowercase`, `text`) so search, exact
+> filtering, and case-insensitive sort all work out of the box — see
+> [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
+> Anything you put in `mapping` overrides the default for that field.
+
+#### Field kinds
+
+`kind` is shorthand for a full-text **text** field with the right analyzer —
+sugar for writing `mapping: { type: text, analyzer: … }` by hand:
+
+| `kind` | Equivalent mapping | Use for |
+| --- | --- | --- |
+| `code` | `{ type: text, analyzer: flusso_code }` | Identifier-like short text — names, SKUs, codes, statuses. Splits on punctuation/case so `C-01234` is found by `C01234`, `c-01234`, or `01234`. |
+| `prose` | `{ type: text, analyzer: flusso_text }` | Longer free text — descriptions, bios. Plain tokenize + accent/case folding. |
+
+```yaml
+fields:
+  - field: sku
+    kind: code            # → text + flusso_code, plus the default subfields
+  - field: bio
+    kind: prose           # → text + flusso_text
+```
+
+`kind` only applies to scalar column fields. Setting it alongside a non-`text`
+`mapping` is an error, and an explicit `analyzer` in `mapping` always wins over
+the shorthand. The analyzers themselves are documented in
+[Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
 
 #### Transforms
 

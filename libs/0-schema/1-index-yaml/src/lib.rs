@@ -43,6 +43,10 @@ pub enum ConversionError {
     ExpectedListValue { op: &'static str },
     #[error("a field cannot have both `join` and `aggregate`")]
     ConflictingRelation,
+    #[error("`kind` can only be set on a column field")]
+    KindOnNonScalarField,
+    #[error("`kind` requires a text field, but mapping `type: {got}` was given")]
+    KindRequiresTextMapping { got: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

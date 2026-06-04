@@ -29,6 +29,24 @@ pub struct OpensearchSink {
     pub max_retries: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<String>,
+    #[serde(default = "default_number_of_shards")]
+    pub number_of_shards: u32,
+    #[serde(default = "default_number_of_replicas")]
+    pub number_of_replicas: u32,
+    #[serde(default)]
+    pub text_analysis: TextAnalysis,
+    #[serde(default = "default_auto_subfields")]
+    pub auto_subfields: bool,
+}
+
+/// Which analysis backend the `flusso_*` analyzers use. `builtin` (the default)
+/// needs no plugins; `icu` requires `analysis-icu` installed on every node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAnalysis {
+    #[default]
+    Builtin,
+    Icu,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,4 +76,16 @@ fn default_timeout_secs() -> u64 {
 
 fn default_max_retries() -> u32 {
     3
+}
+
+fn default_number_of_shards() -> u32 {
+    1
+}
+
+fn default_number_of_replicas() -> u32 {
+    1
+}
+
+fn default_auto_subfields() -> bool {
+    true
 }

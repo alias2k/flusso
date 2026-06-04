@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::common::{FieldName, IndexName};
 
 use super::{ContentHash, Mapping};
@@ -10,7 +12,7 @@ use super::{ContentHash, Mapping};
 /// and the database's own column types where it is not. The result has a
 /// concrete type for every field, which is what a sink needs to create the
 /// index up front rather than leaving the destination to guess.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IndexMapping {
     /// The logical index name (the config key) — the pipeline's stable identity.
     pub index: IndexName,
@@ -23,11 +25,20 @@ pub struct IndexMapping {
 }
 
 /// One field within an [`IndexMapping`]: the document key it lands under, its
-/// resolved [`Mapping`] (the `mapping_type` is always present), and the fields
-/// nested under it for `object` / `nested` types.
-#[derive(Debug, Clone)]
+/// resolved [`Mapping`] (the `mapping_type` is always present), whether the
+/// value can be null, and the fields nested under it for `object` / `nested`
+/// types.
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedField {
     pub name: FieldName,
     pub mapping: Mapping,
+    /// Whether this field's value can be null in the document. Derived by the
+    /// source while resolving the mapping — the config does not state it, but the
+    /// source knows (a column's `NOT NULL`, a primary key, a `default`, the
+    /// arity of a relation, an aggregate's zero-row behavior). A sink ignores it;
+    /// it exists for consumers that turn the mapping into typed bindings, where
+    /// `nullable` is the difference between `T` and `Option<T>`.
+    pub nullable: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ResolvedField>,
 }

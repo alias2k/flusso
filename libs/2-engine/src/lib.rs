@@ -175,10 +175,12 @@ impl Engine {
             skip_backfill,
         } = self;
 
-        // Create every target index up front from its resolved mapping, so the
-        // destination uses the configured field types rather than guessing on
-        // first write. Idempotent (create-if-absent), so it runs regardless of
-        // backfill — including resumes.
+        // Enrich the thin config into fully-typed mappings: the source fills the
+        // gaps a human config leaves (field types, nullability) from what it
+        // knows about its store. This runs by design on every start, before any
+        // document flows, so the destination is created from a complete
+        // description rather than guessing on first write — idempotent
+        // (create-if-absent), so it is safe across resumes and backfills alike.
         let mappings = documents.index_mappings().await?;
         tracing::info!(indexes = mappings.len(), "ensuring target indexes");
         for mapping in &mappings {

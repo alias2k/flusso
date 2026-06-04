@@ -671,3 +671,74 @@ fields:
     let err = IndexSchema::try_from(schema).unwrap_err();
     assert!(matches!(err, ConversionError::ConflictingRelation));
 }
+
+// ── kind sugar ───────────────────────────────────────────────────────────────
+
+fn mapping_of<'a>(schema: &'a IndexSchema, name: &str) -> &'a schema_core::Mapping {
+    schema
+        .fields
+        .iter()
+        .find(|f| f.field.as_ref() == name)
+        .expect("field present")
+        .mapping
+        .as_ref()
+        .expect("field has a resolved mapping")
+}
+
+fn analyzer_of(schema: &IndexSchema, name: &str) -> String {
+    match mapping_of(schema, name).extra.get("analyzer") {
+        Some(schema_core::GenericValue::String(s)) => s.clone(),
+        other => panic!("expected analyzer string, got {other:?}"),
+    }
+}
+
+#[test]
+fn kind_prose_implies_text_with_prose_analyzer() {
+    let schema =
+        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: prose")
+            .unwrap();
+    assert_eq!(mapping_of(&schema, "bio").mapping_type.name(), "text");
+    assert_eq!(analyzer_of(&schema, "bio"), "flusso_text");
+}
+
+#[test]
+fn kind_code_implies_text_with_code_analyzer() {
+    let schema =
+        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    kind: code")
+            .unwrap();
+    assert_eq!(mapping_of(&schema, "sku").mapping_type.name(), "text");
+    assert_eq!(analyzer_of(&schema, "sku"), "flusso_code");
+}
+
+#[test]
+fn explicit_analyzer_beats_kind() {
+    let schema = convert(
+        "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: prose\n    mapping: { type: text, analyzer: english }",
+    )
+    .unwrap();
+    assert_eq!(analyzer_of(&schema, "bio"), "english");
+}
+
+#[test]
+fn kind_on_non_text_mapping_errors() {
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: tags\n    kind: code\n    mapping: { type: keyword }";
+    let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::KindRequiresTextMapping { .. }
+    ));
+}
+
+#[test]
+fn kind_on_join_field_errors() {
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: orders\n    kind: prose\n    join:\n      table: orders\n      type: one_to_many\n      foreign_key: user_id\n    fields: [id]";
+    let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
+    assert!(matches!(err, ConversionError::KindOnNonScalarField));
+}
+
+#[test]
+fn unknown_kind_fails_to_parse() {
+    // An invalid `kind` value is rejected at parse time, like any other enum.
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: bogus";
+    assert!(parse(yaml).is_err());
+}

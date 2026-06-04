@@ -35,6 +35,14 @@ impl std::fmt::Display for ContentHash {
     }
 }
 
+/// Serializes as the eight-hex-digit string (its [`Display`]) — the same form
+/// that suffixes a physical index name — rather than the raw `u32`.
+impl serde::Serialize for ContentHash {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
 /// An FNV-1a [`Hasher`], so any [`Hash`] value yields a stable [`ContentHash`]
 /// independent of the platform's default (randomized) hasher.
 struct Fnv1aHasher(u32);

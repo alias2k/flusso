@@ -1,7 +1,7 @@
 # flusso dev config — points at the docker-compose Postgres and prints rebuilt
 # documents to stdout. Run with:
 #
-#   cargo run -p cli -- --config dev/config.toml --pretty
+#   cargo run -- run --config dev/config.toml --pretty
 #
 # Schema paths below are resolved relative to this file's directory.
 
@@ -13,6 +13,12 @@ connection_url = "postgres://postgres:postgres@127.0.0.1:5432/flusso"
 type = "opensearch"
 url = "http://127.0.0.1:9200"
 tls_verify = false
+# Index defaults (shown with their defaults). text_analysis = "icu" needs the
+# analysis-icu plugin; auto_subfields = false emits text/keyword fields bare.
+# number_of_shards = 1
+# number_of_replicas = 1
+# text_analysis = "builtin"
+# auto_subfields = true
 
 [sinks.audit]
 type = "stdout"

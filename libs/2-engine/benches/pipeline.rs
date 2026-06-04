@@ -370,6 +370,10 @@ async fn setup() -> Services {
         timeout_secs: 30,
         max_retries: 3,
         pipeline: None,
+        number_of_shards: 1,
+        number_of_replicas: 1,
+        text_analysis: schema_core::TextAnalysis::Builtin,
+        auto_subfields: true,
     };
     let inner = OpensearchSink::from_config(&os_config).unwrap();
     // Create the index from the builder's resolved, fully-typed mapping so the

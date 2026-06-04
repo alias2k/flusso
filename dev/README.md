@@ -33,7 +33,8 @@ dev/
    also prints each document to the terminal:
 
    ```sh
-   cargo run -- --config dev/config.toml
+   cargo run -- check --config dev/config.toml   # optional: validate first
+   cargo run -- run --config dev/config.toml
    ```
 
 3. **Make changes** in another terminal and watch them appear:

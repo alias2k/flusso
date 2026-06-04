@@ -63,6 +63,12 @@ definitions:
             $ref: "#/definitions/pg_identifier"
           mapping:
             $ref: "#/definitions/mapping"
+          kind:
+            enum: [code, prose]
+            description: >-
+              Full-text shorthand for a text field: 'code' (flusso_code analyzer,
+              for identifier-like short text) or 'prose' (flusso_text analyzer).
+              Only valid on a scalar column field.
           join:
             $ref: "#/definitions/join"
           aggregate:

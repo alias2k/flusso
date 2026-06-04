@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use rust_decimal::Decimal;
@@ -43,6 +44,7 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
                 def.default,
                 nested,
             )?;
+            let mapping = apply_kind(def.kind, mapping, &source)?;
             Ok(Field {
                 field: def.field,
                 mapping,
@@ -98,6 +100,55 @@ fn field_source(
 /// explicitly.
 fn default_column(field: &schema_core::FieldName) -> Result<ColumnName, ConversionError> {
     Ok(ColumnName::try_new(field.as_ref())?)
+}
+
+/// Fold a `kind:` shorthand into the field's mapping. `kind` is sugar for a
+/// full-text `text` field with the matching `flusso_*` analyzer:
+///
+/// - `code`  → `flusso_code` (the default; identifier-like short text)
+/// - `prose` → `flusso_text` (tokenize + fold, for longer prose)
+///
+/// It only applies to scalar column fields, and only to a `text` mapping (it
+/// makes the field `text` when no mapping is given). An explicit `analyzer` in
+/// the mapping always wins over the shorthand.
+fn apply_kind(
+    kind: Option<entities::FieldKind>,
+    mapping: Option<Mapping>,
+    source: &FieldSource,
+) -> Result<Option<Mapping>, ConversionError> {
+    let Some(kind) = kind else {
+        return Ok(mapping);
+    };
+
+    let analyzer = match kind {
+        entities::FieldKind::Code => "flusso_code",
+        entities::FieldKind::Prose => "flusso_text",
+    };
+
+    // `kind` is a text hint, so it only makes sense on a scalar value field —
+    // not a group, join, or aggregate.
+    if !matches!(source, FieldSource::Column(_) | FieldSource::Constant(_)) {
+        return Err(ConversionError::KindOnNonScalarField);
+    }
+
+    let mut mapping = match mapping {
+        None => Mapping {
+            mapping_type: MappingType::Text,
+            extra: BTreeMap::new(),
+        },
+        Some(m) if m.mapping_type == MappingType::Text => m,
+        Some(m) => {
+            return Err(ConversionError::KindRequiresTextMapping {
+                got: m.mapping_type.name().to_owned(),
+            });
+        }
+    };
+
+    mapping
+        .extra
+        .entry("analyzer".to_owned())
+        .or_insert_with(|| GenericValue::String(analyzer.to_owned()));
+    Ok(Some(mapping))
 }
 
 fn convert_mapping(m: entities::Mapping) -> Mapping {

@@ -1,14 +1,23 @@
-//! `flusso` — run the Postgres → sink pipeline from a config file.
+//! `flusso` — keep a search index in sync with Postgres from a config file.
 //!
-//! Loads a `config.toml`, connects to the source's Postgres, and streams
-//! changes through the engine to the configured sink(s). The replication slot
-//! is created automatically if it does not exist. Logs go to stderr.
+//! Two subcommands:
+//!
+//! - `run` loads a `config.toml`, connects to the source's Postgres, and streams
+//!   changes through the engine to the configured sink(s). The replication slot
+//!   is created automatically if it does not exist. Logs go to stderr.
+//! - `check` validates the config and every schema it references — the file
+//!   format and, unless `--offline`, that every table, column, and key the
+//!   schemas name actually resolves against the live database. It prints the
+//!   fully-resolved mapping and exits without touching the sinks.
 
+mod check;
+
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, ensure};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use engine::Engine;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::SpanExporter;
@@ -18,16 +27,31 @@ use schema::{Sink as SinkConfig, SourceType};
 use sinks_core::{FanOutSink, Sink};
 use sinks_opensearch::OpensearchSink;
 use sinks_stdout::StdoutSink;
+use sources_core::document::DocumentBuilder;
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 use url::Url;
 
-/// Stream Postgres changes into a sink, driven by a config file.
+/// Keep a search index in sync with Postgres, driven by a config file.
 #[derive(Debug, Parser)]
 #[command(name = "flusso", version, about)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Stream Postgres changes into the configured sink(s).
+    Run(RunArgs),
+    /// Validate the config and schemas without running the pipeline.
+    Check(CheckArgs),
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
     /// Path to the configuration file.
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
@@ -54,24 +78,56 @@ struct Cli {
     queue_capacity: usize,
 }
 
+#[derive(Debug, Args)]
+struct CheckArgs {
+    /// Path to the configuration file.
+    #[arg(short, long, default_value = "config.toml")]
+    config: PathBuf,
+
+    /// Validate the files only; do not connect to the database. Skips checking
+    /// that the tables, columns, and keys the schemas name actually exist.
+    #[arg(long)]
+    offline: bool,
+
+    /// Output format: a human-readable report, or JSON for piping.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    /// A colored, human-readable report (default).
+    Human,
+    /// A single JSON document: `{ "config": …, "mappings": … }`.
+    Json,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    match Cli::parse().command {
+        Command::Run(args) => run(args).await,
+        Command::Check(args) => check(args).await,
+    }
+}
+
+/// Load the config and stream changes through the engine until the live stream
+/// ends or an error stops the pipeline.
+async fn run(args: RunArgs) -> anyhow::Result<()> {
     let tracer_provider = init_tracing();
 
-    let config = schema::load(&cli.config)
-        .with_context(|| format!("loading config from {}", cli.config.display()))?;
+    let config = schema::load(&args.config)
+        .with_context(|| format!("loading config from {}", args.config.display()))?;
     ensure!(
         config.source.source_type == SourceType::Postgres,
         "only postgres sources are supported",
     );
 
     let connection_url = config.source.connection_url.to_string();
-    let replication = replication_config(&connection_url, &cli.slot, &cli.publication)?;
+    let replication = replication_config(&connection_url, &args.slot, &args.publication)?;
 
     tracing::info!(
-        slot = %cli.slot,
-        publication = %cli.publication,
+        slot = %args.slot,
+        publication = %args.publication,
         indexes = config.indexes.len(),
         "starting sync",
     );
@@ -95,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
         sinks.push(sink);
     }
     let sink: Arc<dyn Sink> = match sinks.len() {
-        0 => Arc::new(StdoutSink::new(cli.pretty)),
+        0 => Arc::new(StdoutSink::new(args.pretty)),
         1 => sinks
             .into_iter()
             .next()
@@ -104,8 +160,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let result = Engine::new(source, documents, sink)
-        .with_queue_capacity(cli.queue_capacity)
-        .skip_backfill(cli.skip_backfill)
+        .with_queue_capacity(args.queue_capacity)
+        .skip_backfill(args.skip_backfill)
         .run()
         .await
         .context("sync engine stopped");
@@ -119,6 +175,87 @@ async fn main() -> anyhow::Result<()> {
     }
 
     result
+}
+
+/// Validate the config and schemas. This runs the **exact** validation the
+/// engine runs at startup — load the config, connect, and resolve every enabled
+/// index's mapping against the live database (the same [`index_mappings`] call
+/// `run` makes before it streams) — and stops there, printing the result. The
+/// only difference from `run` is that it prints and does not proceed; an unknown
+/// table or column, or an unsupported key, fails here exactly as it would there.
+///
+/// `--offline` is the one exception: it skips the database step, validating the
+/// file format alone.
+///
+/// [`index_mappings`]: sources_core::document::DocumentBuilder::index_mappings
+async fn check(args: CheckArgs) -> anyhow::Result<()> {
+    // File-format validation: everything `schema::load` enforces (identifier
+    // shapes, join/aggregate arity, filter value shapes, env-var resolution).
+    let config = Arc::new(
+        schema::load(&args.config)
+            .with_context(|| format!("loading config from {}", args.config.display()))?,
+    );
+
+    // Source validation (skipped by `--offline`): the same `index_mappings()`
+    // call the engine makes at startup, resolving every enabled index against
+    // the database, so an unknown table, column, or key fails here exactly as it
+    // would at run time.
+    let mappings = if args.offline {
+        None
+    } else {
+        ensure!(
+            config.source.source_type == SourceType::Postgres,
+            "only postgres sources are supported",
+        );
+        let connection_url = config.source.connection_url.to_string();
+        let documents = PgDocumentBuilder::connect(&connection_url, Arc::clone(&config))
+            .await
+            .context("connecting to the database")?;
+        Some(
+            documents
+                .index_mappings()
+                .await
+                .context("resolving schemas against the database")?,
+        )
+    };
+
+    let mut out = std::io::stdout().lock();
+    match args.format {
+        OutputFormat::Json => {
+            // One document so the output is valid JSON whether or not the
+            // database step ran (`mappings` is null when offline).
+            let doc = serde_json::json!({ "config": &*config, "mappings": mappings });
+            writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
+        }
+        OutputFormat::Human => {
+            let pen = check::Pen::detect();
+            check::success(
+                &mut out,
+                pen,
+                &format!("config valid: {}", args.config.display()),
+            )?;
+            check::config(&mut out, pen, &config)?;
+            match &mappings {
+                // Offline: show the declared shape and note what was skipped.
+                None => {
+                    check::declared(&mut out, pen, &config)?;
+                    check::warning(
+                        &mut out,
+                        pen,
+                        "offline",
+                        "skipped database validation — tables, columns, and keys not checked",
+                    )?;
+                }
+                // Online: show the resolved types and nullability.
+                Some(mappings) => {
+                    check::resolved(&mut out, pen, mappings)?;
+                    writeln!(out)?;
+                    check::success(&mut out, pen, "check passed")?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build the replication client config from the source connection URL plus the

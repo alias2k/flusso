@@ -44,26 +44,32 @@ mod query;
 mod resolve;
 pub(crate) mod value;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::future::Future;
-use std::pin::Pin;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use schema_core::{
-    AggregateOp, ColumnName, Config, ContentHash, DatabaseSchema, Field, FieldSource, Filter,
-    GenericValue, IndexMapping, IndexSchema, JoinType, Mapping, MappingType, Relation,
-    ResolvedField, SoftDelete, TableName,
+    ColumnName, Config, DatabaseSchema, Filter, IndexMapping, IndexSchema, SoftDelete, TableName,
 };
 use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use sources_core::{Result, RowKey, SnapshotTable, SourceError};
+use sources_core::{Catalog, ColumnInfo, Result, RowKey, SnapshotTable, SourceError};
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
 use mapping::pg_type_to_mapping;
 
-/// Cache of each `(schema, table, column)`'s SQL type.
-type ColTypeCache = HashMap<(String, String, String), String>;
+/// Cache of each `(schema, table, column)`'s catalog metadata.
+type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
+
+/// What the Postgres catalog says about a column: its cast-ready SQL type and
+/// whether it admits null. Fetched once per column and cached — both the
+/// document query (which needs the type to cast operands) and mapping resolution
+/// (which needs the type and nullability) read from the same lookup.
+#[derive(Debug, Clone)]
+struct ColumnMeta {
+    sql_type: String,
+    nullable: bool,
+}
 
 /// Builds index documents from a Postgres database, driven by the loaded
 /// [`Config`]. Cheap to clone — the pool, config, and primary-key cache are
@@ -183,28 +189,42 @@ impl PgDocumentBuilder {
     }
 
     /// The SQL type of a column, as a cast-ready name from the Postgres catalog
-    /// (e.g. `numeric`, `integer`, `timestamp with time zone`), cached. An
-    /// unknown column is an error — a filter naming a column that does not
-    /// exist is a misconfiguration.
+    /// (e.g. `numeric`, `integer`, `timestamp with time zone`). A thin view over
+    /// [`column_meta`](Self::column_meta) for callers that only need the type to
+    /// cast a query operand.
     pub(super) async fn column_type(
         &self,
         schema: &DatabaseSchema,
         table: &TableName,
         column: &ColumnName,
     ) -> Result<String> {
+        Ok(self.column_meta(schema, table, column).await?.sql_type)
+    }
+
+    /// The Postgres catalog's view of a column — its cast-ready SQL type and
+    /// whether it admits null — cached. An unknown column is an error: a field or
+    /// filter naming a column that does not exist is a misconfiguration.
+    async fn column_meta(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<ColumnMeta> {
         let cache_key = (schema.to_string(), table.to_string(), column.to_string());
         {
             let cache = self
                 .col_type_cache
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if let Some(sql_type) = cache.get(&cache_key) {
-                return Ok(sql_type.clone());
+            if let Some(meta) = cache.get(&cache_key) {
+                return Ok(meta.clone());
             }
         }
         // `format_type` yields a canonical, re-parseable type name, so it can be
-        // dropped straight into a `$n::<type>` cast.
-        let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type \
+        // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
+        // NOT NULL constraint — the nullability mapping resolution needs, read
+        // from the same catalog row as the type.
+        let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, a.attnotnull AS not_null \
                    FROM pg_attribute a \
                    WHERE a.attrelid = $1::regclass AND a.attname = $2 \
                      AND a.attnum > 0 AND NOT a.attisdropped";
@@ -214,19 +234,26 @@ impl PgDocumentBuilder {
             .fetch_optional(&self.pool)
             .await
             .map_err(query_err)?;
-        let sql_type: String = match row {
-            Some(row) => row.try_get("sql_type").map_err(query_err)?,
+        let meta = match row {
+            Some(row) => {
+                let sql_type: String = row.try_get("sql_type").map_err(query_err)?;
+                let not_null: bool = row.try_get("not_null").map_err(query_err)?;
+                ColumnMeta {
+                    sql_type,
+                    nullable: !not_null,
+                }
+            }
             None => {
                 return Err(SourceError::Query(format!(
-                    "filter references unknown column `{schema}.{table}.{column}`"
+                    "references unknown column `{schema}.{table}.{column}`"
                 )));
             }
         };
         self.col_type_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(cache_key, sql_type.clone());
-        Ok(sql_type)
+            .insert(cache_key, meta.clone());
+        Ok(meta)
     }
 
     /// Resolve the SQL type of every column a value filter compares against,
@@ -263,111 +290,26 @@ impl PgDocumentBuilder {
         }
         Ok(types)
     }
-
-    /// Resolve a list of fields under `table` into typed mapping fields,
-    /// recursing into groups (same table) and joins (the related table).
-    ///
-    /// Boxed because the recursion is through an `async fn`; the tree is
-    /// shallow (field nesting), so a heap allocation per level is negligible.
-    fn resolve_fields<'a>(
-        &'a self,
-        db_schema: &'a DatabaseSchema,
-        table: &'a TableName,
-        fields: &'a [Field],
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResolvedField>>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut out = Vec::with_capacity(fields.len());
-            for field in fields {
-                out.push(self.resolve_field(db_schema, table, field).await?);
-            }
-            Ok(out)
-        })
-    }
-
-    /// Resolve one field: its children (if any) and its mapping. An explicit
-    /// `mapping` in the config always wins; otherwise the type is inferred from
-    /// where the value comes from — a column's database type, an aggregate's
-    /// operation, a join's cardinality, or a constant's shape.
-    async fn resolve_field(
-        &self,
-        db_schema: &DatabaseSchema,
-        table: &TableName,
-        field: &Field,
-    ) -> Result<ResolvedField> {
-        // Children, and the table whose columns they read.
-        let (child_table, child_fields): (&TableName, &[Field]) = match &field.source {
-            FieldSource::Relation(Relation::Join { join, fields }) => (&join.table, fields),
-            FieldSource::Group(fields) => (table, fields),
-            _ => (table, &[]),
-        };
-        let children = if child_fields.is_empty() {
-            Vec::new()
-        } else {
-            self.resolve_fields(db_schema, child_table, child_fields)
-                .await?
-        };
-
-        let mapping = match &field.mapping {
-            Some(mapping) => mapping.clone(),
-            None => Mapping {
-                mapping_type: self
-                    .infer_mapping_type(db_schema, table, &field.source)
-                    .await?,
-                extra: BTreeMap::new(),
-            },
-        };
-
-        Ok(ResolvedField {
-            name: field.field.clone(),
-            mapping,
-            children,
-        })
-    }
-
-    /// Infer a field's mapping type from its source when the config gives none.
-    async fn infer_mapping_type(
-        &self,
-        db_schema: &DatabaseSchema,
-        table: &TableName,
-        source: &FieldSource,
-    ) -> Result<MappingType> {
-        Ok(match source {
-            FieldSource::Column(column) => {
-                let sql_type = self.column_type(db_schema, table, &column.column).await?;
-                pg_type_to_mapping(&sql_type)
-            }
-            FieldSource::Group(_) => MappingType::Object,
-            FieldSource::Constant(value) => constant_mapping_type(value),
-            FieldSource::Relation(Relation::Join { join, .. }) => match join.join_type {
-                JoinType::OneToOne => MappingType::Object,
-                JoinType::OneToMany | JoinType::ManyToMany => MappingType::Nested,
-            },
-            FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
-                AggregateOp::Count => MappingType::Long,
-                AggregateOp::Avg(_) => MappingType::Double,
-                AggregateOp::Sum(column) | AggregateOp::Min(column) | AggregateOp::Max(column) => {
-                    let sql_type = self
-                        .column_type(db_schema, &aggregate.table, column)
-                        .await?;
-                    pg_type_to_mapping(&sql_type)
-                }
-            },
-        })
-    }
 }
 
-/// The mapping type a constant value's shape implies.
-fn constant_mapping_type(value: &GenericValue) -> MappingType {
-    match value {
-        GenericValue::Bool(_) => MappingType::Boolean,
-        GenericValue::Int(_) => MappingType::Long,
-        GenericValue::Decimal(_) => MappingType::Double,
-        GenericValue::Array(items) => items
-            .first()
-            .map(constant_mapping_type)
-            .unwrap_or(MappingType::Keyword),
-        GenericValue::Map(_) => MappingType::Object,
-        GenericValue::String(_) | GenericValue::Null => MappingType::Keyword,
+/// The Postgres source's view of its own catalog. Resolution of the index
+/// mapping — types and nullability — is shared in [`sources_core`]; this is the
+/// one store-specific piece it needs: how Postgres types and constrains a
+/// column. Everything else (cardinality, aggregates, constants, the nullability
+/// rules) is derived there, the same for every source.
+#[async_trait]
+impl Catalog for PgDocumentBuilder {
+    async fn column(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<ColumnInfo> {
+        let meta = self.column_meta(schema, table, column).await?;
+        Ok(ColumnInfo {
+            mapping_type: pg_type_to_mapping(&meta.sql_type),
+            nullable: meta.nullable,
+        })
     }
 }
 
@@ -488,24 +430,10 @@ impl DocumentBuilder for PgDocumentBuilder {
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {
-        let mut mappings = Vec::new();
-        for (name, index) in &self.config.indexes {
-            if !index.enabled {
-                continue;
-            }
-            let schema = &index.schema;
-            let fields = self
-                .resolve_fields(&schema.db_schema, &schema.table, &schema.fields)
-                .await?;
-            mappings.push(IndexMapping {
-                index: name.clone(),
-                // Hash the parsed schema, not the file: structural changes flip
-                // the hash; cosmetic file changes (whitespace, comments) do not.
-                hash: ContentHash::of(schema),
-                fields,
-            });
-        }
-        Ok(mappings)
+        // Enrich the thin config into fully-typed mappings using the shared
+        // resolver, which asks this builder (as a `Catalog`) only about column
+        // types and nullability.
+        sources_core::enrich_indexes(&self.config, self).await
     }
 }
 

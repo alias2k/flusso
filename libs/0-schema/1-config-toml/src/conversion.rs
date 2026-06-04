@@ -1,5 +1,5 @@
 use schema_core::{
-    OpensearchSink, Sink, Source, StdoutSink,
+    OpensearchSink, Sink, Source, StdoutSink, TextAnalysis,
     common::{ConnectionUrl, HttpUrl, SinkName, SourceType},
 };
 
@@ -88,8 +88,19 @@ pub(crate) fn convert_sink(name: &SinkName, sink: entities::Sink) -> Result<Sink
                 timeout_secs: s.timeout_secs,
                 max_retries: s.max_retries,
                 pipeline: s.pipeline,
+                number_of_shards: s.number_of_shards,
+                number_of_replicas: s.number_of_replicas,
+                text_analysis: convert_text_analysis(s.text_analysis),
+                auto_subfields: s.auto_subfields,
             }))
         }
         entities::Sink::Stdout(s) => Ok(Sink::Stdout(StdoutSink { pretty: s.pretty })),
+    }
+}
+
+fn convert_text_analysis(value: entities::TextAnalysis) -> TextAnalysis {
+    match value {
+        entities::TextAnalysis::Builtin => TextAnalysis::Builtin,
+        entities::TextAnalysis::Icu => TextAnalysis::Icu,
     }
 }

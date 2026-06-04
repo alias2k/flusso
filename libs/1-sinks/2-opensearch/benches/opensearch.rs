@@ -91,6 +91,10 @@ fn sink(base_url: &str, batch_size: u32) -> sinks_opensearch::OpensearchSink {
         timeout_secs: 30,
         max_retries: 3,
         pipeline: None,
+        number_of_shards: 1,
+        number_of_replicas: 1,
+        text_analysis: schema_core::TextAnalysis::Builtin,
+        auto_subfields: true,
     };
     sinks_opensearch::OpensearchSink::from_config(&config).unwrap()
 }
@@ -103,6 +107,7 @@ fn mapping() -> IndexMapping {
             mapping_type: ty,
             extra: BTreeMap::new(),
         },
+        nullable: true,
         children: Vec::new(),
     };
     IndexMapping {

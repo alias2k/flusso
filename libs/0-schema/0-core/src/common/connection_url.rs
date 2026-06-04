@@ -1,23 +1,43 @@
 use nutype::nutype;
 use std::fmt;
 
+// NOTE: `Serialize` is *not* derived — the URL embeds the password, and the
+// derived impl would emit it verbatim. The hand-written impl below redacts it,
+// so a serialized `Config` is always safe to print.
 #[nutype(
     sanitize(trim),
     validate(regex = r"^(postgresql|postgres)://\S+$"),
-    derive(
-        Debug,
-        Clone,
-        Display,
-        AsRef,
-        Deref,
-        Hash,
-        Eq,
-        PartialEq,
-        Serialize,
-        Deserialize
-    )
+    derive(Debug, Clone, Display, AsRef, Deref, Hash, Eq, PartialEq, Deserialize)
 )]
 pub struct ConnectionUrl(String);
+
+/// Mask the password in a `scheme://user:password@host…` URL, leaving the rest
+/// intact: `postgres://user:s3cr3t@host/db` → `postgres://user:***@host/db`. A
+/// URL with no password (or no userinfo) is returned unchanged.
+fn redact_password(url: &str) -> String {
+    let Some(after_scheme) = url.find("://").map(|i| i + 3) else {
+        return url.to_owned();
+    };
+    let Some(at) = url[after_scheme..].find('@').map(|i| after_scheme + i) else {
+        return url.to_owned();
+    };
+    let userinfo = &url[after_scheme..at];
+    match userinfo.find(':') {
+        Some(colon) => format!(
+            "{}{}:***{}",
+            &url[..after_scheme],
+            &userinfo[..colon],
+            &url[at..]
+        ),
+        None => url.to_owned(),
+    }
+}
+
+impl serde::Serialize for ConnectionUrl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&redact_password(self.as_ref()))
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub enum Scheme {
