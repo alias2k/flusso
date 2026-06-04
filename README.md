@@ -1,8 +1,11 @@
 # flusso
 
-> **Note:** Generative AI was used in this project to produce boilerplate and
-> documentation. Every line of code has been manually reviewed and revised by a
-> human software developer.
+> [!IMPORTANT]
+> ## 🤖 Generative AI disclosure
+>
+> **Generative AI was used in this project to produce boilerplate and
+> documentation.** Every single line of code has been manually reviewed and
+> revised by a human software developer.
 
 Keep OpenSearch in sync with Postgres, driven by declarative config.
 
