@@ -2,7 +2,7 @@
 //!
 //! Three subcommands:
 //!
-//! - `compile` reads a `config.toml`, parses and validates every schema it
+//! - `build` reads a `config.toml`, parses and validates every schema it
 //!   references, and writes the whole validated configuration to a single
 //!   portable binary artifact (`flusso.bin`). No database is needed: the schema
 //!   is self-describing, and secrets are kept as references, not baked in.
@@ -38,7 +38,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 use url::Url;
 
-/// The default compiled-artifact path, written by `compile` and loaded by a
+/// The default compiled-artifact path, written by `build` and loaded by a
 /// bare `run`.
 const DEFAULT_ARTIFACT: &str = "flusso.bin";
 
@@ -52,8 +52,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compile a config and its schemas into a single portable artifact.
-    Compile(CompileArgs),
+    /// Build a config and its schemas into a single portable artifact.
+    Build(BuildArgs),
     /// Stream Postgres changes into the configured sink(s).
     Run(RunArgs),
     /// Validate the config and schemas without running the pipeline.
@@ -61,7 +61,7 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
-struct CompileArgs {
+struct BuildArgs {
     /// Path to the configuration file.
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
@@ -131,15 +131,15 @@ enum OutputFormat {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Compile(args) => compile(args),
+        Command::Build(args) => build(args),
         Command::Run(args) => run(args).await,
         Command::Check(args) => check(args).await,
     }
 }
 
-/// Compile a config and its schemas into a single portable artifact. Needs no
+/// Build a config and its schemas into a single portable artifact. Needs no
 /// database and no secret to be set.
-fn compile(args: CompileArgs) -> anyhow::Result<()> {
+fn build(args: BuildArgs) -> anyhow::Result<()> {
     let compiled = schema::compile(&args.config)
         .with_context(|| format!("compiling config from {}", args.config.display()))?;
     schema::write(&compiled, &args.out)
