@@ -14,8 +14,8 @@ use std::collections::HashMap;
 
 use schema_core::{
     Aggregate, AggregateOp, ColumnName, DatabaseSchema, Direction, Field, FieldSource, Filter,
-    FilterOp, FilterValue, GenericValue, IndexSchema, Join, JoinKey, JoinType, NullOp, OrderBy,
-    Relation, SoftDelete, TableName, Transform, ValueOpFilter,
+    FilterOp, FilterValue, Geo, GenericValue, IndexSchema, Join, JoinKey, JoinType, NullOp,
+    OrderBy, Relation, SoftDelete, TableName, Transform, ValueOpFilter,
 };
 use sources_core::{Result, SourceError};
 use sqlx::Postgres;
@@ -217,6 +217,8 @@ impl Builder<'_> {
             )),
             // Same-row nested group: same row, same key.
             FieldSource::Group(nested) => self.object(nested, parent_alias, parent_pk),
+            // Two same-row columns assembled into a `{lat, lon}` point.
+            FieldSource::Geo(geo) => Ok(geo_value(geo, parent_alias)),
             FieldSource::Constant(value) => Ok(literal_or_null(value)),
         }
     }
@@ -536,6 +538,18 @@ fn column_value(
         expr = format!("coalesce({expr}, {literal})");
     }
     expr
+}
+
+/// A `geo_point` value: `{ "lat": …, "lon": … }`, or SQL `NULL` when either
+/// coordinate is null — so a missing point is absent rather than an invalid
+/// `{lat: null, lon: null}` OpenSearch would reject.
+fn geo_value(geo: &Geo, alias: &str) -> String {
+    let lat = qcol(alias, &geo.lat);
+    let lon = qcol(alias, &geo.lon);
+    format!(
+        "CASE WHEN {lat} IS NULL OR {lon} IS NULL THEN NULL \
+         ELSE json_build_object('lat', {lat}, 'lon', {lon}) END"
+    )
 }
 
 fn scalar_literal(value: &GenericValue) -> Option<String> {

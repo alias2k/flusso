@@ -56,35 +56,33 @@ soft_delete:
   column: deleted
 
 fields:
-  - id
-  - field: email
-    type: keyword
+  - integer: id
+    required: false
+  - keyword: email
+    required: true
     transforms: [lowercase, trim]
 
-  # Pull each user's orders in as a nested array. A join is structural — its
-  # `nested` shape is implied, so it declares no `type`. Its `primary_key` is
-  # the related table's, and its `fields` are projected from each related row.
-  - field: orders
-    join:
-      table: orders
-      type: one_to_many
-      foreign_key: user_id
-      primary_key: id
-      order_by: [{ column: created_at, direction: desc }]
-      limit: 5
-      fields:
-        - id
-        - field: total
-          type: double
-        - field: status
-          type: keyword
+  # Pull each user's orders in as a nested array. The join's cardinality is its
+  # type key (`one_to_many`); its `primary_key` is the related table's, and its
+  # `fields` are projected from each related row.
+  - one_to_many: orders
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    order_by: [{ column: created_at, direction: desc }]
+    limit: 5
+    fields:
+      - integer: id
+        required: false
+      - double: total
+        required: true
+      - keyword: status
+        required: true
 
-  # A `count` is always a `long`, so it needs no `type`.
-  - field: orderCount
-    aggregate:
-      table: orders
-      op: count
-      foreign_key: user_id
+  # An aggregate's op is its type key. A `count` is always a `long`.
+  - count: orderCount
+    table: orders
+    foreign_key: user_id
 ```
 
 Every scalar field declares its **type** from a fixed set

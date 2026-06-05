@@ -2,30 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use schema_core::common;
 
-use crate::Field;
-
-use super::Filter;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Join {
-    pub table: common::TableName,
-    #[serde(rename = "type")]
-    pub join_type: JoinType,
-    pub primary_key: common::ColumnName,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub foreign_key: Option<common::ColumnName>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub through: Option<Through>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filters: Option<Vec<Filter>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub order_by: Option<Vec<OrderBy>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u64>,
-    pub fields: Vec<Field>,
-}
-
+/// The cardinality of a join — written as the field's type key
+/// (`one_to_one:` / `one_to_many:` / `many_to_many:`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinType {
@@ -34,6 +12,7 @@ pub enum JoinType {
     ManyToMany,
 }
 
+/// A junction table for a `many_to_many` join.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Through {
@@ -42,6 +21,7 @@ pub struct Through {
     pub right_key: common::ColumnName,
 }
 
+/// One `order_by` entry for a to-many join.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrderBy {

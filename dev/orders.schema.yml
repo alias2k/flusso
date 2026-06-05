@@ -9,64 +9,49 @@ table: orders
 primary_key: id
 
 fields:
-  - field: id
-    type: integer
+  - integer: id
     required: false
-  - field: userId
+  - integer: userId
     column: user_id
-    type: integer
     required: true
-  - field: status
-    type: enum
+  - enum: status
     required: true
-  - field: total
-    type: decimal
+  - decimal: total
     required: true
 
   # A group: the order's timeline. `shippedAt` is null until the order ships.
-  - group: timeline
+  - object: timeline
     fields:
-      - field: placedAt
+      - timestamp: placedAt
         column: placed_at
-        type: timestamp
         required: true
-      - field: shippedAt
+      - timestamp: shippedAt
         column: shipped_at
-        type: timestamp
         required: false
 
   # One-to-many: the line items.
-  - field: items
-    join:
-      table: order_items
-      type: one_to_many
-      foreign_key: order_id
-      primary_key: id
-      order_by:
-        - { column: id, direction: asc }
-      fields:
-        - field: productId
-          column: product_id
-          type: integer
-          required: true
-        - field: quantity
-          type: integer
-          required: true
-        - field: unitPrice
-          column: unit_price
-          type: decimal
-          required: true
+  - one_to_many: items
+    table: order_items
+    foreign_key: order_id
+    primary_key: id
+    order_by:
+      - { column: id, direction: asc }
+    fields:
+      - integer: productId
+        column: product_id
+        required: true
+      - integer: quantity
+        required: true
+      - decimal: unitPrice
+        column: unit_price
+        required: true
 
   # Rollups over the line items.
-  - field: itemCount
-    aggregate:
-      table: order_items
-      op: count
-      foreign_key: order_id
-  - field: unitsSold
-    type: integer # matches the `quantity` column the live check validates against
-    aggregate:
-      table: order_items
-      op: sum
-      column: quantity
-      foreign_key: order_id
+  - count: itemCount
+    table: order_items
+    foreign_key: order_id
+  - sum: unitsSold
+    table: order_items
+    column: quantity
+    value_type: integer # matches the `quantity` column the live check validates against
+    foreign_key: order_id

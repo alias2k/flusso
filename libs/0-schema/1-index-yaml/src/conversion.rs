@@ -4,155 +4,216 @@ use std::str::FromStr;
 use rust_decimal::Decimal;
 use schema_core::{
     Aggregate, AggregateOp, Column, ColumnName, Direction, Field, FieldSource, Filter, FilterOp,
-    FilterValue, FlussoType, GenericValue, Join, JoinKey, JoinType, NullCheckFilter, NullOp,
-    OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
-    Transform, ValueOpFilter,
+    FilterValue, FlussoType, Geo, GenericValue, Join, JoinKey, JoinType, NullCheckFilter, NullOp,
+    OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through, Transform,
+    ValueOpFilter,
 };
 
 use crate::ConversionError;
 use crate::entities;
 
-/// The default leaf type for a column field that declares none — the historical
-/// "anything text-like is a keyword" fallback, now explicit and database-free.
-const DEFAULT_COLUMN_TYPE: FlussoType = FlussoType::Keyword;
-
 pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError> {
     match f {
-        entities::Field::Short(name) => {
-            // Shorthand `- foo` is a `keyword` column of the same name.
-            let column = default_column(&name)?;
-            Ok(Field {
-                field: name,
-                options: BTreeMap::new(),
-                source: FieldSource::Column(Column {
-                    column,
-                    ty: DEFAULT_COLUMN_TYPE,
-                    nullable: true,
-                    transforms: Vec::new(),
-                    default: None,
-                }),
-            })
-        }
-        entities::Field::Group(g) => {
-            // A same-row sub-object: an `object`, never null, assembled from its
-            // nested fields. The `group` key is its document key.
-            let options = g
-                .options
-                .into_iter()
-                .map(|(k, v)| (k, yaml_to_generic(v)))
-                .collect();
-            let fields = g
+        entities::Field::Scalar(ty, body) => convert_scalar(ty, body),
+        entities::Field::Geo(body) => convert_geo(body),
+        entities::Field::Object(body) => {
+            let fields = body
                 .fields
                 .into_iter()
                 .map(convert_field)
                 .collect::<Result<_, _>>()?;
             Ok(Field {
-                field: g.group,
-                options,
+                field: body.field,
+                options: convert_options(body.options),
                 source: FieldSource::Group(fields),
             })
         }
-        entities::Field::Join(def) => {
-            let def = *def;
-            // A field cannot be both a join and an aggregate.
-            if def.aggregate.is_some() {
-                return Err(ConversionError::ConflictingRelation);
-            }
-            // A join folds in a related table; its shape (`nested`/`object`) is
-            // structural, so a declared `type` is rejected.
-            let field_name = def.field.to_string();
-            reject_type_on_relation(&def.ty, &field_name)?;
-            let options = def
-                .options
-                .into_iter()
-                .map(|(k, v)| (k, yaml_to_generic(v)))
-                .collect();
-            Ok(Field {
-                field: def.field,
-                options,
-                source: FieldSource::Relation(Relation::Join(convert_join(def.join)?)),
-            })
-        }
-        entities::Field::Aggregate(def) => {
-            let def = *def;
-            let options = def
-                .options
-                .into_iter()
-                .map(|(k, v)| (k, yaml_to_generic(v)))
-                .collect();
-            Ok(Field {
-                field: def.field,
-                options,
-                source: FieldSource::Relation(Relation::Aggregate(convert_aggregate(
-                    def.aggregate,
-                    def.ty,
-                )?)),
-            })
-        }
-        entities::Field::Column(def) => {
-            let def = *def;
-            let options: BTreeMap<String, GenericValue> = def
-                .options
-                .into_iter()
-                .map(|(k, v)| (k, yaml_to_generic(v)))
-                .collect();
-            let column = match def.column {
+        entities::Field::Join(join_type, body) => convert_join_field(join_type, *body),
+        entities::Field::Aggregate(op, body) => convert_aggregate_field(op, *body),
+        entities::Field::Constant(body) => Ok(Field {
+            field: body.field,
+            options: BTreeMap::new(),
+            source: FieldSource::Constant(yaml_to_generic(body.value)),
+        }),
+    }
+}
+
+/// A scalar leaf: a column with a declared type and nullability.
+fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, ConversionError> {
+    let column = match body.column {
+        Some(column) => column,
+        None => default_column(&body.field)?,
+    };
+    let options = convert_options(body.options);
+    let (ty, options) = resolve_column_type(ty, options);
+    let transforms = body
+        .transforms
+        .map(|ts| ts.into_iter().map(convert_transform).collect())
+        .unwrap_or_default();
+    Ok(Field {
+        field: body.field,
+        options,
+        source: FieldSource::Column(Column {
+            column,
+            ty,
+            nullable: !body.required,
+            transforms,
+            default: body.default.map(yaml_to_generic),
+        }),
+    })
+}
+
+/// A geo point: either two coordinate columns (`lat`/`lon`) assembled into a
+/// `geo_point`, or a single `column` already holding a `geo_point`-shaped value.
+fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
+    let options = convert_options(body.options);
+    let source = match (body.lat, body.lon, body.column) {
+        // Two coordinate columns → a `{lat, lon}` point.
+        (Some(lat), Some(lon), None) => FieldSource::Geo(Geo {
+            lat,
+            lon,
+            nullable: !body.required,
+        }),
+        // A single column (or the field name) already holding a geo value.
+        (None, None, column) => {
+            let column = match column {
                 Some(column) => column,
-                None => default_column(&def.field)?,
+                None => default_column(&body.field)?,
             };
-            let (ty, options) = resolve_column_type(def.ty, options);
-            Ok(Field {
-                field: def.field,
-                options,
-                source: FieldSource::Column(Column {
-                    column,
-                    ty,
-                    nullable: !def.required,
-                    transforms: def
-                        .transforms
-                        .map(|ts| ts.into_iter().map(convert_transform).collect())
-                        .unwrap_or_default(),
-                    default: def.default.map(yaml_to_generic),
-                }),
+            FieldSource::Column(Column {
+                column,
+                ty: FlussoType::GeoPoint,
+                nullable: !body.required,
+                transforms: Vec::new(),
+                default: None,
             })
         }
+        // Any other mix (a stray `lat` without `lon`, `lat` + `column`, …).
+        _ => return Err(ConversionError::InvalidGeoSource),
+    };
+    Ok(Field {
+        field: body.field,
+        options,
+        source,
+    })
+}
+
+fn convert_join_field(
+    join_type: entities::JoinType,
+    body: entities::JoinBody,
+) -> Result<Field, ConversionError> {
+    let key = join_key(body.foreign_key, body.through)?;
+    let fields = body
+        .fields
+        .into_iter()
+        .map(convert_field)
+        .collect::<Result<_, _>>()?;
+    let join = Join {
+        table: body.table,
+        join_type: convert_join_type(join_type),
+        primary_key: body.primary_key,
+        key,
+        filters: convert_filters_opt(body.filters)?,
+        order_by: body
+            .order_by
+            .map(|os| os.into_iter().map(convert_order_by).collect()),
+        limit: body.limit,
+        fields,
+    };
+    Ok(Field {
+        field: body.field,
+        options: convert_options(body.options),
+        source: FieldSource::Relation(Relation::Join(join)),
+    })
+}
+
+fn convert_aggregate_field(
+    op: entities::AggregateOp,
+    body: entities::AggregateBody,
+) -> Result<Field, ConversionError> {
+    let (op, value_type) = convert_aggregate_op(op, body.column, body.value_type)?;
+    let key = join_key(body.foreign_key, body.through)?;
+    let aggregate = Aggregate {
+        table: body.table,
+        op,
+        key,
+        value_type,
+        filters: convert_filters_opt(body.filters)?,
+    };
+    Ok(Field {
+        field: body.field,
+        options: convert_options(body.options),
+        source: FieldSource::Relation(Relation::Aggregate(aggregate)),
+    })
+}
+
+/// `count`/`avg` have fixed result types (`long`/`double`); `sum`/`min`/`max`
+/// mirror the aggregated column, so they require a `column` and a `value_type`.
+fn convert_aggregate_op(
+    op: entities::AggregateOp,
+    column: Option<ColumnName>,
+    value_type: Option<FlussoType>,
+) -> Result<(AggregateOp, Option<FlussoType>), ConversionError> {
+    Ok(match op {
+        entities::AggregateOp::Count => (AggregateOp::Count, None),
+        entities::AggregateOp::Avg => {
+            (AggregateOp::Avg(require_aggregate_column(column, "avg")?), None)
+        }
+        entities::AggregateOp::Sum => (
+            AggregateOp::Sum(require_aggregate_column(column, "sum")?),
+            Some(require_aggregate_type(value_type, "sum")?),
+        ),
+        entities::AggregateOp::Min => (
+            AggregateOp::Min(require_aggregate_column(column, "min")?),
+            Some(require_aggregate_type(value_type, "min")?),
+        ),
+        entities::AggregateOp::Max => (
+            AggregateOp::Max(require_aggregate_column(column, "max")?),
+            Some(require_aggregate_type(value_type, "max")?),
+        ),
+    })
+}
+
+/// A join/aggregate key: exactly one of `foreign_key` or `through`.
+fn join_key(
+    foreign_key: Option<ColumnName>,
+    through: Option<entities::Through>,
+) -> Result<JoinKey, ConversionError> {
+    match (foreign_key, through) {
+        (Some(fk), None) => Ok(JoinKey::Direct(fk)),
+        (None, Some(t)) => Ok(JoinKey::Through(Through {
+            table: t.table,
+            left_key: t.left_key,
+            right_key: t.right_key,
+        })),
+        _ => Err(ConversionError::InvalidJoinKey),
     }
 }
 
-/// A declared `type` makes no sense on a structural field (a join or a group),
-/// whose shape is fixed by the relation, not the schema.
-fn reject_type_on_relation(ty: &Option<FlussoType>, field: &str) -> Result<(), ConversionError> {
-    if ty.is_some() {
-        return Err(ConversionError::TypeOnNonScalarField {
-            field: field.to_owned(),
-        });
-    }
-    Ok(())
+fn convert_options(options: BTreeMap<String, serde_yaml::Value>) -> BTreeMap<String, GenericValue> {
+    options
+        .into_iter()
+        .map(|(k, v)| (k, yaml_to_generic(v)))
+        .collect()
 }
 
-/// The declared type of a column field. The `identifier` type is analyzed `text`
-/// carrying the `flusso_code` analyzer (an explicit `analyzer` option always
-/// wins); plain `text` relies on the sink's natural-language default. An omitted
-/// `type` defaults to `keyword`.
+/// Apply type-specific option defaults. The `identifier` type is analyzed `text`
+/// carrying the `flusso_code` analyzer (an explicit `analyzer` option wins).
 fn resolve_column_type(
-    ty: Option<FlussoType>,
+    ty: FlussoType,
     mut options: BTreeMap<String, GenericValue>,
 ) -> (FlussoType, BTreeMap<String, GenericValue>) {
-    let ty = ty.unwrap_or(DEFAULT_COLUMN_TYPE);
-
     if ty == FlussoType::Identifier {
         options
             .entry("analyzer".to_owned())
             .or_insert_with(|| GenericValue::String("flusso_code".to_owned()));
     }
-
     (ty, options)
 }
 
 /// The column a field reads from when none is given: the field name itself.
 /// `ColumnName` lowercases, matching Postgres's folding of unquoted identifiers;
-/// a field name that isn't a valid column identifier must set `column`
-/// explicitly.
+/// a field name that isn't a valid column identifier must set `column`.
 fn default_column(field: &schema_core::FieldName) -> Result<ColumnName, ConversionError> {
     Ok(ColumnName::try_new(field.as_ref())?)
 }
@@ -162,6 +223,38 @@ fn convert_transform(t: entities::Transform) -> Transform {
         entities::Transform::Lowercase => Transform::Lowercase,
         entities::Transform::Trim => Transform::Trim,
     }
+}
+
+fn convert_join_type(jt: entities::JoinType) -> JoinType {
+    match jt {
+        entities::JoinType::OneToOne => JoinType::OneToOne,
+        entities::JoinType::OneToMany => JoinType::OneToMany,
+        entities::JoinType::ManyToMany => JoinType::ManyToMany,
+    }
+}
+
+fn convert_order_by(ob: entities::OrderBy) -> OrderBy {
+    OrderBy {
+        column: ob.column,
+        direction: ob.direction.map(|d| match d {
+            entities::Direction::Asc => Direction::Asc,
+            entities::Direction::Desc => Direction::Desc,
+        }),
+    }
+}
+
+fn require_aggregate_column(
+    column: Option<ColumnName>,
+    op: &'static str,
+) -> Result<ColumnName, ConversionError> {
+    column.ok_or(ConversionError::MissingAggregateColumn { op })
+}
+
+fn require_aggregate_type(
+    ty: Option<FlussoType>,
+    op: &'static str,
+) -> Result<FlussoType, ConversionError> {
+    ty.ok_or(ConversionError::MissingAggregateType { op })
 }
 
 pub(crate) fn convert_soft_delete(sd: entities::SoftDelete) -> Result<SoftDelete, ConversionError> {
@@ -311,108 +404,4 @@ pub(crate) fn yaml_to_generic(v: serde_yaml::Value) -> GenericValue {
         ),
         serde_yaml::Value::Tagged(tagged) => yaml_to_generic(tagged.value),
     }
-}
-
-pub(crate) fn convert_join(j: entities::Join) -> Result<Join, ConversionError> {
-    let key = match (j.foreign_key, j.through) {
-        (Some(fk), None) => JoinKey::Direct(fk),
-        (None, Some(t)) => JoinKey::Through(Through {
-            table: t.table,
-            left_key: t.left_key,
-            right_key: t.right_key,
-        }),
-        _ => return Err(ConversionError::InvalidJoinKey),
-    };
-    let fields = j
-        .fields
-        .into_iter()
-        .map(convert_field)
-        .collect::<Result<_, _>>()?;
-    Ok(Join {
-        table: j.table,
-        join_type: convert_join_type(j.join_type),
-        primary_key: j.primary_key,
-        key,
-        filters: convert_filters_opt(j.filters)?,
-        order_by: j
-            .order_by
-            .map(|os| os.into_iter().map(convert_order_by).collect()),
-        limit: j.limit,
-        fields,
-    })
-}
-
-fn convert_join_type(jt: entities::JoinType) -> JoinType {
-    match jt {
-        entities::JoinType::OneToOne => JoinType::OneToOne,
-        entities::JoinType::OneToMany => JoinType::OneToMany,
-        entities::JoinType::ManyToMany => JoinType::ManyToMany,
-    }
-}
-
-fn convert_order_by(ob: entities::OrderBy) -> OrderBy {
-    OrderBy {
-        column: ob.column,
-        direction: ob.direction.map(|d| match d {
-            entities::Direction::Asc => Direction::Asc,
-            entities::Direction::Desc => Direction::Desc,
-        }),
-    }
-}
-
-pub(crate) fn convert_aggregate(
-    a: entities::Aggregate,
-    ty: Option<FlussoType>,
-) -> Result<Aggregate, ConversionError> {
-    // `count`/`avg` have fixed result types (`long`/`double`); `sum`/`min`/`max`
-    // mirror the aggregated column, so they must carry a declared `type`.
-    let (op, value_type) = match a.op {
-        entities::AggregateOp::Count => (AggregateOp::Count, None),
-        entities::AggregateOp::Avg => (
-            AggregateOp::Avg(require_aggregate_column(a.column, "avg")?),
-            None,
-        ),
-        entities::AggregateOp::Sum => (
-            AggregateOp::Sum(require_aggregate_column(a.column, "sum")?),
-            Some(require_aggregate_type(ty, "sum")?),
-        ),
-        entities::AggregateOp::Min => (
-            AggregateOp::Min(require_aggregate_column(a.column, "min")?),
-            Some(require_aggregate_type(ty, "min")?),
-        ),
-        entities::AggregateOp::Max => (
-            AggregateOp::Max(require_aggregate_column(a.column, "max")?),
-            Some(require_aggregate_type(ty, "max")?),
-        ),
-    };
-    let key = match (a.foreign_key, a.through) {
-        (Some(fk), None) => JoinKey::Direct(fk),
-        (None, Some(t)) => JoinKey::Through(Through {
-            table: t.table,
-            left_key: t.left_key,
-            right_key: t.right_key,
-        }),
-        _ => return Err(ConversionError::InvalidJoinKey),
-    };
-    Ok(Aggregate {
-        table: a.table,
-        op,
-        key,
-        value_type,
-        filters: convert_filters_opt(a.filters)?,
-    })
-}
-
-fn require_aggregate_column(
-    column: Option<ColumnName>,
-    op: &'static str,
-) -> Result<ColumnName, ConversionError> {
-    column.ok_or(ConversionError::MissingAggregateColumn { op })
-}
-
-fn require_aggregate_type(
-    ty: Option<FlussoType>,
-    op: &'static str,
-) -> Result<FlussoType, ConversionError> {
-    ty.ok_or(ConversionError::MissingAggregateType { op })
 }

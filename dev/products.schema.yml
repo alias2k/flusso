@@ -8,111 +8,87 @@ table: products
 primary_key: id
 
 fields:
-  - field: id
-    type: integer
+  - integer: id
     required: false
-  - field: sku
-    type: keyword
+  - keyword: sku
     required: true
-  - field: name
-    type: text
+  - text: name
     required: true
-  - field: description
-    type: text # natural-language full text
+  - text: description # natural-language full text
     required: false
-  - field: inStock
+  - boolean: inStock
     column: in_stock
-    type: boolean
     required: true
-  - field: categoryId
+  - integer: categoryId
     column: category_id
-    type: integer
     required: false
-  - field: createdAt
+  - timestamp: createdAt
     column: created_at
-    type: timestamp
     required: true
     options:
       format: "strict_date_optional_time||epoch_millis"
 
-  # A group + a custom type: `price` is numeric in Postgres but mapped to an
-  # OpenSearch `scaled_float`, with `scaling_factor` passed through via options.
-  - group: pricing
+  # A group + a custom type: `amount` reads the numeric `price` column but is
+  # mapped to an OpenSearch `scaled_float`, with `scaling_factor` via options.
+  - object: pricing
     fields:
-      - field: amount
+      - custom: amount
         column: price
-        type: { custom: { postgres: [numeric], opensearch: scaled_float } }
-        options: { scaling_factor: 100 }
+        postgres: [numeric]
+        opensearch: scaled_float
         required: true
-      - field: currency
-        type: keyword
+        options: { scaling_factor: 100 }
+      - keyword: currency
         required: true
 
   # Many-to-many through the product_tags junction.
-  - field: tags
-    join:
-      table: tags
-      type: many_to_many
-      through:
-        table: product_tags
-        left_key: product_id # junction → this product
-        right_key: tag_id # junction → the tag
-      primary_key: id
-      order_by:
-        - { column: label, direction: asc }
-      fields:
-        - field: label
-          type: keyword
-          required: true
+  - many_to_many: tags
+    table: tags
+    through:
+      table: product_tags
+      left_key: product_id # junction → this product
+      right_key: tag_id # junction → the tag
+    primary_key: id
+    order_by:
+      - { column: label, direction: asc }
+    fields:
+      - keyword: label
+        required: true
 
   # One-to-many: reviews, newest first.
-  - field: reviews
-    join:
-      table: reviews
-      type: one_to_many
-      foreign_key: product_id
-      primary_key: id
-      order_by:
-        - { column: created_at, direction: desc }
-      fields:
-        - field: rating
-          type: short
-          required: true
-        - field: body
-          type: text
-          required: false
-        - field: userId
-          column: user_id
-          type: integer
-          required: false
-        - field: createdAt
-          column: created_at
-          type: timestamp
-          required: true
+  - one_to_many: reviews
+    table: reviews
+    foreign_key: product_id
+    primary_key: id
+    order_by:
+      - { column: created_at, direction: desc }
+    fields:
+      - short: rating
+        required: true
+      - text: body
+        required: false
+      - integer: userId
+        column: user_id
+        required: false
+      - timestamp: createdAt
+        column: created_at
+        required: true
 
   # Rating rollups over the reviews.
-  - field: reviewCount
-    aggregate:
-      table: reviews
-      op: count
-      foreign_key: product_id
-  - field: avgRating
-    aggregate:
-      table: reviews
-      op: avg
-      column: rating
-      foreign_key: product_id
-  - field: minRating
-    type: short
-    aggregate:
-      table: reviews
-      op: min
-      column: rating
-      foreign_key: product_id
-  - field: maxRating
-    type: short
-    aggregate:
-      table: reviews
-      op: max
-      column: rating
-      foreign_key: product_id
+  - count: reviewCount
+    table: reviews
+    foreign_key: product_id
+  - avg: avgRating
+    table: reviews
+    column: rating
+    foreign_key: product_id
+  - min: minRating
+    table: reviews
+    column: rating
+    value_type: short
+    foreign_key: product_id
+  - max: maxRating
+    table: reviews
+    column: rating
+    value_type: short
+    foreign_key: product_id

@@ -1,146 +1,80 @@
 # yaml-language-server: $schema=../../../../schemas/index.schema.yml
-
+# Fixture for the type-as-key field format: every field kind in one schema.
 version: 1
-
-# Root table
 table: users
-schema: public # optional, default "public"
-primary_key: id # optional
-doc_id: id # optional, defaults to primary_key
+primary_key: id
 
-# Soft-delete: rows matching `when` are treated as deletes
 soft_delete:
-  field: archived
-  when:
-    - { column: "archived_at", op: is_null }
+  column: deleted
 
 fields:
-  # Short form: field name = column name, type defaults to `keyword`
-  - id
-  - email
-
-  # Rename column → field, declared type
-  - field: createdAt
-    column: created_at
-    type: timestamp
+  - integer: id
+    required: false
+  - keyword: email
+    required: true
+    transforms: [lowercase, trim]
+  - text: fullName
+    column: full_name
+    required: false
+  - identifier: sku
     required: false
 
-  - field: handle
-    column: email
-    type: keyword
+  # A geo point from two coordinate columns.
+  - geo: location
+    lat: latitude
+    lon: longitude
     required: false
-    transforms:
-      - lowercase
-      - trim
 
-  # Full-text, with an explicit analyzer via `options`
-  - field: bio
-    type: text
+  # A custom scalar (explicit Postgres/OpenSearch pair).
+  - custom: price
+    postgres: [numeric]
+    opensearch: scaled_float
     required: false
-    options: { analyzer: english }
-    default: ""
+    options:
+      scaling_factor: 100
 
-  - field: displayName
-    column: name
-    type: keyword
-    required: false
-    transforms:
-      - trim
-    default: "anonymous"
+  # A same-row sub-object.
+  - object: account
+    fields:
+      - enum: tier
+        required: true
+      - timestamp: createdAt
+        column: created_at
+        required: true
 
-  # Embedded object (one-to-one): shape is structural, no `type`. The related
-  # table's `primary_key` makes its projected key column non-null automatically.
-  - field: address
-    join:
-      table: addresses
-      type: one_to_one
-      foreign_key: user_id
-      primary_key: id
-      fields:
-        - street
-        - field: city
-          required: false
-          transforms:
-            - trim
-        - country
+  # One-to-one join.
+  - one_to_one: profile
+    table: profiles
+    foreign_key: user_id
+    primary_key: user_id
+    fields:
+      - text: bio
+        required: false
 
-  # Nested array (one-to-many) with order_by + limit
-  - field: orders
-    join:
-      table: orders
-      type: one_to_many
-      foreign_key: user_id
-      primary_key: id
-      order_by:
-        - { column: created_at, direction: desc }
-      limit: 5
-      fields:
-        - id
-        - field: total
-          type: double
-          required: false
-        - field: status
-          type: keyword
-          required: false
+  # One-to-many join with filters and ordering.
+  - one_to_many: orders
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    filters:
+      - { column: status, op: neq, value: cancelled }
+    order_by:
+      - { column: placed_at, direction: desc }
+    fields:
+      - enum: status
+        required: true
+      - decimal: total
+        required: true
 
-        # Nested deeper
-        - field: items
-          join:
-            table: order_items
-            type: one_to_many
-            foreign_key: order_id
-            primary_key: id
-            fields:
-              - id
-              - sku
-              - field: quantity
-                type: integer
-                required: false
-              - field: price
-                type: double
-                required: false
+  # Aggregates.
+  - count: orderCount
+    table: orders
+    foreign_key: user_id
+  - sum: lifetimeValue
+    table: orders
+    column: total
+    value_type: decimal
+    foreign_key: user_id
 
-  # Flat array via join table (many-to-many)
-  - field: tags
-    join:
-      table: tags
-      type: many_to_many
-      through:
-        table: user_tags
-        left_key: user_id
-        right_key: tag_id
-      primary_key: id
-      fields: [name]
-
-  # `count` aggregates: result type is always `long`, so no `type` needed
-  - field: tagCount
-    aggregate:
-      table: tags
-      op: count
-      through:
-        table: user_tags
-        left_key: user_id
-        right_key: tag_id
-
-  - field: totalOrders
-    aggregate:
-      table: orders
-      foreign_key: user_id
-      op: count
-
-  - field: totalOrdersFulfilled
-    aggregate:
-      table: orders
-      foreign_key: user_id
-      op: count
-      filters:
-        - { column: "status", op: "eq", value: "fulfilled" }
-
-  # `sum`/`min`/`max` mirror the column, so they declare a `type`
-  - field: lifetimeValue
-    type: double
-    aggregate:
-      table: orders
-      foreign_key: user_id
-      op: sum
-      column: total
+  - constant: source
+    value: flusso

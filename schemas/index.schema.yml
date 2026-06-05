@@ -50,117 +50,146 @@ definitions:
     pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$"
     maxLength: 63
 
+  # A field is written **type-first**: exactly one type key (its value is the
+  # document key) plus that type's siblings.
+  #
+  #   - keyword: email          # scalar leaf
+  #     required: true
+  #   - geo: location           # geo_point from two columns
+  #     lat: latitude
+  #     lon: longitude
+  #     required: false
+  #   - one_to_many: orders     # join (cardinality is the key)
+  #     table: orders
+  #     foreign_key: user_id
+  #     primary_key: id
+  #     fields: [ … ]
+  #   - count: orderCount       # aggregate (op is the key)
+  #     table: orders
+  #     foreign_key: user_id
+  #
+  # This schema lists every legal key for editor assist; the loader enforces the
+  # rules JSON Schema can't state here: exactly one type key per field, and the
+  # per-type sibling set (e.g. `count` takes no `column`; `sum`/`min`/`max`
+  # require `column` + `value_type`; a `geo` needs `lat`+`lon` or a single
+  # `column`).
   field:
-    oneOf:
-      # Shorthand: `- name` is a `keyword` column of the same name.
-      - $ref: "#/definitions/field_name"
-      # A group: `- group: name` with nested `fields` (a same-row sub-object).
-      - type: object
-        required: [group, fields]
-        additionalProperties: false
-        properties:
-          group:
-            $ref: "#/definitions/field_name"
-          options:
-            type: object
-            additionalProperties: true
-          fields:
-            type: array
-            items:
-              $ref: "#/definitions/field"
-      # A join: a related table folded in. Its nullability is structural, so
-      # `required` is not allowed; `type` is rejected too (the shape is fixed).
-      - type: object
-        required: [field, join]
-        additionalProperties: false
-        properties:
-          field:
-            $ref: "#/definitions/field_name"
-          options:
-            type: object
-            additionalProperties: true
-          join:
-            $ref: "#/definitions/join"
-      # An aggregate: a rollup over a related table. `type` is required for
-      # sum/min/max (their result mirrors the column); `required` is not allowed.
-      - type: object
-        required: [field, aggregate]
-        additionalProperties: false
-        properties:
-          field:
-            $ref: "#/definitions/field_name"
-          type:
-            $ref: "#/definitions/flusso_type"
-          options:
-            type: object
-            additionalProperties: true
-          aggregate:
-            $ref: "#/definitions/aggregate"
-      # A leaf column. `required` is mandatory — every leaf states its
-      # nullability explicitly.
-      - type: object
-        required: [field, required]
-        additionalProperties: false
-        properties:
-          field:
-            $ref: "#/definitions/field_name"
-          column:
-            $ref: "#/definitions/pg_identifier"
-          type:
-            $ref: "#/definitions/flusso_type"
-          required:
-            type: boolean
-            description: Force the field non-null.
-          options:
-            type: object
-            description: >-
-              Extra OpenSearch mapping properties merged beside the derived
-              type (e.g. analyzer, format, scaling_factor).
-            additionalProperties: true
-          transforms:
-            $ref: "#/definitions/transforms"
-          default: {}
+    type: object
+    additionalProperties: false
+    properties:
+      # ── scalar leaf types (value = document key) ──────────────────────────
+      text: { $ref: "#/definitions/field_name" }
+      identifier: { $ref: "#/definitions/field_name" }
+      keyword: { $ref: "#/definitions/field_name" }
+      enum: { $ref: "#/definitions/field_name" }
+      uuid: { $ref: "#/definitions/field_name" }
+      boolean: { $ref: "#/definitions/field_name" }
+      short: { $ref: "#/definitions/field_name" }
+      integer: { $ref: "#/definitions/field_name" }
+      long: { $ref: "#/definitions/field_name" }
+      float: { $ref: "#/definitions/field_name" }
+      double: { $ref: "#/definitions/field_name" }
+      decimal: { $ref: "#/definitions/field_name" }
+      date: { $ref: "#/definitions/field_name" }
+      timestamp: { $ref: "#/definitions/field_name" }
+      binary: { $ref: "#/definitions/field_name" }
+      json: { $ref: "#/definitions/field_name" }
+      # ── custom scalar, geo, object ────────────────────────────────────────
+      custom: { $ref: "#/definitions/field_name" }
+      geo: { $ref: "#/definitions/field_name" }
+      object: { $ref: "#/definitions/field_name" }
+      # ── joins (cardinality is the key) ────────────────────────────────────
+      one_to_one: { $ref: "#/definitions/field_name" }
+      one_to_many: { $ref: "#/definitions/field_name" }
+      many_to_many: { $ref: "#/definitions/field_name" }
+      # ── aggregates (op is the key) ────────────────────────────────────────
+      count: { $ref: "#/definitions/field_name" }
+      sum: { $ref: "#/definitions/field_name" }
+      avg: { $ref: "#/definitions/field_name" }
+      min: { $ref: "#/definitions/field_name" }
+      max: { $ref: "#/definitions/field_name" }
+      # ── constant ──────────────────────────────────────────────────────────
+      constant: { $ref: "#/definitions/field_name" }
+
+      # ── siblings (which apply depends on the type key) ────────────────────
+      # Leaf / scalar:
+      required:
+        type: boolean
+        description: Whether the field may be null. Mandatory on a scalar leaf.
+      column:
+        $ref: "#/definitions/pg_identifier"
+      options:
+        type: object
+        additionalProperties: true
+        description: >-
+          Extra OpenSearch mapping properties merged beside the derived type
+          (e.g. analyzer, format, scaling_factor).
+      transforms:
+        $ref: "#/definitions/transforms"
+      default: {}
+      # custom:
+      postgres:
+        type: array
+        items:
+          type: string
+      opensearch:
+        type: string
+      # geo (two-column form):
+      lat:
+        $ref: "#/definitions/pg_identifier"
+      lon:
+        $ref: "#/definitions/pg_identifier"
+      # object / join (nested projection):
+      fields:
+        type: array
+        items:
+          $ref: "#/definitions/field"
+      # join / aggregate (related table):
+      table:
+        $ref: "#/definitions/pg_identifier"
+      primary_key:
+        $ref: "#/definitions/pg_identifier"
+      foreign_key:
+        $ref: "#/definitions/pg_identifier"
+      through:
+        $ref: "#/definitions/through"
+      filters:
+        $ref: "#/definitions/filters"
+      order_by:
+        $ref: "#/definitions/order_by"
+      limit:
+        type: integer
+        minimum: 1
+      # aggregate (sum/min/max result type):
+      value_type:
+        $ref: "#/definitions/flusso_type"
+      # constant:
+      value: {}
 
   flusso_type:
     description: >-
-      A scalar field's declared type. A named type bridges a Postgres column
-      type and an OpenSearch mapping type; 'custom' carries an explicit
-      OpenSearch type and the Postgres types it accepts.
-    oneOf:
-      - enum:
-          [
-            text,
-            identifier,
-            keyword,
-            enum,
-            uuid,
-            boolean,
-            short,
-            integer,
-            long,
-            float,
-            double,
-            decimal,
-            date,
-            timestamp,
-            binary,
-            json,
-          ]
-      - type: object
-        required: [custom]
-        additionalProperties: false
-        properties:
-          custom:
-            type: object
-            required: [postgres, opensearch]
-            additionalProperties: false
-            properties:
-              postgres:
-                type: array
-                items:
-                  type: string
-              opensearch:
-                type: string
+      A scalar field's declared type — used as a field's type key, and as the
+      `value_type` of a `sum`/`min`/`max` aggregate. Each bridges a Postgres
+      column type and an OpenSearch mapping type.
+    enum:
+      [
+        text,
+        identifier,
+        keyword,
+        enum,
+        uuid,
+        boolean,
+        short,
+        integer,
+        long,
+        float,
+        double,
+        decimal,
+        date,
+        timestamp,
+        binary,
+        json,
+      ]
 
   transforms:
     type: array
@@ -225,61 +254,3 @@ definitions:
         $ref: "#/definitions/pg_identifier"
       right_key:
         $ref: "#/definitions/pg_identifier"
-
-  join:
-    type: object
-    required: [table, type, primary_key, fields]
-    additionalProperties: false
-    properties:
-      table:
-        $ref: "#/definitions/pg_identifier"
-      type:
-        type: string
-        enum: [one_to_one, one_to_many, many_to_many]
-      primary_key:
-        $ref: "#/definitions/pg_identifier"
-        description: >-
-          The related table's primary key. The projected field reading it is
-          marked non-null automatically, just like the root primary_key.
-      foreign_key:
-        $ref: "#/definitions/pg_identifier"
-      through:
-        $ref: "#/definitions/through"
-      filters:
-        $ref: "#/definitions/filters"
-      order_by:
-        $ref: "#/definitions/order_by"
-      limit:
-        type: integer
-        minimum: 1
-      fields:
-        type: array
-        items:
-          $ref: "#/definitions/field"
-    if:
-      properties:
-        type:
-          const: many_to_many
-    then:
-      required: [through]
-    else:
-      required: [foreign_key]
-
-  aggregate:
-    type: object
-    required: [table, op]
-    additionalProperties: false
-    properties:
-      table:
-        $ref: "#/definitions/pg_identifier"
-      op:
-        type: string
-        enum: [count, sum, avg, min, max]
-      column:
-        $ref: "#/definitions/pg_identifier"
-      foreign_key:
-        $ref: "#/definitions/pg_identifier"
-      through:
-        $ref: "#/definitions/through"
-      filters:
-        $ref: "#/definitions/filters"

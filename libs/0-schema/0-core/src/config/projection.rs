@@ -100,6 +100,9 @@ fn type_and_nullability(field: &Field, primary_key: Option<&ColumnName>) -> (Map
         }
         // A group is always assembled — an object, never null.
         FieldSource::Group(_) => (MappingType::Object, false),
+        // A geo point resolves to `geo_point`; its nullability is declared (a
+        // `required` point is non-null, otherwise it may be absent).
+        FieldSource::Geo(geo) => (MappingType::Other("geo_point".to_owned()), geo.nullable),
         // A constant is null exactly when the value is null.
         FieldSource::Constant(value) => (
             constant_mapping_type(value),

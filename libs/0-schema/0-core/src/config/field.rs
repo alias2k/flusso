@@ -34,6 +34,9 @@ pub enum FieldSource {
     /// A sub-object assembled from sibling fields of the *same* row (it adds a
     /// nesting level in the document without reading a related table).
     Group(Vec<Field>),
+    /// A geographic point assembled from two same-row columns
+    /// ([`lat`](Geo::lat)/[`lon`](Geo::lon)) into an OpenSearch `geo_point`.
+    Geo(Geo),
     /// Data drawn from a related table — folded in as nested documents
     /// ([`Join`](Relation::Join)) or reduced to a single value
     /// ([`Aggregate`](Relation::Aggregate)).
@@ -59,6 +62,20 @@ pub struct Column {
     pub default: Option<common::GenericValue>,
 }
 
+/// A geographic point built from two same-row columns. Resolves to an
+/// OpenSearch `geo_point`; the document carries `{ "lat": …, "lon": … }`, or
+/// SQL `NULL` when either column is null (so a nullable point is absent rather
+/// than `{lat: null, lon: null}`, which OpenSearch would reject).
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+pub struct Geo {
+    /// The latitude column (degrees).
+    pub lat: common::ColumnName,
+    /// The longitude column (degrees).
+    pub lon: common::ColumnName,
+    /// Whether the point may be absent — true unless the field is `required`.
+    pub nullable: bool,
+}
+
 /// How a field draws on a related table: either folding its rows in as nested
 /// documents ([`Join`](Self::Join)) or reducing them to a single value
 /// ([`Aggregate`](Self::Aggregate)).
@@ -81,6 +98,7 @@ impl Field {
             FieldSource::Group(fields) => fields,
             FieldSource::Relation(Relation::Join(join)) => &join.fields,
             FieldSource::Column(_)
+            | FieldSource::Geo(_)
             | FieldSource::Relation(Relation::Aggregate(_))
             | FieldSource::Constant(_) => &[],
         }

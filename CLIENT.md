@@ -327,6 +327,7 @@ something else and it won't compile (modulo the leaf-identifier rule above).
 | `timestamp`       | `date`     | `time::OffsetDateTime` (feature) | `Date`          |
 | `binary`          | `binary`   | `String` (base64)                | `Binary`        |
 | `json`            | `object`   | `serde_json::Value`              | `Json`          |
+| `geo_point`       | `geo_point`| `GeoPoint` (`{ lat, lon }`)      | `Geo`           |
 | `custom { opensearch }` | (given) | matching scalar, else `serde_json::Value` | by OS type |
 | `group`           | `object`   | a struct                         | `Object<T>`     |
 | join `one_to_one` | `object`   | `Option<` a struct `>`           | `Object<T>`     |
@@ -380,13 +381,14 @@ type *doesn't exist* on its handle, so the mistake is a compile error.
 
 | Handle          | Operators                                                                 |
 | --------------- | ------------------------------------------------------------------------- |
-| `Keyword`       | `eq`, `in_`, `prefix`, `exists`                                           |
-| `Text`          | `matches`, `match_phrase`, `exists` — *no* exact `eq` (it's analyzed)     |
+| `Keyword`       | `eq`, `in_`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `exists`            |
+| `Text`          | `matches`, `match_phrase`, `match_phrase_prefix`, `matches_fuzzy`, `exists` — *no* exact `eq` (it's analyzed) |
 | `Bool`          | `eq`, `exists`                                                            |
 | `Number<T>`     | `eq`, `in_`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                |
 | `Date`          | `eq`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                       |
 | `Object<T>`     | field access into `T`'s handles (a same-document sub-object)              |
 | `Nested<T>`     | `any(q)` / `all(q)` to match parents — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
+| `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
 | `Binary`        | `exists` — base64-encoded, not searchable                                 |
 | `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
 
@@ -396,6 +398,15 @@ an `IntoIterator<Item = impl Into<String>>`. Sorting is the same — `sort(…)`
 accepts handles whose type is sortable (numbers, dates, keywords, booleans), so
 `sort(User::full_name().desc())` on a `text` field is a compile error, mirroring
 OpenSearch's own refusal to sort un-`fielddata` text.
+
+A few clauses span more than one field, so they're free functions rather than
+single-handle operators: `multi_match("ada", [User::full_name(), User::bio()])`
+runs one analyzed query across several `Text` fields. Anything outside the typed
+surface — `knn`, `function_score`, `script`, `geo_shape`, span queries — stays
+reachable through the [`raw`](#the-escape-hatch) hatch by design; lifting every
+OpenSearch clause into a typed handle would dilute the type guarantee (a `regexp`
+on a number is meaningless), so the typed surface is the operators that fit a
+field's type.
 
 ### Composing queries
 

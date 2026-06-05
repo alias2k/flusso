@@ -1,0 +1,241 @@
+//! The [`Search`] builder and the typed [`SearchResponse`] / [`Hit`] results.
+
+use std::marker::PhantomData;
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
+
+use crate::Client;
+use crate::error::Result;
+use crate::handles::Sort;
+use crate::query::{AsQuery, BoolQuery};
+
+/// A typed search against one index.
+///
+/// Built from `Search::new(client, index)` (the derive will generate a
+/// `Type::search(client)` that calls this). Clauses accumulate into a bool
+/// query: `query`/`should` score, `filter`/`must_not` don't. Finish with
+/// [`Search::send`].
+#[derive(Debug)]
+pub struct Search<'a, T> {
+    client: &'a Client,
+    index: String,
+    bool_query: BoolQuery,
+    raw: Option<Value>,
+    sort: Vec<Sort>,
+    from: Option<u64>,
+    size: Option<u64>,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<'a, T> Search<'a, T> {
+    /// Start a search against `index` using `client`.
+    pub fn new(client: &'a Client, index: impl Into<String>) -> Self {
+        Self {
+            client,
+            index: index.into(),
+            bool_query: BoolQuery::default(),
+            raw: None,
+            sort: Vec::new(),
+            from: None,
+            size: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// A scoring clause (`bool.must`). Accepts any [`AsQuery`]; an absent one
+    /// (e.g. a `None` optional) adds nothing.
+    #[must_use]
+    pub fn query(mut self, query: impl AsQuery) -> Self {
+        if let Some(query) = query.into_query() {
+            self.bool_query.must.push(query);
+        }
+        self
+    }
+
+    /// A non-scoring, cacheable clause (`bool.filter`). An absent clause adds
+    /// nothing — so `filter(opt.map(|v| handle.eq(v)))` is a conditional filter.
+    #[must_use]
+    pub fn filter(mut self, query: impl AsQuery) -> Self {
+        if let Some(query) = query.into_query() {
+            self.bool_query.filter.push(query);
+        }
+        self
+    }
+
+    /// An exclusion clause (`bool.must_not`). An absent clause excludes nothing.
+    #[must_use]
+    pub fn must_not(mut self, query: impl AsQuery) -> Self {
+        if let Some(query) = query.into_query() {
+            self.bool_query.must_not.push(query);
+        }
+        self
+    }
+
+    /// An optional, scoring clause (`bool.should`). An absent clause adds nothing.
+    #[must_use]
+    pub fn should(mut self, query: impl AsQuery) -> Self {
+        if let Some(query) = query.into_query() {
+            self.bool_query.should.push(query);
+        }
+        self
+    }
+
+    /// Append a sort key.
+    #[must_use]
+    pub fn sort(mut self, sort: Sort) -> Self {
+        self.sort.push(sort);
+        self
+    }
+
+    /// Offset of the first hit to return.
+    #[must_use]
+    pub fn from(mut self, from: u64) -> Self {
+        self.from = Some(from);
+        self
+    }
+
+    /// Maximum number of hits to return.
+    #[must_use]
+    pub fn size(mut self, size: u64) -> Self {
+        self.size = Some(size);
+        self
+    }
+
+    /// Replace the query body with a raw OpenSearch query DSL value. The
+    /// pressure-release valve for anything the typed builder can't express;
+    /// results still deserialize into `T`.
+    #[must_use]
+    pub fn raw(mut self, query: Value) -> Self {
+        self.raw = Some(query);
+        self
+    }
+
+    /// The request body this search will POST to `_search`. Pure — useful for
+    /// tests and debugging.
+    #[must_use]
+    pub fn body(&self) -> Value {
+        let query = match &self.raw {
+            Some(raw) => raw.clone(),
+            None if self.bool_query.is_empty() => match_all(),
+            None => self.bool_query.to_value(),
+        };
+
+        let mut root = Map::new();
+        root.insert("query".to_string(), query);
+        if !self.sort.is_empty() {
+            let keys = self.sort.iter().map(Sort::to_value).collect();
+            root.insert("sort".to_string(), Value::Array(keys));
+        }
+        if let Some(from) = self.from {
+            root.insert("from".to_string(), Value::from(from));
+        }
+        if let Some(size) = self.size {
+            root.insert("size".to_string(), Value::from(size));
+        }
+        Value::Object(root)
+    }
+}
+
+impl<T> Search<'_, T>
+where
+    T: DeserializeOwned,
+{
+    /// Execute the search and decode the hits into `SearchResponse<T>`.
+    pub async fn send(self) -> Result<SearchResponse<T>> {
+        let body = self.body();
+        let response = self.client.search(&self.index, &body).await?;
+        SearchResponse::from_value(response)
+    }
+}
+
+/// `{ "match_all": {} }`.
+fn match_all() -> Value {
+    let mut outer = Map::new();
+    outer.insert("match_all".to_string(), Value::Object(Map::new()));
+    Value::Object(outer)
+}
+
+/// A page of search results.
+#[derive(Debug)]
+pub struct SearchResponse<T> {
+    /// Total matches across the whole index, not the page size.
+    pub total: u64,
+    /// The top score in this page, if scored.
+    pub max_score: Option<f32>,
+    /// The hits in this page.
+    pub hits: Vec<Hit<T>>,
+    /// How long OpenSearch reported the query took.
+    pub took: Duration,
+}
+
+impl<T> SearchResponse<T>
+where
+    T: DeserializeOwned,
+{
+    /// Decode an OpenSearch `_search` response body into a typed page.
+    pub fn from_value(value: Value) -> Result<Self> {
+        let raw: RawResponse<T> = serde_json::from_value(value)?;
+        let hits = raw
+            .hits
+            .hits
+            .into_iter()
+            .map(|hit| Hit {
+                id: hit.id,
+                score: hit.score.unwrap_or(0.0),
+                source: hit.source,
+            })
+            .collect();
+        Ok(Self {
+            total: raw.hits.total.value,
+            max_score: raw.hits.max_score,
+            hits,
+            took: Duration::from_millis(raw.took),
+        })
+    }
+}
+
+/// One search hit: the typed document plus its envelope metadata.
+#[derive(Debug)]
+pub struct Hit<T> {
+    /// The document id (root primary key, stringified by OpenSearch).
+    pub id: String,
+    /// The relevance score (`0.0` when the query didn't score).
+    pub score: f32,
+    /// The fully-typed document.
+    pub source: T,
+}
+
+// ---- wire types ------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawResponse<T> {
+    #[serde(default)]
+    took: u64,
+    hits: RawHits<T>,
+}
+
+#[derive(Deserialize)]
+struct RawHits<T> {
+    total: RawTotal,
+    #[serde(default)]
+    max_score: Option<f32>,
+    hits: Vec<RawHit<T>>,
+}
+
+#[derive(Deserialize)]
+struct RawTotal {
+    value: u64,
+}
+
+#[derive(Deserialize)]
+struct RawHit<T> {
+    #[serde(rename = "_id")]
+    id: String,
+    #[serde(rename = "_score", default)]
+    score: Option<f32>,
+    #[serde(rename = "_source")]
+    source: T,
+}

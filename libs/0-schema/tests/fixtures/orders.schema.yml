@@ -2,5 +2,7 @@ version: 1
 table: orders
 primary_key: id
 fields:
-  - id
-  - total
+  - keyword: id
+    required: false
+  - keyword: total
+    required: false

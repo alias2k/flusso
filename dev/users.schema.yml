@@ -2,9 +2,9 @@
 # The `users` search document: a customer with their profile, addresses, and
 # orders (down to line items), plus rollup aggregates over their orders.
 #
-# A change to the user OR to any embedded row (profile, address, order, item)
-# rebuilds and re-emits the whole document. Setting users.deleted = true emits a
-# tombstone (delete) instead.
+# Each field is written type-first: `- <type>: <name>`. A change to the user OR
+# to any embedded row (profile, address, order, item) rebuilds and re-emits the
+# whole document. Setting users.deleted = true emits a tombstone (delete).
 
 version: 1
 table: users
@@ -14,151 +14,113 @@ soft_delete:
   column: deleted
 
 fields:
-  - field: id
-    type: integer
+  - integer: id
     required: false
-  - field: email
-    type: keyword
+  - keyword: email
     required: true
     transforms: [lowercase, trim]
-  - field: fullName
+  - text: fullName # natural-language full text
     column: full_name
-    type: text # natural-language full text
     required: false
 
   # A group: reshape same-row scalar columns into a nested object.
-  - group: account
+  - object: account
     fields:
-      - field: tier
-        type: enum # stored as text, indexed as keyword
+      - enum: tier # stored as text, indexed as keyword
         required: true
-      - field: country
-        type: keyword
+      - keyword: country
         required: false
-      - field: createdAt
+      - timestamp: createdAt
         column: created_at
-        type: timestamp
         required: true
 
   # One-to-one: the user's profile (absent for some users → null object).
-  - field: profile
-    join:
-      table: profiles
-      type: one_to_one
-      foreign_key: user_id
-      primary_key: user_id
-      fields:
-        - field: bio
-          type: text
-          required: false
-        - field: avatarUrl
-          column: avatar_url
-          type: keyword
-          required: false
-        - field: birthDate
-          column: birth_date
-          type: date
-          required: false
+  - one_to_one: profile
+    table: profiles
+    foreign_key: user_id
+    primary_key: user_id
+    fields:
+      - text: bio
+        required: false
+      - keyword: avatarUrl
+        column: avatar_url
+        required: false
+      - date: birthDate
+        column: birth_date
+        required: false
 
   # One-to-many: every address.
-  - field: addresses
-    join:
-      table: addresses
-      type: one_to_many
-      foreign_key: user_id
-      primary_key: id
-      order_by:
-        - { column: id, direction: asc }
-      fields:
-        - field: kind
-          type: enum
-          required: true
-        - field: line1
-          type: text
-          required: true
-        - field: city
-          type: keyword
-          required: true
-        - field: postalCode
-          column: postal_code
-          type: keyword
-          required: false
-        - field: country
-          type: keyword
-          required: false
+  - one_to_many: addresses
+    table: addresses
+    foreign_key: user_id
+    primary_key: id
+    order_by:
+      - { column: id, direction: asc }
+    fields:
+      - enum: kind
+        required: true
+      - text: line1
+        required: true
+      - keyword: city
+        required: true
+      - keyword: postalCode
+        column: postal_code
+        required: false
+      - keyword: country
+        required: false
 
   # One-to-many: orders (cancelled ones filtered out), newest first, with line
   # items and the product each item refers to — three levels of nesting.
-  - field: orders
-    join:
-      table: orders
-      type: one_to_many
-      foreign_key: user_id
-      primary_key: id
-      filters:
-        - { column: status, op: neq, value: cancelled }
-      order_by:
-        - { column: placed_at, direction: desc }
-      fields:
-        - field: status
-          type: enum
-          required: true
-        - field: total
-          type: decimal
-          required: true
-        - field: placedAt
-          column: placed_at
-          type: timestamp
-          required: true
-        - field: items
-          join:
-            table: order_items
-            type: one_to_many
-            foreign_key: order_id
-            primary_key: id
-            fields:
-              - field: productId
-                column: product_id
-                type: integer
-                required: true
-              - field: quantity
-                type: integer
-                required: true
-              - field: unitPrice
-                column: unit_price
-                type: decimal
-                required: true
+  - one_to_many: orders
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    filters:
+      - { column: status, op: neq, value: cancelled }
+    order_by:
+      - { column: placed_at, direction: desc }
+    fields:
+      - enum: status
+        required: true
+      - decimal: total
+        required: true
+      - timestamp: placedAt
+        column: placed_at
+        required: true
+      - one_to_many: items
+        table: order_items
+        foreign_key: order_id
+        primary_key: id
+        fields:
+          - integer: productId
+            column: product_id
+            required: true
+          - integer: quantity
+            required: true
+          - decimal: unitPrice
+            column: unit_price
+            required: true
 
   # Aggregates over the user's orders.
-  - field: orderCount
-    aggregate:
-      table: orders
-      op: count
-      foreign_key: user_id
-  - field: lifetimeValue
-    type: decimal
-    aggregate:
-      table: orders
-      op: sum
-      column: total
-      foreign_key: user_id
-  - field: avgOrderValue
-    aggregate:
-      table: orders
-      op: avg
-      column: total
-      foreign_key: user_id
-  - field: lastOrderAt
-    type: timestamp
-    aggregate:
-      table: orders
-      op: max
-      column: placed_at
-      foreign_key: user_id
-  - field: deliveredOrders
-    aggregate:
-      table: orders
-      op: count
-      foreign_key: user_id
-      filters:
-        - { column: status, op: eq, value: delivered }
+  - count: orderCount
+    table: orders
+    foreign_key: user_id
+  - sum: lifetimeValue
+    table: orders
+    column: total
+    value_type: decimal
+    foreign_key: user_id
+  - avg: avgOrderValue
+    table: orders
+    column: total
+    foreign_key: user_id
+  - max: lastOrderAt
+    table: orders
+    column: placed_at
+    value_type: timestamp
+    foreign_key: user_id
+  - count: deliveredOrders
+    table: orders
+    foreign_key: user_id
+    filters:
+      - { column: status, op: eq, value: delivered }

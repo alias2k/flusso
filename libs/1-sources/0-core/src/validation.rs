@@ -19,7 +19,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use schema_core::common::{ColumnName, IndexName};
 use schema_core::{
-    AggregateOp, Column, Config, DatabaseSchema, Field, FieldSource, FlussoType, Relation,
+    AggregateOp, Column, Config, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation,
     TableName,
 };
 
@@ -175,7 +175,46 @@ async fn validate_field(
             )
             .await?;
         }
+        // A geo point reads two same-row columns; both must exist and be numeric.
+        FieldSource::Geo(geo) => {
+            validate_geo(index, db_schema, table, &field.field, geo, catalog, out).await?;
+        }
         FieldSource::Constant(_) => {}
+    }
+    Ok(())
+}
+
+/// Confirm both coordinate columns of a geo point exist and hold a numeric type.
+async fn validate_geo(
+    index: &IndexName,
+    db_schema: &DatabaseSchema,
+    table: &TableName,
+    field: &FieldName,
+    geo: &Geo,
+    catalog: &dyn Catalog,
+    out: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    const NUMERIC: &[FlussoType] = &[
+        FlussoType::Double,
+        FlussoType::Float,
+        FlussoType::Decimal,
+        FlussoType::Integer,
+        FlussoType::Long,
+        FlussoType::Short,
+    ];
+    for column in [&geo.lat, &geo.lon] {
+        let info = catalog.column(db_schema, table, column).await?;
+        if !NUMERIC.iter().any(|ty| ty.accepts_pg(&info.sql_type)) {
+            out.push(Diagnostic {
+                index: index.clone(),
+                field: field.clone(),
+                severity: Severity::Error,
+                message: format!(
+                    "geo_point coordinate column `{column}` must be numeric, found `{}`",
+                    info.sql_type
+                ),
+            });
+        }
     }
     Ok(())
 }

@@ -2,15 +2,20 @@
 //! [`IndexSchema`](schema_core::IndexSchema).
 //!
 //! A schema file describes one search document: its root table, its fields, and
-//! how related tables fold in through joins and aggregates. Parsing is two stages:
+//! how related tables fold in through joins and aggregates. Each field is
+//! written **type-first** — `- <type>: <name>` (`keyword: email`,
+//! `one_to_many: orders`, `count: orderCount`, `geo: location`) — and carries
+//! only the siblings that type allows. Parsing is two stages:
 //!
-//! 1. [`SchemaYaml`] deserializes the file verbatim. [`ParseFrom`](schema_core::ParseFrom)
-//!    also checks the declared `version` against [`SUPPORTED_VERSIONS`].
+//! 1. [`SchemaYaml`] deserializes the file. Each field's type tag selects the
+//!    body shape it parses into (see [`Field`]).
+//!    [`ParseFrom`](schema_core::ParseFrom) also checks the declared `version`
+//!    against [`SUPPORTED_VERSIONS`].
 //! 2. `TryFrom<SchemaYaml>` converts it into the core model, validating
 //!    identifiers and the arity rules YAML alone can't express: a join needs
-//!    exactly one of `foreign_key` or `through`, `sum`/`avg`/`min`/`max`
-//!    aggregates need a `column`, a `between` filter takes exactly two values,
-//!    and a field can't be both a join and an aggregate.
+//!    exactly one of `foreign_key` or `through`, `sum`/`min`/`max` aggregates
+//!    need a `column` and a `value_type`, a `between` filter takes exactly two
+//!    values, and a `geo` field needs either `lat`+`lon` or a single `column`.
 
 mod conversion;
 mod entities;
@@ -19,7 +24,7 @@ mod parser;
 pub use entities::*;
 pub use parser::ParseError;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 pub const SUPPORTED_VERSIONS: &[u8] = &[1];
 
@@ -41,15 +46,16 @@ pub enum ConversionError {
     InvalidBetweenArity { got: usize },
     #[error("filter op '{op}' requires a sequence value")]
     ExpectedListValue { op: &'static str },
-    #[error("aggregate op '{op}' requires a `type` (its result mirrors the column)")]
+    #[error("aggregate op '{op}' requires a `value_type` (its result mirrors the column)")]
     MissingAggregateType { op: &'static str },
-    #[error("a field cannot have both `join` and `aggregate`")]
-    ConflictingRelation,
-    #[error("`type` cannot be set on field `{field}`: a join or group is structural")]
-    TypeOnNonScalarField { field: String },
+    #[error(
+        "a `geo` field needs either both `lat` and `lon` (two columns) or a single `column` \
+         holding a combined value — not a mix"
+    )]
+    InvalidGeoSource,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaYaml {
     pub version: u8,

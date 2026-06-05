@@ -52,8 +52,17 @@ pub enum FlussoType {
     Binary,
     /// PG `json` / `jsonb` → OS `object`.
     Json,
+    /// A geographic point → OS `geo_point`.
+    ///
+    /// The document is assembled server-side as JSON, so the source column must
+    /// already hold a value OpenSearch accepts as a `geo_point` and that carries
+    /// through JSON verbatim: `json`/`jsonb` shaped as `{"lat": …, "lon": …}` or
+    /// `[lon, lat]`, or `text` as `"lat,lon"`. A PostGIS `geometry` or PG-native
+    /// `point` is **not** accepted — it would serialize as WKB / `(x,y)`; expose
+    /// a generated `jsonb`/`text` column in that shape instead.
+    GeoPoint,
     /// An escape hatch: an explicit OpenSearch type with the Postgres types it
-    /// accepts, for anything the named variants don't cover (`geo_point`,
+    /// accepts, for anything the named variants don't cover (`geo_shape`,
     /// `scaled_float`, …).
     Custom {
         postgres: Vec<String>,
@@ -76,6 +85,7 @@ impl FlussoType {
             FlussoType::Date | FlussoType::Timestamp => MappingType::Date,
             FlussoType::Binary => MappingType::Other("binary".to_owned()),
             FlussoType::Json => MappingType::Object,
+            FlussoType::GeoPoint => MappingType::Other("geo_point".to_owned()),
             FlussoType::Custom { opensearch, .. } => MappingType::from_name(opensearch),
         }
     }
@@ -122,6 +132,22 @@ impl FlussoType {
             ),
             FlussoType::Binary => base == "bytea",
             FlussoType::Json => matches!(base.as_str(), "json" | "jsonb"),
+            // Geo data must reach OpenSearch as JSON `{lat,lon}` / `[lon,lat]` or
+            // a `"lat,lon"` string — i.e. it lives in a json/jsonb or text-like
+            // column. PostGIS `geometry` / PG `point` are intentionally rejected.
+            FlussoType::GeoPoint => matches!(
+                base.as_str(),
+                "json"
+                    | "jsonb"
+                    | "text"
+                    | "character varying"
+                    | "varchar"
+                    | "character"
+                    | "char"
+                    | "bpchar"
+                    | "citext"
+                    | "name"
+            ),
             FlussoType::Custom { postgres, .. } => {
                 postgres.iter().any(|t| normalize_pg_type(t) == base)
             }
@@ -165,6 +191,21 @@ mod tests {
         assert!(FlussoType::Integer.accepts_pg("integer[]"));
         assert!(FlussoType::Decimal.accepts_pg("numeric(10,2)"));
         assert_eq!(FlussoType::Timestamp.opensearch(), MappingType::Date);
+    }
+
+    #[test]
+    fn geo_point_emits_geo_point_and_accepts_only_carryable_columns() {
+        let ty = FlussoType::GeoPoint;
+        assert_eq!(ty.opensearch(), MappingType::Other("geo_point".to_owned()));
+        // Columns whose JSON survives document assembly as valid geo input.
+        assert!(ty.accepts_pg("jsonb"));
+        assert!(ty.accepts_pg("json"));
+        assert!(ty.accepts_pg("text"));
+        assert!(ty.accepts_pg("character varying(64)"));
+        // PostGIS / PG-native point would serialize as WKB / `(x,y)`.
+        assert!(!ty.accepts_pg("point"));
+        assert!(!ty.accepts_pg("geometry"));
+        assert!(!ty.accepts_pg("integer"));
     }
 
     #[test]

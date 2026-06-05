@@ -3,9 +3,9 @@ table: users
 schema: public
 primary_key: id
 fields:
-  - id
-  - field: email
-    type: keyword
+  - keyword: id
+    required: false
+  - keyword: email
     required: false
     transforms:
       - lowercase

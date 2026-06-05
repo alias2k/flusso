@@ -223,93 +223,86 @@ soft_delete:
 
 ### Fields
 
-`fields` is a list whose items take one of three forms, told apart by their
-discriminator key (`field`, `group`, or a bare string).
-
-**Shorthand** — a bare string is a scalar field backed by a column of the same
-name:
+`fields` is a list. Each item is written **type-first**: a single **type key**
+whose value is the document key, plus the siblings that type allows.
 
 ```yaml
 fields:
-  - id          # reads column `id`, document key `id`
-  - email       # reads column `email`, document key `email`
+  - keyword: email        # a `keyword` scalar; document key `email`
+    required: true
+  - text: bio             # analyzed full text
+    required: false
+  - integer: age
+    required: false
 ```
 
-**Group** — `group` (the document key) with nested `fields`. A same-row
-sub-object: it nests sibling columns under one key without reading a related
-table. Renders as an OpenSearch `object`, never null. See [Groups](#groups).
+The type key is one of:
 
-```yaml
-fields:
-  - group: address          # a nested object built from this row's columns
-    fields:
-      - { field: city, column: city, type: keyword }
-      - { field: zip,  column: postal_code, type: keyword }
-```
+- a **scalar** type — `text`, `identifier`, `keyword`, `enum`, `uuid`,
+  `boolean`, `short`, `integer`, `long`, `float`, `double`, `decimal`, `date`,
+  `timestamp`, `binary`, `json` (see [Types](#types)) — or `custom` (an explicit
+  Postgres/OpenSearch pair);
+- `geo` — a geographic point (see [Geo points](#geo-points));
+- `object` — a same-row sub-object (see [Objects](#objects));
+- `one_to_one` / `one_to_many` / `many_to_many` — a related table folded in (see
+  [Joins](#joins));
+- `count` / `sum` / `avg` / `min` / `max` — a rollup over a related table (see
+  [Aggregates](#aggregates));
+- `constant` — a fixed value.
 
-**Full** — an object. `field` (the document key) is the only required property;
-the rest are optional and which ones you set determines the field's *source*:
+There is exactly one type key per field. Which siblings a field accepts depends
+on that type:
 
-| Key | Type | Description |
+| Sibling | Applies to | Description |
 | --- | --- | --- |
-| `field` | field name | **Required.** The key this field lands under in the document. |
-| `column` | Postgres identifier | The source column. Defaults to `field` when omitted. |
-| `type` | type name | The field's declared [type](#types). Required on a `sum`/`min`/`max` aggregate; on a column it defaults to `keyword`. Rejected on a group or join (their shape is structural). |
-| `required` | bool | Force the field non-null. Fields are nullable by default. |
-| `options` | object | Extra OpenSearch mapping properties merged beside the derived `type` (e.g. `analyzer`, `format`, `scaling_factor`). |
-| `transforms` | list | Value transforms to apply. See [Transforms](#transforms). |
-| `default` | any | Value to coalesce a `null` column to. |
-| `join` | object | Fold a related table in as nested documents (carries its own `fields`). See [Joins](#joins). |
-| `aggregate` | object | Reduce a related table to a single value. See [Aggregates](#aggregates). |
-
-#### Field sources
-
-Every field resolves to exactly one source. They are mutually exclusive; the
-resolution precedence (when more than one property is present) is:
-
-1. **Relation** — if `join` or `aggregate` is set. Setting *both* is an error
-   (`a field cannot have both join and aggregate`).
-   - With `join`: the `fields` declared **inside** the join are projected from
-     each related row.
-   - With `aggregate`: the field is a single reduced scalar.
-2. **Column** — otherwise. Reads `column` (or `field` if `column` is omitted),
-   applies any `transforms`, and coalesces null to `default` if given.
-3. **Constant** — a `default` with no column source renders as a fixed value
-   (and `null`/absent renders as JSON null).
+| `required` | scalar, `geo` | **Mandatory** on a scalar/geo leaf. `true` forces the field non-null; nullable otherwise. Joins and aggregates are structural — their nullability is fixed — so they take no `required`. |
+| `column` | scalar, `geo` | The source column. Defaults to the document key when omitted. |
+| `options` | types with a mapping | Extra OpenSearch mapping properties merged beside the derived type (e.g. `analyzer`, `format`, `scaling_factor`). |
+| `transforms` | scalar | Value transforms to apply. See [Transforms](#transforms). |
+| `default` | scalar | Value to coalesce a `null` column to. |
+| `postgres` / `opensearch` | `custom` | The Postgres types accepted and the OpenSearch type emitted. |
+| `lat` / `lon` | `geo` | The two coordinate columns (two-column form). |
+| `fields` | `object`, joins | The nested projection. |
+| `table`, `primary_key`, `foreign_key`, `through`, `order_by`, `filters`, `limit` | joins | See [Joins](#joins). |
+| `table`, `column`, `value_type`, `foreign_key`, `through`, `filters` | aggregates | See [Aggregates](#aggregates). |
+| `value` | `constant` | The fixed value (`null`/absent renders as JSON null). |
 
 ```yaml
 fields:
   # column source, renamed + transformed + defaulted
-  - field: email
+  - keyword: email
     column: email_address
-    type: keyword
+    required: false
     transforms: [lowercase, trim]
     default: "unknown@example.com"
 ```
 
-A **Group** is its own item form (`- group: name`), not a property of a `field:`
-item — see [Groups](#groups).
+#### Objects
 
-#### Groups
-
-A group nests sibling columns of the **same row** under one document key,
+An `object` nests sibling columns of the **same row** under one document key,
 without reading a related table — for shaping a wide, flat table into a tidy
 object. It renders as an OpenSearch `object` and is never null; its members
 declare their own types.
 
 ```yaml
-- group: address
+- object: address
   fields:
-    - { field: street, column: address_street, type: keyword }
-    - { field: city,   column: address_city,   type: keyword }
-    - { field: zip,    column: address_zip,    type: keyword }
+    - keyword: street
+      column: address_street
+      required: true
+    - keyword: city
+      column: address_city
+      required: true
+    - keyword: zip
+      column: address_zip
+      required: false
 ```
 
 → `{ "address": { "street": …, "city": …, "zip": … } }`, all from one row.
 
-A group differs from a `one_to_one` [join](#joins): the join reads a *related
-table* by key, a group stays on the current row. Optional `options` pass extra
-properties to the `object` mapping.
+An `object` differs from a `one_to_one` [join](#joins): the join reads a
+*related table* by key, an object stays on the current row. Optional `options`
+pass extra properties to the `object` mapping.
 
 #### Types
 
@@ -338,18 +331,24 @@ without a database. Shorthand fields and columns with no `type` default to
 | `binary` | `bytea` | `binary` | |
 | `json` | `json`, `jsonb` | `object` | |
 
-For anything the named types don't cover, declare a **custom** type with the
+(A geographic point is a `geo` field, not a scalar `type` — see
+[Geo points](#geo-points).)
+
+For anything the named types don't cover, declare a **`custom`** field with the
 OpenSearch type and the Postgres types it accepts:
 
 ```yaml
-- field: price
-  type: { custom: { postgres: [numeric], opensearch: scaled_float } }
+- custom: price
+  postgres: [numeric]
+  opensearch: scaled_float
+  required: false
   options: { scaling_factor: 100 }
 ```
 
 `options` carries any extra OpenSearch mapping properties (analyzers, formats,
-…) merged beside the derived `type`. Groups are `object` and one-to-many joins
-are `nested` automatically — their shape is structural, so they take no `type`.
+…) merged beside the derived type. Objects, joins, aggregates, and geo points
+carry their own type keys (`object`, `one_to_one`/…, `count`/…, `geo`) rather
+than a scalar type; their shape is structural.
 
 > **Production-ready defaults.** The OpenSearch sink does **not** emit your
 > `text`/`keyword` fields bare. By default it attaches a strong analyzer and a
@@ -371,10 +370,10 @@ analyzer:
 
 ```yaml
 fields:
-  - field: bio
-    type: text            # natural-language analyzer + default subfields
-  - field: sku
-    type: identifier      # punctuation/case-splitting analyzer + default subfields
+  - text: bio             # natural-language analyzer + default subfields
+    required: false
+  - identifier: sku       # punctuation/case-splitting analyzer + default subfields
+    required: false
 ```
 
 (Use `keyword` instead when you want exact match, sort, or aggregation rather
@@ -382,6 +381,35 @@ than full-text search.) Both apply only to scalar column fields, and an explicit
 `analyzer` in `options` always wins over the type's default. The analyzers
 themselves are documented in
 [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
+
+#### Geo points
+
+A `geo` field is a geographic point → OpenSearch `geo_point`. Two forms:
+
+**Two columns** — a latitude and a longitude column assembled into a point. A
+missing coordinate makes the whole point null (never `{lat: null, lon: null}`,
+which OpenSearch would reject):
+
+```yaml
+- geo: location
+  lat: latitude
+  lon: longitude
+  required: false
+```
+
+**Single column** — a column already holding a `geo_point`-shaped value: a
+`json`/`jsonb` `{"lat": …, "lon": …}` or `[lon, lat]`, or a `text` `"lat,lon"`:
+
+```yaml
+- geo: location
+  column: location_json
+  required: false
+```
+
+PostGIS `geometry` and PG-native `point` aren't accepted directly (they
+serialize as WKB / `(x,y)`); expose a generated `jsonb`/`text` column in one of
+the shapes above. The two-column form needs no such column — flusso assembles
+the point in the document query.
 
 #### Transforms
 
@@ -393,42 +421,43 @@ A list applied in order to a column value before it lands in the document:
 | `trim` | Strip leading/trailing whitespace. |
 
 ```yaml
-- field: email
+- keyword: email
+  required: false
   transforms: [trim, lowercase]
 ```
 
 #### Joins
 
-Fold rows from a related table into the document as nested documents. The
-nested `fields` (siblings of `join`) project columns from each related row.
+Fold rows from a related table into the document as nested documents. The join's
+**cardinality is its type key** — `one_to_one`, `one_to_many`, or
+`many_to_many` — and its `fields` project columns from each related row.
 
-A join is `nested` (or `object` for `one_to_one`) by structure, so it takes no
-`type`. Its `fields` — the projection from each related row — and its
-`primary_key` live **inside** the `join`. The field reading that `primary_key`
-is marked non-null automatically, the same way the root `primary_key` works.
+A join is `nested` (or `object` for `one_to_one`) by structure. Its `fields` —
+the projection from each related row — and its `primary_key` are siblings of the
+type key. The field reading that `primary_key` is marked non-null automatically,
+the same way the root `primary_key` works.
 
 ```yaml
-- field: orders
-  join:
-    table: orders
-    type: one_to_many
-    foreign_key: user_id
-    primary_key: id
-    order_by:
-      - { column: created_at, direction: desc }
-    limit: 5
-    fields:
-      - id
-      - field: total
-        type: double
-      - field: status
-        type: keyword
+- one_to_many: orders
+  table: orders
+  foreign_key: user_id
+  primary_key: id
+  order_by:
+    - { column: created_at, direction: desc }
+  limit: 5
+  fields:
+    - integer: id
+      required: false
+    - double: total
+      required: true
+    - keyword: status
+      required: true
 ```
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
+| *(type key)* | field name | yes | `one_to_one`, `one_to_many`, or `many_to_many`; its value is the document key. |
 | `table` | Postgres identifier | yes | The related table. |
-| `type` | enum | yes | `one_to_one`, `one_to_many`, or `many_to_many`. |
 | `primary_key` | Postgres identifier | yes | The related table's primary key. The projected field reading it is forced non-null. |
 | `foreign_key` | Postgres identifier | conditional | The FK tying related rows to the parent. **Required** for `one_to_one`/`one_to_many`. |
 | `through` | object | conditional | A junction table. **Required** for `many_to_many` (and mutually exclusive with `foreign_key`). |
@@ -449,49 +478,47 @@ The `through` object (junction table for many-to-many):
 | `right_key` | yes | Column joining the junction to the related table. |
 
 ```yaml
-- field: tags
-  join:
-    table: tags
-    type: many_to_many
-    through:
-      table: post_tags
-      left_key: post_id
-      right_key: tag_id
-    primary_key: id
-    fields: [name]
+- many_to_many: tags
+  table: tags
+  through:
+    table: post_tags
+    left_key: post_id
+    right_key: tag_id
+  primary_key: id
+  fields:
+    - keyword: name
+      required: true
 ```
 
 #### Aggregates
 
-Reduce rows from a related table to a single scalar — a count or an extreme.
+Reduce rows from a related table to a single scalar — a count or an extreme. The
+**operation is the type key**: `count`, `sum`, `avg`, `min`, or `max`.
 
 A `count` is always a non-null `long` and an `avg` a nullable `double`, so they
-take no `type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
-**must** declare a `type`.
+take no `value_type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
+**must** declare a `column` and a `value_type`.
 
 ```yaml
-- field: orderCount
-  aggregate:
-    table: orders
-    op: count
-    foreign_key: user_id
+- count: orderCount
+  table: orders
+  foreign_key: user_id
 
-- field: lifetimeValue
-  type: double
-  aggregate:
-    table: orders
-    op: sum
-    column: total
-    foreign_key: user_id
-    filters:
-      - { column: status, op: eq, value: paid }
+- sum: lifetimeValue
+  table: orders
+  column: total
+  value_type: decimal
+  foreign_key: user_id
+  filters:
+    - { column: status, op: eq, value: paid }
 ```
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
+| *(type key)* | field name | yes | `count`/`sum`/`avg`/`min`/`max`; its value is the document key. |
 | `table` | Postgres identifier | yes | The related table. |
-| `op` | enum | yes | `count`, `sum`, `avg`, `min`, or `max`. |
-| `column` | Postgres identifier | conditional | The column to reduce. **Required** for `sum`/`avg`/`min`/`max`; ignored by `count`. |
+| `column` | Postgres identifier | conditional | The column to reduce. **Required** for `sum`/`avg`/`min`/`max`; not used by `count`. |
+| `value_type` | type name | conditional | The result type. **Required** for `sum`/`min`/`max` (it mirrors the column); not used by `count`/`avg`. |
 | `foreign_key` | Postgres identifier | conditional | The FK tying related rows to the parent (same `foreign_key` **xor** `through` rule as joins). |
 | `through` | object | conditional | Junction table for aggregating across many-to-many. |
 | `filters` | list | no | [Filters](#filters) restricting which rows count. |
@@ -541,13 +568,12 @@ Loading enforces — beyond what the file format itself can express — that:
 - the schema `version` is supported (only `1`);
 - all table/column/schema/index/sink names are valid Postgres identifiers, and
   field names are valid field-name identifiers;
+- each field has **exactly one** type key, and only the siblings that type allows;
 - a join specifies **exactly one** of `foreign_key` or `through`;
-- `sum`/`avg`/`min`/`max` aggregates carry a `column`;
-- a `between` filter has **exactly two** values, and `in`/`not_in` get a list;
-- a field is not **both** a `join` and an `aggregate`;
-- a scalar's declared `type` is one of the recognized types (or a `custom` one);
-- a `sum`/`min`/`max` aggregate declares a `type`, and a `type` is not set on a
-  structural group or join.
+- `sum`/`avg`/`min`/`max` aggregates carry a `column`, and `sum`/`min`/`max`
+  also declare a `value_type` (it mirrors the column);
+- a `geo` field gives either `lat` **and** `lon`, or a single `column`;
+- a `between` filter has **exactly two** values, and `in`/`not_in` get a list.
 
 A failure at any of these stops the load with a specific error naming the cause.
 None of it needs a database. When the source **is** reachable,
@@ -608,33 +634,31 @@ soft_delete:
   column: deleted
 
 fields:
-  - id
-  - field: email
-    type: keyword
+  - integer: id
+    required: false
+  - keyword: email
+    required: true
     transforms: [lowercase, trim]
-  - field: name
-    type: text
+  - text: name
+    required: false
 
-  - field: orders
-    join:
-      table: orders
-      type: one_to_many
-      foreign_key: user_id
-      primary_key: id
-      order_by:
-        - { column: id, direction: asc }
-      fields:
-        - id
-        - field: total
-          type: double
-        - field: status
-          type: keyword
+  - one_to_many: orders
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    order_by:
+      - { column: id, direction: asc }
+    fields:
+      - integer: id
+        required: false
+      - double: total
+        required: true
+      - keyword: status
+        required: true
 
-  - field: orderCount
-    aggregate:
-      table: orders
-      op: count
-      foreign_key: user_id
+  - count: orderCount
+    table: orders
+    foreign_key: user_id
 ```
 
 A change to a `users` row — or to any of that user's `orders` — rebuilds the
