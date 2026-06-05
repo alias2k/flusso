@@ -724,7 +724,7 @@ fn analyzer_of(schema: &IndexSchema, name: &str) -> String {
 #[test]
 fn identifier_type_carries_code_analyzer() {
     let schema =
-        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    type: identifier")
+        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    type: identifier\n    required: false")
             .unwrap();
     assert_eq!(column_of(&schema, "sku").ty, FlussoType::Identifier);
     assert_eq!(analyzer_of(&schema, "sku"), "flusso_code");
@@ -735,7 +735,7 @@ fn text_type_injects_no_analyzer() {
     // Plain `text` carries no analyzer in `options` — the sink supplies its
     // natural-language default.
     let schema =
-        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    type: text")
+        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    type: text\n    required: false")
             .unwrap();
     assert_eq!(column_of(&schema, "bio").ty, FlussoType::Text);
     let bio = schema
@@ -749,7 +749,7 @@ fn text_type_injects_no_analyzer() {
 #[test]
 fn explicit_analyzer_beats_type_default() {
     let schema = convert(
-        "version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    type: identifier\n    options: { analyzer: english }",
+        "version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    type: identifier\n    required: false\n    options: { analyzer: english }",
     )
     .unwrap();
     assert_eq!(analyzer_of(&schema, "sku"), "english");
@@ -758,7 +758,8 @@ fn explicit_analyzer_beats_type_default() {
 #[test]
 fn declared_type_sets_column_type() {
     let schema =
-        convert("version: 1\ntable: users\nfields:\n  - field: age\n    type: integer").unwrap();
+        convert("version: 1\ntable: users\nfields:\n  - field: age\n    type: integer\n    required: false")
+            .unwrap();
     assert_eq!(column_of(&schema, "age").ty, FlussoType::Integer);
 }
 
@@ -797,7 +798,7 @@ fn aggregate_sum_without_type_errors() {
 #[test]
 fn unknown_type_fails_to_parse() {
     // An invalid `type` value is rejected at parse time, like any other enum.
-    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    type: bogus";
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    type: bogus\n    required: false";
     assert!(parse(yaml).is_err());
 }
 
@@ -812,8 +813,8 @@ table: users
 fields:
   - group: address
     fields:
-      - { field: city, column: city, type: keyword }
-      - { field: zip, column: postal_code, type: keyword }
+      - { field: city, column: city, type: keyword, required: false }
+      - { field: zip, column: postal_code, type: keyword, required: false }
 "#,
     )
     .unwrap();
@@ -841,9 +842,10 @@ table: users
 fields:
   - field: id
     type: integer
+    required: false
   - group: name
     fields:
-      - { field: first, column: first_name, type: keyword }
+      - { field: first, column: first_name, type: keyword, required: false }
 "#,
     )
     .unwrap();

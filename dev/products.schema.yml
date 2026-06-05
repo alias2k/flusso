@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schemas/index.schema.yml
 # The `products` search document: a catalog product with its tags (many-to-many),
 # its reviews (one-to-many), pricing grouped into a sub-object, and rating
 # rollups. A change to the product, a tag link, or a review rebuilds it.
@@ -9,6 +10,7 @@ primary_key: id
 fields:
   - field: id
     type: integer
+    required: false
   - field: sku
     type: keyword
     required: true
@@ -17,6 +19,7 @@ fields:
     required: true
   - field: description
     type: text # natural-language full text
+    required: false
   - field: inStock
     column: in_stock
     type: boolean
@@ -24,6 +27,7 @@ fields:
   - field: categoryId
     column: category_id
     type: integer
+    required: false
   - field: createdAt
     column: created_at
     type: timestamp
@@ -51,8 +55,8 @@ fields:
       type: many_to_many
       through:
         table: product_tags
-        left_key: product_id  # junction → this product
-        right_key: tag_id     # junction → the tag
+        left_key: product_id # junction → this product
+        right_key: tag_id # junction → the tag
       primary_key: id
       order_by:
         - { column: label, direction: asc }
@@ -76,9 +80,11 @@ fields:
           required: true
         - field: body
           type: text
+          required: false
         - field: userId
           column: user_id
           type: integer
+          required: false
         - field: createdAt
           column: created_at
           type: timestamp

@@ -52,68 +52,76 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
                 source: FieldSource::Group(fields),
             })
         }
-        entities::Field::Full(def) => {
+        entities::Field::Join(def) => {
             let def = *def;
+            // A field cannot be both a join and an aggregate.
+            if def.aggregate.is_some() {
+                return Err(ConversionError::ConflictingRelation);
+            }
+            // A join folds in a related table; its shape (`nested`/`object`) is
+            // structural, so a declared `type` is rejected.
             let field_name = def.field.to_string();
+            reject_type_on_relation(&def.ty, &field_name)?;
+            let options = def
+                .options
+                .into_iter()
+                .map(|(k, v)| (k, yaml_to_generic(v)))
+                .collect();
+            Ok(Field {
+                field: def.field,
+                options,
+                source: FieldSource::Relation(Relation::Join(convert_join(def.join)?)),
+            })
+        }
+        entities::Field::Aggregate(def) => {
+            let def = *def;
+            let options = def
+                .options
+                .into_iter()
+                .map(|(k, v)| (k, yaml_to_generic(v)))
+                .collect();
+            Ok(Field {
+                field: def.field,
+                options,
+                source: FieldSource::Relation(Relation::Aggregate(convert_aggregate(
+                    def.aggregate,
+                    def.ty,
+                )?)),
+            })
+        }
+        entities::Field::Column(def) => {
+            let def = *def;
             let options: BTreeMap<String, GenericValue> = def
                 .options
                 .into_iter()
                 .map(|(k, v)| (k, yaml_to_generic(v)))
                 .collect();
-
-            match (def.join, def.aggregate) {
-                (Some(_), Some(_)) => Err(ConversionError::ConflictingRelation),
-                // A join folds in a related table; its shape (`nested`/`object`)
-                // is structural, so a declared `type` is rejected.
-                (Some(j), None) => {
-                    reject_type_on_relation(&def.ty, &field_name)?;
-                    Ok(Field {
-                        field: def.field,
-                        options,
-                        source: FieldSource::Relation(Relation::Join(convert_join(j)?)),
-                    })
-                }
-                (None, Some(a)) => {
-                    Ok(Field {
-                        field: def.field,
-                        options,
-                        source: FieldSource::Relation(Relation::Aggregate(convert_aggregate(
-                            a, def.ty,
-                        )?)),
-                    })
-                }
-                (None, None) => {
-                    let column = match def.column {
-                        Some(column) => column,
-                        None => default_column(&def.field)?,
-                    };
-                    let (ty, options) = resolve_column_type(def.ty, options);
-                    Ok(Field {
-                        field: def.field,
-                        options,
-                        source: FieldSource::Column(Column {
-                            column,
-                            ty,
-                            nullable: !def.required.unwrap_or(false),
-                            transforms: def
-                                .transforms
-                                .map(|ts| ts.into_iter().map(convert_transform).collect())
-                                .unwrap_or_default(),
-                            default: def.default.map(yaml_to_generic),
-                        }),
-                    })
-                }
-            }
+            let column = match def.column {
+                Some(column) => column,
+                None => default_column(&def.field)?,
+            };
+            let (ty, options) = resolve_column_type(def.ty, options);
+            Ok(Field {
+                field: def.field,
+                options,
+                source: FieldSource::Column(Column {
+                    column,
+                    ty,
+                    nullable: !def.required,
+                    transforms: def
+                        .transforms
+                        .map(|ts| ts.into_iter().map(convert_transform).collect())
+                        .unwrap_or_default(),
+                    default: def.default.map(yaml_to_generic),
+                }),
+            })
         }
     }
 }
 
 /// A declared `type` makes no sense on a structural field (a join or a group),
 /// whose shape is fixed by the relation, not the schema.
-fn reject_type_on_relation(
-    ty: &Option<FlussoType>,
-    field: &str,
-) -> Result<(), ConversionError> {
+fn reject_type_on_relation(ty: &Option<FlussoType>, field: &str) -> Result<(), ConversionError> {
     if ty.is_some() {
         return Err(ConversionError::TypeOnNonScalarField {
             field: field.to_owned(),

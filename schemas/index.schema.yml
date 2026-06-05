@@ -52,6 +52,7 @@ definitions:
 
   field:
     oneOf:
+      # Shorthand: `- name` is a `keyword` column of the same name.
       - $ref: "#/definitions/field_name"
       # A group: `- group: name` with nested `fields` (a same-row sub-object).
       - type: object
@@ -67,8 +68,38 @@ definitions:
             type: array
             items:
               $ref: "#/definitions/field"
+      # A join: a related table folded in. Its nullability is structural, so
+      # `required` is not allowed; `type` is rejected too (the shape is fixed).
       - type: object
-        required: [field]
+        required: [field, join]
+        additionalProperties: false
+        properties:
+          field:
+            $ref: "#/definitions/field_name"
+          options:
+            type: object
+            additionalProperties: true
+          join:
+            $ref: "#/definitions/join"
+      # An aggregate: a rollup over a related table. `type` is required for
+      # sum/min/max (their result mirrors the column); `required` is not allowed.
+      - type: object
+        required: [field, aggregate]
+        additionalProperties: false
+        properties:
+          field:
+            $ref: "#/definitions/field_name"
+          type:
+            $ref: "#/definitions/flusso_type"
+          options:
+            type: object
+            additionalProperties: true
+          aggregate:
+            $ref: "#/definitions/aggregate"
+      # A leaf column. `required` is mandatory — every leaf states its
+      # nullability explicitly.
+      - type: object
+        required: [field, required]
         additionalProperties: false
         properties:
           field:
@@ -79,18 +110,13 @@ definitions:
             $ref: "#/definitions/flusso_type"
           required:
             type: boolean
-            description: >-
-              Force the field non-null. Fields are nullable by default.
+            description: Force the field non-null.
           options:
             type: object
             description: >-
               Extra OpenSearch mapping properties merged beside the derived
               type (e.g. analyzer, format, scaling_factor).
             additionalProperties: true
-          join:
-            $ref: "#/definitions/join"
-          aggregate:
-            $ref: "#/definitions/aggregate"
           transforms:
             $ref: "#/definitions/transforms"
           default: {}

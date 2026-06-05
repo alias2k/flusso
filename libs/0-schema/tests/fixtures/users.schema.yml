@@ -6,6 +6,7 @@ fields:
   - id
   - field: email
     type: keyword
+    required: false
     transforms:
       - lowercase
       - trim

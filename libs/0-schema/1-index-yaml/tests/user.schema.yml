@@ -23,10 +23,12 @@ fields:
   - field: createdAt
     column: created_at
     type: timestamp
+    required: false
 
   - field: handle
     column: email
     type: keyword
+    required: false
     transforms:
       - lowercase
       - trim
@@ -34,12 +36,14 @@ fields:
   # Full-text, with an explicit analyzer via `options`
   - field: bio
     type: text
+    required: false
     options: { analyzer: english }
     default: ""
 
   - field: displayName
     column: name
     type: keyword
+    required: false
     transforms:
       - trim
     default: "anonymous"
@@ -55,6 +59,7 @@ fields:
       fields:
         - street
         - field: city
+          required: false
           transforms:
             - trim
         - country
@@ -73,8 +78,10 @@ fields:
         - id
         - field: total
           type: double
+          required: false
         - field: status
           type: keyword
+          required: false
 
         # Nested deeper
         - field: items
@@ -88,8 +95,10 @@ fields:
               - sku
               - field: quantity
                 type: integer
+                required: false
               - field: price
                 type: double
+                required: false
 
   # Flat array via join table (many-to-many)
   - field: tags

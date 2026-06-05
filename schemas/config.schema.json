@@ -62,6 +62,12 @@
           "default": 1000,
           "description": "Maximum number of documents per bulk request chunk"
         },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10485760,
+          "description": "Maximum uncompressed byte size of a bulk request chunk. Defaults to 10 MiB, within OpenSearch's recommended 5–15 MB bulk range."
+        },
         "timeout_secs": {
           "type": "integer",
           "minimum": 1,
@@ -144,6 +150,18 @@
                 },
                 {
                   "type": "object",
+                  "required": ["env"],
+                  "additionalProperties": false,
+                  "description": "Read the full connection URL from an environment variable at runtime",
+                  "properties": {
+                    "env": {
+                      "type": "string",
+                      "description": "Name of the environment variable to read at runtime"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
                   "additionalProperties": false,
                   "required": ["database"],
                   "description": "Individual connection parts",
@@ -166,7 +184,7 @@
                       "description": "Database user"
                     },
                     "password": {
-                      "type": "string",
+                      "$ref": "#/definitions/env_or_value",
                       "description": "Database password"
                     },
                     "database": {

@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schemas/index.schema.yml
 # The `users` search document: a customer with their profile, addresses, and
 # orders (down to line items), plus rollup aggregates over their orders.
 #
@@ -15,6 +16,7 @@ soft_delete:
 fields:
   - field: id
     type: integer
+    required: false
   - field: email
     type: keyword
     required: true
@@ -22,6 +24,7 @@ fields:
   - field: fullName
     column: full_name
     type: text # natural-language full text
+    required: false
 
   # A group: reshape same-row scalar columns into a nested object.
   - group: account
@@ -31,6 +34,7 @@ fields:
         required: true
       - field: country
         type: keyword
+        required: false
       - field: createdAt
         column: created_at
         type: timestamp
@@ -46,12 +50,15 @@ fields:
       fields:
         - field: bio
           type: text
+          required: false
         - field: avatarUrl
           column: avatar_url
           type: keyword
+          required: false
         - field: birthDate
           column: birth_date
           type: date
+          required: false
 
   # One-to-many: every address.
   - field: addresses
@@ -75,8 +82,10 @@ fields:
         - field: postalCode
           column: postal_code
           type: keyword
+          required: false
         - field: country
           type: keyword
+          required: false
 
   # One-to-many: orders (cancelled ones filtered out), newest first, with line
   # items and the product each item refers to — three levels of nesting.
