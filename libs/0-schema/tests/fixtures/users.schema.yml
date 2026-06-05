@@ -5,7 +5,7 @@ primary_key: id
 fields:
   - id
   - field: email
-    mapping: { type: keyword }
+    type: keyword
     transforms:
       - lowercase
       - trim

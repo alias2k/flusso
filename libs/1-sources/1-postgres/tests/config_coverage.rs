@@ -22,11 +22,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use schema_core::{
-    Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Direction,
-    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, GenericValue, Index, IndexName,
-    IndexSchema, Join, JoinKey, JoinType, NullCheckFilter, NullOp, OrderBy, RawFilter,
-    RawFilterValue, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Source, SourceType,
-    TableName, Through, Transform, ValueOpFilter,
+    Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Direction,
+    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Index,
+    IndexName, IndexSchema, Join, JoinKey, JoinType, NullCheckFilter, NullOp, OrderBy, RawFilter,
+    RawFilterValue, Relation, Secret, SoftDelete, SoftDeleteColumn, SoftDeleteField, Source,
+    SourceType, TableName, Through, Transform, ValueOpFilter,
 };
 use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
@@ -128,12 +128,13 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         Join {
             table: table("profiles"),
             join_type: JoinType::OneToOne,
+            primary_key: column("id"),
             key: JoinKey::Direct(column("user_id")),
             filters: None,
             order_by: None,
             limit: None,
+            fields: vec![col("headline", "headline")],
         },
-        vec![col("headline", "headline")],
     );
     // One-to-many, newest first, capped at 2; each order folds in its items.
     let orders = join_field(
@@ -141,6 +142,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         Join {
             table: table("orders"),
             join_type: JoinType::OneToMany,
+            primary_key: column("id"),
             key: JoinKey::Direct(column("user_id")),
             filters: None,
             order_by: Some(vec![OrderBy {
@@ -148,26 +150,27 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                 direction: Some(Direction::Desc),
             }]),
             limit: Some(2),
+            fields: vec![
+                col("id", "id"),
+                col("status", "status"),
+                join_field(
+                    "items",
+                    Join {
+                        table: table("order_items"),
+                        join_type: JoinType::OneToMany,
+                        primary_key: column("id"),
+                        key: JoinKey::Direct(column("order_id")),
+                        filters: None,
+                        order_by: Some(vec![OrderBy {
+                            column: column("sku"),
+                            direction: Some(Direction::Asc),
+                        }]),
+                        limit: None,
+                        fields: vec![col("sku", "sku"), col("qty", "qty")],
+                    },
+                ),
+            ],
         },
-        vec![
-            col("id", "id"),
-            col("status", "status"),
-            join_field(
-                "items",
-                Join {
-                    table: table("order_items"),
-                    join_type: JoinType::OneToMany,
-                    key: JoinKey::Direct(column("order_id")),
-                    filters: None,
-                    order_by: Some(vec![OrderBy {
-                        column: column("sku"),
-                        direction: Some(Direction::Asc),
-                    }]),
-                    limit: None,
-                },
-                vec![col("sku", "sku"), col("qty", "qty")],
-            ),
-        ],
     );
     // Many-to-many through the user_tags junction, labels A→Z.
     let tags = join_field(
@@ -175,6 +178,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         Join {
             table: table("tags"),
             join_type: JoinType::ManyToMany,
+            primary_key: column("id"),
             key: JoinKey::Through(Through {
                 table: table("user_tags"),
                 left_key: column("user_id"),
@@ -186,8 +190,8 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                 direction: Some(Direction::Asc),
             }]),
             limit: None,
+            fields: vec![col("label", "label")],
         },
-        vec![col("label", "label")],
     );
 
     let builder = builder(
@@ -281,6 +285,7 @@ async fn aggregates_cover_every_op_and_through() {
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
                 }),
+                value_type: None,
                 filters: None,
             },
         ),
@@ -488,6 +493,8 @@ async fn transforms_and_defaults_apply() {
     let email = Field {
         source: FieldSource::Column(Column {
             column: column("email"),
+            ty: FlussoType::Keyword,
+            nullable: true,
             transforms: vec![Transform::Trim, Transform::Lowercase],
             default: None,
         }),
@@ -496,6 +503,8 @@ async fn transforms_and_defaults_apply() {
     let bio = Field {
         source: FieldSource::Column(Column {
             column: column("bio"),
+            ty: FlussoType::Keyword,
+            nullable: true,
             transforms: Vec::new(),
             default: Some(GenericValue::String("(no bio)".into())),
         }),
@@ -666,44 +675,48 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             Join {
                 table: table("profiles"),
                 join_type: JoinType::OneToOne,
+                primary_key: column("id"),
                 key: JoinKey::Direct(column("user_id")),
                 filters: None,
                 order_by: None,
                 limit: None,
+                fields: vec![col("headline", "headline")],
             },
-            vec![col("headline", "headline")],
         ),
         join_field(
             "orders",
             Join {
                 table: table("orders"),
                 join_type: JoinType::OneToMany,
+                primary_key: column("id"),
                 key: JoinKey::Direct(column("user_id")),
                 filters: None,
                 order_by: None,
                 limit: None,
+                fields: vec![
+                    col("id", "id"),
+                    join_field(
+                        "items",
+                        Join {
+                            table: table("order_items"),
+                            join_type: JoinType::OneToMany,
+                            primary_key: column("id"),
+                            key: JoinKey::Direct(column("order_id")),
+                            filters: None,
+                            order_by: None,
+                            limit: None,
+                            fields: vec![col("sku", "sku")],
+                        },
+                    ),
+                ],
             },
-            vec![
-                col("id", "id"),
-                join_field(
-                    "items",
-                    Join {
-                        table: table("order_items"),
-                        join_type: JoinType::OneToMany,
-                        key: JoinKey::Direct(column("order_id")),
-                        filters: None,
-                        order_by: None,
-                        limit: None,
-                    },
-                    vec![col("sku", "sku")],
-                ),
-            ],
         ),
         join_field(
             "tags",
             Join {
                 table: table("tags"),
                 join_type: JoinType::ManyToMany,
+                primary_key: column("id"),
                 key: JoinKey::Through(Through {
                     table: table("user_tags"),
                     left_key: column("user_id"),
@@ -712,8 +725,8 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                 filters: None,
                 order_by: None,
                 limit: None,
+                fields: vec![col("label", "label")],
             },
-            vec![col("label", "label")],
         ),
     ];
 
@@ -781,7 +794,9 @@ fn config(connection_url: &str, schema: IndexSchema) -> Config {
     Config {
         source: Source {
             source_type: SourceType::Postgres,
-            connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
+            connection: Some(ConnectionSpec::Url(Secret::Value(
+                connection_url.to_owned(),
+            ))),
         },
         sinks: BTreeMap::new(),
         indexes: BTreeMap::from([(
@@ -811,7 +826,7 @@ fn base(name: &str) -> Field {
     // caller overrides `source`.
     Field {
         field: field(name),
-        mapping: None,
+        options: Default::default(),
         source: FieldSource::Constant(GenericValue::Null),
     }
 }
@@ -820,6 +835,8 @@ fn col(name: &str, source_column: &str) -> Field {
     Field {
         source: FieldSource::Column(Column {
             column: column(source_column),
+            ty: FlussoType::Keyword,
+            nullable: true,
             transforms: Vec::new(),
             default: None,
         }),
@@ -827,9 +844,9 @@ fn col(name: &str, source_column: &str) -> Field {
     }
 }
 
-fn join_field(name: &str, join: Join, sub: Vec<Field>) -> Field {
+fn join_field(name: &str, join: Join) -> Field {
     Field {
-        source: FieldSource::Relation(Relation::Join { join, fields: sub }),
+        source: FieldSource::Relation(Relation::Join(join)),
         ..base(name)
     }
 }
@@ -847,6 +864,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         table: table("orders"),
         op,
         key: JoinKey::Direct(column("user_id")),
+        value_type: None,
         filters,
     }
 }

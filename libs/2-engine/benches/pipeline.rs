@@ -67,10 +67,11 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use engine::{BatchPolicy, Engine};
 use futures::stream::{self, BoxStream};
 use schema_core::{
-    Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Direction,
-    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, GenericValue, Index,
-    IndexMapping, IndexName, IndexSchema, Join, JoinKey, JoinType, OrderBy, Relation, SoftDelete,
-    SoftDeleteColumn, Source, SourceType, TableName, Through, Transform, ValueOpFilter,
+    Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Direction,
+    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Index,
+    IndexMapping, IndexName, IndexSchema, Join, JoinKey, JoinType, OrderBy, Relation, Secret,
+    SinkName, SoftDelete, SoftDeleteColumn, Source, SourceType, TableName, Through, Transform,
+    ValueOpFilter,
 };
 use sinks_core::{Result as SinkResult, Sink};
 use sinks_opensearch::OpensearchSink;
@@ -361,7 +362,7 @@ async fn setup() -> Services {
 
     let (opensearch, os_url) = start_opensearch().await;
     let os_config = schema_core::OpensearchSink {
-        url: schema_core::HttpUrl::try_new(&os_url).unwrap(),
+        url: Secret::Value(os_url.clone()),
         username: None,
         password: None,
         tls_verify: false,
@@ -375,7 +376,8 @@ async fn setup() -> Services {
         text_analysis: schema_core::TextAnalysis::Builtin,
         auto_subfields: true,
     };
-    let inner = OpensearchSink::from_config(&os_config).unwrap();
+    let os_name = SinkName::try_new("bench").unwrap();
+    let inner = OpensearchSink::from_config(&os_name, &os_config).unwrap();
     // Create the index from the builder's resolved, fully-typed mapping so the
     // `change` and `baseline` benches (which write before any backfill) land in
     // a real index. `Engine::run` also calls this — it is idempotent.
@@ -558,13 +560,14 @@ fn config(connection_url: &str) -> Config {
         "profile",
         Join {
             table: table("profiles"),
+            primary_key: column("id"),
             join_type: JoinType::OneToOne,
             key: JoinKey::Direct(column("user_id")),
             filters: None,
             order_by: None,
             limit: None,
+            fields: vec![col("headline", "headline")],
         },
-        vec![col("headline", "headline")],
     );
 
     // 1:N join to orders (newest first), each folding in its items (nested 1:N).
@@ -573,28 +576,30 @@ fn config(connection_url: &str) -> Config {
         Join {
             table: table("orders"),
             join_type: JoinType::OneToMany,
+            primary_key: column("id"),
             key: JoinKey::Direct(column("user_id")),
             filters: None,
             order_by: Some(vec![order_by("placed_at", Direction::Desc)]),
             limit: None,
+            fields: vec![
+                col("id", "id"),
+                col("status", "status"),
+                col("total", "total"),
+                join_field(
+                    "items",
+                    Join {
+                        table: table("order_items"),
+                        join_type: JoinType::OneToMany,
+                        primary_key: column("id"),
+                        key: JoinKey::Direct(column("order_id")),
+                        filters: None,
+                        order_by: Some(vec![order_by("sku", Direction::Asc)]),
+                        limit: None,
+                        fields: vec![col("sku", "sku"), col("qty", "qty"), col("price", "price")],
+                    },
+                ),
+            ],
         },
-        vec![
-            col("id", "id"),
-            col("status", "status"),
-            col("total", "total"),
-            join_field(
-                "items",
-                Join {
-                    table: table("order_items"),
-                    join_type: JoinType::OneToMany,
-                    key: JoinKey::Direct(column("order_id")),
-                    filters: None,
-                    order_by: Some(vec![order_by("sku", Direction::Asc)]),
-                    limit: None,
-                },
-                vec![col("sku", "sku"), col("qty", "qty"), col("price", "price")],
-            ),
-        ],
     );
 
     // M:N join to tags through the user_tags junction, labels A→Z.
@@ -603,6 +608,7 @@ fn config(connection_url: &str) -> Config {
         Join {
             table: table("tags"),
             join_type: JoinType::ManyToMany,
+            primary_key: column("id"),
             key: JoinKey::Through(Through {
                 table: table("user_tags"),
                 left_key: column("user_id"),
@@ -611,8 +617,8 @@ fn config(connection_url: &str) -> Config {
             filters: None,
             order_by: Some(vec![order_by("label", Direction::Asc)]),
             limit: None,
+            fields: vec![col("label", "label")],
         },
-        vec![col("label", "label")],
     );
 
     // A group sub-object: a transformed column plus a constant, nested without
@@ -681,6 +687,7 @@ fn config(connection_url: &str) -> Config {
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
                 }),
+                value_type: None,
                 filters: None,
             },
         ),
@@ -701,7 +708,9 @@ fn config(connection_url: &str) -> Config {
     Config {
         source: Source {
             source_type: SourceType::Postgres,
-            connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
+            connection: Some(ConnectionSpec::Url(Secret::Value(
+                connection_url.to_owned(),
+            ))),
         },
         sinks: BTreeMap::new(),
         indexes: BTreeMap::from([(
@@ -728,9 +737,11 @@ fn col_full(
 ) -> Field {
     Field {
         field: field(name),
-        mapping: None,
+        options: Default::default(),
         source: FieldSource::Column(Column {
             column: column(source_column),
+            ty: FlussoType::Keyword,
+            nullable: true,
             transforms,
             default,
         }),
@@ -740,7 +751,7 @@ fn col_full(
 fn group_field(name: &str, fields: Vec<Field>) -> Field {
     Field {
         field: field(name),
-        mapping: None,
+        options: Default::default(),
         source: FieldSource::Group(fields),
     }
 }
@@ -748,23 +759,23 @@ fn group_field(name: &str, fields: Vec<Field>) -> Field {
 fn constant_field(name: &str, value: GenericValue) -> Field {
     Field {
         field: field(name),
-        mapping: None,
+        options: Default::default(),
         source: FieldSource::Constant(value),
     }
 }
 
-fn join_field(name: &str, join: Join, sub: Vec<Field>) -> Field {
+fn join_field(name: &str, join: Join) -> Field {
     Field {
         field: field(name),
-        mapping: None,
-        source: FieldSource::Relation(Relation::Join { join, fields: sub }),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(join)),
     }
 }
 
 fn agg_field(name: &str, aggregate: Aggregate) -> Field {
     Field {
         field: field(name),
-        mapping: None,
+        options: Default::default(),
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     }
 }
@@ -774,6 +785,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         table: table("orders"),
         op,
         key: JoinKey::Direct(column("user_id")),
+        value_type: None,
         filters,
     }
 }

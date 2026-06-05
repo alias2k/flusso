@@ -1,8 +1,13 @@
-#![allow(unused_crate_dependencies)]
+#![allow(
+    unused_crate_dependencies,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 
 use std::path::Path;
 
-use schema::{IndexName, LoadError, load};
+use schema::{ConnectionSpec, IndexName, LoadError, Secret, load};
 
 fn index_name(name: &str) -> IndexName {
     IndexName::try_new(name).unwrap()
@@ -18,8 +23,11 @@ fn fixture(name: &str) -> std::path::PathBuf {
 fn loads_config_with_indexes() {
     let config = load(fixture("config.toml")).unwrap();
 
-    // Source and sinks come from the TOML.
-    assert!(config.source.connection_url.as_ref().contains("localhost"));
+    // Source and sinks come from the TOML; the connection stays deferred.
+    match &config.source.connection {
+        Some(ConnectionSpec::Url(Secret::Value(v))) => assert!(v.contains("localhost")),
+        other => panic!("expected a literal connection URL, got {other:?}"),
+    }
     assert_eq!(config.sinks.len(), 1);
 
     // Both index entries are loaded from their YAML files, keyed by name.
@@ -71,4 +79,50 @@ enabled = true
     std::fs::remove_file(&config_path).ok();
 
     assert!(matches!(err, LoadError::ReadSchema { .. }));
+}
+
+#[test]
+fn compiled_artifact_roundtrips_and_preserves_mappings() {
+    let compiled = schema::compile(fixture("config.toml")).unwrap();
+    let bytes = schema::to_bytes(&compiled).unwrap();
+    let config = schema::from_bytes(&bytes).unwrap();
+
+    // The whole configuration survives the binary round-trip.
+    assert_eq!(config.indexes.len(), 2);
+
+    // The mapping (and its content hash → physical index name) is identical to
+    // the one derived directly from source — the artifact is faithful.
+    let from_source = load(fixture("config.toml")).unwrap().resolve_mappings();
+    let from_artifact = config.resolve_mappings();
+    assert_eq!(from_source.len(), from_artifact.len());
+    for (a, b) in from_source.iter().zip(&from_artifact) {
+        assert_eq!(a.index, b.index);
+        assert_eq!(a.hash, b.hash);
+    }
+}
+
+#[test]
+fn compiled_artifact_keeps_env_secret_unresolved() {
+    use schema::{Compiled, Config, ConnectionSpec, FORMAT_VERSION, Secret, Source, SourceType};
+    let config = Config {
+        source: Source {
+            source_type: SourceType::Postgres,
+            connection: Some(ConnectionSpec::Url(Secret::Env("DATABASE_URL".to_owned()))),
+        },
+        sinks: Default::default(),
+        indexes: Default::default(),
+    };
+    let compiled = Compiled {
+        format_version: FORMAT_VERSION,
+        flusso_version: "test".to_owned(),
+        config,
+    };
+    let bytes = schema::to_bytes(&compiled).unwrap();
+    let config = schema::from_bytes(&bytes).unwrap();
+
+    // The env reference is carried through verbatim — never resolved or baked.
+    match config.source.connection {
+        Some(ConnectionSpec::Url(Secret::Env(var))) => assert_eq!(var, "DATABASE_URL"),
+        other => panic!("expected an unresolved env secret, got {other:?}"),
+    }
 }

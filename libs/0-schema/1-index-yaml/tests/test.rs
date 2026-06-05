@@ -1,4 +1,9 @@
-#![allow(unused_crate_dependencies)]
+#![allow(
+    unused_crate_dependencies,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 
 use schema_core::{Filter, FilterValue, IndexSchema, JoinKey, ParseFrom, Relation};
 use schema_index_yaml::{ConversionError, ParseError, SchemaYaml};
@@ -53,8 +58,8 @@ fields:
       table: orders
       type: one_to_many
       foreign_key: user_id
-    mapping: { type: nested }
-    fields: [id, total]
+      primary_key: id
+      fields: [id, total]
 "#,
     )
     .unwrap();
@@ -75,8 +80,8 @@ fields:
         table: user_tags
         left_key: user_id
         right_key: tag_id
-    mapping: { type: keyword }
-    fields: [name]
+      primary_key: id
+      fields: [name]
 "#,
     )
     .unwrap();
@@ -133,7 +138,8 @@ fields:
         - { column: status, op: eq, value: "active" }
         - { column: total, op: between, value: [10, 1000] }
         - { column: tag, op: in, value: [a, b, c] }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -153,7 +159,8 @@ fields:
       foreign_key: user_id
       filters:
         - { column: deleted_at, op: is_null }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -173,7 +180,8 @@ fields:
       foreign_key: user_id
       filters:
         - raw: "status != 'cancelled'"
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -299,14 +307,15 @@ fields:
       table: orders
       type: one_to_many
       foreign_key: user_id
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
 
     let field = &schema.fields[0];
     match field.relation().unwrap() {
-        Relation::Join { join, .. } => match &join.key {
+        Relation::Join(join) => match &join.key {
             JoinKey::Direct(col) => assert_eq!(col.as_ref(), "user_id"),
             JoinKey::Through(_) => panic!("expected direct key"),
         },
@@ -329,14 +338,15 @@ fields:
         table: user_tags
         left_key: user_id
         right_key: tag_id
-    fields: [name]
+      primary_key: id
+      fields: [name]
 "#,
     )
     .unwrap();
 
     let field = &schema.fields[0];
     match field.relation().unwrap() {
-        Relation::Join { join, .. } => match &join.key {
+        Relation::Join(join) => match &join.key {
             JoinKey::Through(t) => {
                 assert_eq!(t.table.as_ref(), "user_tags");
                 assert_eq!(t.left_key.as_ref(), "user_id");
@@ -381,6 +391,7 @@ version: 1
 table: users
 fields:
   - field: total_spent
+    type: double
     aggregate:
       table: orders
       op: sum
@@ -414,14 +425,15 @@ fields:
       foreign_key: user_id
       filters:
         - { column: status, op: in, value: [active, pending] }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
 
     let field = &schema.fields[0];
     let join = match field.relation().unwrap() {
-        Relation::Join { join, .. } => join,
+        Relation::Join(join) => join,
         _ => panic!("expected join"),
     };
     let filter = &join.filters.as_ref().unwrap()[0];
@@ -447,14 +459,15 @@ fields:
       foreign_key: user_id
       filters:
         - { column: total, op: between, value: [10, 500] }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
 
     let field = &schema.fields[0];
     let join = match field.relation().unwrap() {
-        Relation::Join { join, .. } => join,
+        Relation::Join(join) => join,
         _ => panic!("expected join"),
     };
     let filter = &join.filters.as_ref().unwrap()[0];
@@ -480,14 +493,15 @@ fields:
       foreign_key: user_id
       filters:
         - { column: status, op: eq, value: "active" }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
 
     let field = &schema.fields[0];
     let join = match field.relation().unwrap() {
-        Relation::Join { join, .. } => join,
+        Relation::Join(join) => join,
         _ => panic!("expected join"),
     };
     let filter = &join.filters.as_ref().unwrap()[0];
@@ -524,7 +538,8 @@ fields:
         table: pivot
         left_key: user_id
         right_key: order_id
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -543,7 +558,8 @@ fields:
     join:
       table: orders
       type: one_to_many
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -587,7 +603,8 @@ fields:
       foreign_key: user_id
       filters:
         - { column: status, op: in, value: "active" }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -612,7 +629,8 @@ fields:
       foreign_key: user_id
       filters:
         - { column: total, op: between, value: [10] }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -637,7 +655,8 @@ fields:
       foreign_key: user_id
       filters:
         - { column: status, op: eq }
-    fields: [id]
+      primary_key: id
+      fields: [id]
 "#,
     )
     .unwrap();
@@ -660,11 +679,12 @@ fields:
       table: orders
       type: one_to_many
       foreign_key: user_id
+      primary_key: id
+      fields: [id]
     aggregate:
       table: orders
       op: count
       foreign_key: user_id
-    fields: [id]
 "#,
     )
     .unwrap();
@@ -674,19 +694,28 @@ fields:
 
 // ── kind sugar ───────────────────────────────────────────────────────────────
 
-fn mapping_of<'a>(schema: &'a IndexSchema, name: &str) -> &'a schema_core::Mapping {
-    schema
+use schema_core::{Column, FieldSource, FlussoType};
+
+fn column_of<'a>(schema: &'a IndexSchema, name: &str) -> &'a Column {
+    match &schema
         .fields
         .iter()
         .find(|f| f.field.as_ref() == name)
         .expect("field present")
-        .mapping
-        .as_ref()
-        .expect("field has a resolved mapping")
+        .source
+    {
+        FieldSource::Column(c) => c,
+        other => panic!("expected a column field, got {other:?}"),
+    }
 }
 
 fn analyzer_of(schema: &IndexSchema, name: &str) -> String {
-    match mapping_of(schema, name).extra.get("analyzer") {
+    let field = schema
+        .fields
+        .iter()
+        .find(|f| f.field.as_ref() == name)
+        .expect("field present");
+    match field.options.get("analyzer") {
         Some(schema_core::GenericValue::String(s)) => s.clone(),
         other => panic!("expected analyzer string, got {other:?}"),
     }
@@ -697,7 +726,7 @@ fn kind_prose_implies_text_with_prose_analyzer() {
     let schema =
         convert("version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: prose")
             .unwrap();
-    assert_eq!(mapping_of(&schema, "bio").mapping_type.name(), "text");
+    assert_eq!(column_of(&schema, "bio").ty, FlussoType::Text);
     assert_eq!(analyzer_of(&schema, "bio"), "flusso_text");
 }
 
@@ -706,32 +735,68 @@ fn kind_code_implies_text_with_code_analyzer() {
     let schema =
         convert("version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    kind: code")
             .unwrap();
-    assert_eq!(mapping_of(&schema, "sku").mapping_type.name(), "text");
+    assert_eq!(column_of(&schema, "sku").ty, FlussoType::Text);
     assert_eq!(analyzer_of(&schema, "sku"), "flusso_code");
 }
 
 #[test]
 fn explicit_analyzer_beats_kind() {
     let schema = convert(
-        "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: prose\n    mapping: { type: text, analyzer: english }",
+        "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: prose\n    options: { analyzer: english }",
     )
     .unwrap();
     assert_eq!(analyzer_of(&schema, "bio"), "english");
 }
 
 #[test]
-fn kind_on_non_text_mapping_errors() {
-    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: tags\n    kind: code\n    mapping: { type: keyword }";
+fn kind_on_non_text_type_errors() {
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: tags\n    kind: code\n    type: keyword";
+    let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
+    assert!(matches!(err, ConversionError::KindRequiresTextType { .. }));
+}
+
+#[test]
+fn declared_type_sets_column_type() {
+    let schema =
+        convert("version: 1\ntable: users\nfields:\n  - field: age\n    type: integer").unwrap();
+    assert_eq!(column_of(&schema, "age").ty, FlussoType::Integer);
+}
+
+#[test]
+fn shorthand_defaults_to_keyword_nullable() {
+    let schema = convert("version: 1\ntable: users\nfields:\n  - id").unwrap();
+    let col = column_of(&schema, "id");
+    assert_eq!(col.ty, FlussoType::Keyword);
+    assert!(col.nullable);
+}
+
+#[test]
+fn required_makes_column_non_null() {
+    let schema =
+        convert("version: 1\ntable: users\nfields:\n  - field: id\n    required: true").unwrap();
+    assert!(!column_of(&schema, "id").nullable);
+}
+
+#[test]
+fn type_on_join_field_errors() {
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: orders\n    type: integer\n    join:\n      table: orders\n      type: one_to_many\n      foreign_key: user_id\n      primary_key: id\n      fields: [id]";
+    let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
+    assert!(matches!(err, ConversionError::TypeOnNonScalarField { .. }));
+}
+
+#[test]
+fn aggregate_sum_without_type_errors() {
+    let yaml = "version: 1\ntable: users\nfields:\n  - field: total\n    aggregate:\n      table: orders\n      op: sum\n      column: amount\n      foreign_key: user_id";
     let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
     assert!(matches!(
         err,
-        ConversionError::KindRequiresTextMapping { .. }
+        ConversionError::MissingAggregateType { op: "sum" }
     ));
 }
 
 #[test]
 fn kind_on_join_field_errors() {
-    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: orders\n    kind: prose\n    join:\n      table: orders\n      type: one_to_many\n      foreign_key: user_id\n    fields: [id]";
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: orders\n    kind: prose\n    join:\n      table: orders\n      type: one_to_many\n      foreign_key: user_id\n      primary_key: id\n      fields: [id]";
     let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
     assert!(matches!(err, ConversionError::KindOnNonScalarField));
 }

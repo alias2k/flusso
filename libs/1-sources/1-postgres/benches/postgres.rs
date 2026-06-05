@@ -31,9 +31,9 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use schema_core::{
-    Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, FieldSource,
-    GenericValue, Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Relation, SoftDelete,
-    SoftDeleteColumn, Source, SourceType, TableName,
+    Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Field, FieldName, FieldSource,
+    FlussoType, GenericValue, Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Relation,
+    Secret, SoftDelete, SoftDeleteColumn, Source, SourceType, TableName,
 };
 use sources_core::RowKey;
 use sources_core::document::{DocumentBuilder, DocumentId};
@@ -185,22 +185,21 @@ fn bench(c: &mut Criterion) {
 fn config(connection_url: &str) -> Config {
     let orders = Field {
         field: field("orders"),
-        mapping: None,
-        source: FieldSource::Relation(Relation::Join {
-            join: Join {
-                table: table("orders"),
-                join_type: JoinType::OneToMany,
-                key: JoinKey::Direct(column("user_id")),
-                filters: None,
-                order_by: None,
-                limit: None,
-            },
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: table("orders"),
+            join_type: JoinType::OneToMany,
+            primary_key: column("id"),
+            key: JoinKey::Direct(column("user_id")),
+            filters: None,
+            order_by: None,
+            limit: None,
             fields: vec![
                 column_field("id", "id"),
                 column_field("total", "total"),
                 column_field("status", "status"),
             ],
-        }),
+        })),
     };
     let schema = IndexSchema {
         version: 1,
@@ -222,7 +221,9 @@ fn config(connection_url: &str) -> Config {
     Config {
         source: Source {
             source_type: SourceType::Postgres,
-            connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
+            connection: Some(ConnectionSpec::Url(Secret::Value(
+                connection_url.to_owned(),
+            ))),
         },
         sinks: BTreeMap::new(),
         indexes: BTreeMap::from([(
@@ -238,9 +239,11 @@ fn config(connection_url: &str) -> Config {
 fn column_field(name: &str, col: &str) -> Field {
     Field {
         field: field(name),
-        mapping: None,
+        options: Default::default(),
         source: FieldSource::Column(Column {
             column: column(col),
+            ty: FlussoType::Keyword,
+            nullable: true,
             transforms: Vec::new(),
             default: None,
         }),

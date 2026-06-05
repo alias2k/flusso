@@ -203,8 +203,8 @@ impl Builder<'_> {
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
         match &field.source {
-            FieldSource::Relation(Relation::Join { join, fields }) => {
-                self.join_value(join, fields, parent_alias, parent_pk)
+            FieldSource::Relation(Relation::Join(join)) => {
+                self.join_value(join, parent_alias, parent_pk)
             }
             FieldSource::Relation(Relation::Aggregate(aggregate)) => {
                 self.aggregate_value(aggregate, parent_alias, parent_pk)
@@ -224,7 +224,6 @@ impl Builder<'_> {
     fn join_value(
         &mut self,
         join: &Join,
-        sub: &[Field],
         parent_alias: &str,
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
@@ -237,7 +236,7 @@ impl Builder<'_> {
                 match join.join_type {
                     JoinType::OneToOne => {
                         let alias = self.alias();
-                        let object = self.object(sub, &alias, Some(&child_pk))?;
+                        let object = self.object(&join.fields, &alias, Some(&child_pk))?;
                         let filters = self.filters(join.filters.as_deref(), &alias, child)?;
                         let order = order_clause(join.order_by.as_deref(), &alias);
                         Ok(format!(
@@ -250,7 +249,7 @@ impl Builder<'_> {
                     }
                     JoinType::OneToMany | JoinType::ManyToMany => {
                         let derived = self.alias();
-                        let object = self.object(sub, &derived, Some(&child_pk))?;
+                        let object = self.object(&join.fields, &derived, Some(&child_pk))?;
                         let inner = self.alias();
                         let filters = self.filters(join.filters.as_deref(), &inner, child)?;
                         let inner_sql = format!(
@@ -275,7 +274,7 @@ impl Builder<'_> {
                 let far = &join.table;
                 let far_pk = self.pk_of(far)?;
                 let derived = self.alias();
-                let object = self.object(sub, &derived, Some(&far_pk))?;
+                let object = self.object(&join.fields, &derived, Some(&far_pk))?;
                 let far_alias = self.alias();
                 let junction_alias = self.alias();
                 let filters = self.filters(join.filters.as_deref(), &far_alias, far)?;
@@ -631,9 +630,11 @@ mod tests {
     fn col_field(name: &str, column: &str) -> Field {
         Field {
             field: f(name),
-            mapping: None,
+            options: Default::default(),
             source: FieldSource::Column(schema_core::Column {
                 column: c(column),
+                ty: schema_core::FlussoType::Keyword,
+                nullable: true,
                 transforms: Vec::new(),
                 default: None,
             }),
@@ -680,21 +681,20 @@ mod tests {
     fn one_to_many_with_order_and_limit() {
         let orders = Field {
             field: f("orders"),
-            mapping: None,
-            source: FieldSource::Relation(Relation::Join {
-                join: Join {
-                    table: t("orders"),
-                    join_type: JoinType::OneToMany,
-                    key: JoinKey::Direct(c("user_id")),
-                    filters: None,
-                    order_by: Some(vec![OrderBy {
-                        column: c("created_at"),
-                        direction: Some(Direction::Desc),
-                    }]),
-                    limit: Some(5),
-                },
+            options: Default::default(),
+            source: FieldSource::Relation(Relation::Join(Join {
+                table: t("orders"),
+                join_type: JoinType::OneToMany,
+                primary_key: c("primary_key"),
+                key: JoinKey::Direct(c("user_id")),
+                filters: None,
+                order_by: Some(vec![OrderBy {
+                    column: c("created_at"),
+                    direction: Some(Direction::Desc),
+                }]),
+                limit: Some(5),
                 fields: vec![col_field("id", "id"), col_field("total", "total")],
-            }),
+            })),
         };
         let schema = index(Some("id"), None, vec![orders]);
         let mut pks = HashMap::new();
@@ -716,11 +716,12 @@ mod tests {
     fn aggregate_count() {
         let count = Field {
             field: f("order_count"),
-            mapping: None,
+            options: Default::default(),
             source: FieldSource::Relation(Relation::Aggregate(Aggregate {
                 table: t("orders"),
                 op: AggregateOp::Count,
                 key: JoinKey::Direct(c("user_id")),
+                value_type: None,
                 filters: None,
             })),
         };

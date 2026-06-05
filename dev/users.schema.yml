@@ -12,24 +12,31 @@ soft_delete:
   column: deleted
 
 fields:
-  - id
+  - field: id
+    type: integer
   - field: email
-    mapping: { type: keyword }
+    type: keyword
+    required: true
     transforms:
       - lowercase
       - trim
   - field: name
-    mapping: { type: text }
+    type: text
   - field: orders
-    mapping: { type: nested }
     join:
       table: orders
       type: one_to_many
+      primary_key: id
       foreign_key: user_id
       order_by:
         - column: id
           direction: asc
-    fields:
-      - id
-      - total
-      - status
+      fields:
+        - field: id
+          type: integer
+        - field: total
+          type: decimal
+          required: true
+        - field: status
+          type: keyword
+          required: true

@@ -43,15 +43,19 @@ suit the search index).
 ### `env_or_value`
 
 Anywhere a secret or connection string is expected in `config.toml`, you may
-give either a literal string or a reference to an environment variable resolved
-at load time:
+give either a literal string or a reference to an environment variable:
 
 ```toml
 password = "literal-secret"          # literal
-password = { env = "OS_PASSWORD" }   # read from $OS_PASSWORD at load time
+password = { env = "OS_PASSWORD" }   # read from $OS_PASSWORD at run time
 ```
 
-If the named variable is unset, loading fails with a clear error.
+Resolution is **deferred to run time**, not load time: a literal is carried
+through, and an `{ env = … }` reference is read in the environment where the
+pipeline runs. This is what lets a [compiled artifact](#compiling) travel
+without baking in its secrets — and an unset variable fails at run, not compile.
+Precedence and the reserved-variable overrides below are applied at that same
+point.
 
 ### Reserved environment variables
 
@@ -237,13 +241,14 @@ the rest are optional and which ones you set determines the field's *source*:
 | --- | --- | --- |
 | `field` | field name | **Required.** The key this field lands under in the document. |
 | `column` | Postgres identifier | The source column. Defaults to `field` when omitted. |
-| `mapping` | object | The OpenSearch mapping for this field. See [Mappings](#mappings). |
+| `type` | type name | The field's declared [type](#types). Required on a `sum`/`min`/`max` aggregate; on a column it defaults to `keyword`. Rejected on a group or join (their shape is structural). |
+| `required` | bool | Force the field non-null. Fields are nullable by default. |
+| `options` | object | Extra OpenSearch mapping properties merged beside the derived `type` (e.g. `analyzer`, `format`, `scaling_factor`). |
 | `kind` | `code` \| `prose` | Full-text shorthand for a text field. See [Field kinds](#field-kinds). |
 | `transforms` | list | Value transforms to apply. See [Transforms](#transforms). |
 | `default` | any | Value to coalesce a `null` column to. |
-| `join` | object | Fold a related table in as nested documents. See [Joins](#joins). |
+| `join` | object | Fold a related table in as nested documents (carries its own `fields`). See [Joins](#joins). |
 | `aggregate` | object | Reduce a related table to a single value. See [Aggregates](#aggregates). |
-| `fields` | list | Nested fields — a sub-object (group) or a join's projection. |
 
 #### Field sources
 
@@ -252,14 +257,12 @@ resolution precedence (when more than one property is present) is:
 
 1. **Relation** — if `join` or `aggregate` is set. Setting *both* is an error
    (`a field cannot have both join and aggregate`).
-   - With `join`: the field's nested `fields` are projected from each related row.
+   - With `join`: the `fields` declared **inside** the join are projected from
+     each related row.
    - With `aggregate`: the field is a single reduced scalar.
-2. **Group** — if there is no `column` but there *are* nested `fields`. Builds a
-   sub-object from sibling values of the **same** row (adds a nesting level
-   without reading a related table).
-3. **Column** — otherwise. Reads `column` (or `field` if `column` is omitted),
+2. **Column** — otherwise. Reads `column` (or `field` if `column` is omitted),
    applies any `transforms`, and coalesces null to `default` if given.
-4. **Constant** — a `default` with no column source renders as a fixed value
+3. **Constant** — a `default` with no column source renders as a fixed value
    (and `null`/absent renders as JSON null).
 
 ```yaml
@@ -267,56 +270,66 @@ fields:
   # column source, renamed + transformed + defaulted
   - field: email
     column: email_address
+    type: keyword
     transforms: [lowercase, trim]
     default: "unknown@example.com"
-
-  # group: a same-row sub-object
-  - field: address
-    fields:
-      - { field: city,    column: city }
-      - { field: zip,     column: postal_code }
 ```
 
-#### Mappings
+#### Types
 
-`mapping` declares the OpenSearch field type. `type` is required; **every other
-property is passed through as-is** to the destination mapping, so you can set
-analyzers, formats, sub-fields, etc.
+A scalar field declares its **`type`** from a fixed set. Each type bridges a
+Postgres column type and an OpenSearch mapping type, so the schema describes the
+document fully — flusso derives the index mapping (and validates a config)
+without a database. Shorthand fields and columns with no `type` default to
+`keyword`.
+
+| `type` | Postgres | OpenSearch | Notes |
+| --- | --- | --- | --- |
+| `text` | `text`, `varchar` | `text` | Analyzed full-text. |
+| `keyword` | `text`, `varchar` | `keyword` | Exact, aggregatable. |
+| `enum` | `text`, `varchar`, PG enum | `keyword` | A closed string set stored as text, indexed exactly. |
+| `uuid` | `uuid` | `keyword` | |
+| `boolean` | `boolean` | `boolean` | |
+| `short` | `smallint` / `int2` | `short` | |
+| `integer` | `integer` / `int4` | `integer` | |
+| `long` | `bigint` / `int8` | `long` | |
+| `float` | `real` / `float4` | `float` | |
+| `double` | `double precision` / `float8` | `double` | |
+| `decimal` | `numeric` / `money` | `double` | Lossy; use a `custom` `scaled_float` when exactness matters. |
+| `date` | `date` | `date` | |
+| `timestamp` | `timestamp(tz)`, `time` | `date` | |
+| `binary` | `bytea` | `binary` | |
+| `json` | `json`, `jsonb` | `object` | |
+
+For anything the named types don't cover, declare a **custom** type with the
+OpenSearch type and the Postgres types it accepts:
 
 ```yaml
-- field: email
-  mapping: { type: keyword }
-
-- field: created_at
-  mapping:
-    type: date
-    format: "strict_date_optional_time||epoch_millis"
+- field: price
+  type: { custom: { postgres: [numeric], opensearch: scaled_float } }
+  options: { scaling_factor: 100 }
 ```
 
-Recognized `type` values (any other string is passed through verbatim):
-
-`text`, `keyword`, `boolean`, `byte`, `short`, `integer`, `long`, `float`,
-`double`, `half_float`, `scaled_float`, `date`, `object`, `nested`.
-
-Where a field has no explicit `mapping`, the source infers the type from the
-database column. Use `object` for groups and `nested` for one-to-many joins.
+`options` carries any extra OpenSearch mapping properties (analyzers, formats,
+…) merged beside the derived `type`. Groups are `object` and one-to-many joins
+are `nested` automatically — their shape is structural, so they take no `type`.
 
 > **Production-ready defaults.** The OpenSearch sink does **not** emit your
 > `text`/`keyword` fields bare. By default it attaches a strong analyzer and a
 > set of subfields (`keyword`, `keyword_lowercase`, `text`) so search, exact
 > filtering, and case-insensitive sort all work out of the box — see
 > [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
-> Anything you put in `mapping` overrides the default for that field.
+> Anything you put in `options` overrides the default for that field.
 
 #### Field kinds
 
 `kind` is shorthand for a full-text **text** field with the right analyzer —
-sugar for writing `mapping: { type: text, analyzer: … }` by hand:
+sugar for `type: text` plus the matching analyzer in `options`:
 
-| `kind` | Equivalent mapping | Use for |
+| `kind` | Equivalent | Use for |
 | --- | --- | --- |
-| `code` | `{ type: text, analyzer: flusso_code }` | Identifier-like short text — names, SKUs, codes, statuses. Splits on punctuation/case so `C-01234` is found by `C01234`, `c-01234`, or `01234`. |
-| `prose` | `{ type: text, analyzer: flusso_text }` | Longer free text — descriptions, bios. Plain tokenize + accent/case folding. |
+| `code` | `type: text`, `options: { analyzer: flusso_code }` | Identifier-like short text — names, SKUs, codes, statuses. Splits on punctuation/case so `C-01234` is found by `C01234`, `c-01234`, or `01234`. |
+| `prose` | `type: text`, `options: { analyzer: flusso_text }` | Longer free text — descriptions, bios. Plain tokenize + accent/case folding. |
 
 ```yaml
 fields:
@@ -327,8 +340,8 @@ fields:
 ```
 
 `kind` only applies to scalar column fields. Setting it alongside a non-`text`
-`mapping` is an error, and an explicit `analyzer` in `mapping` always wins over
-the shorthand. The analyzers themselves are documented in
+`type` is an error, and an explicit `analyzer` in `options` always wins over the
+shorthand. The analyzers themselves are documented in
 [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
 
 #### Transforms
@@ -350,28 +363,40 @@ A list applied in order to a column value before it lands in the document:
 Fold rows from a related table into the document as nested documents. The
 nested `fields` (siblings of `join`) project columns from each related row.
 
+A join is `nested` (or `object` for `one_to_one`) by structure, so it takes no
+`type`. Its `fields` — the projection from each related row — and its
+`primary_key` live **inside** the `join`. The field reading that `primary_key`
+is marked non-null automatically, the same way the root `primary_key` works.
+
 ```yaml
 - field: orders
-  mapping: { type: nested }
   join:
     table: orders
     type: one_to_many
     foreign_key: user_id
+    primary_key: id
     order_by:
       - { column: created_at, direction: desc }
     limit: 5
-  fields: [id, total, status]
+    fields:
+      - id
+      - field: total
+        type: double
+      - field: status
+        type: keyword
 ```
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
 | `table` | Postgres identifier | yes | The related table. |
 | `type` | enum | yes | `one_to_one`, `one_to_many`, or `many_to_many`. |
+| `primary_key` | Postgres identifier | yes | The related table's primary key. The projected field reading it is forced non-null. |
 | `foreign_key` | Postgres identifier | conditional | The FK tying related rows to the parent. **Required** for `one_to_one`/`one_to_many`. |
 | `through` | object | conditional | A junction table. **Required** for `many_to_many` (and mutually exclusive with `foreign_key`). |
 | `filters` | list | no | [Filters](#filters) narrowing which related rows are folded in. |
 | `order_by` | list | no | Ordering — a list of `{ column, direction }`, where `direction` is `asc` (default) or `desc`. |
 | `limit` | int ≥ 1 | no | Cap the number of related rows folded in. |
+| `fields` | list | yes | The fields projected from each related row. |
 
 **Key arity rule:** a join must specify *exactly one* of `foreign_key` or
 `through` — never both, never neither.
@@ -386,7 +411,6 @@ The `through` object (junction table for many-to-many):
 
 ```yaml
 - field: tags
-  mapping: { type: keyword }
   join:
     table: tags
     type: many_to_many
@@ -394,23 +418,27 @@ The `through` object (junction table for many-to-many):
       table: post_tags
       left_key: post_id
       right_key: tag_id
-  fields: [name]
+    primary_key: id
+    fields: [name]
 ```
 
 #### Aggregates
 
 Reduce rows from a related table to a single scalar — a count or an extreme.
 
+A `count` is always a non-null `long` and an `avg` a nullable `double`, so they
+take no `type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
+**must** declare a `type`.
+
 ```yaml
 - field: orderCount
-  mapping: { type: integer }
   aggregate:
     table: orders
     op: count
     foreign_key: user_id
 
 - field: lifetimeValue
-  mapping: { type: scaled_float }
+  type: double
   aggregate:
     table: orders
     op: sum
@@ -478,9 +506,30 @@ Loading enforces — beyond what the file format itself can express — that:
 - `sum`/`avg`/`min`/`max` aggregates carry a `column`;
 - a `between` filter has **exactly two** values, and `in`/`not_in` get a list;
 - a field is not **both** a `join` and an `aggregate`;
-- referenced environment variables (`{ env = "…" }`) are set.
+- a scalar's declared `type` is one of the recognized types (or a `custom` one);
+- a `sum`/`min`/`max` aggregate declares a `type`, and a `type` is not set on a
+  structural group or join.
 
 A failure at any of these stops the load with a specific error naming the cause.
+None of it needs a database. When the source **is** reachable,
+`flusso check` additionally confirms each declared type and nullability against
+the live columns and reports any disagreement.
+
+---
+
+## Compiling
+
+`flusso compile --config config.toml -o flusso.bin` runs everything above and
+writes the whole validated configuration — every schema inlined — to a single
+binary artifact (MessagePack). Because schemas are self-describing and secrets
+are [deferred](#env_or_value), compiling needs no database and bakes in no
+secret: `{ env = … }` references travel as references.
+
+`flusso run` with no `--config` loads that artifact and resolves the connection
+and credentials in its own environment; `flusso run --config config.toml`
+compiles from source and runs that. So a deployment ships one file — no YAML
+tree, no source checkout — and the same artifact runs anywhere its environment
+provides the secrets.
 
 ---
 
@@ -522,23 +571,27 @@ soft_delete:
 fields:
   - id
   - field: email
-    mapping: { type: keyword }
+    type: keyword
     transforms: [lowercase, trim]
   - field: name
-    mapping: { type: text }
+    type: text
 
   - field: orders
-    mapping: { type: nested }
     join:
       table: orders
       type: one_to_many
       foreign_key: user_id
+      primary_key: id
       order_by:
         - { column: id, direction: asc }
-    fields: [id, total, status]
+      fields:
+        - id
+        - field: total
+          type: double
+        - field: status
+          type: keyword
 
   - field: orderCount
-    mapping: { type: integer }
     aggregate:
       table: orders
       op: count

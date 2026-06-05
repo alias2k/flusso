@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use schema_core::common;
 
+use crate::Field;
+
 use super::Filter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,6 +12,7 @@ pub struct Join {
     pub table: common::TableName,
     #[serde(rename = "type")]
     pub join_type: JoinType,
+    pub primary_key: common::ColumnName,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_key: Option<common::ColumnName>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -20,6 +23,7 @@ pub struct Join {
     pub order_by: Option<Vec<OrderBy>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+    pub fields: Vec<Field>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -12,10 +12,8 @@
 use std::io::{IsTerminal, Write};
 
 use anyhow::Result;
-use schema::{
-    AggregateOp, Config, Field, FieldSource, IndexMapping, Relation, ResolvedField, Sink,
-    SoftDelete, Transform,
-};
+use schema::{Config, ConnectionSpec, IndexMapping, ResolvedField, Secret, Sink, SoftDelete};
+use sources_core::{Diagnostic, Severity};
 
 // ── color ───────────────────────────────────────────────────────────────────
 
@@ -93,9 +91,7 @@ pub(crate) fn config(out: &mut impl Write, pen: Pen, config: &Config) -> Result<
         out,
         "  {}  {}",
         pen.magenta(source_kind),
-        // ConnectionUrl's Display is the raw URL; its Serialize redacts. Redact
-        // here too so the human report never shows the password.
-        pen.dim(&redact_url(config.source.connection_url.as_ref())),
+        pen.dim(&describe_connection(config.source.connection.as_ref())),
     )?;
 
     section(out, pen, "Sinks")?;
@@ -180,15 +176,30 @@ pub(crate) fn resolved(out: &mut impl Write, pen: Pen, mappings: &[IndexMapping]
     Ok(())
 }
 
-/// The *declared* schema of every index — each field's source (column, join,
-/// aggregate, …) as written in the config. Shown offline, where there is no
-/// resolved mapping to display.
-pub(crate) fn declared(out: &mut impl Write, pen: Pen, config: &Config) -> Result<()> {
-    for (name, index) in &config.indexes {
-        section(out, pen, &format!("Index  {}  (declared)", name))?;
-        let mut rows = Vec::new();
-        flatten_declared(&index.schema.fields, 0, &mut rows);
-        print_rows(out, pen, &rows)?;
+/// The disagreements found checking the declared schema against the database.
+/// Errors are red, warnings yellow; an empty list prints a reassuring line.
+pub(crate) fn diagnostics(
+    out: &mut impl Write,
+    pen: Pen,
+    diagnostics: &[Diagnostic],
+) -> Result<()> {
+    section(out, pen, "Database validation")?;
+    if diagnostics.is_empty() {
+        writeln!(out, "  {}", pen.dim("(schema matches the database)"))?;
+        return Ok(());
+    }
+    for d in diagnostics {
+        let (label, code) = match d.severity {
+            Severity::Error => ("error", "31"),
+            Severity::Warning => ("warning", "33"),
+        };
+        writeln!(
+            out,
+            "  {} {}  {}",
+            pen.paint(code, &format!("[{label}]")),
+            pen.bold(&format!("{}.{}", d.index, d.field)),
+            pen.dim(&d.message),
+        )?;
     }
     Ok(())
 }
@@ -209,17 +220,6 @@ fn flatten_resolved(fields: &[ResolvedField], depth: usize, rows: &mut Vec<Row>)
             ],
         });
         flatten_resolved(&field.children, depth + 1, rows);
-    }
-}
-
-fn flatten_declared(fields: &[Field], depth: usize, rows: &mut Vec<Row>) {
-    for field in fields {
-        rows.push(Row {
-            depth,
-            name: field.field.to_string(),
-            cells: vec![(describe_source(&field.source), "2")],
-        });
-        flatten_declared(field.children(), depth + 1, rows);
     }
 }
 
@@ -277,7 +277,7 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
 fn describe_sink(sink: &Sink) -> (&'static str, String) {
     match sink {
         Sink::Opensearch(os) => {
-            let mut detail = os.url.to_string();
+            let mut detail = describe_secret_url(&os.url);
             if !os.tls_verify {
                 detail.push_str("   tls-verify off");
             }
@@ -301,49 +301,34 @@ fn describe_soft_delete(sd: &SoftDelete) -> String {
     }
 }
 
-/// A one-line description of where a declared field's value comes from.
-fn describe_source(source: &FieldSource) -> String {
-    match source {
-        FieldSource::Column(c) => {
-            let mut s = format!("column {}", c.column);
-            if !c.transforms.is_empty() {
-                let names: Vec<&str> = c.transforms.iter().map(transform_name).collect();
-                s.push_str(&format!(" [{}]", names.join(", ")));
-            }
-            s
-        }
-        FieldSource::Group(_) => "group".to_owned(),
-        FieldSource::Constant(_) => "constant".to_owned(),
-        FieldSource::Relation(Relation::Join { join, .. }) => {
-            let key = match &join.key {
-                schema::JoinKey::Direct(col) => format!("on {col}"),
-                schema::JoinKey::Through(t) => format!("via {}", t.table),
-            };
-            format!("join {} ({:?}, {key})", join.table, join.join_type)
-        }
-        FieldSource::Relation(Relation::Aggregate(agg)) => {
-            let op = match &agg.op {
-                AggregateOp::Count => "count".to_owned(),
-                AggregateOp::Sum(c) => format!("sum {c}"),
-                AggregateOp::Avg(c) => format!("avg {c}"),
-                AggregateOp::Min(c) => format!("min {c}"),
-                AggregateOp::Max(c) => format!("max {c}"),
-            };
-            format!("aggregate {op} over {}", agg.table)
-        }
+/// Describe the source connection without resolving it: an env reference shows
+/// the variable, a literal URL shows itself (password masked), parts show the
+/// host/database, and an absent connection notes the `DATABASE_URL` fallback.
+fn describe_connection(spec: Option<&ConnectionSpec>) -> String {
+    match spec {
+        None => "(from DATABASE_URL at runtime)".to_owned(),
+        Some(ConnectionSpec::Url(secret)) => describe_secret_url(secret),
+        Some(ConnectionSpec::Parts {
+            host,
+            port,
+            user,
+            database,
+            ..
+        }) => format!("{user}@{host}:{port}/{database}"),
     }
 }
 
-fn transform_name(t: &Transform) -> &'static str {
-    match t {
-        Transform::Lowercase => "lowercase",
-        Transform::Trim => "trim",
+/// Describe a URL-bearing secret without leaking it: an env reference shows the
+/// variable name, a literal shows the URL with any embedded password masked.
+fn describe_secret_url(secret: &Secret) -> String {
+    match secret {
+        Secret::Env(var) => format!("${{{var}}}"),
+        Secret::Value(url) => redact_url(url),
     }
 }
 
-/// Mask the password in `scheme://user:password@host…`, mirroring what
-/// `ConnectionUrl`'s `Serialize` does — the report shows the URL, never the
-/// secret.
+/// Mask the password in `scheme://user:password@host…` — the report shows the
+/// URL, never the secret.
 fn redact_url(url: &str) -> String {
     let Some(after) = url.find("://").map(|i| i + 3) else {
         return url.to_owned();

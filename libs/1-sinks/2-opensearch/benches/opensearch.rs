@@ -82,7 +82,7 @@ async fn start_opensearch() -> (
 /// A sink configured for `base_url` with the given bulk `batch_size`.
 fn sink(base_url: &str, batch_size: u32) -> sinks_opensearch::OpensearchSink {
     let config = schema_core::OpensearchSink {
-        url: schema_core::HttpUrl::try_new(base_url).unwrap(),
+        url: schema_core::Secret::Value(base_url.to_owned()),
         username: None,
         password: None,
         tls_verify: false,
@@ -96,7 +96,8 @@ fn sink(base_url: &str, batch_size: u32) -> sinks_opensearch::OpensearchSink {
         text_analysis: schema_core::TextAnalysis::Builtin,
         auto_subfields: true,
     };
-    sinks_opensearch::OpensearchSink::from_config(&config).unwrap()
+    let name = schema_core::SinkName::try_new("bench").unwrap();
+    sinks_opensearch::OpensearchSink::from_config(&name, &config).unwrap()
 }
 
 /// The explicit, `dynamic: strict` mapping the documents below conform to.
@@ -135,7 +136,7 @@ fn document(i: usize) -> GenericValue {
         "name".to_owned(),
         GenericValue::String(format!("Customer Number {i}")),
     );
-    map.insert("active".to_owned(), GenericValue::Bool(i % 2 == 0));
+    map.insert("active".to_owned(), GenericValue::Bool(i.is_multiple_of(2)));
     map.insert("score".to_owned(), GenericValue::Decimal((i as i64).into()));
     GenericValue::Map(map)
 }

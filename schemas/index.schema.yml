@@ -61,8 +61,18 @@ definitions:
             $ref: "#/definitions/field_name"
           column:
             $ref: "#/definitions/pg_identifier"
-          mapping:
-            $ref: "#/definitions/mapping"
+          type:
+            $ref: "#/definitions/flusso_type"
+          required:
+            type: boolean
+            description: >-
+              Force the field non-null. Fields are nullable by default.
+          options:
+            type: object
+            description: >-
+              Extra OpenSearch mapping properties merged beside the derived
+              type (e.g. analyzer, format, scaling_factor).
+            additionalProperties: true
           kind:
             enum: [code, prose]
             description: >-
@@ -76,18 +86,46 @@ definitions:
           transforms:
             $ref: "#/definitions/transforms"
           default: {}
-          fields:
-            type: array
-            items:
-              $ref: "#/definitions/field"
 
-  mapping:
-    type: object
-    required: [type]
-    properties:
-      type:
-        type: string
-    additionalProperties: true
+  flusso_type:
+    description: >-
+      A scalar field's declared type. A named type bridges a Postgres column
+      type and an OpenSearch mapping type; 'custom' carries an explicit
+      OpenSearch type and the Postgres types it accepts.
+    oneOf:
+      - enum:
+          [
+            text,
+            keyword,
+            enum,
+            uuid,
+            boolean,
+            short,
+            integer,
+            long,
+            float,
+            double,
+            decimal,
+            date,
+            timestamp,
+            binary,
+            json,
+          ]
+      - type: object
+        required: [custom]
+        additionalProperties: false
+        properties:
+          custom:
+            type: object
+            required: [postgres, opensearch]
+            additionalProperties: false
+            properties:
+              postgres:
+                type: array
+                items:
+                  type: string
+              opensearch:
+                type: string
 
   transforms:
     type: array
@@ -155,7 +193,7 @@ definitions:
 
   join:
     type: object
-    required: [table, type]
+    required: [table, type, primary_key, fields]
     additionalProperties: false
     properties:
       table:
@@ -163,6 +201,11 @@ definitions:
       type:
         type: string
         enum: [one_to_one, one_to_many, many_to_many]
+      primary_key:
+        $ref: "#/definitions/pg_identifier"
+        description: >-
+          The related table's primary key. The projected field reading it is
+          marked non-null automatically, just like the root primary_key.
       foreign_key:
         $ref: "#/definitions/pg_identifier"
       through:
@@ -174,6 +217,10 @@ definitions:
       limit:
         type: integer
         minimum: 1
+      fields:
+        type: array
+        items:
+          $ref: "#/definitions/field"
     if:
       properties:
         type:

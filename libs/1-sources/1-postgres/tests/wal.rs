@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use engine::Engine;
 use schema_core::{
-    Column, ColumnName, Config, ConnectionUrl, DatabaseSchema, Field, FieldName, FieldSource,
-    GenericValue, Index, IndexName, IndexSchema, Source, SourceType, TableName,
+    Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Field, FieldName, FieldSource,
+    FlussoType, GenericValue, Index, IndexName, IndexSchema, Secret, Source, SourceType, TableName,
 };
 use sinks_core::{Result as SinkResult, Sink};
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
@@ -254,7 +254,9 @@ fn users_config(connection_url: &str) -> Config {
     Config {
         source: Source {
             source_type: SourceType::Postgres,
-            connection_url: ConnectionUrl::try_new(connection_url).unwrap(),
+            connection: Some(ConnectionSpec::Url(Secret::Value(
+                connection_url.to_owned(),
+            ))),
         },
         sinks: BTreeMap::new(),
         indexes: BTreeMap::from([(
@@ -270,9 +272,11 @@ fn users_config(connection_url: &str) -> Config {
 fn column_field(name: &str, col: &str) -> Field {
     Field {
         field: field(name),
-        mapping: None,
+        options: Default::default(),
         source: FieldSource::Column(Column {
             column: column(col),
+            ty: FlussoType::Keyword,
+            nullable: true,
             transforms: Vec::new(),
             default: None,
         }),

@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use schema_core::{
-    GenericValue, IndexMapping, IndexName, MappingType, ResolvedField, TextAnalysis,
+    GenericValue, IndexMapping, IndexName, MappingType, ResolvedField, SinkName, TextAnalysis,
 };
 use serde_json::{Map, Value, json};
 use sinks_core::{Result, Sink, SinkError, to_json};
@@ -100,8 +100,11 @@ pub struct OpensearchSink {
 }
 
 impl OpensearchSink {
-    /// Build a sink from the schema's OpenSearch sink configuration.
-    pub fn from_config(config: &schema_core::OpensearchSink) -> Result<Self> {
+    /// Build a sink from the schema's OpenSearch sink configuration. The
+    /// connection URL and credentials are resolved here, in the running
+    /// environment, applying the `<NAME>_OPENSEARCH_*` deployment overrides for
+    /// the sink named `name`.
+    pub fn from_config(name: &SinkName, config: &schema_core::OpensearchSink) -> Result<Self> {
         let mut builder =
             reqwest::Client::builder().timeout(Duration::from_secs(config.timeout_secs));
 
@@ -113,15 +116,25 @@ impl OpensearchSink {
             .build()
             .map_err(|e| SinkError::Write(format!("failed to build HTTP client: {e}")))?;
 
-        let auth = match (&config.username, &config.password) {
-            (Some(u), Some(p)) => Some((u.clone(), p.clone())),
-            (Some(u), None) => Some((u.clone(), String::new())),
+        let url = config
+            .resolve_url(name)
+            .map_err(|e| SinkError::Write(format!("resolving OpenSearch URL: {e}")))?;
+        let username = config
+            .resolve_username(name)
+            .map_err(|e| SinkError::Write(format!("resolving OpenSearch username: {e}")))?;
+        let password = config
+            .resolve_password(name)
+            .map_err(|e| SinkError::Write(format!("resolving OpenSearch password: {e}")))?;
+
+        let auth = match (username, password) {
+            (Some(u), Some(p)) => Some((u, p)),
+            (Some(u), None) => Some((u, String::new())),
             _ => None,
         };
 
         Ok(Self {
             client,
-            base_url: config.url.as_ref().trim_end_matches('/').to_owned(),
+            base_url: url.as_ref().trim_end_matches('/').to_owned(),
             auth,
             // `chunks(0)` panics, so a zero batch size would crash the first
             // non-empty flush; clamp it to at least one document per request.

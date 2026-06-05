@@ -1,25 +1,31 @@
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-use super::{Aggregate, Filter, Join, JoinKey, Transform};
+use super::{Aggregate, Filter, FlussoType, Join, JoinKey, Transform};
 
-/// One field of a document: a name, an optional OpenSearch mapping override, and
-/// a [`source`](Self::source) saying where its value comes from.
-#[derive(Debug, Clone, Hash, Serialize)]
+/// One field of a document: a name, optional OpenSearch mapping `options` passed
+/// through to the index, and a [`source`](Self::source) saying where its value
+/// comes from. A leaf field's *type* is declared on its source (a
+/// [`Column`]'s [`ty`](Column::ty), an [`Aggregate`]'s
+/// [`value_type`](Aggregate::value_type)) so the document shape is known without
+/// a database.
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct Field {
     pub field: common::FieldName,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mapping: Option<Mapping>,
+    /// Extra OpenSearch mapping properties merged beside the derived `type`
+    /// (e.g. `analyzer`, `scaling_factor`). Empty for most fields.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, common::GenericValue>,
     pub source: FieldSource,
 }
 
 /// Where a field's value comes from. The shapes are mutually exclusive — a field
 /// is exactly one of them — which is why this is an enum rather than a bag of
 /// optional `column` / `relation` / `fields` that can contradict each other.
-#[derive(Debug, Clone, Hash, Serialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldSource {
     /// A column of the current row, optionally transformed, with an optional
@@ -36,26 +42,32 @@ pub enum FieldSource {
     Constant(common::GenericValue),
 }
 
-/// A column-backed field: the column to read, the transforms to apply to it, and
-/// a default to coalesce nulls to.
-#[derive(Debug, Clone, Hash, Serialize)]
+/// A column-backed field: the column to read, its declared type and nullability,
+/// the transforms to apply, and a default to coalesce nulls to.
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct Column {
     pub column: common::ColumnName,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// The declared type — the OpenSearch mapping derives from it, and a live
+    /// database (when reachable) is checked against it.
+    pub ty: FlussoType,
+    /// Whether the column admits null. The resolver still forces non-null for a
+    /// primary key or a column with a `default`.
+    pub nullable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<Transform>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<common::GenericValue>,
 }
 
 /// How a field draws on a related table: either folding its rows in as nested
 /// documents ([`Join`](Self::Join)) or reducing them to a single value
 /// ([`Aggregate`](Self::Aggregate)).
-#[derive(Debug, Clone, Hash, Serialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Relation {
     /// Fold the related rows in as nested documents, projecting `fields` from
     /// each one.
-    Join { join: Join, fields: Vec<Field> },
+    Join(Join),
     /// Reduce the related rows to a single scalar.
     Aggregate(Aggregate),
 }
@@ -67,7 +79,7 @@ impl Field {
     pub fn children(&self) -> &[Field] {
         match &self.source {
             FieldSource::Group(fields) => fields,
-            FieldSource::Relation(Relation::Join { fields, .. }) => fields,
+            FieldSource::Relation(Relation::Join(join)) => &join.fields,
             FieldSource::Column(_)
             | FieldSource::Relation(Relation::Aggregate(_))
             | FieldSource::Constant(_) => &[],
@@ -95,7 +107,7 @@ impl Relation {
     /// The related table this relation targets.
     pub fn table(&self) -> &common::TableName {
         match self {
-            Relation::Join { join, .. } => &join.table,
+            Relation::Join(join) => &join.table,
             Relation::Aggregate(aggregate) => &aggregate.table,
         }
     }
@@ -103,7 +115,7 @@ impl Relation {
     /// The key tying the related rows back to the parent row.
     pub fn key(&self) -> &JoinKey {
         match self {
-            Relation::Join { join, .. } => &join.key,
+            Relation::Join(join) => &join.key,
             Relation::Aggregate(aggregate) => &aggregate.key,
         }
     }
@@ -111,7 +123,7 @@ impl Relation {
     /// Filters narrowing the related rows, if any.
     pub fn filters(&self) -> Option<&[Filter]> {
         match self {
-            Relation::Join { join, .. } => join.filters.as_deref(),
+            Relation::Join(join) => join.filters.as_deref(),
             Relation::Aggregate(aggregate) => aggregate.filters.as_deref(),
         }
     }
@@ -181,6 +193,30 @@ impl MappingType {
             MappingType::Object => "object",
             MappingType::Nested => "nested",
             MappingType::Other(name) => name,
+        }
+    }
+
+    /// The mapping type for an OpenSearch type name — the inverse of
+    /// [`name`](Self::name). An unrecognized name becomes [`Other`].
+    ///
+    /// [`Other`]: MappingType::Other
+    pub fn from_name(name: &str) -> MappingType {
+        match name {
+            "text" => MappingType::Text,
+            "keyword" => MappingType::Keyword,
+            "boolean" => MappingType::Boolean,
+            "byte" => MappingType::Byte,
+            "short" => MappingType::Short,
+            "integer" => MappingType::Integer,
+            "long" => MappingType::Long,
+            "float" => MappingType::Float,
+            "double" => MappingType::Double,
+            "half_float" => MappingType::HalfFloat,
+            "scaled_float" => MappingType::ScaledFloat,
+            "date" => MappingType::Date,
+            "object" => MappingType::Object,
+            "nested" => MappingType::Nested,
+            other => MappingType::Other(other.to_owned()),
         }
     }
 }

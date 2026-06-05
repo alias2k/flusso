@@ -1,13 +1,15 @@
 use nutype::nutype;
 use std::fmt;
 
-// NOTE: `Serialize` is *not* derived — the URL embeds the password, and the
-// derived impl would emit it verbatim. The hand-written impl below redacts it,
-// so a serialized `Config` is always safe to print.
+// `Display` and `Debug` are hand-written below to redact the password, so a
+// printed or logged `ConnectionUrl` never leaks it. `Serialize` emits the real
+// value: a resolved URL is only serialized into artifacts the operator already
+// holds, and the real value is needed to reconstruct it. Read the real value
+// through `AsRef`/`Deref` (`.as_ref()`), never through `Display`.
 #[nutype(
     sanitize(trim),
     validate(regex = r"^(postgresql|postgres)://\S+$"),
-    derive(Debug, Clone, Display, AsRef, Deref, Hash, Eq, PartialEq, Deserialize)
+    derive(Clone, AsRef, Deref, Hash, Eq, PartialEq, Serialize, Deserialize)
 )]
 pub struct ConnectionUrl(String);
 
@@ -33,9 +35,17 @@ fn redact_password(url: &str) -> String {
     }
 }
 
-impl serde::Serialize for ConnectionUrl {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&redact_password(self.as_ref()))
+/// Redacts the password — safe to log or print.
+impl fmt::Display for ConnectionUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&redact_password(self.as_ref()))
+    }
+}
+
+/// Redacts the password — safe to log or print.
+impl fmt::Debug for ConnectionUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ConnectionUrl({})", redact_password(self.as_ref()))
     }
 }
 
@@ -173,9 +183,14 @@ mod tests {
             .database("mydb")
             .call()
             .unwrap();
+        // The real value is read through `AsRef`; `Display` redacts.
+        assert_eq!(
+            url.as_ref(),
+            "postgresql://user:s3cr3t@db.example.com:5432/mydb"
+        );
         assert_eq!(
             url.to_string(),
-            "postgresql://user:s3cr3t@db.example.com:5432/mydb"
+            "postgresql://user:***@db.example.com:5432/mydb"
         );
     }
 

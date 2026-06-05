@@ -19,8 +19,12 @@
 //! # Ok::<(), schema::LoadError>(())
 //! ```
 
+mod compiled;
 mod loader;
 
+pub use compiled::{
+    CompileError, Compiled, FORMAT_VERSION, compile, from_bytes, load_compiled, to_bytes, write,
+};
 pub use loader::{LoadError, load};
 
 // Re-export the canonical schema types so downstream crates depend only on

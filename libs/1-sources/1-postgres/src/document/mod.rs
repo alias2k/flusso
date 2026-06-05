@@ -39,7 +39,6 @@
 //! CDC design. Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
-mod mapping;
 mod query;
 mod resolve;
 pub(crate) mod value;
@@ -56,7 +55,6 @@ use sources_core::{Catalog, ColumnInfo, Result, RowKey, SnapshotTable, SourceErr
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
-use mapping::pg_type_to_mapping;
 
 /// Cache of each `(schema, table, column)`'s catalog metadata.
 type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
@@ -292,11 +290,11 @@ impl PgDocumentBuilder {
     }
 }
 
-/// The Postgres source's view of its own catalog. Resolution of the index
-/// mapping — types and nullability — is shared in [`sources_core`]; this is the
-/// one store-specific piece it needs: how Postgres types and constrains a
-/// column. Everything else (cardinality, aggregates, constants, the nullability
-/// rules) is derived there, the same for every source.
+/// The Postgres source's view of its own catalog. The index mapping is derived
+/// from the self-describing schema in [`schema_core`]; this is the one
+/// store-specific piece used for *validation* — how Postgres types and
+/// constrains a column — so a declared schema can be checked against the live
+/// database.
 #[async_trait]
 impl Catalog for PgDocumentBuilder {
     async fn column(
@@ -307,7 +305,7 @@ impl Catalog for PgDocumentBuilder {
     ) -> Result<ColumnInfo> {
         let meta = self.column_meta(schema, table, column).await?;
         Ok(ColumnInfo {
-            mapping_type: pg_type_to_mapping(&meta.sql_type),
+            sql_type: meta.sql_type,
             nullable: meta.nullable,
         })
     }
@@ -430,10 +428,9 @@ impl DocumentBuilder for PgDocumentBuilder {
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {
-        // Enrich the thin config into fully-typed mappings using the shared
-        // resolver, which asks this builder (as a `Catalog`) only about column
-        // types and nullability.
-        sources_core::enrich_indexes(&self.config, self).await
+        // The schema is self-describing, so the mapping is projected from it
+        // without touching the database.
+        Ok(self.config.resolve_mappings())
     }
 }
 

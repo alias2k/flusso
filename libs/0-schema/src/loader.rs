@@ -19,12 +19,6 @@ pub enum LoadError {
         #[source]
         source: schema_config_toml::ParseError,
     },
-    #[error("failed to convert config `{path}`: {source}")]
-    ConvertConfig {
-        path: PathBuf,
-        #[source]
-        source: schema_config_toml::ConversionError,
-    },
     #[error("failed to read schema `{name}` from `{path}`: {source}")]
     ReadSchema {
         name: IndexName,
@@ -70,10 +64,8 @@ pub fn load(config_path: impl AsRef<Path>) -> Result<Config, LoadError> {
 
     let indexes = config_toml.index.clone();
 
-    let mut config = Config::try_from(config_toml).map_err(|source| LoadError::ConvertConfig {
-        path: config_path.to_path_buf(),
-        source,
-    })?;
+    // Infallible: secrets are deferred and URLs validated at resolution time.
+    let mut config = Config::from(config_toml);
 
     let base_dir = config_path.parent().unwrap_or(Path::new("."));
 

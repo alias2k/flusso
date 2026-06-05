@@ -4,94 +4,144 @@ use std::str::FromStr;
 use rust_decimal::Decimal;
 use schema_core::{
     Aggregate, AggregateOp, Column, ColumnName, Direction, Field, FieldSource, Filter, FilterOp,
-    FilterValue, GenericValue, Join, JoinKey, JoinType, Mapping, MappingType, NullCheckFilter,
-    NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
+    FilterValue, FlussoType, GenericValue, Join, JoinKey, JoinType, NullCheckFilter, NullOp,
+    OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
     Transform, ValueOpFilter,
 };
 
 use crate::ConversionError;
 use crate::entities;
 
+/// The default leaf type for a column field that declares none — the historical
+/// "anything text-like is a keyword" fallback, now explicit and database-free.
+const DEFAULT_COLUMN_TYPE: FlussoType = FlussoType::Keyword;
+
 pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError> {
     match f {
         entities::Field::Short(name) => {
-            // Shorthand `- foo` is a scalar field backed by a column of the
-            // same name.
-            let source = FieldSource::Column(Column {
-                column: default_column(&name)?,
-                transforms: Vec::new(),
-                default: None,
-            });
+            // Shorthand `- foo` is a `keyword` column of the same name.
+            let column = default_column(&name)?;
             Ok(Field {
                 field: name,
-                mapping: None,
-                source,
+                options: BTreeMap::new(),
+                source: FieldSource::Column(Column {
+                    column,
+                    ty: DEFAULT_COLUMN_TYPE,
+                    nullable: true,
+                    transforms: Vec::new(),
+                    default: None,
+                }),
             })
         }
         entities::Field::Full(def) => {
             let def = *def;
-            let mapping = def.mapping.map(convert_mapping);
-            let nested = def
-                .fields
-                .map(|fs| fs.into_iter().map(convert_field).collect::<Result<_, _>>())
-                .transpose()?;
-            let source = field_source(
-                &def.field,
-                def.column,
-                def.join,
-                def.aggregate,
-                def.transforms,
-                def.default,
-                nested,
-            )?;
-            let mapping = apply_kind(def.kind, mapping, &source)?;
-            Ok(Field {
-                field: def.field,
-                mapping,
-                source,
-            })
+            let field_name = def.field.to_string();
+            let options: BTreeMap<String, GenericValue> = def
+                .options
+                .into_iter()
+                .map(|(k, v)| (k, yaml_to_generic(v)))
+                .collect();
+
+            match (def.join, def.aggregate) {
+                (Some(_), Some(_)) => Err(ConversionError::ConflictingRelation),
+                // A join folds in a related table; its shape (`nested`/`object`)
+                // is structural, so a declared `type` or `kind` is rejected.
+                (Some(j), None) => {
+                    reject_type_on_relation(&def.ty, &def.kind, &field_name)?;
+                    Ok(Field {
+                        field: def.field,
+                        options,
+                        source: FieldSource::Relation(Relation::Join(convert_join(j)?)),
+                    })
+                }
+                (None, Some(a)) => {
+                    if def.kind.is_some() {
+                        return Err(ConversionError::KindOnNonScalarField);
+                    }
+                    Ok(Field {
+                        field: def.field,
+                        options,
+                        source: FieldSource::Relation(Relation::Aggregate(convert_aggregate(
+                            a, def.ty,
+                        )?)),
+                    })
+                }
+                (None, None) => {
+                    let column = match def.column {
+                        Some(column) => column,
+                        None => default_column(&def.field)?,
+                    };
+                    let (ty, options) = resolve_column_type(def.ty, def.kind, options)?;
+                    Ok(Field {
+                        field: def.field,
+                        options,
+                        source: FieldSource::Column(Column {
+                            column,
+                            ty,
+                            nullable: !def.required.unwrap_or(false),
+                            transforms: def
+                                .transforms
+                                .map(|ts| ts.into_iter().map(convert_transform).collect())
+                                .unwrap_or_default(),
+                            default: def.default.map(yaml_to_generic),
+                        }),
+                    })
+                }
+            }
         }
     }
 }
 
-/// Resolve a full field definition's parts into exactly one [`FieldSource`].
-///
-/// A relation (`join`/`aggregate`) wins; then a same-row group (nested fields
-/// with no column); otherwise a column field, defaulting the column to the
-/// field name when omitted so `field: email` shorthand just works.
-#[allow(clippy::too_many_arguments)]
-fn field_source(
-    field: &schema_core::FieldName,
-    column: Option<ColumnName>,
-    join: Option<entities::Join>,
-    aggregate: Option<entities::Aggregate>,
-    transforms: Option<Vec<entities::Transform>>,
-    default: Option<serde_yaml::Value>,
-    nested: Option<Vec<Field>>,
-) -> Result<FieldSource, ConversionError> {
-    match (join, aggregate) {
-        (Some(_), Some(_)) => Err(ConversionError::ConflictingRelation),
-        (Some(j), None) => Ok(FieldSource::Relation(Relation::Join {
-            join: convert_join(j)?,
-            fields: nested.unwrap_or_default(),
-        })),
-        (None, Some(a)) => Ok(FieldSource::Relation(Relation::Aggregate(
-            convert_aggregate(a)?,
-        ))),
-        (None, None) => match (column, nested) {
-            (None, Some(fields)) => Ok(FieldSource::Group(fields)),
-            (column, _) => Ok(FieldSource::Column(Column {
-                column: match column {
-                    Some(column) => column,
-                    None => default_column(field)?,
-                },
-                transforms: transforms
-                    .map(|ts| ts.into_iter().map(convert_transform).collect())
-                    .unwrap_or_default(),
-                default: default.map(yaml_to_generic),
-            })),
-        },
+/// A declared `type` or `kind` makes no sense on a structural field (a join or a
+/// group), whose shape is fixed by the relation, not the schema.
+fn reject_type_on_relation(
+    ty: &Option<FlussoType>,
+    kind: &Option<entities::FieldKind>,
+    field: &str,
+) -> Result<(), ConversionError> {
+    if ty.is_some() {
+        return Err(ConversionError::TypeOnNonScalarField {
+            field: field.to_owned(),
+        });
     }
+    if kind.is_some() {
+        return Err(ConversionError::KindOnNonScalarField);
+    }
+    Ok(())
+}
+
+/// The declared type of a column field, folding in the `kind` shorthand. `kind`
+/// forces `text` and adds the matching `flusso_*` analyzer (an explicit
+/// `analyzer` option always wins); without `kind`, an omitted `type` defaults to
+/// `keyword`.
+fn resolve_column_type(
+    ty: Option<FlussoType>,
+    kind: Option<entities::FieldKind>,
+    mut options: BTreeMap<String, GenericValue>,
+) -> Result<(FlussoType, BTreeMap<String, GenericValue>), ConversionError> {
+    let Some(kind) = kind else {
+        return Ok((ty.unwrap_or(DEFAULT_COLUMN_TYPE), options));
+    };
+
+    // `kind` is a full-text hint, so the type must be `text`.
+    match &ty {
+        None | Some(FlussoType::Text) => {}
+        Some(other) => {
+            return Err(ConversionError::KindRequiresTextType {
+                got: format!("{other:?}"),
+            });
+        }
+    }
+
+    let analyzer = match kind {
+        entities::FieldKind::Code => "flusso_code",
+        entities::FieldKind::Prose => "flusso_text",
+    };
+    options
+        .entry("analyzer".to_owned())
+        .or_insert_with(|| GenericValue::String(analyzer.to_owned()));
+
+    Ok((FlussoType::Text, options))
 }
 
 /// The column a field reads from when none is given: the field name itself.
@@ -100,86 +150,6 @@ fn field_source(
 /// explicitly.
 fn default_column(field: &schema_core::FieldName) -> Result<ColumnName, ConversionError> {
     Ok(ColumnName::try_new(field.as_ref())?)
-}
-
-/// Fold a `kind:` shorthand into the field's mapping. `kind` is sugar for a
-/// full-text `text` field with the matching `flusso_*` analyzer:
-///
-/// - `code`  → `flusso_code` (the default; identifier-like short text)
-/// - `prose` → `flusso_text` (tokenize + fold, for longer prose)
-///
-/// It only applies to scalar column fields, and only to a `text` mapping (it
-/// makes the field `text` when no mapping is given). An explicit `analyzer` in
-/// the mapping always wins over the shorthand.
-fn apply_kind(
-    kind: Option<entities::FieldKind>,
-    mapping: Option<Mapping>,
-    source: &FieldSource,
-) -> Result<Option<Mapping>, ConversionError> {
-    let Some(kind) = kind else {
-        return Ok(mapping);
-    };
-
-    let analyzer = match kind {
-        entities::FieldKind::Code => "flusso_code",
-        entities::FieldKind::Prose => "flusso_text",
-    };
-
-    // `kind` is a text hint, so it only makes sense on a scalar value field —
-    // not a group, join, or aggregate.
-    if !matches!(source, FieldSource::Column(_) | FieldSource::Constant(_)) {
-        return Err(ConversionError::KindOnNonScalarField);
-    }
-
-    let mut mapping = match mapping {
-        None => Mapping {
-            mapping_type: MappingType::Text,
-            extra: BTreeMap::new(),
-        },
-        Some(m) if m.mapping_type == MappingType::Text => m,
-        Some(m) => {
-            return Err(ConversionError::KindRequiresTextMapping {
-                got: m.mapping_type.name().to_owned(),
-            });
-        }
-    };
-
-    mapping
-        .extra
-        .entry("analyzer".to_owned())
-        .or_insert_with(|| GenericValue::String(analyzer.to_owned()));
-    Ok(Some(mapping))
-}
-
-fn convert_mapping(m: entities::Mapping) -> Mapping {
-    Mapping {
-        mapping_type: parse_mapping_type(m.mapping_type),
-        extra: m
-            .extra
-            .into_iter()
-            .map(|(k, v)| (k, yaml_to_generic(v)))
-            .collect(),
-    }
-}
-
-fn parse_mapping_type(s: String) -> MappingType {
-    match s.as_str() {
-        "text" => MappingType::Text,
-        "keyword" => MappingType::Keyword,
-        "boolean" => MappingType::Boolean,
-        "byte" => MappingType::Byte,
-        "short" => MappingType::Short,
-        "integer" => MappingType::Integer,
-        "long" => MappingType::Long,
-        "float" => MappingType::Float,
-        "double" => MappingType::Double,
-        "half_float" => MappingType::HalfFloat,
-        "scaled_float" => MappingType::ScaledFloat,
-        "date" => MappingType::Date,
-        "object" => MappingType::Object,
-        "nested" => MappingType::Nested,
-        _ => MappingType::Other(s),
-    }
 }
 
 fn convert_transform(t: entities::Transform) -> Transform {
@@ -348,15 +318,22 @@ pub(crate) fn convert_join(j: entities::Join) -> Result<Join, ConversionError> {
         }),
         _ => return Err(ConversionError::InvalidJoinKey),
     };
+    let fields = j
+        .fields
+        .into_iter()
+        .map(convert_field)
+        .collect::<Result<_, _>>()?;
     Ok(Join {
         table: j.table,
         join_type: convert_join_type(j.join_type),
+        primary_key: j.primary_key,
         key,
         filters: convert_filters_opt(j.filters)?,
         order_by: j
             .order_by
             .map(|os| os.into_iter().map(convert_order_by).collect()),
         limit: j.limit,
+        fields,
     })
 }
 
@@ -378,24 +355,29 @@ fn convert_order_by(ob: entities::OrderBy) -> OrderBy {
     }
 }
 
-pub(crate) fn convert_aggregate(a: entities::Aggregate) -> Result<Aggregate, ConversionError> {
-    let op = match a.op {
-        entities::AggregateOp::Count => AggregateOp::Count,
-        entities::AggregateOp::Sum => AggregateOp::Sum(
-            a.column
-                .ok_or(ConversionError::MissingAggregateColumn { op: "sum" })?,
+pub(crate) fn convert_aggregate(
+    a: entities::Aggregate,
+    ty: Option<FlussoType>,
+) -> Result<Aggregate, ConversionError> {
+    // `count`/`avg` have fixed result types (`long`/`double`); `sum`/`min`/`max`
+    // mirror the aggregated column, so they must carry a declared `type`.
+    let (op, value_type) = match a.op {
+        entities::AggregateOp::Count => (AggregateOp::Count, None),
+        entities::AggregateOp::Avg => (
+            AggregateOp::Avg(require_aggregate_column(a.column, "avg")?),
+            None,
         ),
-        entities::AggregateOp::Avg => AggregateOp::Avg(
-            a.column
-                .ok_or(ConversionError::MissingAggregateColumn { op: "avg" })?,
+        entities::AggregateOp::Sum => (
+            AggregateOp::Sum(require_aggregate_column(a.column, "sum")?),
+            Some(require_aggregate_type(ty, "sum")?),
         ),
-        entities::AggregateOp::Min => AggregateOp::Min(
-            a.column
-                .ok_or(ConversionError::MissingAggregateColumn { op: "min" })?,
+        entities::AggregateOp::Min => (
+            AggregateOp::Min(require_aggregate_column(a.column, "min")?),
+            Some(require_aggregate_type(ty, "min")?),
         ),
-        entities::AggregateOp::Max => AggregateOp::Max(
-            a.column
-                .ok_or(ConversionError::MissingAggregateColumn { op: "max" })?,
+        entities::AggregateOp::Max => (
+            AggregateOp::Max(require_aggregate_column(a.column, "max")?),
+            Some(require_aggregate_type(ty, "max")?),
         ),
     };
     let key = match (a.foreign_key, a.through) {
@@ -411,6 +393,21 @@ pub(crate) fn convert_aggregate(a: entities::Aggregate) -> Result<Aggregate, Con
         table: a.table,
         op,
         key,
+        value_type,
         filters: convert_filters_opt(a.filters)?,
     })
+}
+
+fn require_aggregate_column(
+    column: Option<ColumnName>,
+    op: &'static str,
+) -> Result<ColumnName, ConversionError> {
+    column.ok_or(ConversionError::MissingAggregateColumn { op })
+}
+
+fn require_aggregate_type(
+    ty: Option<FlussoType>,
+    op: &'static str,
+) -> Result<FlussoType, ConversionError> {
+    ty.ok_or(ConversionError::MissingAggregateType { op })
 }

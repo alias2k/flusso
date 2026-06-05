@@ -58,27 +58,39 @@ soft_delete:
 fields:
   - id
   - field: email
-    mapping: { type: keyword }
+    type: keyword
     transforms: [lowercase, trim]
 
-  # Pull each user's orders in as a nested array.
+  # Pull each user's orders in as a nested array. A join is structural — its
+  # `nested` shape is implied, so it declares no `type`. Its `primary_key` is
+  # the related table's, and its `fields` are projected from each related row.
   - field: orders
-    mapping: { type: nested }
     join:
       table: orders
       type: one_to_many
       foreign_key: user_id
+      primary_key: id
       order_by: [{ column: created_at, direction: desc }]
       limit: 5
-    fields: [id, total, status]
+      fields:
+        - id
+        - field: total
+          type: double
+        - field: status
+          type: keyword
 
+  # A `count` is always a `long`, so it needs no `type`.
   - field: orderCount
-    mapping: { type: integer }
     aggregate:
       table: orders
       op: count
       foreign_key: user_id
 ```
+
+Every scalar field declares its **type** from a fixed set
+([`SCHEMA.md`](SCHEMA.md) lists them) that bridges a Postgres column type and an
+OpenSearch mapping. That makes a schema self-describing: flusso derives the full
+index mapping — and validates a config — without a database.
 
 A change to a user — *or* to one of their orders — rebuilds the whole `users`
 document and re-emits it. flusso resolves which documents a changed row affects,
@@ -146,22 +158,31 @@ See [`dev/README.md`](dev/README.md) for the full walk-through (resetting state,
 inspecting the slot/publication, OpenSearch Dashboards at
 http://localhost:5601).
 
-The CLI has two subcommands:
+The CLI has three subcommands:
 
-- `flusso check` validates the config and every schema it references — the file
-  format, and (unless `--offline`) that the tables, columns, and keys they name
-  resolve against the live database. It prints the fully-resolved mapping —
-  each field's type and nullability — and exits without touching the sinks.
-- `flusso run` streams changes through the engine. It takes the source
-  connection from the config; the replication slot and publication names, queue
-  capacity, backfill skip, and output formatting are flags.
+- `flusso compile` reads a config and the schemas it references and writes the
+  whole validated configuration to a single portable binary artifact
+  (`flusso.bin` by default). No database is needed — schemas are self-describing
+  — and no secret is baked in: `{ env = "VAR" }` references are carried through
+  and resolved wherever the artifact runs. This is what lets a deployment ship
+  one file instead of a tree of YAML.
+- `flusso run` streams changes through the engine. With no `--config` it loads
+  the compiled artifact (`--artifact`, default `flusso.bin`); with `--config` it
+  compiles the source afresh and runs that. The connection and credentials are
+  resolved here, in the running environment.
+- `flusso check` validates the config and prints the fully-typed mapping — each
+  field's type and nullability — derived from the schema with no database.
+  Unless `--offline`, it also connects and confirms the declared types and
+  nullability agree with the live database, reporting any disagreement.
 
 ```sh
 flusso --help
-flusso check --config config.toml                 # validate against the database
-flusso check --config config.toml --offline       # validate the files only
-flusso run --config config.toml --slot flusso --publication flusso
-flusso run --config config.toml --skip-backfill    # resume live capture only
+flusso compile --config config.toml -o flusso.bin  # build the portable artifact
+flusso check   --config config.toml                # validate (+ check vs database)
+flusso check   --config config.toml --offline      # validate without a database
+flusso run                                          # run the compiled flusso.bin
+flusso run --config config.toml --slot flusso       # compile from source and run
+flusso run --skip-backfill                          # resume live capture only
 ```
 
 Logging honors `RUST_LOG` (default `info`). Set `FLUSSO_LOG_FORMAT=json` for
@@ -197,10 +218,12 @@ separate from the model the rest of the system relies on:
 
 1. **Parse** — `serde` deserializes the file into permissive *entity* types that
    mirror the format one-to-one. Unknown fields are rejected.
-2. **Convert** — `TryFrom` lifts those entities into `schema-core` types and
-   applies the rules the format can't express on its own: identifier validation,
-   join and aggregate arity, filter value shapes, and environment-variable
-   resolution for secrets.
+2. **Convert** — the entities are lifted into `schema-core` types and the rules
+   the format can't express on its own are applied: identifier validation, join
+   and aggregate arity, declared-type placement, and filter value shapes. Secrets
+   are **not** resolved here — a `{ env = "VAR" }` reference becomes a deferred
+   `Secret` and is read in the environment that runs the pipeline, so a compiled
+   config carries no secret it wasn't given literally.
 
 ## Testing
 

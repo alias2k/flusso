@@ -11,3 +11,5 @@ schema-core.workspace = true
 schema-config-toml.workspace = true
 schema-index-yaml.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+rmp-serde.workspace = true

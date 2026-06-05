@@ -78,6 +78,7 @@ bon = { version = "3.*" }
 rust_decimal = { version = "1.*", features = ["serde-with-str"] }
 pgwire-replication = { version = "0.3.*", features = ["md5"] }
 async-trait = { version = "0.1.*" }
+rmp-serde = { version = "1.*" }
 futures = { version = "0.3.*" }
 tracing = { version = "0.1.*" }
 tokio = { version = "1.*", default-features = false }

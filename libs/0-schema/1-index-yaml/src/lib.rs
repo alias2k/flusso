@@ -41,12 +41,16 @@ pub enum ConversionError {
     InvalidBetweenArity { got: usize },
     #[error("filter op '{op}' requires a sequence value")]
     ExpectedListValue { op: &'static str },
+    #[error("aggregate op '{op}' requires a `type` (its result mirrors the column)")]
+    MissingAggregateType { op: &'static str },
     #[error("a field cannot have both `join` and `aggregate`")]
     ConflictingRelation,
+    #[error("`type` cannot be set on field `{field}`: a join or group is structural")]
+    TypeOnNonScalarField { field: String },
     #[error("`kind` can only be set on a column field")]
     KindOnNonScalarField,
-    #[error("`kind` requires a text field, but mapping `type: {got}` was given")]
-    KindRequiresTextMapping { got: String },
+    #[error("`kind` requires a text field, but `type: {got}` was given")]
+    KindRequiresTextType { got: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
