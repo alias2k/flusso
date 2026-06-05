@@ -53,6 +53,20 @@ definitions:
   field:
     oneOf:
       - $ref: "#/definitions/field_name"
+      # A group: `- group: name` with nested `fields` (a same-row sub-object).
+      - type: object
+        required: [group, fields]
+        additionalProperties: false
+        properties:
+          group:
+            $ref: "#/definitions/field_name"
+          options:
+            type: object
+            additionalProperties: true
+          fields:
+            type: array
+            items:
+              $ref: "#/definitions/field"
       - type: object
         required: [field]
         additionalProperties: false

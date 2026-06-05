@@ -24,7 +24,18 @@ tls_verify = false
 type = "stdout"
 pretty = true
 
+# Three indexes built from the same store, each a different root table.
 [[index]]
 name = "users"
 schema = "users.schema.yml"
+enabled = true
+
+[[index]]
+name = "products"
+schema = "products.schema.yml"
+enabled = true
+
+[[index]]
+name = "orders"
+schema = "orders.schema.yml"
 enabled = true

@@ -10,8 +10,24 @@ use super::{Aggregate, Join, Transform};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Field {
+    /// `- name` — a `keyword` column of the same name.
     Short(common::FieldName),
+    /// `- group: name` with nested `fields` — a same-row sub-object. Its own
+    /// key (`group`) keeps it unambiguous from the `field:` forms.
+    Group(GroupDef),
+    /// `- field: name` with a column, join, or aggregate source.
     Full(Box<FieldDef>),
+}
+
+/// A same-row sub-object: nested `fields` assembled from the parent row, with no
+/// column or related table of its own. Renders as an OpenSearch `object`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupDef {
+    pub group: common::FieldName,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, serde_yaml::Value>,
+    pub fields: Vec<Field>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

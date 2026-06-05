@@ -807,3 +807,53 @@ fn unknown_kind_fails_to_parse() {
     let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: bogus";
     assert!(parse(yaml).is_err());
 }
+
+// ── groups ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn group_builds_same_row_object() {
+    let schema = convert(
+        r#"
+version: 1
+table: users
+fields:
+  - group: address
+    fields:
+      - { field: city, column: city, type: keyword }
+      - { field: zip, column: postal_code, type: keyword }
+"#,
+    )
+    .unwrap();
+
+    let field = &schema.fields[0];
+    assert_eq!(field.field.as_ref(), "address");
+    match &field.source {
+        FieldSource::Group(fields) => {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].field.as_ref(), "city");
+            assert_eq!(fields[1].field.as_ref(), "zip");
+        }
+        other => panic!("expected a group, got {other:?}"),
+    }
+}
+
+#[test]
+fn group_and_field_forms_are_distinct() {
+    // A `group:` item parses as a group; a `field:` item parses as a column —
+    // the disjoint discriminator keys keep the untagged enum unambiguous.
+    let schema = convert(
+        r#"
+version: 1
+table: users
+fields:
+  - field: id
+    type: integer
+  - group: name
+    fields:
+      - { field: first, column: first_name, type: keyword }
+"#,
+    )
+    .unwrap();
+    assert!(matches!(schema.fields[0].source, FieldSource::Column(_)));
+    assert!(matches!(schema.fields[1].source, FieldSource::Group(_)));
+}

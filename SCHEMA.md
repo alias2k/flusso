@@ -223,7 +223,8 @@ soft_delete:
 
 ### Fields
 
-`fields` is a list whose items take one of two forms.
+`fields` is a list whose items take one of three forms, told apart by their
+discriminator key (`field`, `group`, or a bare string).
 
 **Shorthand** — a bare string is a scalar field backed by a column of the same
 name:
@@ -232,6 +233,18 @@ name:
 fields:
   - id          # reads column `id`, document key `id`
   - email       # reads column `email`, document key `email`
+```
+
+**Group** — `group` (the document key) with nested `fields`. A same-row
+sub-object: it nests sibling columns under one key without reading a related
+table. Renders as an OpenSearch `object`, never null. See [Groups](#groups).
+
+```yaml
+fields:
+  - group: address          # a nested object built from this row's columns
+    fields:
+      - { field: city, column: city, type: keyword }
+      - { field: zip,  column: postal_code, type: keyword }
 ```
 
 **Full** — an object. `field` (the document key) is the only required property;
@@ -274,6 +287,30 @@ fields:
     transforms: [lowercase, trim]
     default: "unknown@example.com"
 ```
+
+A **Group** is its own item form (`- group: name`), not a property of a `field:`
+item — see [Groups](#groups).
+
+#### Groups
+
+A group nests sibling columns of the **same row** under one document key,
+without reading a related table — for shaping a wide, flat table into a tidy
+object. It renders as an OpenSearch `object` and is never null; its members
+declare their own types.
+
+```yaml
+- group: address
+  fields:
+    - { field: street, column: address_street, type: keyword }
+    - { field: city,   column: address_city,   type: keyword }
+    - { field: zip,    column: address_zip,    type: keyword }
+```
+
+→ `{ "address": { "street": …, "city": …, "zip": … } }`, all from one row.
+
+A group differs from a `one_to_one` [join](#joins): the join reads a *related
+table* by key, a group stays on the current row. Optional `options` pass extra
+properties to the `object` mapping.
 
 #### Types
 

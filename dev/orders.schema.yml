@@ -1,0 +1,69 @@
+# The `orders` search document: an order with its line items and totals. A
+# second root over the same store — a change to the order or any of its items
+# rebuilds it. (The customer is referenced by `userId`; flusso joins relate a
+# child back to its parent, so a parent-side lookup is kept as a column.)
+
+version: 1
+table: orders
+primary_key: id
+
+fields:
+  - field: id
+    type: integer
+  - field: userId
+    column: user_id
+    type: integer
+    required: true
+  - field: status
+    type: enum
+    required: true
+  - field: total
+    type: decimal
+    required: true
+
+  # A group: the order's timeline. `shippedAt` is null until the order ships.
+  - group: timeline
+    fields:
+      - field: placedAt
+        column: placed_at
+        type: timestamp
+        required: true
+      - field: shippedAt
+        column: shipped_at
+        type: timestamp
+
+  # One-to-many: the line items.
+  - field: items
+    join:
+      table: order_items
+      type: one_to_many
+      foreign_key: order_id
+      primary_key: id
+      order_by:
+        - { column: id, direction: asc }
+      fields:
+        - field: productId
+          column: product_id
+          type: integer
+          required: true
+        - field: quantity
+          type: integer
+          required: true
+        - field: unitPrice
+          column: unit_price
+          type: decimal
+          required: true
+
+  # Rollups over the line items.
+  - field: itemCount
+    aggregate:
+      table: order_items
+      op: count
+      foreign_key: order_id
+  - field: unitsSold
+    type: integer # matches the `quantity` column the live check validates against
+    aggregate:
+      table: order_items
+      op: sum
+      column: quantity
+      foreign_key: order_id

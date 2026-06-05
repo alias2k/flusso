@@ -1,11 +1,12 @@
-# The `users` search document: a user with their orders nested in.
+# The `users` search document: a customer with their profile, addresses, and
+# orders (down to line items), plus rollup aggregates over their orders.
 #
-# A change to a user OR to one of their orders rebuilds and re-emits the whole
-# document. Setting users.deleted = true emits a tombstone (delete) instead.
+# A change to the user OR to any embedded row (profile, address, order, item)
+# rebuilds and re-emits the whole document. Setting users.deleted = true emits a
+# tombstone (delete) instead.
 
 version: 1
 table: users
-schema: public
 primary_key: id
 
 soft_delete:
@@ -17,26 +18,138 @@ fields:
   - field: email
     type: keyword
     required: true
-    transforms:
-      - lowercase
-      - trim
-  - field: name
-    type: text
+    transforms: [lowercase, trim]
+  - field: fullName
+    column: full_name
+    kind: prose # full-text, flusso_text analyzer
+
+  # A group: reshape same-row scalar columns into a nested object.
+  - group: account
+    fields:
+      - field: tier
+        type: enum # stored as text, indexed as keyword
+        required: true
+      - field: country
+        type: keyword
+      - field: createdAt
+        column: created_at
+        type: timestamp
+        required: true
+
+  # One-to-one: the user's profile (absent for some users → null object).
+  - field: profile
+    join:
+      table: profiles
+      type: one_to_one
+      foreign_key: user_id
+      primary_key: user_id
+      fields:
+        - field: bio
+          type: text
+        - field: avatarUrl
+          column: avatar_url
+          type: keyword
+        - field: birthDate
+          column: birth_date
+          type: date
+
+  # One-to-many: every address.
+  - field: addresses
+    join:
+      table: addresses
+      type: one_to_many
+      foreign_key: user_id
+      primary_key: id
+      order_by:
+        - { column: id, direction: asc }
+      fields:
+        - field: kind
+          type: enum
+          required: true
+        - field: line1
+          type: text
+          required: true
+        - field: city
+          type: keyword
+          required: true
+        - field: postalCode
+          column: postal_code
+          type: keyword
+        - field: country
+          type: keyword
+
+  # One-to-many: orders (cancelled ones filtered out), newest first, with line
+  # items and the product each item refers to — three levels of nesting.
   - field: orders
     join:
       table: orders
       type: one_to_many
-      primary_key: id
       foreign_key: user_id
+      primary_key: id
+      filters:
+        - { column: status, op: neq, value: cancelled }
       order_by:
-        - column: id
-          direction: asc
+        - { column: placed_at, direction: desc }
       fields:
-        - field: id
-          type: integer
+        - field: status
+          type: enum
+          required: true
         - field: total
           type: decimal
           required: true
-        - field: status
-          type: keyword
+        - field: placedAt
+          column: placed_at
+          type: timestamp
           required: true
+        - field: items
+          join:
+            table: order_items
+            type: one_to_many
+            foreign_key: order_id
+            primary_key: id
+            fields:
+              - field: productId
+                column: product_id
+                type: integer
+                required: true
+              - field: quantity
+                type: integer
+                required: true
+              - field: unitPrice
+                column: unit_price
+                type: decimal
+                required: true
+
+  # Aggregates over the user's orders.
+  - field: orderCount
+    aggregate:
+      table: orders
+      op: count
+      foreign_key: user_id
+  - field: lifetimeValue
+    type: decimal
+    aggregate:
+      table: orders
+      op: sum
+      column: total
+      foreign_key: user_id
+  - field: avgOrderValue
+    aggregate:
+      table: orders
+      op: avg
+      column: total
+      foreign_key: user_id
+  - field: lastOrderAt
+    type: timestamp
+    aggregate:
+      table: orders
+      op: max
+      column: placed_at
+      foreign_key: user_id
+  - field: deliveredOrders
+    aggregate:
+      table: orders
+      op: count
+      foreign_key: user_id
+      filters:
+        - { column: status, op: eq, value: delivered }

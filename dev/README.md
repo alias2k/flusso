@@ -7,16 +7,26 @@ as you change rows.
 
 ## Layout
 
+A small e-commerce store (users, profiles, addresses, categories, products,
+tags, orders, items, reviews) feeding **three** indexes, between them exercising
+every feature: all scalar types (incl. a `custom` → `scaled_float`), groups,
+one-to-one / one-to-many / many-to-many joins, three levels of nesting, every
+aggregate, filters, and soft-delete.
+
 ```
 docker-compose.yml          Postgres + OpenSearch
 dev/
-  config.toml               source + sinks (opensearch + stdout) + indexes
-  users.schema.yml          the `users` document: user + nested orders
+  config.toml               source + sinks (opensearch + stdout) + 3 indexes
+  users.schema.yml          user + account group + profile + addresses +
+                            orders→items + order rollups
+  products.schema.yml       product + pricing group (custom scaled_float) +
+                            tags (m:n) + reviews + rating rollups
+  orders.schema.yml         order + timeline group + line items + rollups
   changes.sql               sample INSERT/UPDATE/DELETE to watch live
   postgres/init/
-    01_schema.sql           users + orders tables
+    01_schema.sql           the 10-table store schema
     02_seed.sql             initial fixtures
-    03_replication.sql      publication `flusso` (slot is created automatically)
+    03_replication.sql      publication `flusso` over every table
 ```
 
 ## Run it
@@ -43,10 +53,19 @@ dev/
    psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
    ```
 
-   You should see: a new user 4, then user 4 rebuilt with an order, user 1
-   re-emitted after its order changes, user 2 with a new email, and user 3
-   turning into a `delete` (soft-deleted). All changes are also visible in
-   OpenSearch immediately (the sink forces a refresh after every flush).
+   The changes touch all three indexes: a new user, a profile filling in,
+   a new order rebuilding both its `orders` doc and the owner's `users` doc, a
+   line-item edit reverse-resolving to both, a cancelled order dropping out of
+   the user's (filtered) orders array, a new review updating a `products` doc's
+   rollups, a re-tag, a reprice, and finally a soft-delete turning a user into a
+   `delete`. All are visible in OpenSearch immediately (the sink forces a
+   refresh after every flush). Inspect each index:
+
+   ```sh
+   curl -s localhost:9200/users/_search?pretty
+   curl -s localhost:9200/products/_search?pretty
+   curl -s localhost:9200/orders/_search?pretty
+   ```
 
 ## Notes
 

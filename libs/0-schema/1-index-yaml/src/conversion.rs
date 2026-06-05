@@ -33,6 +33,25 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
                 }),
             })
         }
+        entities::Field::Group(g) => {
+            // A same-row sub-object: an `object`, never null, assembled from its
+            // nested fields. The `group` key is its document key.
+            let options = g
+                .options
+                .into_iter()
+                .map(|(k, v)| (k, yaml_to_generic(v)))
+                .collect();
+            let fields = g
+                .fields
+                .into_iter()
+                .map(convert_field)
+                .collect::<Result<_, _>>()?;
+            Ok(Field {
+                field: g.group,
+                options,
+                source: FieldSource::Group(fields),
+            })
+        }
         entities::Field::Full(def) => {
             let def = *def;
             let field_name = def.field.to_string();
