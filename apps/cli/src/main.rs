@@ -15,7 +15,7 @@
 //!   mapping (database-free), and — unless `--offline` — also confirms the
 //!   declared types and nullability agree with the live database.
 
-mod check;
+mod print;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -146,8 +146,8 @@ fn compile(args: CompileArgs) -> anyhow::Result<()> {
         .with_context(|| format!("writing compiled artifact to {}", args.out.display()))?;
 
     let mut out = std::io::stdout().lock();
-    let pen = check::Pen::detect();
-    check::success(
+    let pen = print::Pen::detect();
+    print::success(
         &mut out,
         pen,
         &format!(
@@ -305,17 +305,17 @@ async fn check(args: CheckArgs) -> anyhow::Result<()> {
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         }
         OutputFormat::Human => {
-            let pen = check::Pen::detect();
-            check::success(
+            let pen = print::Pen::detect();
+            print::success(
                 &mut out,
                 pen,
                 &format!("config valid: {}", args.config.display()),
             )?;
-            check::config(&mut out, pen, &config)?;
-            check::resolved(&mut out, pen, &mappings)?;
+            print::config(&mut out, pen, &config)?;
+            print::resolved(&mut out, pen, &mappings)?;
             match &diagnostics {
                 None => {
-                    check::warning(
+                    print::warning(
                         &mut out,
                         pen,
                         "offline",
@@ -323,12 +323,12 @@ async fn check(args: CheckArgs) -> anyhow::Result<()> {
                     )?;
                 }
                 Some(diagnostics) => {
-                    check::diagnostics(&mut out, pen, diagnostics)?;
+                    print::diagnostics(&mut out, pen, diagnostics)?;
                     writeln!(out)?;
                     if has_errors {
-                        check::warning(&mut out, pen, "failed", "schema disagrees with database")?;
+                        print::warning(&mut out, pen, "failed", "schema disagrees with database")?;
                     } else {
-                        check::success(&mut out, pen, "check passed")?;
+                        print::success(&mut out, pen, "check passed")?;
                     }
                 }
             }
