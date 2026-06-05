@@ -257,7 +257,6 @@ the rest are optional and which ones you set determines the field's *source*:
 | `type` | type name | The field's declared [type](#types). Required on a `sum`/`min`/`max` aggregate; on a column it defaults to `keyword`. Rejected on a group or join (their shape is structural). |
 | `required` | bool | Force the field non-null. Fields are nullable by default. |
 | `options` | object | Extra OpenSearch mapping properties merged beside the derived `type` (e.g. `analyzer`, `format`, `scaling_factor`). |
-| `kind` | `code` \| `prose` | Full-text shorthand for a text field. See [Field kinds](#field-kinds). |
 | `transforms` | list | Value transforms to apply. See [Transforms](#transforms). |
 | `default` | any | Value to coalesce a `null` column to. |
 | `join` | object | Fold a related table in as nested documents (carries its own `fields`). See [Joins](#joins). |
@@ -322,7 +321,8 @@ without a database. Shorthand fields and columns with no `type` default to
 
 | `type` | Postgres | OpenSearch | Notes |
 | --- | --- | --- | --- |
-| `text` | `text`, `varchar` | `text` | Analyzed full-text. |
+| `text` | `text`, `varchar` | `text` | Analyzed natural-language full text (descriptions, bios) — the default analyzed type. Plain tokenize + accent/case fold. |
+| `identifier` | `text`, `varchar` | `text` | Analyzed identifier-like short text (names, SKUs, codes, statuses) — splits on punctuation/case so `C-01234` is found by `C01234`, `c-01234`, or `01234`. |
 | `keyword` | `text`, `varchar` | `keyword` | Exact, aggregatable. |
 | `enum` | `text`, `varchar`, PG enum | `keyword` | A closed string set stored as text, indexed exactly. |
 | `uuid` | `uuid` | `keyword` | |
@@ -358,27 +358,29 @@ are `nested` automatically — their shape is structural, so they take no `type`
 > [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
 > Anything you put in `options` overrides the default for that field.
 
-#### Field kinds
+#### `text` vs `identifier`
 
-`kind` is shorthand for a full-text **text** field with the right analyzer —
-sugar for `type: text` plus the matching analyzer in `options`:
+Both are analyzed (full-text searchable) `text` fields; they differ only in the
+analyzer:
 
-| `kind` | Equivalent | Use for |
-| --- | --- | --- |
-| `code` | `type: text`, `options: { analyzer: flusso_code }` | Identifier-like short text — names, SKUs, codes, statuses. Splits on punctuation/case so `C-01234` is found by `C01234`, `c-01234`, or `01234`. |
-| `prose` | `type: text`, `options: { analyzer: flusso_text }` | Longer free text — descriptions, bios. Plain tokenize + accent/case folding. |
+- **`text`** — natural language (descriptions, bios, comments). The default
+  analyzed type; tokenizes on word boundaries with accent/case folding.
+- **`identifier`** — short structured strings (names, SKUs, codes, statuses).
+  Splits on punctuation/case so `C-01234` is found by `C01234`, `c-01234`, or
+  `01234`.
 
 ```yaml
 fields:
-  - field: sku
-    kind: code            # → text + flusso_code, plus the default subfields
   - field: bio
-    kind: prose           # → text + flusso_text
+    type: text            # natural-language analyzer + default subfields
+  - field: sku
+    type: identifier      # punctuation/case-splitting analyzer + default subfields
 ```
 
-`kind` only applies to scalar column fields. Setting it alongside a non-`text`
-`type` is an error, and an explicit `analyzer` in `options` always wins over the
-shorthand. The analyzers themselves are documented in
+(Use `keyword` instead when you want exact match, sort, or aggregation rather
+than full-text search.) Both apply only to scalar column fields, and an explicit
+`analyzer` in `options` always wins over the type's default. The analyzers
+themselves are documented in
 [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
 
 #### Transforms

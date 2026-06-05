@@ -38,7 +38,8 @@ pub struct FieldDef {
     pub column: Option<common::ColumnName>,
     /// The declared type. Required for a leaf column (defaults to `keyword`
     /// shorthand when omitted) and for `sum`/`min`/`max` aggregates; rejected on
-    /// groups and joins, whose shape is structural.
+    /// groups and joins, whose shape is structural. `text` is analyzed
+    /// natural-language full text; `identifier` is analyzed identifier-style text.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub ty: Option<FlussoType>,
     /// Force the field non-null. Fields are nullable by default.
@@ -48,10 +49,6 @@ pub struct FieldDef {
     /// (e.g. `analyzer`, `scaling_factor`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, serde_yaml::Value>,
-    /// Shorthand for full-text text fields. Sugar for `type: text` plus the
-    /// matching `flusso_*` analyzer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<FieldKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join: Option<Join>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,13 +57,4 @@ pub struct FieldDef {
     pub transforms: Option<Vec<Transform>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_yaml::Value>,
-}
-
-/// Full-text shorthand for a text field: `code` (the `flusso_code` analyzer,
-/// for identifier-like short text) or `prose` (the `flusso_text` analyzer).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FieldKind {
-    Code,
-    Prose,
 }

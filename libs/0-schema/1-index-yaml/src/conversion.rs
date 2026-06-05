@@ -64,9 +64,9 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
             match (def.join, def.aggregate) {
                 (Some(_), Some(_)) => Err(ConversionError::ConflictingRelation),
                 // A join folds in a related table; its shape (`nested`/`object`)
-                // is structural, so a declared `type` or `kind` is rejected.
+                // is structural, so a declared `type` is rejected.
                 (Some(j), None) => {
-                    reject_type_on_relation(&def.ty, &def.kind, &field_name)?;
+                    reject_type_on_relation(&def.ty, &field_name)?;
                     Ok(Field {
                         field: def.field,
                         options,
@@ -74,9 +74,6 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
                     })
                 }
                 (None, Some(a)) => {
-                    if def.kind.is_some() {
-                        return Err(ConversionError::KindOnNonScalarField);
-                    }
                     Ok(Field {
                         field: def.field,
                         options,
@@ -90,7 +87,7 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
                         Some(column) => column,
                         None => default_column(&def.field)?,
                     };
-                    let (ty, options) = resolve_column_type(def.ty, def.kind, options)?;
+                    let (ty, options) = resolve_column_type(def.ty, options);
                     Ok(Field {
                         field: def.field,
                         options,
@@ -111,11 +108,10 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
     }
 }
 
-/// A declared `type` or `kind` makes no sense on a structural field (a join or a
-/// group), whose shape is fixed by the relation, not the schema.
+/// A declared `type` makes no sense on a structural field (a join or a group),
+/// whose shape is fixed by the relation, not the schema.
 fn reject_type_on_relation(
     ty: &Option<FlussoType>,
-    kind: &Option<entities::FieldKind>,
     field: &str,
 ) -> Result<(), ConversionError> {
     if ty.is_some() {
@@ -123,44 +119,26 @@ fn reject_type_on_relation(
             field: field.to_owned(),
         });
     }
-    if kind.is_some() {
-        return Err(ConversionError::KindOnNonScalarField);
-    }
     Ok(())
 }
 
-/// The declared type of a column field, folding in the `kind` shorthand. `kind`
-/// forces `text` and adds the matching `flusso_*` analyzer (an explicit
-/// `analyzer` option always wins); without `kind`, an omitted `type` defaults to
-/// `keyword`.
+/// The declared type of a column field. The `identifier` type is analyzed `text`
+/// carrying the `flusso_code` analyzer (an explicit `analyzer` option always
+/// wins); plain `text` relies on the sink's natural-language default. An omitted
+/// `type` defaults to `keyword`.
 fn resolve_column_type(
     ty: Option<FlussoType>,
-    kind: Option<entities::FieldKind>,
     mut options: BTreeMap<String, GenericValue>,
-) -> Result<(FlussoType, BTreeMap<String, GenericValue>), ConversionError> {
-    let Some(kind) = kind else {
-        return Ok((ty.unwrap_or(DEFAULT_COLUMN_TYPE), options));
-    };
+) -> (FlussoType, BTreeMap<String, GenericValue>) {
+    let ty = ty.unwrap_or(DEFAULT_COLUMN_TYPE);
 
-    // `kind` is a full-text hint, so the type must be `text`.
-    match &ty {
-        None | Some(FlussoType::Text) => {}
-        Some(other) => {
-            return Err(ConversionError::KindRequiresTextType {
-                got: format!("{other:?}"),
-            });
-        }
+    if ty == FlussoType::Identifier {
+        options
+            .entry("analyzer".to_owned())
+            .or_insert_with(|| GenericValue::String("flusso_code".to_owned()));
     }
 
-    let analyzer = match kind {
-        entities::FieldKind::Code => "flusso_code",
-        entities::FieldKind::Prose => "flusso_text",
-    };
-    options
-        .entry("analyzer".to_owned())
-        .or_insert_with(|| GenericValue::String(analyzer.to_owned()));
-
-    Ok((FlussoType::Text, options))
+    (ty, options)
 }
 
 /// The column a field reads from when none is given: the field name itself.

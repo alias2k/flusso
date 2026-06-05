@@ -87,12 +87,6 @@ definitions:
               Extra OpenSearch mapping properties merged beside the derived
               type (e.g. analyzer, format, scaling_factor).
             additionalProperties: true
-          kind:
-            enum: [code, prose]
-            description: >-
-              Full-text shorthand for a text field: 'code' (flusso_code analyzer,
-              for identifier-like short text) or 'prose' (flusso_text analyzer).
-              Only valid on a scalar column field.
           join:
             $ref: "#/definitions/join"
           aggregate:
@@ -110,6 +104,7 @@ definitions:
       - enum:
           [
             text,
+            identifier,
             keyword,
             enum,
             uuid,

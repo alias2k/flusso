@@ -14,8 +14,14 @@ use super::MappingType;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlussoType {
-    /// Analyzed full-text. PG `text` / `varchar` → OS `text`.
+    /// Analyzed natural-language full text — descriptions, bios, comments. The
+    /// default analyzed type; carries the `flusso_text` analyzer (plain tokenize
+    /// + accent/case fold). PG `text` / `varchar` → OS `text`.
     Text,
+    /// Identifier-like short text — names, SKUs, codes, statuses. Analyzed with
+    /// the `flusso_code` analyzer, which splits on punctuation/case so `C-01234`
+    /// is found by `c01234` or `01234`. PG `text` / `varchar` → OS `text`.
+    Identifier,
     /// Exact, aggregatable token. PG `text` / `varchar` → OS `keyword`.
     Keyword,
     /// A closed set of string values — stored as text in Postgres (a `varchar`
@@ -59,7 +65,7 @@ impl FlussoType {
     /// The OpenSearch [`MappingType`] this declared type maps to.
     pub fn opensearch(&self) -> MappingType {
         match self {
-            FlussoType::Text => MappingType::Text,
+            FlussoType::Text | FlussoType::Identifier => MappingType::Text,
             FlussoType::Keyword | FlussoType::Enum | FlussoType::Uuid => MappingType::Keyword,
             FlussoType::Boolean => MappingType::Boolean,
             FlussoType::Short => MappingType::Short,
@@ -81,17 +87,19 @@ impl FlussoType {
     pub fn accepts_pg(&self, sql_type: &str) -> bool {
         let base = normalize_pg_type(sql_type);
         match self {
-            FlussoType::Text | FlussoType::Keyword | FlussoType::Enum => matches!(
-                base.as_str(),
-                "text"
-                    | "character varying"
-                    | "varchar"
-                    | "character"
-                    | "char"
-                    | "bpchar"
-                    | "citext"
-                    | "name"
-            ),
+            FlussoType::Text | FlussoType::Identifier | FlussoType::Keyword | FlussoType::Enum => {
+                matches!(
+                    base.as_str(),
+                    "text"
+                        | "character varying"
+                        | "varchar"
+                        | "character"
+                        | "char"
+                        | "bpchar"
+                        | "citext"
+                        | "name"
+                )
+            }
             FlussoType::Uuid => base == "uuid",
             FlussoType::Boolean => matches!(base.as_str(), "boolean" | "bool"),
             FlussoType::Short => matches!(base.as_str(), "smallint" | "int2" | "smallserial"),

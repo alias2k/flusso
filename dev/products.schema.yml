@@ -16,7 +16,7 @@ fields:
     type: text
     required: true
   - field: description
-    kind: prose # text + flusso_text analyzer
+    type: text # natural-language full text
   - field: inStock
     column: in_stock
     type: boolean
@@ -75,7 +75,7 @@ fields:
           type: short
           required: true
         - field: body
-          kind: prose
+          type: text
         - field: userId
           column: user_id
           type: integer

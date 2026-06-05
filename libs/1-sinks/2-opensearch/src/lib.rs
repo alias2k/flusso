@@ -15,7 +15,7 @@
 //!   untouched.
 //! - **Production-ready defaults.** Every index ships the `flusso_*` analysis
 //!   definitions, and (unless `auto_subfields` is off) each `text`/`keyword`
-//!   field is enriched with a punctuation/case/accent-insensitive analyzer plus
+//!   field is enriched with a good case/accent-insensitive analyzer plus
 //!   `keyword` (exact), `keyword_lowercase` (sortable), and `text` (searchable)
 //!   subfields. A field's explicit mapping always wins. See
 //!   [`build_analysis`] and [`build_property`].
@@ -567,11 +567,12 @@ const KEYWORD_LOWERCASE_SUBFIELD: &str = "keyword_lowercase";
 /// The subfield key holding the full-text-analyzed value of a `keyword` field,
 /// so a `keyword` is still searchable in a search box.
 const TEXT_SUBFIELD: &str = "text";
-/// The analyzer attached to `text` fields (and `keyword` text subfields) by
-/// default — punctuation-splitting, case- and accent-insensitive. Tuned for
-/// short identifier-like text (names, codes, SKUs, statuses).
+/// The identifier analyzer (`type: identifier` points fields here, as do
+/// `keyword` text subfields) — punctuation-splitting, case- and
+/// accent-insensitive. Tuned for short identifier-like text (names, codes, SKUs,
+/// statuses).
 const CODE_ANALYZER: &str = "flusso_code";
-/// The prose analyzer (`kind: prose` points fields here). Plain
+/// The natural-language analyzer attached to `text` fields by default. Plain
 /// tokenize + fold, no code-splitting.
 const TEXT_ANALYZER: &str = "flusso_text";
 /// The normalizer attached to lowercase keyword subfields.
@@ -619,7 +620,7 @@ fn build_analysis(mode: TextAnalysis) -> Value {
         "filter": ["flusso_word_delimiter", "flatten_graph", "lowercase", code_fold],
     });
 
-    // `flusso_text`: prose. Built-in standard tokenizer + fold, or the ICU
+    // `flusso_text`: natural language. Built-in standard tokenizer + fold, or the ICU
     // tokenizer/normalizer/folding which segment CJK/Thai and fold every script.
     let text_analyzer = match mode {
         TextAnalysis::Builtin => json!({
@@ -696,7 +697,7 @@ fn build_property(field: &ResolvedField, options: &IndexOptions) -> Value {
     if options.auto_subfields && field.children.is_empty() {
         match field.mapping.mapping_type {
             MappingType::Text => {
-                prop.insert("analyzer".to_owned(), json!(CODE_ANALYZER));
+                prop.insert("analyzer".to_owned(), json!(TEXT_ANALYZER));
                 prop.insert("fields".to_owned(), text_subfields());
             }
             MappingType::Keyword => {
@@ -980,11 +981,11 @@ mod tests {
     }
 
     #[test]
-    fn text_field_gets_code_analyzer_and_subfields() {
+    fn text_field_gets_text_analyzer_and_subfields() {
         let body = build_index_body(&[field("name", MappingType::Text, vec![])], &opts());
         let name = &body["mappings"]["properties"]["name"];
         assert_eq!(name["type"], "text");
-        assert_eq!(name["analyzer"], "flusso_code");
+        assert_eq!(name["analyzer"], "flusso_text");
         assert_eq!(name["fields"]["keyword"]["type"], "keyword");
         assert_eq!(name["fields"]["keyword"]["ignore_above"], 256);
         assert_eq!(
@@ -1020,12 +1021,13 @@ mod tests {
 
     #[test]
     fn explicit_extra_overrides_the_auto_shape() {
-        // A field that sets its own analyzer (e.g. via `kind: prose`) keeps it,
-        // and explicit `fields` replace the auto subfields wholesale.
+        // A field that sets its own analyzer (e.g. `options: { analyzer: english }`)
+        // keeps it over the auto default, and explicit `fields` replace the auto
+        // subfields wholesale.
         let mut extra = BTreeMap::new();
         extra.insert(
             "analyzer".to_owned(),
-            GenericValue::String("flusso_text".to_owned()),
+            GenericValue::String("english".to_owned()),
         );
         let name = ResolvedField {
             name: FieldName::try_new("bio").unwrap(),
@@ -1038,7 +1040,7 @@ mod tests {
         };
         let body = build_index_body(&[name], &opts());
         let bio = &body["mappings"]["properties"]["bio"];
-        assert_eq!(bio["analyzer"], "flusso_text");
+        assert_eq!(bio["analyzer"], "english");
         // The auto subfields are still present (only `analyzer` was overridden).
         assert_eq!(bio["fields"]["keyword"]["type"], "keyword");
     }

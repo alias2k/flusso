@@ -166,8 +166,8 @@ owns the **index** (mapping + analyzers + subfields); your application owns the
 
 | Name | What it does |
 | --- | --- |
-| `flusso_code` | Default for `text`. Splits on punctuation, case, and letter↔digit boundaries, then lowercases and folds accents. `C-01234` indexes as `c-01234`, `c01234`, `c`, `01234`, so it's found by `C01234`, `c-01234`, or `01234` — but **not** by a fuzzy `c1234` (add `fuzziness` on the query side if you want that). Tuned for identifier-like short text. |
-| `flusso_text` | Prose (`kind: prose`). Plain tokenize + lowercase + accent fold, no code-splitting. |
+| `flusso_code` | The `type: identifier` analyzer (and the analyzer on a `keyword` field's `text` subfield). Splits on punctuation, case, and letter↔digit boundaries, then lowercases and folds accents. `C-01234` indexes as `c-01234`, `c01234`, `c`, `01234`, so it's found by `C01234`, `c-01234`, or `01234` — but **not** by a fuzzy `c1234` (add `fuzziness` on the query side if you want that). Tuned for identifier-like short text. |
+| `flusso_text` | The default for `type: text` — natural language. Plain tokenize + lowercase + accent fold, no code-splitting. |
 | `flusso_lowercase` | A normalizer (single token, no splitting) for case- and accent-insensitive exact match and sort. |
 
 With `text_analysis = "icu"` the folding/tokenizing swaps to the `analysis-icu`

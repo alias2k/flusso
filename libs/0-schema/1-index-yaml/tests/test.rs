@@ -692,7 +692,7 @@ fields:
     assert!(matches!(err, ConversionError::ConflictingRelation));
 }
 
-// ── kind sugar ───────────────────────────────────────────────────────────────
+// ── full-text types ──────────────────────────────────────────────────────────
 
 use schema_core::{Column, FieldSource, FlussoType};
 
@@ -722,37 +722,37 @@ fn analyzer_of(schema: &IndexSchema, name: &str) -> String {
 }
 
 #[test]
-fn kind_prose_implies_text_with_prose_analyzer() {
+fn identifier_type_carries_code_analyzer() {
     let schema =
-        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: prose")
+        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    type: identifier")
             .unwrap();
-    assert_eq!(column_of(&schema, "bio").ty, FlussoType::Text);
-    assert_eq!(analyzer_of(&schema, "bio"), "flusso_text");
-}
-
-#[test]
-fn kind_code_implies_text_with_code_analyzer() {
-    let schema =
-        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    kind: code")
-            .unwrap();
-    assert_eq!(column_of(&schema, "sku").ty, FlussoType::Text);
+    assert_eq!(column_of(&schema, "sku").ty, FlussoType::Identifier);
     assert_eq!(analyzer_of(&schema, "sku"), "flusso_code");
 }
 
 #[test]
-fn explicit_analyzer_beats_kind() {
-    let schema = convert(
-        "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: prose\n    options: { analyzer: english }",
-    )
-    .unwrap();
-    assert_eq!(analyzer_of(&schema, "bio"), "english");
+fn text_type_injects_no_analyzer() {
+    // Plain `text` carries no analyzer in `options` — the sink supplies its
+    // natural-language default.
+    let schema =
+        convert("version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    type: text")
+            .unwrap();
+    assert_eq!(column_of(&schema, "bio").ty, FlussoType::Text);
+    let bio = schema
+        .fields
+        .iter()
+        .find(|f| f.field.as_ref() == "bio")
+        .unwrap();
+    assert!(bio.options.get("analyzer").is_none());
 }
 
 #[test]
-fn kind_on_non_text_type_errors() {
-    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: tags\n    kind: code\n    type: keyword";
-    let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
-    assert!(matches!(err, ConversionError::KindRequiresTextType { .. }));
+fn explicit_analyzer_beats_type_default() {
+    let schema = convert(
+        "version: 1\ntable: users\nfields:\n  - id\n  - field: sku\n    type: identifier\n    options: { analyzer: english }",
+    )
+    .unwrap();
+    assert_eq!(analyzer_of(&schema, "sku"), "english");
 }
 
 #[test]
@@ -795,16 +795,9 @@ fn aggregate_sum_without_type_errors() {
 }
 
 #[test]
-fn kind_on_join_field_errors() {
-    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: orders\n    kind: prose\n    join:\n      table: orders\n      type: one_to_many\n      foreign_key: user_id\n      primary_key: id\n      fields: [id]";
-    let err = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap_err();
-    assert!(matches!(err, ConversionError::KindOnNonScalarField));
-}
-
-#[test]
-fn unknown_kind_fails_to_parse() {
-    // An invalid `kind` value is rejected at parse time, like any other enum.
-    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    kind: bogus";
+fn unknown_type_fails_to_parse() {
+    // An invalid `type` value is rejected at parse time, like any other enum.
+    let yaml = "version: 1\ntable: users\nfields:\n  - id\n  - field: bio\n    type: bogus";
     assert!(parse(yaml).is_err());
 }
 
