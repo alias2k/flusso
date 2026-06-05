@@ -1,4 +1,8 @@
-//! `flusso-client` — a typed query client for a flusso-maintained OpenSearch index.
+//! `flusso-search` — a typed query client for a flusso-maintained search index.
+//!
+//! Targets OpenSearch and Elasticsearch 7.x, which share the `_search` query DSL
+//! this crate emits; any future backend divergence is handled on the [`Client`],
+//! not by separate crates.
 //!
 //! This is the **runtime** layer described in [`CLIENT.md`](../../../CLIENT.md):
 //! the transport, the field-handle / [`Query`] / [`Search`] builder, and the
@@ -25,7 +29,7 @@
 //! # Example (hand-written until the derive lands)
 //!
 //! ```no_run
-//! use flusso_client::{Client, Keyword, Number, Nested};
+//! use flusso_search::{Client, Keyword, Number, Nested};
 //!
 //! #[derive(serde::Deserialize)]
 //! struct User {
@@ -37,12 +41,12 @@
 //! impl User {
 //!     fn email() -> Keyword { Keyword::at("email") }
 //!     fn order_count() -> Number<i64> { Number::at("orderCount") }
-//!     fn search(client: &Client) -> flusso_client::Search<'_, User> {
-//!         flusso_client::Search::new(client, "users")
+//!     fn search(client: &Client) -> flusso_search::Search<'_, User> {
+//!         flusso_search::Search::new(client, "users")
 //!     }
 //! }
 //!
-//! # async fn run() -> flusso_client::Result<()> {
+//! # async fn run() -> flusso_search::Result<()> {
 //! let client = Client::connect("https://localhost:9200")?;
 //! let page = User::search(&client)
 //!     .filter(User::email().eq("ada@example.com"))

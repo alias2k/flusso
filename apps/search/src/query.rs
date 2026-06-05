@@ -151,12 +151,12 @@ impl Query {
 /// in any clause (`must_not(None)` excludes nothing, `and(None)` is identity).
 ///
 /// ```
-/// use flusso_client::{AsQuery, Keyword};
+/// use flusso_search::{AsQuery, Keyword};
 ///
 /// // A plain query is present…
 /// assert!(Keyword::at("email").eq("a@b.com").into_query().is_some());
 /// // …an absent optional contributes nothing.
-/// let missing: Option<flusso_client::Query> = None;
+/// let missing: Option<flusso_search::Query> = None;
 /// assert!(missing.into_query().is_none());
 /// ```
 pub trait AsQuery {

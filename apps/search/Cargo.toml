@@ -1,10 +1,10 @@
 [package]
-name = "flusso-client"
+name = "flusso-search"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "flusso_client"
+name = "flusso_search"
 path = "src/lib.rs"
 
 [lints]
