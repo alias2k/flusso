@@ -1,7 +1,7 @@
 # flusso dev config — points at the docker-compose Postgres and prints rebuilt
 # documents to stdout. Run with:
 #
-#   cargo run -- run --config dev/config.toml --pretty
+#   cargo run -- run --config dev/flusso.toml --pretty
 #
 # Schema paths below are resolved relative to this file's directory.
 

@@ -6,7 +6,7 @@
 # consumer — it creates neither).
 #
 #   docker compose up -d
-#   cargo run -- --config dev/config.toml
+#   cargo run -- --config dev/flusso.toml
 #   psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
 #
 # See dev/README.md for the full walk-through.
@@ -46,7 +46,7 @@ services:
     container_name: flusso-opensearch
     environment:
       # Single-node dev cluster with the security plugin disabled, so flusso can
-      # talk plain HTTP on 9200 with no credentials (see dev/config.toml).
+      # talk plain HTTP on 9200 with no credentials (see dev/flusso.toml).
       discovery.type: single-node
       DISABLE_SECURITY_PLUGIN: "true"
       DISABLE_INSTALL_DEMO_CONFIG: "true"

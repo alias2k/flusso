@@ -18,13 +18,13 @@ logical replication stream so the index stays current as the source changes.
 
 A deployment is described by two kinds of files.
 
-- **`config.toml`** — one per deployment. Declares the Postgres source, the
+- **`flusso.toml`** — one per deployment. Declares the Postgres source, the
   sinks to write to, and the list of indexes to build.
 - **`*.schema.yml`** — one per index. Describes a single search document: the
   root table, its fields, and how related tables join or aggregate into it.
 
 ```toml
-# config.toml
+# flusso.toml
 [source]
 type = "postgres"
 connection_url = { env = "DATABASE_URL" }
@@ -143,11 +143,11 @@ docker compose ps                         # wait for both to be "healthy"
 
 # 2. Validate the config and schemas first — that every table, column, and key
 #    the schemas name resolves against the database. Prints the resolved mapping.
-cargo run -- check --config dev/config.toml
+cargo run -- check --config dev/flusso.toml
 
 # 3. Start flusso: it creates the replication slot if needed, backfills
 #    OpenSearch, then follows live changes. Logs go to stderr.
-cargo run -- run --config dev/config.toml
+cargo run -- run --config dev/flusso.toml
 
 # 4. In another terminal, make changes and watch them stream through.
 psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
@@ -160,14 +160,14 @@ http://localhost:5601).
 
 The CLI has three subcommands:
 
-- `flusso compile` reads a config and the schemas it references and writes the
+- `flusso build` reads a config and the schemas it references and writes the
   whole validated configuration to a single portable binary artifact
-  (`flusso.bin` by default). No database is needed — schemas are self-describing
+  (`flusso.lock` by default). No database is needed — schemas are self-describing
   — and no secret is baked in: `{ env = "VAR" }` references are carried through
   and resolved wherever the artifact runs. This is what lets a deployment ship
   one file instead of a tree of YAML.
 - `flusso run` streams changes through the engine. With no `--config` it loads
-  the compiled artifact (`--artifact`, default `flusso.bin`); with `--config` it
+  the compiled artifact (`--artifact`, default `flusso.lock`); with `--config` it
   compiles the source afresh and runs that. The connection and credentials are
   resolved here, in the running environment.
 - `flusso check` validates the config and prints the fully-typed mapping — each
@@ -177,11 +177,11 @@ The CLI has three subcommands:
 
 ```sh
 flusso --help
-flusso compile --config config.toml -o flusso.bin  # build the portable artifact
-flusso check   --config config.toml                # validate (+ check vs database)
-flusso check   --config config.toml --offline      # validate without a database
-flusso run                                          # run the compiled flusso.bin
-flusso run --config config.toml --slot flusso       # compile from source and run
+flusso build   --config flusso.toml -o flusso.lock # build the portable artifact
+flusso check   --config flusso.toml                # validate (+ check vs database)
+flusso check   --config flusso.toml --offline      # validate without a database
+flusso run                                          # run the compiled flusso.lock
+flusso run --config flusso.toml --slot flusso       # compile from source and run
 flusso run --skip-backfill                          # resume live capture only
 ```
 
@@ -199,7 +199,7 @@ layer — a crate only depends on lower-numbered ones.
 | --- | --- | --- |
 | `schema` | `libs/0-schema` | Config entry point. `load()` reads a config and its schemas into one validated `Config`. |
 | `schema-core` | `libs/0-schema/0-core` | The validated domain model — the types every other crate produces and consumes. |
-| `schema-config-toml` | `libs/0-schema/1-config-toml` | Parses `config.toml` and converts it into core types. |
+| `schema-config-toml` | `libs/0-schema/1-config-toml` | Parses `flusso.toml` and converts it into core types. |
 | `schema-index-yaml` | `libs/0-schema/1-index-yaml` | Parses `*.schema.yml` and converts it into core types. |
 | `queue-core` | `libs/1-queue/0-core` | The work-queue abstraction (`Producer` / `Consumer` / `AckHandle`), generic over the payload. |
 | `queue-channel` | `libs/1-queue/1-channel` | In-process queue over a bounded `tokio` mpsc channel (back-pressure; ack is a no-op). |

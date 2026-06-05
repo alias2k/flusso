@@ -1,4 +1,4 @@
-//! Parse `config.toml` into the core [`Config`](schema_core::Config) model.
+//! Parse `flusso.toml` into the core [`Config`](schema_core::Config) model.
 //!
 //! A config file declares the Postgres source, the sinks documents are written
 //! to, and the indexes to build. Parsing happens in two stages:

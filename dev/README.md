@@ -16,7 +16,7 @@ aggregate, filters, and soft-delete.
 ```
 docker-compose.yml          Postgres + OpenSearch
 dev/
-  config.toml               source + sinks (opensearch + stdout) + 3 indexes
+  flusso.toml               source + sinks (opensearch + stdout) + 3 indexes
   users.schema.yml          user + account group + profile + addresses +
                             orders→items + order rollups
   products.schema.yml       product + pricing group (custom scaled_float) +
@@ -43,8 +43,8 @@ dev/
    also prints each document to the terminal:
 
    ```sh
-   cargo run -- check --config dev/config.toml   # optional: validate first
-   cargo run -- run --config dev/config.toml
+   cargo run -- check --config dev/flusso.toml   # optional: validate first
+   cargo run -- run --config dev/flusso.toml
    ```
 
 3. **Make changes** in another terminal and watch them appear:

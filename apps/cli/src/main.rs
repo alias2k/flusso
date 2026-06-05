@@ -2,9 +2,9 @@
 //!
 //! Three subcommands:
 //!
-//! - `build` reads a `config.toml`, parses and validates every schema it
+//! - `build` reads a `flusso.toml`, parses and validates every schema it
 //!   references, and writes the whole validated configuration to a single
-//!   portable binary artifact (`flusso.bin`). No database is needed: the schema
+//!   portable binary artifact (`flusso.lock`). No database is needed: the schema
 //!   is self-describing, and secrets are kept as references, not baked in.
 //! - `run` streams Postgres changes through the engine to the configured
 //!   sink(s). With no `--config` it loads the compiled artifact; with `--config`
@@ -38,9 +38,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 use url::Url;
 
+/// The default config-file path, by convention `flusso.toml`.
+const DEFAULT_CONFIG: &str = "flusso.toml";
+
 /// The default compiled-artifact path, written by `build` and loaded by a
 /// bare `run`.
-const DEFAULT_ARTIFACT: &str = "flusso.bin";
+const DEFAULT_ARTIFACT: &str = "flusso.lock";
 
 /// Keep a search index in sync with Postgres, driven by a config file.
 #[derive(Debug, Parser)]
@@ -63,7 +66,7 @@ enum Command {
 #[derive(Debug, Args)]
 struct BuildArgs {
     /// Path to the configuration file.
-    #[arg(short, long, default_value = "config.toml")]
+    #[arg(short, long, default_value = DEFAULT_CONFIG)]
     config: PathBuf,
 
     /// Where to write the compiled artifact.
@@ -107,7 +110,7 @@ struct RunArgs {
 #[derive(Debug, Args)]
 struct CheckArgs {
     /// Path to the configuration file.
-    #[arg(short, long, default_value = "config.toml")]
+    #[arg(short, long, default_value = DEFAULT_CONFIG)]
     config: PathBuf,
 
     /// Validate the files only; do not connect to the database. The mapping is

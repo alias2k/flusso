@@ -1,7 +1,7 @@
 //! Load a `flusso` configuration into a validated model.
 //!
 //! This is the front door to the configuration layer. [`load`] takes the path
-//! to a `config.toml`, reads the source and sinks from it, resolves and parses
+//! to a `flusso.toml`, reads the source and sinks from it, resolves and parses
 //! every index schema the file references, and hands back a single [`Config`].
 //!
 //! The format-specific crates (`schema-config-toml`, `schema-index-yaml`) and
@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```no_run
-//! let config = schema::load("config.toml")?;
+//! let config = schema::load("flusso.toml")?;
 //!
 //! for (name, index) in &config.indexes {
 //!     println!("{name}: table {} ({} fields)", index.schema.table, index.schema.fields.len());

@@ -148,7 +148,7 @@ resolved mapping — the thing that is fully typed — is produced *against the
 source*. flusso emits it as a deterministic JSON file you check in:
 
 ```sh
-flusso emit-mapping --config config.toml --index users > users.mapping.json
+flusso emit-mapping --config flusso.toml --index users > users.mapping.json
 ```
 
 The derive reads that artifact at compile time. The `mapping` attribute is a

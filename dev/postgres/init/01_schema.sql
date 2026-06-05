@@ -3,7 +3,7 @@
 -- It is deliberately broad so the dev documents exercise every feature: all
 -- scalar types, one-to-one / one-to-many / many-to-many joins, deep nesting,
 -- every aggregate, filters, groups, and soft-delete. Three indexes are built
--- from it (users, products, orders) — see dev/config.toml.
+-- from it (users, products, orders) — see dev/flusso.toml.
 --
 -- Ids are explicit (not serial) so the seed and changes stay deterministic.
 

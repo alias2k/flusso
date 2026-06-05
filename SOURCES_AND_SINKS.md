@@ -2,10 +2,10 @@
 
 flusso connects one **source** — where rows come from — to one or more **sinks**
 — where the built documents go. They are configured under `[source]` and
-`[sinks.<name>]` in `config.toml`; this document is the reference for every
+`[sinks.<name>]` in `flusso.toml`; this document is the reference for every
 supported type and its options.
 
-For the overall `config.toml` structure, the `env_or_value` form, and the
+For the overall `flusso.toml` structure, the `env_or_value` form, and the
 reserved-environment-variable override rules referenced throughout, see
 [`SCHEMA.md`](SCHEMA.md). For the index document format, see the same file.
 

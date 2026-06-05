@@ -5,12 +5,12 @@ A deployment is described by two kinds of file:
 
 | File | Count | Format | Describes |
 | --- | --- | --- | --- |
-| [`config.toml`](#configtoml) | one per deployment | TOML | the source database, the sink destinations, and which indexes to build |
+| [`flusso.toml`](#flussotoml) | one per deployment | TOML | the source database, the sink destinations, and which indexes to build |
 | [`*.schema.yml`](#schemayml) | one per index | YAML | a single search document — its root table, fields, and how related tables fold in |
 
-`schema::load("config.toml")` reads the config and every schema it references,
+`schema::load("flusso.toml")` reads the config and every schema it references,
 validates both layers, and returns one fully-validated `Config`. Schema paths in
-`config.toml` are resolved **relative to the config file's directory**.
+`flusso.toml` are resolved **relative to the config file's directory**.
 
 The supported source and sink **types** — their connection options and behavior
 — are documented separately in
@@ -42,7 +42,7 @@ suit the search index).
 
 ### `env_or_value`
 
-Anywhere a secret or connection string is expected in `config.toml`, you may
+Anywhere a secret or connection string is expected in `flusso.toml`, you may
 give either a literal string or a reference to an environment variable:
 
 ```toml
@@ -60,7 +60,7 @@ point.
 ### Reserved environment variables
 
 On top of the explicit `{ env = … }` form, a set of **reserved variables** act
-as a deployment override layer, so the same `config.toml` works across
+as a deployment override layer, so the same `flusso.toml` works across
 environments without edits (the 12-factor pattern). When set, they take
 **priority over** the config file:
 
@@ -86,7 +86,7 @@ its own `PRIMARY_…`, `SECONDARY_…`, etc.
 4. else → error, for required values (the source URL, a sink `url`).
 
 ```toml
-# config.toml ships a default; the deployment overrides via env.
+# flusso.toml ships a default; the deployment overrides via env.
 [source]
 type = "postgres"
 connection_url = "postgres://localhost/dev"   # overridden by $DATABASE_URL if set
@@ -100,7 +100,7 @@ url = "https://localhost:9200"                 # overridden by $PRIMARY_OPENSEAR
 
 ---
 
-## `config.toml`
+## `flusso.toml`
 
 Top-level table. Only `[source]` is required.
 
@@ -558,14 +558,14 @@ the live columns and reports any disagreement.
 
 ## Compiling
 
-`flusso compile --config config.toml -o flusso.bin` runs everything above and
+`flusso build --config config.toml -o flusso.lock` runs everything above and
 writes the whole validated configuration — every schema inlined — to a single
 binary artifact (MessagePack). Because schemas are self-describing and secrets
 are [deferred](#env_or_value), compiling needs no database and bakes in no
 secret: `{ env = … }` references travel as references.
 
 `flusso run` with no `--config` loads that artifact and resolves the connection
-and credentials in its own environment; `flusso run --config config.toml`
+and credentials in its own environment; `flusso run --config flusso.toml`
 compiles from source and runs that. So a deployment ships one file — no YAML
 tree, no source checkout — and the same artifact runs anywhere its environment
 provides the secrets.
@@ -574,7 +574,7 @@ provides the secrets.
 
 ## A complete example
 
-`config.toml`:
+`flusso.toml`:
 
 ```toml
 [source]

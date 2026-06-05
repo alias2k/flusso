@@ -1,6 +1,6 @@
 //! Compiling a configuration into a single, portable binary artifact.
 //!
-//! [`compile`] runs the whole load pipeline — read `config.toml`, parse every
+//! [`compile`] runs the whole load pipeline — read `flusso.toml`, parse every
 //! referenced schema, validate and convert into a [`Config`] — and wraps the
 //! result in a [`Compiled`] envelope. [`write`] serializes that envelope to
 //! MessagePack; [`load_compiled`] reads it back.
@@ -62,7 +62,7 @@ pub enum CompileError {
     VersionMismatch { got: u8, expected: u8 },
 }
 
-/// Compile a `config.toml` (and the schemas it references) into a [`Compiled`]
+/// Compile a `flusso.toml` (and the schemas it references) into a [`Compiled`]
 /// envelope. Needs neither a database nor any secret to be set — schemas are
 /// self-describing and secrets are deferred.
 pub fn compile(config_path: impl AsRef<Path>) -> Result<Compiled, CompileError> {

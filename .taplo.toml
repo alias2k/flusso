@@ -1,5 +1,5 @@
 [[rule]]
-include = ["**/config.toml"]
+include = ["**/flusso.toml"]
 
 [rule.schema]
 path = "schemas/config.schema.json"
