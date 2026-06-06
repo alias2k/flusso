@@ -1,0 +1,5 @@
+error: `path = "orders.shipping"`: `shipping` is an object inside a `nested` array — querying object sub-fields within a nested scope isn't supported yet
+ --> tests/ui/object_under_nested.rs:7:34
+  |
+7 | #[flusso(index = "users", path = "orders.shipping")]
+  |                                  ^^^^^^^^^^^^^^^^^

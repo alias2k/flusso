@@ -3,7 +3,21 @@
 
 use std::path::{Path, PathBuf};
 
-use schema::{IndexMapping, IndexName, ResolvedField};
+use schema::{IndexMapping, IndexName, MappingType, ResolvedField};
+
+/// The query **scope** a struct's handles live in (see `query::Root`).
+///
+/// `Root` for the document root and for any `object`/`one_to_one` reached only
+/// through other objects (flattened, dotted, no wrapper). `SelfTagged` for a
+/// `nested` element: its handles carry the struct's own type as their scope, so
+/// they must be lifted with `Nested::any`/`all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// The document root scope.
+    Root,
+    /// This struct's own type (a `nested` element introduces its own scope).
+    SelfTagged,
+}
 
 /// A resolved index plus the files whose changes should retrigger a rebuild.
 pub(crate) struct Resolved {
@@ -49,6 +63,43 @@ impl Resolved {
             }
         }
         Ok(fields)
+    }
+
+    /// The query scope for the struct bound at `path` (see [`Scope`]).
+    ///
+    /// `None`/object-only path → [`Scope::Root`]; a path whose final segment is
+    /// a `nested` array → [`Scope::SelfTagged`]. An `object` *under* a `nested`
+    /// can't be expressed in the "objects-direct" scope model, so it's an error.
+    /// Assumes `path` has already validated via [`Resolved::fields_at`].
+    pub(crate) fn scope_at(&self, path: Option<&str>) -> Result<Scope, String> {
+        let Some(path) = path else {
+            return Ok(Scope::Root);
+        };
+        let segments: Vec<&str> = path.split('.').collect();
+        let mut fields = self.mapping.fields.as_slice();
+        let mut nested_ancestor = false;
+        for (i, segment) in segments.iter().enumerate() {
+            let Some(field) = fields.iter().find(|f| f.name.as_ref() == *segment) else {
+                return Err(format!("`path = \"{path}\"`: no field `{segment}`"));
+            };
+            let is_nested = matches!(field.mapping.mapping_type, MappingType::Nested);
+            let is_object = matches!(field.mapping.mapping_type, MappingType::Object);
+            if i + 1 == segments.len() {
+                if is_nested {
+                    return Ok(Scope::SelfTagged);
+                }
+                if is_object && nested_ancestor {
+                    return Err(format!(
+                        "`path = \"{path}\"`: `{segment}` is an object inside a `nested` array \
+                         — querying object sub-fields within a nested scope isn't supported yet"
+                    ));
+                }
+                return Ok(Scope::Root);
+            }
+            nested_ancestor |= is_nested;
+            fields = &field.children;
+        }
+        Ok(Scope::Root)
     }
 }
 

@@ -14,11 +14,14 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::quote;
 use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, LitStr, parse_macro_input};
 
 mod doc;
 mod resolve;
+
+use resolve::Scope;
 
 /// Derive the typed query surface for a flusso document struct.
 ///
@@ -148,6 +151,14 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         Err(message) => return syn::Error::new(attrs.path_span, message).to_compile_error(),
     };
 
+    // The scope this struct's handles live in: `Root` (untagged) at the root and
+    // through flattened objects; the struct's own type under a `nested` array.
+    let scope_tag = match resolved.scope_at(attrs.path.as_deref()) {
+        Ok(Scope::Root) => quote! { ::flusso_search::Root },
+        Ok(Scope::SelfTagged) => quote! { Self },
+        Err(message) => return syn::Error::new(attrs.path_span, message).to_compile_error(),
+    };
+
     let scope = match &attrs.path {
         Some(path) => format!("`{path}` in index `{}`", attrs.index),
         None => format!("index `{}`", attrs.index),
@@ -170,6 +181,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         &hash,
         prefix,
         is_root,
+        &scope_tag,
         level,
         &fields,
         &tracked,

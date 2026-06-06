@@ -281,11 +281,14 @@ pub(crate) fn codegen(
     hash: &str,
     prefix: &str,
     is_root: bool,
+    scope: &TokenStream,
     level: &[ResolvedField],
     fields: &[DocField],
     tracked: &[String],
 ) -> TokenStream {
-    let handles = level.iter().filter_map(|resolved| handle_fn(resolved, prefix, fields));
+    let handles = level
+        .iter()
+        .filter_map(|resolved| handle_fn(resolved, prefix, scope, fields));
 
     // The physical index name = logical name + schema hash, exactly what the
     // OpenSearch sink writes. The derive bakes it in (a structural schema change
@@ -333,8 +336,15 @@ pub(crate) fn codegen(
     }
 }
 
-/// The handle fn for one schema field (every mapping kind has one now).
-fn handle_fn(resolved: &ResolvedField, prefix: &str, fields: &[DocField]) -> Option<TokenStream> {
+/// The handle fn for one schema field (every mapping kind has one now). `scope`
+/// is this level's query scope tag (`::flusso_search::Root` or `Self`), baked
+/// into every emitted handle so its queries land in the right scope.
+fn handle_fn(
+    resolved: &ResolvedField,
+    prefix: &str,
+    scope: &TokenStream,
+    fields: &[DocField],
+) -> Option<TokenStream> {
     let path = if prefix.is_empty() {
         resolved.name.to_string()
     } else {
@@ -345,15 +355,15 @@ fn handle_fn(resolved: &ResolvedField, prefix: &str, fields: &[DocField]) -> Opt
     let simple = |ty: &str| {
         let ty = Ident::new(ty, Span::call_site());
         Some((
-            quote! { ::flusso_search::#ty },
-            quote! { ::flusso_search::#ty::at(#path) },
+            quote! { ::flusso_search::#ty<#scope> },
+            quote! { ::flusso_search::#ty::<#scope>::at(#path) },
         ))
     };
     let number = |inner: &str| {
         let inner = Ident::new(inner, Span::call_site());
         Some((
-            quote! { ::flusso_search::Number<#inner> },
-            quote! { ::flusso_search::Number::<#inner>::at(#path) },
+            quote! { ::flusso_search::Number<#inner, #scope> },
+            quote! { ::flusso_search::Number::<#inner, #scope>::at(#path) },
         ))
     };
 
@@ -371,27 +381,25 @@ fn handle_fn(resolved: &ResolvedField, prefix: &str, fields: &[DocField]) -> Opt
         MappingType::Other(name) if name == "geo_point" => simple("Geo"),
         MappingType::Other(name) if name == "binary" => simple("Binary"),
         MappingType::Object if resolved.children.is_empty() => simple("Json"),
-        // A group / one_to_one object → an `Object<T>` handle (for `.exists()`;
-        // sub-fields are queried via their own dotted-path child handles).
-        MappingType::Object => Some(match object_element(resolved, fields) {
-            Some(elem) => (
-                quote! { ::flusso_search::Object<#elem> },
-                quote! { ::flusso_search::Object::<#elem>::at(#path) },
-            ),
-            None => (
-                quote! { ::flusso_search::Object },
-                quote! { ::flusso_search::Object::at(#path) },
-            ),
-        }),
+        // A group / one_to_one object → an `Object<S>` handle (for `.exists()`;
+        // sub-fields are queried via their own dotted-path child handles). `S` is
+        // the enclosing scope, same as the leaf handles at this level.
+        MappingType::Object => Some((
+            quote! { ::flusso_search::Object<#scope> },
+            quote! { ::flusso_search::Object::<#scope>::at(#path) },
+        )),
+        // A `nested` array → `Nested<EnclosingScope, ChildScope>`: queries lift
+        // from the element scope up to this level. The child scope is the
+        // projected element struct (which derives its own `SelfTagged` handles),
+        // or the `Nested` default element type when un-projected.
         MappingType::Nested => Some(match nested_element(resolved, fields) {
             Some(elem) => (
-                quote! { ::flusso_search::Nested<#elem> },
-                quote! { ::flusso_search::Nested::<#elem>::at(#path) },
+                quote! { ::flusso_search::Nested<#scope, #elem> },
+                quote! { ::flusso_search::Nested::<#scope, #elem>::at(#path) },
             ),
-            // Un-projected nested path → the `Nested` default element type.
             None => (
-                quote! { ::flusso_search::Nested },
-                quote! { ::flusso_search::Nested::at(#path) },
+                quote! { ::flusso_search::Nested<#scope> },
+                quote! { ::flusso_search::Nested::<#scope>::at(#path) },
             ),
         }),
         MappingType::Other(_) => simple("Json"),
@@ -407,18 +415,6 @@ fn nested_element(resolved: &ResolvedField, fields: &[DocField]) -> Option<Token
     let inner = option_inner(field.ty).unwrap_or(field.ty);
     let elem = vec_inner(inner)?;
     Some(quote! { #elem })
-}
-
-/// The sub-document type for an `Object` handle: the struct's projected field
-/// type (stripping `Option`), or `None` (use the `Object` default type).
-fn object_element(resolved: &ResolvedField, fields: &[DocField]) -> Option<TokenStream> {
-    let field = fields.iter().find(|f| f.doc_key == resolved.name.as_ref())?;
-    let inner = option_inner(field.ty).unwrap_or(field.ty);
-    // A struct, not a `Vec` (that would be `nested`, handled separately).
-    if vec_inner(inner).is_some() {
-        return None;
-    }
-    Some(quote! { #inner })
 }
 
 // ── type helpers ─────────────────────────────────────────────────────────────

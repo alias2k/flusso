@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use crate::Client;
 use crate::error::Result;
 use crate::handles::{NestedProjection, Sort};
-use crate::query::{AsQuery, BoolQuery};
+use crate::query::{AsQuery, BoolBuilder, Root};
 
 /// A typed search against one index.
 ///
@@ -22,7 +22,7 @@ use crate::query::{AsQuery, BoolQuery};
 pub struct Search<'a, T> {
     client: &'a Client,
     index: String,
-    bool_query: BoolQuery,
+    bool_query: BoolBuilder,
     raw: Option<Value>,
     sort: Vec<Sort>,
     from: Option<u64>,
@@ -37,7 +37,7 @@ impl<'a, T> Search<'a, T> {
         Self {
             client,
             index: index.into(),
-            bool_query: BoolQuery::default(),
+            bool_query: BoolBuilder::default(),
             raw: None,
             sort: Vec::new(),
             from: None,
@@ -47,12 +47,12 @@ impl<'a, T> Search<'a, T> {
         }
     }
 
-    /// A scoring clause (`bool.must`). Accepts any [`AsQuery`]; an absent one
-    /// (e.g. a `None` optional) adds nothing.
+    /// A scoring clause (`bool.must`). Accepts any root-scope [`AsQuery`]; an
+    /// absent one (e.g. a `None` optional) adds nothing.
     #[must_use]
-    pub fn query(mut self, query: impl AsQuery) -> Self {
+    pub fn query(mut self, query: impl AsQuery<Root>) -> Self {
         if let Some(query) = query.into_query() {
-            self.bool_query.must.push(query);
+            self.bool_query.push_must(query.into_inner());
         }
         self
     }
@@ -60,27 +60,27 @@ impl<'a, T> Search<'a, T> {
     /// A non-scoring, cacheable clause (`bool.filter`). An absent clause adds
     /// nothing — so `filter(opt.map(|v| handle.eq(v)))` is a conditional filter.
     #[must_use]
-    pub fn filter(mut self, query: impl AsQuery) -> Self {
+    pub fn filter(mut self, query: impl AsQuery<Root>) -> Self {
         if let Some(query) = query.into_query() {
-            self.bool_query.filter.push(query);
+            self.bool_query.push_filter(query.into_inner());
         }
         self
     }
 
     /// An exclusion clause (`bool.must_not`). An absent clause excludes nothing.
     #[must_use]
-    pub fn must_not(mut self, query: impl AsQuery) -> Self {
+    pub fn must_not(mut self, query: impl AsQuery<Root>) -> Self {
         if let Some(query) = query.into_query() {
-            self.bool_query.must_not.push(query);
+            self.bool_query.push_must_not(query.into_inner());
         }
         self
     }
 
     /// An optional, scoring clause (`bool.should`). An absent clause adds nothing.
     #[must_use]
-    pub fn should(mut self, query: impl AsQuery) -> Self {
+    pub fn should(mut self, query: impl AsQuery<Root>) -> Self {
         if let Some(query) = query.into_query() {
-            self.bool_query.should.push(query);
+            self.bool_query.push_should(query.into_inner());
         }
         self
     }
@@ -142,7 +142,7 @@ impl<'a, T> Search<'a, T> {
         } else {
             let mut bool_body = Map::new();
             bool_body.insert("must".to_string(), Value::Array(vec![query]));
-            let shoulds = self.nested.iter().map(|p| p.to_query().to_value()).collect();
+            let shoulds = self.nested.iter().map(NestedProjection::to_value).collect();
             bool_body.insert("should".to_string(), Value::Array(shoulds));
             let mut outer = Map::new();
             outer.insert("bool".to_string(), Value::Object(bool_body));

@@ -1,21 +1,23 @@
-//! Field handles. Each handle carries a field path and exposes only the
-//! operators its mapping type supports; every operator builds a [`Query`].
+//! Field handles. Each handle carries a field path **and a scope** `S`, and
+//! exposes only the operators its mapping type supports; every operator builds a
+//! [`Query`]`<S>`.
 //!
-//! Until the `#[derive(FlussoDocument)]` macro exists, callers construct these
-//! by hand with [`Keyword::at`] and friends, passing the field's document path
-//! (dotted for sub-objects and nested fields, e.g. `"account.tier"`,
-//! `"orders.status"`). The derive will generate exactly these constructors.
+//! Root fields and flattened object / `one_to_one` sub-fields are scope
+//! [`Root`]; a `nested` array's element handles carry the element type as their
+//! scope, so their queries must be lifted with [`Nested::any`]/[`Nested::all`]
+//! before joining a parent query. (The derive picks the right scope; hand-written
+//! handles default to `Root`.)
 
 use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use crate::query::{AsQuery, BoolQuery, Query};
+use crate::query::{AsQuery, Query, Root};
 
-// ---- shared leaf builders --------------------------------------------------
+// ---- shared leaf builders (generic over scope) -----------------------------
 
 /// `{ "<wrapper>": { "<path>": <value> } }`.
-fn single(wrapper: &str, path: &str, value: Value) -> Query {
+fn single<S>(wrapper: &str, path: &str, value: Value) -> Query<S> {
     let mut inner = Map::new();
     inner.insert(path.to_string(), value);
     let mut outer = Map::new();
@@ -24,7 +26,7 @@ fn single(wrapper: &str, path: &str, value: Value) -> Query {
 }
 
 /// `{ "exists": { "field": "<path>" } }`.
-fn exists_q(path: &str) -> Query {
+fn exists_q<S>(path: &str) -> Query<S> {
     let mut inner = Map::new();
     inner.insert("field".to_string(), Value::String(path.to_string()));
     let mut outer = Map::new();
@@ -33,7 +35,7 @@ fn exists_q(path: &str) -> Query {
 }
 
 /// `{ "range": { "<path>": { <bounds…> } } }`.
-fn range_q(path: &str, bounds: Vec<(&str, Value)>) -> Query {
+fn range_q<S>(path: &str, bounds: Vec<(&str, Value)>) -> Query<S> {
     let mut body = Map::new();
     for (key, value) in bounds {
         body.insert(key.to_string(), value);
@@ -41,45 +43,57 @@ fn range_q(path: &str, bounds: Vec<(&str, Value)>) -> Query {
     single("range", path, Value::Object(body))
 }
 
-/// `{ "nested": { "path": "<path>", "query": <inner> } }`.
-fn nested_q(path: &str, inner: Query) -> Query {
+/// `{ "nested": { "path": "<path>", "query": <query> } }`.
+fn nested_value(path: &str, query: Value) -> Value {
     let mut body = Map::new();
     body.insert("path".to_string(), Value::String(path.to_string()));
-    body.insert("query".to_string(), inner.to_value());
+    body.insert("query".to_string(), query);
     let mut outer = Map::new();
     outer.insert("nested".to_string(), Value::Object(body));
-    Query::leaf(Value::Object(outer))
+    Value::Object(outer)
 }
 
-/// `{ "<name>": { <body> } }` — for clauses whose body isn't a single
-/// `path: value` pair.
-fn wrap(name: &str, body: Map<String, Value>) -> Query {
+/// `{ "bool": { "<clause>": [ … ] } }`.
+fn bool_value(clause: &str, items: Vec<Value>) -> Value {
+    let mut body = Map::new();
+    body.insert(clause.to_string(), Value::Array(items));
     let mut outer = Map::new();
-    outer.insert(name.to_string(), Value::Object(body));
-    Query::leaf(Value::Object(outer))
+    outer.insert("bool".to_string(), Value::Object(body));
+    Value::Object(outer)
+}
+
+/// `{ "match_all": {} }`.
+fn match_all_value() -> Value {
+    let mut outer = Map::new();
+    outer.insert("match_all".to_string(), Value::Object(Map::new()));
+    Value::Object(outer)
 }
 
 // ---- Keyword ---------------------------------------------------------------
 
 /// An exact, aggregatable string field (`keyword`, `enum`, `uuid`).
 #[derive(Debug, Clone)]
-pub struct Keyword {
+pub struct Keyword<S = Root> {
     path: String,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl Keyword {
+impl<S> Keyword<S> {
     /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
     /// Exact match.
-    pub fn eq(&self, value: impl Into<String>) -> Query {
+    pub fn eq(&self, value: impl Into<String>) -> Query<S> {
         single("term", &self.path, Value::String(value.into()))
     }
 
     /// Match any of the given values.
-    pub fn in_(&self, values: impl IntoIterator<Item = impl Into<String>>) -> Query {
+    pub fn in_(&self, values: impl IntoIterator<Item = impl Into<String>>) -> Query<S> {
         let array = values
             .into_iter()
             .map(|v| Value::String(v.into()))
@@ -88,29 +102,27 @@ impl Keyword {
     }
 
     /// Prefix match.
-    pub fn prefix(&self, value: impl Into<String>) -> Query {
+    pub fn prefix(&self, value: impl Into<String>) -> Query<S> {
         single("prefix", &self.path, Value::String(value.into()))
     }
 
     /// Wildcard match — `?` matches one character, `*` matches any run.
-    pub fn wildcard(&self, pattern: impl Into<String>) -> Query {
+    pub fn wildcard(&self, pattern: impl Into<String>) -> Query<S> {
         single("wildcard", &self.path, Value::String(pattern.into()))
     }
 
-    /// Regular-expression match (Lucene regex syntax, anchored to the whole
-    /// term).
-    pub fn regexp(&self, pattern: impl Into<String>) -> Query {
+    /// Regular-expression match (Lucene regex syntax, anchored to the whole term).
+    pub fn regexp(&self, pattern: impl Into<String>) -> Query<S> {
         single("regexp", &self.path, Value::String(pattern.into()))
     }
 
-    /// Fuzzy term match — tolerates typos within the default `AUTO` edit
-    /// distance.
-    pub fn fuzzy(&self, value: impl Into<String>) -> Query {
+    /// Fuzzy term match — tolerates typos within the default `AUTO` distance.
+    pub fn fuzzy(&self, value: impl Into<String>) -> Query<S> {
         single("fuzzy", &self.path, Value::String(value.into()))
     }
 
     /// The field has a non-null value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 
@@ -129,34 +141,37 @@ impl Keyword {
 
 /// An analyzed full-text field (`text`, `identifier`). No exact `eq`.
 #[derive(Debug, Clone)]
-pub struct Text {
+pub struct Text<S = Root> {
     path: String,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl Text {
+impl<S> Text<S> {
     /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
     /// Analyzed match.
-    pub fn matches(&self, value: impl Into<String>) -> Query {
+    pub fn matches(&self, value: impl Into<String>) -> Query<S> {
         single("match", &self.path, Value::String(value.into()))
     }
 
     /// Analyzed phrase match (terms in order).
-    pub fn match_phrase(&self, value: impl Into<String>) -> Query {
+    pub fn match_phrase(&self, value: impl Into<String>) -> Query<S> {
         single("match_phrase", &self.path, Value::String(value.into()))
     }
 
-    /// Analyzed phrase-prefix match — the last term is treated as a prefix
-    /// (search-as-you-type).
-    pub fn match_phrase_prefix(&self, value: impl Into<String>) -> Query {
+    /// Analyzed phrase-prefix match (search-as-you-type).
+    pub fn match_phrase_prefix(&self, value: impl Into<String>) -> Query<S> {
         single("match_phrase_prefix", &self.path, Value::String(value.into()))
     }
 
     /// Analyzed match tolerant of typos — a `match` with `fuzziness: AUTO`.
-    pub fn matches_fuzzy(&self, value: impl Into<String>) -> Query {
+    pub fn matches_fuzzy(&self, value: impl Into<String>) -> Query<S> {
         let mut params = Map::new();
         params.insert("query".to_string(), Value::String(value.into()));
         params.insert("fuzziness".to_string(), Value::String("AUTO".to_string()));
@@ -164,17 +179,16 @@ impl Text {
     }
 
     /// The field has a non-null value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 }
 
-/// A cross-field full-text query over several [`Text`] fields.
-///
-/// `{ "multi_match": { "query": "<query>", "fields": [ <paths…> ] } }`, using
-/// OpenSearch's default `best_fields` scoring. For per-field boosts, a phrase
-/// type, or analyzer overrides, drop to a `raw` clause.
-pub fn multi_match(query: impl Into<String>, fields: impl IntoIterator<Item = Text>) -> Query {
+/// A cross-field full-text query over several [`Text`] fields in the same scope.
+pub fn multi_match<S>(
+    query: impl Into<String>,
+    fields: impl IntoIterator<Item = Text<S>>,
+) -> Query<S> {
     let paths = fields
         .into_iter()
         .map(|field| Value::String(field.path))
@@ -191,40 +205,42 @@ pub fn multi_match(query: impl Into<String>, fields: impl IntoIterator<Item = Te
 
 /// A boolean field.
 #[derive(Debug, Clone)]
-pub struct Bool {
+pub struct Bool<S = Root> {
     path: String,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl Bool {
+impl<S> Bool<S> {
     /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
     /// Exact match.
-    pub fn eq(&self, value: bool) -> Query {
+    pub fn eq(&self, value: bool) -> Query<S> {
         single("term", &self.path, Value::Bool(value))
     }
 
     /// The field has a non-null value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 }
 
 // ---- Number ----------------------------------------------------------------
 
-/// A numeric field. `T` is the Rust scalar (`i16`/`i32`/`i64`/`f32`/`f64`) the
-/// schema's type maps to; operator arguments take that type.
+/// A numeric field. `T` is the Rust scalar; `S` is the scope (defaults to
+/// [`Root`], so `Number<i64>` is a root-scope handle).
 #[derive(Debug, Clone)]
-pub struct Number<T> {
+pub struct Number<T, S = Root> {
     path: String,
-    // `fn() -> T` keeps `Number<T>` `Send`/`Sync` and `Debug` without bounding
-    // `T`, while still pinning the operator argument type.
-    _marker: PhantomData<fn() -> T>,
+    _marker: PhantomData<fn() -> (T, S)>,
 }
 
-impl<T> Number<T>
+impl<T, S> Number<T, S>
 where
     T: Into<Value> + Copy,
 {
@@ -237,43 +253,43 @@ where
     }
 
     /// Exact match.
-    pub fn eq(&self, value: T) -> Query {
+    pub fn eq(&self, value: T) -> Query<S> {
         single("term", &self.path, value.into())
     }
 
     /// Match any of the given values.
-    pub fn in_(&self, values: impl IntoIterator<Item = T>) -> Query {
+    pub fn in_(&self, values: impl IntoIterator<Item = T>) -> Query<S> {
         let array = values.into_iter().map(Into::into).collect();
         single("terms", &self.path, Value::Array(array))
     }
 
     /// Strictly less than `value`.
-    pub fn lt(&self, value: T) -> Query {
+    pub fn lt(&self, value: T) -> Query<S> {
         range_q(&self.path, vec![("lt", value.into())])
     }
 
     /// Less than or equal to `value`.
-    pub fn lte(&self, value: T) -> Query {
+    pub fn lte(&self, value: T) -> Query<S> {
         range_q(&self.path, vec![("lte", value.into())])
     }
 
     /// Strictly greater than `value`.
-    pub fn gt(&self, value: T) -> Query {
+    pub fn gt(&self, value: T) -> Query<S> {
         range_q(&self.path, vec![("gt", value.into())])
     }
 
     /// Greater than or equal to `value`.
-    pub fn gte(&self, value: T) -> Query {
+    pub fn gte(&self, value: T) -> Query<S> {
         range_q(&self.path, vec![("gte", value.into())])
     }
 
     /// Inclusive range `[low, high]`.
-    pub fn between(&self, low: T, high: T) -> Query {
+    pub fn between(&self, low: T, high: T) -> Query<S> {
         range_q(&self.path, vec![("gte", low.into()), ("lte", high.into())])
     }
 
     /// The field has a non-null value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 
@@ -290,46 +306,49 @@ where
 
 // ---- Date ------------------------------------------------------------------
 
-/// A `date`/`timestamp` field. Bounds are ISO-8601 strings (or anything the
-/// index's date format accepts).
+/// A `date`/`timestamp` field. Bounds are ISO-8601 strings.
 #[derive(Debug, Clone)]
-pub struct Date {
+pub struct Date<S = Root> {
     path: String,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl Date {
+impl<S> Date<S> {
     /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
     /// Exact match.
-    pub fn eq(&self, value: impl Into<String>) -> Query {
+    pub fn eq(&self, value: impl Into<String>) -> Query<S> {
         single("term", &self.path, Value::String(value.into()))
     }
 
     /// Strictly before `value`.
-    pub fn lt(&self, value: impl Into<String>) -> Query {
+    pub fn lt(&self, value: impl Into<String>) -> Query<S> {
         range_q(&self.path, vec![("lt", Value::String(value.into()))])
     }
 
     /// At or before `value`.
-    pub fn lte(&self, value: impl Into<String>) -> Query {
+    pub fn lte(&self, value: impl Into<String>) -> Query<S> {
         range_q(&self.path, vec![("lte", Value::String(value.into()))])
     }
 
     /// Strictly after `value`.
-    pub fn gt(&self, value: impl Into<String>) -> Query {
+    pub fn gt(&self, value: impl Into<String>) -> Query<S> {
         range_q(&self.path, vec![("gt", Value::String(value.into()))])
     }
 
     /// At or after `value`.
-    pub fn gte(&self, value: impl Into<String>) -> Query {
+    pub fn gte(&self, value: impl Into<String>) -> Query<S> {
         range_q(&self.path, vec![("gte", Value::String(value.into()))])
     }
 
     /// Inclusive range `[low, high]`.
-    pub fn between(&self, low: impl Into<String>, high: impl Into<String>) -> Query {
+    pub fn between(&self, low: impl Into<String>, high: impl Into<String>) -> Query<S> {
         range_q(
             &self.path,
             vec![
@@ -340,7 +359,7 @@ impl Date {
     }
 
     /// The field has a non-null value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 
@@ -357,18 +376,17 @@ impl Date {
 
 // ---- Nested ----------------------------------------------------------------
 
-/// A `nested` array of objects. `T` is the element document type (the struct
-/// the array deserializes into); it defaults to [`serde_json::Value`] for a
-/// nested path that isn't projected into a typed struct. Queries over the
-/// element fields are built with handles whose paths are dotted under this one
-/// (e.g. `"orders.status"`).
+/// A `nested` array of objects. `E` is the **enclosing** scope (where queries
+/// over this array land — `Root` at the top level, the parent element type when
+/// deeper); `C` is the **child** scope (the element type). Lifting a child query
+/// (`Query<C>`) through `any`/`all` produces a `Query<E>`.
 #[derive(Debug, Clone)]
-pub struct Nested<T = serde_json::Value> {
+pub struct Nested<E = Root, C = serde_json::Value> {
     path: String,
-    _marker: PhantomData<fn() -> T>,
+    _marker: PhantomData<fn() -> (E, C)>,
 }
 
-impl<T> Nested<T> {
+impl<E, C> Nested<E, C> {
     /// Build a handle for the nested array at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
@@ -378,43 +396,41 @@ impl<T> Nested<T> {
     }
 
     /// Parents with **at least one** element matching `query`.
-    pub fn any(&self, query: Query) -> Query {
-        nested_q(&self.path, query)
+    pub fn any(&self, query: impl AsQuery<C>) -> Query<E> {
+        let inner = query
+            .into_query()
+            .map_or_else(match_all_value, |q| q.to_value());
+        Query::leaf(nested_value(&self.path, inner))
     }
 
-    /// Parents where **every** element matches `query` (including those with no
-    /// elements). Expressed as "no element fails `query`".
-    pub fn all(&self, query: Query) -> Query {
-        let fails = Query::from_bool(BoolQuery {
-            must_not: vec![query],
-            ..BoolQuery::default()
-        });
-        Query::from_bool(BoolQuery {
-            must_not: vec![nested_q(&self.path, fails)],
-            ..BoolQuery::default()
-        })
+    /// Parents where **every** element matches `query` ("no element fails it").
+    pub fn all(&self, query: impl AsQuery<C>) -> Query<E> {
+        let inner = query
+            .into_query()
+            .map_or_else(match_all_value, |q| q.to_value());
+        let fails = bool_value("must_not", vec![inner]);
+        let nested = nested_value(&self.path, fails);
+        Query::leaf(bool_value("must_not", vec![nested]))
     }
 
     /// The nested array has at least one element.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<E> {
         exists_q(&self.path)
     }
 
-    /// Shape the **returned** array: keep only the elements matching `query`
-    /// (optionally sorted/capped). Pass to [`crate::Search::filter_nested`]. This
-    /// does not change which parents match — it trims each parent's array.
-    pub fn matching(&self, query: impl AsQuery) -> NestedProjection {
+    /// Shape the **returned** array: keep elements matching `query` (with the
+    /// builder's sort/size). Pass to [`crate::Search::filter_nested`].
+    pub fn matching(&self, query: impl AsQuery<C>) -> NestedProjection {
         NestedProjection {
             path: self.path.clone(),
-            query: query.into_query(),
+            query: query.into_query().map(|q| q.to_value()),
             sort: Vec::new(),
             size: None,
             from: None,
         }
     }
 
-    /// Like [`matching`](Self::matching) with no predicate — every element, just
-    /// sorted/capped by the builder.
+    /// Like [`matching`](Self::matching) with no predicate — every element.
     pub fn project(&self) -> NestedProjection {
         NestedProjection {
             path: self.path.clone(),
@@ -426,13 +442,11 @@ impl<T> Nested<T> {
     }
 }
 
-/// A request to shape one nested array in the results (via OpenSearch
-/// `inner_hits`). Build it with [`Nested::matching`] / [`Nested::project`] and
-/// hand it to [`crate::Search::filter_nested`].
+/// A request to shape one nested array in the results (via `inner_hits`).
 #[derive(Debug, Clone)]
 pub struct NestedProjection {
     path: String,
-    query: Option<Query>,
+    query: Option<Value>,
     sort: Vec<Sort>,
     size: Option<u64>,
     from: Option<u64>,
@@ -464,13 +478,10 @@ impl NestedProjection {
         &self.path
     }
 
-    /// The `{ "nested": { path, query, inner_hits } }` clause that collects the
-    /// matching children. The `inner_hits` name is the path, for retrieval.
-    pub(crate) fn to_query(&self) -> Query {
-        let query = match &self.query {
-            Some(query) => query.to_value(),
-            None => single_match_all(),
-        };
+    /// The `{ "nested": { path, query, inner_hits } }` clause (inner_hits named
+    /// after the path, for retrieval).
+    pub(crate) fn to_value(&self) -> Value {
+        let query = self.query.clone().unwrap_or_else(match_all_value);
         let mut inner_hits = Map::new();
         inner_hits.insert("name".to_string(), Value::String(self.path.clone()));
         if let Some(size) = self.size {
@@ -489,41 +500,33 @@ impl NestedProjection {
         nested.insert("inner_hits".to_string(), Value::Object(inner_hits));
         let mut outer = Map::new();
         outer.insert("nested".to_string(), Value::Object(nested));
-        Query::leaf(Value::Object(outer))
+        Value::Object(outer)
     }
-}
-
-/// `{ "match_all": {} }`.
-fn single_match_all() -> Value {
-    let mut outer = Map::new();
-    outer.insert("match_all".to_string(), Value::Object(Map::new()));
-    Value::Object(outer)
 }
 
 // ---- Object ----------------------------------------------------------------
 
 /// An `object` sub-document — a `group` or a `one_to_one` join. Objects are
-/// **flattened**, so their sub-fields are queried by their own dotted-path
-/// handles directly (e.g. `Account::tier()` at `account.tier`); this handle is
-/// for operating on the object itself. `T` is the sub-document type (defaults to
-/// [`serde_json::Value`] when the path isn't projected into a struct).
+/// **flattened**, so their sub-fields are queried by their own scope-`S`
+/// dotted-path handles directly (`Account::tier()`); this handle is for the
+/// object itself. `S` is the enclosing scope (`Root` at the top level).
 #[derive(Debug, Clone)]
-pub struct Object<T = serde_json::Value> {
+pub struct Object<S = Root> {
     path: String,
-    _marker: PhantomData<fn() -> T>,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl<T> Object<T> {
+impl<S> Object<S> {
     /// Build a handle for the object at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
-            _marker: PhantomData,
+            _scope: PhantomData,
         }
     }
 
     /// The object is present — most useful on a nullable `one_to_one`.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 }
@@ -532,18 +535,22 @@ impl<T> Object<T> {
 
 /// A `binary` field — base64-encoded, not searchable. Only existence.
 #[derive(Debug, Clone)]
-pub struct Binary {
+pub struct Binary<S = Root> {
     path: String,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl Binary {
+impl<S> Binary<S> {
     /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
     /// The field has a non-null value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 }
@@ -553,33 +560,86 @@ impl Binary {
 /// An untyped `object`/`json` field. The escape hatch: existence, or a raw
 /// clause spliced in verbatim.
 #[derive(Debug, Clone)]
-pub struct Json {
+pub struct Json<S = Root> {
     path: String,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl Json {
+impl<S> Json<S> {
     /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
     /// The field has a non-null value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 
     /// Splice a raw OpenSearch query clause in verbatim.
-    pub fn raw(&self, clause: Value) -> Query {
+    pub fn raw(&self, clause: Value) -> Query<S> {
         Query::leaf(clause)
+    }
+}
+
+// ---- Sort ------------------------------------------------------------------
+
+/// Sort direction.
+#[derive(Debug, Clone, Copy)]
+pub enum SortOrder {
+    /// Ascending.
+    Asc,
+    /// Descending.
+    Desc,
+}
+
+impl SortOrder {
+    fn as_str(self) -> &'static str {
+        match self {
+            SortOrder::Asc => "asc",
+            SortOrder::Desc => "desc",
+        }
+    }
+}
+
+/// A single sort key, produced by `.asc()` / `.desc()` on a sortable handle (or
+/// `Geo::distance_sort`). Scope-free.
+#[derive(Debug, Clone)]
+pub struct Sort {
+    value: Value,
+}
+
+impl Sort {
+    /// A field/order sort: `{ "<field>": { "order": "asc"|"desc" } }`.
+    fn new(field: &str, order: SortOrder) -> Self {
+        let mut order_body = Map::new();
+        order_body.insert(
+            "order".to_string(),
+            Value::String(order.as_str().to_string()),
+        );
+        let mut outer = Map::new();
+        outer.insert(field.to_string(), Value::Object(order_body));
+        Self {
+            value: Value::Object(outer),
+        }
+    }
+
+    /// A pre-built sort clause (e.g. `_geo_distance`).
+    fn raw(value: Value) -> Self {
+        Self { value }
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        self.value.clone()
     }
 }
 
 // ---- Geo -------------------------------------------------------------------
 
 /// A geographic point — latitude/longitude in degrees.
-///
-/// The argument type for the [`Geo`] operators, and a deserialization target
-/// for a `geo_point` field stored as `{ "lat": …, "lon": … }`.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct GeoPoint {
     /// Latitude in degrees.
@@ -606,57 +666,55 @@ impl GeoPoint {
 /// A `geo_point` field — distance, bounding-box, and polygon queries, plus
 /// sort-by-distance.
 #[derive(Debug, Clone)]
-pub struct Geo {
+pub struct Geo<S = Root> {
     path: String,
+    _scope: PhantomData<fn() -> S>,
 }
 
-impl Geo {
+impl<S> Geo<S> {
     /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
     /// Points within `distance` (e.g. `"12km"`, `"5mi"`) of `center`.
-    pub fn within(&self, distance: impl Into<String>, center: GeoPoint) -> Query {
+    pub fn within(&self, distance: impl Into<String>, center: GeoPoint) -> Query<S> {
         let mut body = Map::new();
         body.insert("distance".to_string(), Value::String(distance.into()));
         body.insert(self.path.clone(), center.to_value());
-        wrap("geo_distance", body)
+        wrap_object("geo_distance", body)
     }
 
     /// Points inside the axis-aligned box with the given corners.
-    pub fn in_bounding_box(&self, top_left: GeoPoint, bottom_right: GeoPoint) -> Query {
+    pub fn in_bounding_box(&self, top_left: GeoPoint, bottom_right: GeoPoint) -> Query<S> {
         let mut corners = Map::new();
         corners.insert("top_left".to_string(), top_left.to_value());
         corners.insert("bottom_right".to_string(), bottom_right.to_value());
         let mut body = Map::new();
         body.insert(self.path.clone(), Value::Object(corners));
-        wrap("geo_bounding_box", body)
+        wrap_object("geo_bounding_box", body)
     }
 
     /// Points inside the polygon described by `points` (three or more vertices).
-    pub fn in_polygon(&self, points: impl IntoIterator<Item = GeoPoint>) -> Query {
+    pub fn in_polygon(&self, points: impl IntoIterator<Item = GeoPoint>) -> Query<S> {
         let vertices = points.into_iter().map(GeoPoint::to_value).collect();
         let mut inner = Map::new();
         inner.insert("points".to_string(), Value::Array(vertices));
         let mut body = Map::new();
         body.insert(self.path.clone(), Value::Object(inner));
-        wrap("geo_polygon", body)
+        wrap_object("geo_polygon", body)
     }
 
     /// The field has a value.
-    pub fn exists(&self) -> Query {
+    pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
 
-    /// Sort by distance from `center`, measured in `unit` (e.g. `"km"`, `"mi"`,
-    /// `"m"`).
-    pub fn distance_sort(
-        &self,
-        center: GeoPoint,
-        order: SortOrder,
-        unit: impl Into<String>,
-    ) -> Sort {
+    /// Sort by distance from `center`, measured in `unit` (e.g. `"km"`).
+    pub fn distance_sort(&self, center: GeoPoint, order: SortOrder, unit: impl Into<String>) -> Sort {
         let mut body = Map::new();
         body.insert(self.path.clone(), center.to_value());
         body.insert("order".to_string(), Value::String(order.as_str().to_string()));
@@ -667,55 +725,9 @@ impl Geo {
     }
 }
 
-// ---- Sort ------------------------------------------------------------------
-
-/// Sort direction.
-#[derive(Debug, Clone, Copy)]
-pub enum SortOrder {
-    /// Ascending.
-    Asc,
-    /// Descending.
-    Desc,
-}
-
-impl SortOrder {
-    fn as_str(self) -> &'static str {
-        match self {
-            SortOrder::Asc => "asc",
-            SortOrder::Desc => "desc",
-        }
-    }
-}
-
-/// A single sort key, produced by `.asc()` / `.desc()` on a sortable handle (or
-/// `Geo::distance_sort`). Carries its already-built clause.
-#[derive(Debug, Clone)]
-pub struct Sort {
-    value: Value,
-}
-
-impl Sort {
-    /// A field/order sort: `{ "<field>": { "order": "asc"|"desc" } }`.
-    fn new(field: &str, order: SortOrder) -> Self {
-        let mut order_body = Map::new();
-        order_body.insert(
-            "order".to_string(),
-            Value::String(order.as_str().to_string()),
-        );
-        let mut outer = Map::new();
-        outer.insert(field.to_string(), Value::Object(order_body));
-        Self {
-            value: Value::Object(outer),
-        }
-    }
-
-    /// A pre-built sort clause (used for shapes that aren't field/order, like
-    /// `_geo_distance`).
-    fn raw(value: Value) -> Self {
-        Self { value }
-    }
-
-    pub(crate) fn to_value(&self) -> Value {
-        self.value.clone()
-    }
+/// `{ "<name>": { <body> } }` as a scope-`S` query.
+fn wrap_object<S>(name: &str, body: Map<String, Value>) -> Query<S> {
+    let mut outer = Map::new();
+    outer.insert(name.to_string(), Value::Object(body));
+    Query::leaf(Value::Object(outer))
 }

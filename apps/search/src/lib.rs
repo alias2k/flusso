@@ -19,8 +19,12 @@
 //! - Typed [`SearchResponse`] / [`Hit`].
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/`one_to_one`
-//! handles ([`Object`]); and shaping returned nested arrays
-//! ([`Search::filter_nested`] + [`Nested::matching`], via `inner_hits`).
+//! handles ([`Object`]); shaping returned nested arrays ([`Search::filter_nested`]
+//! with [`Nested::matching`], via `inner_hits`); and scope-tagged queries —
+//! [`Query`]`<S>` carries the scope `S` it was built in ([`Root`] for the document
+//! root and flattened objects, the element type for a `nested` array), so a nested
+//! query must be lifted through [`Nested::any`]/[`Nested::all`] before it can join a
+//! root query; the compiler enforces it.
 //!
 //! # Not yet built (see CLIENT.md for the endgame)
 //!
@@ -28,8 +32,7 @@
 //!   (the `derive` feature). Without it, document structs + handles are written
 //!   by hand — exactly the calls this crate exposes (see the integration tests).
 //! - `filter_nested`'s `keep_source()` opt-out (it always replaces the array in
-//!   `source` today) and a typed `hit.nested(handle)` accessor; scope-tagged
-//!   `Query<S>` child-merge & lift.
+//!   `source` today) and a typed `hit.nested(handle)` accessor.
 //!
 //! # Example (hand-written until the derive lands)
 //!
@@ -79,7 +82,7 @@ pub use handles::{
     Binary, Bool, Date, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection, Number, Object,
     Sort, SortOrder, Text, multi_match,
 };
-pub use query::{AsQuery, Query};
+pub use query::{AsQuery, Query, Root};
 pub use search::{Hit, Search, SearchResponse};
 
 /// `#[derive(FlussoDocument)]` — generates the typed query surface for a

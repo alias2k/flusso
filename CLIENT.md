@@ -237,9 +237,9 @@ impl User {
     pub fn id() -> Number<i32> { /* … */ }
     pub fn email() -> Keyword { /* … */ }
     pub fn full_name() -> Text { /* … */ }
-    pub fn account() -> Object<Account> { /* … */ }
-    pub fn addresses() -> Nested<AddressFields> { /* … */ } // not projected — generated namespace
-    pub fn orders() -> Nested<Order> { /* … */ }            // projected — your `Order` struct
+    pub fn account() -> Object { /* … */ }                  // object/one_to_one → `Object<Root>` (scope-only; `.exists()`)
+    pub fn addresses() -> Nested<Root, AddressFields> { /* … */ } // not projected — generated namespace
+    pub fn orders() -> Nested<Root, Order> { /* … */ }      // projected — `Nested<enclosing scope, your struct>`
     pub fn order_count() -> Number<i64> { /* … */ }
     pub fn lifetime_value() -> Number<f64> { /* … */ }
     pub fn avg_order_value() -> Number<f64> { /* … */ }       // not projected by `User`
@@ -257,11 +257,15 @@ impl User {
 // `Query` in that path's scope. When you wrote a struct for the path, that struct
 // IS the namespace — its derive adds the handles, covering the full sub-schema
 // (not just the fields it deserializes), producing `Query<Order>`:
+// `orders` is a `nested` array, so it introduces its own scope: `Order`'s handles
+// are tagged `<Order>` (a `nested` array tags handles with the element type; the
+// root and flattened objects stay `<Root>`). They must be lifted before joining a
+// root query — see below.
 impl Order {
-    pub fn status() -> Keyword { /* … */ }
-    pub fn total() -> Number<f64> { /* … */ }
-    pub fn placed_at() -> Date { /* … */ }
-    pub fn items() -> Nested<Item> { /* … */ }   // a deeper path → your `Item` struct
+    pub fn status() -> Keyword<Order> { /* … */ }
+    pub fn total() -> Number<f64, Order> { /* … */ }
+    pub fn placed_at() -> Date<Order> { /* … */ }
+    pub fn items() -> Nested<Order, Item> { /* … */ }   // deeper nested: enclosing scope `Order`, child `Item`
     // …one per field at the `orders` path.
 }
 
@@ -269,8 +273,8 @@ impl Order {
 // handles-only namespace named `<Path>Fields`, so it's still queryable:
 pub struct AddressFields;
 impl AddressFields {
-    pub fn city() -> Keyword { /* … */ }
-    pub fn postal_code() -> Keyword { /* … */ }
+    pub fn city() -> Keyword<AddressFields> { /* … */ }       // nested scope, like `Order`
+    pub fn postal_code() -> Keyword<AddressFields> { /* … */ }
     // …one per field at the `addresses` path.
 }
 ```
@@ -331,9 +335,9 @@ something else and it won't compile (modulo the leaf-identifier rule above).
 | `json`            | `object`   | `serde_json::Value`              | `Json`          |
 | `geo_point`       | `geo_point`| `GeoPoint` (`{ lat, lon }`)      | `Geo`           |
 | `custom { opensearch }` | (given) | matching scalar, else `serde_json::Value` | by OS type |
-| `group`           | `object`   | a struct                         | `Object<T>`     |
-| join `one_to_one` | `object`   | `Option<` a struct `>`           | `Object<T>`     |
-| join `one_to_many` / `many_to_many` | `nested` | `Vec<` a struct `>`  | `Nested<T>`     |
+| `group`           | `object`   | a struct                         | `Object`        |
+| join `one_to_one` | `object`   | `Option<` a struct `>`           | `Object`        |
+| join `one_to_many` / `many_to_many` | `nested` | `Vec<` a struct `>`  | `Nested<S, T>`  |
 
 **Decimals are lossy by default.** `type: decimal` maps to OpenSearch `double`,
 so a money field round-trips as `f64`. When exactness matters, declare a `custom`
@@ -388,8 +392,8 @@ type *doesn't exist* on its handle, so the mistake is a compile error.
 | `Bool`          | `eq`, `exists`                                                            |
 | `Number<T>`     | `eq`, `in_`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                |
 | `Date`          | `eq`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                       |
-| `Object<T>`     | `exists` (a same-document sub-object — group or `one_to_one`). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
-| `Nested<T>`     | `any(q)` / `all(q)` to match parents — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
+| `Object<S>`     | `exists` (a same-document sub-object — group or `one_to_one`; `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
+| `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
 | `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
 | `Binary`        | `exists` — base64-encoded, not searchable                                 |
 | `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
@@ -413,9 +417,12 @@ field's type.
 ### Composing queries
 
 A handle's operator produces a `Query<S>` — a query that carries the **scope** it
-was built in: the document or nested context `S` it constrains. Queries compose
-with `and` / `or` / `not` *within a scope*, and the `Search` builder exposes the
-bool-query clauses directly for callers who want score-vs-filter control:
+was built in: the document or nested context `S` it constrains. The root document
+and any flattened `object`/`one_to_one` sub-field share the scope `Root` (so root
+handles produce `Query<Root>`); only a `nested` array introduces a fresh scope,
+tagged with its element type (`Query<Order>`). Queries compose with `and` / `or` /
+`not` *within a scope*, and the `Search` builder exposes the bool-query clauses
+directly for callers who want score-vs-filter control:
 
 ```rust
 // Combinator style.
@@ -435,15 +442,16 @@ User::search(&client)
     .await?;
 ```
 
-`query`/`filter`/`must_not`/`should` accept anything that is a `Query<User>`, so
+`query`/`filter`/`must_not`/`should` accept anything that is a `Query<Root>`, so
 the two styles mix freely.
 
 ### Building a child filter and merging it into the parent
 
 Because the scope is part of the type, a query is a value you can build, name,
-store, and reuse — not just an inline expression. A **child** struct (one with a
-`path`) carries its own field handles, exactly as the root does, but tagged with
-the child scope — so they produce `Query<Order>`, not `Query<User>`:
+store, and reuse — not just an inline expression. A **nested** child struct (one
+whose `path` ends in a `nested` array) carries its own field handles, exactly as
+the root does, but tagged with the child scope — so they produce `Query<Order>`,
+not `Query<Root>`:
 
 ```rust
 // Built from Order's own handles. Reusable — a plain function returning a query:
@@ -455,24 +463,24 @@ fn big_delivered() -> Query<Order> {
 
 To merge a child filter into a parent, **lift** it through the nesting that holds
 it: `User::orders().any(child)` (or `.all(child)`) takes a `Query<Order>` and
-returns a `Query<User>` — a nested clause at the `orders` path — which then
+returns a `Query<Root>` — a nested clause at the `orders` path — which then
 composes with parent-scope queries like any other:
 
 ```rust
 let q = User::email().eq("ada@example.com")
-    .and(User::orders().any(big_delivered()));   // Query<Order> → lifted → Query<User>
+    .and(User::orders().any(big_delivered()));   // Query<Order> → lifted → Query<Root>
 
 User::search(&client).filter(q).send().await?;
 ```
 
 The scope tag is what keeps this honest: `User::email().and(Order::status().eq(…))`
-**does not compile** — you can't `and` a `Query<User>` with a `Query<Order>`; the
+**does not compile** — you can't `and` a `Query<Root>` with a `Query<Order>`; the
 child query has to be lifted through `User::orders()` first, so a child constraint
 can never be silently applied at the wrong level.
 
 Lifting composes through depth too: `Order::items().any(Item::quantity().gt(1))`
 is a `Query<Order>`, which `User::orders().any(…)` then lifts the rest of the way
-to `Query<User>`.
+to `Query<Root>`.
 
 ### Optional filters
 
@@ -571,9 +579,9 @@ let delivered: &[Order]  = hit.nested(User::orders());  // matched subset
 ```
 
 `hit.nested(User::orders())` returns `&[Order]` with no turbofish because your
-struct declared `orders: Vec<Order>`, so `User::orders()` is `Nested<Order>` and
-the subset deserializes into `Order`. For a nested path your struct doesn't
-project (a `Nested<AddressFields>`), pass the type explicitly:
+struct declared `orders: Vec<Order>`, so `User::orders()` is `Nested<Root, Order>`
+and the subset deserializes into `Order`. For a nested path your struct doesn't
+project (a `Nested<Root, AddressFields>`), pass the type explicitly:
 `hit.nested::<Address>("addresses")`.
 
 ### Depth
