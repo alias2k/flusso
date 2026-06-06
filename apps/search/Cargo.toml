@@ -10,9 +10,19 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+# Re-export the `#[derive(FlussoDocument)]` proc-macro (serde/serde_derive pattern).
+derive = ["dep:flusso-search-derive"]
+# Make `rust_decimal::Decimal` / `chrono` available for `decimal` / `date` fields.
+decimal = ["dep:rust_decimal"]
+chrono = ["dep:chrono"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+flusso-search-derive = { path = "../search-derive", optional = true }
+rust_decimal = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }

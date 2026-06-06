@@ -1,0 +1,28 @@
+version: 1
+table: users
+primary_key: id
+
+fields:
+  - integer: id
+    required: false
+  - keyword: email
+    required: true
+  - text: fullName
+    column: full_name
+    required: false
+  - geo: location
+    lat: latitude
+    lon: longitude
+    required: false
+  - one_to_many: orders
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    fields:
+      - enum: status
+        required: true
+      - decimal: total
+        required: true
+  - count: orderCount
+    table: orders
+    foreign_key: user_id

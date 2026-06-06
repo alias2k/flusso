@@ -246,8 +246,10 @@ impl User {
     pub fn last_order_at() -> Date { /* … */ }                // not projected by `User`
     // …one per schema field.
 
-    /// The schema hash this binding was checked against — asserted against the
-    /// live index on first query so a stale binding fails loudly, not silently.
+    /// The physical index this binds to — `get`/`search` use it. Logical name
+    /// plus the schema hash, matching what the engine's sink writes.
+    pub const INDEX: &str = "users_3f2a1b9c…";
+    /// The schema hash this binding was generated from (the `INDEX` suffix).
     pub const SCHEMA_HASH: &str = "3f2a1b9c…";
 }
 
@@ -386,7 +388,7 @@ type *doesn't exist* on its handle, so the mistake is a compile error.
 | `Bool`          | `eq`, `exists`                                                            |
 | `Number<T>`     | `eq`, `in_`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                |
 | `Date`          | `eq`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                       |
-| `Object<T>`     | field access into `T`'s handles (a same-document sub-object)              |
+| `Object<T>`     | `exists` (a same-document sub-object — group or `one_to_one`). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<T>`     | `any(q)` / `all(q)` to match parents — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
 | `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
 | `Binary`        | `exists` — base64-encoded, not searchable                                 |
@@ -608,20 +610,21 @@ struct is the result.
 
 ## Resolving the index name
 
-The struct's binding knows the **logical** name (`users`, from the `index`
-attribute) and its `SCHEMA_HASH`. The **physical** index carries the hash suffix
-(`users_3f2a1b9c`) and rotates on a structural schema change — so the client must
-not query the physical name directly, or every reindex breaks it.
+The **physical** index carries the hash suffix (`users_3f2a1b9c`) — exactly what
+the OpenSearch sink writes — and rotates on a structural schema change.
 
-The contract: **flusso maintains a read alias from the logical name to the
-current physical index.** The client queries `users`; flusso points `users` at
-`users_<hash>` and atomically re-points it after a backfill into a new shape.
-This is a requirement the endgame places on the **engine**, not just the client —
-without the alias there is no stable name to query, and "where we need to arrive"
-includes the engine owning that alias. On first query the client compares its
-`User::SCHEMA_HASH` against the alias's current target and warns (or errors, by
-config) on a mismatch, so a binding that has drifted from the deployed index says
-so instead of silently returning the wrong shape.
+Because the binding is **generated from the schema at compile time**, the derive
+knows that hash and emits it as a `const`: `User::INDEX` is the physical name
+(`users_<hash>`), and `get`/`search` use it. So `User::search(&client)` addresses
+the right index directly, with the hash hidden from the caller — no read alias
+required. This is self-correcting: a structural schema change rotates the hash
+*and* changes the resolved mapping, so the next `cargo build` regenerates the
+binding against the new physical index. (`User::INDEX` and `User::SCHEMA_HASH`
+are exposed for logging, admin, or a hand-built `Search`.)
+
+> A read alias (`users` → current physical) is still worthwhile for clients that
+> *don't* recompile against the schema — dynamic/scripting use, dashboards. For a
+> derived binding it's unnecessary: the compile-time hash is the stable name.
 
 ---
 

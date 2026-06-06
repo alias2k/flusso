@@ -1,0 +1,5 @@
+error: missing `#[flusso(index = "…")]` — name the index this document binds to
+ --> tests/ui/missing_index.rs:5:8
+  |
+5 | struct User {
+  |        ^^^^

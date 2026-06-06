@@ -1,0 +1,5 @@
+error: field `email` is required (non-null) in the schema — drop the `Option<…>`
+ --> tests/ui/wrong_nullable.rs:8:12
+  |
+8 |     email: Option<String>,
+  |            ^^^^^^

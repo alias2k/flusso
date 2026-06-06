@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use crate::query::{BoolQuery, Query};
+use crate::query::{AsQuery, BoolQuery, Query};
 
 // ---- shared leaf builders --------------------------------------------------
 
@@ -358,10 +358,12 @@ impl Date {
 // ---- Nested ----------------------------------------------------------------
 
 /// A `nested` array of objects. `T` is the element document type (the struct
-/// the array deserializes into). Queries over the element fields are built with
-/// handles whose paths are dotted under this one (e.g. `"orders.status"`).
+/// the array deserializes into); it defaults to [`serde_json::Value`] for a
+/// nested path that isn't projected into a typed struct. Queries over the
+/// element fields are built with handles whose paths are dotted under this one
+/// (e.g. `"orders.status"`).
 #[derive(Debug, Clone)]
-pub struct Nested<T> {
+pub struct Nested<T = serde_json::Value> {
     path: String,
     _marker: PhantomData<fn() -> T>,
 }
@@ -394,6 +396,133 @@ impl<T> Nested<T> {
     }
 
     /// The nested array has at least one element.
+    pub fn exists(&self) -> Query {
+        exists_q(&self.path)
+    }
+
+    /// Shape the **returned** array: keep only the elements matching `query`
+    /// (optionally sorted/capped). Pass to [`crate::Search::filter_nested`]. This
+    /// does not change which parents match — it trims each parent's array.
+    pub fn matching(&self, query: impl AsQuery) -> NestedProjection {
+        NestedProjection {
+            path: self.path.clone(),
+            query: query.into_query(),
+            sort: Vec::new(),
+            size: None,
+            from: None,
+        }
+    }
+
+    /// Like [`matching`](Self::matching) with no predicate — every element, just
+    /// sorted/capped by the builder.
+    pub fn project(&self) -> NestedProjection {
+        NestedProjection {
+            path: self.path.clone(),
+            query: None,
+            sort: Vec::new(),
+            size: None,
+            from: None,
+        }
+    }
+}
+
+/// A request to shape one nested array in the results (via OpenSearch
+/// `inner_hits`). Build it with [`Nested::matching`] / [`Nested::project`] and
+/// hand it to [`crate::Search::filter_nested`].
+#[derive(Debug, Clone)]
+pub struct NestedProjection {
+    path: String,
+    query: Option<Query>,
+    sort: Vec<Sort>,
+    size: Option<u64>,
+    from: Option<u64>,
+}
+
+impl NestedProjection {
+    /// Order the returned elements.
+    #[must_use]
+    pub fn sort(mut self, sort: Sort) -> Self {
+        self.sort.push(sort);
+        self
+    }
+
+    /// Cap how many elements are returned per parent.
+    #[must_use]
+    pub fn size(mut self, size: u64) -> Self {
+        self.size = Some(size);
+        self
+    }
+
+    /// Offset within each parent's matching elements.
+    #[must_use]
+    pub fn from(mut self, from: u64) -> Self {
+        self.from = Some(from);
+        self
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The `{ "nested": { path, query, inner_hits } }` clause that collects the
+    /// matching children. The `inner_hits` name is the path, for retrieval.
+    pub(crate) fn to_query(&self) -> Query {
+        let query = match &self.query {
+            Some(query) => query.to_value(),
+            None => single_match_all(),
+        };
+        let mut inner_hits = Map::new();
+        inner_hits.insert("name".to_string(), Value::String(self.path.clone()));
+        if let Some(size) = self.size {
+            inner_hits.insert("size".to_string(), Value::from(size));
+        }
+        if let Some(from) = self.from {
+            inner_hits.insert("from".to_string(), Value::from(from));
+        }
+        if !self.sort.is_empty() {
+            let keys = self.sort.iter().map(Sort::to_value).collect();
+            inner_hits.insert("sort".to_string(), Value::Array(keys));
+        }
+        let mut nested = Map::new();
+        nested.insert("path".to_string(), Value::String(self.path.clone()));
+        nested.insert("query".to_string(), query);
+        nested.insert("inner_hits".to_string(), Value::Object(inner_hits));
+        let mut outer = Map::new();
+        outer.insert("nested".to_string(), Value::Object(nested));
+        Query::leaf(Value::Object(outer))
+    }
+}
+
+/// `{ "match_all": {} }`.
+fn single_match_all() -> Value {
+    let mut outer = Map::new();
+    outer.insert("match_all".to_string(), Value::Object(Map::new()));
+    Value::Object(outer)
+}
+
+// ---- Object ----------------------------------------------------------------
+
+/// An `object` sub-document — a `group` or a `one_to_one` join. Objects are
+/// **flattened**, so their sub-fields are queried by their own dotted-path
+/// handles directly (e.g. `Account::tier()` at `account.tier`); this handle is
+/// for operating on the object itself. `T` is the sub-document type (defaults to
+/// [`serde_json::Value`] when the path isn't projected into a struct).
+#[derive(Debug, Clone)]
+pub struct Object<T = serde_json::Value> {
+    path: String,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Object<T> {
+    /// Build a handle for the object at `path`.
+    pub fn at(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// The object is present — most useful on a nullable `one_to_one`.
     pub fn exists(&self) -> Query {
         exists_q(&self.path)
     }

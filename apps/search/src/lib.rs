@@ -18,13 +18,18 @@
 //!   `size` / `raw`).
 //! - Typed [`SearchResponse`] / [`Hit`].
 //!
+//! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/`one_to_one`
+//! handles ([`Object`]); and shaping returned nested arrays
+//! ([`Search::filter_nested`] + [`Nested::matching`], via `inner_hits`).
+//!
 //! # Not yet built (see CLIENT.md for the endgame)
 //!
-//! - The `#[derive(FlussoDocument)]` proc-macro. Today the document struct and
-//!   its field handles are written **by hand**; the derive will generate exactly
-//!   the calls this crate exposes. See the integration tests for the shape.
-//! - `filter_nested` / inner-hits, scope-tagged `Query<S>` child-merge & lift,
-//!   and the `Option<Q>` optional-filter primitive.
+//! - The `#[derive(FlussoDocument)]` proc-macro lives in `flusso-search-derive`
+//!   (the `derive` feature). Without it, document structs + handles are written
+//!   by hand — exactly the calls this crate exposes (see the integration tests).
+//! - `filter_nested`'s `keep_source()` opt-out (it always replaces the array in
+//!   `source` today) and a typed `hit.nested(handle)` accessor; scope-tagged
+//!   `Query<S>` child-merge & lift.
 //!
 //! # Example (hand-written until the derive lands)
 //!
@@ -71,8 +76,24 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
-    Binary, Bool, Date, Geo, GeoPoint, Json, Keyword, Nested, Number, Sort, SortOrder, Text,
-    multi_match,
+    Binary, Bool, Date, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection, Number, Object,
+    Sort, SortOrder, Text, multi_match,
 };
 pub use query::{AsQuery, Query};
 pub use search::{Hit, Search, SearchResponse};
+
+/// `#[derive(FlussoDocument)]` — generates the typed query surface for a
+/// hand-written document struct (see [`CLIENT.md`](../../../CLIENT.md)). Enabled
+/// by the `derive` feature.
+#[cfg(feature = "derive")]
+pub use flusso_search_derive::FlussoDocument;
+
+/// `rust_decimal::Decimal`, re-exported for `decimal` fields. Enabled by the
+/// `decimal` feature.
+#[cfg(feature = "decimal")]
+pub use rust_decimal::Decimal;
+
+/// `chrono`, re-exported for `date`/`timestamp` fields. Enabled by the `chrono`
+/// feature.
+#[cfg(feature = "chrono")]
+pub use chrono;

@@ -1,0 +1,11 @@
+# Fixture config for the FlussoDocument derive tests. No database is touched —
+# the derive only loads + resolves this (schemas are self-describing).
+
+[source]
+type = "postgres"
+connection_url = "postgres://app@localhost/test"
+
+[[index]]
+name = "users"
+schema = "users.schema.yml"
+enabled = true

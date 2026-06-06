@@ -1,0 +1,5 @@
+error: no field `bogus` in index `users` — known fields: email, fullName, id, location, orderCount, orders
+ --> tests/ui/unknown_field.rs:7:5
+  |
+7 |     bogus: String,
+  |     ^^^^^

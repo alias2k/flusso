@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::Client;
 use crate::error::Result;
-use crate::handles::Sort;
+use crate::handles::{NestedProjection, Sort};
 use crate::query::{AsQuery, BoolQuery};
 
 /// A typed search against one index.
@@ -27,6 +27,7 @@ pub struct Search<'a, T> {
     sort: Vec<Sort>,
     from: Option<u64>,
     size: Option<u64>,
+    nested: Vec<NestedProjection>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -41,6 +42,7 @@ impl<'a, T> Search<'a, T> {
             sort: Vec::new(),
             from: None,
             size: None,
+            nested: Vec::new(),
             _marker: PhantomData,
         }
     }
@@ -113,6 +115,15 @@ impl<'a, T> Search<'a, T> {
         self
     }
 
+    /// Shape a nested array in the results (built via `Nested::matching` /
+    /// `Nested::project`). Each hit's `source.<path>` is replaced with the
+    /// matching subset; this does **not** change which parents match.
+    #[must_use]
+    pub fn filter_nested(mut self, projection: NestedProjection) -> Self {
+        self.nested.push(projection);
+        self
+    }
+
     /// The request body this search will POST to `_search`. Pure — useful for
     /// tests and debugging.
     #[must_use]
@@ -121,6 +132,21 @@ impl<'a, T> Search<'a, T> {
             Some(raw) => raw.clone(),
             None if self.bool_query.is_empty() => match_all(),
             None => self.bool_query.to_value(),
+        };
+
+        // `filter_nested` projections collect `inner_hits` without filtering
+        // parents: they sit in `should` of a bool whose `must` holds the real
+        // query, so (with `must` present) they're optional and only attach hits.
+        let query = if self.nested.is_empty() {
+            query
+        } else {
+            let mut bool_body = Map::new();
+            bool_body.insert("must".to_string(), Value::Array(vec![query]));
+            let shoulds = self.nested.iter().map(|p| p.to_query().to_value()).collect();
+            bool_body.insert("should".to_string(), Value::Array(shoulds));
+            let mut outer = Map::new();
+            outer.insert("bool".to_string(), Value::Object(bool_body));
+            Value::Object(outer)
         };
 
         let mut root = Map::new();
@@ -146,7 +172,11 @@ where
     /// Execute the search and decode the hits into `SearchResponse<T>`.
     pub async fn send(self) -> Result<SearchResponse<T>> {
         let body = self.body();
-        let response = self.client.search(&self.index, &body).await?;
+        let mut response = self.client.search(&self.index, &body).await?;
+        if !self.nested.is_empty() {
+            let paths: Vec<&str> = self.nested.iter().map(NestedProjection::path).collect();
+            merge_inner_hits(&mut response, &paths);
+        }
         SearchResponse::from_value(response)
     }
 }
@@ -156,6 +186,37 @@ fn match_all() -> Value {
     let mut outer = Map::new();
     outer.insert("match_all".to_string(), Value::Object(Map::new()));
     Value::Object(outer)
+}
+
+/// Replace each `paths` array in every hit's `_source` with that path's
+/// `inner_hits` subset, so the typed source carries the filtered nested array.
+pub(crate) fn merge_inner_hits(response: &mut Value, paths: &[&str]) {
+    let Some(hits) = response
+        .get_mut("hits")
+        .and_then(|hits| hits.get_mut("hits"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for hit in hits {
+        let inner = match hit.get("inner_hits") {
+            Some(inner) => inner.clone(),
+            None => continue,
+        };
+        let Some(source) = hit.get_mut("_source").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for path in paths {
+            let subset: Vec<Value> = inner
+                .get(*path)
+                .and_then(|hit| hit.get("hits"))
+                .and_then(|hits| hits.get("hits"))
+                .and_then(Value::as_array)
+                .map(|hits| hits.iter().filter_map(|h| h.get("_source").cloned()).collect())
+                .unwrap_or_default();
+            source.insert((*path).to_string(), Value::Array(subset));
+        }
+    }
 }
 
 /// A page of search results.

@@ -1,0 +1,5 @@
+error: field `email` is `keyword` in the schema — expected `String`, found `i32`
+ --> tests/ui/wrong_type.rs:8:12
+  |
+8 |     email: i32,
+  |            ^^^

@@ -12,8 +12,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    Client, Geo, GeoPoint, Keyword, Nested, Number, Query, Search, SearchResponse, SortOrder, Text,
-    multi_match,
+    Client, Date, Geo, GeoPoint, Keyword, Nested, Number, Query, Search, SearchResponse, SortOrder,
+    Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -44,6 +44,62 @@ impl Order {
     fn status() -> Keyword {
         Keyword::at("orders.status")
     }
+    fn placed_at() -> Date {
+        Date::at("orders.placedAt")
+    }
+}
+
+#[test]
+fn filter_nested_wraps_with_inner_hits() -> Result {
+    let client = Client::connect("http://localhost:9200")?;
+    let body = User::search(&client)
+        .filter(User::order_count().gte(1))
+        .filter_nested(
+            User::orders()
+                .matching(Order::status().eq("delivered"))
+                .sort(Order::placed_at().desc())
+                .size(5),
+        )
+        .body();
+
+    let expected = json!({
+        "query": { "bool": {
+            "must": [ { "bool": { "filter": [ { "range": { "orderCount": { "gte": 1 } } } ] } } ],
+            "should": [ { "nested": {
+                "path": "orders",
+                "query": { "term": { "orders.status": "delivered" } },
+                "inner_hits": {
+                    "name": "orders",
+                    "size": 5,
+                    "sort": [ { "orders.placedAt": { "order": "desc" } } ]
+                }
+            } } ]
+        } }
+    });
+    assert_eq!(body, expected);
+    Ok(())
+}
+
+#[test]
+fn merge_inner_hits_replaces_the_source_array() {
+    let mut response = json!({
+        "took": 2,
+        "hits": { "total": { "value": 1 }, "hits": [ {
+            "_id": "1", "_score": 1.0,
+            "_source": { "id": 1, "orders": [ { "status": "x" }, { "status": "y" } ] },
+            "inner_hits": { "orders": { "hits": { "hits": [
+                { "_source": { "status": "delivered" } }
+            ] } } }
+        } ] }
+    });
+
+    crate::search::merge_inner_hits(&mut response, &["orders"]);
+
+    let orders = response
+        .pointer("/hits/hits/0/_source/orders")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(orders, json!([ { "status": "delivered" } ]));
 }
 
 #[test]
