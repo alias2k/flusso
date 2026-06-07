@@ -61,11 +61,11 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use queue_channel::{ChannelConsumer, channel};
 use queue_core::{AckHandle, Consumer, Delivery, Producer};
-use schema_core::{GenericValue, IndexName, TableName};
+use schema_core::{GenericValue, IndexName};
 use sinks_core::Sink;
+use sources_core::SnapshotTable;
 use sources_core::cdc::{Ack, Change, ChangeCapture, ChangeEvent};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
-use sources_core::{RowKey, SnapshotTable};
 use tokio::time::{Instant, timeout_at};
 
 /// Pending changes buffered between capture and the worker.
@@ -345,7 +345,7 @@ async fn work(
         let Some(delivery) = consumer.recv().await? else {
             break;
         };
-        buffer(delivery, documents, sink, filter, &mut pending).await?;
+        buffer(delivery, documents, filter, &mut pending).await?;
 
         // Fill the batch until it is full or its time window closes. `recv` is
         // cancel-safe, so dropping it on timeout never drops a queued change.
@@ -354,28 +354,36 @@ async fn work(
             match timeout_at(deadline, consumer.recv()).await {
                 Err(_elapsed) => break, // window closed: flush a partial batch
                 Ok(Ok(Some(delivery))) => {
-                    buffer(delivery, documents, sink, filter, &mut pending).await?;
+                    buffer(delivery, documents, filter, &mut pending).await?;
                 }
                 Ok(Ok(None)) => {
                     // Stream ended: flush what we have, then stop.
-                    commit(sink, &mut pending).await?;
+                    commit(documents, sink, &mut pending).await?;
                     break 'batches;
                 }
                 Ok(Err(queue_err)) => return Err(queue_err.into()),
             }
         }
-        commit(sink, &mut pending).await?;
+        commit(documents, sink, &mut pending).await?;
     }
     // A batch left buffered when the stream ended mid-fill.
-    commit(sink, &mut pending).await
+    commit(documents, sink, &mut pending).await
 }
 
-/// Acks owed for the documents currently buffered in the sink: the source acks
-/// (which advance the replication slot) and the queue delivery handles.
+/// A batch in the making: the acks owed once its documents are durable (the
+/// source acks that advance the replication slot, plus the queue handles), and
+/// the deduplicated ids of the documents the buffered changes resolved to —
+/// built together in one [`build_many`](DocumentBuilder::build_many) at commit.
 #[derive(Debug)]
 struct Batch {
     source: Vec<Ack>,
     handles: Vec<Box<dyn AckHandle>>,
+    /// Ids to (re)build for this batch, in first-seen order.
+    ids: Vec<DocumentId>,
+    /// Membership of `ids`, so a document touched by several changes in the
+    /// batch is built once — the dedup the two-step resolve/build is designed
+    /// for (see [`DocumentBuilder`]).
+    seen: HashSet<DocumentId>,
 }
 
 impl Batch {
@@ -383,27 +391,40 @@ impl Batch {
         Self {
             source: Vec::with_capacity(capacity),
             handles: Vec::with_capacity(capacity),
+            ids: Vec::with_capacity(capacity),
+            seen: HashSet::with_capacity(capacity),
         }
     }
 
+    /// The number of changes buffered — what the batch policy caps.
     fn len(&self) -> usize {
         self.source.len()
     }
 }
 
-/// Buffer one change's documents into the sink — no flush, no ack yet. The acks
-/// are retained until the batch is committed.
+/// Resolve one change to the documents it affects and fold their ids into the
+/// batch (deduplicated) — no build, no sink write, no ack yet. The actual
+/// assembly happens once per batch in [`commit`]. The change's acks are
+/// retained until then.
 async fn buffer(
     delivery: Delivery<Change>,
     documents: &dyn DocumentBuilder,
-    sink: &dyn Sink,
     filter: Option<&HashSet<IndexName>>,
     pending: &mut Batch,
 ) -> Result<()> {
     let (change, handle) = delivery.into_parts();
     match &change.event {
         ChangeEvent::Upsert { table, key } | ChangeEvent::Delete { table, key } => {
-            apply_row(table, key, documents, sink, filter).await?;
+            let affected = documents.resolve(table, key).await?;
+            tracing::trace!(documents = affected.len(), "change resolved to documents");
+            for id in affected {
+                if filter.is_some_and(|filter| !filter.contains(&id.index)) {
+                    continue;
+                }
+                if pending.seen.insert(id.clone()) {
+                    pending.ids.push(id);
+                }
+            }
         }
     }
     pending.source.push(change.ack);
@@ -411,49 +432,32 @@ async fn buffer(
     Ok(())
 }
 
-/// Close a batch: one [`flush`](Sink::flush) makes its documents durable, then
-/// every ack is confirmed. The ordering is the at-least-once guarantee — a crash
+/// Close a batch: assemble its deduplicated documents in one
+/// [`build_many`](DocumentBuilder::build_many), write each to the sink, then one
+/// [`flush`](Sink::flush) makes them durable and every ack is confirmed.
+///
+/// The flush-then-confirm ordering is the at-least-once guarantee — a crash
 /// before the flush leaves the whole batch unconfirmed and redelivered;
 /// confirming after it means the slot only advances over durable changes.
+/// Building the batch's ids as a set rather than per change reorders writes
+/// within the batch, which is safe: documents are keyed and rebuilt from the
+/// current row, so the resulting sink state is identical either way.
 ///
 /// Source acks confirm out of order safely — the mechanism advances its resume
 /// point only to the highest *contiguous* confirmed sequence (see
 /// [`Ack`](sources_core::cdc::Ack)) — so confirming a batch advances the slot to
 /// the batch's last change and no further.
-#[tracing::instrument(name = "commit", level = "debug", skip_all, fields(changes = pending.len()))]
-async fn commit(sink: &dyn Sink, pending: &mut Batch) -> Result<()> {
+#[tracing::instrument(name = "commit", level = "debug", skip_all, fields(changes = pending.len(), documents = pending.ids.len()))]
+async fn commit(
+    documents: &dyn DocumentBuilder,
+    sink: &dyn Sink,
+    pending: &mut Batch,
+) -> Result<()> {
     if pending.len() == 0 {
         return Ok(());
     }
-    sink.flush().await?;
-    for ack in pending.source.drain(..) {
-        ack.confirm();
-    }
-    for handle in pending.handles.drain(..) {
-        handle.ack().await?;
-    }
-    tracing::debug!("batch flushed and acked");
-    Ok(())
-}
-
-/// Rebuild and write every document affected by a change to one row. When
-/// `filter` is set, documents in indexes outside it are skipped (the backfill
-/// seeds only the indexes it is responsible for).
-#[tracing::instrument(level = "debug", skip_all, fields(table = table.as_ref()))]
-async fn apply_row(
-    table: &TableName,
-    key: &RowKey,
-    documents: &dyn DocumentBuilder,
-    sink: &dyn Sink,
-    filter: Option<&HashSet<IndexName>>,
-) -> Result<()> {
-    let affected = documents.resolve(table, key).await?;
-    tracing::trace!(documents = affected.len(), "change resolved to documents");
-    for id in affected {
-        if filter.is_some_and(|filter| !filter.contains(&id.index)) {
-            continue;
-        }
-        match documents.build(&id).await? {
+    for document in documents.build_many(&pending.ids).await? {
+        match document {
             Document::Upsert { id, body } => {
                 sink.upsert(&id.index, &document_id(&id), &body).await?;
             }
@@ -462,6 +466,16 @@ async fn apply_row(
             }
         }
     }
+    sink.flush().await?;
+    for ack in pending.source.drain(..) {
+        ack.confirm();
+    }
+    for handle in pending.handles.drain(..) {
+        handle.ack().await?;
+    }
+    pending.ids.clear();
+    pending.seen.clear();
+    tracing::debug!("batch built, flushed, and acked");
     Ok(())
 }
 
@@ -497,7 +511,8 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::stream;
-    use schema_core::{ColumnName, IndexName};
+    use schema_core::{ColumnName, IndexName, TableName};
+    use sources_core::RowKey;
     use sources_core::cdc::{Ack, AckSink};
 
     /// A source that replays a fixed list of changes once.
@@ -736,6 +751,84 @@ mod tests {
             5,
             "the whole batch is confirmed"
         );
+    }
+
+    /// Resolves every change to the *same* document id and counts how many
+    /// times that document is assembled — so a test can show a batch builds a
+    /// repeatedly-touched document once, not once per change.
+    #[derive(Debug)]
+    struct CountingBuilder {
+        builds: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl DocumentBuilder for CountingBuilder {
+        async fn resolve(
+            &self,
+            _table: &TableName,
+            _key: &RowKey,
+        ) -> sources_core::Result<Vec<DocumentId>> {
+            Ok(vec![DocumentId {
+                index: IndexName::try_new("users").unwrap(),
+                key: RowKey(vec![(
+                    ColumnName::try_new("id").unwrap(),
+                    GenericValue::Int(1),
+                )]),
+            }])
+        }
+
+        async fn build(&self, id: &DocumentId) -> sources_core::Result<Document> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            Ok(Document::Upsert {
+                id: id.clone(),
+                body: GenericValue::Map(Default::default()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn builds_a_repeatedly_touched_document_once_per_batch() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let builds = Arc::new(AtomicU64::new(0));
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        // Three changes that all resolve to the same document id.
+        let changes = (0..3)
+            .map(|i| upsert_change(100 + i as i64, i, &acks))
+            .collect::<Vec<_>>();
+
+        Engine::new(
+            Box::new(MockSource {
+                changes: Mutex::new(Some(changes)),
+            }),
+            Arc::new(CountingBuilder {
+                builds: Arc::clone(&builds),
+            }),
+            Arc::new(FlushLogSink {
+                ops: Arc::clone(&ops),
+            }),
+        )
+        // One batch holds all three changes.
+        .with_batch(BatchPolicy {
+            max_changes: 256,
+            max_delay: Duration::from_secs(10),
+        })
+        .skip_backfill(true)
+        .run()
+        .await
+        .unwrap();
+
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "the document is assembled once despite three changes touching it"
+        );
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec!["upsert users 1".to_owned(), "flush".to_owned()],
+            "one upsert, one flush",
+        );
+        // Every change is still confirmed — dedup is on the build, not the ack.
+        assert_eq!(acks.load(Ordering::SeqCst), 3);
     }
 
     /// Counts flushes; shares its counter with [`OrderingAck`] so a test can

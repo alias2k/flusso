@@ -48,7 +48,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use schema_core::{
-    ColumnName, Config, DatabaseSchema, Filter, IndexMapping, IndexSchema, SoftDelete, TableName,
+    ColumnName, Config, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
+    TableName,
 };
 use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use sources_core::{Catalog, ColumnInfo, Result, RowKey, SnapshotTable, SourceError};
@@ -58,6 +59,11 @@ use fields::find_paths;
 
 /// Cache of each `(schema, table, column)`'s catalog metadata.
 type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
+
+/// Most keys per batched `build_many` query. Bounds the SQL length and the
+/// prepared-statement cache churn from the `IN (…)` list growing with key
+/// count; larger id sets are split across several round-trips.
+const BUILD_CHUNK: usize = 512;
 
 /// What the Postgres catalog says about a column: its cast-ready SQL type and
 /// whether it admits null. Fetched once per column and cached — both the
@@ -408,6 +414,87 @@ impl DocumentBuilder for PgDocumentBuilder {
                 })
             }
         }
+    }
+
+    #[tracing::instrument(name = "pg.build_many", level = "debug", skip_all, fields(ids = ids.len()))]
+    async fn build_many(&self, ids: &[DocumentId]) -> Result<Vec<Document>> {
+        // Group by index: each index has its own schema, root table, and key.
+        let mut by_index: HashMap<&IndexName, Vec<&DocumentId>> = HashMap::new();
+        for id in ids {
+            by_index.entry(&id.index).or_default().push(id);
+        }
+
+        let mut out = Vec::with_capacity(ids.len());
+        for (index_name, group) in by_index {
+            let index = self
+                .config
+                .indexes
+                .get(index_name)
+                .ok_or_else(|| SourceError::Query(format!("unknown index `{index_name}`")))?;
+            let schema = &index.schema;
+
+            // The batched query keys the root with `IN (…)` on a single column,
+            // so it needs both a declared single-column primary key and ids that
+            // carry exactly that one key column. Pair each id with its lone key
+            // value; if any id is composite (or the index has no `primary_key`),
+            // fall back to per-document assembly for this group — correct, just
+            // not batched.
+            let keyed: Option<Vec<(&schema_core::GenericValue, &DocumentId)>> = group
+                .iter()
+                .map(|id| match id.key.0.as_slice() {
+                    [(_, value)] => Some((value, *id)),
+                    _ => None,
+                })
+                .collect();
+            let (Some(pk_column), Some(keyed)) = (schema.primary_key.clone(), keyed) else {
+                for id in group {
+                    out.push(self.build(id).await?);
+                }
+                continue;
+            };
+
+            let pks = self.relation_pks(schema).await?;
+            let col_types = self.filter_column_types(schema).await?;
+
+            for chunk in keyed.chunks(BUILD_CHUNK) {
+                let keys: Vec<schema_core::GenericValue> =
+                    chunk.iter().map(|(value, _)| (*value).clone()).collect();
+                let (sql, params) =
+                    query::documents_query(schema, &pk_column, &keys, &pks, &col_types)?;
+
+                let mut statement = sqlx::query(sql);
+                for param in &params {
+                    statement = query::bind_param(statement, param)?;
+                }
+                let rows = statement.fetch_all(&self.pool).await.map_err(query_err)?;
+
+                // Map each returned root key to its assembled body. `doc_key` is
+                // the first column, decoded through the same path live-change
+                // keys take, so it matches the ids' key values exactly.
+                let mut bodies: HashMap<schema_core::GenericValue, schema_core::GenericValue> =
+                    HashMap::with_capacity(rows.len());
+                for row in &rows {
+                    let key = value::first_column_to_generic(row);
+                    let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
+                    bodies.insert(key, value::json_to_generic(document));
+                }
+
+                // Every requested id yields an outcome: a body present in the
+                // result is an upsert; an absent key means the root is gone or
+                // soft-deleted (both fold into the query's WHERE) → a tombstone.
+                for (value, id) in chunk {
+                    let document = match bodies.remove(*value) {
+                        Some(body) => Document::Upsert {
+                            id: (*id).clone(),
+                            body,
+                        },
+                        None => Document::Delete { id: (*id).clone() },
+                    };
+                    out.push(document);
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn backfill_scopes(&self) -> Vec<IndexScope> {

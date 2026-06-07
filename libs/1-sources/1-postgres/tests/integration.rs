@@ -87,6 +87,78 @@ async fn assembles_documents_resolves_and_tombstones() {
     assert!(matches!(missing, Document::Delete { .. }));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn build_many_assembles_a_set_and_tombstones_absent_keys() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text, deleted boolean NOT NULL DEFAULT false)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL, total numeric NOT NULL)",
+        "INSERT INTO users (id, email) VALUES (1, 'ada@x.io'), (2, 'bob@x.io'), (3, 'cy@x.io')",
+        "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 19.99), (11, 1, 5.00), (20, 2, 7.50)",
+        // User 3 is soft-deleted, so it must come back as a tombstone.
+        "UPDATE users SET deleted = true WHERE id = 3",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(users_config(&url)))
+        .await
+        .unwrap();
+
+    // A mix: two live rows, one soft-deleted (3), one absent (999).
+    let ids = vec![
+        document_id(1),
+        document_id(2),
+        document_id(3),
+        document_id(999),
+    ];
+    let documents = builder.build_many(&ids).await.unwrap();
+
+    // One outcome per requested id; index by the document's key value to assert
+    // regardless of the order rows came back in.
+    assert_eq!(documents.len(), 4);
+    let by_key = |target: i64| {
+        documents
+            .iter()
+            .find(|d| d.id().key == row_key(target))
+            .unwrap_or_else(|| panic!("no outcome for id {target}"))
+    };
+
+    // User 1: upsert with both orders nested in.
+    let Document::Upsert { body, .. } = by_key(1) else {
+        panic!("expected user 1 to upsert");
+    };
+    let GenericValue::Map(map) = body else {
+        panic!("expected an object");
+    };
+    assert_eq!(
+        map.get("email"),
+        Some(&GenericValue::String("ada@x.io".into()))
+    );
+    let Some(GenericValue::Array(orders)) = map.get("orders") else {
+        panic!("expected an orders array");
+    };
+    assert_eq!(orders.len(), 2, "user 1's two orders nest in");
+
+    // User 2: upsert with its single order.
+    assert!(matches!(by_key(2), Document::Upsert { .. }));
+
+    // Soft-deleted and absent rows are tombstones.
+    assert!(
+        matches!(by_key(3), Document::Delete { .. }),
+        "a soft-deleted root yields a tombstone",
+    );
+    assert!(
+        matches!(by_key(999), Document::Delete { .. }),
+        "an absent root yields a tombstone",
+    );
+}
+
 fn users_config(connection_url: &str) -> Config {
     let orders = Field {
         field: field("orders"),

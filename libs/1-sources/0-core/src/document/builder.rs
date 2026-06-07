@@ -71,6 +71,24 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
     /// Assemble one document, or report it deleted if its root row is absent.
     async fn build(&self, id: &DocumentId) -> Result<Document>;
 
+    /// Assemble many documents at once. Returns one [`Document`] per requested
+    /// id — an `Upsert`, or a `Delete` tombstone when the root row is absent —
+    /// in any order; callers match results back by [`Document::id`].
+    ///
+    /// The default builds each id independently, so it matches [`build`] one
+    /// for one. Sources that can assemble a set in fewer round-trips (e.g. one
+    /// `WHERE pk IN (…)` query per index) should override it; the engine builds
+    /// a whole batch's deduplicated ids through this in a single call.
+    ///
+    /// [`build`]: Self::build
+    async fn build_many(&self, ids: &[DocumentId]) -> Result<Vec<Document>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(self.build(id).await?);
+        }
+        Ok(out)
+    }
+
     /// The enabled indexes this builder serves, each with the root table to
     /// snapshot when seeding it. The engine uses this to scope an initial
     /// backfill per index. The default is empty — a builder with no backfillable

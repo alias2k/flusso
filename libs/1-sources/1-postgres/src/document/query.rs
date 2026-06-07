@@ -112,6 +112,53 @@ pub(super) fn document_query(
     Ok((SqlString::new(sql), builder.params))
 }
 
+/// Build a single query that assembles every document whose root key is in
+/// `keys`, for an index with a single-column root key (`pk_column`). Selects
+/// the root key as the first column (`doc_key`) beside the assembled document,
+/// so the caller can match each row back to its id; a key with no matching
+/// row simply doesn't come back, which the caller reads as a tombstone.
+///
+/// The document is assembled exactly as in [`document_query`] — same nested
+/// `json_build_object` / `json_agg` — differing only in selecting the key and
+/// matching the root with `IN (…)` instead of a single equality. The key is
+/// wrapped in `to_json` so it decodes through the same path as the document.
+pub(super) fn documents_query(
+    schema: &IndexSchema,
+    pk_column: &ColumnName,
+    keys: &[GenericValue],
+    pks: &HashMap<String, ColumnName>,
+    col_types: &HashMap<(String, String), String>,
+) -> Result<(SqlString, Vec<GenericValue>)> {
+    let mut builder = Builder {
+        db: &schema.db_schema,
+        pks,
+        col_types,
+        params: Vec::new(),
+        seq: 0,
+    };
+
+    // Build the object first: its filters push the leading `$n` params, exactly
+    // as `document_query` does, so the key placeholders that follow come after.
+    let object = builder.object(&schema.fields, ROOT, schema.primary_key.as_ref())?;
+
+    let mut placeholders = Vec::with_capacity(keys.len());
+    for key in keys {
+        placeholders.push(builder.placeholder(key.clone())?);
+    }
+    let mut predicate = format!("{} IN ({})", qcol(ROOT, pk_column), placeholders.join(", "),);
+    if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
+        predicate = format!("{predicate} AND NOT ({soft_delete})");
+    }
+
+    let sql = format!(
+        "SELECT to_json({key}) AS \"doc_key\", {object} AS \"document\" \
+         FROM {} AS \"{ROOT}\" WHERE {predicate}",
+        qtable(&schema.db_schema, &schema.table),
+        key = qcol(ROOT, pk_column),
+    );
+    Ok((SqlString::new(sql), builder.params))
+}
+
 /// Build a reverse-resolution query: one column from a table, filtered by a key.
 pub(super) fn reverse_query(
     db: &DatabaseSchema,
@@ -772,6 +819,51 @@ mod tests {
         .unwrap();
         assert!(sql.as_str().contains(
             r#"WHERE "root"."id" = $1 AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        ));
+    }
+
+    #[test]
+    fn documents_query_keys_with_in_and_selects_the_key() {
+        let schema = index(
+            Some("id"),
+            None,
+            vec![col_field("id", "id"), col_field("email", "email")],
+        );
+        let (sql, params) = documents_query(
+            &schema,
+            &c("id"),
+            &[GenericValue::Int(7), GenericValue::Int(9)],
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            sql.as_str(),
+            r#"SELECT to_json("root"."id") AS "doc_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1, $2)"#
+        );
+        assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
+    }
+
+    #[test]
+    fn documents_query_folds_soft_delete_into_where() {
+        let schema = index(
+            Some("id"),
+            Some(SoftDelete::Column(SoftDeleteColumn {
+                column: c("deleted_at"),
+                when: None,
+            })),
+            vec![col_field("id", "id")],
+        );
+        let (sql, _) = documents_query(
+            &schema,
+            &c("id"),
+            &[GenericValue::Int(1)],
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(sql.as_str().contains(
+            r#"WHERE "root"."id" IN ($1) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
         ));
     }
 
