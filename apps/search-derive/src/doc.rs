@@ -106,9 +106,8 @@ fn flusso_field_attr(field: &Field) -> syn::Result<(bool, Option<String>)> {
                     rename = Some(meta.value()?.parse::<LitStr>()?.value());
                     Ok(())
                 } else {
-                    Err(meta.error(
-                        "unknown `flusso` field attribute (expected `skip` or `rename`)",
-                    ))
+                    Err(meta
+                        .error("unknown `flusso` field attribute (expected `skip` or `rename`)"))
                 }
             })?;
         }
@@ -120,7 +119,11 @@ fn flusso_field_attr(field: &Field) -> syn::Result<(bool, Option<String>)> {
 
 /// Validate each declared field against the resolved fields at this level.
 /// Returns *every* problem (not just the first) so one build surfaces them all.
-pub(crate) fn validate(level: &[ResolvedField], fields: &[DocField], scope: &str) -> Vec<syn::Error> {
+pub(crate) fn validate(
+    level: &[ResolvedField],
+    fields: &[DocField],
+    scope: &str,
+) -> Vec<syn::Error> {
     let mut errors = Vec::new();
     for field in fields {
         if field.skip {
@@ -213,7 +216,10 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<()> {
 fn shape_error(field: &DocField, os: &str, expected: &str) -> syn::Error {
     syn::Error::new(
         field.ty.span(),
-        format!("field `{}` is `{os}` in the schema — expected {expected}", field.doc_key),
+        format!(
+            "field `{}` is `{os}` in the schema — expected {expected}",
+            field.doc_key
+        ),
     )
 }
 
@@ -263,8 +269,24 @@ fn is_primitive(ident: Option<&str>) -> bool {
     matches!(
         ident,
         Some(
-            "String" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8"
-                | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64" | "Decimal"
+            "String"
+                | "bool"
+                | "char"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
+                | "f32"
+                | "f64"
+                | "Decimal"
         )
     )
 }
@@ -411,7 +433,9 @@ fn handle_fn(
 /// The element type for a `Nested` handle: the struct's projected `Vec<Elem>`
 /// element when present, else `None` (use the `Nested` default type).
 fn nested_element(resolved: &ResolvedField, fields: &[DocField]) -> Option<TokenStream> {
-    let field = fields.iter().find(|f| f.doc_key == resolved.name.as_ref())?;
+    let field = fields
+        .iter()
+        .find(|f| f.doc_key == resolved.name.as_ref())?;
     let inner = option_inner(field.ty).unwrap_or(field.ty);
     let elem = vec_inner(inner)?;
     Some(quote! { #elem })

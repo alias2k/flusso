@@ -45,8 +45,12 @@ fn convert_fixture() {
 
 #[test]
 fn minimal_schema() {
-    let schema = convert("version: 1\ntable: users\nfields:\n  - integer: id\n    required: false").unwrap();
-    assert!(matches!(field(&schema, "id").source, FieldSource::Column(_)));
+    let schema =
+        convert("version: 1\ntable: users\nfields:\n  - integer: id\n    required: false").unwrap();
+    assert!(matches!(
+        field(&schema, "id").source,
+        FieldSource::Column(_)
+    ));
 }
 
 // ── each field kind converts to the right source ─────────────────────────────
@@ -238,8 +242,9 @@ fn missing_type_tag_is_an_error() {
 
 #[test]
 fn unknown_sibling_is_rejected() {
-    let err = parse("version: 1\ntable: t\nfields:\n  - keyword: x\n    required: true\n    bogus: 1")
-        .unwrap_err();
+    let err =
+        parse("version: 1\ntable: t\nfields:\n  - keyword: x\n    required: true\n    bogus: 1")
+            .unwrap_err();
     assert!(matches!(err, ParseError::Serde(_)));
 }
 
@@ -249,7 +254,10 @@ fn sum_without_value_type_is_an_error() {
         "version: 1\ntable: t\nfields:\n  - sum: s\n    table: orders\n    column: total\n    foreign_key: t_id",
     )
     .unwrap_err();
-    assert!(matches!(err, ConversionError::MissingAggregateType { op: "sum" }));
+    assert!(matches!(
+        err,
+        ConversionError::MissingAggregateType { op: "sum" }
+    ));
 }
 
 #[test]

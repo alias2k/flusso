@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use schema_core::{
     Aggregate, AggregateOp, ColumnName, DatabaseSchema, Direction, Field, FieldSource, Filter,
-    FilterOp, FilterValue, Geo, GenericValue, IndexSchema, Join, JoinKey, JoinType, NullOp,
+    FilterOp, FilterValue, GenericValue, Geo, IndexSchema, Join, JoinKey, JoinType, NullOp,
     OrderBy, Relation, SoftDelete, TableName, Transform, ValueOpFilter,
 };
 use sources_core::{Result, SourceError};

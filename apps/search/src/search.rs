@@ -212,7 +212,11 @@ pub(crate) fn merge_inner_hits(response: &mut Value, paths: &[&str]) {
                 .and_then(|hit| hit.get("hits"))
                 .and_then(|hits| hits.get("hits"))
                 .and_then(Value::as_array)
-                .map(|hits| hits.iter().filter_map(|h| h.get("_source").cloned()).collect())
+                .map(|hits| {
+                    hits.iter()
+                        .filter_map(|h| h.get("_source").cloned())
+                        .collect()
+                })
                 .unwrap_or_default();
             source.insert((*path).to_string(), Value::Array(subset));
         }

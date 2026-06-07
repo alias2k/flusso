@@ -21,7 +21,11 @@ struct User {
 }
 
 #[derive(serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "orders", config = "tests/fixtures/flusso.toml")]
+#[flusso(
+    index = "users",
+    path = "orders",
+    config = "tests/fixtures/flusso.toml"
+)]
 struct Order {
     status: String,
     total: f64,

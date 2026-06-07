@@ -23,6 +23,10 @@ impl IntoResponse for ApiError {
             _ => StatusCode::BAD_GATEWAY,
         };
         tracing::warn!(error = %self.0, "request failed");
-        (status, Json(serde_json::json!({ "error": self.0.to_string() }))).into_response()
+        (
+            status,
+            Json(serde_json::json!({ "error": self.0.to_string() })),
+        )
+            .into_response()
     }
 }

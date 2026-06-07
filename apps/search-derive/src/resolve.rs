@@ -139,7 +139,10 @@ fn find_config(start: &Path, config_override: Option<&str>) -> Result<PathBuf, S
         return if candidate.is_file() {
             Ok(candidate)
         } else {
-            Err(format!("configured flusso.toml not found at `{}`", candidate.display()))
+            Err(format!(
+                "configured flusso.toml not found at `{}`",
+                candidate.display()
+            ))
         };
     }
 
@@ -157,7 +160,9 @@ fn find_config(start: &Path, config_override: Option<&str>) -> Result<PathBuf, S
 }
 
 fn env_config() -> Option<String> {
-    std::env::var("FLUSSO_CONFIG").ok().filter(|s| !s.is_empty())
+    std::env::var("FLUSSO_CONFIG")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn resolve_relative(base: &Path, path: &str) -> PathBuf {

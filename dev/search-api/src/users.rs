@@ -123,7 +123,11 @@ async fn list(
             if has { present } else { present.not() }
         }))
         // Filter BY nested one-to-many fields: keep parents with a matching child.
-        .filter(filter.city.map(|v| User::addresses().any(Address::city().eq(v))))
+        .filter(
+            filter
+                .city
+                .map(|v| User::addresses().any(Address::city().eq(v))),
+        )
         .filter(
             filter
                 .order_status

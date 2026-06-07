@@ -153,7 +153,9 @@ fn empty_search_matches_all() -> Result {
 
 #[test]
 fn combinators_build_bool_clauses() {
-    let and = Keyword::<Root>::at("a").eq("x").and(Keyword::<Root>::at("b").eq("y"));
+    let and = Keyword::<Root>::at("a")
+        .eq("x")
+        .and(Keyword::<Root>::at("b").eq("y"));
     assert_eq!(
         and.to_value(),
         json!({ "bool": { "must": [
@@ -175,7 +177,9 @@ fn combinators_build_bool_clauses() {
         ] } })
     );
 
-    let or = Keyword::<Root>::at("a").eq("x").or(Keyword::<Root>::at("b").eq("y"));
+    let or = Keyword::<Root>::at("a")
+        .eq("x")
+        .or(Keyword::<Root>::at("b").eq("y"));
     assert_eq!(
         or.to_value(),
         json!({ "bool": { "should": [
@@ -194,7 +198,9 @@ fn combinators_build_bool_clauses() {
 #[test]
 fn operators_render_expected_clauses() {
     assert_eq!(
-        Keyword::<Root>::at("status").in_(["paid", "shipped"]).to_value(),
+        Keyword::<Root>::at("status")
+            .in_(["paid", "shipped"])
+            .to_value(),
         json!({ "terms": { "status": ["paid", "shipped"] } })
     );
 
@@ -246,7 +252,9 @@ fn extended_term_and_text_operators() {
     );
 
     assert_eq!(
-        Text::<Root>::at("bio").match_phrase_prefix("software eng").to_value(),
+        Text::<Root>::at("bio")
+            .match_phrase_prefix("software eng")
+            .to_value(),
         json!({ "match_phrase_prefix": { "bio": "software eng" } })
     );
 
@@ -313,10 +321,11 @@ fn geo_queries_render_expected_clauses() {
 fn geo_distance_sort_in_search_body() -> Result {
     let client = Client::connect("http://localhost:9200")?;
     let body = Search::<User>::new(&client, "places")
-        .sort(
-            Geo::<Root>::at("location")
-                .distance_sort(GeoPoint::new(52.37, 4.90), SortOrder::Asc, "km"),
-        )
+        .sort(Geo::<Root>::at("location").distance_sort(
+            GeoPoint::new(52.37, 4.90),
+            SortOrder::Asc,
+            "km",
+        ))
         .body();
 
     let expected = json!({

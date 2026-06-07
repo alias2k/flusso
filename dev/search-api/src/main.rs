@@ -33,15 +33,19 @@ mod users;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 
-    let url = std::env::var("OPENSEARCH_URL").unwrap_or_else(|_| "http://localhost:9200".to_owned());
+    let url =
+        std::env::var("OPENSEARCH_URL").unwrap_or_else(|_| "http://localhost:9200".to_owned());
     let mut client = Client::connect(&url)?;
-    if let (Ok(user), Ok(password)) =
-        (std::env::var("OPENSEARCH_USER"), std::env::var("OPENSEARCH_PASSWORD"))
-    {
+    if let (Ok(user), Ok(password)) = (
+        std::env::var("OPENSEARCH_USER"),
+        std::env::var("OPENSEARCH_PASSWORD"),
+    ) {
         client = client.basic_auth(user, password);
     }
 

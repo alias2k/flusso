@@ -4,9 +4,9 @@ use std::str::FromStr;
 use rust_decimal::Decimal;
 use schema_core::{
     Aggregate, AggregateOp, Column, ColumnName, Direction, Field, FieldSource, Filter, FilterOp,
-    FilterValue, FlussoType, Geo, GenericValue, Join, JoinKey, JoinType, NullCheckFilter, NullOp,
-    OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through, Transform,
-    ValueOpFilter,
+    FilterValue, FlussoType, GenericValue, Geo, Join, JoinKey, JoinType, NullCheckFilter, NullOp,
+    OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
+    Transform, ValueOpFilter,
 };
 
 use crate::ConversionError;
@@ -156,9 +156,10 @@ fn convert_aggregate_op(
 ) -> Result<(AggregateOp, Option<FlussoType>), ConversionError> {
     Ok(match op {
         entities::AggregateOp::Count => (AggregateOp::Count, None),
-        entities::AggregateOp::Avg => {
-            (AggregateOp::Avg(require_aggregate_column(column, "avg")?), None)
-        }
+        entities::AggregateOp::Avg => (
+            AggregateOp::Avg(require_aggregate_column(column, "avg")?),
+            None,
+        ),
         entities::AggregateOp::Sum => (
             AggregateOp::Sum(require_aggregate_column(column, "sum")?),
             Some(require_aggregate_type(value_type, "sum")?),
