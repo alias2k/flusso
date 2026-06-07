@@ -50,7 +50,7 @@
 //!     fn email() -> Keyword { Keyword::at("email") }
 //!     fn order_count() -> Number<i64> { Number::at("orderCount") }
 //!     fn search(client: &Client) -> flusso_search::Search<'_, User> {
-//!         flusso_search::Search::new(client, "users")
+//!         flusso_search::Search::new(client, "users", "xxxxxx")
 //!     }
 //! }
 //!

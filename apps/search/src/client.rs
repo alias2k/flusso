@@ -54,15 +54,24 @@ impl Client {
         }
     }
 
-    /// POST a search body to `<index>/_search` and return the parsed response
+    /// POST a search body to `<index>_<hash>/_search` and return the parsed response
     /// JSON. Crate-internal: [`crate::Search::send`] drives this.
-    pub(crate) async fn search(&self, index: &str, body: &Value) -> Result<Value> {
-        let endpoint = format!("{}/{}/_search", self.base, index);
+    #[tracing::instrument(
+        name = "search.request",
+        level = "debug",
+        skip_all,
+        fields(index, hash, status = tracing::field::Empty),
+        err,
+    )]
+    pub(crate) async fn search(&self, index: &str, hash: &str, body: &Value) -> Result<Value> {
+        let endpoint = format!("{}/{}_{}/_search", self.base, index, hash);
+        tracing::debug!(%endpoint, "POST _search");
         let response = self
             .authed(self.http.post(&endpoint).json(body))
             .send()
             .await?;
         let status = response.status();
+        tracing::Span::current().record("status", status.as_u16());
         if !status.is_success() {
             return Err(Error::Status {
                 status: status.as_u16(),
@@ -72,18 +81,32 @@ impl Client {
         Ok(response.json::<Value>().await?)
     }
 
-    /// Fetch a single document by id from `<index>/_doc/<id>`. Returns `None`
+    /// Fetch a single document by id from `<index>_<hash>/_doc/<id>`. Returns `None`
     /// when the document does not exist.
     ///
     /// Until the derive generates `Type::get`, callers invoke this directly with
     /// the document type as `T`.
-    pub async fn get_doc<T>(&self, index: &str, id: impl std::fmt::Display) -> Result<Option<T>>
+    #[tracing::instrument(
+        name = "search.get",
+        level = "debug",
+        skip_all,
+        fields(index, hash, id = %id, status = tracing::field::Empty),
+        err,
+    )]
+    pub async fn get_doc<T>(
+        &self,
+        index: &str,
+        hash: &str,
+        id: impl std::fmt::Display,
+    ) -> Result<Option<T>>
     where
         T: DeserializeOwned,
     {
-        let endpoint = format!("{}/{}/_doc/{}", self.base, index, id);
+        let endpoint = format!("{}/{}_{}/_doc/{}", self.base, index, hash, id);
+        tracing::debug!(%endpoint, "GET _doc");
         let response = self.authed(self.http.get(&endpoint)).send().await?;
         let status = response.status();
+        tracing::Span::current().record("status", status.as_u16());
         if status.as_u16() == 404 {
             return Ok(None);
         }

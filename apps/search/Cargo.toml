@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
+tracing = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 flusso-search-derive = { path = "../search-derive", optional = true }
 rust_decimal = { workspace = true, optional = true }

@@ -316,20 +316,18 @@ pub(crate) fn codegen(
     // OpenSearch sink writes. The derive bakes it in (a structural schema change
     // rotates the hash *and* forces this binding to be recompiled), so the hash
     // stays hidden from callers — `Type::search(&client)` just works.
-    let physical_index = format!("{index}_{hash}");
-
     let entry = if is_root {
         quote! {
             /// The physical index this binding queries — the logical name plus
             /// the schema hash, matching what the engine's OpenSearch sink writes.
-            pub const INDEX: &'static str = #physical_index;
+            pub const INDEX: &'static str = #index;
 
             /// The schema hash this binding was generated from (the `INDEX` suffix).
             pub const SCHEMA_HASH: &'static str = #hash;
 
             /// Start a typed search against this index.
             pub fn search(client: &::flusso_search::Client) -> ::flusso_search::Search<'_, Self> {
-                ::flusso_search::Search::new(client, Self::INDEX)
+                ::flusso_search::Search::new(client, Self::INDEX, Self::SCHEMA_HASH)
             }
 
             /// Fetch one document by id; `None` when absent.
@@ -337,7 +335,7 @@ pub(crate) fn codegen(
                 client: &::flusso_search::Client,
                 id: impl ::core::fmt::Display,
             ) -> ::flusso_search::Result<::core::option::Option<Self>> {
-                client.get_doc::<Self>(Self::INDEX, id).await
+                client.get_doc::<Self>(Self::INDEX, Self::SCHEMA_HASH, id).await
             }
         }
     } else {

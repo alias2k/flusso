@@ -35,7 +35,7 @@ impl User {
         Nested::at("orders")
     }
     fn search(client: &Client) -> Search<'_, User> {
-        Search::new(client, "users")
+        Search::new(client, "users", "xxxxxx")
     }
 }
 
@@ -146,7 +146,7 @@ fn builds_the_full_search_body() -> Result {
 #[test]
 fn empty_search_matches_all() -> Result {
     let client = Client::connect("http://localhost:9200")?;
-    let body = Search::<User>::new(&client, "users").body();
+    let body = Search::<User>::new(&client, "users", "xxxxxx").body();
     assert_eq!(body, json!({ "query": { "match_all": {} } }));
     Ok(())
 }
@@ -320,7 +320,7 @@ fn geo_queries_render_expected_clauses() {
 #[test]
 fn geo_distance_sort_in_search_body() -> Result {
     let client = Client::connect("http://localhost:9200")?;
-    let body = Search::<User>::new(&client, "places")
+    let body = Search::<User>::new(&client, "places", "xxxxxx")
         .sort(Geo::<Root>::at("location").distance_sort(
             GeoPoint::new(52.37, 4.90),
             SortOrder::Asc,

@@ -22,6 +22,7 @@ use crate::query::{AsQuery, BoolBuilder, Root};
 pub struct Search<'a, T> {
     client: &'a Client,
     index: String,
+    hash: String,
     bool_query: BoolBuilder,
     raw: Option<Value>,
     sort: Vec<Sort>,
@@ -33,10 +34,11 @@ pub struct Search<'a, T> {
 
 impl<'a, T> Search<'a, T> {
     /// Start a search against `index` using `client`.
-    pub fn new(client: &'a Client, index: impl Into<String>) -> Self {
+    pub fn new(client: &'a Client, index: impl Into<String>, hash: impl Into<String>) -> Self {
         Self {
             client,
             index: index.into(),
+            hash: hash.into(),
             bool_query: BoolBuilder::default(),
             raw: None,
             sort: Vec::new(),
@@ -170,14 +172,31 @@ where
     T: DeserializeOwned,
 {
     /// Execute the search and decode the hits into `SearchResponse<T>`.
+    #[tracing::instrument(
+        name = "search.send",
+        skip_all,
+        fields(
+            index = %self.index,
+            from = ?self.from,
+            size = ?self.size,
+            total = tracing::field::Empty,
+            took_ms = tracing::field::Empty,
+        ),
+        err,
+    )]
     pub async fn send(self) -> Result<SearchResponse<T>> {
         let body = self.body();
-        let mut response = self.client.search(&self.index, &body).await?;
+        let mut response = self.client.search(&self.index, &self.hash, &body).await?;
         if !self.nested.is_empty() {
             let paths: Vec<&str> = self.nested.iter().map(NestedProjection::path).collect();
             merge_inner_hits(&mut response, &paths);
         }
-        SearchResponse::from_value(response)
+        let page = SearchResponse::from_value(response)?;
+        let span = tracing::Span::current();
+        span.record("total", page.total);
+        span.record("took_ms", page.took.as_millis() as u64);
+        tracing::debug!(total = page.total, hits = page.hits.len(), "search completed");
+        Ok(page)
     }
 }
 

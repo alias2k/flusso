@@ -46,7 +46,7 @@ fn generated_surface_builds_queries() -> Result {
     assert!(body.is_object());
     assert!(!User::SCHEMA_HASH.is_empty());
     // The index const is the physical name: logical + the hash, used by search/get.
-    assert_eq!(User::INDEX, format!("users_{}", User::SCHEMA_HASH));
+    assert_eq!(User::INDEX, "users");
 
     // Spot-check the emitted DSL (compact JSON, no indexing into Value).
     let json = body.to_string();
