@@ -118,13 +118,16 @@ fn flusso_field_attr(field: &Field) -> syn::Result<(bool, Option<String>)> {
 // ── validation ───────────────────────────────────────────────────────────────
 
 /// Validate each declared field against the resolved fields at this level.
-/// Returns *every* problem (not just the first) so one build surfaces them all.
+/// Returns *every* problem (not just the first) so one build surfaces them all,
+/// plus any deferred type assertions to emit alongside the generated surface
+/// (see [`check_type`] — a `KeywordValue` bound for user enums / newtypes).
 pub(crate) fn validate(
     level: &[ResolvedField],
     fields: &[DocField],
     scope: &str,
-) -> Vec<syn::Error> {
+) -> (Vec<syn::Error>, Vec<TokenStream>) {
     let mut errors = Vec::new();
+    let mut asserts = Vec::new();
     for field in fields {
         if field.skip {
             continue;
@@ -136,11 +139,13 @@ pub(crate) fn validate(
         if let Err(error) = check_nullability(field, resolved) {
             errors.push(error);
         }
-        if let Err(error) = check_type(field, resolved) {
-            errors.push(error);
+        match check_type(field, resolved) {
+            Ok(Some(assertion)) => asserts.push(assertion),
+            Ok(None) => {}
+            Err(error) => errors.push(error),
         }
     }
-    errors
+    (errors, asserts)
 }
 
 fn unknown_field(field: &DocField, level: &[ResolvedField], scope: &str) -> syn::Error {
@@ -177,11 +182,14 @@ fn check_nullability(field: &DocField, resolved: &ResolvedField) -> syn::Result<
     }
 }
 
-fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<()> {
+/// Check one field's Rust type against its resolved mapping. `Ok(None)` = fine,
+/// `Ok(Some(tokens))` = fine *if* a deferred bound holds (emitted into the
+/// generated code), `Err` = a definite mismatch reported with a precise span.
+fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<TokenStream>> {
     let inner = option_inner(field.ty).unwrap_or(field.ty);
     // `serde_json::Value` opts out of type checking.
     if leaf_ident(inner).as_deref() == Some("Value") {
-        return Ok(());
+        return Ok(None);
     }
     let os = resolved.mapping.mapping_type.name();
     match &resolved.mapping.mapping_type {
@@ -189,27 +197,67 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<()> {
             if vec_inner(inner).is_none() {
                 return Err(shape_error(field, os, "a `Vec<…>` (a nested array)"));
             }
-            Ok(())
+            Ok(None)
         }
-        MappingType::Object if resolved.children.is_empty() => Ok(()), // json → anything
+        MappingType::Object if resolved.children.is_empty() => Ok(None), // json → anything
         MappingType::Object => {
             if vec_inner(inner).is_some() || is_primitive(leaf_ident(inner).as_deref()) {
                 return Err(shape_error(field, os, "a struct (a sub-object)"));
             }
-            Ok(())
+            Ok(None)
         }
         scalar => {
             let expected = expected_leaves(scalar);
             if expected.is_empty() {
-                return Ok(()); // unrecognized OpenSearch type → accept anything
+                return Ok(None); // unrecognized OpenSearch type → accept anything
             }
             let found = leaf_ident(inner);
             if found.as_deref().is_some_and(|f| expected.contains(&f)) {
-                Ok(())
-            } else {
-                Err(scalar_error(field, os, &expected, found.as_deref()))
+                return Ok(None);
             }
+            // Hybrid: a user-defined type (a path that isn't a known primitive)
+            // in a kind that supports custom values defers to a `FieldValue<K>`
+            // bound — satisfied by `#[derive(FlussoValue)]`. Primitives (a real
+            // mismatch like `i32` in a keyword) and non-path types still
+            // hard-error here with the precise, schema-aware message.
+            if let Some(kind) = value_kind(scalar)
+                && found.as_deref().is_some_and(|f| !is_primitive(Some(f)))
+            {
+                return Ok(Some(value_assert(inner, kind)));
+            }
+            Err(scalar_error(field, os, &expected, found.as_deref()))
         }
+    }
+}
+
+/// The `flusso_search::kind::…` marker a scalar mapping accepts custom values
+/// for, or `None` for kinds without a `FlussoValue` escape hatch (`bool`, geo,
+/// binary — a custom type there is almost always a mistake).
+fn value_kind(mapping_type: &MappingType) -> Option<TokenStream> {
+    match mapping_type {
+        MappingType::Keyword => Some(quote! { ::flusso_search::kind::Keyword }),
+        MappingType::Text => Some(quote! { ::flusso_search::kind::Text }),
+        MappingType::Byte
+        | MappingType::Short
+        | MappingType::Integer
+        | MappingType::Long
+        | MappingType::Float
+        | MappingType::HalfFloat
+        | MappingType::Double
+        | MappingType::ScaledFloat => Some(quote! { ::flusso_search::kind::Number }),
+        MappingType::Date => Some(quote! { ::flusso_search::kind::Date }),
+        _ => None,
+    }
+}
+
+/// A zero-cost assertion that `ty` implements `FieldValue<kind>`, reported at
+/// the field's type span if it doesn't (e.g. a missing `#[derive(FlussoValue)]`).
+fn value_assert(ty: &Type, kind: TokenStream) -> TokenStream {
+    quote::quote_spanned! {ty.span()=>
+        const _: fn() = || {
+            fn __assert_field_value<__T: ::flusso_search::FieldValue<#kind>>() {}
+            __assert_field_value::<#ty>();
+        };
     }
 }
 

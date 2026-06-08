@@ -1,0 +1,5 @@
+error: a `number` FlussoValue requires a newtype wrapper (e.g. `struct Cents(i64)`) — an enum serializes to a string, not a number
+ --> tests/ui/value_enum_not_number.rs:7:6
+  |
+7 | enum Tier {
+  |      ^^^^

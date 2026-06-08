@@ -195,7 +195,11 @@ where
         let span = tracing::Span::current();
         span.record("total", page.total);
         span.record("took_ms", page.took.as_millis() as u64);
-        tracing::debug!(total = page.total, hits = page.hits.len(), "search completed");
+        tracing::debug!(
+            total = page.total,
+            hits = page.hits.len(),
+            "search completed"
+        );
         Ok(page)
     }
 }

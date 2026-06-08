@@ -4,7 +4,7 @@
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_search::{Client, FlussoDocument};
+use flusso_search::{Client, FlussoDocument, FlussoValue};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -36,9 +36,23 @@ struct User {
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "users", path = "account")]
 struct Account {
-    tier: String,
+    tier: AccountTier,
     country: Option<String>,
     created_at: String,
+}
+
+// A string enum stands in for the `keyword` at `account.tier`. `FlussoValue`
+// with `#[flusso(keyword)]` implements `FieldValue<kind::Keyword>` so
+// `FlussoDocument` accepts it as the field type *and* `Account::tier().eq(…)`
+// accepts it as a query value; serde's `rename_all` controls the actual keyword
+// strings (`"pro"`, …).
+#[derive(Debug, Serialize, Deserialize, FlussoValue)]
+#[serde(rename_all = "camelCase")]
+#[flusso(keyword)]
+enum AccountTier {
+    Pro,
+    Enterprise,
+    Free,
 }
 
 #[derive(Debug, Serialize, Deserialize, FlussoDocument)]

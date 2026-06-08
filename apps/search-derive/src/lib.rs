@@ -20,6 +20,7 @@ use syn::{Data, DeriveInput, LitStr, parse_macro_input};
 
 mod doc;
 mod resolve;
+mod value;
 
 use resolve::Scope;
 
@@ -34,6 +35,23 @@ use resolve::Scope;
 pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(input).into()
+}
+
+/// Implement `flusso_search::FieldValue<K>` for an enum or newtype wrapper, so
+/// it may stand in for a field of kind `K` in a `FlussoDocument` struct. The
+/// kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
+/// `#[flusso(number)]`, or `#[flusso(date)]`.
+///
+/// ```ignore
+/// #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+/// #[serde(rename_all = "camelCase")]
+/// #[flusso(keyword)]
+/// enum AccountTier { Pro, Enterprise, Free }
+/// ```
+#[proc_macro_derive(FlussoValue, attributes(flusso))]
+pub fn derive_flusso_value(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    value::expand(input).into()
 }
 
 /// The `#[flusso(…)]` container attributes, plus serde's container `rename_all`.
@@ -188,7 +206,9 @@ fn expand(input: DeriveInput) -> TokenStream2 {
     );
 
     let mut out = items;
-    for error in doc::validate(level, &fields, &scope) {
+    let (errors, asserts) = doc::validate(level, &fields, &scope);
+    out.extend(asserts);
+    for error in errors {
         out.extend(error.to_compile_error());
     }
     out

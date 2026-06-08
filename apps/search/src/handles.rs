@@ -69,6 +69,74 @@ fn match_all_value() -> Value {
     Value::Object(outer)
 }
 
+/// The keyword term for a value, taken from its serde serialization — so a
+/// `#[derive(FlussoKeyword)]` enum/newtype matches exactly the string it stores
+/// in the document. `String`/`&str` pass straight through; the non-string
+/// fallback only fires for a hand-written [`KeywordValue`] impl that breaks the
+/// "serializes to a string" contract the derive enforces.
+fn keyword_term(value: &impl serde::Serialize) -> Value {
+    match serde_json::to_value(value) {
+        Ok(Value::String(string)) => Value::String(string),
+        Ok(other) => Value::String(other.to_string()),
+        Err(_) => Value::String(String::new()),
+    }
+}
+
+// ---- FieldValue ------------------------------------------------------------
+
+/// Field-category markers for [`FieldValue`]. Zero-size and uninhabited — they
+/// exist only as the `K` type parameter, so one type can be a valid value for
+/// several kinds (e.g. `String` is a [`kind::Keyword`], [`kind::Text`], and
+/// [`kind::Date`] value).
+pub mod kind {
+    /// A `keyword` field — an exact string.
+    #[derive(Debug)]
+    pub enum Keyword {}
+    /// A `text` field — an analyzed string.
+    #[derive(Debug)]
+    pub enum Text {}
+    /// A numeric field (`byte`…`double`, `scaled_float`).
+    #[derive(Debug)]
+    pub enum Number {}
+    /// A `date`/`timestamp` field — an ISO-8601 string.
+    #[derive(Debug)]
+    pub enum Date {}
+}
+
+/// A Rust type usable where a field of kind `K` is expected: as the field type
+/// in a `#[derive(FlussoDocument)]` struct, and (for [`kind::Keyword`]) as a
+/// query value on [`Keyword::eq`]/[`Keyword::in_`].
+///
+/// Built-in leaf types are pre-implemented (`String`/`&str` for keyword, the
+/// numeric primitives for number, …). Custom enums and newtype wrappers opt in
+/// with `#[derive(FlussoValue)]` (e.g. a `Pro`/`Enterprise`/`Free` tier enum →
+/// `Account::tier().eq(AccountTier::Pro)`, matched against its serde string).
+/// `FlussoDocument` emits a deferred bound on this trait for any non-primitive
+/// field type, so a document only compiles when the type genuinely fits.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid value for a `{K}` field",
+    label = "unsupported field type",
+    note = "use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `{Self}`"
+)]
+pub trait FieldValue<K> {}
+
+impl FieldValue<kind::Keyword> for String {}
+impl FieldValue<kind::Keyword> for &str {}
+
+impl FieldValue<kind::Text> for String {}
+impl FieldValue<kind::Text> for &str {}
+
+impl FieldValue<kind::Number> for i8 {}
+impl FieldValue<kind::Number> for i16 {}
+impl FieldValue<kind::Number> for i32 {}
+impl FieldValue<kind::Number> for i64 {}
+impl FieldValue<kind::Number> for f32 {}
+impl FieldValue<kind::Number> for f64 {}
+#[cfg(feature = "decimal")]
+impl FieldValue<kind::Number> for crate::Decimal {}
+
+impl FieldValue<kind::Date> for String {}
+
 // ---- Keyword ---------------------------------------------------------------
 
 /// An exact, aggregatable string field (`keyword`, `enum`, `uuid`).
@@ -87,17 +155,19 @@ impl<S> Keyword<S> {
         }
     }
 
-    /// Exact match.
-    pub fn eq(&self, value: impl Into<String>) -> Query<S> {
-        single("term", &self.path, Value::String(value.into()))
+    /// Exact match. Accepts a `String`/`&str`, or any `#[derive(FlussoValue)]`
+    /// keyword enum/newtype — matched against its serde string form
+    /// (`Account::tier().eq(AccountTier::Pro)`).
+    pub fn eq(&self, value: impl FieldValue<kind::Keyword> + serde::Serialize) -> Query<S> {
+        single("term", &self.path, keyword_term(&value))
     }
 
-    /// Match any of the given values.
-    pub fn in_(&self, values: impl IntoIterator<Item = impl Into<String>>) -> Query<S> {
-        let array = values
-            .into_iter()
-            .map(|v| Value::String(v.into()))
-            .collect();
+    /// Match any of the given values (`String`/`&str` or keyword `FlussoValue` types).
+    pub fn in_(
+        &self,
+        values: impl IntoIterator<Item = impl FieldValue<kind::Keyword> + serde::Serialize>,
+    ) -> Query<S> {
+        let array = values.into_iter().map(|v| keyword_term(&v)).collect();
         single("terms", &self.path, Value::Array(array))
     }
 

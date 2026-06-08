@@ -79,8 +79,8 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
-    Binary, Bool, Date, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection, Number, Object,
-    Sort, SortOrder, Text, multi_match,
+    Binary, Bool, Date, FieldValue, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection, Number,
+    Object, Sort, SortOrder, Text, kind, multi_match,
 };
 pub use query::{AsQuery, Query, Root};
 pub use search::{Hit, Search, SearchResponse};
@@ -90,6 +90,13 @@ pub use search::{Hit, Search, SearchResponse};
 /// by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_search_derive::FlussoDocument;
+
+/// `#[derive(FlussoValue)]` — implements [`FieldValue`] for an enum or newtype
+/// wrapper, so it may stand in for a field of the chosen kind (`#[flusso(keyword)]`
+/// — the default — `#[flusso(text)]`, `#[flusso(number)]`, or `#[flusso(date)]`)
+/// in a [`FlussoDocument`] struct. Enabled by the `derive` feature.
+#[cfg(feature = "derive")]
+pub use flusso_search_derive::FlussoValue;
 
 /// `rust_decimal::Decimal`, re-exported for `decimal` fields. Enabled by the
 /// `decimal` feature.

@@ -1,0 +1,5 @@
+error: FlussoValue requires unit variants — `Custom` carries data, which serializes to an object/array, not a string
+ --> tests/ui/value_data_variant.rs:8:5
+  |
+8 |     Custom(String),
+  |     ^^^^^^
