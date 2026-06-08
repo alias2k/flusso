@@ -8,8 +8,8 @@
 //!   and [`ColumnName`] that enforce Postgres identifier rules at construction.
 //! - [`config`] holds the structures built from them: [`Config`],
 //!   [`IndexSchema`], [`Field`], [`Join`], [`Aggregate`], [`Filter`], and the rest.
-//! - [`traits`] defines the conversions the format crates implement —
-//!   [`ParseFrom`] (text into entities) and [`ContentHasher`].
+//! - [`traits`] defines the conversion the format crates implement —
+//!   [`ParseFrom`] (text into entities).
 //!
 //! Identifier types are built with [`nutype`]: they can only be constructed
 //! through `try_new`, so an invalid name never reaches the model.

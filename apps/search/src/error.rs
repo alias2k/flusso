@@ -29,11 +29,6 @@ pub enum Error {
     /// A response could not be decoded into the expected shape.
     #[error("decoding response: {0}")]
     Decode(#[from] serde_json::Error),
-
-    /// A response was valid JSON but did not have the structure we expect from
-    /// the OpenSearch search/get APIs.
-    #[error("unexpected response shape: {0}")]
-    Shape(String),
 }
 
 /// A `Result` whose error is this crate's [`Error`].

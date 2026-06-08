@@ -63,7 +63,7 @@ fn bool_value(clause: &str, items: Vec<Value>) -> Value {
 }
 
 /// `{ "match_all": {} }`.
-fn match_all_value() -> Value {
+pub(crate) fn match_all_value() -> Value {
     let mut outer = Map::new();
     outer.insert("match_all".to_string(), Value::Object(Map::new()));
     Value::Object(outer)

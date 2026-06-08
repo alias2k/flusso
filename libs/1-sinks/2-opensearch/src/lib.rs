@@ -250,6 +250,34 @@ impl OpensearchSink {
         }))
     }
 
+    /// Turn a non-success response into a `Write` error, draining its body for
+    /// diagnostics. `context` names the operation (e.g. `"refresh failed"`).
+    async fn status_error(resp: reqwest::Response, context: &str) -> SinkError {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        SinkError::Write(format!("{context}: HTTP {status}: {text}"))
+    }
+
+    /// Send `req` (with auth applied) and require a 2xx response, returning it.
+    /// Both the transport failure and the non-success status are reported with
+    /// the `context` prefix.
+    async fn send_ok(
+        &self,
+        req: reqwest::RequestBuilder,
+        context: &str,
+    ) -> Result<reqwest::Response> {
+        let resp = self
+            .maybe_auth(req)
+            .send()
+            .await
+            .map_err(|e| SinkError::Write(format!("{context}: {e}")))?;
+        if resp.status().is_success() {
+            Ok(resp)
+        } else {
+            Err(Self::status_error(resp, context).await)
+        }
+    }
+
     /// Whether `index` already exists in the cluster.
     async fn index_exists(&self, index: &str) -> Result<bool> {
         let url = format!("{}/{index}", self.base_url);
@@ -265,33 +293,17 @@ impl OpensearchSink {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(false);
         }
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        Err(SinkError::Write(format!(
-            "index check failed: HTTP {status}: {text}"
-        )))
+        Err(Self::status_error(resp, "index check failed").await)
     }
 
     /// Force a one-off refresh so everything written to `index` so far becomes
     /// searchable, regardless of the index's refresh interval.
     async fn refresh_index(&self, index: &str) -> Result<()> {
         let url = format!("{}/{index}/_refresh", self.base_url);
-        let resp = self
-            .maybe_auth(self.client.post(&url))
-            .send()
-            .await
-            .map_err(|e| SinkError::Write(format!("refresh failed: {e}")))?;
-
-        if resp.status().is_success() {
-            debug!(index, "refreshed index");
-            Ok(())
-        } else {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            Err(SinkError::Write(format!(
-                "refresh failed: HTTP {status}: {text}"
-            )))
-        }
+        self.send_ok(self.client.post(&url), "refresh failed")
+            .await?;
+        debug!(index, "refreshed index");
+        Ok(())
     }
 
     /// Hand `index` back to automatic refresh by resetting `refresh_interval`
@@ -304,22 +316,9 @@ impl OpensearchSink {
             .header("Content-Type", "application/json")
             .json(&json!({ "index": { "refresh_interval": null } }));
 
-        let resp = self
-            .maybe_auth(req)
-            .send()
-            .await
-            .map_err(|e| SinkError::Write(format!("restore refresh failed: {e}")))?;
-
-        if resp.status().is_success() {
-            debug!(index, "restored automatic refresh on index");
-            Ok(())
-        } else {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            Err(SinkError::Write(format!(
-                "restore refresh failed: HTTP {status}: {text}"
-            )))
-        }
+        self.send_ok(req, "restore refresh failed").await?;
+        debug!(index, "restored automatic refresh on index");
+        Ok(())
     }
 
     /// Write a document to `META_INDEX` under the given id.
@@ -331,30 +330,15 @@ impl OpensearchSink {
             .header("Content-Type", "application/json")
             .json(&doc);
 
-        let resp = self
-            .maybe_auth(req)
-            .send()
-            .await
-            .map_err(|e| SinkError::Write(format!("meta put failed: {e}")))?;
-
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            Err(SinkError::Write(format!(
-                "meta put failed: HTTP {status}: {text}"
-            )))
-        }
+        self.send_ok(req, "meta put failed").await?;
+        Ok(())
     }
 
     /// Fetch a document from `META_INDEX` by id. Returns `None` on 404.
     async fn get_meta(&self, id: &str) -> Result<Option<Value>> {
         let url = format!("{}/{META_INDEX}/_doc/{id}", self.base_url);
-        let req = self.client.get(&url);
-
         let resp = self
-            .maybe_auth(req)
+            .maybe_auth(self.client.get(&url))
             .send()
             .await
             .map_err(|e| SinkError::Write(format!("meta get failed: {e}")))?;
@@ -370,11 +354,7 @@ impl OpensearchSink {
                 .map_err(|e| SinkError::Write(format!("failed to parse meta response: {e}")))?;
             Ok(Some(body))
         } else {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            Err(SinkError::Write(format!(
-                "meta get failed: HTTP {status}: {text}"
-            )))
+            Err(Self::status_error(resp, "meta get failed").await)
         }
     }
 }

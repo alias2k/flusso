@@ -96,9 +96,9 @@ mod tests {
         producer.publish(2).await.unwrap();
         drop(producer); // close the queue so it drains then ends
 
-        let first = consumer.recv().await.unwrap().unwrap();
-        assert_eq!(*first.item(), 1);
-        first.ack().await.unwrap();
+        let (first, first_handle) = consumer.recv().await.unwrap().unwrap().into_parts();
+        assert_eq!(first, 1);
+        first_handle.ack().await.unwrap();
 
         let (item, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
         assert_eq!(item, 2);

@@ -19,9 +19,10 @@ pub trait Consumer<T: Send>: std::fmt::Debug + Send {
 
 /// A received item paired with the handle that confirms or returns it.
 ///
-/// Processing is complete only when [`ack`](Self::ack) is called; until then a
-/// durable backend may redeliver after a crash. Dropping a delivery without
-/// acking leaves it unconfirmed (a durable backend redelivers it later).
+/// Processing is complete only when the [`AckHandle`] taken from
+/// [`into_parts`](Self::into_parts) is acked; until then a durable backend may
+/// redeliver after a crash. Dropping a delivery without acking leaves it
+/// unconfirmed (a durable backend redelivers it later).
 #[derive(Debug)]
 pub struct Delivery<T> {
     item: T,
@@ -34,20 +35,10 @@ impl<T> Delivery<T> {
         Self { item, handle }
     }
 
-    /// The work item.
-    pub fn item(&self) -> &T {
-        &self.item
-    }
-
     /// Split into the item and its ack handle, so the item can be processed and
     /// the handle acked once the work is durably done.
     pub fn into_parts(self) -> (T, Box<dyn AckHandle>) {
         (self.item, self.handle)
-    }
-
-    /// Confirm the item was processed; a durable backend won't redeliver it.
-    pub async fn ack(self) -> Result<()> {
-        self.handle.ack().await
     }
 
     /// Return the item to the queue for redelivery (processing failed).

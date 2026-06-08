@@ -98,54 +98,63 @@ pub(crate) fn config(out: &mut impl Write, pen: Pen, config: &Config) -> Result<
     if config.sinks.is_empty() {
         writeln!(out, "  {}", pen.dim("(none — defaults to a stdout sink)"))?;
     } else {
-        let width = config
+        let rows: Vec<(String, String, String)> = config
             .sinks
-            .keys()
-            .map(|n| n.as_ref().chars().count())
-            .max()
-            .unwrap_or(0);
-        for (name, sink) in &config.sinks {
-            let (kind, detail) = describe_sink(sink);
-            writeln!(
-                out,
-                "  {:<width$}  {}  {}",
-                pen.bold(name.as_ref()),
-                pen.magenta(kind),
-                pen.dim(&detail),
-                // pad the *uncolored* name, then color — so widths line up
-                width = width + pen_pad(pen, name.as_ref()),
-            )?;
-        }
+            .iter()
+            .map(|(name, sink)| {
+                let (kind, detail) = describe_sink(sink);
+                (
+                    name.as_ref().to_owned(),
+                    pen.magenta(kind),
+                    pen.dim(&detail),
+                )
+            })
+            .collect();
+        aligned_rows(out, pen, &rows)?;
     }
 
     section(out, pen, "Indexes")?;
-    let width = config
+    let rows: Vec<(String, String, String)> = config
         .indexes
-        .keys()
-        .map(|n| n.as_ref().chars().count())
+        .iter()
+        .map(|(name, index)| {
+            let schema = &index.schema;
+            let state = if index.enabled {
+                pen.green("enabled")
+            } else {
+                pen.dim("disabled")
+            };
+            let mut detail = format!("{}.{}", schema.db_schema, schema.table);
+            if let Some(pk) = &schema.primary_key {
+                detail.push_str(&format!("   pk {pk}"));
+            }
+            if let Some(sd) = &schema.soft_delete {
+                detail.push_str(&format!("   soft-delete {}", describe_soft_delete(sd)));
+            }
+            (name.as_ref().to_owned(), state, pen.dim(&detail))
+        })
+        .collect();
+    aligned_rows(out, pen, &rows)?;
+    Ok(())
+}
+
+/// Print a left-aligned bold name column sized to the widest entry, followed by
+/// two already-colored cells. The name column is padded on its *uncolored*
+/// width (via [`pen_pad`]) so colored names still line up.
+fn aligned_rows(out: &mut impl Write, pen: Pen, rows: &[(String, String, String)]) -> Result<()> {
+    let width = rows
+        .iter()
+        .map(|(name, _, _)| name.chars().count())
         .max()
         .unwrap_or(0);
-    for (name, index) in &config.indexes {
-        let schema = &index.schema;
-        let state = if index.enabled {
-            pen.green("enabled")
-        } else {
-            pen.dim("disabled")
-        };
-        let mut detail = format!("{}.{}", schema.db_schema, schema.table);
-        if let Some(pk) = &schema.primary_key {
-            detail.push_str(&format!("   pk {pk}"));
-        }
-        if let Some(sd) = &schema.soft_delete {
-            detail.push_str(&format!("   soft-delete {}", describe_soft_delete(sd)));
-        }
+    for (name, col1, col2) in rows {
         writeln!(
             out,
             "  {:<width$}  {}  {}",
-            pen.bold(name.as_ref()),
-            state,
-            pen.dim(&detail),
-            width = width + pen_pad(pen, name.as_ref()),
+            pen.bold(name),
+            col1,
+            col2,
+            width = width + pen_pad(pen, name),
         )?;
     }
     Ok(())

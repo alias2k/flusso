@@ -1,7 +1,5 @@
 use std::hash::{Hash, Hasher};
 
-use crate::traits::ContentHasher;
-
 /// FNV-1a offset basis.
 const FNV_OFFSET: u32 = 2_166_136_261;
 /// FNV-1a prime.
@@ -15,17 +13,13 @@ impl ContentHash {
         Self(value)
     }
 
-    pub fn from_bytes(data: &[u8]) -> Self {
-        let mut hasher = Fnv1aHasher::default();
-        hasher.write(data);
-        Self(hasher.0)
-    }
-
     /// The content hash of any [`Hash`] value, via FNV-1a. Deterministic for a
     /// given structure — the same parsed value always hashes the same — which
     /// is what makes it usable as a stable, structure-derived identifier.
     pub fn of<T: Hash>(value: &T) -> Self {
-        Fnv1aContentHasher.hash(value)
+        let mut hasher = Fnv1aHasher::default();
+        value.hash(&mut hasher);
+        Self(hasher.0)
     }
 }
 
@@ -63,18 +57,6 @@ impl Hasher for Fnv1aHasher {
             self.0 ^= u32::from(*byte);
             self.0 = self.0.wrapping_mul(FNV_PRIME);
         }
-    }
-}
-
-/// Hashes values with FNV-1a (see [`ContentHash::of`]).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Fnv1aContentHasher;
-
-impl ContentHasher for Fnv1aContentHasher {
-    fn hash<T: Hash>(&self, data: &T) -> ContentHash {
-        let mut hasher = Fnv1aHasher::default();
-        data.hash(&mut hasher);
-        ContentHash::new(hasher.0)
     }
 }
 

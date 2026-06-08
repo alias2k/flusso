@@ -168,10 +168,8 @@ impl PgDocumentBuilder {
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
         for row in &rows {
-            if let Some(value) = value::row_to_map(row).remove(result_column)
-                && !matches!(value, GenericValue::Null)
-                && seen.insert(value.clone())
-            {
+            let value = value::decode_named_column(row, result_column);
+            if !matches!(value, GenericValue::Null) && seen.insert(value.clone()) {
                 roots.push(value);
             }
         }

@@ -1,20 +1,19 @@
-//! Decoding Postgres results into the schema's [`GenericValue`]: whole rows
-//! (for reverse-resolution lookups) and JSON documents (assembled server-side).
-
-use std::collections::HashMap;
+//! Decoding Postgres results into the schema's [`GenericValue`]: single named
+//! columns (for reverse-resolution lookups) and JSON documents (assembled
+//! server-side).
 
 use rust_decimal::Decimal;
 use schema_core::GenericValue;
 use sqlx::postgres::{PgColumn, PgRow};
 use sqlx::{Column, Row, TypeInfo};
 
-/// Decode every column of a row into a name→value map.
-pub(super) fn row_to_map(row: &PgRow) -> HashMap<String, GenericValue> {
-    let mut map = HashMap::with_capacity(row.columns().len());
-    for col in row.columns() {
-        map.insert(col.name().to_owned(), decode_column(row, col));
+/// Decode one named column of a row into a [`GenericValue`], or
+/// [`GenericValue::Null`] if the row has no such column.
+pub(super) fn decode_named_column(row: &PgRow, name: &str) -> GenericValue {
+    match row.columns().iter().find(|col| col.name() == name) {
+        Some(col) => decode_column(row, col),
+        None => GenericValue::Null,
     }
-    map
 }
 
 /// Decode a single column by its Postgres type. Unsupported types and decode

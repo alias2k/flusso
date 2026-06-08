@@ -133,6 +133,8 @@ struct GetResponse<T> {
     source: Option<T>,
 }
 
+/// `Option::None` without requiring `T: Default` — which `#[serde(default)]`
+/// would, but a missing `_source` should just be absent for any `T`.
 fn none<T>() -> Option<T> {
     None
 }

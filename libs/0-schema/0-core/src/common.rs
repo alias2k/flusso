@@ -7,7 +7,6 @@ mod index_name;
 mod raw_filter_value;
 mod schema_path;
 mod sink_name;
-mod sink_type;
 mod source_type;
 mod table_name;
 
@@ -20,6 +19,5 @@ pub use index_name::*;
 pub use raw_filter_value::*;
 pub use schema_path::*;
 pub use sink_name::*;
-pub use sink_type::*;
 pub use source_type::*;
 pub use table_name::*;

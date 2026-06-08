@@ -40,7 +40,7 @@ use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
 use sources_core::{Result, RowKey, SnapshotTable, SourceError};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPoolOptions, PgRow};
-use sqlx::{PgPool, Postgres, Row};
+use sqlx::{PgPool, Postgres};
 
 use crate::document::value;
 
@@ -105,20 +105,12 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
 /// The single-column primary key of a table from the catalog, or `None` (with a
 /// warning) if it has no primary key or a composite one.
 async fn primary_key(pool: &PgPool, schema: &str, table: &str) -> Result<Option<ColumnName>> {
-    let sql = "SELECT a.attname AS name \
-               FROM pg_index i \
-               JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
-               WHERE i.indrelid = $1::regclass AND i.indisprimary";
-    let rows = sqlx::query(sql)
-        .bind(format!("{}.{}", quote_ident(schema), quote_ident(table)))
-        .fetch_all(pool)
-        .await
-        .map_err(query_err)?;
+    let qualified = format!("{}.{}", quote_ident(schema), quote_ident(table));
+    let names = crate::document::primary_key_column_names(pool, qualified).await?;
 
-    let mut columns = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let name: String = row.try_get("name").map_err(query_err)?;
-        match ColumnName::try_new(&name) {
+    let mut columns = Vec::with_capacity(names.len());
+    for name in &names {
+        match ColumnName::try_new(name) {
             Ok(column) => columns.push(column),
             Err(e) => {
                 tracing::warn!(%table, column = %name, error = %e, "skipping backfill: invalid primary key column");

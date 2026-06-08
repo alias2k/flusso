@@ -151,26 +151,14 @@ impl PgDocumentBuilder {
         schema: &DatabaseSchema,
         table: &TableName,
     ) -> Result<Vec<ColumnName>> {
-        let qualified = format!("{schema}.{table}");
-        let sql = "SELECT a.attname AS name \
-                   FROM pg_index i \
-                   JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
-                   WHERE i.indrelid = $1::regclass AND i.indisprimary";
-        let rows = sqlx::query(sql)
-            .bind(qualified)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(query_err)?;
-
-        let mut columns = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let name: String = row.try_get("name").map_err(query_err)?;
-            columns.push(
+        let names = primary_key_column_names(&self.pool, format!("{schema}.{table}")).await?;
+        names
+            .into_iter()
+            .map(|name| {
                 ColumnName::try_new(name)
-                    .map_err(|e| SourceError::Query(format!("invalid primary key column: {e}")))?,
-            );
-        }
-        Ok(columns)
+                    .map_err(|e| SourceError::Query(format!("invalid primary key column: {e}")))
+            })
+            .collect()
     }
 
     /// Resolve every relation table's primary key up front (cached), so the
@@ -523,4 +511,30 @@ impl DocumentBuilder for PgDocumentBuilder {
 
 pub(super) fn query_err(error: sqlx::Error) -> SourceError {
     SourceError::Query(error.to_string())
+}
+
+/// Primary-key column names of a table, in index order. `$1` binds the
+/// qualified `schema.table` (cast to `regclass`).
+pub(crate) const PRIMARY_KEY_SQL: &str = "SELECT a.attname AS name \
+     FROM pg_index i \
+     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+     WHERE i.indrelid = $1::regclass AND i.indisprimary";
+
+/// Fetch the raw primary-key column-name strings for the table `qualified`
+/// names (e.g. `"public"."users"` or `public.users`). Callers apply their own
+/// policy for an invalid name, a missing key, or a composite key.
+pub(crate) async fn primary_key_column_names(
+    pool: &PgPool,
+    qualified: String,
+) -> Result<Vec<String>> {
+    let rows = sqlx::query(PRIMARY_KEY_SQL)
+        .bind(qualified)
+        .fetch_all(pool)
+        .await
+        .map_err(query_err)?;
+    let mut names = Vec::with_capacity(rows.len());
+    for row in &rows {
+        names.push(row.try_get::<String, _>("name").map_err(query_err)?);
+    }
+    Ok(names)
 }

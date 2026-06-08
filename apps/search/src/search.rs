@@ -160,7 +160,7 @@ impl<'a, T> Search<'a, T> {
     pub fn body(&self) -> Value {
         let query = match &self.raw {
             Some(raw) => raw.clone(),
-            None if self.bool_query.is_empty() => match_all(),
+            None if self.bool_query.is_empty() => crate::handles::match_all_value(),
             None => self.bool_query.to_value(),
         };
 
@@ -230,13 +230,6 @@ where
         );
         Ok(page)
     }
-}
-
-/// `{ "match_all": {} }`.
-fn match_all() -> Value {
-    let mut outer = Map::new();
-    outer.insert("match_all".to_string(), Value::Object(Map::new()));
-    Value::Object(outer)
 }
 
 /// Replace each `paths` array in every hit's `_source` with that path's
