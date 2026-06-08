@@ -14,6 +14,9 @@
 //! - `check` validates the config and every schema, prints the fully-typed
 //!   mapping (database-free), and — unless `--offline` — also confirms the
 //!   declared types and nullability agree with the live database.
+//! - `schema` prints an embedded JSON Schema for editor assist — the
+//!   `flusso.toml` config schema or the `*.schema.yml` index schema — so a user
+//!   can pin the schema that matches their installed version.
 
 mod print;
 
@@ -61,6 +64,8 @@ enum Command {
     Run(RunArgs),
     /// Validate the config and schemas without running the pipeline.
     Check(CheckArgs),
+    /// Print an embedded JSON Schema for editor assist.
+    Schema(SchemaArgs),
 }
 
 #[derive(Debug, Args)]
@@ -131,13 +136,42 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Args)]
+struct SchemaArgs {
+    /// Which schema to print.
+    #[arg(value_enum)]
+    which: SchemaKind,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SchemaKind {
+    /// The `flusso.toml` config schema (JSON Schema).
+    Config,
+    /// The `*.schema.yml` index schema (JSON Schema, authored as YAML).
+    Index,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Build(args) => build(args),
         Command::Run(args) => run(args).await,
         Command::Check(args) => check(args).await,
+        Command::Schema(args) => schema_cmd(args),
     }
+}
+
+/// Print an embedded JSON Schema to stdout. Needs no config and no database —
+/// the schema is compiled into the binary, so it always matches this version.
+fn schema_cmd(args: SchemaArgs) -> anyhow::Result<()> {
+    let body = match args.which {
+        SchemaKind::Config => schema::CONFIG_SCHEMA,
+        SchemaKind::Index => schema::INDEX_SCHEMA,
+    };
+    let mut out = std::io::stdout().lock();
+    // Normalize to exactly one trailing newline regardless of the file's.
+    writeln!(out, "{}", body.trim_end())?;
+    Ok(())
 }
 
 /// Build a config and its schemas into a single portable artifact. Needs no

@@ -52,7 +52,8 @@ cargo run -- run   --config dev/flusso.toml   # backfill + follow live changes
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
 baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run` (loads
 `flusso.lock` by default, or `--config` to compile-and-run; `--skip-backfill` resumes live
-only). See `dev/README.md` for the walk-through.
+only), `schema` (print an embedded editor-assist JSON Schema: `schema config` or `schema
+index`; no DB). See `dev/README.md` for the walk-through.
 
 ## Workspace lints are strict — they fail the build
 
@@ -177,9 +178,14 @@ belongs in the linked docs.
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
   `libs/0-schema/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
-- `dev/` is a runnable example, not shipping code; `schemas/*.json|yml` are JSON Schemas for
-  editor completion. They're hand-curated (not generated), but `libs/0-schema/tests/schema_drift.rs`
-  guards their enumerable sets — field type tags, field siblings, enum tokens, sink fields —
-  against the parsers, so adding a tag/sibling/variant fails CI until the schema matches.
-  It does **not** check descriptions, defaults, the permissive `field` union, or the identifier
-  `pattern`s (which can't model the newtypes' trim/lowercase sanitization).
+- `dev/` is a runnable example, not shipping code; `schemas/*.json|yml` are hand-curated JSON
+  Schemas for editor completion. Each is owned by the format crate that defines its shape and
+  embedded via `include_str!`: `schema_config_toml::CONFIG_SCHEMA` (`schemas/config.schema.json`)
+  and `schema_index_yaml::INDEX_SCHEMA` (`schemas/index.schema.yml`), both re-exported from
+  `schema` and emitted by `flusso schema config|index`. The files stay at repo root so the
+  `# yaml-language-server: $schema=…` refs and external registries keep working.
+  `libs/0-schema/tests/schema_drift.rs` guards their enumerable sets — field type tags, field
+  siblings, enum tokens, sink fields — against the parsers (reading the embedded consts), so
+  adding a tag/sibling/variant fails CI until the schema matches. It does **not** check
+  descriptions, defaults, the permissive `field` union, or the identifier `pattern`s (which
+  can't model the newtypes' trim/lowercase sanitization).

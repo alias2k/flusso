@@ -30,29 +30,24 @@
 //! newtypes' `trim`/`lowercase` sanitization.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use schema::ParseFrom;
 use serde::Serialize;
 use serde_json::Value;
 
-// ── loading the committed schemas ────────────────────────────────────────────
-
-fn repo_file(rel: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../")
-        .join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
+// ── loading the embedded schemas ──────────────────────────────────────────────
+//
+// Read the schemas as the crates embed them (`include_str!`), so the test
+// validates the bytes that ship and emit — not a loose file that could diverge.
 
 /// The TOML config schema, as JSON.
 fn config_schema() -> Value {
-    serde_json::from_str(&repo_file("schemas/config.schema.json")).expect("config schema is JSON")
+    serde_json::from_str(schema::CONFIG_SCHEMA).expect("config schema is JSON")
 }
 
 /// The index schema (authored in YAML, but a JSON Schema document), as JSON.
 fn index_schema() -> Value {
-    serde_yaml::from_str(&repo_file("schemas/index.schema.yml")).expect("index schema is YAML")
+    serde_yaml::from_str(schema::INDEX_SCHEMA).expect("index schema is YAML")
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
