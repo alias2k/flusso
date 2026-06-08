@@ -168,7 +168,7 @@ belongs in the linked docs.
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding) | `libs/1-sinks/2-opensearch/src/lib.rs` |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
-| CLI subcommands (`build`/`check`/`run`) | `apps/cli/src/main.rs` |
+| CLI subcommands (`build`/`run`/`check`/`schema`) | `apps/cli/src/` — `main.rs` dispatches; one module per command (`build.rs`, `run.rs`, `check.rs`, `schema_cmd.rs`), plus `telemetry.rs` and `print.rs` |
 | Query client (`flusso-search`) | `apps/search/src/` |
 | `#[derive(FlussoDocument)]` proc-macro | `apps/search-derive/src/` (+ the `flusso-search-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
