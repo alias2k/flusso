@@ -19,6 +19,11 @@
 //! # Ok::<(), schema::LoadError>(())
 //! ```
 
+// `serde_json` / `serde_yaml` are dev-dependencies used only by the
+// `schema_drift` integration test; allow them to look unused in the lib's own
+// test build (see `tests/schema_drift.rs`).
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
 mod compiled;
 mod loader;
 

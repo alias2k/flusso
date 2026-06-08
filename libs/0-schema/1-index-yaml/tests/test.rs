@@ -273,6 +273,18 @@ fn sum_without_column_is_an_error() {
 }
 
 #[test]
+fn aggregate_value_type_rejects_geo_point() {
+    let err = convert(
+        "version: 1\ntable: t\nfields:\n  - max: m\n    table: orders\n    column: loc\n    value_type: geo_point\n    foreign_key: t_id",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::InvalidAggregateType { op: "max" }
+    ));
+}
+
+#[test]
 fn join_without_key_is_an_error() {
     let err = convert(
         "version: 1\ntable: t\nfields:\n  - one_to_many: o\n    table: orders\n    primary_key: id\n    fields:\n      - keyword: x\n        required: true",

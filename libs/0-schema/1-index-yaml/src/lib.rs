@@ -49,6 +49,11 @@ pub enum ConversionError {
     #[error("aggregate op '{op}' requires a `value_type` (its result mirrors the column)")]
     MissingAggregateType { op: &'static str },
     #[error(
+        "aggregate op '{op}' `value_type` must be a scalar type — `geo_point` and `custom` \
+         are not valid aggregate result types"
+    )]
+    InvalidAggregateType { op: &'static str },
+    #[error(
         "a `geo` field needs either both `lat` and `lon` (two columns) or a single `column` \
          holding a combined value — not a mix"
     )]

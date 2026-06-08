@@ -251,11 +251,19 @@ fn require_aggregate_column(
     column.ok_or(ConversionError::MissingAggregateColumn { op })
 }
 
+/// The `value_type` of a `sum`/`min`/`max` aggregate mirrors the aggregated
+/// column, so it must be a scalar type. `geo_point` and `custom` are not
+/// meaningful results for these ops and are rejected.
 fn require_aggregate_type(
     ty: Option<FlussoType>,
     op: &'static str,
 ) -> Result<FlussoType, ConversionError> {
-    ty.ok_or(ConversionError::MissingAggregateType { op })
+    match ty.ok_or(ConversionError::MissingAggregateType { op })? {
+        FlussoType::GeoPoint | FlussoType::Custom { .. } => {
+            Err(ConversionError::InvalidAggregateType { op })
+        }
+        scalar => Ok(scalar),
+    }
 }
 
 pub(crate) fn convert_soft_delete(sd: entities::SoftDelete) -> Result<SoftDelete, ConversionError> {

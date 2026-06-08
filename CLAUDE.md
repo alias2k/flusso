@@ -178,4 +178,8 @@ belongs in the linked docs.
   `libs/0-schema/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - `dev/` is a runnable example, not shipping code; `schemas/*.json|yml` are JSON Schemas for
-  editor completion.
+  editor completion. They're hand-curated (not generated), but `libs/0-schema/tests/schema_drift.rs`
+  guards their enumerable sets — field type tags, field siblings, enum tokens, sink fields —
+  against the parsers, so adding a tag/sibling/variant fails CI until the schema matches.
+  It does **not** check descriptions, defaults, the permissive `field` union, or the identifier
+  `pattern`s (which can't model the newtypes' trim/lowercase sanitization).

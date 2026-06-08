@@ -15,7 +15,7 @@ properties:
   primary_key:
     $ref: "#/definitions/pg_identifier"
   doc_id:
-    type: string
+    $ref: "#/definitions/pg_identifier"
   soft_delete:
     oneOf:
       - type: object
@@ -205,6 +205,7 @@ definitions:
         properties:
           raw:
             type: string
+            minLength: 1
       - type: object
         required: [column, op]
         additionalProperties: false
