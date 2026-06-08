@@ -237,7 +237,7 @@ fn filter_value(filter: &schema_core::Filter) -> Option<&FilterValue> {
 #[test]
 fn missing_type_tag_is_an_error() {
     let err = parse("version: 1\ntable: t\nfields:\n  - required: true").unwrap_err();
-    assert!(matches!(err, ParseError::Serde(_)));
+    assert!(matches!(err, ParseError::Syntax(_)));
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn unknown_sibling_is_rejected() {
     let err =
         parse("version: 1\ntable: t\nfields:\n  - keyword: x\n    required: true\n    bogus: 1")
             .unwrap_err();
-    assert!(matches!(err, ParseError::Serde(_)));
+    assert!(matches!(err, ParseError::Syntax(_)));
 }
 
 #[test]
@@ -279,6 +279,53 @@ fn join_without_key_is_an_error() {
     )
     .unwrap_err();
     assert!(matches!(err, ConversionError::InvalidJoinKey));
+}
+
+// ── error messages are clear: location snippet + field-aware phrasing ────────
+
+#[test]
+fn top_level_error_renders_a_source_snippet() {
+    // A top-level (non-field) error locates accurately, so it gets a caret snippet.
+    let err = parse("version: 1\ntable: t\nbogus: 9\nfields: []").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("--> line 3"), "missing location header: {msg}");
+    assert!(msg.contains("bogus: 9"), "missing source line: {msg}");
+    assert!(msg.contains('^'), "missing caret: {msg}");
+}
+
+#[test]
+fn unknown_sibling_message_names_the_field_and_hides_internal_key() {
+    let err =
+        parse("version: 1\ntable: t\nfields:\n  - keyword: email\n    requierd: true").unwrap_err();
+    let msg = err.to_string();
+    // Names the field by tag and document key, in our phrasing…
+    assert!(msg.contains("`keyword` field `email`"), "{msg}");
+    assert!(msg.contains("unknown key `requierd`"), "{msg}");
+    // …never leaks the internal `field` key we inject while parsing…
+    assert!(!msg.contains("`field`"), "internal key leaked: {msg}");
+    // …and omits the snippet, whose location would point at the wrong field.
+    assert!(!msg.contains("-->"), "misleading snippet rendered: {msg}");
+}
+
+#[test]
+fn missing_type_tag_lists_the_fields_keys_to_locate_it() {
+    let err =
+        parse("version: 1\ntable: t\nfields:\n  - column: c\n    required: true").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("missing a type tag"), "{msg}");
+    // With no tag there's no name, so the present keys are listed instead.
+    assert!(msg.contains("column") && msg.contains("required"), "{msg}");
+}
+
+#[test]
+fn missing_required_key_uses_plain_phrasing() {
+    let err = parse("version: 1\ntable: t\nfields:\n  - keyword: email").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("`keyword` field `email`: missing key `required`"),
+        "{msg}"
+    );
+    assert!(!msg.contains("missing field"), "serde jargon leaked: {msg}");
 }
 
 #[test]

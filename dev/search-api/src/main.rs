@@ -3,12 +3,17 @@
 //! It uses `flusso-search` + `#[derive(FlussoDocument)]` against the **same**
 //! `../flusso.toml` the engine builds from (auto-discovered at compile time), so
 //! the document types are checked against the schema and the query surface is
-//! generated. Each index gets a filterable `GET` endpoint:
+//! generated. Each index gets a filterable list endpoint plus a fetch-by-id
+//! endpoint (`Type::get`, returning `404` when absent); `users`/`products` also
+//! take a free-text `q` (a scoring `multi_match` over their analyzed fields):
 //!
 //! ```text
-//! GET /users?email=ada@example.com&min_orders=5&tier=gold&city=Boston
-//! GET /products?name=widget&in_stock=true&min_rating=4
-//! GET /orders?status=delivered&user_id=42&min_total=100
+//! GET /users?q=ada&min_orders=5&tier=pro&city=London
+//! GET /users/1
+//! GET /products?q=keyboard&in_stock=true&min_rating=4
+//! GET /products/3
+//! GET /orders?status=delivered&user_id=2&min_total=100
+//! GET /orders/10
 //! GET /health
 //! ```
 //!

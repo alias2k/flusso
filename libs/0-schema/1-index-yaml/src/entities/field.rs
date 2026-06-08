@@ -224,19 +224,50 @@ fn find_tag<E: de::Error>(map: &serde_yaml::Mapping) -> Result<(String, TagKind)
         }
     }
     found.ok_or_else(|| {
-        E::custom(
-            "field is missing a type tag (expected one of: a scalar type like \
+        // Name the field's keys so it can be located — its position is otherwise
+        // unreliable (see `render_yaml_error`), and with no tag there's no name.
+        let keys: Vec<&str> = map.iter().filter_map(|(key, _)| key.as_str()).collect();
+        let here = if keys.is_empty() {
+            String::new()
+        } else {
+            format!(" (this field has keys: {})", keys.join(", "))
+        };
+        E::custom(format!(
+            "field is missing a type tag{here}; expected one of: a scalar type like \
              `keyword`/`text`/`integer`, or `custom`, `geo`, `object`, \
              `one_to_one`/`one_to_many`/`many_to_many`, \
-             `count`/`sum`/`avg`/`min`/`max`, `constant`)",
-        )
+             `count`/`sum`/`avg`/`min`/`max`, `constant`"
+        ))
     })
 }
 
 /// Deserialize a body from the field mapping (after the tag value has been moved
-/// under the `field` key).
-fn body_from<T: DeserializeOwned, E: de::Error>(body: serde_yaml::Value) -> Result<T, E> {
-    serde_yaml::from_value(body).map_err(|e| E::custom(e.to_string()))
+/// under the `field` key). On failure the message names the field — its type tag
+/// and document key — and hides the internal `field` key we inject, so the user
+/// sees only keys they can actually write.
+fn body_from<T: DeserializeOwned, E: de::Error>(
+    body: serde_yaml::Value,
+    tag: &str,
+    name: &str,
+) -> Result<T, E> {
+    serde_yaml::from_value(body).map_err(|e| {
+        let detail = e
+            .to_string()
+            .replace("`field`, ", "")
+            .replace(", `field`", "")
+            .replace("unknown field", "unknown key")
+            .replace("missing field", "missing key");
+        E::custom(format!("`{tag}` field `{name}`: {detail}"))
+    })
+}
+
+/// The document key a field carries (the value of its type tag), for use in
+/// error messages. Non-string keys are uncommon but possible to write.
+fn field_name(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        other => format!("{other:?}"),
+    }
 }
 
 impl<'de> Deserialize<'de> for Field {
@@ -252,13 +283,15 @@ impl<'de> Deserialize<'de> for Field {
         let name = map
             .remove(serde_yaml::Value::String(tag_key.clone()))
             .ok_or_else(|| de::Error::custom("internal: type tag vanished"))?;
+        let name_str = field_name(&name);
+        let tag = tag_key.as_str();
         map.insert(serde_yaml::Value::String("field".to_owned()), name);
         let body = serde_yaml::Value::Mapping(map);
 
         Ok(match kind {
-            TagKind::Scalar(ty) => Field::Scalar(ty, body_from(body)?),
+            TagKind::Scalar(ty) => Field::Scalar(ty, body_from(body, tag, &name_str)?),
             TagKind::Custom => {
-                let c: CustomBody = body_from(body)?;
+                let c: CustomBody = body_from(body, tag, &name_str)?;
                 Field::Scalar(
                     FlussoType::Custom {
                         postgres: c.postgres,
@@ -274,11 +307,15 @@ impl<'de> Deserialize<'de> for Field {
                     },
                 )
             }
-            TagKind::Geo => Field::Geo(body_from(body)?),
-            TagKind::Object => Field::Object(body_from(body)?),
-            TagKind::Join(join_type) => Field::Join(join_type, Box::new(body_from(body)?)),
-            TagKind::Aggregate(op) => Field::Aggregate(op, Box::new(body_from(body)?)),
-            TagKind::Constant => Field::Constant(body_from(body)?),
+            TagKind::Geo => Field::Geo(body_from(body, tag, &name_str)?),
+            TagKind::Object => Field::Object(body_from(body, tag, &name_str)?),
+            TagKind::Join(join_type) => {
+                Field::Join(join_type, Box::new(body_from(body, tag, &name_str)?))
+            }
+            TagKind::Aggregate(op) => {
+                Field::Aggregate(op, Box::new(body_from(body, tag, &name_str)?))
+            }
+            TagKind::Constant => Field::Constant(body_from(body, tag, &name_str)?),
         })
     }
 }

@@ -28,21 +28,37 @@ cargo run -p flusso-dev-search-api
 
 ## Endpoints
 
-Every list endpoint is filterable via query params; absent params are simply
-not applied (the `Option<Query>` optional-filter primitive).
+Each index has a **list** endpoint (filterable via query params; absent params
+are simply not applied — the `Option<Query>` optional-filter primitive) and a
+**fetch-by-id** endpoint (`GET /<index>/{id}`, backed by `Type::get`, returning
+`404` when the document doesn't exist).
 
-| Endpoint    | Filters |
-| ----------- | ------- |
-| `GET /users` | `email`, `email_prefix`, `name` (full-text on `fullName`), `tier` (`account.tier`), `bio` (full-text on `profile.bio`), `has_profile` (one-to-one exists), `city` (matches an address), `order_status` (matches an order), `min_orders`, `recent_orders=N` (trim each user's returned `orders` to the N newest), `limit` |
-| `GET /products` | `sku`, `name` (full-text), `in_stock`, `min_reviews`, `min_rating`, `limit` |
+`users` and `products` also accept a free-text **`q`** — a single scoring
+`multi_match` across that document's analyzed `text` fields, so it drives
+relevance ranking while the other params only narrow. (`orders` has no `text`
+field, so it has no `q`.)
+
+| Endpoint | Filters |
+| -------- | ------- |
+| `GET /users` | `q` (full-text over `fullName` + `profile.bio`), `email`, `email_prefix`, `name` (full-text on `fullName`), `tier` (`account.tier`), `bio` (full-text on `profile.bio`), `has_profile` (one-to-one exists), `city` (matches an address), `order_status` (matches an order), `min_orders`, `recent_orders=N` (trim each user's returned `orders` to the N newest), `limit` |
+| `GET /users/{id}` | — (fetch one) |
+| `GET /products` | `q` (full-text over `name` + `description`), `sku`, `name` (full-text), `in_stock`, `min_reviews`, `min_rating`, `limit` |
+| `GET /products/{id}` | — (fetch one) |
 | `GET /orders` | `user_id`, `status`, `min_total`, `min_items`, `limit` |
+| `GET /orders/{id}` | — (fetch one) |
 | `GET /health` | — |
 
 ```sh
-# Users in a city who have a delivered order, returning only their 3 newest orders:
-curl 'localhost:8080/users?city=Boston&order_status=delivered&recent_orders=3&tier=gold'
-curl 'localhost:8080/products?name=widget&in_stock=true&min_rating=4'
+# Free-text, then narrow: users matching "ada" with ≥5 orders, in London, pro tier,
+# returning only their 3 newest orders:
+curl 'localhost:8080/users?q=ada&min_orders=5&tier=pro&city=London&recent_orders=3'
+curl 'localhost:8080/products?q=keyboard&in_stock=true&min_rating=4'
 curl 'localhost:8080/orders?status=delivered&min_total=100'
+
+# Fetch one document by id (404 if absent):
+curl 'localhost:8080/users/1'
+curl 'localhost:8080/products/3'
+curl 'localhost:8080/orders/10'
 ```
 
 The `users` document is the full nested shape — the derive validates each level

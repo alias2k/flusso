@@ -36,7 +36,7 @@ pub trait FlussoDocument: DeserializeOwned {
         client: &Client,
         id: impl std::fmt::Display,
     ) -> impl std::future::Future<Output = Result<Option<Self>>> {
-        client.get_doc::<Self>(Self::INDEX, Self::SCHEMA_HASH, id)
+        client.get_one::<Self>(Self::INDEX, Self::SCHEMA_HASH, id)
     }
 }
 

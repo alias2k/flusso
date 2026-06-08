@@ -1,10 +1,10 @@
 //! The `users` index: the full document (object + one-to-one + nested arrays,
 //! three levels deep) and a filterable endpoint.
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_search::{Client, FlussoDocument, FlussoValue};
+use flusso_search::{Client, FlussoDocument, FlussoValue, multi_match};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -98,6 +98,8 @@ struct OrderLine {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct UserFilter {
+    // Free-text relevance query across the user's analyzed `text` fields.
+    q: Option<String>,
     email: Option<String>,
     email_prefix: Option<String>,
     name: Option<String>,
@@ -113,7 +115,23 @@ struct UserFilter {
 }
 
 pub(crate) fn routes() -> Router<Client> {
-    Router::new().route("/users", get(list))
+    Router::new()
+        .route("/users", get(list))
+        .route("/users/{id}", get(get_one))
+}
+
+/// `GET /users/{id}` — fetch one document by its root primary key, or `404`.
+async fn get_one(
+    State(client): State<Client>,
+    Path(id): Path<i32>,
+) -> Result<Json<User>, ApiError> {
+    User::get(&client, id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound {
+            resource: "users",
+            id: id.to_string(),
+        })
 }
 
 async fn list(
@@ -121,6 +139,16 @@ async fn list(
     Query(filter): Query<UserFilter>,
 ) -> Result<Json<Page<User>>, ApiError> {
     let mut search = User::search(&client)
+        // Free-text `q`: one scoring `multi_match` across the analyzed `text`
+        // fields, root and flattened one-to-one alike (`fullName`, `profile.bio`).
+        // It scores (drives relevance ranking) where the `filter(…)` clauses
+        // below only narrow. Nested `text` (addresses, order items) needs a
+        // nested query and so isn't part of this cross-field match.
+        .query(
+            filter
+                .q
+                .map(|q| multi_match(q, [User::full_name(), Profile::bio()])),
+        )
         .filter(filter.email.map(|v| User::email().eq(v)))
         .filter(filter.email_prefix.map(|v| User::email().prefix(v)))
         .query(filter.name.map(|v| User::full_name().matches(v)))

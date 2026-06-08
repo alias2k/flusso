@@ -210,6 +210,64 @@ fn parse_opensearch_missing_url_fails() {
     );
 }
 
+// ── error messages are clear (no untagged-enum jargon) ───────────────────────
+
+#[test]
+fn sink_url_wrong_type_explains_accepted_shapes() {
+    let err = parse(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgres://user@localhost/mydb"
+
+        [sinks.es]
+        type = "opensearch"
+        url = 9200
+    "#,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("untagged enum"),
+        "leaked serde untagged-enum jargon: {msg}"
+    );
+    assert!(
+        msg.contains(r#"env = "VAR""#),
+        "missing accepted-shape hint: {msg}"
+    );
+}
+
+#[test]
+fn source_url_wrong_type_lists_the_three_forms() {
+    let err = parse(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = 9200
+    "#,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.contains("untagged enum"), "{msg}");
+    assert!(msg.contains("connection URL string"), "{msg}");
+    assert!(msg.contains("connection-parts table"), "{msg}");
+}
+
+#[test]
+fn env_reference_with_extra_key_is_explained() {
+    let err = parse(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = { env = "DB", oops = "x" }
+    "#,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("`oops`"), "{msg}");
+    assert!(msg.contains(r#"{ env = "VAR" }"#), "{msg}");
+}
+
 // ── conversion: deferred shape (no resolution) ───────────────────────────────
 
 #[test]

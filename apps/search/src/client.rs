@@ -1,6 +1,7 @@
 //! The [`Client`] transport. Points at OpenSearch (not at flusso — the engine
 //! is write-only; reads go straight to the index it maintains).
 
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -64,7 +65,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn search(&self, index: &str, hash: &str, body: &Value) -> Result<Value> {
-        let endpoint = format!("{}/{}_{}/_search", self.base, index, hash);
+        let endpoint = format!("{}/{index}_{hash}/_search", self.base);
         tracing::debug!(%endpoint, "POST _search");
         let response = self
             .authed(self.http.post(&endpoint).json(body))
@@ -93,7 +94,7 @@ impl Client {
         fields(index, hash, id = %id, status = tracing::field::Empty),
         err,
     )]
-    pub async fn get_doc<T>(
+    pub async fn get_one<T>(
         &self,
         index: &str,
         hash: &str,
@@ -102,12 +103,12 @@ impl Client {
     where
         T: DeserializeOwned,
     {
-        let endpoint = format!("{}/{}_{}/_doc/{}", self.base, index, hash, id);
+        let endpoint = format!("{}/{index}_{hash}/_doc/{id}", self.base);
         tracing::debug!(%endpoint, "GET _doc");
         let response = self.authed(self.http.get(&endpoint)).send().await?;
         let status = response.status();
         tracing::Span::current().record("status", status.as_u16());
-        if status.as_u16() == 404 {
+        if status == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !status.is_success() {
