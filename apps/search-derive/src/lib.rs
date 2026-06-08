@@ -37,7 +37,7 @@ pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
     expand(input).into()
 }
 
-/// Implement `flusso_search::FieldValue<K>` for an enum or newtype wrapper, so
+/// Implement `flusso_search::FlussoValue<K>` for an enum or newtype wrapper, so
 /// it may stand in for a field of kind `K` in a `FlussoDocument` struct. The
 /// kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
 /// `#[flusso(number)]`, or `#[flusso(date)]`.

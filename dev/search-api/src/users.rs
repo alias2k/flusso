@@ -42,7 +42,7 @@ struct Account {
 }
 
 // A string enum stands in for the `keyword` at `account.tier`. `FlussoValue`
-// with `#[flusso(keyword)]` implements `FieldValue<kind::Keyword>` so
+// with `#[flusso(keyword)]` implements `FlussoValue<kind::Keyword>` so
 // `FlussoDocument` accepts it as the field type *and* `Account::tier().eq(…)`
 // accepts it as a query value; serde's `rename_all` controls the actual keyword
 // strings (`"pro"`, …).

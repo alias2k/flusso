@@ -59,7 +59,7 @@ fn generated_surface_builds_queries() -> Result {
 }
 
 // `#[derive(FlussoValue)]` lets a field be a Rust enum or newtype wrapper
-// instead of a bare leaf type: the derive impls `FieldValue<K>` for the chosen
+// instead of a bare leaf type: the derive impls `FlussoValue<K>` for the chosen
 // kind, which `FlussoDocument` defers to. Works across kinds — `keyword` here,
 // plus a `number` newtype on the orders' decimal `total`.
 
@@ -112,7 +112,7 @@ struct TypedOrder {
 fn value_derive_accepts_enums_and_newtypes() -> Result {
     let client = Client::connect("http://localhost:9200")?;
 
-    // The struct compiled at all → the deferred `FieldValue<K>` bounds held
+    // The struct compiled at all → the deferred `FlussoValue<K>` bounds held
     // (keyword `email`/`status`, number `total`). Keyword operators also accept
     // the typed value directly, matched against its serde string form.
     let body = TypedUser::search(&client)

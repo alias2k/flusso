@@ -1,7 +1,7 @@
 use flusso_search::FlussoDocument;
 
 // `email` is a `keyword` in the schema. A user enum is allowed *only* if it
-// implements `FieldValue<kind::Keyword>` (via `#[derive(FlussoValue)]`). This
+// implements `FlussoValue<kind::Keyword>` (via `#[derive(FlussoValue)]`). This
 // one doesn't, so the deferred bound fails to resolve.
 #[derive(serde::Deserialize)]
 enum Tier {

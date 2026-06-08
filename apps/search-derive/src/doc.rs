@@ -216,7 +216,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
                 return Ok(None);
             }
             // Hybrid: a user-defined type (a path that isn't a known primitive)
-            // in a kind that supports custom values defers to a `FieldValue<K>`
+            // in a kind that supports custom values defers to a `FlussoValue<K>`
             // bound — satisfied by `#[derive(FlussoValue)]`. Primitives (a real
             // mismatch like `i32` in a keyword) and non-path types still
             // hard-error here with the precise, schema-aware message.
@@ -250,12 +250,12 @@ fn value_kind(mapping_type: &MappingType) -> Option<TokenStream> {
     }
 }
 
-/// A zero-cost assertion that `ty` implements `FieldValue<kind>`, reported at
+/// A zero-cost assertion that `ty` implements `FlussoValue<kind>`, reported at
 /// the field's type span if it doesn't (e.g. a missing `#[derive(FlussoValue)]`).
 fn value_assert(ty: &Type, kind: TokenStream) -> TokenStream {
     quote::quote_spanned! {ty.span()=>
         const _: fn() = || {
-            fn __assert_field_value<__T: ::flusso_search::FieldValue<#kind>>() {}
+            fn __assert_field_value<__T: ::flusso_search::FlussoValue<#kind>>() {}
             __assert_field_value::<#ty>();
         };
     }
@@ -341,9 +341,10 @@ fn is_primitive(ident: Option<&str>) -> bool {
 
 // ── codegen ──────────────────────────────────────────────────────────────────
 
-/// Generate the `impl` block: a handle per schema field at this level, plus
-/// entry points (`get`/`search`/`SCHEMA_HASH`) at the root, plus rebuild
-/// tracking. `prefix` is the dotted path of this level (empty at the root).
+/// Generate the field-handle `impl` (a handle per schema field at this level),
+/// plus — at the root — the `FlussoDocument` trait impl (`INDEX`/`SCHEMA_HASH`,
+/// inheriting `search`/`get`), plus rebuild tracking. `prefix` is the dotted
+/// path of this level (empty at the root).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn codegen(
     ident: &Ident,
@@ -360,30 +361,16 @@ pub(crate) fn codegen(
         .iter()
         .filter_map(|resolved| handle_fn(resolved, prefix, scope, fields));
 
-    // The physical index name = logical name + schema hash, exactly what the
-    // OpenSearch sink writes. The derive bakes it in (a structural schema change
-    // rotates the hash *and* forces this binding to be recompiled), so the hash
-    // stays hidden from callers — `Type::search(&client)` just works.
+    // The root binding implements `FlussoDocument`: it supplies the physical
+    // index name = logical name + schema hash (exactly what the OpenSearch sink
+    // writes), and inherits `search`/`get`. The derive bakes the hash in (a
+    // structural schema change rotates it *and* forces a recompile), so it stays
+    // hidden from callers — `Type::search(&client)` just works.
     let entry = if is_root {
         quote! {
-            /// The physical index this binding queries — the logical name plus
-            /// the schema hash, matching what the engine's OpenSearch sink writes.
-            pub const INDEX: &'static str = #index;
-
-            /// The schema hash this binding was generated from (the `INDEX` suffix).
-            pub const SCHEMA_HASH: &'static str = #hash;
-
-            /// Start a typed search against this index.
-            pub fn search(client: &::flusso_search::Client) -> ::flusso_search::Search<'_, Self> {
-                ::flusso_search::Search::new(client, Self::INDEX, Self::SCHEMA_HASH)
-            }
-
-            /// Fetch one document by id; `None` when absent.
-            pub async fn get(
-                client: &::flusso_search::Client,
-                id: impl ::core::fmt::Display,
-            ) -> ::flusso_search::Result<::core::option::Option<Self>> {
-                client.get_doc::<Self>(Self::INDEX, Self::SCHEMA_HASH, id).await
+            impl ::flusso_search::FlussoDocument for #ident {
+                const INDEX: &'static str = #index;
+                const SCHEMA_HASH: &'static str = #hash;
             }
         }
     } else {
@@ -397,8 +384,8 @@ pub(crate) fn codegen(
 
     quote! {
         #(#tracked)*
+        #entry
         impl #ident {
-            #entry
             #(#handles)*
         }
     }

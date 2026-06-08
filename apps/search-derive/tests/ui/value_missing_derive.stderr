@@ -4,21 +4,21 @@ error[E0277]: `Tier` is not a valid value for a `flusso_search::kind::Keyword` f
 16 |     email: Tier,
    |            ^^^^ unsupported field type
    |
-help: the trait `FieldValue<flusso_search::kind::Keyword>` is not implemented for `Tier`
+help: the trait `FlussoValue<flusso_search::kind::Keyword>` is not implemented for `Tier`
   --> tests/ui/value_missing_derive.rs:7:1
    |
  7 | enum Tier {
    | ^^^^^^^^^
    = note: use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `Tier`
-   = help: the following other types implement trait `FieldValue<K>`:
-             `&str` implements `FieldValue<flusso_search::kind::Keyword>`
-             `&str` implements `FieldValue<flusso_search::kind::Text>`
-             `String` implements `FieldValue<flusso_search::kind::Date>`
-             `String` implements `FieldValue<flusso_search::kind::Keyword>`
-             `String` implements `FieldValue<flusso_search::kind::Text>`
-             `f32` implements `FieldValue<flusso_search::kind::Number>`
-             `f64` implements `FieldValue<flusso_search::kind::Number>`
-             `i16` implements `FieldValue<flusso_search::kind::Number>`
+   = help: the following other types implement trait `FlussoValue<K>`:
+             `&str` implements `FlussoValue<flusso_search::kind::Keyword>`
+             `&str` implements `FlussoValue<flusso_search::kind::Text>`
+             `String` implements `FlussoValue<flusso_search::kind::Date>`
+             `String` implements `FlussoValue<flusso_search::kind::Keyword>`
+             `String` implements `FlussoValue<flusso_search::kind::Text>`
+             `f32` implements `FlussoValue<flusso_search::kind::Number>`
+             `f64` implements `FlussoValue<flusso_search::kind::Number>`
+             `i16` implements `FlussoValue<flusso_search::kind::Number>`
            and $N others
 note: required by a bound in `__assert_field_value`
   --> tests/ui/value_missing_derive.rs:16:12

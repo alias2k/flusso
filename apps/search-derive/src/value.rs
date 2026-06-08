@@ -1,4 +1,4 @@
-//! `#[derive(FlussoValue)]` — opts a Rust type into `flusso_search::FieldValue<K>`,
+//! `#[derive(FlussoValue)]` — opts a Rust type into `flusso_search::FlussoValue<K>`,
 //! so it may stand in for a field of kind `K` in a [`FlussoDocument`] struct.
 //!
 //! The kind is chosen with a `#[flusso(…)]` attribute and defaults to `keyword`:
@@ -9,7 +9,7 @@
 //! - `#[flusso(number)]` / `#[flusso(date)]` — a **newtype** wrapper over a
 //!   numeric / timestamp value (an enum serializes to a string, not a number).
 //!
-//! On success it emits `impl ::flusso_search::FieldValue<#kind> for #ident {}`.
+//! On success it emits `impl ::flusso_search::FlussoValue<#kind> for #ident {}`.
 //! The leaf value's actual serde form is enforced by serde at the boundary;
 //! this derive guarantees the *shape* fits the kind.
 
@@ -74,7 +74,7 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     let ident = &input.ident;
     let marker = kind.marker();
     quote! {
-        impl ::flusso_search::FieldValue<#marker> for #ident {}
+        impl ::flusso_search::FlussoValue<#marker> for #ident {}
     }
 }
 

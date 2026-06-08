@@ -70,9 +70,9 @@ fn match_all_value() -> Value {
 }
 
 /// The keyword term for a value, taken from its serde serialization — so a
-/// `#[derive(FlussoKeyword)]` enum/newtype matches exactly the string it stores
+/// `#[derive(FlussoValue)]` enum/newtype matches exactly the string it stores
 /// in the document. `String`/`&str` pass straight through; the non-string
-/// fallback only fires for a hand-written [`KeywordValue`] impl that breaks the
+/// fallback only fires for a hand-written [`trait@FlussoValue`] impl that breaks the
 /// "serializes to a string" contract the derive enforces.
 fn keyword_term(value: &impl serde::Serialize) -> Value {
     match serde_json::to_value(value) {
@@ -82,9 +82,9 @@ fn keyword_term(value: &impl serde::Serialize) -> Value {
     }
 }
 
-// ---- FieldValue ------------------------------------------------------------
+// ---- FlussoValue ------------------------------------------------------------
 
-/// Field-category markers for [`FieldValue`]. Zero-size and uninhabited — they
+/// Field-category markers for [`trait@FlussoValue`]. Zero-size and uninhabited — they
 /// exist only as the `K` type parameter, so one type can be a valid value for
 /// several kinds (e.g. `String` is a [`kind::Keyword`], [`kind::Text`], and
 /// [`kind::Date`] value).
@@ -118,24 +118,24 @@ pub mod kind {
     label = "unsupported field type",
     note = "use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `{Self}`"
 )]
-pub trait FieldValue<K> {}
+pub trait FlussoValue<K> {}
 
-impl FieldValue<kind::Keyword> for String {}
-impl FieldValue<kind::Keyword> for &str {}
+impl FlussoValue<kind::Keyword> for String {}
+impl FlussoValue<kind::Keyword> for &str {}
 
-impl FieldValue<kind::Text> for String {}
-impl FieldValue<kind::Text> for &str {}
+impl FlussoValue<kind::Text> for String {}
+impl FlussoValue<kind::Text> for &str {}
 
-impl FieldValue<kind::Number> for i8 {}
-impl FieldValue<kind::Number> for i16 {}
-impl FieldValue<kind::Number> for i32 {}
-impl FieldValue<kind::Number> for i64 {}
-impl FieldValue<kind::Number> for f32 {}
-impl FieldValue<kind::Number> for f64 {}
+impl FlussoValue<kind::Number> for i8 {}
+impl FlussoValue<kind::Number> for i16 {}
+impl FlussoValue<kind::Number> for i32 {}
+impl FlussoValue<kind::Number> for i64 {}
+impl FlussoValue<kind::Number> for f32 {}
+impl FlussoValue<kind::Number> for f64 {}
 #[cfg(feature = "decimal")]
-impl FieldValue<kind::Number> for crate::Decimal {}
+impl FlussoValue<kind::Number> for crate::Decimal {}
 
-impl FieldValue<kind::Date> for String {}
+impl FlussoValue<kind::Date> for String {}
 
 // ---- Keyword ---------------------------------------------------------------
 
@@ -158,14 +158,14 @@ impl<S> Keyword<S> {
     /// Exact match. Accepts a `String`/`&str`, or any `#[derive(FlussoValue)]`
     /// keyword enum/newtype — matched against its serde string form
     /// (`Account::tier().eq(AccountTier::Pro)`).
-    pub fn eq(&self, value: impl FieldValue<kind::Keyword> + serde::Serialize) -> Query<S> {
+    pub fn eq(&self, value: impl FlussoValue<kind::Keyword> + serde::Serialize) -> Query<S> {
         single("term", &self.path, keyword_term(&value))
     }
 
     /// Match any of the given values (`String`/`&str` or keyword `FlussoValue` types).
     pub fn in_(
         &self,
-        values: impl IntoIterator<Item = impl FieldValue<kind::Keyword> + serde::Serialize>,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword> + serde::Serialize>,
     ) -> Query<S> {
         let array = values.into_iter().map(|v| keyword_term(&v)).collect();
         single("terms", &self.path, Value::Array(array))

@@ -12,6 +12,34 @@ use crate::error::Result;
 use crate::handles::{NestedProjection, Sort};
 use crate::query::{AsQuery, BoolBuilder, Root};
 
+/// A document type bound to a flusso-maintained index — the trait that
+/// `#[derive(FlussoDocument)]` implements.
+///
+/// The derive supplies [`INDEX`](Self::INDEX) and [`SCHEMA_HASH`](Self::SCHEMA_HASH)
+/// (the physical index is `{INDEX}_{SCHEMA_HASH}`, exactly what the OpenSearch
+/// sink writes); [`search`](Self::search) and [`get`](Self::get) are provided.
+/// `DeserializeOwned` is required so search hits and fetched documents decode.
+pub trait FlussoDocument: DeserializeOwned {
+    /// The logical index name this binding queries.
+    const INDEX: &'static str;
+
+    /// The schema hash this binding was generated from (the physical-index suffix).
+    const SCHEMA_HASH: &'static str;
+
+    /// Start a typed search against this index.
+    fn search(client: &Client) -> Search<'_, Self> {
+        Search::new(client, Self::INDEX, Self::SCHEMA_HASH)
+    }
+
+    /// Fetch one document by id; `None` when absent.
+    fn get(
+        client: &Client,
+        id: impl std::fmt::Display,
+    ) -> impl std::future::Future<Output = Result<Option<Self>>> {
+        client.get_doc::<Self>(Self::INDEX, Self::SCHEMA_HASH, id)
+    }
+}
+
 /// A typed search against one index.
 ///
 /// Built from `Search::new(client, index)` (the derive will generate a
