@@ -20,6 +20,8 @@
 
 mod build;
 mod check;
+mod http;
+mod metrics;
 mod print;
 mod run;
 mod schema_cmd;

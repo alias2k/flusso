@@ -1,0 +1,10 @@
+# Scrape config for the local dev stack. The only target is flusso itself,
+# which runs on the host (`cargo run -- run … --http-addr 127.0.0.1:9464`) and
+# exposes OpenTelemetry metrics in Prometheus format at /metrics.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: flusso
+    static_configs:
+      - targets: ["host.docker.internal:9464"]

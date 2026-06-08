@@ -44,8 +44,13 @@ dev/
 
    ```sh
    cargo run -- check --config dev/flusso.toml   # optional: validate first
-   cargo run -- run --config dev/flusso.toml
+   cargo run -- run --config dev/flusso.toml --http-addr 127.0.0.1:9464
    ```
+
+   `--http-addr` serves the operational surface: `/healthz`, `/readyz`,
+   `/status` (live JSON — phase, per-index seeded state, counters, slot lag),
+   and `/metrics` (Prometheus). Use port `9464` so the bundled Prometheus
+   scrapes it (see [Observability](#observability)).
 
 3. **Make changes** in another terminal and watch them appear:
 
@@ -99,3 +104,23 @@ dev/
 - **OpenSearch Dashboards** is available at http://localhost:5601 once the
   stack is healthy. Use it to explore indices, run Dev Tools queries, and
   inspect mappings.
+
+## Observability
+
+The stack includes Prometheus and Grafana, both wired to flusso's metrics.
+
+- Run flusso with `--http-addr 127.0.0.1:9464` so it exposes `/metrics`.
+  **Prometheus** (http://localhost:9090) scrapes it via `host.docker.internal`.
+- **Grafana** (http://localhost:3000, opens straight in — anonymous admin) comes
+  pre-provisioned with a *flusso* dashboard: change throughput, in-flight
+  changes (back-pressure), replication slot lag, flush-duration p95, documents
+  built, and errors.
+- The same metrics export over **OTLP** when an endpoint is configured, e.g.
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run -- run …` — the
+  same env vars that already drive trace export.
+- Peek at the raw numbers without Grafana:
+
+  ```sh
+  curl -s localhost:9464/status | jq        # live pipeline state
+  curl -s localhost:9464/metrics            # Prometheus exposition
+  ```

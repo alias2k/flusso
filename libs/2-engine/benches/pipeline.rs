@@ -506,7 +506,7 @@ fn bench(c: &mut Criterion) {
                     let documents = Arc::clone(&documents);
                     let sink = Arc::clone(&sink);
                     async move {
-                        Engine::new(Box::new(BurstCapture { count: BURST }), documents, sink)
+                        Engine::new(Arc::new(BurstCapture { count: BURST }), documents, sink)
                             .with_batch(BatchPolicy {
                                 max_changes,
                                 max_delay: Duration::from_secs(10),
@@ -534,7 +534,7 @@ fn bench(c: &mut Criterion) {
                 inner: WalChangeCapture::new(services.replication.clone(), services.url.clone()),
             };
             let engine = Engine::new(
-                Box::new(capture),
+                Arc::new(capture),
                 Arc::clone(&services.documents),
                 Arc::clone(&services.sink),
             );

@@ -1,22 +1,26 @@
-//! `flusso run` — load the configuration and stream Postgres changes through the
-//! engine into the configured sink(s) until the live stream ends or an error
-//! stops the pipeline.
+//! `flusso run` — the composition root for a sync run.
+//!
+//! The daemon owns the pipeline and exposes its live [`Status`](daemon::Status);
+//! this command owns the *transport* around it: telemetry export (traces +
+//! metrics), the operational HTTP surface, and process signals. It binds the
+//! HTTP listener, installs the meter provider, starts the daemon, serves its
+//! status/metrics, and runs until the stream ends, an error stops it, or a
+//! signal arrives — then drains the server and flushes telemetry.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use clap::Args;
-use engine::Engine;
-use schema::{Config, Sink as SinkConfig, SourceType};
-use sinks_core::{FanOutSink, Sink};
-use sinks_opensearch::OpensearchSink;
-use sinks_stdout::StdoutSink;
-use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
-use url::Url;
+use daemon::{Daemon, DaemonOptions};
+use schema::Config;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use crate::DEFAULT_ARTIFACT;
-use crate::telemetry;
+use crate::{http, metrics, telemetry};
 
 #[derive(Debug, Args)]
 pub(crate) struct RunArgs {
@@ -49,68 +53,78 @@ pub(crate) struct RunArgs {
     /// Maximum changes buffered between capture and processing.
     #[arg(long, default_value_t = 1024)]
     queue_capacity: usize,
+
+    /// Serve the operational HTTP surface (`/healthz`, `/readyz`, `/status`,
+    /// `/metrics`) on this address. Omit to disable it.
+    #[arg(long)]
+    http_addr: Option<SocketAddr>,
+
+    /// How often, in seconds, to sample replication slot lag.
+    #[arg(long, default_value_t = 15)]
+    lag_poll_secs: u64,
 }
 
 pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let tracer_provider = telemetry::init_tracing();
 
     let config = load_run_config(&args)?;
-    ensure!(
-        config.source.source_type == SourceType::Postgres,
-        "only postgres sources are supported",
-    );
 
-    // Resolve the connection in *this* environment (applying DATABASE_URL).
-    let connection_url = config
-        .source
-        .resolve_connection_url()
-        .context("resolving the source connection URL")?;
-    let connection_url = connection_url.as_ref().to_owned();
-    let replication = replication_config(&connection_url, &args.slot, &args.publication)?;
-
-    tracing::info!(
-        slot = %args.slot,
-        publication = %args.publication,
-        indexes = config.indexes.len(),
-        "starting sync",
-    );
-
-    let config = Arc::new(config);
-    let source = Box::new(WalChangeCapture::new(replication, connection_url.clone()));
-    let documents = Arc::new(
-        PgDocumentBuilder::connect(&connection_url, Arc::clone(&config))
-            .await
-            .context("connecting to Postgres")?,
-    );
-    let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
-    for (name, sink_config) in &config.sinks {
-        let sink: Arc<dyn Sink> = match sink_config {
-            SinkConfig::Opensearch(os) => Arc::new(
-                OpensearchSink::from_config(name, os)
-                    .with_context(|| format!("building OpenSearch sink '{name}'"))?,
-            ),
-            SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(s)),
-        };
-        sinks.push(sink);
-    }
-    let sink: Arc<dyn Sink> = match sinks.len() {
-        0 => Arc::new(StdoutSink::new(args.pretty)),
-        1 => sinks
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| Arc::new(StdoutSink::new(false))),
-        _ => Arc::new(FanOutSink::new(sinks)),
+    // Bind the HTTP listener up front: an unusable `--http-addr` should fail fast,
+    // before we open database connections or start the pipeline.
+    let listener = match args.http_addr {
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("binding HTTP surface to {addr}"))?,
+        ),
+        None => None,
     };
 
-    let result = Engine::new(source, documents, sink)
-        .with_queue_capacity(args.queue_capacity)
-        .skip_backfill(args.skip_backfill)
-        .run()
-        .await
-        .context("sync engine stopped");
+    // Install the meter provider *before* starting the daemon, so its observer's
+    // instruments bind to the readers. Prometheus reader when serving HTTP; OTLP
+    // when an endpoint is configured. With neither, the global meter is a no-op.
+    let metrics = if args.http_addr.is_some() || metrics::otlp_configured() {
+        Some(metrics::init(args.http_addr.is_some())?)
+    } else {
+        None
+    };
+    let registry = metrics.as_ref().and_then(|m| m.registry.clone());
 
-    // Flush any buffered spans to the collector before exiting, on success or
-    // error alike — otherwise the last batch of traces is lost.
+    let options = DaemonOptions {
+        slot: args.slot,
+        publication: args.publication,
+        skip_backfill: args.skip_backfill,
+        queue_capacity: args.queue_capacity,
+        pretty: args.pretty,
+        lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
+    };
+
+    let running = Daemon::new(config).with_options(options).start().await?;
+    let status = running.status();
+
+    // Serve the status/metrics surface (graceful drain on `http_shutdown`).
+    let (http_shutdown, http_rx) = oneshot::channel::<()>();
+    let http = listener.map(|listener| {
+        let state = http::AppState {
+            status: Arc::clone(&status),
+            registry: registry.clone(),
+        };
+        tokio::spawn(http::serve(listener, state, http_rx))
+    });
+
+    // Run until the stream ends, an error stops it, or a signal arrives.
+    let result = running.run(shutdown_signal()).await;
+
+    // Drain the HTTP server, then flush telemetry — on success or error alike.
+    let _ = http_shutdown.send(());
+    if let Some(http) = http
+        && let Err(error) = http.await
+    {
+        tracing::warn!(%error, "HTTP server task did not shut down cleanly");
+    }
+    if let Some(metrics) = &metrics {
+        metrics.shutdown();
+    }
     if let Some(provider) = tracer_provider
         && let Err(error) = provider.shutdown()
     {
@@ -132,25 +146,33 @@ fn load_run_config(args: &RunArgs) -> anyhow::Result<Config> {
     }
 }
 
-/// Build the replication client config from the source connection URL plus the
-/// slot and publication names.
-fn replication_config(
-    connection_url: &str,
-    slot: &str,
-    publication: &str,
-) -> anyhow::Result<ReplicationConfig> {
-    let url = Url::parse(connection_url).context("parsing connection URL")?;
-    let host = url
-        .host_str()
-        .context("connection URL has no host")?
-        .to_owned();
-    let port = url.port().unwrap_or(5432);
-    let user = url.username();
-    ensure!(!user.is_empty(), "connection URL has no user");
-    let password = url.password().unwrap_or_default();
-    let database = url.path().trim_start_matches('/');
-    // Postgres defaults the database to the user when the URL omits it.
-    let database = if database.is_empty() { user } else { database };
+/// Resolve once either Ctrl-C (SIGINT) or, on Unix, SIGTERM arrives — the
+/// process's signals are the binary's to own, not the daemon library's.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(%error, "failed to listen for Ctrl-C");
+            std::future::pending::<()>().await;
+        }
+    };
 
-    Ok(ReplicationConfig::new(host, user, password, database, slot, publication).with_port(port))
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
 }

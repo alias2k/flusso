@@ -13,6 +13,7 @@ members = [
   "libs/1-sources/0-core",
   "libs/1-sources/1-postgres",
   "libs/2-engine",
+  "libs/3-daemon",
   "apps/*",
   "dev/search-api",
 ]
@@ -98,9 +99,23 @@ sqlx = { version = "0.9.*", default-features = false, features = [
 chrono = { version = "0.4.*", default-features = false, features = ["std"] }
 uuid = { version = "1.*" }
 serde_json = { version = "1.*" }
+# Our HTTP client stays on 0.12. The OTLP exporter pulls its own reqwest 0.13
+# transitively; deduping would force a 0.13 TLS-feature migration (rustls-tls →
+# rustls + a crypto provider) that risks colliding with sqlx's rustls provider,
+# so it's a deliberate separate change, not a version bump.
 reqwest = { version = "0.12.*", default-features = false }
 testcontainers-modules = { version = "0.15.*" }
-criterion = { version = "0.5.*", features = ["async_tokio"] }
+criterion = { version = "0.8.*", features = ["async_tokio"] }
+axum = { version = "0.8.*" }
+# OpenTelemetry stack, shared by the CLI (traces) and the daemon (metrics).
+# Per-crate feature sets differ and are added at the use site; Cargo unifies
+# them. Keep these versions in lockstep — the otel crates release together.
+opentelemetry = { version = "0.32.*" }
+opentelemetry_sdk = { version = "0.32.*" }
+opentelemetry-otlp = { version = "0.32.*" }
+opentelemetry-prometheus = { version = "0.32.*" }
+tracing-opentelemetry = { version = "0.33.*" }
+prometheus = { version = "0.14.*" }
 
 schema = { path = "libs/0-schema" }
 schema-core = { path = "libs/0-schema/0-core" }
@@ -108,6 +123,7 @@ schema-config-toml = { path = "libs/0-schema/1-config-toml" }
 schema-index-yaml = { path = "libs/0-schema/1-index-yaml" }
 
 engine = { path = "libs/2-engine" }
+daemon = { path = "libs/3-daemon" }
 
 sources-core = { path = "libs/1-sources/0-core" }
 sources-postgres = { path = "libs/1-sources/1-postgres" }

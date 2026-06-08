@@ -83,6 +83,40 @@ services:
       opensearch:
         condition: service_healthy
 
+  # Scrapes flusso's `/metrics`. flusso runs on the *host* (cargo run), not in
+  # compose, so Prometheus reaches it via host.docker.internal — run flusso with
+  # `--http-addr 127.0.0.1:9464` (see dev/README.md). `extra_hosts` makes that
+  # name resolve on Linux too (Docker Desktop provides it automatically).
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: flusso-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9090:9090"
+
+  # Pre-provisioned with the Prometheus datasource and a flusso dashboard.
+  # Open http://localhost:3000 (anonymous admin, no login).
+  grafana:
+    image: grafana/grafana:latest
+    container_name: flusso-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./dev/grafana/provisioning:/etc/grafana/provisioning:ro
+      - flusso-grafana:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   flusso-pgdata:
   flusso-osdata:
+  flusso-grafana:

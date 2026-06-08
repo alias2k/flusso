@@ -50,10 +50,12 @@
 #![cfg_attr(test, allow(unused_crate_dependencies))]
 
 mod error;
+mod observer;
 
 pub use error::*;
+pub use observer::*;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,9 +104,10 @@ impl Default for BatchPolicy {
 /// Drives changes from a source through to a sink.
 #[derive(Debug)]
 pub struct Engine {
-    source: Box<dyn ChangeCapture>,
+    source: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
+    observer: Arc<dyn Observer>,
     queue_capacity: usize,
     batch: BatchPolicy,
     skip_backfill: bool,
@@ -113,7 +116,7 @@ pub struct Engine {
 impl Engine {
     /// Assemble an engine from its pluggable parts.
     pub fn new(
-        source: Box<dyn ChangeCapture>,
+        source: Arc<dyn ChangeCapture>,
         documents: Arc<dyn DocumentBuilder>,
         sink: Arc<dyn Sink>,
     ) -> Self {
@@ -121,10 +124,18 @@ impl Engine {
             source,
             documents,
             sink,
+            observer: Arc::new(NoopObserver),
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             batch: BatchPolicy::default(),
             skip_backfill: false,
         }
+    }
+
+    /// Report lifecycle and progress events to `observer` (metrics, a live
+    /// status surface, …). Defaults to [`NoopObserver`]. See [`Observer`].
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = observer;
+        self
     }
 
     /// Set how many changes may buffer between capture and the worker.
@@ -170,53 +181,75 @@ impl Engine {
             source,
             documents,
             sink,
+            observer,
             queue_capacity,
             batch,
             skip_backfill,
         } = self;
-
-        // Enrich the thin config into fully-typed mappings: the source fills the
-        // gaps a human config leaves (field types, nullability) from what it
-        // knows about its store. This runs by design on every start, before any
-        // document flows, so the destination is created from a complete
-        // description rather than guessing on first write — idempotent
-        // (create-if-absent), so it is safe across resumes and backfills alike.
-        let mappings = documents.index_mappings().await?;
-        tracing::info!(indexes = mappings.len(), "ensuring target indexes");
-        for mapping in &mappings {
-            sink.ensure_index(mapping).await?;
-        }
-
-        if skip_backfill {
-            tracing::info!("skipping backfill (skip_backfill set)");
-        } else {
-            backfill(
-                source.as_ref(),
-                documents.as_ref(),
-                sink.as_ref(),
-                queue_capacity,
-                batch,
-            )
-            .await?;
-        }
-
-        let stream = source.live().await?;
-        tracing::info!("following live changes");
-        let result = pump(
-            stream,
-            documents.as_ref(),
-            sink.as_ref(),
+        let pipeline = Pipeline {
+            documents: documents.as_ref(),
+            sink: sink.as_ref(),
+            observer: &observer,
             queue_capacity,
             batch,
-            None,
-        )
-        .await;
-        match &result {
-            Ok(()) => tracing::info!("pipeline stopped: live stream ended"),
-            Err(error) => tracing::error!(%error, "pipeline stopped on error"),
+        };
+        let result = run_inner(pipeline, source.as_ref(), skip_backfill).await;
+        if let Err(error) = &result {
+            observer.on_error(&error.to_string());
         }
         result
     }
+}
+
+/// The run-constant borrowed parts threaded through the pipeline's inner
+/// functions, so each takes a single context instead of repeating the same five
+/// arguments. `Copy` (it is only references plus two small values), so it is
+/// passed by value.
+#[derive(Clone, Copy)]
+struct Pipeline<'a> {
+    documents: &'a dyn DocumentBuilder,
+    sink: &'a dyn Sink,
+    observer: &'a Arc<dyn Observer>,
+    queue_capacity: usize,
+    batch: BatchPolicy,
+}
+
+/// The body of [`Engine::run`], over borrowed parts, so [`run`](Engine::run) can
+/// report any error to the observer after the borrow ends.
+async fn run_inner(
+    pipeline: Pipeline<'_>,
+    source: &dyn ChangeCapture,
+    skip_backfill: bool,
+) -> Result<()> {
+    // Enrich the thin config into fully-typed mappings: the source fills the
+    // gaps a human config leaves (field types, nullability) from what it
+    // knows about its store. This runs by design on every start, before any
+    // document flows, so the destination is created from a complete
+    // description rather than guessing on first write — idempotent
+    // (create-if-absent), so it is safe across resumes and backfills alike.
+    let mappings = pipeline.documents.index_mappings().await?;
+    tracing::info!(indexes = mappings.len(), "ensuring target indexes");
+    for mapping in &mappings {
+        pipeline.sink.ensure_index(mapping).await?;
+    }
+    pipeline.observer.on_indexes_ensured(mappings.len());
+
+    if skip_backfill {
+        tracing::info!("skipping backfill (skip_backfill set)");
+    } else {
+        backfill(pipeline, source).await?;
+    }
+    pipeline.observer.on_backfill_completed();
+
+    let stream = source.live().await?;
+    tracing::info!("following live changes");
+    pipeline.observer.on_live_started();
+    let result = pump(pipeline, stream, None).await;
+    match &result {
+        Ok(()) => tracing::info!("pipeline stopped: live stream ended"),
+        Err(error) => tracing::error!(%error, "pipeline stopped on error"),
+    }
+    result
 }
 
 /// Seed every index the sink reports as unseeded, then mark them seeded.
@@ -227,17 +260,11 @@ impl Engine {
 /// scoped to just those indexes, so an already-seeded index sharing a table is
 /// never rewritten.
 #[tracing::instrument(name = "backfill", skip_all)]
-async fn backfill(
-    source: &dyn ChangeCapture,
-    documents: &dyn DocumentBuilder,
-    sink: &dyn Sink,
-    queue_capacity: usize,
-    batch: BatchPolicy,
-) -> Result<()> {
+async fn backfill(pipeline: Pipeline<'_>, source: &dyn ChangeCapture) -> Result<()> {
     let mut seeding: HashSet<IndexName> = HashSet::new();
     let mut tables: Vec<SnapshotTable> = Vec::new();
-    for scope in documents.backfill_scopes() {
-        if sink.is_seeded(&scope.index).await? {
+    for scope in pipeline.documents.backfill_scopes() {
+        if pipeline.sink.is_seeded(&scope.index).await? {
             continue;
         }
         if !tables.contains(&scope.root) {
@@ -255,21 +282,17 @@ async fn backfill(
         tables = tables.len(),
         "seeding indexes"
     );
+    pipeline
+        .observer
+        .on_backfill_started(&seeding.iter().cloned().collect::<Vec<_>>());
     let stream = source.snapshot(&tables).await?;
-    pump(
-        stream,
-        documents,
-        sink,
-        queue_capacity,
-        batch,
-        Some(&seeding),
-    )
-    .await?;
+    pump(pipeline, stream, Some(&seeding)).await?;
 
     // The snapshot is fully applied and flushed once `pump` returns; record each
     // index as seeded so a later run skips it.
     for index in &seeding {
-        sink.mark_seeded(index).await?;
+        pipeline.sink.mark_seeded(index).await?;
+        pipeline.observer.on_index_seeded(index);
     }
     tracing::info!(indexes = seeding.len(), "backfill complete");
     Ok(())
@@ -282,19 +305,17 @@ async fn backfill(
 /// the backfill so a snapshot only seeds the indexes being backfilled.
 #[tracing::instrument(name = "pump", skip_all)]
 async fn pump(
+    pipeline: Pipeline<'_>,
     stream: BoxStream<'static, sources_core::Result<Change>>,
-    documents: &dyn DocumentBuilder,
-    sink: &dyn Sink,
-    queue_capacity: usize,
-    batch: BatchPolicy,
     filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
-    let (producer, mut consumer) = channel::<Change>(queue_capacity);
+    let (producer, mut consumer) = channel::<Change>(pipeline.queue_capacity);
 
     // Capture runs concurrently with the worker; the worker borrows the shared
-    // builder and sink.
-    let capture = tokio::spawn(capture(stream, producer));
-    let worker = work(&mut consumer, documents, sink, batch, filter).await;
+    // builder and sink. The observer's events are `&self`, so capture takes an
+    // `Arc` clone it can move into the spawned `'static` task.
+    let capture = tokio::spawn(capture(stream, producer, Arc::clone(pipeline.observer)));
+    let worker = work(pipeline, &mut consumer, filter).await;
 
     capture.abort();
     let captured = capture.await;
@@ -312,11 +333,13 @@ async fn pump(
 async fn capture(
     mut stream: BoxStream<'static, sources_core::Result<Change>>,
     producer: queue_channel::ChannelProducer<Change>,
+    observer: Arc<dyn Observer>,
 ) -> Result<()> {
     let mut captured = 0u64;
     while let Some(change) = stream.next().await {
         producer.publish(change?).await?;
         captured += 1;
+        observer.on_change_captured();
     }
     tracing::debug!(captured, "capture stream ended");
     Ok(())
@@ -328,14 +351,13 @@ async fn capture(
 /// A batch starts when the first change arrives (the worker blocks for it, so an
 /// idle stream costs nothing) and closes when `max_changes` are buffered, when
 /// `max_delay` elapses since that first change, or when the stream ends.
-#[tracing::instrument(name = "worker", skip_all, fields(max_changes = batch.max_changes))]
+#[tracing::instrument(name = "worker", skip_all, fields(max_changes = pipeline.batch.max_changes))]
 async fn work(
+    pipeline: Pipeline<'_>,
     consumer: &mut ChannelConsumer<Change>,
-    documents: &dyn DocumentBuilder,
-    sink: &dyn Sink,
-    batch: BatchPolicy,
     filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
+    let batch = pipeline.batch;
     // Source acks and queue handles for changes whose documents are buffered in
     // the sink but not yet flushed. Confirmed/acked only after the flush below.
     let mut pending: Batch = Batch::with_capacity(batch.max_changes);
@@ -345,7 +367,7 @@ async fn work(
         let Some(delivery) = consumer.recv().await? else {
             break;
         };
-        buffer(delivery, documents, filter, &mut pending).await?;
+        buffer(delivery, pipeline.documents, filter, &mut pending).await?;
 
         // Fill the batch until it is full or its time window closes. `recv` is
         // cancel-safe, so dropping it on timeout never drops a queued change.
@@ -354,20 +376,20 @@ async fn work(
             match timeout_at(deadline, consumer.recv()).await {
                 Err(_elapsed) => break, // window closed: flush a partial batch
                 Ok(Ok(Some(delivery))) => {
-                    buffer(delivery, documents, filter, &mut pending).await?;
+                    buffer(delivery, pipeline.documents, filter, &mut pending).await?;
                 }
                 Ok(Ok(None)) => {
                     // Stream ended: flush what we have, then stop.
-                    commit(documents, sink, &mut pending).await?;
+                    commit(pipeline, &mut pending).await?;
                     break 'batches;
                 }
                 Ok(Err(queue_err)) => return Err(queue_err.into()),
             }
         }
-        commit(documents, sink, &mut pending).await?;
+        commit(pipeline, &mut pending).await?;
     }
     // A batch left buffered when the stream ended mid-fill.
-    commit(documents, sink, &mut pending).await
+    commit(pipeline, &mut pending).await
 }
 
 /// A batch in the making: the acks owed once its documents are durable (the
@@ -448,25 +470,35 @@ async fn buffer(
 /// [`Ack`](sources_core::cdc::Ack)) — so confirming a batch advances the slot to
 /// the batch's last change and no further.
 #[tracing::instrument(name = "commit", level = "debug", skip_all, fields(changes = pending.len(), documents = pending.ids.len()))]
-async fn commit(
-    documents: &dyn DocumentBuilder,
-    sink: &dyn Sink,
-    pending: &mut Batch,
-) -> Result<()> {
+async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch) -> Result<()> {
     if pending.len() == 0 {
         return Ok(());
     }
-    for document in documents.build_many(&pending.ids).await? {
+    let changes = pending.len();
+    let documents_built = pending.ids.len();
+    // Tally documents per target index for per-index metrics, before the ids
+    // are cleared below.
+    let mut by_index: HashMap<IndexName, usize> = HashMap::new();
+    for id in &pending.ids {
+        *by_index.entry(id.index.clone()).or_insert(0) += 1;
+    }
+
+    for document in pipeline.documents.build_many(&pending.ids).await? {
         match document {
             Document::Upsert { id, body } => {
-                sink.upsert(&id.index, &document_id(&id), &body).await?;
+                pipeline
+                    .sink
+                    .upsert(&id.index, &document_id(&id), &body)
+                    .await?;
             }
             Document::Delete { id } => {
-                sink.delete(&id.index, &document_id(&id)).await?;
+                pipeline.sink.delete(&id.index, &document_id(&id)).await?;
             }
         }
     }
-    sink.flush().await?;
+    let flush_start = Instant::now();
+    pipeline.sink.flush().await?;
+    let flush = flush_start.elapsed();
     for ack in pending.source.drain(..) {
         ack.confirm();
     }
@@ -475,6 +507,12 @@ async fn commit(
     }
     pending.ids.clear();
     pending.seen.clear();
+    pipeline.observer.on_batch_committed(BatchStats {
+        changes,
+        documents: documents_built,
+        documents_by_index: by_index.into_iter().collect(),
+        flush,
+    });
     tracing::debug!("batch built, flushed, and acked");
     Ok(())
 }
@@ -652,7 +690,7 @@ mod tests {
         let changes = vec![upsert_change(1, 0, &acks), delete_change(2, 1, &acks)];
 
         let engine = Engine::new(
-            Box::new(MockSource {
+            Arc::new(MockSource {
                 changes: Mutex::new(Some(changes)),
             }),
             Arc::new(MockDocuments),
@@ -715,7 +753,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         Engine::new(
-            Box::new(MockSource {
+            Arc::new(MockSource {
                 changes: Mutex::new(Some(changes)),
             }),
             Arc::new(MockDocuments),
@@ -797,7 +835,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         Engine::new(
-            Box::new(MockSource {
+            Arc::new(MockSource {
                 changes: Mutex::new(Some(changes)),
             }),
             Arc::new(CountingBuilder {
@@ -903,7 +941,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         Engine::new(
-            Box::new(MockSource {
+            Arc::new(MockSource {
                 changes: Mutex::new(Some(changes)),
             }),
             Arc::new(MockDocuments),
@@ -1038,7 +1076,7 @@ mod tests {
             ops: Arc::clone(&ops),
         });
 
-        Engine::new(Box::new(source), Arc::new(MockDocuments), sink)
+        Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
             .run()
             .await
             .unwrap();
@@ -1072,7 +1110,7 @@ mod tests {
             ops: Arc::clone(&ops),
         });
 
-        Engine::new(Box::new(source), Arc::new(MockDocuments), sink)
+        Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
             .run()
             .await
             .unwrap();
@@ -1083,6 +1121,70 @@ mod tests {
         );
         assert!(ops.lock().unwrap().is_empty());
         assert!(marked.lock().unwrap().is_empty());
+    }
+
+    /// Records the observer events a run emits, so a test can assert the engine
+    /// reports its lifecycle and per-batch progress.
+    #[derive(Debug, Default)]
+    struct RecordingObserver {
+        indexes_ensured: AtomicU64,
+        captured: AtomicU64,
+        committed_changes: AtomicU64,
+        committed_documents: AtomicU64,
+        batches: AtomicU64,
+        live: AtomicBool,
+    }
+
+    impl Observer for RecordingObserver {
+        fn on_indexes_ensured(&self, count: usize) {
+            self.indexes_ensured.store(count as u64, Ordering::SeqCst);
+        }
+        fn on_live_started(&self) {
+            self.live.store(true, Ordering::SeqCst);
+        }
+        fn on_change_captured(&self) {
+            self.captured.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_batch_committed(&self, stats: BatchStats) {
+            self.committed_changes
+                .fetch_add(stats.changes as u64, Ordering::SeqCst);
+            self.committed_documents
+                .fetch_add(stats.documents as u64, Ordering::SeqCst);
+            self.batches.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_lifecycle_and_progress_to_the_observer() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let observer = Arc::new(RecordingObserver::default());
+        // Five changes resolving to five distinct documents, one batch.
+        let changes = (0..5)
+            .map(|i| upsert_change(10 + i as i64, i, &acks))
+            .collect::<Vec<_>>();
+
+        Engine::new(
+            Arc::new(MockSource {
+                changes: Mutex::new(Some(changes)),
+            }),
+            Arc::new(MockDocuments),
+            Arc::new(RecordingSink::default()),
+        )
+        .with_observer(Arc::clone(&observer) as Arc<dyn Observer>)
+        .with_batch(BatchPolicy {
+            max_changes: 256,
+            max_delay: Duration::from_secs(10),
+        })
+        .skip_backfill(true)
+        .run()
+        .await
+        .unwrap();
+
+        assert!(observer.live.load(Ordering::SeqCst), "live phase reported");
+        assert_eq!(observer.captured.load(Ordering::SeqCst), 5, "all captured");
+        assert_eq!(observer.committed_changes.load(Ordering::SeqCst), 5);
+        assert_eq!(observer.committed_documents.load(Ordering::SeqCst), 5);
+        assert_eq!(observer.batches.load(Ordering::SeqCst), 1, "one batch");
     }
 
     #[tokio::test]
@@ -1098,7 +1200,7 @@ mod tests {
             ops: Arc::clone(&ops),
         });
 
-        Engine::new(Box::new(source), Arc::new(MockDocuments), sink)
+        Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
             .skip_backfill(true)
             .run()
             .await

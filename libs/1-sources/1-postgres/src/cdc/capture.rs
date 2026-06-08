@@ -5,7 +5,8 @@ use futures::stream::BoxStream;
 use pgwire_replication::{ReplicationClient, ReplicationConfig};
 use sources_core::cdc::{AckSink, Change, ChangeCapture};
 use sources_core::{Result, SnapshotTable, SourceError};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
+use tokio::sync::OnceCell;
 
 use super::ack::{AckShared, WalAckSink};
 use super::{backfill, stream};
@@ -33,6 +34,12 @@ pub struct WalChangeCapture {
     /// Ordinary SQL connection URL, used by [`snapshot`](Self::snapshot) and
     /// for the automatic slot creation check.
     connection_url: String,
+    /// A small, lazily-opened SQL pool shared by the slot check and the
+    /// out-of-band [`lag`](Self::lag) polling, so periodic status probes reuse
+    /// connections instead of opening and tearing one down each time. Shared
+    /// across clones (an `Arc`), opened on first use. The bulk snapshot read
+    /// stays on its own connection (see [`snapshot`](Self::snapshot)).
+    admin_pool: Arc<OnceCell<PgPool>>,
 }
 
 impl WalChangeCapture {
@@ -46,25 +53,37 @@ impl WalChangeCapture {
         Self {
             config,
             connection_url: connection_url.into(),
+            admin_pool: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// The shared admin pool, opened on first call and reused thereafter. Kept
+    /// deliberately small — it serves only the slot check and lag probes, not
+    /// the change or snapshot paths.
+    async fn admin_pool(&self) -> Result<&PgPool> {
+        self.admin_pool
+            .get_or_try_init(|| async {
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect(&self.connection_url)
+                    .await
+                    .map_err(|e| SourceError::Connection(e.to_string()))
+            })
+            .await
     }
 
     /// Ensure the replication slot exists, creating it if it does not.
     ///
-    /// Connects via the ordinary SQL URL so the check can run before the
+    /// Runs over the shared admin pool so the check can run before the
     /// replication connection is opened. If the slot already exists its plugin
     /// is validated; a slot with the wrong plugin name is an error (it was
     /// created for a different consumer and we should not clobber it).
     async fn ensure_slot(&self) -> Result<()> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&self.connection_url)
-            .await
-            .map_err(|e| SourceError::Connection(e.to_string()))?;
+        let pool = self.admin_pool().await?;
 
         let row = sqlx::query("SELECT plugin FROM pg_replication_slots WHERE slot_name = $1")
             .bind(&self.config.slot)
-            .fetch_optional(&pool)
+            .fetch_optional(pool)
             .await
             .map_err(|e| SourceError::Query(e.to_string()))?;
 
@@ -84,7 +103,7 @@ impl WalChangeCapture {
             None => {
                 sqlx::query("SELECT pg_create_logical_replication_slot($1, 'pgoutput')")
                     .bind(&self.config.slot)
-                    .execute(&pool)
+                    .execute(pool)
                     .await
                     .map_err(|e| {
                         SourceError::Connection(format!(
@@ -96,7 +115,6 @@ impl WalChangeCapture {
             }
         }
 
-        pool.close().await;
         Ok(())
     }
 }
@@ -127,5 +145,38 @@ impl ChangeCapture for WalChangeCapture {
     ) -> Result<BoxStream<'static, Result<Change>>> {
         tracing::info!(tables = tables.len(), "starting snapshot");
         backfill::snapshot(&self.connection_url, tables).await
+    }
+
+    /// Bytes between the slot's `confirmed_flush_lsn` and the server's current
+    /// WAL LSN — how far behind the destination is. Returns `None` until the
+    /// slot exists (it is created on the first [`live`](Self::live) connect).
+    #[tracing::instrument(name = "wal.lag", skip_all, err)]
+    async fn lag(&self) -> Result<Option<u64>> {
+        let pool = self.admin_pool().await?;
+
+        // `pg_wal_lsn_diff` yields a numeric byte distance; cast to bigint so it
+        // decodes as an integer. A slot whose consumer is fully caught up reads
+        // zero; a never-connected slot has no row, hence `Option`.
+        let row = sqlx::query(
+            "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint AS lag \
+             FROM pg_replication_slots WHERE slot_name = $1",
+        )
+        .bind(&self.config.slot)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| SourceError::Query(e.to_string()))?;
+
+        let lag = match row {
+            Some(row) => {
+                let bytes: i64 = row
+                    .try_get("lag")
+                    .map_err(|e| SourceError::Query(e.to_string()))?;
+                // A negative diff (slot momentarily ahead of the read LSN) clamps
+                // to zero — there is no meaningful "negative lag".
+                Some(bytes.max(0) as u64)
+            }
+            None => None,
+        };
+        Ok(lag)
     }
 }

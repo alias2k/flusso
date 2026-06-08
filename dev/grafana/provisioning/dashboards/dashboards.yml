@@ -1,0 +1,10 @@
+# Load any dashboard JSON in this directory (flusso.json) on startup.
+apiVersion: 1
+
+providers:
+  - name: flusso
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

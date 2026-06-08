@@ -116,7 +116,7 @@ async fn wal_changes_flow_through_the_engine() {
         ops: Arc::clone(&recorded),
     });
     let engine = Engine::new(
-        Box::new(WalChangeCapture::new(replication, url.clone())),
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
         sink,
     );
@@ -193,7 +193,7 @@ async fn backfill_seeds_preexisting_rows() {
         ops: Arc::clone(&recorded),
     });
     let engine = Engine::new(
-        Box::new(WalChangeCapture::new(replication, url.clone())),
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
         sink,
     );

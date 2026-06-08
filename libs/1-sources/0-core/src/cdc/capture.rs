@@ -49,4 +49,17 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
         let _ = tables;
         Ok(Box::pin(stream::empty()))
     }
+
+    /// How far the mechanism's durable resume point trails the source's latest
+    /// position, in bytes — e.g. a replication slot's distance from the server's
+    /// current WAL LSN. A growing value means the consumer is falling behind the
+    /// source; it is the single best signal of pipeline health.
+    ///
+    /// This is sampled out-of-band (by a supervisor, on a timer), not on the
+    /// change path, so it opens its own short-lived connection rather than
+    /// borrowing the live stream's. The default is `Ok(None)` — for mechanisms
+    /// that have no notion of lag (e.g. a finite snapshot-only source).
+    async fn lag(&self) -> Result<Option<u64>> {
+        Ok(None)
+    }
 }
