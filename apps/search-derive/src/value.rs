@@ -20,7 +20,7 @@ use syn::{Data, DeriveInput, Fields};
 
 /// The field kind a `FlussoValue` type stands in for.
 #[derive(Clone, Copy)]
-enum Kind {
+pub(crate) enum Kind {
     Keyword,
     Text,
     Number,
@@ -28,8 +28,10 @@ enum Kind {
 }
 
 impl Kind {
-    /// The `flusso_search::kind::…` marker this resolves to.
-    fn marker(self) -> TokenStream {
+    /// The `flusso_search::kind::…` marker this resolves to. The single place
+    /// these marker paths are written — both this derive and the field-validation
+    /// codegen route their kind through here.
+    pub(crate) fn marker(self) -> TokenStream {
         match self {
             Kind::Keyword => quote! { ::flusso_search::kind::Keyword },
             Kind::Text => quote! { ::flusso_search::kind::Text },

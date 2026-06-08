@@ -8,6 +8,8 @@ use syn::{Field, Fields, Ident, LitStr, Type};
 
 use schema::{MappingType, ResolvedField};
 
+use crate::value::Kind;
+
 /// One struct field, with its resolved document key.
 pub(crate) struct DocField<'a> {
     pub(crate) ident: &'a Ident,
@@ -223,20 +225,21 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             if let Some(kind) = value_kind(scalar)
                 && found.as_deref().is_some_and(|f| !is_primitive(Some(f)))
             {
-                return Ok(Some(value_assert(inner, kind)));
+                return Ok(Some(value_assert(inner, kind.marker())));
             }
             Err(scalar_error(field, os, &expected, found.as_deref()))
         }
     }
 }
 
-/// The `flusso_search::kind::…` marker a scalar mapping accepts custom values
-/// for, or `None` for kinds without a `FlussoValue` escape hatch (`bool`, geo,
-/// binary — a custom type there is almost always a mistake).
-fn value_kind(mapping_type: &MappingType) -> Option<TokenStream> {
+/// The [`Kind`] a scalar mapping accepts custom values for, or `None` for kinds
+/// without a `FlussoValue` escape hatch (`bool`, geo, binary — a custom type
+/// there is almost always a mistake). The marker tokens themselves live on
+/// [`Kind::marker`]; this only classifies the mapping type.
+fn value_kind(mapping_type: &MappingType) -> Option<Kind> {
     match mapping_type {
-        MappingType::Keyword => Some(quote! { ::flusso_search::kind::Keyword }),
-        MappingType::Text => Some(quote! { ::flusso_search::kind::Text }),
+        MappingType::Keyword => Some(Kind::Keyword),
+        MappingType::Text => Some(Kind::Text),
         MappingType::Byte
         | MappingType::Short
         | MappingType::Integer
@@ -244,8 +247,8 @@ fn value_kind(mapping_type: &MappingType) -> Option<TokenStream> {
         | MappingType::Float
         | MappingType::HalfFloat
         | MappingType::Double
-        | MappingType::ScaledFloat => Some(quote! { ::flusso_search::kind::Number }),
-        MappingType::Date => Some(quote! { ::flusso_search::kind::Date }),
+        | MappingType::ScaledFloat => Some(Kind::Number),
+        MappingType::Date => Some(Kind::Date),
         _ => None,
     }
 }

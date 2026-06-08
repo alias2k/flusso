@@ -169,10 +169,7 @@ pub(super) fn reverse_query(
     let mut params = Vec::new();
     let mut conditions = Vec::new();
     for (column, value) in key {
-        if matches!(
-            value,
-            GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_)
-        ) {
+        if !value.is_bindable_scalar() {
             return Err(SourceError::Query(
                 "cannot bind null, array, or map as a key".into(),
             ));
@@ -204,10 +201,7 @@ struct Builder<'a> {
 
 impl Builder<'_> {
     fn placeholder(&mut self, value: GenericValue) -> Result<String> {
-        if matches!(
-            value,
-            GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_)
-        ) {
+        if !value.is_bindable_scalar() {
             return Err(SourceError::Query(
                 "cannot bind null, array, or map as a parameter".into(),
             ));

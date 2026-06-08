@@ -16,6 +16,24 @@ pub enum GenericValue {
     Map(BTreeMap<String, GenericValue>),
 }
 
+impl GenericValue {
+    /// Whether this value can stand as a single SQL parameter, key, or literal:
+    /// true for the scalar variants, false for `Null` and the composite
+    /// `Array`/`Map`. The one home for that rule — the Postgres source applies
+    /// it when binding params, building keys, and inlining literals. Written as
+    /// an exhaustive match so a new variant cannot be added without classifying
+    /// it here.
+    pub fn is_bindable_scalar(&self) -> bool {
+        match self {
+            GenericValue::Bool(_)
+            | GenericValue::Int(_)
+            | GenericValue::Decimal(_)
+            | GenericValue::String(_) => true,
+            GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => false,
+        }
+    }
+}
+
 /// Serializes to the **natural** JSON shape — `5`, `"x"`, `true`, `null`,
 /// `[…]`, `{…}` — not serde's externally-tagged enum form (`{"Int": 5}`). This
 /// is what makes a serialized `Config` or `IndexMapping` read like the data it
