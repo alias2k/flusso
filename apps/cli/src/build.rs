@@ -12,11 +12,11 @@ use crate::{DEFAULT_ARTIFACT, DEFAULT_CONFIG};
 #[derive(Debug, Args)]
 pub(crate) struct BuildArgs {
     /// Path to the configuration file.
-    #[arg(short, long, default_value = DEFAULT_CONFIG)]
+    #[arg(short, long, env = "FLUSSO_CONFIG", default_value = DEFAULT_CONFIG)]
     config: PathBuf,
 
     /// Where to write the compiled artifact.
-    #[arg(short, long, default_value = DEFAULT_ARTIFACT)]
+    #[arg(short, long, env = "FLUSSO_OUT", default_value = DEFAULT_ARTIFACT)]
     out: PathBuf,
 }
 

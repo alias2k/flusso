@@ -1,9 +1,21 @@
 # syntax=docker/dockerfile:1
 #
-# Builds the `flusso` binary and bakes the dev config + schemas into a portable
-# `flusso.lock`. Used by docker-compose.demo.yml to run flusso in-cluster.
-# Connection and sink URLs are NOT baked in — they come from the environment at
-# run time (DATABASE_URL, PRIMARY_OPENSEARCH_URL), set by compose.
+# Registry-ready image for the `flusso` binary.
+#
+# The default (`runtime`) target is a generic, config-less image meant to be
+# published to a container registry: it bakes in NO config and NO secrets. You
+# supply a `flusso.toml` (+ schemas) or a compiled `flusso.lock` at run time —
+# mount one in and pass `--config`, or bake your own lock into a child image —
+# and connection/sink URLs come from the environment via `{ env = "VAR" }`
+# secret references resolved where the pipeline runs.
+#
+#   docker build -t ghcr.io/OWNER/flusso:VERSION .
+#
+# The `demo` target extends the same runtime with the repo's dev config compiled
+# into `/app/flusso.lock`; it is what docker-compose.demo.yml builds to run
+# flusso in-cluster with no host toolchain (see that file).
+#
+#   docker build --target demo -t flusso:dev .
 
 # ---- builder ----
 FROM rust:1-bookworm AS builder
@@ -13,23 +25,54 @@ WORKDIR /usr/src/flusso
 # toolchain in rust-toolchain.toml is honored by rustup automatically.
 COPY . .
 
-# Build the release binary (default-members = apps/cli → the `flusso` binary),
-# then compile the dev config + schemas into a portable artifact (no DB needed).
-RUN cargo build --release --locked
-RUN ./target/release/flusso build --config dev/flusso.toml --out flusso.lock
+# Build the release binary (default-members = apps/cli → the `flusso` binary).
+# Cache the cargo registry and target dir across builds; the binary lives inside
+# the cached target mount, so copy it out to a real path in the same RUN.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/src/flusso/target \
+    cargo build --release --locked \
+    && cp target/release/flusso /usr/local/bin/flusso
 
-# ---- runtime ----
+# ---- runtime (the published image) ----
 FROM debian:bookworm-slim AS runtime
+
+# ca-certificates for TLS to Postgres/OpenSearch; a non-root system user to run as.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 flusso \
+    && useradd --system --uid 65532 --gid flusso --no-create-home --shell /usr/sbin/nologin flusso
+
+COPY --from=builder /usr/local/bin/flusso /usr/local/bin/flusso
 
 WORKDIR /app
-COPY --from=builder /usr/src/flusso/target/release/flusso /usr/local/bin/flusso
-COPY --from=builder /usr/src/flusso/flusso.lock /app/flusso.lock
+USER 65532:65532
 
-# `flusso run` loads /app/flusso.lock by default and serves status/metrics on all
-# interfaces so Prometheus (and the host) can reach it.
+# Operational HTTP surface (/healthz /readyz /status /metrics).
 EXPOSE 9464
+
+# `flusso run` loads /app/flusso.lock by default; override with `--config` to a
+# mounted flusso.toml, or bake a lock into a child image. Bind to all interfaces
+# so a sidecar/Prometheus can reach the surface.
 ENTRYPOINT ["flusso"]
 CMD ["run", "--http-addr", "0.0.0.0:9464"]
+
+# OCI metadata — CI stamps the dynamic values: --build-arg VERSION=… REVISION=… CREATED=…
+ARG VERSION=0.0.0-dev
+ARG REVISION=unknown
+ARG CREATED=unknown
+LABEL org.opencontainers.image.title="flusso" \
+      org.opencontainers.image.description="Keep OpenSearch in sync with Postgres from declarative config." \
+      org.opencontainers.image.source="https://github.com/OWNER/flusso" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}"
+
+# ---- demo lock (compile the repo's dev config → flusso.lock; no DB, no secrets) ----
+FROM builder AS demo-lock
+RUN flusso build --config dev/flusso.toml --out /flusso.lock
+
+# ---- demo (runtime + baked dev lock; built by docker-compose.demo.yml) ----
+FROM runtime AS demo
+COPY --from=demo-lock /flusso.lock /app/flusso.lock

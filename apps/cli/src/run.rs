@@ -27,41 +27,41 @@ use crate::{http, metrics, telemetry};
 pub(crate) struct RunArgs {
     /// Source config to compile and run. When omitted, the compiled artifact at
     /// `--artifact` is loaded instead.
-    #[arg(short, long)]
+    #[arg(short, long, env = "FLUSSO_CONFIG")]
     config: Option<PathBuf>,
 
     /// Compiled artifact to run when `--config` is not given.
-    #[arg(long, default_value = DEFAULT_ARTIFACT)]
+    #[arg(long, env = "FLUSSO_ARTIFACT", default_value = DEFAULT_ARTIFACT)]
     artifact: PathBuf,
 
     /// Logical replication slot to consume. Must already exist.
-    #[arg(long, default_value = "flusso")]
+    #[arg(long, env = "FLUSSO_SLOT", default_value = "flusso")]
     slot: String,
 
     /// Publication to subscribe to. Must already exist and cover the tables.
-    #[arg(long, default_value = "flusso")]
+    #[arg(long, env = "FLUSSO_PUBLICATION", default_value = "flusso")]
     publication: String,
 
     /// Skip the initial backfill and resume live capture only. Use after the
     /// index has already been seeded, to avoid re-reading every existing row.
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_SKIP_BACKFILL")]
     skip_backfill: bool,
 
     /// Pretty-print documents instead of compact one-per-line JSON.
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_PRETTY")]
     pretty: bool,
 
     /// Maximum changes buffered between capture and processing.
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, env = "FLUSSO_QUEUE_CAPACITY", default_value_t = 1024)]
     queue_capacity: usize,
 
     /// Serve the operational HTTP surface (`/healthz`, `/readyz`, `/status`,
     /// `/metrics`) on this address. Omit to disable it.
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_HTTP_ADDR")]
     http_addr: Option<SocketAddr>,
 
     /// How often, in seconds, to sample replication slot lag.
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, env = "FLUSSO_LAG_POLL_SECS", default_value_t = 15)]
     lag_poll_secs: u64,
 }
 

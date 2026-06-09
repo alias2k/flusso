@@ -1,0 +1,21 @@
+flusso is deployed as a single instance (one Postgres replication slot).
+
+Operational HTTP surface (in-cluster):
+  http://{{ include "flusso.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/status
+
+Port-forward to inspect it locally:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "flusso.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  # then: curl localhost:{{ .Values.service.port }}/healthz /readyz /status /metrics
+
+{{- if not (or .Values.secrets.create .Values.secrets.existingSecret) }}
+
+WARNING: no Secret is configured. Your config uses `{ env = "VAR" }` references
+(e.g. DATABASE_URL, PRIMARY_OPENSEARCH_URL) that must be supplied. Set
+`secrets.create=true` with `secrets.data`, or point `secrets.existingSecret` at
+a Secret you manage.
+{{- end }}
+{{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) }}
+
+NOTE: no config is mounted (config.create=false, no existingConfigMap). The image
+must already carry /app/flusso.lock (a custom-baked image).
+{{- end }}

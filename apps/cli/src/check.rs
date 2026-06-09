@@ -19,16 +19,16 @@ use crate::print;
 #[derive(Debug, Args)]
 pub(crate) struct CheckArgs {
     /// Path to the configuration file.
-    #[arg(short, long, default_value = DEFAULT_CONFIG)]
+    #[arg(short, long, env = "FLUSSO_CONFIG", default_value = DEFAULT_CONFIG)]
     config: std::path::PathBuf,
 
     /// Validate the files only; do not connect to the database. The mapping is
     /// shown either way; `--offline` skips confirming it against the database.
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_OFFLINE")]
     offline: bool,
 
     /// Output format: a human-readable report, or JSON for piping.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    #[arg(long, env = "FLUSSO_FORMAT", value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
 

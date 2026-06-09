@@ -58,11 +58,17 @@ pre-provisioned with a flusso dashboard). Prometheus scrapes flusso's `/metrics`
 *host* via `host.docker.internal:9464`, so run `flusso run` with `--http-addr 127.0.0.1:9464`.
 Prometheus config and Grafana provisioning live under `dev/prometheus/` and `dev/grafana/`.
 
+The `Dockerfile` is a **registry-ready, config-less** image (its default `runtime` target
+bakes no config and no secrets; you mount a `flusso.toml`/`flusso.lock` and pass `--config`,
+or bake a lock into a child image). It also defines a `demo` target that extends that runtime
+with the repo's dev config compiled into `/app/flusso.lock` — that target is what the demo
+compose builds.
+
 For a **self-contained demo** that runs flusso *in* the cluster too (no host toolchain),
 layer the demo override on the base the Docker way:
 `docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build`. The override
-(`docker-compose.demo.yml`) just *adds* a `flusso` service built from the `Dockerfile`
-(release binary + a baked `flusso.lock`), pointed at the in-network services via
+(`docker-compose.demo.yml`) just *adds* a `flusso` service built from the `Dockerfile`'s
+`demo` target (release binary + a baked `flusso.lock`), pointed at the in-network services via
 `DATABASE_URL` / `PRIMARY_OPENSEARCH_URL`. It publishes `9464`, so the base Prometheus scrapes
 it via the same `host.docker.internal:9464` it uses for a host-run flusso — one config, both
 modes. Same project as the base, so it shares its volumes; don't run a host `cargo run` flusso
@@ -73,7 +79,17 @@ subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, 
 baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run` (loads
 `flusso.lock` by default, or `--config` to compile-and-run; `--skip-backfill` resumes live
 only), `schema` (print an embedded editor-assist JSON Schema: `schema config` or `schema
-index`; no DB). See `dev/README.md` for the walk-through.
+index`; no DB). See `dev/README.md` for the walk-through. **Every flag also reads a
+`FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.
+`FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_HTTP_ADDR` — so the binary configures cleanly from
+the environment (Helm/compose). This is separate from the config's own reserved env vars
+(`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`) and `{ env = "VAR" }` secret refs.
+
+A **Helm chart** lives at `deploy/helm/flusso/` — a single-instance Deployment (one
+replication slot → `replicas: 1`, enforced; `Recreate` strategy), config via ConfigMap
+(`config.flussoToml` + `config.schemas`, `--config`-mounted) and secrets via `envFrom`,
+plus a Service, optional Prometheus-Operator `ServiceMonitor`, and probes on the HTTP
+surface. Postgres/OpenSearch are external, not deployed by the chart. See its `README.md`.
 
 ## Workspace lints are strict — they fail the build
 
@@ -231,7 +247,8 @@ belongs in the linked docs.
 | Query client (`flusso-search`) | `apps/search/src/` |
 | `#[derive(FlussoDocument)]` proc-macro | `apps/search-derive/src/` (+ the `flusso-search-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
-| Containerized demo (flusso in-cluster) | `docker-compose.demo.yml` (override that adds the `flusso` service over the base), `Dockerfile`, `.dockerignore` |
+| Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore` |
+| Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 
 ## Conventions
 

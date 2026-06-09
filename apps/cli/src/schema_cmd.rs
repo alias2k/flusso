@@ -10,7 +10,7 @@ use clap::{Args, ValueEnum};
 #[derive(Debug, Args)]
 pub(crate) struct SchemaArgs {
     /// Which schema to print.
-    #[arg(value_enum)]
+    #[arg(value_enum, env = "FLUSSO_SCHEMA")]
     which: SchemaKind,
 }
 

@@ -16,6 +16,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # The `demo` target extends the registry runtime with the dev config
+      # compiled into /app/flusso.lock (the default `runtime` target bakes none).
+      target: demo
     image: flusso:dev
     container_name: flusso-flusso
     environment:
@@ -32,4 +35,3 @@ services:
         condition: service_healthy
       opensearch:
         condition: service_healthy
-    restart: on-failure

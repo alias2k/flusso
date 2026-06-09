@@ -1,0 +1,118 @@
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- fail "flusso consumes a single Postgres replication slot: replicaCount must be 1" }}
+{{- end }}
+{{- $useConfig := or .Values.config.create .Values.config.existingConfigMap -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flusso.fullname" . }}
+  labels:
+    {{- include "flusso.labels" . | nindent 4 }}
+spec:
+  # Single instance only (one replication slot). Recreate so a rollout never runs
+  # two pods against the same slot at once.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "flusso.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if .Values.config.create }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "flusso.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "flusso.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: flusso
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - run
+            - --http-addr
+            - "0.0.0.0:{{ .Values.http.port }}"
+            {{- if $useConfig }}
+            - --config
+            - "{{ .Values.config.mountPath }}/flusso.toml"
+            {{- end }}
+            - --slot
+            - {{ .Values.run.slot | quote }}
+            - --publication
+            - {{ .Values.run.publication | quote }}
+            - --queue-capacity
+            - {{ .Values.run.queueCapacity | quote }}
+            - --lag-poll-secs
+            - {{ .Values.run.lagPollSecs | quote }}
+            {{- if .Values.run.skipBackfill }}
+            - --skip-backfill
+            {{- end }}
+            {{- with .Values.run.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.http.port }}
+              protocol: TCP
+          {{- with .Values.env }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
+          envFrom:
+            {{- if or .Values.secrets.create .Values.secrets.existingSecret }}
+            - secretRef:
+                name: {{ .Values.secrets.existingSecret | default (printf "%s-secrets" (include "flusso.fullname" .)) }}
+            {{- end }}
+            {{- with .Values.envFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if $useConfig }}
+          volumeMounts:
+            - name: config
+              mountPath: {{ .Values.config.mountPath }}
+              readOnly: true
+          {{- end }}
+      {{- if $useConfig }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "flusso.configMapName" . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
