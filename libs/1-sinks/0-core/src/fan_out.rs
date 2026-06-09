@@ -46,9 +46,9 @@ impl Sink for FanOutSink {
         Ok(())
     }
 
-    async fn flush(&self) -> Result<()> {
+    async fn flush(&self, caught_up: bool) -> Result<()> {
         for sink in &self.sinks {
-            sink.flush().await?;
+            sink.flush(caught_up).await?;
         }
         Ok(())
     }

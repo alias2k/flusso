@@ -431,6 +431,7 @@ fn populated_config_json() -> Value {
         pipeline = "p"
         number_of_shards = 1
         number_of_replicas = 0
+        refresh_interval = "10s"
         text_analysis = "icu"
         auto_subfields = true
 

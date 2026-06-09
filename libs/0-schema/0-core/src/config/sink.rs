@@ -43,6 +43,13 @@ pub struct OpensearchSink {
     pub number_of_shards: u32,
     /// Replica shards for each created index. Default: 1.
     pub number_of_replicas: u32,
+    /// OpenSearch `refresh_interval` applied to each index once its backfill
+    /// completes — the steady-state visibility ceiling (e.g. `"10s"`, `"1s"`,
+    /// or `"-1"` to disable automatic refresh). Indexes are seeded with refresh
+    /// off (`-1`) and handed this value afterwards. flusso forces an immediate
+    /// refresh on any flush that catches the pipeline up, so this only bounds
+    /// search staleness while a backlog is draining. Default: `"10s"`.
+    pub refresh_interval: String,
     /// Which analysis backend the built-in `flusso_*` analyzers use. Default:
     /// [`Builtin`](TextAnalysis::Builtin).
     pub text_analysis: TextAnalysis,

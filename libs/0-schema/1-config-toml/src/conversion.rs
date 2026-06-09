@@ -51,6 +51,7 @@ pub(crate) fn convert_sink(sink: entities::Sink) -> Sink {
             pipeline: s.pipeline,
             number_of_shards: s.number_of_shards,
             number_of_replicas: s.number_of_replicas,
+            refresh_interval: s.refresh_interval,
             text_analysis: convert_text_analysis(s.text_analysis),
             auto_subfields: s.auto_subfields,
         }),

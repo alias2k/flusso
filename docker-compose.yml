@@ -96,6 +96,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
     volumes:
       - ./dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./dev/prometheus/rules:/etc/prometheus/rules:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

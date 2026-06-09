@@ -12,6 +12,11 @@ for source/sink options, and `CLIENT.md` for the query-side `flusso-search` crat
 
 ## Commands
 
+Common workflows are wrapped in a `justfile` — run `just` to list them (e.g. `just up`,
+`just run`, `just check`, `just test`, `just lint`, `just bench`, `just status`). It needs
+[`just`](https://just.systems) (`cargo install just --locked`). The raw commands it wraps
+are below.
+
 Tests run with [`cargo-nextest`](https://nexte.st) (`cargo install cargo-nextest --locked`).
 
 ```sh

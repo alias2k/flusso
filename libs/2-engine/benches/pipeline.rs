@@ -151,8 +151,8 @@ impl Sink for AlwaysUnseeded {
     async fn delete(&self, index: &IndexName, id: &str) -> SinkResult<()> {
         self.inner.delete(index, id).await
     }
-    async fn flush(&self) -> SinkResult<()> {
-        self.inner.flush().await
+    async fn flush(&self, caught_up: bool) -> SinkResult<()> {
+        self.inner.flush(caught_up).await
     }
     // `is_seeded` / `mark_seeded` deliberately keep the trait defaults
     // (`false` / no-op) so the backfill runs on every iteration.
@@ -373,6 +373,7 @@ async fn setup() -> Services {
         pipeline: None,
         number_of_shards: 1,
         number_of_replicas: 1,
+        refresh_interval: "10s".to_owned(),
         text_analysis: schema_core::TextAnalysis::Builtin,
         auto_subfields: true,
     };
@@ -465,7 +466,7 @@ fn bench(c: &mut Criterion) {
                 .upsert(&index, "baseline", &body)
                 .await
                 .unwrap();
-            services.sink.flush().await.unwrap();
+            services.sink.flush(true).await.unwrap();
         });
     });
     group.finish();
@@ -480,7 +481,7 @@ fn bench(c: &mut Criterion) {
         let key = row_key(CHANGED_ITEM_ID);
         b.to_async(&rt).iter(|| async {
             propagate(&services, &table("order_items"), &key).await;
-            services.sink.flush().await.unwrap();
+            services.sink.flush(true).await.unwrap();
         });
     });
     group.finish();

@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     futures::executor::block_on(async {
         sink.upsert(&index, "42", &document).await?;
         sink.delete(&index, "7").await?;
-        sink.flush().await
+        sink.flush(true).await
     })?;
 
     Ok(())

@@ -20,6 +20,21 @@ members = [
 default-members = ["apps/cli"]
 resolver = "3"
 
+[profile.release]
+strip = "symbols"
+lto = "thin"
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+split-debuginfo = "unpacked"
+incremental = true
+debug = 2
+
+[profile.dev.package."*"]
+opt-level = 1
+
 [workspace.lints.rust]
 # Turn ALL warnings from rustc into errors.
 warnings = "deny"

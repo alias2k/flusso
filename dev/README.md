@@ -151,7 +151,13 @@ The stack includes Prometheus and Grafana, both wired to flusso's metrics.
 - **Grafana** (http://localhost:3000, opens straight in — anonymous admin) comes
   pre-provisioned with a *flusso* dashboard: change throughput, in-flight
   changes (back-pressure), replication slot lag, flush-duration p95, documents
-  built, and errors.
+  built, errors, and a **backlog drain ETA** (how long until the backlog clears
+  at the current rate) plus the slot-lag trend.
+- The ETA comes from **Prometheus recording rules** (`dev/prometheus/rules/`):
+  `flusso:slot_lag_bytes_rate5m` is the net drain rate (bytes/s; `< 0` = catching
+  up) and `flusso:backlog_drain_eta_seconds` is `lag ÷ drain_rate`, present only
+  while actually draining (a flat or growing backlog has no finite ETA). Both are
+  queryable directly and alertable.
 - The same metrics export over **OTLP** when an endpoint is configured, e.g.
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run -- run …` — the
   same env vars that already drive trace export.

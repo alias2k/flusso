@@ -109,6 +109,56 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 7,
+      "title": "Backlog drain ETA",
+      "description": "Estimated time until the replication backlog is fully processed, at the current net drain rate. Shows 'not draining' when the backlog is flat or growing (no finite ETA).",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "not draining (flat or growing)",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 300 },
+              { "color": "red", "value": 1800 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "flusso:backlog_drain_eta_seconds",
+          "legendFormat": "ETA",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Slot-lag trend (bytes/s; < 0 = draining)",
+      "description": "Net rate of change of the slot lag. Negative means catching up, positive means falling behind, ~0 means keeping up in real time.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 20 },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "flusso:slot_lag_bytes_rate5m",
+          "legendFormat": "lag change/s",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

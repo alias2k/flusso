@@ -19,13 +19,17 @@
 //!   `keyword` (exact), `keyword_lowercase` (sortable), and `text` (searchable)
 //!   subfields. A field's explicit mapping always wins. See
 //!   [`build_analysis`] and [`build_property`].
-//! - **Refresh follows the index lifecycle, not every flush.** The index is
-//!   created with auto-refresh disabled (`refresh_interval: -1`) for fast bulk
-//!   seeding; writes during backfill accumulate without per-flush refresh churn.
-//!   When seeding completes ([`mark_seeded`](OpensearchSink::mark_seeded)) the
-//!   index is refreshed once and handed back to automatic refresh (the interval
-//!   is reset to the cluster default). In steady state, visibility is automatic;
-//!   [`flush`](OpensearchSink::flush) does not force a refresh.
+//! - **Refresh adapts to the pipeline's backlog.** The index is created with
+//!   auto-refresh disabled (`refresh_interval: -1`) for fast bulk seeding;
+//!   writes during backfill accumulate without per-flush refresh churn. When
+//!   seeding completes ([`mark_seeded`](OpensearchSink::mark_seeded)) the index
+//!   is refreshed once and handed the configured `refresh_interval` (default
+//!   `"10s"`) — the steady-state visibility ceiling. On top of that,
+//!   [`flush`](OpensearchSink::flush) forces an immediate refresh whenever it is
+//!   told the pipeline has *caught up* (no backlog behind the batch), so search
+//!   is fresh when idle but indexing stays cheap while a backlog drains. The
+//!   `refresh_interval` only bounds staleness during sustained backlog, when a
+//!   caught-up flush never happens.
 //!
 //! Operations are buffered in memory until `flush` is called. Large flushes are
 //! chunked by `batch_size` to stay within OpenSearch request limits.
@@ -88,6 +92,10 @@ pub struct OpensearchSink {
     max_bytes: usize,
     max_retries: u32,
     pipeline: Option<String>,
+    /// `refresh_interval` handed to each index once seeded — the steady-state
+    /// visibility ceiling (see [`flush`](Self::flush) for how a caught-up flush
+    /// forces an immediate refresh on top of this).
+    refresh_interval: String,
     /// Settings that shape every index this sink creates: shard counts, the
     /// analysis backend, and whether `text`/`keyword` fields are auto-enriched.
     index_options: IndexOptions,
@@ -144,6 +152,7 @@ impl OpensearchSink {
             max_bytes: (config.max_bytes as usize).max(1),
             max_retries: config.max_retries,
             pipeline: config.pipeline.clone(),
+            refresh_interval: config.refresh_interval.clone(),
             index_options: IndexOptions {
                 // At least one primary shard — zero is not a valid index.
                 number_of_shards: config.number_of_shards.max(1),
@@ -306,18 +315,24 @@ impl OpensearchSink {
         Ok(())
     }
 
-    /// Hand `index` back to automatic refresh by resetting `refresh_interval`
-    /// to the cluster default (it was set to `-1` at creation for bulk seeding).
+    /// Set `index`'s steady-state `refresh_interval` (the configured value, e.g.
+    /// `"10s"`), called once seeding completes — it was `-1` (refresh off) at
+    /// creation for fast bulk seeding. This is the visibility ceiling under
+    /// load; a caught-up [`flush`](Self::flush) refreshes sooner on top of it.
     async fn restore_auto_refresh(&self, index: &str) -> Result<()> {
         let url = format!("{}/{index}/_settings", self.base_url);
         let req = self
             .client
             .put(&url)
             .header("Content-Type", "application/json")
-            .json(&json!({ "index": { "refresh_interval": null } }));
+            .json(&json!({ "index": { "refresh_interval": self.refresh_interval } }));
 
         self.send_ok(req, "restore refresh failed").await?;
-        debug!(index, "restored automatic refresh on index");
+        debug!(
+            index,
+            refresh_interval = self.refresh_interval,
+            "set steady-state refresh interval on index"
+        );
         Ok(())
     }
 
@@ -445,11 +460,15 @@ impl Sink for OpensearchSink {
     /// OpenSearch's `http.max_content_length`. A single document larger than
     /// `max_bytes` is sent on its own (it can't be split) with a warning.
     ///
-    /// No refresh is forced: visibility is governed by the index's refresh
-    /// interval — disabled during backfill and automatic in steady state (see
+    /// Refresh is forced **only when `caught_up`**: if this flush drained the
+    /// queue (no backlog behind it), the bulk requests carry `?refresh=true` so
+    /// the just-written documents are searchable immediately — cheap precisely
+    /// because the pipeline is idle. While a backlog is draining (`!caught_up`)
+    /// no refresh is forced; visibility is left to the index's configured
+    /// `refresh_interval`, keeping bulk indexing fast so the backlog clears (see
     /// the module docs).
-    #[tracing::instrument(name = "os.flush", skip_all, err)]
-    async fn flush(&self) -> Result<()> {
+    #[tracing::instrument(name = "os.flush", skip_all, fields(caught_up), err)]
+    async fn flush(&self, caught_up: bool) -> Result<()> {
         let actions = {
             let mut buf = self.buffer.lock().await;
             std::mem::take(&mut *buf)
@@ -492,7 +511,10 @@ impl Sink for OpensearchSink {
                     body.push_str(&fragment);
                 }
             }
-            self.send_bulk_chunk(&body, count, false).await?;
+            // A caught-up flush is small (it drained the queue), so forcing the
+            // refresh on each of its chunks — rather than only the last — keeps
+            // every touched index searchable with negligible extra cost.
+            self.send_bulk_chunk(&body, count, caught_up).await?;
         }
 
         Ok(())

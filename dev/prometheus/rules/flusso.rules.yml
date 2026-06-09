@@ -1,0 +1,30 @@
+# Derived backlog metrics for flusso.
+#
+# `flusso_replication_slot_lag_bytes` is the raw backlog (how far behind the WAL
+# head flusso's confirmed position is). Its time-derivative is the *net* drain
+# rate — consumption minus whatever the source is still writing — so dividing the
+# backlog by it gives a time-to-drain estimate that already accounts for ongoing
+# writes. The bytes cancel, so the ETA is in seconds; no change-count is needed
+# (un-decoded WAL has none).
+groups:
+  - name: flusso_backlog
+    interval: 15s
+    rules:
+      # Net change in slot lag, bytes/sec, smoothed over 5m.
+      #   < 0  → lag shrinking  (catching up)
+      #   > 0  → lag growing    (falling behind)
+      #   ~ 0  → keeping up in real time
+      - record: flusso:slot_lag_bytes_rate5m
+        expr: deriv(flusso_replication_slot_lag_bytes[2m])
+
+      # Estimated seconds until the backlog clears at the current net rate
+      # (lag / drain_rate). Two guards keep it honest:
+      #   * `- rate > 0` — only while actually draining; a flat or growing
+      #     backlog has no finite ETA, so the series is simply absent.
+      #   * `lag > 4 MiB` — ignore the slot's idle floor. The lag never reaches
+      #     zero (Postgres advances the WAL via checkpoints/autovacuum while
+      #     flusso's confirmed position only moves on real changes), so a near-
+      #     floor lag inching down would otherwise divide to a huge, meaningless
+      #     ETA. Raise this above your deployment's steady idle lag.
+      - record: flusso:backlog_drain_eta_seconds
+        expr: (flusso_replication_slot_lag_bytes > 4194304) / (- flusso:slot_lag_bytes_rate5m > 0)

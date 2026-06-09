@@ -95,7 +95,9 @@ impl Sink for StdoutSink {
         self.write_line(&line)
     }
 
-    async fn flush(&self) -> Result<()> {
+    async fn flush(&self, _caught_up: bool) -> Result<()> {
+        // stdout has no visibility/durability split, so the caught-up hint is
+        // irrelevant — just flush the writer.
         std::io::stdout()
             .lock()
             .flush()
@@ -244,6 +246,6 @@ mod tests {
     #[test]
     fn flush_runs_via_an_executor() {
         // Exercises the async `Sink` surface end-to-end (without writing output).
-        futures::executor::block_on(StdoutSink::new(false).flush()).unwrap();
+        futures::executor::block_on(StdoutSink::new(false).flush(true)).unwrap();
     }
 }

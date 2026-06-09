@@ -52,6 +52,16 @@ pub struct ChannelConsumer<T> {
     rx: mpsc::Receiver<T>,
 }
 
+impl<T> ChannelConsumer<T> {
+    /// Whether no items are currently waiting in the queue — a point-in-time
+    /// snapshot of whether the pipeline has drained everything captured so far.
+    /// The engine reads this at a batch boundary to decide whether a flush has
+    /// *caught up* (see `Sink::flush`'s `caught_up`).
+    pub fn is_empty(&self) -> bool {
+        self.rx.is_empty()
+    }
+}
+
 impl<T> std::fmt::Debug for ChannelConsumer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChannelConsumer").finish_non_exhaustive()

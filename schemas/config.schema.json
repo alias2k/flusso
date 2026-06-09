@@ -96,6 +96,11 @@
           "default": 1,
           "description": "Replica shards for each created index"
         },
+        "refresh_interval": {
+          "type": "string",
+          "default": "10s",
+          "description": "OpenSearch refresh_interval applied to each index after seeding — the steady-state search-visibility ceiling (e.g. \"10s\", \"1s\", or \"-1\" to disable automatic refresh). flusso forces an immediate refresh whenever the pipeline catches up, so this only bounds staleness while a backlog is draining."
+        },
         "text_analysis": {
           "enum": ["builtin", "icu"],
           "default": "builtin",

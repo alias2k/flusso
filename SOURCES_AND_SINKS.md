@@ -127,6 +127,7 @@ Writes documents to an OpenSearch cluster via the bulk API.
 | `pipeline` | string | — | Optional OpenSearch ingest pipeline applied on every index operation. |
 | `number_of_shards` | int ≥ 1 | `1` | Primary shards for each created index. |
 | `number_of_replicas` | int ≥ 0 | `1` | Replica shards for each created index. |
+| `refresh_interval` | string | `"10s"` | OpenSearch `refresh_interval` applied to each index after seeding — the steady-state visibility ceiling (e.g. `"10s"`, `"1s"`, or `"-1"` to disable auto-refresh). flusso forces an immediate refresh whenever the pipeline catches up, so this only bounds staleness while a backlog drains (see below). |
 | `text_analysis` | `builtin` \| `icu` | `builtin` | Analysis backend for the `flusso_*` analyzers (see [below](#index-analysis--subfields)). `icu` requires the `analysis-icu` plugin on every node. |
 | `auto_subfields` | bool | `true` | Auto-enrich `text`/`keyword` fields with a good analyzer and subfields. A field's explicit `mapping` always wins; set `false` to emit fields bare. |
 
@@ -146,10 +147,15 @@ variables (for `[sinks.primary]`, that's `PRIMARY_OPENSEARCH_*`). See
   changes the hash, so the sink writes to a *fresh* index (re-seeded from
   scratch) rather than into the old, now-mismatched shape. The logical name
   remains the pipeline's identity.
-- **Refresh follows the index lifecycle.** Created with auto-refresh disabled
+- **Refresh adapts to the backlog.** Created with auto-refresh disabled
   (`refresh_interval: -1`) for fast bulk seeding; on seeding completion the index
-  is refreshed once and handed back to the cluster's default interval. In steady
-  state, visibility is automatic — `flush` does not force a refresh.
+  is handed the configured `refresh_interval` (default `"10s"`) — the
+  steady-state visibility ceiling. On top of that, a `flush` forces an immediate
+  refresh whenever the pipeline has *caught up* (no backlog behind the batch), so
+  search is fresh when traffic is light but bulk indexing stays cheap while a
+  backlog drains. The `refresh_interval` only bounds staleness during sustained
+  backlog, when a caught-up flush never happens — raise it for more write
+  throughput under load, lower it (toward `1s`) for fresher search while behind.
 - **Production-ready defaults.** Created indexes ship a tuned `analysis` block
   and, unless `auto_subfields` is off, well-shaped `text`/`keyword` fields — see
   [Index analysis & subfields](#index-analysis--subfields).

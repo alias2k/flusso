@@ -93,6 +93,7 @@ fn sink(base_url: &str, batch_size: u32) -> sinks_opensearch::OpensearchSink {
         pipeline: None,
         number_of_shards: 1,
         number_of_replicas: 1,
+        refresh_interval: "10s".to_owned(),
         text_analysis: schema_core::TextAnalysis::Builtin,
         auto_subfields: true,
     };
@@ -152,7 +153,7 @@ async fn index_batch(
     for (id, doc) in docs {
         sink.upsert(index, id, doc).await.unwrap();
     }
-    sink.flush().await.unwrap();
+    sink.flush(true).await.unwrap();
 }
 
 fn bench(c: &mut Criterion) {

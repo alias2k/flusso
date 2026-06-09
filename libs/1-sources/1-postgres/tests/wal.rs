@@ -56,7 +56,7 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
-    async fn flush(&self) -> SinkResult<()> {
+    async fn flush(&self, _caught_up: bool) -> SinkResult<()> {
         Ok(())
     }
 }

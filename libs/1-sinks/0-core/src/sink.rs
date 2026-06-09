@@ -30,7 +30,15 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     async fn delete(&self, index: &IndexName, id: &str) -> Result<()>;
 
     /// Flush any buffered writes so everything written so far is durable.
-    async fn flush(&self) -> Result<()>;
+    ///
+    /// `caught_up` tells the sink the engine has drained the queue with this
+    /// batch — there is no backlog waiting behind it. A sink whose destination
+    /// has a cost to making writes *visible* (distinct from durable) can use
+    /// this to take that cost only when it's cheap: do it on a caught-up flush
+    /// (the pipeline is idle), skip it while a backlog is draining. Sinks with
+    /// no such distinction ignore it. See the OpenSearch sink, which forces an
+    /// index refresh only when `caught_up`.
+    async fn flush(&self, caught_up: bool) -> Result<()>;
 
     /// Whether `index` has already been seeded — its initial backfill completed
     /// and durably applied here. The engine asks this at startup and skips the

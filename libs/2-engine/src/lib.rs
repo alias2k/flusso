@@ -351,6 +351,13 @@ async fn capture(
 /// A batch starts when the first change arrives (the worker blocks for it, so an
 /// idle stream costs nothing) and closes when `max_changes` are buffered, when
 /// `max_delay` elapses since that first change, or when the stream ends.
+///
+/// At each flush the worker reads whether the queue is now empty — its
+/// `caught_up` signal: the batch drained everything captured so far, with no
+/// backlog behind it. It is forwarded through [`commit`] to [`Sink::flush`]
+/// (the OpenSearch sink uses it to force a refresh only when idle). It is a
+/// point-in-time snapshot, which is all the sink needs: a caught-up flush that
+/// races a just-arrived change simply does its idle-time work slightly early.
 #[tracing::instrument(name = "worker", skip_all, fields(max_changes = pipeline.batch.max_changes))]
 async fn work(
     pipeline: Pipeline<'_>,
@@ -380,16 +387,16 @@ async fn work(
                 }
                 Ok(Ok(None)) => {
                     // Stream ended: flush what we have, then stop.
-                    commit(pipeline, &mut pending).await?;
+                    commit(pipeline, &mut pending, consumer.is_empty()).await?;
                     break 'batches;
                 }
                 Ok(Err(queue_err)) => return Err(queue_err.into()),
             }
         }
-        commit(pipeline, &mut pending).await?;
+        commit(pipeline, &mut pending, consumer.is_empty()).await?;
     }
     // A batch left buffered when the stream ended mid-fill.
-    commit(pipeline, &mut pending).await
+    commit(pipeline, &mut pending, consumer.is_empty()).await
 }
 
 /// A batch in the making: the acks owed once its documents are durable (the
@@ -469,8 +476,13 @@ async fn buffer(
 /// point only to the highest *contiguous* confirmed sequence (see
 /// [`Ack`](sources_core::cdc::Ack)) — so confirming a batch advances the slot to
 /// the batch's last change and no further.
-#[tracing::instrument(name = "commit", level = "debug", skip_all, fields(changes = pending.len(), documents = pending.ids.len()))]
-async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch) -> Result<()> {
+///
+/// `caught_up` is forwarded to [`Sink::flush`]: it tells the sink no backlog is
+/// waiting behind this batch, so a sink with a cost to making writes *visible*
+/// can pay it now (while idle) instead of under load. See [`work`] for how it is
+/// derived from the queue.
+#[tracing::instrument(name = "commit", level = "debug", skip_all, fields(changes = pending.len(), documents = pending.ids.len(), caught_up))]
+async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch, caught_up: bool) -> Result<()> {
     if pending.len() == 0 {
         return Ok(());
     }
@@ -497,7 +509,7 @@ async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch) -> Result<()> {
         }
     }
     let flush_start = Instant::now();
-    pipeline.sink.flush().await?;
+    pipeline.sink.flush(caught_up).await?;
     let flush = flush_start.elapsed();
     for ack in pending.source.drain(..) {
         ack.confirm();
@@ -652,7 +664,7 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self) -> sinks_core::Result<()> {
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
             Ok(())
         }
     }
@@ -738,7 +750,7 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self) -> sinks_core::Result<()> {
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
             self.ops.lock().unwrap().push("flush".to_owned());
             Ok(())
         }
@@ -889,7 +901,7 @@ mod tests {
         async fn delete(&self, _index: &IndexName, _id: &str) -> sinks_core::Result<()> {
             Ok(())
         }
-        async fn flush(&self) -> sinks_core::Result<()> {
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -1048,7 +1060,7 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self) -> sinks_core::Result<()> {
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
             Ok(())
         }
 
@@ -1212,5 +1224,239 @@ mod tests {
         );
         assert!(ops.lock().unwrap().is_empty());
         assert!(marked.lock().unwrap().is_empty());
+    }
+
+    /// One write staged in the sink between flushes.
+    #[derive(Debug)]
+    enum CrashOp {
+        Upsert(String, GenericValue),
+        Delete(String),
+    }
+
+    /// A durable store behind a staging buffer — OpenSearch behind its bulk
+    /// buffer. `upsert`/`delete` stage an op; `flush` applies the staged ops to
+    /// the durable `store` atomically. A sink built to fail returns an error
+    /// from its first `flush` *without* touching the store, reproducing a crash
+    /// in the window after writes are buffered but before they are durable —
+    /// exactly what at-least-once delivery must survive.
+    ///
+    /// `store` is shared across runs on purpose: a flusso restart points at the
+    /// same destination, so what survived the crash is what the next run sees.
+    #[derive(Debug)]
+    struct CrashSink {
+        store: Arc<Mutex<BTreeMap<String, GenericValue>>>,
+        staging: Mutex<Vec<CrashOp>>,
+        fail_next_flush: AtomicBool,
+    }
+
+    impl CrashSink {
+        fn new(store: Arc<Mutex<BTreeMap<String, GenericValue>>>, fail_first_flush: bool) -> Self {
+            Self {
+                store,
+                staging: Mutex::new(Vec::new()),
+                fail_next_flush: AtomicBool::new(fail_first_flush),
+            }
+        }
+    }
+
+    /// The store key the engine's deterministic `_id` maps to within an index.
+    fn doc_key(index: &IndexName, id: &str) -> String {
+        format!("{}/{id}", index.as_ref())
+    }
+
+    #[async_trait]
+    impl Sink for CrashSink {
+        async fn upsert(
+            &self,
+            index: &IndexName,
+            id: &str,
+            document: &GenericValue,
+        ) -> sinks_core::Result<()> {
+            self.staging
+                .lock()
+                .unwrap()
+                .push(CrashOp::Upsert(doc_key(index, id), document.clone()));
+            Ok(())
+        }
+
+        async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+            self.staging
+                .lock()
+                .unwrap()
+                .push(CrashOp::Delete(doc_key(index, id)));
+            Ok(())
+        }
+
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
+            if self.fail_next_flush.swap(false, Ordering::SeqCst) {
+                // Crash before durability: the staged ops never reach the store.
+                return Err(sinks_core::SinkError::Write(
+                    "simulated crash before flush completed".to_owned(),
+                ));
+            }
+            let mut store = self.store.lock().unwrap();
+            for op in self.staging.lock().unwrap().drain(..) {
+                match op {
+                    CrashOp::Upsert(key, body) => {
+                        store.insert(key, body);
+                    }
+                    CrashOp::Delete(key) => {
+                        store.remove(&key);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// The at-least-once guarantee end to end: a crash in the window *after* a
+    /// batch's documents are buffered but *before* the flush that makes them
+    /// durable must lose nothing. The slot never advances over an unconfirmed
+    /// change, so the source redelivers the whole batch on restart, and rebuilding
+    /// from the current row by deterministic id re-applies it idempotently — the
+    /// durable state ends identical to a single clean run. This is the durability
+    /// counterpart to `confirms_no_ack_before_its_flush`, which guards the
+    /// ack-ordering half of the same invariant.
+    #[tokio::test]
+    async fn redelivers_and_reapplies_idempotently_after_a_crash_before_flush() {
+        let store: Arc<Mutex<BTreeMap<String, GenericValue>>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let acks = Arc::new(AtomicU64::new(0));
+        // A wide window and a high cap so both changes buffer into one batch and
+        // commit in a single flush — the one the first run crashes on.
+        let batch = BatchPolicy {
+            max_changes: 256,
+            max_delay: Duration::from_secs(10),
+        };
+
+        // Run 1: two changes are delivered and buffered, but the sole flush
+        // crashes — so nothing lands durably and nothing is confirmed.
+        let run1 = Engine::new(
+            Arc::new(MockSource {
+                changes: Mutex::new(Some(vec![
+                    upsert_change(1, 0, &acks),
+                    upsert_change(3, 1, &acks),
+                ])),
+            }),
+            Arc::new(MockDocuments),
+            Arc::new(CrashSink::new(Arc::clone(&store), true)),
+        )
+        .with_batch(batch)
+        .skip_backfill(true)
+        .run()
+        .await;
+
+        assert!(run1.is_err(), "the crashing flush stops the run");
+        assert!(
+            store.lock().unwrap().is_empty(),
+            "a crash before the flush completes leaves nothing durable"
+        );
+        assert_eq!(
+            acks.load(Ordering::SeqCst),
+            0,
+            "no change is confirmed when the flush that would persist it never completed"
+        );
+
+        // Run 2: nothing was confirmed, so the slot never advanced and the source
+        // redelivers the same changes. This run's flush succeeds.
+        Engine::new(
+            Arc::new(MockSource {
+                changes: Mutex::new(Some(vec![
+                    upsert_change(1, 0, &acks),
+                    upsert_change(3, 1, &acks),
+                ])),
+            }),
+            Arc::new(MockDocuments),
+            Arc::new(CrashSink::new(Arc::clone(&store), false)),
+        )
+        .with_batch(batch)
+        .skip_backfill(true)
+        .run()
+        .await
+        .unwrap();
+
+        // The redelivered batch lands exactly once, by deterministic id —
+        // identical to what a single clean run would have produced.
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store.keys().cloned().collect::<Vec<_>>(),
+            vec!["users/1".to_owned(), "users/3".to_owned()],
+            "both documents are durable exactly once after replay — no loss, no duplicate"
+        );
+        assert_eq!(
+            acks.load(Ordering::SeqCst),
+            2,
+            "every redelivered change is confirmed once its flush completes"
+        );
+    }
+
+    /// Records the `caught_up` flag of every flush, so a test can assert the
+    /// engine derives it from the queue and forwards it to the sink.
+    #[derive(Debug, Default)]
+    struct CaughtUpSink {
+        flushes: Arc<Mutex<Vec<bool>>>,
+    }
+
+    #[async_trait]
+    impl Sink for CaughtUpSink {
+        async fn upsert(
+            &self,
+            _index: &IndexName,
+            _id: &str,
+            _document: &GenericValue,
+        ) -> sinks_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _index: &IndexName, _id: &str) -> sinks_core::Result<()> {
+            Ok(())
+        }
+        async fn flush(&self, caught_up: bool) -> sinks_core::Result<()> {
+            self.flushes.lock().unwrap().push(caught_up);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn caught_up_is_false_while_a_backlog_drains_then_true_on_the_last_batch() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let flushes = Arc::new(Mutex::new(Vec::new()));
+        let documents = MockDocuments;
+        let sink = CaughtUpSink {
+            flushes: Arc::clone(&flushes),
+        };
+        let observer: Arc<dyn Observer> = Arc::new(NoopObserver);
+
+        // Pre-fill the queue and close it, so the worker sees a fixed backlog
+        // with no concurrent capture racing — making the caught-up sequence
+        // deterministic. Five changes in batches of two drain as [2, 2, 1]; only
+        // the final batch empties the queue.
+        let (producer, mut consumer) = channel::<Change>(16);
+        for seq in 0..5 {
+            producer
+                .publish(upsert_change(seq as i64, seq, &acks))
+                .await
+                .unwrap();
+        }
+        drop(producer);
+
+        let pipeline = Pipeline {
+            documents: &documents,
+            sink: &sink,
+            observer: &observer,
+            queue_capacity: 16,
+            batch: BatchPolicy {
+                max_changes: 2,
+                // Wide window: only the closed-and-drained queue ends a batch
+                // early, never the timer — so the split is purely backlog-driven.
+                max_delay: Duration::from_secs(10),
+            },
+        };
+        work(pipeline, &mut consumer, None).await.unwrap();
+
+        assert_eq!(
+            flushes.lock().unwrap().as_slice(),
+            &[false, false, true],
+            "a flush is caught up only once it has drained the queue behind it",
+        );
     }
 }

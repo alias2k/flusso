@@ -33,6 +33,8 @@ pub struct OpensearchSink {
     pub number_of_shards: u32,
     #[serde(default = "default_number_of_replicas")]
     pub number_of_replicas: u32,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval: String,
     #[serde(default)]
     pub text_analysis: TextAnalysis,
     #[serde(default = "default_auto_subfields")]
@@ -84,6 +86,13 @@ fn default_number_of_shards() -> u32 {
 
 fn default_number_of_replicas() -> u32 {
     1
+}
+
+/// A 10s steady-state ceiling: under sustained backlog (when flusso never
+/// catches up to force a refresh) documents are visible within 10s, while bulk
+/// indexing stays cheap. `"-1"` disables automatic refresh entirely.
+fn default_refresh_interval() -> String {
+    "10s".to_owned()
 }
 
 fn default_auto_subfields() -> bool {
