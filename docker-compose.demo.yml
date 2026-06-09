@@ -1,0 +1,35 @@
+# Demo override — layered on top of the base stack to add flusso itself, so the
+# whole thing (incl. flusso) runs in containers with no host toolchain:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+#
+# The base file (docker-compose.yml) brings up Postgres, OpenSearch (+ Dashboards),
+# Prometheus, and Grafana; this adds the `flusso` service on the same project, so
+# it shares their network and volumes. Don't also run a host `cargo run -- run`
+# at the same time — both would consume the same replication slot.
+#
+# Then: http://localhost:9464/status · http://localhost:3000 (Grafana) ·
+#       psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
+
+services:
+  flusso:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: flusso:dev
+    container_name: flusso-flusso
+    environment:
+      # Point the baked-in (127.0.0.1) config at the in-network service names.
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/flusso"
+      PRIMARY_OPENSEARCH_URL: "http://opensearch:9200"
+      RUST_LOG: "info"
+    # Publish 9464 so the base Prometheus reaches it via host.docker.internal:9464,
+    # exactly as it reaches a host-run flusso — one scrape config serves both.
+    ports:
+      - "9464:9464"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    restart: on-failure

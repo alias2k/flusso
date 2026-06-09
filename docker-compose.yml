@@ -83,10 +83,12 @@ services:
       opensearch:
         condition: service_healthy
 
-  # Scrapes flusso's `/metrics`. flusso runs on the *host* (cargo run), not in
-  # compose, so Prometheus reaches it via host.docker.internal — run flusso with
-  # `--http-addr 127.0.0.1:9464` (see dev/README.md). `extra_hosts` makes that
-  # name resolve on Linux too (Docker Desktop provides it automatically).
+  # Scrapes flusso's `/metrics` via host.docker.internal:9464 — which reaches a
+  # flusso run on the *host* (`cargo run -- run … --http-addr 127.0.0.1:9464`,
+  # the default workflow) *or*, when the demo override is layered on, the
+  # published port of the containerized flusso. So this one scrape config serves
+  # both. `extra_hosts` makes the name resolve on Linux too (Docker Desktop
+  # provides it automatically). See dev/README.md.
   prometheus:
     image: prom/prometheus:latest
     container_name: flusso-prometheus

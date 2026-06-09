@@ -1,0 +1,10 @@
+# Keep the build context small and the build reproducible.
+target/
+.git/
+.github/
+**/*.md
+dev/grafana/
+dev/prometheus/
+docker-compose*.yml
+Dockerfile
+.dockerignore

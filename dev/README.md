@@ -5,6 +5,42 @@ pre-seeded with data and the publication flusso consumes, plus a config + schema
 so you can watch documents stream into OpenSearch (and to stdout for inspection)
 as you change rows.
 
+## Two ways to run
+
+- **One-command demo** — everything in containers, *including flusso itself*. No
+  Rust toolchain needed; good for a quick look. See [Quick demo](#quick-demo).
+- **Dev stack** — Postgres/OpenSearch (+ Prometheus/Grafana) in Docker, with
+  flusso run on the host via `cargo run`. Better for iterating. See [Run it](#run-it).
+
+## Quick demo
+
+Brings up Postgres, OpenSearch (+ Dashboards), Prometheus, Grafana, **and flusso
+itself** — flusso is built from the repo and runs in the cluster. It's the base
+stack with a demo override layered on (the Docker way), so the demo file just
+adds the `flusso` service:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build   # first build compiles flusso (~a few min)
+```
+
+Once it's up:
+
+- flusso status / metrics — http://localhost:9464/status , http://localhost:9464/metrics
+- **Grafana** (flusso dashboard, opens straight in) — http://localhost:3000
+- OpenSearch — `curl -s localhost:9200/users/_search?pretty`
+- drive live changes:
+
+  ```sh
+  psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
+  ```
+
+flusso reads its baked-in `flusso.lock`; the connection and sink URLs are pointed
+at the in-cluster services via `DATABASE_URL` / `PRIMARY_OPENSEARCH_URL` in the
+override. Since it's the same Compose project, it shares the base stack's network
+and volumes — just don't *also* run a host `cargo run -- run` at the same time
+(both would consume the same replication slot). Tear down with
+`docker compose -f docker-compose.yml -f docker-compose.demo.yml down -v`.
+
 ## Layout
 
 A small e-commerce store (users, profiles, addresses, categories, products,
@@ -23,6 +59,7 @@ dev/
                             tags (m:n) + reviews + rating rollups
   orders.schema.yml         order + timeline group + line items + rollups
   changes.sql               sample INSERT/UPDATE/DELETE to watch live
+  load.sql                  simulate_production() — continuous read→modify→write load
   postgres/init/
     01_schema.sql           the 10-table store schema
     02_seed.sql             initial fixtures
@@ -124,3 +161,24 @@ The stack includes Prometheus and Grafana, both wired to flusso's metrics.
   curl -s localhost:9464/status | jq        # live pipeline state
   curl -s localhost:9464/metrics            # Prometheus exposition
   ```
+
+### Generate load
+
+To actually *see* throughput, in-flight backlog, slot lag, and flush latency
+move, drive sustained traffic with `load.sql` — it defines `simulate_production()`,
+a read→modify→write loop (user/product edits, line-item changes that
+reverse-resolve into orders + users, new orders, reviews, soft-deletes) that
+commits each tick so changes stream out as it runs:
+
+```sh
+# host stack (flusso via cargo run) or demo (containerized) — same DB:
+psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/load.sql
+psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" \
+  -c "CALL simulate_production(duration_secs => 300, ops_per_tick => 25, sleep_ms => 150)"
+```
+
+Tune the rate with `ops_per_tick` / `sleep_ms` (more ops, less sleep = higher
+throughput; `sleep_ms => 0` with a big `ops_per_tick` is a burst/stress run).
+Watch `flusso_changes_in_flight` climb when the source outruns the sink — that's
+back-pressure — and `flusso_replication_slot_lag_bytes` track how far behind
+Postgres flusso is.

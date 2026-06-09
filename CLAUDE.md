@@ -53,6 +53,16 @@ pre-provisioned with a flusso dashboard). Prometheus scrapes flusso's `/metrics`
 *host* via `host.docker.internal:9464`, so run `flusso run` with `--http-addr 127.0.0.1:9464`.
 Prometheus config and Grafana provisioning live under `dev/prometheus/` and `dev/grafana/`.
 
+For a **self-contained demo** that runs flusso *in* the cluster too (no host toolchain),
+layer the demo override on the base the Docker way:
+`docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build`. The override
+(`docker-compose.demo.yml`) just *adds* a `flusso` service built from the `Dockerfile`
+(release binary + a baked `flusso.lock`), pointed at the in-network services via
+`DATABASE_URL` / `PRIMARY_OPENSEARCH_URL`. It publishes `9464`, so the base Prometheus scrapes
+it via the same `host.docker.internal:9464` it uses for a host-run flusso — one config, both
+modes. Same project as the base, so it shares its volumes; don't run a host `cargo run` flusso
+and the container at once (same replication slot).
+
 `default-members = ["apps/cli"]`, so bare `cargo run` is the `flusso` binary. CLI
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
 baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run` (loads
@@ -216,6 +226,7 @@ belongs in the linked docs.
 | Query client (`flusso-search`) | `apps/search/src/` |
 | `#[derive(FlussoDocument)]` proc-macro | `apps/search-derive/src/` (+ the `flusso-search-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
+| Containerized demo (flusso in-cluster) | `docker-compose.demo.yml` (override that adds the `flusso` service over the base), `Dockerfile`, `.dockerignore` |
 
 ## Conventions
 
