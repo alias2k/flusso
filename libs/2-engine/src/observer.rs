@@ -16,6 +16,7 @@
 //! no-op default so an implementation overrides only what it cares about, and
 //! [`NoopObserver`] is the default when none is set.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use schema_core::IndexName;
@@ -93,3 +94,76 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
 pub struct NoopObserver;
 
 impl Observer for NoopObserver {}
+
+/// An [`Observer`] that forwards every event to several observers in turn.
+///
+/// The engine drives a single observer, so this composes many — e.g. one that
+/// updates a status surface and one that records metrics — without the engine
+/// knowing how many there are. Mirrors [`FanOutSink`](sinks_core::FanOutSink).
+#[derive(Debug, Default)]
+pub struct FanOut {
+    observers: Vec<Arc<dyn Observer>>,
+}
+
+impl FanOut {
+    /// Compose the given observers; each receives every event, in order.
+    pub fn new(observers: Vec<Arc<dyn Observer>>) -> Self {
+        Self { observers }
+    }
+}
+
+impl Observer for FanOut {
+    fn on_indexes_ensured(&self, count: usize) {
+        for observer in &self.observers {
+            observer.on_indexes_ensured(count);
+        }
+    }
+
+    fn on_backfill_started(&self, indexes: &[IndexName]) {
+        for observer in &self.observers {
+            observer.on_backfill_started(indexes);
+        }
+    }
+
+    fn on_index_seeded(&self, index: &IndexName) {
+        for observer in &self.observers {
+            observer.on_index_seeded(index);
+        }
+    }
+
+    fn on_backfill_completed(&self) {
+        for observer in &self.observers {
+            observer.on_backfill_completed();
+        }
+    }
+
+    fn on_live_started(&self) {
+        for observer in &self.observers {
+            observer.on_live_started();
+        }
+    }
+
+    fn on_change_captured(&self) {
+        for observer in &self.observers {
+            observer.on_change_captured();
+        }
+    }
+
+    fn on_batch_committed(&self, stats: BatchStats) {
+        for observer in &self.observers {
+            observer.on_batch_committed(stats.clone());
+        }
+    }
+
+    fn on_slot_lag(&self, bytes: u64) {
+        for observer in &self.observers {
+            observer.on_slot_lag(bytes);
+        }
+    }
+
+    fn on_error(&self, error: &str) {
+        for observer in &self.observers {
+            observer.on_error(error);
+        }
+    }
+}

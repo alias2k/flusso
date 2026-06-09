@@ -805,7 +805,6 @@ dependencies = [
  "async-trait",
  "engine",
  "futures",
- "opentelemetry",
  "schema",
  "schema-core",
  "serde",

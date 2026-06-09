@@ -1,13 +1,16 @@
 //! The `flusso` daemon — the supervisor around the [`engine`].
 //!
-//! It builds the pluggable parts from a validated [`Config`], wires an
-//! [`Observer`] that updates a shared [`Status`] (and records to the global
-//! OpenTelemetry meter), runs the engine, and polls source lag out of band.
+//! It builds the pluggable parts from a validated [`Config`], wires a
+//! [`StatusObserver`] that updates a shared [`Status`], runs the engine, and
+//! polls source lag out of band.
 //!
-//! It owns the **domain**: the pipeline and its observable state. It does *not*
-//! own **transport** — the HTTP surface, process signals, and the telemetry
-//! exporter setup live in the binary (the CLI), which installs a meter provider,
-//! reads the [`Status`] handle this exposes, serves it, and drives shutdown:
+//! It owns the **domain**: the pipeline and its observable state, and it is
+//! telemetry-agnostic — it depends only on the engine's [`Observer`] trait, not
+//! on any metrics backend. It does *not* own **transport**: the HTTP surface,
+//! process signals, the telemetry exporter, *and the metrics recording itself*
+//! live in the binary (the CLI), which installs a meter provider, attaches its
+//! own metrics observer via [`Daemon::with_observer`], reads the [`Status`]
+//! handle this exposes, serves it, and drives shutdown:
 //!
 //! ```text
 //!   CLI ── install meter provider ─▶ Daemon::start ──▶ RunningDaemon
@@ -20,15 +23,21 @@ mod lag;
 mod observer;
 pub mod status;
 
-pub use observer::DaemonObserver;
+pub use observer::StatusObserver;
 pub use status::{IndexState, Phase, Status, StatusSnapshot};
+
+// Re-exported so a binary can attach its own observer (e.g. a metrics recorder)
+// without depending on `engine`/`schema-core` directly — these are part of the
+// daemon's observe-the-pipeline surface.
+pub use engine::{BatchStats, Observer};
+pub use schema_core::IndexName;
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, ensure};
-use engine::{Engine, Observer};
+use engine::{Engine, FanOut};
 use schema::{Config, SourceType};
 use sources_core::cdc::ChangeCapture;
 use sources_postgres::WalChangeCapture;
@@ -70,6 +79,7 @@ impl Default for DaemonOptions {
 pub struct Daemon {
     config: Config,
     options: DaemonOptions,
+    extra_observers: Vec<Arc<dyn Observer>>,
 }
 
 impl Daemon {
@@ -78,6 +88,7 @@ impl Daemon {
         Self {
             config,
             options: DaemonOptions::default(),
+            extra_observers: Vec::new(),
         }
     }
 
@@ -87,16 +98,28 @@ impl Daemon {
         self
     }
 
+    /// Attach an additional [`Observer`] alongside the daemon's own status
+    /// observer — e.g. a metrics recorder the binary owns. All attached
+    /// observers receive every event (the engine drives a [`FanOut`]).
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.extra_observers.push(observer);
+        self
+    }
+
     /// Build the pipeline and its observable state, returning a [`RunningDaemon`]
     /// whose [`status`](RunningDaemon::status) can be read (e.g. served over HTTP)
     /// while it runs.
     ///
-    /// The observer records to the **global** OpenTelemetry meter, so install a
-    /// meter provider *before* calling this if metrics are wanted; with none, the
-    /// instruments are no-ops.
+    /// If an attached observer (via [`with_observer`](Self::with_observer)) records
+    /// to the global OpenTelemetry meter, install a meter provider *before* calling
+    /// this; otherwise its instruments are no-ops.
     #[tracing::instrument(name = "daemon.start", skip_all)]
     pub async fn start(self) -> anyhow::Result<RunningDaemon> {
-        let Daemon { config, options } = self;
+        let Daemon {
+            config,
+            options,
+            extra_observers,
+        } = self;
         ensure!(
             config.source.source_type == SourceType::Postgres,
             "only postgres sources are supported",
@@ -114,7 +137,12 @@ impl Daemon {
         );
 
         let status = Arc::new(Status::new(config.indexes.keys().cloned(), Instant::now()));
-        let observer: Arc<dyn Observer> = Arc::new(DaemonObserver::new(Arc::clone(&status)));
+        // The daemon's own observer updates status; any binary-supplied observers
+        // (metrics, …) ride alongside it through one fan-out.
+        let mut observers: Vec<Arc<dyn Observer>> =
+            vec![Arc::new(StatusObserver::new(Arc::clone(&status)))];
+        observers.extend(extra_observers);
+        let observer: Arc<dyn Observer> = Arc::new(FanOut::new(observers));
 
         let config = Arc::new(config);
         let source: Arc<dyn ChangeCapture> =
@@ -201,7 +229,7 @@ mod tests {
     use sources_core::cdc::Change;
     use tokio::sync::Notify;
 
-    use crate::observer::DaemonObserver;
+    use crate::observer::StatusObserver;
     use crate::status::{IndexState, Phase};
 
     fn users() -> IndexName {
@@ -213,7 +241,7 @@ mod tests {
     #[test]
     fn observer_drives_status_through_its_lifecycle() {
         let status = Arc::new(Status::new([users()], Instant::now()));
-        let observer = DaemonObserver::new(Arc::clone(&status));
+        let observer = StatusObserver::new(Arc::clone(&status));
 
         // Starts pending, before any events.
         let snap = status.snapshot();
@@ -266,7 +294,7 @@ mod tests {
     #[test]
     fn already_seeded_index_and_error_phase() {
         let status = Arc::new(Status::new([users()], Instant::now()));
-        let observer = DaemonObserver::new(Arc::clone(&status));
+        let observer = StatusObserver::new(Arc::clone(&status));
 
         // No backfill_started for `users` — it was already seeded.
         observer.on_live_started();

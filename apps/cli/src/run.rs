@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::DEFAULT_ARTIFACT;
+use crate::observer::OtelObserver;
 use crate::{http, metrics, telemetry};
 
 #[derive(Debug, Args)]
@@ -99,8 +100,19 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
     };
 
-    let running = Daemon::new(config).with_options(options).start().await?;
+    // Attach the metrics observer (records to the meter installed above; a no-op
+    // if none). Metric definitions live in the binary — the daemon is agnostic.
+    let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new());
+    let running = Daemon::new(config)
+        .with_options(options)
+        .with_observer(otel_observer)
+        .start()
+        .await?;
     let status = running.status();
+
+    // `in_flight` is derived from the status, so it's an observable gauge
+    // registered now that the handle exists. Kept alive for the run's duration.
+    let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
 
     // Serve the status/metrics surface (graceful drain on `http_shutdown`).
     let (http_shutdown, http_rx) = oneshot::channel::<()>();

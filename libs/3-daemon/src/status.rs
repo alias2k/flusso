@@ -130,8 +130,9 @@ impl Status {
     }
 
     /// Changes captured but not yet committed — the queue/back-pressure signal.
-    /// A cheap two-atomic read, safe to call from a metrics collection thread.
-    pub(crate) fn in_flight(&self) -> u64 {
+    /// A cheap two-atomic read, safe to call from a metrics collection thread
+    /// (e.g. an observable-gauge callback in the binary).
+    pub fn in_flight(&self) -> u64 {
         self.changes_captured
             .load(Ordering::Relaxed)
             .saturating_sub(self.changes_committed.load(Ordering::Relaxed))

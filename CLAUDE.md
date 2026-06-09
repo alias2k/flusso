@@ -121,27 +121,33 @@ touching the loop. Key invariants to preserve when editing the engine:
 ### The daemon (`libs/3-daemon/src/lib.rs`) — domain only
 
 The daemon owns the **domain**: it builds the pluggable parts from a `Config` (`build.rs`,
-the wiring `run.rs` used to do inline), wires a `DaemonObserver` (`observer.rs`) that updates
-a shared `Status` (`status.rs`) and records to the **global** OpenTelemetry meter, runs the
-engine, and polls source capture lag out-of-band (`lag.rs` over `ChangeCapture::lag`). It does
-**not** own transport — no HTTP server, no process signals, no metrics *exporter*; those are
-the binary's. `Daemon::start()` builds everything and returns a `RunningDaemon` exposing
-`status()` (an `Arc<Status>` a transport can read) and `run(shutdown)`, which runs until the
-stream ends, an error stops it, or the caller's `shutdown` future fires. So the daemon's
-public contract is *data* (`Status` + the global-meter instruments), and the CLI presents it.
+the wiring `run.rs` used to do inline), wires a `StatusObserver` (`observer.rs`) that updates a
+shared `Status` (`status.rs`), runs the engine, and polls source capture lag out-of-band
+(`lag.rs` over `ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
+engine's `Observer` trait, not on any metrics backend — and owns **no transport**: no HTTP
+server, no process signals, no metrics *recording* or *exporter*; those are the binary's.
+`Daemon::start()` builds everything and returns a `RunningDaemon` exposing `status()` (an
+`Arc<Status>` a transport can read) and `run(shutdown)`, which runs until the stream ends, an
+error stops it, or the caller's `shutdown` future fires. A binary attaches its own metrics
+observer via `Daemon::with_observer`; the engine drives a `FanOut` (`engine::FanOut`) of the
+status observer plus any attached ones. So the daemon's public contract is *data*: the
+backend-agnostic `Observer` events and the `Status` handle.
 
-The CLI (`apps/cli`) is the **composition root** for transport: it installs the meter provider
-(`metrics.rs` — one `SdkMeterProvider` feeding a Prometheus reader scraped at `/metrics` when
-`--http-addr` is set, and an OTLP periodic push when the standard `OTEL_EXPORTER_OTLP_*` env
-vars configure an endpoint, matching the trace export in `telemetry.rs`), serves the HTTP
-surface (`http.rs`: `/healthz` `/readyz` `/status` `/metrics`, reading the daemon's `Status` +
-the Prometheus registry), and owns SIGINT/SIGTERM. It binds the listener up front (a bad
-`--http-addr` fails fast), then `Daemon::start()` → serve → `run(shutdown_signal())` → drain.
-With no meter provider installed the global meter is a no-op and the instruments cost nothing
-— which is why the daemon tests run with no setup. A view in `metrics.rs` overrides the
-flush-duration histogram buckets to seconds (OTel's defaults assume milliseconds). The
-Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened admin pool
-(`WalChangeCapture::admin_pool`) so periodic lag probes reuse connections.
+The CLI (`apps/cli`) is the **composition root** for transport and telemetry: it installs the
+meter provider (`metrics.rs` — one `SdkMeterProvider` feeding a Prometheus reader scraped at
+`/metrics` when `--http-addr` is set, and an OTLP periodic push when the standard
+`OTEL_EXPORTER_OTLP_*` env vars configure an endpoint, matching the trace export in
+`telemetry.rs`), defines the metrics and records them (`observer.rs`'s `OtelObserver`, attached
+via `with_observer`; metric names/labels/buckets live here because they're a presentation
+choice), serves the HTTP surface (`http.rs`: `/healthz` `/readyz` `/status` `/metrics`, reading
+the daemon's `Status` + the Prometheus registry), and owns SIGINT/SIGTERM. It binds the
+listener up front (a bad `--http-addr` fails fast), then `Daemon::with_observer(otel).start()`
+→ register the `in_flight` observable gauge (read from `Status` at collection) → serve →
+`run(shutdown_signal())` → drain. With no meter provider installed the global meter is a no-op
+and the instruments cost nothing — which is why the daemon tests run with no setup. A view in
+`metrics.rs` overrides the flush-duration histogram buckets to seconds (OTel's defaults assume
+milliseconds). The Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened
+admin pool (`WalChangeCapture::admin_pool`) so periodic lag probes reuse connections.
 
 ### Config layer — two-stage parse then convert
 
@@ -194,9 +200,9 @@ belongs in the linked docs.
 | To work on… | Go to |
 | --- | --- |
 | The sync loop / batching / ack ordering | `libs/2-engine/src/lib.rs` |
-| Pipeline observability trait (`Observer`, `BatchStats`) | `libs/2-engine/src/observer.rs` |
-| Daemon (domain): pipeline wiring, `Status`, observer, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `observer.rs`, `status.rs`, `lag.rs`, `build.rs` |
-| Transport (binary): telemetry export, HTTP surface, signals | `apps/cli/src/` — `telemetry.rs` (traces), `metrics.rs` (meter provider), `http.rs` (`/healthz` `/readyz` `/status` `/metrics`), `run.rs` (orchestration + signals) |
+| Pipeline observability trait (`Observer`, `BatchStats`, `FanOut`) | `libs/2-engine/src/observer.rs` |
+| Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `observer.rs`, `status.rs`, `lag.rs`, `build.rs` |
+| Transport + telemetry (binary): exporters, metrics recording, HTTP surface, signals | `apps/cli/src/` — `telemetry.rs` (traces), `metrics.rs` (meter provider + `in_flight` gauge), `observer.rs` (`OtelObserver`), `http.rs` (`/healthz` `/readyz` `/status` `/metrics`), `run.rs` (orchestration + signals) |
 | Config loading entry point | `libs/0-schema/src/lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`) |
 | Validated domain model (the shared types) | `libs/0-schema/0-core/src/` — `config/`, `common/` (newtypes), `GenericValue` |
 | `flusso.toml` parsing | `libs/0-schema/1-config-toml/src/` (`entities/`, `conversion.rs`) |

@@ -12,10 +12,13 @@
 //! `global::meter` and records into whichever readers are configured (and
 //! harmlessly into none, as a no-op, when metrics are off).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use daemon::Status;
 use opentelemetry::global;
+use opentelemetry::metrics::ObservableGauge;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{Aggregation, PeriodicReader, SdkMeterProvider, Stream};
 use prometheus::Registry;
@@ -111,6 +114,19 @@ pub(crate) fn init(prometheus: bool) -> anyhow::Result<Metrics> {
     let provider = builder.build();
     global::set_meter_provider(provider.clone());
     Ok(Metrics { provider, registry })
+}
+
+/// Register `flusso.changes.in_flight` as an observable gauge that reads the
+/// daemon's [`Status`] at collection time — so it stays current even while the
+/// sink is stalled (no commits), which is when a growing backlog matters most.
+/// Returns the instrument handle, which the caller keeps alive to keep the
+/// callback registered.
+pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u64> {
+    global::meter("flusso")
+        .u64_observable_gauge("flusso.changes.in_flight")
+        .with_description("Captured but not yet committed changes (back-pressure)")
+        .with_callback(move |observer| observer.observe(status.in_flight(), &[]))
+        .build()
 }
 
 /// Whether an OTLP endpoint is configured (general or metrics-specific).

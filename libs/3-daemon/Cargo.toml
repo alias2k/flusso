@@ -20,9 +20,6 @@ tracing.workspace = true
 url.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
-# The observer records onto the *global* OpenTelemetry meter; the exporter and
-# meter provider are installed by the binary, so no SDK/exporter deps here.
-opentelemetry = { workspace = true, features = ["metrics"] }
 
 [dev-dependencies]
 async-trait.workspace = true
