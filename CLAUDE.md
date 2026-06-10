@@ -8,7 +8,9 @@ flusso keeps OpenSearch in sync with Postgres from declarative config. You descr
 search document in YAML (`*.schema.yml`); flusso derives the index mapping, seeds it,
 then follows Postgres logical replication so the index stays current. Read `README.md`
 for the full picture, `SCHEMA.md` for every config/schema key, `SOURCES_AND_SINKS.md`
-for source/sink options, and `CLIENT.md` for the query-side `flusso-search` crate.
+for source/sink options, `CONFIG.md` for every environment variable (secrets, the
+`FLUSSO_*` flag overrides, logging/telemetry — centralized there, not in the other docs),
+and `CLIENT.md` for the query-side `flusso-search` crate.
 
 ## Commands
 

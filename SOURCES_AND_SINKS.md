@@ -1,88 +1,50 @@
 # flusso sources and sinks
 
-flusso connects one **source** — where rows come from — to one or more **sinks**
-— where the built documents go. They are configured under `[source]` and
-`[sinks.<name>]` in `flusso.toml`; this document is the reference for every
+> [!IMPORTANT]
+> ## 🤖 Generative AI disclosure
+>
+> **Generative AI was used in this project to produce boilerplate and
+> documentation.** Every single line of code has been manually reviewed and
+> revised by a human software developer.
+
+flusso connects one **source** — where rows come from — to one or more **sinks**,
+where the built documents go. You configure them under `[source]` and
+`[sinks.<name>]` in `flusso.toml`, and this document is the reference for every
 supported type and its options.
 
-For the overall `flusso.toml` structure, the `env_or_value` form, and the
-reserved-environment-variable override rules referenced throughout, see
-[`SCHEMA.md`](SCHEMA.md). For the index document format, see the same file.
+The cast is short today: Postgres in, OpenSearch (or stdout) out. The seams are
+trait objects, so the menu can grow without the engine noticing — but this page
+only documents what actually ships.
+
+For the overall `flusso.toml` structure and the index document format, see
+[`SCHEMA.md`](SCHEMA.md). For how environment variables resolve and override these
+values — the `{ env = "VAR" }` form, the reserved deployment-override names, and
+who wins when two of them disagree — see [`CONFIG.md`](CONFIG.md). For the
+query-side client that reads what flusso writes, see [`CLIENT.md`](CLIENT.md). The
+big-picture tour lives in [`README.md`](README.md).
+
+## Contents
+
+- [The model](#the-model) — one source, many sinks
+- [Sinks](#sinks) — where documents land
+  - [OpenSearch](#opensearch) — the real sink, with all the knobs
+  - [Index analysis & subfields](#index-analysis--subfields) — what flusso bakes into every index
+  - [Stdout](#stdout) — the development sink
+- [Sources](#sources) — where rows come from
+  - [Postgres](#postgres) — connection shapes and change capture
 
 ## The model
 
-- **One source, many sinks.** A deployment reads from a single source and writes
-  every document to *all* configured sinks (**fan-out**). Define as many as you
-  need; if none are defined, the CLI falls back to a single [stdout](#stdout) sink.
-- **Pluggable.** Source, sink, and the in-process queue are trait objects, so
-  the backend choices below can be swapped without touching the engine. The
-  types documented here are the ones implemented today.
+**One source, many sinks.** A deployment reads from a single source and writes
+every document to *all* configured sinks. That's the fan-out: define as many
+destinations as you need, and the same document lands in each. Define none and the
+CLI quietly falls back to a single [stdout](#stdout) sink, which is more useful
+than it sounds when you're poking at things.
 
----
-
-## Sources
-
-### Postgres
-
-```toml
-[source]
-type = "postgres"
-connection_url = "postgresql://user:pass@localhost:5432/mydb"
-```
-
-The only source type today. flusso follows Postgres' **logical replication**
-stream to capture changes, and snapshots tables to seed an index before
-following live changes.
-
-#### Connection
-
-`connection_url` takes one of two shapes.
-
-**A full URL** — a string or [`env_or_value`](SCHEMA.md#env_or_value). Must match
-`^(postgresql|postgres)://…`:
-
-```toml
-connection_url = "postgresql://user:pass@localhost:5432/mydb"
-connection_url = { env = "DATABASE_URL" }
-```
-
-**Individual parts** — a table. `database` is required; the rest default:
-
-| Part | Type | Default | |
-| --- | --- | --- | --- |
-| `host` | string | `127.0.0.1` | |
-| `port` | int (1–65535) | `5432` | |
-| `user` | string | `postgres` | |
-| `password` | `env_or_value` | — | optional |
-| `database` | string | — | **required** |
-
-```toml
-[source.connection_url]
-host = "127.0.0.1"
-port = 5432
-user = "postgres"
-password = { env = "PGPASSWORD" }
-database = "mydb"
-```
-
-The reserved **`DATABASE_URL`** environment variable overrides whichever shape is
-configured, and fills an omitted `connection_url` — see
-[Reserved environment variables](SCHEMA.md#reserved-environment-variables) for
-the precedence.
-
-#### How it captures changes
-
-- **Logical replication (WAL).** flusso consumes a logical replication slot. The
-  slot is **created automatically** if it does not exist; the **publication must
-  already exist** (it decides which tables are streamed — a schema decision, not
-  a runtime one). Slot and publication names are CLI flags (`--slot`,
-  `--publication`, both defaulting to `flusso`).
-- **Backfill.** Before live capture, the engine asks each sink whether an index
-  is already seeded and, for those that aren't, snapshots the root tables to seed
-  them. `--skip-backfill` resumes live capture only.
-- Requires `wal_level = logical` on the server. See the
-  [`dev/`](dev/README.md) environment for a ready-to-run Postgres configured for
-  this.
+**Pluggable.** Source, sink, and the in-process queue are all trait objects, so
+the backend choices below swap without touching the engine. The types documented
+here are the ones implemented today; the abstraction is ready for more, the
+authors are not.
 
 ---
 
@@ -112,7 +74,15 @@ password = { env = "OS_PASSWORD" }
 batch_size = 2000
 ```
 
-Writes documents to an OpenSearch cluster via the bulk API.
+Writes documents to an OpenSearch cluster via the bulk API. This is the sink you
+actually deploy.
+
+`url`, `username`, and `password` each accept an
+[`env_or_value`](CONFIG.md#secret--connection-values) — a literal, or a
+`{ env = "VAR" }` reference resolved when the pipeline runs. These three fields can
+also be supplied or overridden per sink via reserved deployment-override
+variables; the naming and precedence rules live in
+[`CONFIG.md`](CONFIG.md#secret--connection-values).
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -130,11 +100,6 @@ Writes documents to an OpenSearch cluster via the bulk API.
 | `refresh_interval` | string | `"10s"` | OpenSearch `refresh_interval` applied to each index after seeding — the steady-state visibility ceiling (e.g. `"10s"`, `"1s"`, or `"-1"` to disable auto-refresh). flusso forces an immediate refresh whenever the pipeline catches up, so this only bounds staleness while a backlog drains (see below). |
 | `text_analysis` | `builtin` \| `icu` | `builtin` | Analysis backend for the `flusso_*` analyzers (see [below](#index-analysis--subfields)). `icu` requires the `analysis-icu` plugin on every node. |
 | `auto_subfields` | bool | `true` | Auto-enrich `text`/`keyword` fields with a good analyzer and subfields. A field's explicit `mapping` always wins; set `false` to emit fields bare. |
-
-`url`, `username`, and `password` can also be supplied or overridden per sink via
-the reserved `<SINK>_OPENSEARCH_URL` / `_USERNAME` / `_PASSWORD` environment
-variables (for `[sinks.primary]`, that's `PRIMARY_OPENSEARCH_*`). See
-[Reserved environment variables](SCHEMA.md#reserved-environment-variables).
 
 **How it owns its indexes:**
 
@@ -160,13 +125,15 @@ variables (for `[sinks.primary]`, that's `PRIMARY_OPENSEARCH_*`). See
   and, unless `auto_subfields` is off, well-shaped `text`/`keyword` fields — see
   [Index analysis & subfields](#index-analysis--subfields).
 - **Seeding markers.** Seeded state is persisted in a hidden `flusso_meta` index,
-  so a restart skips a completed backfill.
+  so a restart skips a completed backfill instead of redoing all that work for
+  old times' sake.
 
 #### Index analysis & subfields
 
-The sink creates every index with a good search setup out of the box. flusso
-owns the **index** (mapping + analyzers + subfields); your application owns the
-**queries** — the notes below say which subfield to target for each job.
+The sink creates every index with a good search setup out of the box. flusso owns
+the **index** (mapping + analyzers + subfields); your application owns the
+**queries**. The notes below say which subfield to target for each job, so you
+don't have to reverse-engineer it later.
 
 **Analyzers** (always defined, named `flusso_*`):
 
@@ -194,7 +161,8 @@ plugins.
 `boolean`, …) and the `object`/`nested` containers are emitted as-is. Any key you
 set in a field's `mapping` overrides the auto default for that field — e.g.
 supplying your own `analyzer` replaces `flusso_code`, and supplying `fields`
-replaces the auto subfields wholesale.
+replaces the auto subfields wholesale. flusso has opinions, but they yield to
+yours.
 
 Example query against a `text` field `name`, precise (all terms must match) and
 case/punctuation-insensitive:
@@ -212,7 +180,7 @@ pretty = true
 ```
 
 Writes each operation to standard output as a JSON envelope — handy for
-development and for piping into `jq`.
+development and for piping into `jq` at 2am to find out why a document looks wrong.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -230,3 +198,74 @@ An `upsert` carries the `document`; a `delete` does not.
 ```
 
 > Logs go to **stderr**, so stdout stays a clean data stream.
+
+---
+
+## Sources
+
+A source is where rows come from. There is exactly one per deployment, and exactly
+one type today.
+
+### Postgres
+
+```toml
+[source]
+type = "postgres"
+connection_url = "postgresql://user:pass@localhost:5432/mydb"
+```
+
+The only source type today. flusso follows Postgres' **logical replication**
+stream to capture changes, and snapshots tables to seed an index before following
+live changes.
+
+#### Connection
+
+`connection_url` takes one of two shapes — pick whichever you find less annoying
+to template.
+
+**A full URL** — a string or
+[`env_or_value`](CONFIG.md#secret--connection-values). Must match
+`^(postgresql|postgres)://…`:
+
+```toml
+connection_url = "postgresql://user:pass@localhost:5432/mydb"
+connection_url = { env = "DATABASE_URL" }
+```
+
+**Individual parts** — a table. `database` is required; the rest default:
+
+| Part | Type | Default | |
+| --- | --- | --- | --- |
+| `host` | string | `127.0.0.1` | |
+| `port` | int (1–65535) | `5432` | |
+| `user` | string | `postgres` | |
+| `password` | `env_or_value` | — | optional |
+| `database` | string | — | **required** |
+
+```toml
+[source.connection_url]
+host = "127.0.0.1"
+port = 5432
+user = "postgres"
+password = { env = "PGPASSWORD" }
+database = "mydb"
+```
+
+Whichever shape you choose can be overridden by a reserved deployment variable, so
+the same config travels across environments unedited — see
+[`CONFIG.md`](CONFIG.md#secret--connection-values) for the override and precedence
+rules.
+
+#### How it captures changes
+
+- **Logical replication (WAL).** flusso consumes a logical replication slot. The
+  slot is **created automatically** if it does not exist; the **publication must
+  already exist** (it decides which tables are streamed — a schema decision, not
+  a runtime one). Slot and publication names are CLI flags (`--slot`,
+  `--publication`, both defaulting to `flusso`).
+- **Backfill.** Before live capture, the engine asks each sink whether an index
+  is already seeded and, for those that aren't, snapshots the root tables to seed
+  them. `--skip-backfill` resumes live capture only.
+- Requires `wal_level = logical` on the server. See the
+  [`dev/`](dev/README.md) environment for a ready-to-run Postgres configured for
+  this, so you don't have to discover the requirement the hard way.

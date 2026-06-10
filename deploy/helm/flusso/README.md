@@ -1,5 +1,12 @@
 # flusso Helm chart
 
+> [!IMPORTANT]
+> ## 🤖 Generative AI disclosure
+>
+> **Generative AI was used in this project to produce boilerplate and
+> documentation.** Every single line of code has been manually reviewed and
+> revised by a human software developer.
+
 Deploys [flusso](../../../README.md) — which keeps OpenSearch in sync with
 Postgres from declarative config — as a single Kubernetes Deployment.
 

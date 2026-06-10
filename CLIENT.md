@@ -1,24 +1,34 @@
 # flusso client (endgame)
 
+> [!IMPORTANT]
+> ## 🤖 Generative AI disclosure
+>
+> **Generative AI was used in this project to produce boilerplate and
+> documentation.** Every single line of code has been manually reviewed and
+> revised by a human software developer.
+
 > [!NOTE]
 > This is a **target document**, not a description of code that exists. It writes
 > the client crate's API the way we wish we could call it, so the implementation
 > has a fixed point to aim at. Everything below is aspirational; nothing here is
 > built yet.
 
-flusso keeps an OpenSearch index in sync with Postgres from a declarative
-schema. That schema is a contract: it fixes the shape of every document in the
-index — which fields exist, their types, which are nested arrays, which are
-scalars. Today that contract is enforced on the **write** side (the engine
-builds the index to match) but not on the **read** side: anyone querying the
-index hand-writes OpenSearch JSON and hand-deserializes the results, with
-nothing checking either against the schema.
+flusso keeps an OpenSearch index in sync with Postgres from a declarative schema
+(see [`README.md`](README.md) for the write side). That schema is a contract: it
+fixes the shape of every document in the index — which fields exist, their types,
+which are nested arrays, which are scalars.
 
-`flusso-search` closes that gap — but it does **not** generate the document
-types for you. The developer writes the document struct by hand and keeps full
-control over it: its derives, its field types, which fields it projects, how the
-doc keys map to Rust names. A **derive macro** then does two things against the
-resolved schema, at compile time:
+Today that contract is enforced on the **write** side — the engine builds the
+index to match — but not on the **read** side. Anyone querying the index
+hand-writes OpenSearch JSON and hand-deserializes the results, with nothing
+checking either against the schema. It works right up until someone renames a
+field and finds out in production.
+
+`flusso-search` closes that gap. Notably, it does **not** generate the document
+types for you. You write the document struct by hand and keep full control over
+it: its derives, its field types, which fields it projects, how the doc keys map
+to Rust names. A **derive macro** then does two things against the resolved
+schema, at compile time:
 
 1. **Validates** that every field the struct declares lines up with the schema —
    the field exists, its Rust type matches the field's type, and its nullability
@@ -28,24 +38,38 @@ resolved schema, at compile time:
    `get`/`search` entry points, the schema hash — so a downstream service queries
    the index the way it would call a typed function: field names checked at
    compile time, operators that only exist for the field types that support them,
-   and results that deserialize into the struct the developer wrote.
+   and results that deserialize into the struct you wrote.
 
 The query surface comes from the **full schema**, not from the struct — so you
 can filter or sort on a field even if your struct doesn't deserialize it. The
 struct is a projection you control; the schema is the contract both the struct
 and the query surface are checked against. When the schema changes and the index
 is rebuilt, the schema the macro reads changes with it, and any struct or query
-that no longer fits stops compiling — the drift surfaces at `cargo build`, not in
-production.
+that no longer fits stops compiling. The drift surfaces at `cargo build`, not at
+2am.
+
+## Contents
+
+- [A query, from the caller's seat](#a-query-from-the-callers-seat) — the whole thing in one example
+- [What the field type buys you](#what-the-field-type-buys-you) — operators, composing queries, optional filters
+- [Filtering nested collections](#filtering-nested-collections) — filter *by* vs. filter *of*
+- [Results](#results) — what `get`/`search` hand back
+- [Binding to the schema](#binding-to-the-schema) — how the macro finds and reads the schema
+- [The escape hatch](#the-escape-hatch) — raw DSL when the typed surface can't reach
+- [Resolving the index name](#resolving-the-index-name) — the hashed physical index
+- [Explicitly out of scope for the first cut](#explicitly-out-of-scope-for-the-first-cut)
+- [Where this lands in the workspace](#where-this-lands-in-the-workspace)
 
 ---
 
-## The shape of it, from a caller's seat
+## A query, from the caller's seat
 
-A service that searches the `users` index from [`SCHEMA.md`](SCHEMA.md). The
-developer writes the structs; `#[derive(FlussoDocument)]` validates them and
-generates the query surface. The only thing the macro needs is the **index
-name** — it finds `flusso.toml` itself (see "Binding to the schema"):
+Here is a service that searches the `users` index from [`SCHEMA.md`](SCHEMA.md).
+You write the structs; `#[derive(FlussoDocument)]` validates them and generates
+the query surface. The only thing the macro needs is the **index name** — it
+finds `flusso.toml` itself (see [Binding to the schema](#binding-to-the-schema)).
+
+### The document structs
 
 ```rust
 use flusso_search::{Client, FlussoDocument};
@@ -99,7 +123,11 @@ pub struct Item {
     #[serde(rename = "unitPrice")]
     pub unit_price: f64,
 }
+```
 
+### The query
+
+```rust
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Transport. Points at OpenSearch, not at flusso — the engine is write-only;
@@ -143,16 +171,273 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-The whole point is what you *can't* write. `User::email().matches(..)` does not
-compile — `matches` is a text operator and `email` is a `keyword`.
-`User::full_name().eq(..)` does not compile — `full_name` is analyzed `text`, so
-it has no exact `eq`. `User::nmae()` does not compile — there is no such handle.
-`hit.source.totl` does not compile. And — the new guarantee — the struct itself
-can't drift: declaring `email: i32`, or `email: Option<String>` when the field is
-`required`, or a field `totl` the schema doesn't have, is a **compile error from
-the derive**, not a runtime surprise. None of these are runtime errors; the
-schema has been lifted into the type system, so the compiler is checking both
-your queries and your struct against it.
+### What you *can't* write
+
+That last part is the whole point. The compiler refuses the mistakes:
+
+- `User::email().matches(..)` does not compile — `matches` is a text operator and
+  `email` is a `keyword`.
+- `User::full_name().eq(..)` does not compile — `full_name` is analyzed `text`, so
+  it has no exact `eq`.
+- `User::nmae()` does not compile — there is no such handle.
+- `hit.source.totl` does not compile.
+
+And — the new guarantee — the struct itself can't drift. Declaring `email: i32`,
+or `email: Option<String>` when the field is `required`, or a field `totl` the
+schema doesn't have, is a **compile error from the derive**, not a runtime
+surprise. None of these are runtime errors; the schema has been lifted into the
+type system, so the compiler is checking both your queries and your struct
+against it.
+
+> `OS_PASSWORD` above is just a variable name you picked for the example — there's
+> nothing special about it. The full env-var story (secrets, the reserved
+> deployment overrides, `FLUSSO_CONFIG`) lives in [`CONFIG.md`](CONFIG.md).
+
+---
+
+## What the field type buys you
+
+The handle a schema field generates determines the operators in scope. This is
+the type safety that matters: an operator that doesn't make sense for a field's
+type *doesn't exist* on its handle, so the mistake is a compile error rather than
+a 400 from OpenSearch.
+
+| Handle          | Operators                                                                 |
+| --------------- | ------------------------------------------------------------------------- |
+| `Keyword`       | `eq`, `in_`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `exists`            |
+| `Text`          | `matches`, `match_phrase`, `match_phrase_prefix`, `matches_fuzzy`, `exists` — *no* exact `eq` (it's analyzed) |
+| `Bool`          | `eq`, `exists`                                                            |
+| `Number<T>`     | `eq`, `in_`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                |
+| `Date`          | `eq`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                       |
+| `Object<S>`     | `exists` (a same-document sub-object — group or `one_to_one`; `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
+| `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
+| `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
+| `Binary`        | `exists` — base64-encoded, not searchable                                 |
+| `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
+
+Each operator's argument is typed too: `User::order_count().gte(_)` takes an
+`i64`, `User::order_count().between(_, _)` takes two; `User::email().in_(_)` takes
+an `IntoIterator<Item = impl Into<String>>`.
+
+Sorting is the same — `sort(…)` only accepts handles whose type is sortable
+(numbers, dates, keywords, booleans), so `sort(User::full_name().desc())` on a
+`text` field is a compile error, mirroring OpenSearch's own refusal to sort
+un-`fielddata` text.
+
+A few clauses span more than one field, so they're free functions rather than
+single-handle operators: `multi_match("ada", [User::full_name(), User::bio()])`
+runs one analyzed query across several `Text` fields.
+
+Anything outside the typed surface — `knn`, `function_score`, `script`,
+`geo_shape`, span queries — stays reachable through the
+[`raw`](#the-escape-hatch) hatch by design. Lifting every OpenSearch clause into a
+typed handle would dilute the type guarantee (a `regexp` on a number is
+meaningless), so the typed surface is the operators that fit a field's type, and
+nothing more.
+
+### Composing queries
+
+A handle's operator produces a `Query<S>` — a query that carries the **scope** it
+was built in: the document or nested context `S` it constrains. The root document
+and any flattened `object`/`one_to_one` sub-field share the scope `Root` (so root
+handles produce `Query<Root>`); only a `nested` array introduces a fresh scope,
+tagged with its element type (`Query<Order>`).
+
+Queries compose with `and` / `or` / `not` *within a scope*, and the `Search`
+builder exposes the bool-query clauses directly for callers who want
+score-vs-filter control:
+
+```rust
+// Combinator style.
+let q = User::email().eq("ada@example.com")
+    .and(User::order_count().gte(5))
+    .and(User::orders().any(Order::status().eq("delivered").and(Order::total().gt(0.0))));
+
+User::search(&client).query(q).send().await?;
+
+// Clause style — `filter`/`must_not` don't score, `query`(=must)/`should` do.
+User::search(&client)
+    .query(User::full_name().matches("ada"))       // scored
+    .filter(User::order_count().gte(5))            // filtered, cached, no score
+    .must_not(User::email().prefix("test-"))
+    .should(User::orders().any(Order::status().eq("delivered")))
+    .send()
+    .await?;
+```
+
+`query`/`filter`/`must_not`/`should` accept anything that is a `Query<Root>`, so
+the two styles mix freely.
+
+### Building a child filter and merging it into the parent
+
+Because the scope is part of the type, a query is a value you can build, name,
+store, and reuse — not just an inline expression. A **nested** child struct (one
+whose `path` ends in a `nested` array) carries its own field handles, exactly as
+the root does, but tagged with the child scope — so they produce `Query<Order>`,
+not `Query<Root>`:
+
+```rust
+// Built from Order's own handles. Reusable — a plain function returning a query:
+fn big_delivered() -> Query<Order> {
+    Order::status().eq("delivered")
+        .and(Order::total().gt(100.0))
+}
+```
+
+To merge a child filter into a parent, **lift** it through the nesting that holds
+it: `User::orders().any(child)` (or `.all(child)`) takes a `Query<Order>` and
+returns a `Query<Root>` — a nested clause at the `orders` path — which then
+composes with parent-scope queries like any other:
+
+```rust
+let q = User::email().eq("ada@example.com")
+    .and(User::orders().any(big_delivered()));   // Query<Order> → lifted → Query<Root>
+
+User::search(&client).filter(q).send().await?;
+```
+
+The scope tag is what keeps this honest: `User::email().and(Order::status().eq(…))`
+**does not compile** — you can't `and` a `Query<Root>` with a `Query<Order>`; the
+child query has to be lifted through `User::orders()` first. A child constraint
+can never be silently applied at the wrong level.
+
+Lifting composes through depth too: `Order::items().any(Item::quantity().gt(1))`
+is a `Query<Order>`, which `User::orders().any(…)` then lifts the rest of the way
+to `Query<Root>`.
+
+### Optional filters
+
+Real callers build queries from optional inputs — request params, form fields —
+and the `if let Some(x) = … { q = q.filter(…) }` dance breaks the fluent chain.
+The primitive that fixes it: **`Option<Q>` is itself a `Query`**, where `None`
+contributes nothing. It adds no constraint, in any clause — `must_not(None)`
+excludes nothing, `and(None)` is the identity. So every clause and combinator
+already accepts an optional; you just `.map` the value into the handle:
+
+```rust
+User::search(&client)
+    .filter(params.email.map(|e| User::email().eq(e)))          // skipped when None
+    .filter(params.min_orders.map(|n| User::order_count().gte(n)))
+    .send().await?;
+
+// Composes inside and/or too — a None branch just drops out:
+let q = User::email().eq("ada@example.com")
+    .and(params.tier.map(|t| User::account().tier().eq(t)));    // None → just the email clause
+```
+
+A named `filter_some(value, |v| …)` sugar that drops the `.map` is an obvious
+follow-on — it would be just `filter(value.map(f))` over this primitive — but it's
+left out of the first cut.
+
+---
+
+## Filtering nested collections
+
+`orders` is a nested array, and there are two **independent** things you might
+want to filter — flusso keeps them separate, because conflating them is how you
+end up confused about why a user with no delivered orders still showed up:
+
+- **Filter *by* nested** — choose which *users* come back, based on their orders.
+  This is the `any`/`all` you've already seen: it's a `Query`, so it goes in
+  `filter`/`query`/etc. A matching user still carries its **whole** `orders`
+  array.
+- **Filter *of* nested** — shape the `orders` array each user comes back with,
+  without changing which users return. This is a separate clause,
+  `filter_nested`.
+
+They compose: use either alone, or both together (often with the same predicate).
+
+### `filter_nested` — shaping the returned array
+
+```rust
+let page = User::search(&client)
+    // filter BY: only users with a delivered order
+    .filter(User::orders().any(Order::status().eq("delivered")))
+    // filter OF: and within each, keep only the delivered orders, newest first, ≤5
+    .filter_nested(
+        User::orders()
+            .matching(Order::status().eq("delivered"))
+            .sort(Order::placed_at().desc())
+            .size(5),
+    )
+    .send().await?;
+
+for hit in &page.hits {
+    // By default `source.orders` IS the filtered subset — no extra accessor:
+    for order in &hit.source.orders {       // delivered, newest first, ≤ 5
+        println!("{} — {}", order.total, order.status);
+    }
+}
+```
+
+`User::orders().matching(q)` is a nested **projection**: `q` is a `Query<Order>`
+built from `Order`'s handles, plus optional `.sort(Order::field().desc())`,
+`.size(n)`, `.from(n)`. `matching` itself is optional — drop it to keep every
+child but still sort or cap the array.
+
+Because `filter_nested` does **not** touch which parents match, a user with no
+delivered orders still comes back — with `orders: []`. Pair it with a
+`filter(User::orders().any(…))` when you also want to drop those users.
+
+### Where the subset lands — replace by default, opt out to keep both
+
+By default `filter_nested` **replaces** `hit.source.orders` with the matched
+subset, so you read it straight off the typed struct. Mechanically the client
+fetches the nested matches and substitutes them for that field before
+deserializing `User` — `source.orders` reflects the projection, not the stored
+array.
+
+When you'd rather keep the stored array intact, opt out per path with
+`.keep_source()`: `source.orders` stays the full document array, and the subset
+moves to a typed side accessor.
+
+```rust
+.filter_nested(
+    User::orders()
+        .matching(Order::status().eq("delivered"))
+        .size(5)
+        .keep_source(),         // leave source.orders untouched
+)
+// …
+let all_orders: &[Order] = &hit.source.orders;          // full, as stored
+let delivered: &[Order]  = hit.nested(User::orders());  // matched subset
+```
+
+`hit.nested(User::orders())` returns `&[Order]` with no turbofish because your
+struct declared `orders: Vec<Order>`, so `User::orders()` is `Nested<Root, Order>`
+and the subset deserializes into `Order`. For a nested path your struct doesn't
+project (a `Nested<Root, AddressFields>`), pass the type explicitly:
+`hit.nested::<Address>("addresses")`.
+
+### Depth
+
+`filter_nested` shapes one nested level — `orders`. You can still *match* on
+deeper nesting from inside the predicate (`Order::items().any(Item::quantity().gt(1))`),
+and the returned orders honor it; returning a filtered `items` array *inside*
+each returned order is a deeper inner-hits case left to the `raw` hatch for now.
+
+---
+
+## Results
+
+```rust
+pub struct SearchResponse<T> {
+    pub total: u64,            // total matches (not the page size)
+    pub max_score: Option<f32>,
+    pub hits: Vec<Hit<T>>,
+    pub took: std::time::Duration,
+}
+
+pub struct Hit<T> {
+    pub id: String,            // the document id (root primary key, stringified)
+    pub score: f32,
+    pub source: T,             // the fully-typed document
+}
+```
+
+`get` returns `Option<T>`; `search` returns `SearchResponse<T>`, where `T` is the
+struct you wrote. There is no `serde_json::Value` in the common path — your typed
+struct is the result.
 
 ---
 
@@ -161,16 +446,19 @@ your queries and your struct against it.
 The macro validates against the **resolved mapping** — flusso's
 [`IndexMapping`](libs/0-schema/0-core/src/config/index_mapping.rs): every field
 with a concrete type, whether it is **nullable**, and its nested `children`, plus
-the schema `hash`. Crucially, flusso's schemas are **self-describing**: every
-leaf declares its `type` and whether it's `required`, and joins/groups/aggregates
-have structural types — so the mapping resolves with **no database**, exactly as
-`flusso build` does when it writes `flusso.lock`. The client reuses that
-resolution rather than re-deriving one.
+the schema `hash`.
+
+Crucially, flusso's schemas are **self-describing**: every leaf declares its
+`type` and whether it's `required`, and joins/groups/aggregates have structural
+types — so the mapping resolves with **no database**, exactly as `flusso build`
+does when it writes `flusso.lock`. The client reuses that resolution rather than
+re-deriving one. (See [`SCHEMA.md`](SCHEMA.md) for the schema format and
+[`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md) for how the index is written.)
 
 ### The one input: the index name
 
-The developer never points the macro at a file. They name the **index**, and the
-macro finds the schema:
+You never point the macro at a file. You name the **index**, and the macro finds
+the schema:
 
 ```rust
 #[derive(serde::Deserialize, FlussoDocument)]
@@ -183,7 +471,8 @@ At compile time the macro:
 1. **Locates `flusso.toml`** by walking up the directory tree from the consuming
    crate's `CARGO_MANIFEST_DIR`, the way cargo finds `Cargo.toml`. (Override with
    `#[flusso(index = "users", config = "…")]` or the `FLUSSO_CONFIG` env var if
-   the config lives outside that path.)
+   the config lives outside that path — see [`CONFIG.md`](CONFIG.md#the-derive-compile-time)
+   for that variable.)
 2. **Selects the `[[index]]`** whose `name` matches `"users"` — the reason an
    index name is required at all, since one `flusso.toml` defines several
    (`users`, `products`, `orders`).
@@ -340,23 +629,24 @@ something else and it won't compile (modulo the leaf-identifier rule above).
 | join `one_to_many` / `many_to_many` | `nested` | `Vec<` a struct `>`  | `Nested<S, T>`  |
 
 **Decimals are lossy by default.** `type: decimal` maps to OpenSearch `double`,
-so a money field round-trips as `f64`. When exactness matters, declare a `custom`
-`scaled_float` in the schema (`type: { custom: { postgres: [numeric], opensearch:
-scaled_float } }`, `options: { scaling_factor: 100 }`); the derive then accepts
-`rust_decimal::Decimal` for that field. **Dates** are behind a feature so a caller
-picks `time` or `chrono` (or `String` for raw ISO-8601) without the crate forcing
-a dependency; the derive accepts whichever leaf type the chosen feature settles
-on.
+so a money field round-trips as `f64` — fine for most things, less fine for an
+accountant. When exactness matters, declare a `custom` `scaled_float` in the
+schema (`type: { custom: { postgres: [numeric], opensearch: scaled_float } }`,
+`options: { scaling_factor: 100 }`); the derive then accepts
+`rust_decimal::Decimal` for that field.
+
+**Dates** are behind a feature so a caller picks `time` or `chrono` (or `String`
+for raw ISO-8601) without the crate forcing a dependency; the derive accepts
+whichever leaf type the chosen feature settles on.
 
 ### Nullability is declared, not guessed
 
-A field is `T` or `Option<T>`, and the developer must not guess which — the
-derive **checks** it against the resolved mapping and rejects a mismatch. Because
-schemas are self-describing, nullability comes straight from the schema with no
-database round-trip: a leaf states it with `required`, and joins, groups, and
-aggregates carry it structurally. `ResolvedField` records the resulting
-`nullable: bool`; the derive requires `nullable: false → T`,
-`nullable: true → Option<T>`.
+A field is `T` or `Option<T>`, and you must not guess which — the derive
+**checks** it against the resolved mapping and rejects a mismatch. Because schemas
+are self-describing, nullability comes straight from the schema with no database
+round-trip: a leaf states it with `required`, and joins, groups, and aggregates
+carry it structurally. `ResolvedField` records the resulting `nullable: bool`; the
+derive requires `nullable: false → T`, `nullable: true → Option<T>`.
 
 | Field source                          | `nullable` | Why                                                  |
 | ------------------------------------- | ---------- | ---------------------------------------------------- |
@@ -379,267 +669,10 @@ requirement the endgame places on the engine.
 
 ---
 
-## What the field type buys you
-
-The handle a schema field generates determines the operators in scope. This is
-the type safety that matters: an operator that doesn't make sense for a field's
-type *doesn't exist* on its handle, so the mistake is a compile error.
-
-| Handle          | Operators                                                                 |
-| --------------- | ------------------------------------------------------------------------- |
-| `Keyword`       | `eq`, `in_`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `exists`            |
-| `Text`          | `matches`, `match_phrase`, `match_phrase_prefix`, `matches_fuzzy`, `exists` — *no* exact `eq` (it's analyzed) |
-| `Bool`          | `eq`, `exists`                                                            |
-| `Number<T>`     | `eq`, `in_`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                |
-| `Date`          | `eq`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                       |
-| `Object<S>`     | `exists` (a same-document sub-object — group or `one_to_one`; `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
-| `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
-| `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
-| `Binary`        | `exists` — base64-encoded, not searchable                                 |
-| `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
-
-Each operator's argument is typed too: `User::order_count().gte(_)` takes an
-`i64`, `User::order_count().between(_, _)` takes two; `User::email().in_(_)` takes
-an `IntoIterator<Item = impl Into<String>>`. Sorting is the same — `sort(…)` only
-accepts handles whose type is sortable (numbers, dates, keywords, booleans), so
-`sort(User::full_name().desc())` on a `text` field is a compile error, mirroring
-OpenSearch's own refusal to sort un-`fielddata` text.
-
-A few clauses span more than one field, so they're free functions rather than
-single-handle operators: `multi_match("ada", [User::full_name(), User::bio()])`
-runs one analyzed query across several `Text` fields. Anything outside the typed
-surface — `knn`, `function_score`, `script`, `geo_shape`, span queries — stays
-reachable through the [`raw`](#the-escape-hatch) hatch by design; lifting every
-OpenSearch clause into a typed handle would dilute the type guarantee (a `regexp`
-on a number is meaningless), so the typed surface is the operators that fit a
-field's type.
-
-### Composing queries
-
-A handle's operator produces a `Query<S>` — a query that carries the **scope** it
-was built in: the document or nested context `S` it constrains. The root document
-and any flattened `object`/`one_to_one` sub-field share the scope `Root` (so root
-handles produce `Query<Root>`); only a `nested` array introduces a fresh scope,
-tagged with its element type (`Query<Order>`). Queries compose with `and` / `or` /
-`not` *within a scope*, and the `Search` builder exposes the bool-query clauses
-directly for callers who want score-vs-filter control:
-
-```rust
-// Combinator style.
-let q = User::email().eq("ada@example.com")
-    .and(User::order_count().gte(5))
-    .and(User::orders().any(Order::status().eq("delivered").and(Order::total().gt(0.0))));
-
-User::search(&client).query(q).send().await?;
-
-// Clause style — `filter`/`must_not` don't score, `query`(=must)/`should` do.
-User::search(&client)
-    .query(User::full_name().matches("ada"))       // scored
-    .filter(User::order_count().gte(5))            // filtered, cached, no score
-    .must_not(User::email().prefix("test-"))
-    .should(User::orders().any(Order::status().eq("delivered")))
-    .send()
-    .await?;
-```
-
-`query`/`filter`/`must_not`/`should` accept anything that is a `Query<Root>`, so
-the two styles mix freely.
-
-### Building a child filter and merging it into the parent
-
-Because the scope is part of the type, a query is a value you can build, name,
-store, and reuse — not just an inline expression. A **nested** child struct (one
-whose `path` ends in a `nested` array) carries its own field handles, exactly as
-the root does, but tagged with the child scope — so they produce `Query<Order>`,
-not `Query<Root>`:
-
-```rust
-// Built from Order's own handles. Reusable — a plain function returning a query:
-fn big_delivered() -> Query<Order> {
-    Order::status().eq("delivered")
-        .and(Order::total().gt(100.0))
-}
-```
-
-To merge a child filter into a parent, **lift** it through the nesting that holds
-it: `User::orders().any(child)` (or `.all(child)`) takes a `Query<Order>` and
-returns a `Query<Root>` — a nested clause at the `orders` path — which then
-composes with parent-scope queries like any other:
-
-```rust
-let q = User::email().eq("ada@example.com")
-    .and(User::orders().any(big_delivered()));   // Query<Order> → lifted → Query<Root>
-
-User::search(&client).filter(q).send().await?;
-```
-
-The scope tag is what keeps this honest: `User::email().and(Order::status().eq(…))`
-**does not compile** — you can't `and` a `Query<Root>` with a `Query<Order>`; the
-child query has to be lifted through `User::orders()` first, so a child constraint
-can never be silently applied at the wrong level.
-
-Lifting composes through depth too: `Order::items().any(Item::quantity().gt(1))`
-is a `Query<Order>`, which `User::orders().any(…)` then lifts the rest of the way
-to `Query<Root>`.
-
-### Optional filters
-
-Real callers build queries from optional inputs — request params, form fields —
-and the `if let Some(x) = … { q = q.filter(…) }` dance breaks the fluent chain.
-The primitive that fixes it: **`Option<Q>` is itself a `Query`**, where `None`
-contributes nothing (it adds no constraint, in any clause — `must_not(None)`
-excludes nothing, `and(None)` is the identity). So every clause and combinator
-already accepts an optional; you just `.map` the value into the handle:
-
-```rust
-User::search(&client)
-    .filter(params.email.map(|e| User::email().eq(e)))          // skipped when None
-    .filter(params.min_orders.map(|n| User::order_count().gte(n)))
-    .send().await?;
-
-// Composes inside and/or too — a None branch just drops out:
-let q = User::email().eq("ada@example.com")
-    .and(params.tier.map(|t| User::account().tier().eq(t)));    // None → just the email clause
-```
-
-A named `filter_some(value, |v| …)` sugar that drops the `.map` is an obvious
-follow-on — it would be just `filter(value.map(f))` over this primitive — but it's
-left out of the first cut.
-
----
-
-## Filtering nested collections
-
-`orders` is a nested array, and there are two **independent** things you might
-want to filter — flusso keeps them separate:
-
-- **Filter *by* nested** — choose which *users* come back, based on their orders.
-  This is the `any`/`all` you've already seen: it's a `Query`, so it goes in
-  `filter`/`query`/etc. A matching user still carries its **whole** `orders`
-  array.
-- **Filter *of* nested** — shape the `orders` array each user comes back with,
-  without changing which users return. This is a separate clause,
-  `filter_nested`.
-
-They compose: use either alone, or both together (often with the same predicate).
-
-### `filter_nested` — shaping the returned array
-
-```rust
-let page = User::search(&client)
-    // filter BY: only users with a delivered order
-    .filter(User::orders().any(Order::status().eq("delivered")))
-    // filter OF: and within each, keep only the delivered orders, newest first, ≤5
-    .filter_nested(
-        User::orders()
-            .matching(Order::status().eq("delivered"))
-            .sort(Order::placed_at().desc())
-            .size(5),
-    )
-    .send().await?;
-
-for hit in &page.hits {
-    // By default `source.orders` IS the filtered subset — no extra accessor:
-    for order in &hit.source.orders {       // delivered, newest first, ≤ 5
-        println!("{} — {}", order.total, order.status);
-    }
-}
-```
-
-`User::orders().matching(q)` is a nested **projection**: `q` is a `Query<Order>`
-built from `Order`'s handles, plus optional `.sort(Order::field().desc())`,
-`.size(n)`, `.from(n)`.
-`matching` itself is optional — drop it to keep every child but still sort or cap
-the array. Because `filter_nested` does **not** touch which parents match, a user
-with no delivered orders still comes back — with `orders: []`. Pair it with a
-`filter(User::orders().any(…))` when you also want to drop those users.
-
-### Where the subset lands — replace by default, opt out to keep both
-
-By default `filter_nested` **replaces** `hit.source.orders` with the matched
-subset, so you read it straight off the typed struct. Mechanically the client
-fetches the nested matches and substitutes them for that field before
-deserializing `User` — `source.orders` reflects the projection, not the stored
-array.
-
-When you'd rather keep the stored array intact, opt out per path with
-`.keep_source()`: `source.orders` stays the full document array, and the subset
-moves to a typed side accessor.
-
-```rust
-.filter_nested(
-    User::orders()
-        .matching(Order::status().eq("delivered"))
-        .size(5)
-        .keep_source(),         // leave source.orders untouched
-)
-// …
-let all_orders: &[Order] = &hit.source.orders;          // full, as stored
-let delivered: &[Order]  = hit.nested(User::orders());  // matched subset
-```
-
-`hit.nested(User::orders())` returns `&[Order]` with no turbofish because your
-struct declared `orders: Vec<Order>`, so `User::orders()` is `Nested<Root, Order>`
-and the subset deserializes into `Order`. For a nested path your struct doesn't
-project (a `Nested<Root, AddressFields>`), pass the type explicitly:
-`hit.nested::<Address>("addresses")`.
-
-### Depth
-
-`filter_nested` shapes one nested level — `orders`. You can still *match* on
-deeper nesting from inside the predicate (`Order::items().any(Item::quantity().gt(1))`),
-and the returned orders honor it; returning a filtered `items` array *inside*
-each returned order is a deeper inner-hits case left to the `raw` hatch for now.
-
----
-
-## Results
-
-```rust
-pub struct SearchResponse<T> {
-    pub total: u64,            // total matches (not the page size)
-    pub max_score: Option<f32>,
-    pub hits: Vec<Hit<T>>,
-    pub took: std::time::Duration,
-}
-
-pub struct Hit<T> {
-    pub id: String,            // the document id (root primary key, stringified)
-    pub score: f32,
-    pub source: T,             // the fully-typed document
-}
-```
-
-`get` returns `Option<T>`; `search` returns `SearchResponse<T>`, where `T` is the
-struct you wrote. There is no `serde_json::Value` in the common path — your typed
-struct is the result.
-
----
-
-## Resolving the index name
-
-The **physical** index carries the hash suffix (`users_3f2a1b9c`) — exactly what
-the OpenSearch sink writes — and rotates on a structural schema change.
-
-Because the binding is **generated from the schema at compile time**, the derive
-knows that hash and emits it as a `const`: `User::INDEX` is the physical name
-(`users_<hash>`), and `get`/`search` use it. So `User::search(&client)` addresses
-the right index directly, with the hash hidden from the caller — no read alias
-required. This is self-correcting: a structural schema change rotates the hash
-*and* changes the resolved mapping, so the next `cargo build` regenerates the
-binding against the new physical index. (`User::INDEX` and `User::SCHEMA_HASH`
-are exposed for logging, admin, or a hand-built `Search`.)
-
-> A read alias (`users` → current physical) is still worthwhile for clients that
-> *don't* recompile against the schema — dynamic/scripting use, dashboards. For a
-> derived binding it's unnecessary: the compile-time hash is the stable name.
-
----
-
 ## The escape hatch
 
-Anything the typed builder can't express stays reachable, and still
-deserializes into the typed struct:
+Anything the typed builder can't express stays reachable, and still deserializes
+into the typed struct:
 
 ```rust
 let page: SearchResponse<User> = User::search(&client)
@@ -653,6 +686,28 @@ let page: SearchResponse<User> = User::search(&client)
 `raw` takes the OpenSearch query DSL verbatim and is the pressure-release valve
 for geo queries, `function_score`, percolators, and anything else not yet in the
 typed surface — without dropping to an untyped client or losing typed results.
+
+---
+
+## Resolving the index name
+
+The **physical** index carries the hash suffix (`users_3f2a1b9c`) — exactly what
+the OpenSearch sink writes — and rotates on a structural schema change.
+
+Because the binding is **generated from the schema at compile time**, the derive
+knows that hash and emits it as a `const`: `User::INDEX` is the physical name
+(`users_<hash>`), and `get`/`search` use it. So `User::search(&client)` addresses
+the right index directly, with the hash hidden from the caller — no read alias
+required.
+
+This is self-correcting: a structural schema change rotates the hash *and* changes
+the resolved mapping, so the next `cargo build` regenerates the binding against the
+new physical index. (`User::INDEX` and `User::SCHEMA_HASH` are exposed for
+logging, admin, or a hand-built `Search`.)
+
+> A read alias (`users` → current physical) is still worthwhile for clients that
+> *don't* recompile against the schema — dynamic/scripting use, dashboards. For a
+> derived binding it's unnecessary: the compile-time hash is the stable name.
 
 ---
 
