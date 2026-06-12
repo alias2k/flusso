@@ -138,7 +138,7 @@ async fn list(
     State(client): State<Client>,
     Query(filter): Query<UserFilter>,
 ) -> Result<Json<Page<User>>, ApiError> {
-    let mut search = User::search(&client)
+    let mut search = User::query()
         // Free-text `q`: one scoring `multi_match` across the analyzed `text`
         // fields, root and flattened one-to-one alike (`fullName`, `profile.bio`).
         // It scores (drives relevance ranking) where the `filter(…)` clauses
@@ -190,6 +190,6 @@ async fn list(
         );
     }
 
-    let response = search.send().await?;
+    let response = search.send(&client).await?;
     Ok(Json(Page::from(response)))
 }

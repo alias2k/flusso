@@ -17,7 +17,7 @@ use crate::query::{AsQuery, BoolBuilder, Root};
 ///
 /// The derive supplies [`INDEX`](Self::INDEX) and [`SCHEMA_HASH`](Self::SCHEMA_HASH)
 /// (the physical index is `{INDEX}_{SCHEMA_HASH}`, exactly what the OpenSearch
-/// sink writes); [`search`](Self::search) and [`get`](Self::get) are provided.
+/// sink writes); [`query`](Self::query) and [`get`](Self::get) are provided.
 /// `DeserializeOwned` is required so search hits and fetched documents decode.
 pub trait FlussoDocument: DeserializeOwned {
     /// The logical index name this binding queries.
@@ -26,9 +26,13 @@ pub trait FlussoDocument: DeserializeOwned {
     /// The schema hash this binding was generated from (the physical-index suffix).
     const SCHEMA_HASH: &'static str;
 
-    /// Start a typed search against this index.
-    fn search(client: &Client) -> Search<'_, Self> {
-        Search::new(client, Self::INDEX, Self::SCHEMA_HASH)
+    /// Start a typed query against this index. No client is involved: the
+    /// returned [`Search`] is a plain value — build it anywhere, store it,
+    /// clone it, and hand a [`Client`] to a terminal
+    /// ([`send`](Search::send) / [`ids`](Search::ids) / [`count`](Search::count))
+    /// when it's time to run.
+    fn query() -> Search<Self> {
+        Search::new(Self::INDEX, Self::SCHEMA_HASH)
     }
 
     /// Fetch one document by id; `None` when absent.
@@ -40,16 +44,18 @@ pub trait FlussoDocument: DeserializeOwned {
     }
 }
 
-/// A typed search against one index.
+/// A typed query against one index — a plain, client-free value.
 ///
-/// Built from `Search::new(client, index)` (the derive will generate a
-/// `Type::search(client)` that calls this). Clauses accumulate into a bool
-/// query: `query`/`should` score, `filter`/`must_not` don't. Finish with
-/// [`Search::send`] for a page of hits, [`Search::ids`] for a page of bare
-/// document ids, or [`Search::count`] for just the number of matches.
-#[derive(Debug)]
-pub struct Search<'a, T> {
-    client: &'a Client,
+/// Built from [`FlussoDocument::query`] (or `Search::new(index, hash)` by
+/// hand). Clauses accumulate into a bool query: `query`/`should` score,
+/// `filter`/`must_not` don't. Because no client (and no lifetime) is
+/// involved, a `Search` can be named, stored, cloned, and reused; a [`Client`]
+/// appears only at the terminals — [`Search::send`] for a page of hits,
+/// [`Search::ids`] for a page of bare document ids, [`Search::count`] for
+/// just the number of matches (all `&self`, so running consumes nothing) —
+/// or several searches go in one round-trip via [`Client::msearch`].
+#[derive(Debug, Clone)]
+pub struct Search<T> {
     index: String,
     hash: String,
     bool_query: BoolBuilder,
@@ -61,11 +67,10 @@ pub struct Search<'a, T> {
     _marker: PhantomData<fn() -> T>,
 }
 
-impl<'a, T> Search<'a, T> {
-    /// Start a search against `index` using `client`.
-    pub fn new(client: &'a Client, index: impl Into<String>, hash: impl Into<String>) -> Self {
+impl<T> Search<T> {
+    /// Start a query against `index` (the logical name) and its schema `hash`.
+    pub fn new(index: impl Into<String>, hash: impl Into<String>) -> Self {
         Self {
-            client,
             index: index.into(),
             hash: hash.into(),
             bool_query: BoolBuilder::default(),
@@ -244,14 +249,27 @@ impl<'a, T> Search<'a, T> {
         fields(index = %self.index, returned = tracing::field::Empty),
         err,
     )]
-    pub async fn ids(self) -> Result<Vec<String>> {
+    pub async fn ids(&self, client: &Client) -> Result<Vec<String>> {
         let body = self.ids_body();
-        let response = self.client.search(&self.index, &self.hash, &body).await?;
+        let response = client.search(&self.index, &self.hash, &body).await?;
         let raw: RawIdsResponse = serde_json::from_value(response)?;
         let ids: Vec<String> = raw.hits.hits.into_iter().map(|hit| hit.id).collect();
         tracing::Span::current().record("returned", ids.len());
         tracing::debug!(returned = ids.len(), "ids search completed");
         Ok(ids)
+    }
+
+    /// The physical index this query addresses (`{index}_{hash}` — exactly
+    /// what the sink writes). Crate-internal: [`Client::msearch`] renders it
+    /// into each NDJSON header line.
+    pub(crate) fn physical_index(&self) -> String {
+        format!("{}_{}", self.index, self.hash)
+    }
+
+    /// The paths of the accumulated [`filter_nested`](Self::filter_nested)
+    /// projections, for post-processing a response with [`merge_inner_hits`].
+    pub(crate) fn nested_paths(&self) -> Vec<&str> {
+        self.nested.iter().map(NestedProjection::path).collect()
     }
 
     /// Execute the query as a count: how many documents match, without fetching
@@ -264,9 +282,9 @@ impl<'a, T> Search<'a, T> {
         fields(index = %self.index, count = tracing::field::Empty),
         err,
     )]
-    pub async fn count(self) -> Result<u64> {
+    pub async fn count(&self, client: &Client) -> Result<u64> {
         let body = self.count_body();
-        let response = self.client.count(&self.index, &self.hash, &body).await?;
+        let response = client.count(&self.index, &self.hash, &body).await?;
         let raw: RawCount = serde_json::from_value(response)?;
         tracing::Span::current().record("count", raw.count);
         tracing::debug!(count = raw.count, "count completed");
@@ -274,7 +292,7 @@ impl<'a, T> Search<'a, T> {
     }
 }
 
-impl<T> Search<'_, T>
+impl<T> Search<T>
 where
     T: DeserializeOwned,
 {
@@ -291,11 +309,11 @@ where
         ),
         err,
     )]
-    pub async fn send(self) -> Result<SearchResponse<T>> {
+    pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
         let body = self.body();
-        let mut response = self.client.search(&self.index, &self.hash, &body).await?;
-        if !self.nested.is_empty() {
-            let paths: Vec<&str> = self.nested.iter().map(NestedProjection::path).collect();
+        let mut response = client.search(&self.index, &self.hash, &body).await?;
+        let paths = self.nested_paths();
+        if !paths.is_empty() {
             merge_inner_hits(&mut response, &paths);
         }
         let page = SearchResponse::from_value(response)?;

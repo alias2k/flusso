@@ -26,6 +26,19 @@ pub enum Error {
         body: String,
     },
 
+    /// One slot of a [`crate::Client::msearch`] bundle failed. `_msearch`
+    /// reports errors per slot; the whole call fails on the first one — there
+    /// are no partial results.
+    #[error("msearch slot {slot} failed (status {status}): {body}")]
+    Msearch {
+        /// Zero-based position of the failed search in the bundle.
+        slot: usize,
+        /// The per-slot status OpenSearch reported (`0` if absent).
+        status: u16,
+        /// The slot's error object, serialized for diagnostics.
+        body: String,
+    },
+
     /// A response could not be decoded into the expected shape.
     #[error("decoding response: {0}")]
     Decode(#[from] serde_json::Error),

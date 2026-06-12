@@ -58,14 +58,14 @@ async fn list(
     State(client): State<Client>,
     Query(filter): Query<OrderFilter>,
 ) -> Result<Json<Page<Order>>, ApiError> {
-    let response = Order::search(&client)
+    let response = Order::query()
         .filter(filter.user_id.map(|v| Order::user_id().eq(v)))
         .filter(filter.status.map(|v| Order::status().eq(v)))
         .filter(filter.min_total.map(|v| Order::total().gte(v)))
         .filter(filter.min_items.map(|v| Order::item_count().gte(v)))
         .sort(Order::total().desc())
         .size(filter.limit.unwrap_or(20))
-        .send()
+        .send(&client)
         .await?;
     Ok(Json(Page::from(response)))
 }

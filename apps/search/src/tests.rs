@@ -13,8 +13,8 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    Client, Date, Geo, GeoPoint, Keyword, Nested, Number, Query, Search, SearchResponse, SortOrder,
-    Text, multi_match,
+    Date, Geo, GeoPoint, Keyword, MsearchBundle, Nested, Number, Query, Search, SearchResponse,
+    SortOrder, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -34,8 +34,8 @@ impl User {
     fn orders() -> Nested<Root, Order> {
         Nested::at("orders")
     }
-    fn search(client: &Client) -> Search<'_, User> {
-        Search::new(client, "users", "xxxxxx")
+    fn query() -> Search<User> {
+        Search::new("users", "xxxxxx")
     }
 }
 
@@ -53,8 +53,7 @@ impl Order {
 
 #[test]
 fn filter_nested_wraps_with_inner_hits() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-    let body = User::search(&client)
+    let body = User::query()
         .filter(User::order_count().gte(1))
         .filter_nested(
             User::orders()
@@ -106,9 +105,7 @@ fn merge_inner_hits_replaces_the_source_array() {
 
 #[test]
 fn builds_the_full_search_body() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-
-    let body = User::search(&client)
+    let body = User::query()
         .filter(User::email().eq("ada@example.com"))
         .filter(User::order_count().gte(5))
         .query(User::full_name().matches("ada lovelace"))
@@ -145,8 +142,7 @@ fn builds_the_full_search_body() -> Result {
 
 #[test]
 fn count_body_keeps_the_query_and_drops_the_rest() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-    let body = User::search(&client)
+    let body = User::query()
         .filter(User::email().eq("ada@example.com"))
         .filter_nested(User::orders().matching(Order::status().eq("delivered")))
         .sort(User::order_count().desc())
@@ -167,8 +163,7 @@ fn count_body_keeps_the_query_and_drops_the_rest() -> Result {
 
 #[test]
 fn ids_body_keeps_paging_and_disables_source() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-    let body = User::search(&client)
+    let body = User::query()
         .filter(User::email().eq("ada@example.com"))
         .filter_nested(User::orders().matching(Order::status().eq("delivered")))
         .sort(User::order_count().desc())
@@ -193,16 +188,14 @@ fn ids_body_keeps_paging_and_disables_source() -> Result {
 
 #[test]
 fn empty_count_body_matches_all() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-    let body = Search::<User>::new(&client, "users", "xxxxxx").count_body();
+    let body = Search::<User>::new("users", "xxxxxx").count_body();
     assert_eq!(body, json!({ "query": { "match_all": {} } }));
     Ok(())
 }
 
 #[test]
 fn empty_search_matches_all() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-    let body = Search::<User>::new(&client, "users", "xxxxxx").body();
+    let body = Search::<User>::new("users", "xxxxxx").body();
     assert_eq!(body, json!({ "query": { "match_all": {} } }));
     Ok(())
 }
@@ -375,8 +368,7 @@ fn geo_queries_render_expected_clauses() {
 
 #[test]
 fn geo_distance_sort_in_search_body() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-    let body = Search::<User>::new(&client, "places", "xxxxxx")
+    let body = Search::<User>::new("places", "xxxxxx")
         .sort(Geo::<Root>::at("location").distance_sort(
             GeoPoint::new(52.37, 4.90),
             SortOrder::Asc,
@@ -398,12 +390,11 @@ fn geo_distance_sort_in_search_body() -> Result {
 
 #[test]
 fn optional_filters_apply_only_when_some() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
 
     let email: Option<&str> = Some("ada@example.com");
     let min_orders: Option<i64> = None;
 
-    let body = User::search(&client)
+    let body = User::query()
         .filter(email.map(|value| User::email().eq(value)))
         .filter(min_orders.map(|value| User::order_count().gte(value)))
         .body();
@@ -431,6 +422,87 @@ struct DecodedUser {
     email: String,
     #[serde(rename = "orderCount")]
     order_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecodedOrder {
+    status: String,
+}
+
+#[test]
+fn msearch_ndjson_renders_one_header_and_body_per_slot() -> Result {
+    // Handles are document-type-free, so the typed slot is `Search<Decoded…>`.
+    let users = Search::<DecodedUser>::new("users", "xxxxxx")
+        .filter(User::email().eq("ada@example.com"))
+        .size(5);
+    let orders = Search::<DecodedOrder>::new("orders", "yyyyyy");
+
+    let ndjson = (&users, &orders).ndjson()?;
+    let lines: Vec<serde_json::Value> = ndjson
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+
+    let expected = vec![
+        json!({ "index": "users_xxxxxx" }),
+        json!({
+            "query": { "bool": { "filter": [ { "term": { "email": "ada@example.com" } } ] } },
+            "size": 5
+        }),
+        json!({ "index": "orders_yyyyyy" }),
+        json!({ "query": { "match_all": {} } }),
+    ];
+    assert_eq!(lines, expected);
+    Ok(())
+}
+
+#[test]
+fn msearch_decodes_each_slot_with_its_own_type() -> Result {
+    let users = Search::<DecodedUser>::new("users", "xxxxxx");
+    let orders = Search::<DecodedOrder>::new("orders", "yyyyyy");
+
+    let responses = vec![
+        json!({ "took": 1, "hits": { "total": { "value": 7 }, "hits": [
+            { "_id": "1", "_score": 1.0,
+              "_source": { "email": "ada@example.com", "orderCount": 2 } }
+        ] } }),
+        json!({ "took": 2, "hits": { "total": { "value": 3 }, "hits": [
+            { "_id": "9", "_score": 1.0, "_source": { "status": "open" } }
+        ] } }),
+    ];
+
+    let (users_page, orders_page) = (&users, &orders).decode(responses)?;
+    assert_eq!(users_page.total, 7);
+    assert_eq!(
+        users_page.hits.first().ok_or("expected a user hit")?.source.email,
+        "ada@example.com"
+    );
+    assert_eq!(orders_page.total, 3);
+    assert_eq!(
+        orders_page.hits.first().ok_or("expected an order hit")?.source.status,
+        "open"
+    );
+    Ok(())
+}
+
+#[test]
+fn msearch_surfaces_a_slot_error_with_its_position() {
+    let users = Search::<DecodedUser>::new("users", "xxxxxx");
+    let orders = Search::<DecodedOrder>::new("orders", "yyyyyy");
+
+    // Slot 0 succeeds; slot 1 carries a per-slot error object.
+    let responses = vec![
+        json!({ "took": 1, "hits": { "total": { "value": 0 }, "hits": [] } }),
+        json!({ "error": { "type": "search_phase_execution_exception" }, "status": 400 }),
+    ];
+
+    match (&users, &orders).decode(responses) {
+        Err(crate::Error::Msearch { slot, status, .. }) => {
+            assert_eq!(slot, 1);
+            assert_eq!(status, 400);
+        }
+        other => panic!("expected a slot error, got {other:?}"),
+    }
 }
 
 #[test]

@@ -366,9 +366,9 @@ pub(crate) fn codegen(
 
     // The root binding implements `FlussoDocument`: it supplies the physical
     // index name = logical name + schema hash (exactly what the OpenSearch sink
-    // writes), and inherits `search`/`get`. The derive bakes the hash in (a
+    // writes), and inherits `query`/`get`. The derive bakes the hash in (a
     // structural schema change rotates it *and* forces a recompile), so it stays
-    // hidden from callers — `Type::search(&client)` just works.
+    // hidden from callers — `Type::query()` just works.
     let entry = if is_root {
         quote! {
             impl ::flusso_search::FlussoDocument for #ident {

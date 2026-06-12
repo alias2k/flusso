@@ -35,7 +35,7 @@ schema, at compile time:
    matches. A struct that has drifted from the schema *stops compiling*, pointing
    at the offending field.
 2. **Generates the typed query surface** from the schema — field handles,
-   `get`/`search` entry points, the schema hash — so a downstream service queries
+   `get`/`query` entry points, the schema hash — so a downstream service queries
    the index the way it would call a typed function: field names checked at
    compile time, operators that only exist for the field types that support them,
    and results that deserialize into the struct you wrote.
@@ -53,7 +53,7 @@ that no longer fits stops compiling. The drift surfaces at `cargo build`, not at
 - [A query, from the caller's seat](#a-query-from-the-callers-seat) — the whole thing in one example
 - [What the field type buys you](#what-the-field-type-buys-you) — operators, composing queries, optional filters
 - [Filtering nested collections](#filtering-nested-collections) — filter *by* vs. filter *of*
-- [Results](#results) — what `get`/`search` hand back
+- [Results](#results) — what `get`/`query` hand back
 - [Binding to the schema](#binding-to-the-schema) — how the macro finds and reads the schema
 - [The escape hatch](#the-escape-hatch) — raw DSL when the typed surface can't reach
 - [Resolving the index name](#resolving-the-index-name) — the hashed physical index
@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
     // operators its mapping supports (see "What the field type buys you"). The
     // handles cover the *whole schema* — so `User::addresses()` filters fine even
     // though this projection never deserializes addresses.
-    let page = User::search(&client)
+    let page = User::query()
         .filter(User::email().eq("ada@example.com"))      // keyword → exact
         .filter(User::order_count().gte(5))               // long → range
         .filter(User::account().tier().eq("gold"))        // into the group's handles
@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
         .sort(User::order_count().desc())
         .from(0)
         .size(20)
-        .send()
+        .send(&client)
         .await?;
 
     println!("{} total matches", page.total);
@@ -253,15 +253,15 @@ let q = User::email().eq("ada@example.com")
     .and(User::order_count().gte(5))
     .and(User::orders().any(Order::status().eq("delivered").and(Order::total().gt(0.0))));
 
-User::search(&client).query(q).send().await?;
+User::query().query(q).send(&client).await?;
 
 // Clause style — `filter`/`must_not` don't score, `query`(=must)/`should` do.
-User::search(&client)
+User::query()
     .query(User::full_name().matches("ada"))       // scored
     .filter(User::order_count().gte(5))            // filtered, cached, no score
     .must_not(User::email().prefix("test-"))
     .should(User::orders().any(Order::status().eq("delivered")))
-    .send()
+    .send(&client)
     .await?;
 ```
 
@@ -275,9 +275,9 @@ fetched). Sort, `from`/`size`, and `filter_nested` projections are ignored; they
 never change which documents match.
 
 ```rust
-let open_orders: u64 = User::search(&client)
+let open_orders: u64 = User::query()
     .filter(User::orders().any(Order::status().eq("open")))
-    .count()
+    .count(&client)
     .await?;
 ```
 
@@ -289,13 +289,50 @@ shape). This is the cheap way to feed another lookup — e.g. search in
 OpenSearch, then load the full rows from Postgres:
 
 ```rust
-let user_ids: Vec<String> = User::search(&client)
+let user_ids: Vec<String> = User::query()
     .filter(User::orders().any(Order::status().eq("open")))
     .sort(User::order_count().desc())
     .size(100)
-    .ids()
+    .ids(&client)
     .await?;
 ```
+
+### Queries are values; the client appears once
+
+`Type::query()` takes no client: a `Search<T>` is a plain, `Clone`able value
+with no lifetime attached. Build it anywhere — a helper function, a struct
+field, a cached "prepared search" — and hand a `&Client` to the terminal
+(`send` / `ids` / `count`, all `&self`) when it's time to run. One built query
+can run many times, against different clients, or with per-call tweaks via
+`clone()`:
+
+```rust
+fn busy_users() -> Search<User> {                      // no client in sight
+    User::query().filter(User::order_count().gte(5))
+}
+
+let page = busy_users().send(&client).await?;          // run it
+let next = busy_users().from(20).send(&client).await?; // tweak a copy
+```
+
+### Several searches, one round-trip (`_msearch`)
+
+Independent typed searches — different indexes, different document types — can
+share one HTTP round-trip. `client.msearch(…)` takes a tuple of `&Search<T>`
+(arity 1–8) and returns one typed `SearchResponse` per slot, in order:
+
+```rust
+let users_q  = User::query().query(User::full_name().matches(&q)).size(10);
+let orders_q = Order::query().filter(Order::status().eq("open")).size(5);
+
+let (users, orders) = client.msearch((&users_q, &orders_q)).await?;
+```
+
+This is the "search page with separate sections" primitive: each slot keeps its
+own query, sort, pagination, and `filter_nested` projections, and decodes into
+its own type. A slot-level failure fails the whole call with an error naming
+the slot (no partial results). For many searches of *one* type there's
+`client.msearch_all(&searches)` → `Vec<SearchResponse<T>>`.
 
 ### Building a child filter and merging it into the parent
 
@@ -322,7 +359,7 @@ composes with parent-scope queries like any other:
 let q = User::email().eq("ada@example.com")
     .and(User::orders().any(big_delivered()));   // Query<Order> → lifted → Query<Root>
 
-User::search(&client).filter(q).send().await?;
+User::query().filter(q).send(&client).await?;
 ```
 
 The scope tag is what keeps this honest: `User::email().and(Order::status().eq(…))`
@@ -344,10 +381,10 @@ excludes nothing, `and(None)` is the identity. So every clause and combinator
 already accepts an optional; you just `.map` the value into the handle:
 
 ```rust
-User::search(&client)
+User::query()
     .filter(params.email.map(|e| User::email().eq(e)))          // skipped when None
     .filter(params.min_orders.map(|n| User::order_count().gte(n)))
-    .send().await?;
+    .send(&client).await?;
 
 // Composes inside and/or too — a None branch just drops out:
 let q = User::email().eq("ada@example.com")
@@ -379,7 +416,7 @@ They compose: use either alone, or both together (often with the same predicate)
 ### `filter_nested` — shaping the returned array
 
 ```rust
-let page = User::search(&client)
+let page = User::query()
     // filter BY: only users with a delivered order
     .filter(User::orders().any(Order::status().eq("delivered")))
     // filter OF: and within each, keep only the delivered orders, newest first, ≤5
@@ -389,7 +426,7 @@ let page = User::search(&client)
             .sort(Order::placed_at().desc())
             .size(5),
     )
-    .send().await?;
+    .send(&client).await?;
 
 for hit in &page.hits {
     // By default `source.orders` IS the filtered subset — no extra accessor:
@@ -537,7 +574,7 @@ These contribute field validation **and** their own field handles —
 `Order::status()`, `Order::total()`, … — producing `Query<Order>` values you can
 compose, store, and lift into a parent query (see [Building a child filter and
 merging it into the parent](#building-a-child-filter-and-merging-it-into-the-parent)).
-Only the **root** struct gets entry points (`get`/`search`) and `SCHEMA_HASH`.
+Only the **root** struct gets entry points (`get`/`query`) and `SCHEMA_HASH`.
 
 ### What the derive expands to
 
@@ -547,7 +584,7 @@ Only the **root** struct gets entry points (`get`/`search`) and `SCHEMA_HASH`.
 impl User {
     // Entry points.
     pub fn get(client: &Client, id: i32) -> impl Future<Output = Result<Option<User>>>;
-    pub fn search(client: &Client) -> Search<User>;
+    pub fn query() -> Search<User>;   // client-free: a plain, reusable value
 
     // Field handles — one per *schema* field, carrying its type. These are what
     // the query builder consumes; see "What the field type buys you". They exist
@@ -564,7 +601,7 @@ impl User {
     pub fn last_order_at() -> Date { /* … */ }                // not projected by `User`
     // …one per schema field.
 
-    /// The physical index this binds to — `get`/`search` use it. Logical name
+    /// The physical index this binds to — `get`/`query` use it. Logical name
     /// plus the schema hash, matching what the engine's sink writes.
     pub const INDEX: &str = "users_3f2a1b9c…";
     /// The schema hash this binding was generated from (the `INDEX` suffix).
@@ -704,11 +741,11 @@ Anything the typed builder can't express stays reachable, and still deserializes
 into the typed struct:
 
 ```rust
-let page: SearchResponse<User> = User::search(&client)
+let page: SearchResponse<User> = User::query()
     .raw(serde_json::json!({
         "function_score": { "query": { "match_all": {} }, "random_score": {} }
     }))
-    .send()
+    .send(&client)
     .await?;
 ```
 
@@ -725,7 +762,7 @@ the OpenSearch sink writes — and rotates on a structural schema change.
 
 Because the binding is **generated from the schema at compile time**, the derive
 knows that hash and emits it as a `const`: `User::INDEX` is the physical name
-(`users_<hash>`), and `get`/`search` use it. So `User::search(&client)` addresses
+(`users_<hash>`), and `get`/`query` use it. So `User::query()` addresses
 the right index directly, with the hash hidden from the caller — no read alias
 required.
 
@@ -750,8 +787,12 @@ So the target is unambiguous about where the line is:
   them in the meantime.
 - **Writes.** flusso owns the index; the client never upserts or deletes. It is a
   query client by construction.
-- **Cross-index / multi-index search.** One binding, one index. Joining across
-  indexes is the caller's job, above this crate.
+- **Blended cross-index search.** One *combined* result list over several
+  indexes (one query, hits ranked together) needs a sum type and per-hit
+  dispatch — a planned follow-on (`FlussoUnion`). Running several independent
+  typed searches in one round-trip is already covered by
+  [`_msearch`](#several-searches-one-round-trip-_msearch); true joining across
+  indexes remains the caller's job, above this crate.
 - **Scroll / `search_after` pagination.** `from`/`size` first; deep pagination is
   a follow-on once the typed cursor shape is settled.
 - **Generating the document struct.** By design — the developer owns the struct.

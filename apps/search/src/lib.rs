@@ -10,14 +10,20 @@
 //!
 //! # What this first cut covers
 //!
-//! - [`Client`] transport over OpenSearch (`connect`, `basic_auth`, search, get).
+//! - [`Client`] transport over OpenSearch (`connect`, `basic_auth`, search,
+//!   msearch, get).
 //! - Field handles ([`Keyword`], [`Text`], [`Bool`], [`Number`], [`Date`],
 //!   [`Nested`], [`Binary`], [`Json`]) with operators that build a [`Query`].
 //! - [`Query`] composition (`and` / `or` / `not`) and the [`Search`] bool-clause
 //!   builder (`query` / `filter` / `must_not` / `should`, plus `sort` / `from` /
-//!   `size` / `raw`), finished with [`Search::send`] (a typed page),
-//!   [`Search::ids`] (a page of bare document ids, `_source: false`), or
-//!   [`Search::count`] (just the number of matches, via `_count`).
+//!   `size` / `raw`). A [`Search`] is a plain client-free value — build it
+//!   anywhere, store and reuse it; a [`Client`] appears only at the terminals:
+//!   [`Search::send`] (a typed page), [`Search::ids`] (a page of bare document
+//!   ids, `_source: false`), or [`Search::count`] (just the number of matches,
+//!   via `_count`).
+//! - Several searches in one round-trip: [`Client::msearch`] (a tuple of
+//!   `&Search<T>`, mixed document types, one typed response per slot) and
+//!   [`Client::msearch_all`] (a slice of one type).
 //! - Typed [`SearchResponse`] / [`Hit`].
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/to-one-join
@@ -51,19 +57,21 @@
 //! impl User {
 //!     fn email() -> Keyword { Keyword::at("email") }
 //!     fn order_count() -> Number<i64> { Number::at("orderCount") }
-//!     fn search(client: &Client) -> flusso_search::Search<'_, User> {
-//!         flusso_search::Search::new(client, "users", "xxxxxx")
+//!     fn query() -> flusso_search::Search<User> {
+//!         flusso_search::Search::new("users", "xxxxxx")
 //!     }
 //! }
 //!
 //! # async fn run() -> flusso_search::Result<()> {
-//! let client = Client::connect("https://localhost:9200")?;
-//! let page = User::search(&client)
+//! // A query is a plain value — no client involved while building it.
+//! let busy = User::query()
 //!     .filter(User::email().eq("ada@example.com"))
 //!     .filter(User::order_count().gte(5))
-//!     .size(20)
-//!     .send()
-//!     .await?;
+//!     .size(20);
+//!
+//! // The client appears once, when it's time to run.
+//! let client = Client::connect("https://localhost:9200")?;
+//! let page = busy.send(&client).await?;
 //! println!("{} matches", page.total);
 //! # Ok(())
 //! # }
@@ -72,6 +80,7 @@
 mod client;
 mod error;
 mod handles;
+mod msearch;
 mod query;
 mod search;
 
@@ -80,6 +89,7 @@ mod tests;
 
 pub use client::Client;
 pub use error::{Error, Result};
+pub use msearch::MsearchBundle;
 pub use handles::{
     Binary, Bool, Date, FlussoValue, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection,
     Number, Object, Sort, SortOrder, Text, kind, multi_match,

@@ -85,13 +85,37 @@ impl Client {
         self.post_json(&endpoint, body).await
     }
 
+    /// POST an NDJSON body to `/_msearch` and return the parsed response JSON
+    /// (the `{"responses": […]}` envelope). Crate-internal:
+    /// [`Client::msearch`](Self::msearch) drives this.
+    #[tracing::instrument(
+        name = "msearch.request",
+        level = "debug",
+        skip_all,
+        fields(bytes = ndjson.len(), status = tracing::field::Empty),
+        err,
+    )]
+    pub(crate) async fn msearch_raw(&self, ndjson: String) -> Result<Value> {
+        let endpoint = format!("{}/_msearch", self.base);
+        tracing::debug!(%endpoint, "POST _msearch");
+        let builder = self
+            .http
+            .post(&endpoint)
+            .header("Content-Type", "application/x-ndjson")
+            .body(ndjson);
+        self.execute_json(builder).await
+    }
+
     /// POST a JSON body, require a 2xx status (recorded on the current span),
     /// and parse the response as JSON.
     async fn post_json(&self, endpoint: &str, body: &Value) -> Result<Value> {
-        let response = self
-            .authed(self.http.post(endpoint).json(body))
-            .send()
-            .await?;
+        self.execute_json(self.http.post(endpoint).json(body)).await
+    }
+
+    /// Send a prepared request (with auth applied), require a 2xx status
+    /// (recorded on the current span), and parse the response as JSON.
+    async fn execute_json(&self, builder: reqwest::RequestBuilder) -> Result<Value> {
+        let response = self.authed(builder).send().await?;
         let status = response.status();
         tracing::Span::current().record("status", status.as_u16());
         if !status.is_success() {

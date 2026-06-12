@@ -2,7 +2,7 @@
 //! `flusso.toml` fixture → a generated query surface that builds real requests.
 #![allow(dead_code, unused_crate_dependencies)]
 
-use flusso_search::{Client, FlussoDocument, FlussoValue, GeoPoint};
+use flusso_search::{FlussoDocument, FlussoValue, GeoPoint};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -33,9 +33,7 @@ struct Order {
 
 #[test]
 fn generated_surface_builds_queries() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-
-    let body = User::search(&client)
+    let body = User::query()
         .filter(User::email().eq("ada@example.com")) // keyword handle
         .filter(User::order_count().gte(5)) // count → Number<i64>
         .query(User::full_name().matches("ada")) // text (renamed fullName)
@@ -110,12 +108,10 @@ struct TypedOrder {
 
 #[test]
 fn value_derive_accepts_enums_and_newtypes() -> Result {
-    let client = Client::connect("http://localhost:9200")?;
-
     // The struct compiled at all → the deferred `FlussoValue<K>` bounds held
     // (keyword `email`/`status`, number `total`). Keyword operators also accept
     // the typed value directly, matched against its serde string form.
-    let body = TypedUser::search(&client)
+    let body = TypedUser::query()
         .filter(TypedUser::email().eq("ada@example.com")) // &str still works
         .filter(TypedUser::orders().any(TypedOrder::status().eq(OrderStatus::Paid)))
         .body();

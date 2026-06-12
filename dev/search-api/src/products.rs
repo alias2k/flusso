@@ -59,7 +59,7 @@ async fn list(
     State(client): State<Client>,
     Query(filter): Query<ProductFilter>,
 ) -> Result<Json<Page<Product>>, ApiError> {
-    let response = Product::search(&client)
+    let response = Product::query()
         // Free-text `q`: a scoring cross-field match over the two analyzed
         // `text` fields. `name` (a single field) keeps its own narrower filter.
         .query(
@@ -74,7 +74,7 @@ async fn list(
         .filter(filter.min_rating.map(|v| Product::avg_rating().gte(v)))
         .sort(Product::review_count().desc())
         .size(filter.limit.unwrap_or(20))
-        .send()
+        .send(&client)
         .await?;
     Ok(Json(Page::from(response)))
 }
