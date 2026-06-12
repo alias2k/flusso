@@ -268,6 +268,35 @@ User::search(&client)
 `query`/`filter`/`must_not`/`should` accept anything that is a `Query<Root>`, so
 the two styles mix freely.
 
+A built search can also finish as a **count** instead of a page: `.count()` sends
+the same query to `_count` and returns just the number of matching documents
+(`u64`) — cheaper than `send()` when the hits aren't needed (nothing is scored or
+fetched). Sort, `from`/`size`, and `filter_nested` projections are ignored; they
+never change which documents match.
+
+```rust
+let open_orders: u64 = User::search(&client)
+    .filter(User::orders().any(Order::status().eq("open")))
+    .count()
+    .await?;
+```
+
+Or as an **id page**: `.ids()` runs the same search with `_source: false` and
+returns `Vec<String>` — the matching document ids (the root primary keys,
+stringified), in order, with no sources fetched. Sort and `from`/`size` apply as
+in `send()`; `filter_nested` projections are dropped (there's no source to
+shape). This is the cheap way to feed another lookup — e.g. search in
+OpenSearch, then load the full rows from Postgres:
+
+```rust
+let user_ids: Vec<String> = User::search(&client)
+    .filter(User::orders().any(Order::status().eq("open")))
+    .sort(User::order_count().desc())
+    .size(100)
+    .ids()
+    .await?;
+```
+
 ### Building a child filter and merging it into the parent
 
 Because the scope is part of the type, a query is a value you can build, name,

@@ -67,8 +67,29 @@ impl Client {
     pub(crate) async fn search(&self, index: &str, hash: &str, body: &Value) -> Result<Value> {
         let endpoint = format!("{}/{index}_{hash}/_search", self.base);
         tracing::debug!(%endpoint, "POST _search");
+        self.post_json(&endpoint, body).await
+    }
+
+    /// POST a query body to `<index>_<hash>/_count` and return the parsed response
+    /// JSON. Crate-internal: [`crate::Search::count`] drives this.
+    #[tracing::instrument(
+        name = "count.request",
+        level = "debug",
+        skip_all,
+        fields(index, hash, status = tracing::field::Empty),
+        err,
+    )]
+    pub(crate) async fn count(&self, index: &str, hash: &str, body: &Value) -> Result<Value> {
+        let endpoint = format!("{}/{index}_{hash}/_count", self.base);
+        tracing::debug!(%endpoint, "POST _count");
+        self.post_json(&endpoint, body).await
+    }
+
+    /// POST a JSON body, require a 2xx status (recorded on the current span),
+    /// and parse the response as JSON.
+    async fn post_json(&self, endpoint: &str, body: &Value) -> Result<Value> {
         let response = self
-            .authed(self.http.post(&endpoint).json(body))
+            .authed(self.http.post(endpoint).json(body))
             .send()
             .await?;
         let status = response.status();

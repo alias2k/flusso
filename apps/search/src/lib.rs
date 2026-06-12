@@ -15,7 +15,9 @@
 //!   [`Nested`], [`Binary`], [`Json`]) with operators that build a [`Query`].
 //! - [`Query`] composition (`and` / `or` / `not`) and the [`Search`] bool-clause
 //!   builder (`query` / `filter` / `must_not` / `should`, plus `sort` / `from` /
-//!   `size` / `raw`).
+//!   `size` / `raw`), finished with [`Search::send`] (a typed page),
+//!   [`Search::ids`] (a page of bare document ids, `_source: false`), or
+//!   [`Search::count`] (just the number of matches, via `_count`).
 //! - Typed [`SearchResponse`] / [`Hit`].
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/to-one-join

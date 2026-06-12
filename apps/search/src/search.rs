@@ -45,7 +45,8 @@ pub trait FlussoDocument: DeserializeOwned {
 /// Built from `Search::new(client, index)` (the derive will generate a
 /// `Type::search(client)` that calls this). Clauses accumulate into a bool
 /// query: `query`/`should` score, `filter`/`must_not` don't. Finish with
-/// [`Search::send`].
+/// [`Search::send`] for a page of hits, [`Search::ids`] for a page of bare
+/// document ids, or [`Search::count`] for just the number of matches.
 #[derive(Debug)]
 pub struct Search<'a, T> {
     client: &'a Client,
@@ -154,15 +155,22 @@ impl<'a, T> Search<'a, T> {
         self
     }
 
+    /// The accumulated query alone: the raw override, the bool clauses, or
+    /// `match_all` when nothing was added. Shared by [`body`](Self::body) and
+    /// [`count_body`](Self::count_body).
+    fn query_value(&self) -> Value {
+        match &self.raw {
+            Some(raw) => raw.clone(),
+            None if self.bool_query.is_empty() => crate::handles::match_all_value(),
+            None => self.bool_query.to_value(),
+        }
+    }
+
     /// The request body this search will POST to `_search`. Pure — useful for
     /// tests and debugging.
     #[must_use]
     pub fn body(&self) -> Value {
-        let query = match &self.raw {
-            Some(raw) => raw.clone(),
-            None if self.bool_query.is_empty() => crate::handles::match_all_value(),
-            None => self.bool_query.to_value(),
-        };
+        let query = self.query_value();
 
         // `filter_nested` projections collect `inner_hits` without filtering
         // parents: they sit in `should` of a bool whose `must` holds the real
@@ -181,6 +189,13 @@ impl<'a, T> Search<'a, T> {
 
         let mut root = Map::new();
         root.insert("query".to_string(), query);
+        self.insert_page_params(&mut root);
+        Value::Object(root)
+    }
+
+    /// Add the page-shaping keys (`sort` / `from` / `size`) to a request body.
+    /// Shared by [`body`](Self::body) and [`ids_body`](Self::ids_body).
+    fn insert_page_params(&self, root: &mut Map<String, Value>) {
         if !self.sort.is_empty() {
             let keys = self.sort.iter().map(Sort::to_value).collect();
             root.insert("sort".to_string(), Value::Array(keys));
@@ -191,7 +206,71 @@ impl<'a, T> Search<'a, T> {
         if let Some(size) = self.size {
             root.insert("size".to_string(), Value::from(size));
         }
+    }
+
+    /// The request body [`count`](Self::count) will POST to `_count`: just the
+    /// query. Sort, `from`/`size`, and `filter_nested` projections are dropped —
+    /// `_count` accepts none of them, and none of them changes which documents
+    /// match. Pure — useful for tests and debugging.
+    #[must_use]
+    pub fn count_body(&self) -> Value {
+        let mut root = Map::new();
+        root.insert("query".to_string(), self.query_value());
         Value::Object(root)
+    }
+
+    /// The request body [`ids`](Self::ids) will POST to `_search`: the query
+    /// plus sort and pagination, with `_source: false` so hits carry only
+    /// their `_id` and nothing is fetched from stored source. `filter_nested`
+    /// projections are dropped — they shape returned sources, and there are
+    /// none. Pure — useful for tests and debugging.
+    #[must_use]
+    pub fn ids_body(&self) -> Value {
+        let mut root = Map::new();
+        root.insert("query".to_string(), self.query_value());
+        self.insert_page_params(&mut root);
+        root.insert("_source".to_string(), Value::Bool(false));
+        Value::Object(root)
+    }
+
+    /// Execute the search and return only the matching document ids (the root
+    /// primary keys, stringified by OpenSearch) — no sources are fetched, so
+    /// this is the cheap way to feed another lookup (e.g. load the rows from
+    /// Postgres). Sort, [`from`](Self::from), and [`size`](Self::size) apply
+    /// as in [`send`](Self::send); the page's ids are returned in order.
+    #[tracing::instrument(
+        name = "search.ids",
+        skip_all,
+        fields(index = %self.index, returned = tracing::field::Empty),
+        err,
+    )]
+    pub async fn ids(self) -> Result<Vec<String>> {
+        let body = self.ids_body();
+        let response = self.client.search(&self.index, &self.hash, &body).await?;
+        let raw: RawIdsResponse = serde_json::from_value(response)?;
+        let ids: Vec<String> = raw.hits.hits.into_iter().map(|hit| hit.id).collect();
+        tracing::Span::current().record("returned", ids.len());
+        tracing::debug!(returned = ids.len(), "ids search completed");
+        Ok(ids)
+    }
+
+    /// Execute the query as a count: how many documents match, without fetching
+    /// (or scoring) any hits — cheaper than [`send`](Self::send) when only the
+    /// total is needed. Sort, pagination, and nested projections are ignored
+    /// (see [`count_body`](Self::count_body)).
+    #[tracing::instrument(
+        name = "search.count",
+        skip_all,
+        fields(index = %self.index, count = tracing::field::Empty),
+        err,
+    )]
+    pub async fn count(self) -> Result<u64> {
+        let body = self.count_body();
+        let response = self.client.count(&self.index, &self.hash, &body).await?;
+        let raw: RawCount = serde_json::from_value(response)?;
+        tracing::Span::current().record("count", raw.count);
+        tracing::debug!(count = raw.count, "count completed");
+        Ok(raw.count)
     }
 }
 
@@ -337,6 +416,30 @@ struct RawHits<T> {
 #[derive(Deserialize)]
 struct RawTotal {
     value: u64,
+}
+
+/// The `_count` response envelope (`{ "count": N, "_shards": … }`).
+#[derive(Deserialize)]
+struct RawCount {
+    count: u64,
+}
+
+/// A `_search` response read for its hit ids only (`_source: false`, so hits
+/// carry no source to decode).
+#[derive(Deserialize)]
+struct RawIdsResponse {
+    hits: RawIdsHits,
+}
+
+#[derive(Deserialize)]
+struct RawIdsHits {
+    hits: Vec<RawIdHit>,
+}
+
+#[derive(Deserialize)]
+struct RawIdHit {
+    #[serde(rename = "_id")]
+    id: String,
 }
 
 #[derive(Deserialize)]

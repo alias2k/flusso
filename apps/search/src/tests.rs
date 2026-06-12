@@ -144,6 +144,62 @@ fn builds_the_full_search_body() -> Result {
 }
 
 #[test]
+fn count_body_keeps_the_query_and_drops_the_rest() -> Result {
+    let client = Client::connect("http://localhost:9200")?;
+    let body = User::search(&client)
+        .filter(User::email().eq("ada@example.com"))
+        .filter_nested(User::orders().matching(Order::status().eq("delivered")))
+        .sort(User::order_count().desc())
+        .from(10)
+        .size(20)
+        .count_body();
+
+    // Only the matching clauses survive: no sort/from/size (which `_count`
+    // rejects), and no inner-hits projection (which never affects matching).
+    let expected = json!({
+        "query": { "bool": { "filter": [
+            { "term": { "email": "ada@example.com" } }
+        ] } }
+    });
+    assert_eq!(body, expected);
+    Ok(())
+}
+
+#[test]
+fn ids_body_keeps_paging_and_disables_source() -> Result {
+    let client = Client::connect("http://localhost:9200")?;
+    let body = User::search(&client)
+        .filter(User::email().eq("ada@example.com"))
+        .filter_nested(User::orders().matching(Order::status().eq("delivered")))
+        .sort(User::order_count().desc())
+        .from(10)
+        .size(20)
+        .ids_body();
+
+    // Sort and pagination shape the id page, `_source` is off, and the
+    // inner-hits projection is dropped (no source to shape).
+    let expected = json!({
+        "query": { "bool": { "filter": [
+            { "term": { "email": "ada@example.com" } }
+        ] } },
+        "sort": [ { "orderCount": { "order": "desc" } } ],
+        "from": 10,
+        "size": 20,
+        "_source": false
+    });
+    assert_eq!(body, expected);
+    Ok(())
+}
+
+#[test]
+fn empty_count_body_matches_all() -> Result {
+    let client = Client::connect("http://localhost:9200")?;
+    let body = Search::<User>::new(&client, "users", "xxxxxx").count_body();
+    assert_eq!(body, json!({ "query": { "match_all": {} } }));
+    Ok(())
+}
+
+#[test]
 fn empty_search_matches_all() -> Result {
     let client = Client::connect("http://localhost:9200")?;
     let body = Search::<User>::new(&client, "users", "xxxxxx").body();
