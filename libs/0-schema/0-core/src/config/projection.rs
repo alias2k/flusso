@@ -13,7 +13,7 @@ use crate::common::{ColumnName, GenericValue, IndexName};
 
 use super::{
     Aggregate, AggregateOp, Column, Config, ContentHash, Field, FieldSource, IndexMapping,
-    IndexSchema, JoinType, Mapping, MappingType, Relation, ResolvedField,
+    IndexSchema, Mapping, MappingType, Relation, ResolvedField,
 };
 
 impl Config {
@@ -108,12 +108,16 @@ fn type_and_nullability(field: &Field, primary_key: Option<&ColumnName>) -> (Map
             constant_mapping_type(value),
             matches!(value, GenericValue::Null),
         ),
-        // A join's arity decides its shape and nullability: one-to-one is an
-        // object that may be absent; to-many is a nested array, never null.
-        FieldSource::Relation(Relation::Join(join)) => match join.join_type {
-            JoinType::OneToOne => (MappingType::Object, true),
-            JoinType::OneToMany | JoinType::ManyToMany => (MappingType::Nested, false),
-        },
+        // A join's verb decides its shape and nullability: a to-one join
+        // (`belongs_to`/`has_one`) is an object that may be absent; a to-many
+        // join is a nested array, never null.
+        FieldSource::Relation(Relation::Join(join)) => {
+            if join.kind.is_to_many() {
+                (MappingType::Nested, false)
+            } else {
+                (MappingType::Object, true)
+            }
+        }
         // An aggregate's type follows its op; only `count` is guaranteed
         // non-null. `sum`/`min`/`max` carry a declared `value_type`.
         FieldSource::Relation(Relation::Aggregate(aggregate)) => aggregate_type(aggregate),

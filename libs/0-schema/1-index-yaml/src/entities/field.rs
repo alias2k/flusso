@@ -1,7 +1,7 @@
 //! The YAML field form: `- <type>: <name>` with type-specific siblings.
 //!
 //! The field's **type is the key** — `keyword: email`, `text: bio`,
-//! `geo: location`, `one_to_many: orders`, `count: orderCount`. The key's value
+//! `geo: location`, `has_many: orders`, `count: orderCount`. The key's value
 //! is the document key; the sibling keys are whatever that type allows.
 //!
 //! Each variant owns exactly one body struct that derives [`Deserialize`] with
@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer};
 use schema_core::FlussoType;
 use schema_core::common;
 
-use super::{AggregateOp, Filter, JoinType, OrderBy, Through, Transform};
+use super::{AggregateOp, Filter, JoinVerb, OrderBy, Through, Transform};
 
 /// One field of a document, parsed from the type-as-key form. Each variant
 /// carries the type/op the tag denoted plus a body holding the rest.
@@ -30,8 +30,8 @@ pub enum Field {
     Geo(GeoBody),
     /// A same-row sub-object (`object:`).
     Object(ObjectBody),
-    /// A related table folded in, with its cardinality.
-    Join(JoinType, Box<JoinBody>),
+    /// A related table folded in, with its relationship verb.
+    Join(JoinVerb, Box<JoinBody>),
     /// A rollup over a related table, with its operation.
     Aggregate(AggregateOp, Box<AggregateBody>),
     /// A constant value (`constant:`).
@@ -98,13 +98,18 @@ pub struct ObjectBody {
     pub fields: Vec<Field>,
 }
 
-/// A join field (its cardinality is the type key).
+/// A join field (its relationship verb is the type key). Which key sibling is
+/// allowed depends on the verb: `column` for `belongs_to` (defaulting to the
+/// field name), `foreign_key` for `has_one`/`has_many`, `through` for
+/// `many_to_many` — enforced at conversion.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoinBody {
     pub field: common::FieldName,
     pub table: common::TableName,
     pub primary_key: common::ColumnName,
+    #[serde(default)]
+    pub column: Option<common::ColumnName>,
     #[serde(default)]
     pub foreign_key: Option<common::ColumnName>,
     #[serde(default)]
@@ -157,7 +162,7 @@ enum TagKind {
     Custom,
     Geo,
     Object,
-    Join(JoinType),
+    Join(JoinVerb),
     Aggregate(AggregateOp),
     Constant,
 }
@@ -171,9 +176,10 @@ fn classify(key: &str) -> Option<TagKind> {
         "custom" => TagKind::Custom,
         "geo" => TagKind::Geo,
         "object" => TagKind::Object,
-        "one_to_one" => TagKind::Join(JoinType::OneToOne),
-        "one_to_many" => TagKind::Join(JoinType::OneToMany),
-        "many_to_many" => TagKind::Join(JoinType::ManyToMany),
+        "belongs_to" => TagKind::Join(JoinVerb::BelongsTo),
+        "has_one" => TagKind::Join(JoinVerb::HasOne),
+        "has_many" => TagKind::Join(JoinVerb::HasMany),
+        "many_to_many" => TagKind::Join(JoinVerb::ManyToMany),
         "count" => TagKind::Aggregate(AggregateOp::Count),
         "sum" => TagKind::Aggregate(AggregateOp::Sum),
         "avg" => TagKind::Aggregate(AggregateOp::Avg),
@@ -235,7 +241,7 @@ fn find_tag<E: de::Error>(map: &serde_yaml::Mapping) -> Result<(String, TagKind)
         E::custom(format!(
             "field is missing a type tag{here}; expected one of: a scalar type like \
              `keyword`/`text`/`integer`, or `custom`, `geo`, `object`, \
-             `one_to_one`/`one_to_many`/`many_to_many`, \
+             `belongs_to`/`has_one`/`has_many`/`many_to_many`, \
              `count`/`sum`/`avg`/`min`/`max`, `constant`"
         ))
     })

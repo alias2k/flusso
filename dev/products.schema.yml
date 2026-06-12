@@ -56,7 +56,7 @@ fields:
         required: true
 
   # One-to-many: reviews, newest first.
-  - one_to_many: reviews
+  - has_many: reviews
     table: reviews
     foreign_key: product_id
     primary_key: id

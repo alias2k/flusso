@@ -86,7 +86,7 @@ pub struct User {
     #[serde(rename = "fullName")]
     pub full_name: Option<String>,              // text, not required → nullable
     pub account: Account,                       // a group (object) — always assembled
-    pub orders: Vec<Order>,                     // one_to_many join → nested, never null
+    pub orders: Vec<Order>,                     // has_many join → nested, never null
     #[serde(rename = "orderCount")]
     pub order_count: i64,                        // count aggregate → long, never null
     #[serde(rename = "lifetimeValue")]
@@ -111,7 +111,7 @@ pub struct Order {
     pub total: f64,                             // decimal → double (lossy; see the type table)
     #[serde(rename = "placedAt")]
     pub placed_at: time::OffsetDateTime,        // timestamp, required
-    pub items: Vec<Item>,                       // a deeper one_to_many → nested
+    pub items: Vec<Item>,                       // a deeper has_many → nested
 }
 
 #[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
@@ -209,7 +209,7 @@ a 400 from OpenSearch.
 | `Bool`          | `eq`, `exists`                                                            |
 | `Number<T>`     | `eq`, `in_`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                |
 | `Date`          | `eq`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                       |
-| `Object<S>`     | `exists` (a same-document sub-object — group or `one_to_one`; `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
+| `Object<S>`     | `exists` (a same-document sub-object — group or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
 | `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
 | `Binary`        | `exists` — base64-encoded, not searchable                                 |
@@ -239,7 +239,7 @@ nothing more.
 
 A handle's operator produces a `Query<S>` — a query that carries the **scope** it
 was built in: the document or nested context `S` it constrains. The root document
-and any flattened `object`/`one_to_one` sub-field share the scope `Root` (so root
+and any flattened `object`/to-one-join sub-field share the scope `Root` (so root
 handles produce `Query<Root>`); only a `nested` array introduces a fresh scope,
 tagged with its element type (`Query<Order>`).
 
@@ -526,7 +526,7 @@ impl User {
     pub fn id() -> Number<i32> { /* … */ }
     pub fn email() -> Keyword { /* … */ }
     pub fn full_name() -> Text { /* … */ }
-    pub fn account() -> Object { /* … */ }                  // object/one_to_one → `Object<Root>` (scope-only; `.exists()`)
+    pub fn account() -> Object { /* … */ }                  // object/to-one join → `Object<Root>` (scope-only; `.exists()`)
     pub fn addresses() -> Nested<Root, AddressFields> { /* … */ } // not projected — generated namespace
     pub fn orders() -> Nested<Root, Order> { /* … */ }      // projected — `Nested<enclosing scope, your struct>`
     pub fn order_count() -> Number<i64> { /* … */ }
@@ -625,8 +625,8 @@ something else and it won't compile (modulo the leaf-identifier rule above).
 | `geo_point`       | `geo_point`| `GeoPoint` (`{ lat, lon }`)      | `Geo`           |
 | `custom { opensearch }` | (given) | matching scalar, else `serde_json::Value` | by OS type |
 | `group`           | `object`   | a struct                         | `Object`        |
-| join `one_to_one` | `object`   | `Option<` a struct `>`           | `Object`        |
-| join `one_to_many` / `many_to_many` | `nested` | `Vec<` a struct `>`  | `Nested<S, T>`  |
+| join `belongs_to` / `has_one` | `object`   | `Option<` a struct `>`           | `Object`        |
+| join `has_many` / `many_to_many` | `nested` | `Vec<` a struct `>`  | `Nested<S, T>`  |
 
 **Decimals are lossy by default.** `type: decimal` maps to OpenSearch `double`,
 so a money field round-trips as `f64` — fine for most things, less fine for an
@@ -655,8 +655,8 @@ derive requires `nullable: false → T`, `nullable: true → Option<T>`.
 | leaf column, `required: true`         | `false`    | declared non-null                                    |
 | leaf column, `required: false`        | `true`     | nullable by default                                  |
 | `group` (`object`)                    | `false`    | always assembled from the same row                   |
-| join `one_to_one` (`object`)          | `true`     | there may be no related row                          |
-| join `one_to_many` / `many_to_many`   | `false`    | a `Vec`, empty when there are none, never null       |
+| join `belongs_to` / `has_one` (`object`)          | `true`     | there may be no related row                          |
+| join `has_many` / `many_to_many`     | `false`    | a `Vec`, empty when there are none, never null       |
 | aggregate `count`                     | `false`    | a non-null `long` — zero rows is `0`, not null       |
 | aggregate `avg`                       | `true`     | a nullable `double` — null over zero rows            |
 | aggregate `sum` / `min` / `max`       | `true`     | null over zero rows; the result mirrors the column   |

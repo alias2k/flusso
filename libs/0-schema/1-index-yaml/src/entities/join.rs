@@ -2,14 +2,30 @@ use serde::{Deserialize, Serialize};
 
 use schema_core::common;
 
-/// The cardinality of a join — written as the field's type key
-/// (`one_to_one:` / `one_to_many:` / `many_to_many:`).
+/// The relationship verb of a join — written as the field's type key
+/// (`belongs_to:` / `has_one:` / `has_many:` / `many_to_many:`). The verb names
+/// which side carries the key: `belongs_to` follows a column on *this* table;
+/// `has_one`/`has_many` follow a `foreign_key` on the *related* table;
+/// `many_to_many` goes `through` a junction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum JoinType {
-    OneToOne,
-    OneToMany,
+pub enum JoinVerb {
+    BelongsTo,
+    HasOne,
+    HasMany,
     ManyToMany,
+}
+
+impl JoinVerb {
+    /// The verb as written in YAML, for error messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JoinVerb::BelongsTo => "belongs_to",
+            JoinVerb::HasOne => "has_one",
+            JoinVerb::HasMany => "has_many",
+            JoinVerb::ManyToMany => "many_to_many",
+        }
+    }
 }
 
 /// A junction table for a `many_to_many` join.

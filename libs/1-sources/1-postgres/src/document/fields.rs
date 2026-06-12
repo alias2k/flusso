@@ -2,10 +2,10 @@
 //! resolution), collecting relation tables (to pre-resolve their primary keys),
 //! and resolving a field name back to its column. No I/O.
 
-use schema_core::{ColumnName, Field, FieldName, Filter, JoinKey, Relation, TableName};
+use schema_core::{ColumnName, Field, FieldName, Filter, Relation, RelationKey, TableName};
 
 /// The target table and key of a relation.
-pub(super) fn relation_target(relation: &Relation) -> (&TableName, &JoinKey) {
+pub(super) fn relation_target(relation: &Relation) -> (&TableName, RelationKey<'_>) {
     (relation.table(), relation.key())
 }
 
@@ -46,7 +46,7 @@ pub(super) fn find_paths<'a>(
                 prefix.push(relation);
                 let (target, key) = relation_target(relation);
                 let hit = target == table
-                    || matches!(key, JoinKey::Through(through) if through.table == *table);
+                    || matches!(key, RelationKey::Through(through) if through.table == *table);
                 if hit {
                     out.push(prefix.clone());
                 }

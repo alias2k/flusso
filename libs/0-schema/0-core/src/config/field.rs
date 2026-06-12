@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-use super::{Aggregate, Filter, FlussoType, Join, JoinKey, Transform};
+use super::{Aggregate, AggregateKey, Filter, FlussoType, Join, JoinKind, Through, Transform};
 
 /// One field of a document: a name, optional OpenSearch mapping `options` passed
 /// through to the index, and a [`source`](Self::source) saying where its value
@@ -121,6 +121,22 @@ impl Field {
     }
 }
 
+/// A relation's key, viewed uniformly across joins and aggregates — the three
+/// physical shapes a "these tables connect" fact can take. Traversal code
+/// (document SQL, reverse resolution) matches on this instead of caring whether
+/// the relation is a join or an aggregate.
+#[derive(Debug, Clone, Copy)]
+pub enum RelationKey<'a> {
+    /// The **parent** row holds the key: `parent.column → target.primary_key`
+    /// (a `belongs_to`).
+    Local(&'a common::ColumnName),
+    /// The **related** rows hold the key: `target.foreign_key → parent.pk`
+    /// (a `has_one`/`has_many`, or a direct-keyed aggregate).
+    Direct(&'a common::ColumnName),
+    /// Both sides connect through a junction table.
+    Through(&'a Through),
+}
+
 impl Relation {
     /// The related table this relation targets.
     pub fn table(&self) -> &common::TableName {
@@ -130,11 +146,20 @@ impl Relation {
         }
     }
 
-    /// The key tying the related rows back to the parent row.
-    pub fn key(&self) -> &JoinKey {
+    /// The key tying the related rows and the parent row together.
+    pub fn key(&self) -> RelationKey<'_> {
         match self {
-            Relation::Join(join) => &join.key,
-            Relation::Aggregate(aggregate) => &aggregate.key,
+            Relation::Join(join) => match &join.kind {
+                JoinKind::BelongsTo { column } => RelationKey::Local(column),
+                JoinKind::HasOne { foreign_key } | JoinKind::HasMany { foreign_key } => {
+                    RelationKey::Direct(foreign_key)
+                }
+                JoinKind::ManyToMany { through } => RelationKey::Through(through),
+            },
+            Relation::Aggregate(aggregate) => match &aggregate.key {
+                AggregateKey::Direct(foreign_key) => RelationKey::Direct(foreign_key),
+                AggregateKey::Through(through) => RelationKey::Through(through),
+            },
         }
     }
 

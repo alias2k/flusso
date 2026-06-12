@@ -18,7 +18,7 @@
 //!   `size` / `raw`).
 //! - Typed [`SearchResponse`] / [`Hit`].
 //!
-//! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/`one_to_one`
+//! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/to-one-join
 //! handles ([`Object`]); shaping returned nested arrays ([`Search::filter_nested`]
 //! with [`Nested::matching`], via `inner_hits`); and scope-tagged queries —
 //! [`Query`]`<S>` carries the scope `S` it was built in ([`Root`] for the document

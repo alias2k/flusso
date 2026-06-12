@@ -2,7 +2,7 @@
 //! was built in, composed with `and` / `or` / `not`.
 //!
 //! Scope `S` is the query context a handle belongs to. Root fields and flattened
-//! object / `one_to_one` sub-fields are all [`Root`]; a `nested` array introduces
+//! object / to-one-join sub-fields are all [`Root`]; a `nested` array introduces
 //! its own scope (the element type), so a nested query must be lifted
 //! ([`Nested::any`](crate::Nested::any)/[`all`](crate::Nested::all)) before it can
 //! join a `Root` query — the compiler enforces it.
@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 use serde_json::{Map, Value};
 
 /// The default query scope — the document root. Root fields and flattened
-/// object / `one_to_one` sub-fields share it.
+/// object / to-one-join sub-fields share it.
 #[derive(Debug, Clone, Copy)]
 pub struct Root;
 

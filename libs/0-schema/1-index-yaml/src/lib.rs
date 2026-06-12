@@ -4,7 +4,7 @@
 //! A schema file describes one search document: its root table, its fields, and
 //! how related tables fold in through joins and aggregates. Each field is
 //! written **type-first** — `- <type>: <name>` (`keyword: email`,
-//! `one_to_many: orders`, `count: orderCount`, `geo: location`) — and carries
+//! `has_many: orders`, `count: orderCount`, `geo: location`) — and carries
 //! only the siblings that type allows. Parsing is two stages:
 //!
 //! 1. [`SchemaYaml`] deserializes the file. Each field's type tag selects the
@@ -12,10 +12,12 @@
 //!    [`ParseFrom`](schema_core::ParseFrom) also checks the declared `version`
 //!    against [`SUPPORTED_VERSIONS`].
 //! 2. `TryFrom<SchemaYaml>` converts it into the core model, validating
-//!    identifiers and the arity rules YAML alone can't express: a join needs
-//!    exactly one of `foreign_key` or `through`, `sum`/`min`/`max` aggregates
-//!    need a `column` and a `value_type`, a `between` filter takes exactly two
-//!    values, and a `geo` field needs either `lat`+`lon` or a single `column`.
+//!    identifiers and the arity rules YAML alone can't express: a join takes
+//!    exactly the key its verb implies (`column` for `belongs_to`,
+//!    `foreign_key` for `has_one`/`has_many`, `through` for `many_to_many`),
+//!    `sum`/`min`/`max` aggregates need a `column` and a `value_type`, a
+//!    `between` filter takes exactly two values, and a `geo` field needs either
+//!    `lat`+`lon` or a single `column`.
 
 mod conversion;
 mod entities;
@@ -45,8 +47,24 @@ pub enum ConversionError {
     ColumnName(#[from] schema_core::ColumnNameError),
     #[error("invalid database schema name: {0}")]
     DatabaseSchema(#[from] schema_core::DatabaseSchemaError),
-    #[error("join must specify either `foreign_key` or `through`, not both or neither")]
-    InvalidJoinKey,
+    #[error("`{verb}` join is missing its key: it takes {expected}")]
+    MissingJoinKey {
+        verb: &'static str,
+        expected: &'static str,
+    },
+    #[error("`{verb}` join does not take `{sibling}`; it takes {expected}")]
+    UnexpectedJoinKey {
+        verb: &'static str,
+        sibling: &'static str,
+        expected: &'static str,
+    },
+    #[error("`{verb}` join does not take `{sibling}` (a to-one join picks a single row)")]
+    UnexpectedJoinSibling {
+        verb: &'static str,
+        sibling: &'static str,
+    },
+    #[error("aggregate must specify either `foreign_key` or `through`, not both or neither")]
+    InvalidAggregateKey,
     #[error("aggregate op '{op}' requires a `column`")]
     MissingAggregateColumn { op: &'static str },
     #[error("filter op '{op}' requires a value")]

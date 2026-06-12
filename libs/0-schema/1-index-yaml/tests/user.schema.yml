@@ -42,8 +42,8 @@ fields:
         column: created_at
         required: true
 
-  # One-to-one join.
-  - one_to_one: profile
+  # To-one join, key on the related table.
+  - has_one: profile
     table: profiles
     foreign_key: user_id
     primary_key: user_id
@@ -51,8 +51,17 @@ fields:
       - text: bio
         required: false
 
-  # One-to-many join with filters and ordering.
-  - one_to_many: orders
+  # To-one join, key on this table (`column` defaults to the field name).
+  - belongs_to: organization
+    table: organizations
+    column: organization_id
+    primary_key: id
+    fields:
+      - keyword: name
+        required: true
+
+  # To-many join with filters and ordering.
+  - has_many: orders
     table: orders
     foreign_key: user_id
     primary_key: id

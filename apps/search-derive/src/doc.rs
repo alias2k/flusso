@@ -439,7 +439,7 @@ fn handle_fn(
         MappingType::Other(name) if name == "geo_point" => simple("Geo"),
         MappingType::Other(name) if name == "binary" => simple("Binary"),
         MappingType::Object if resolved.children.is_empty() => simple("Json"),
-        // A group / one_to_one object → an `Object<S>` handle (for `.exists()`;
+        // A group / to-one-join object → an `Object<S>` handle (for `.exists()`;
         // sub-fields are queried via their own dotted-path child handles). `S` is
         // the enclosing scope, same as the leaf handles at this level.
         MappingType::Object => Some((

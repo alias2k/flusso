@@ -99,7 +99,7 @@ fields:
     transforms: [lowercase, trim]
 
   # Fold each user's recent orders in as a nested array.
-  - one_to_many: orders
+  - has_many: orders
     table: orders
     foreign_key: user_id
     primary_key: id

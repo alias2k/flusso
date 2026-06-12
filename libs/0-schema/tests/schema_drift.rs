@@ -145,15 +145,15 @@ fn all_directions() -> Vec<schema_index_yaml::Direction> {
     vec![Asc, Desc]
 }
 
-fn all_join_types() -> Vec<schema_index_yaml::JoinType> {
-    use schema_index_yaml::JoinType::*;
-    fn _exhaustive(j: schema_index_yaml::JoinType) {
-        use schema_index_yaml::JoinType::*;
+fn all_join_verbs() -> Vec<schema_index_yaml::JoinVerb> {
+    use schema_index_yaml::JoinVerb::*;
+    fn _exhaustive(j: schema_index_yaml::JoinVerb) {
+        use schema_index_yaml::JoinVerb::*;
         match j {
-            OneToOne | OneToMany | ManyToMany => {}
+            BelongsTo | HasOne | HasMany | ManyToMany => {}
         }
     }
-    vec![OneToOne, OneToMany, ManyToMany]
+    vec![BelongsTo, HasOne, HasMany, ManyToMany]
 }
 
 fn all_aggregate_ops() -> Vec<schema_index_yaml::AggregateOp> {
@@ -246,6 +246,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             field: _,
             table: _,
             primary_key: _,
+            column: _,
             foreign_key: _,
             through: _,
             filters: _,
@@ -321,7 +322,7 @@ fn index_field_type_tags_match_parser() {
     let (schema_tags, _) = schema_field_props();
 
     let mut rust_tags = scalar_type_tokens();
-    rust_tags.extend(tokens(&all_join_types()));
+    rust_tags.extend(tokens(&all_join_verbs()));
     rust_tags.extend(tokens(&all_aggregate_ops()));
     // Parser keywords with no 1:1 serializable enum: `geo`→GeoPoint, `object`→
     // Group, `custom`→Custom, `constant`→Constant (see `field::classify`).

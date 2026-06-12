@@ -13,9 +13,9 @@
 use std::collections::HashMap;
 
 use schema_core::{
-    Aggregate, AggregateOp, ColumnName, DatabaseSchema, Direction, Field, FieldSource, Filter,
-    FilterOp, FilterValue, GenericValue, Geo, IndexSchema, Join, JoinKey, JoinType, NullOp,
-    OrderBy, Relation, SoftDelete, TableName, Transform, ValueOpFilter,
+    Aggregate, AggregateKey, AggregateOp, ColumnName, DatabaseSchema, Direction, Field,
+    FieldSource, Filter, FilterOp, FilterValue, GenericValue, Geo, IndexSchema, Join, JoinKind,
+    NullOp, OrderBy, Relation, SoftDelete, TableName, Transform, ValueOpFilter,
 };
 use sources_core::{Result, SourceError};
 use sqlx::Postgres;
@@ -270,50 +270,65 @@ impl Builder<'_> {
         parent_alias: &str,
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
-        let parent_pk = require_pk(parent_pk)?;
-
-        match &join.key {
-            JoinKey::Direct(foreign_key) => {
+        match &join.kind {
+            // The parent row points at the target: correlate the target's
+            // primary key with the parent's own column. No parent pk needed.
+            JoinKind::BelongsTo { column } => {
+                let target = &join.table;
+                let target_pk = self.pk_of(target)?;
+                let alias = self.alias();
+                let object = self.object(&join.fields, &alias, Some(&target_pk))?;
+                let filters = self.filters(join.filters.as_deref(), &alias, target)?;
+                Ok(format!(
+                    "(SELECT {object} FROM {} AS {} WHERE {} = {}{filters} LIMIT 1)",
+                    qtable(self.db, target),
+                    qident(&alias),
+                    qcol(&alias, &target_pk),
+                    qcol(parent_alias, column),
+                ))
+            }
+            JoinKind::HasOne { foreign_key } => {
+                let parent_pk = require_pk(parent_pk)?;
                 let child = &join.table;
                 let child_pk = self.pk_of(child)?;
-                match join.join_type {
-                    JoinType::OneToOne => {
-                        let alias = self.alias();
-                        let object = self.object(&join.fields, &alias, Some(&child_pk))?;
-                        let filters = self.filters(join.filters.as_deref(), &alias, child)?;
-                        let order = order_clause(join.order_by.as_deref(), &alias);
-                        Ok(format!(
-                            "(SELECT {object} FROM {} AS {} WHERE {} = {}{filters}{order} LIMIT 1)",
-                            qtable(self.db, child),
-                            qident(&alias),
-                            qcol(&alias, foreign_key),
-                            qcol(parent_alias, parent_pk),
-                        ))
-                    }
-                    JoinType::OneToMany | JoinType::ManyToMany => {
-                        let derived = self.alias();
-                        let object = self.object(&join.fields, &derived, Some(&child_pk))?;
-                        let inner = self.alias();
-                        let filters = self.filters(join.filters.as_deref(), &inner, child)?;
-                        let inner_sql = format!(
-                            "SELECT {ia}.* FROM {} AS {ia} WHERE {} = {}{filters}{}{}",
-                            qtable(self.db, child),
-                            qcol(&inner, foreign_key),
-                            qcol(parent_alias, parent_pk),
-                            order_clause(join.order_by.as_deref(), &inner),
-                            limit_clause(join.limit),
-                            ia = qident(&inner),
-                        );
-                        Ok(json_agg_subquery(
-                            &object,
-                            &inner_sql,
-                            &derived,
-                            order_clause(join.order_by.as_deref(), &derived),
-                        ))
-                    }
-                }
+                let alias = self.alias();
+                let object = self.object(&join.fields, &alias, Some(&child_pk))?;
+                let filters = self.filters(join.filters.as_deref(), &alias, child)?;
+                let order = order_clause(join.order_by.as_deref(), &alias);
+                Ok(format!(
+                    "(SELECT {object} FROM {} AS {} WHERE {} = {}{filters}{order} LIMIT 1)",
+                    qtable(self.db, child),
+                    qident(&alias),
+                    qcol(&alias, foreign_key),
+                    qcol(parent_alias, parent_pk),
+                ))
             }
-            JoinKey::Through(through) => {
+            JoinKind::HasMany { foreign_key } => {
+                let parent_pk = require_pk(parent_pk)?;
+                let child = &join.table;
+                let child_pk = self.pk_of(child)?;
+                let derived = self.alias();
+                let object = self.object(&join.fields, &derived, Some(&child_pk))?;
+                let inner = self.alias();
+                let filters = self.filters(join.filters.as_deref(), &inner, child)?;
+                let inner_sql = format!(
+                    "SELECT {ia}.* FROM {} AS {ia} WHERE {} = {}{filters}{}{}",
+                    qtable(self.db, child),
+                    qcol(&inner, foreign_key),
+                    qcol(parent_alias, parent_pk),
+                    order_clause(join.order_by.as_deref(), &inner),
+                    limit_clause(join.limit),
+                    ia = qident(&inner),
+                );
+                Ok(json_agg_subquery(
+                    &object,
+                    &inner_sql,
+                    &derived,
+                    order_clause(join.order_by.as_deref(), &derived),
+                ))
+            }
+            JoinKind::ManyToMany { through } => {
+                let parent_pk = require_pk(parent_pk)?;
                 let far = &join.table;
                 let far_pk = self.pk_of(far)?;
                 let derived = self.alias();
@@ -352,7 +367,7 @@ impl Builder<'_> {
     ) -> Result<String> {
         let parent_pk = require_pk(parent_pk)?;
         match &aggregate.key {
-            JoinKey::Direct(foreign_key) => {
+            AggregateKey::Direct(foreign_key) => {
                 let alias = self.alias();
                 let function = agg_function(&aggregate.op, &alias);
                 let filters =
@@ -365,7 +380,7 @@ impl Builder<'_> {
                     qcol(parent_alias, parent_pk),
                 ))
             }
-            JoinKey::Through(through) => {
+            AggregateKey::Through(through) => {
                 let far_pk = self.pk_of(&aggregate.table)?;
                 let alias = self.alias();
                 let junction_alias = self.alias();
@@ -733,15 +748,16 @@ mod tests {
     }
 
     #[test]
-    fn one_to_many_with_order_and_limit() {
+    fn has_many_with_order_and_limit() {
         let orders = Field {
             field: f("orders"),
             options: Default::default(),
             source: FieldSource::Relation(Relation::Join(Join {
                 table: t("orders"),
-                join_type: JoinType::OneToMany,
+                kind: JoinKind::HasMany {
+                    foreign_key: c("user_id"),
+                },
                 primary_key: c("primary_key"),
-                key: JoinKey::Direct(c("user_id")),
                 filters: None,
                 order_by: Some(vec![OrderBy {
                     column: c("created_at"),
@@ -768,6 +784,41 @@ mod tests {
     }
 
     #[test]
+    fn belongs_to_correlates_on_the_parent_column() {
+        let org = Field {
+            field: f("org"),
+            options: Default::default(),
+            source: FieldSource::Relation(Relation::Join(Join {
+                table: t("orgs"),
+                kind: JoinKind::BelongsTo {
+                    column: c("org_id"),
+                },
+                primary_key: c("id"),
+                filters: None,
+                order_by: None,
+                limit: None,
+                fields: vec![col_field("name", "name")],
+            })),
+        };
+        let schema = index(Some("id"), None, vec![org]);
+        let mut pks = HashMap::new();
+        pks.insert("orgs".to_owned(), c("id"));
+        let (sql, _) = document_query(
+            &schema,
+            &[(c("id"), GenericValue::Int(1))],
+            &pks,
+            &HashMap::new(),
+        )
+        .unwrap();
+        // The target is matched by ITS primary key against the parent's own
+        // column — the reverse of a has_one — and needs no parent primary key.
+        assert_eq!(
+            sql.as_str(),
+            r#"SELECT json_build_object('org', (SELECT json_build_object('name', "rel1"."name") FROM "public"."orgs" AS "rel1" WHERE "rel1"."id" = "root"."org_id" LIMIT 1)) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
+        );
+    }
+
+    #[test]
     fn aggregate_count() {
         let count = Field {
             field: f("order_count"),
@@ -775,7 +826,7 @@ mod tests {
             source: FieldSource::Relation(Relation::Aggregate(Aggregate {
                 table: t("orders"),
                 op: AggregateOp::Count,
-                key: JoinKey::Direct(c("user_id")),
+                key: AggregateKey::Direct(c("user_id")),
                 value_type: None,
                 filters: None,
             })),

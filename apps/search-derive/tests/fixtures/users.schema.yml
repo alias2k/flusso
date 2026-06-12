@@ -14,7 +14,7 @@ fields:
     lat: latitude
     lon: longitude
     required: false
-  - one_to_many: orders
+  - has_many: orders
     table: orders
     foreign_key: user_id
     primary_key: id
@@ -23,9 +23,9 @@ fields:
         required: true
       - decimal: total
         required: true
-      # An object (one_to_one) *inside* a nested array — used to exercise the
+      # An object (has_one) *inside* a nested array — used to exercise the
       # derive's "object under nested" error (its scope can't be expressed).
-      - one_to_one: shipping
+      - has_one: shipping
         table: shipments
         foreign_key: order_id
         primary_key: order_id

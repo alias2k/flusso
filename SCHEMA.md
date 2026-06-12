@@ -201,8 +201,8 @@ The type key is one of:
   Postgres/OpenSearch pair);
 - `geo` — a geographic point (see [Geo points](#geo-points));
 - `object` — a same-row sub-object (see [Objects](#objects));
-- `one_to_one` / `one_to_many` / `many_to_many` — a related table folded in (see
-  [Joins](#joins));
+- `belongs_to` / `has_one` / `has_many` / `many_to_many` — a related table
+  folded in (see [Joins](#joins));
 - `count` / `sum` / `avg` / `min` / `max` — a rollup over a related table (see
   [Aggregates](#aggregates));
 - `constant` — a fixed value.
@@ -213,14 +213,14 @@ on that type:
 | Sibling | Applies to | Description |
 | --- | --- | --- |
 | `required` | scalar, `geo` | **Mandatory** on a scalar/geo leaf. `true` forces the field non-null; nullable otherwise. Joins and aggregates are structural — their nullability is fixed — so they take no `required`. |
-| `column` | scalar, `geo` | The source column. Defaults to the document key when omitted. |
+| `column` | scalar, `geo`, `belongs_to` | The source column — for a `belongs_to`, this table's column pointing at the related row. Defaults to the document key when omitted. |
 | `options` | types with a mapping | Extra OpenSearch mapping properties merged beside the derived type (e.g. `analyzer`, `format`, `scaling_factor`). |
 | `transforms` | scalar | Value transforms to apply. See [Transforms](#transforms). |
 | `default` | scalar | Value to coalesce a `null` column to. |
 | `postgres` / `opensearch` | `custom` | The Postgres types accepted and the OpenSearch type emitted. |
 | `lat` / `lon` | `geo` | The two coordinate columns (two-column form). |
 | `fields` | `object`, joins | The nested projection. |
-| `table`, `primary_key`, `foreign_key`, `through`, `order_by`, `filters`, `limit` | joins | See [Joins](#joins). |
+| `table`, `primary_key`, `column`/`foreign_key`/`through`, `order_by`, `filters`, `limit` | joins | Which key sibling applies depends on the verb. See [Joins](#joins). |
 | `table`, `column`, `value_type`, `foreign_key`, `through`, `filters` | aggregates | See [Aggregates](#aggregates). |
 | `value` | `constant` | The fixed value (`null`/absent renders as JSON null). |
 
@@ -257,9 +257,9 @@ declare their own types.
 
 → `{ "address": { "street": …, "city": …, "zip": … } }`, all from one row.
 
-An `object` differs from a `one_to_one` [join](#joins): the join reads a
-*related table* by key, an object stays put on the current row. Optional
-`options` pass extra properties to the `object` mapping.
+An `object` differs from a to-one [join](#joins) (`belongs_to`/`has_one`): the
+join reads a *related table* by key, an object stays put on the current row.
+Optional `options` pass extra properties to the `object` mapping.
 
 ### Types
 
@@ -304,7 +304,7 @@ OpenSearch type and the Postgres types it accepts:
 
 `options` carries any extra OpenSearch mapping properties (analyzers, formats,
 …) merged beside the derived type. Objects, joins, aggregates, and geo points
-carry their own type keys (`object`, `one_to_one`/…, `count`/…, `geo`) rather
+carry their own type keys (`object`, `belongs_to`/…, `count`/…, `geo`) rather
 than a scalar type; their shape is structural.
 
 > **Production-ready defaults.** The OpenSearch sink does **not** emit your
@@ -385,17 +385,36 @@ A list applied in order to a column value before it lands in the document:
 
 ### Joins
 
-Fold rows from a related table into the document as nested documents. The join's
-**cardinality is its type key** — `one_to_one`, `one_to_many`, or
-`many_to_many` — and its `fields` project columns from each related row.
+Fold rows from a related table into the document as nested documents. The
+join's **relationship verb is its type key**, and the verb names the one thing
+that matters: **which table holds the key.**
 
-A join is `nested` (or `object` for `one_to_one`) by structure. Its `fields` —
-the projection from each related row — and its `primary_key` are siblings of the
-type key. The field reading that `primary_key` is marked non-null automatically,
-the same way the root `primary_key` works.
+| Type key | The key lives on… | Reads as | Renders as |
+| --- | --- | --- | --- |
+| `belongs_to` | **this** table (`column`) | "my `column` points at the related row" | object (nullable) |
+| `has_one` | the **related** table (`foreign_key`) | "one related row points back at me" | object (nullable) |
+| `has_many` | the **related** table (`foreign_key`) | "many related rows point back at me" | nested array (never null) |
+| `many_to_many` | a junction table (`through`) | "we connect through a junction" | nested array (never null) |
+
+The `fields` — the projection from each related row — and the related table's
+`primary_key` are siblings of the type key. The field reading that
+`primary_key` is marked non-null automatically, the same way the root
+`primary_key` works.
 
 ```yaml
-- one_to_many: orders
+# My column points at them: embed the user a `created_by` column references.
+# `column` defaults to the field name — here, the FK column IS `created_by`.
+- belongs_to: created_by
+  table: users
+  primary_key: id
+  fields:
+    - keyword: email
+      required: true
+    - text: name
+      required: false
+
+# Their column points at me: fold in the rows holding my key.
+- has_many: orders
   table: orders
   foreign_key: user_id
   primary_key: id
@@ -413,18 +432,25 @@ the same way the root `primary_key` works.
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
-| *(type key)* | field name | yes | `one_to_one`, `one_to_many`, or `many_to_many`; its value is the document key. |
+| *(type key)* | field name | yes | `belongs_to`, `has_one`, `has_many`, or `many_to_many`; its value is the document key. |
 | `table` | Postgres identifier | yes | The related table. |
 | `primary_key` | Postgres identifier | yes | The related table's primary key. The projected field reading it is forced non-null. |
-| `foreign_key` | Postgres identifier | conditional | The FK tying related rows to the parent. **Required** for `one_to_one`/`one_to_many`. |
-| `through` | object | conditional | A junction table. **Required** for `many_to_many` (and mutually exclusive with `foreign_key`). |
+| `column` | Postgres identifier | `belongs_to` only | **This** table's column pointing at the related row. Defaults to the field name (so `belongs_to: created_by` reads the `created_by` column). |
+| `foreign_key` | Postgres identifier | `has_one`/`has_many` | The **related** table's column pointing back at the parent. |
+| `through` | object | `many_to_many` | A junction table. |
 | `filters` | list | no | [Filters](#filters) narrowing which related rows are folded in. |
-| `order_by` | list | no | Ordering — a list of `{ column, direction }`, where `direction` is `asc` (default) or `desc`. |
-| `limit` | int ≥ 1 | no | Cap the number of related rows folded in. |
+| `order_by` | list | no | Ordering — a list of `{ column, direction }`, where `direction` is `asc` (default) or `desc`. Not allowed on `belongs_to` (its target is unique); on `has_one` it picks *which* row becomes the object. |
+| `limit` | int ≥ 1 | `has_many`/`many_to_many` only | Cap the number of related rows folded in (the to-one verbs imply their own `LIMIT 1`). |
 | `fields` | list | yes | The fields projected from each related row. |
 
-**Key arity rule:** a join must specify *exactly one* of `foreign_key` or
-`through` — never both, never neither.
+**Key arity rule:** a join takes *exactly* the key sibling its verb implies —
+`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, `through`
+for `many_to_many`. Anything else is a load-time error naming the right one.
+
+A `belongs_to` target that changes — or is deleted — re-emits every document
+pointing at it: flusso finds the referrers on the parent table itself
+(`WHERE column = <changed key>`), so a deleted target rebuilds those documents
+with a null object rather than leaving them stale.
 
 The `through` object (junction table for many-to-many):
 
@@ -476,7 +502,7 @@ take no `value_type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
 | `table` | Postgres identifier | yes | The related table. |
 | `column` | Postgres identifier | conditional | The column to reduce. **Required** for `sum`/`avg`/`min`/`max`; not used by `count`. |
 | `value_type` | type name | conditional | The result type. **Required** for `sum`/`min`/`max` (it mirrors the column); not used by `count`/`avg`. |
-| `foreign_key` | Postgres identifier | conditional | The FK tying related rows to the parent (same `foreign_key` **xor** `through` rule as joins). |
+| `foreign_key` | Postgres identifier | conditional | The aggregated table's column pointing back at the parent (exactly one of `foreign_key` **xor** `through`). |
 | `through` | object | conditional | Junction table for aggregating across many-to-many. |
 | `filters` | list | no | [Filters](#filters) restricting which rows count. |
 
@@ -566,7 +592,11 @@ Loading enforces — beyond what the file format itself can express — that:
 - all table/column/schema/index/sink names are valid Postgres identifiers, and
   field names are valid field-name identifiers;
 - each field has **exactly one** type key, and only the siblings that type allows;
-- a join specifies **exactly one** of `foreign_key` or `through`;
+- a join carries exactly the key sibling its verb implies — `column` for
+  `belongs_to` (defaulting to the field name), `foreign_key` for
+  `has_one`/`has_many`, `through` for `many_to_many` — and the to-one verbs
+  take no `limit` (nor `order_by`, for `belongs_to`);
+- an aggregate specifies **exactly one** of `foreign_key` or `through`;
 - `sum`/`avg`/`min`/`max` aggregates carry a `column`, and `sum`/`min`/`max`
   also declare a `value_type` (it mirrors the column);
 - a `geo` field gives either `lat` **and** `lon`, or a single `column`;
@@ -639,7 +669,7 @@ fields:
   - text: name
     required: false
 
-  - one_to_many: orders
+  - has_many: orders
     table: orders
     foreign_key: user_id
     primary_key: id

@@ -22,11 +22,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use schema_core::{
-    Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Direction,
-    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Index,
-    IndexName, IndexSchema, Join, JoinKey, JoinType, NullCheckFilter, NullOp, OrderBy, RawFilter,
-    RawFilterValue, Relation, Secret, SoftDelete, SoftDeleteColumn, SoftDeleteField, Source,
-    SourceType, TableName, Through, Transform, ValueOpFilter,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, Config, ConnectionSpec,
+    DatabaseSchema, Direction, Field, FieldName, FieldSource, Filter, FilterOp, FilterValue,
+    FlussoType, GenericValue, Index, IndexName, IndexSchema, Join, JoinKind, NullCheckFilter,
+    NullOp, OrderBy, RawFilter, RawFilterValue, Relation, Secret, SoftDelete, SoftDeleteColumn,
+    SoftDeleteField, Source, SourceType, TableName, Through, Transform, ValueOpFilter,
 };
 use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
@@ -127,9 +127,10 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         "profile",
         Join {
             table: table("profiles"),
-            join_type: JoinType::OneToOne,
             primary_key: column("id"),
-            key: JoinKey::Direct(column("user_id")),
+            kind: JoinKind::HasOne {
+                foreign_key: column("user_id"),
+            },
             filters: None,
             order_by: None,
             limit: None,
@@ -141,9 +142,10 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         "orders",
         Join {
             table: table("orders"),
-            join_type: JoinType::OneToMany,
             primary_key: column("id"),
-            key: JoinKey::Direct(column("user_id")),
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
             filters: None,
             order_by: Some(vec![OrderBy {
                 column: column("placed_at"),
@@ -157,9 +159,10 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                     "items",
                     Join {
                         table: table("order_items"),
-                        join_type: JoinType::OneToMany,
                         primary_key: column("id"),
-                        key: JoinKey::Direct(column("order_id")),
+                        kind: JoinKind::HasMany {
+                            foreign_key: column("order_id"),
+                        },
                         filters: None,
                         order_by: Some(vec![OrderBy {
                             column: column("sku"),
@@ -177,13 +180,14 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         "tags",
         Join {
             table: table("tags"),
-            join_type: JoinType::ManyToMany,
             primary_key: column("id"),
-            key: JoinKey::Through(Through {
-                table: table("user_tags"),
-                left_key: column("user_id"),
-                right_key: column("tag_id"),
-            }),
+            kind: JoinKind::ManyToMany {
+                through: Through {
+                    table: table("user_tags"),
+                    left_key: column("user_id"),
+                    right_key: column("tag_id"),
+                },
+            },
             filters: None,
             order_by: Some(vec![OrderBy {
                 column: column("label"),
@@ -280,7 +284,7 @@ async fn aggregates_cover_every_op_and_through() {
             Aggregate {
                 table: table("tags"),
                 op: AggregateOp::Count,
-                key: JoinKey::Through(Through {
+                key: AggregateKey::Through(Through {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
@@ -674,9 +678,10 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             "profile",
             Join {
                 table: table("profiles"),
-                join_type: JoinType::OneToOne,
                 primary_key: column("id"),
-                key: JoinKey::Direct(column("user_id")),
+                kind: JoinKind::HasOne {
+                    foreign_key: column("user_id"),
+                },
                 filters: None,
                 order_by: None,
                 limit: None,
@@ -687,9 +692,10 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             "orders",
             Join {
                 table: table("orders"),
-                join_type: JoinType::OneToMany,
                 primary_key: column("id"),
-                key: JoinKey::Direct(column("user_id")),
+                kind: JoinKind::HasMany {
+                    foreign_key: column("user_id"),
+                },
                 filters: None,
                 order_by: None,
                 limit: None,
@@ -699,9 +705,10 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                         "items",
                         Join {
                             table: table("order_items"),
-                            join_type: JoinType::OneToMany,
                             primary_key: column("id"),
-                            key: JoinKey::Direct(column("order_id")),
+                            kind: JoinKind::HasMany {
+                                foreign_key: column("order_id"),
+                            },
                             filters: None,
                             order_by: None,
                             limit: None,
@@ -715,13 +722,14 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             "tags",
             Join {
                 table: table("tags"),
-                join_type: JoinType::ManyToMany,
                 primary_key: column("id"),
-                key: JoinKey::Through(Through {
-                    table: table("user_tags"),
-                    left_key: column("user_id"),
-                    right_key: column("tag_id"),
-                }),
+                kind: JoinKind::ManyToMany {
+                    through: Through {
+                        table: table("user_tags"),
+                        left_key: column("user_id"),
+                        right_key: column("tag_id"),
+                    },
+                },
                 filters: None,
                 order_by: None,
                 limit: None,
@@ -783,6 +791,86 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// belongs_to: the parent row holds the key. Assembly correlates the target's
+// primary key with the parent's own column; reverse resolution finds the
+// referrers on the parent table itself — so a changed (or deleted) target
+// re-emits every document pointing at it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn belongs_to_assembles_and_reverse_resolves() {
+    let (_pg, url) = start_seeded().await;
+
+    // An order pointing at a user that does not exist — a dangling reference.
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    sqlx::query(
+        "INSERT INTO orders (id, user_id, total, status, placed_at)
+         VALUES (30, 999, 1.00, 'pending', '2021-04-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Documents rooted at `orders`, each embedding the user its own `user_id`
+    // points at. (The index keeps the helpers' name; only the root differs.)
+    let schema = IndexSchema {
+        version: 1,
+        table: table("orders"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        fields: vec![
+            col("id", "id"),
+            join_field(
+                "buyer",
+                Join {
+                    table: table("users"),
+                    primary_key: column("id"),
+                    kind: JoinKind::BelongsTo {
+                        column: column("user_id"),
+                    },
+                    filters: None,
+                    order_by: None,
+                    limit: None,
+                    fields: vec![col("name", "name"), col("email", "email")],
+                },
+            ),
+        ],
+    };
+    let builder = builder(&url, schema).await;
+
+    // Assembly: the order's own `user_id` selects the embedded user.
+    let body = upsert(&builder, 10).await;
+    let GenericValue::Map(buyer) = body.get("buyer").unwrap() else {
+        panic!("buyer should be a nested object");
+    };
+    assert_eq!(str_of(buyer, "name"), "Ada Lovelace");
+
+    // A dangling pointer renders a null object, not an error.
+    let body = upsert(&builder, 30).await;
+    assert!(
+        matches!(body.get("buyer"), Some(GenericValue::Null)),
+        "missing target → null object, got {:?}",
+        body.get("buyer"),
+    );
+
+    // Reverse: a user change re-emits every order pointing at it — found on
+    // the parent table itself (`WHERE user_id = 1`).
+    let mut roots = builder.resolve(&table("users"), &key(1)).await.unwrap();
+    roots.sort_by_key(id_of);
+    assert_eq!(roots, vec![doc(10), doc(11), doc(12)]);
+
+    // Reverse, deleted/absent target: the referrers are alive and still
+    // resolve — they rebuild with a null object instead of going stale.
+    assert_eq!(
+        builder.resolve(&table("users"), &key(999)).await.unwrap(),
+        vec![doc(30)],
     );
 }
 
@@ -863,7 +951,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
     Aggregate {
         table: table("orders"),
         op,
-        key: JoinKey::Direct(column("user_id")),
+        key: AggregateKey::Direct(column("user_id")),
         value_type: None,
         filters,
     }

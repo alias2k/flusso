@@ -3,9 +3,9 @@ use std::str::FromStr;
 
 use rust_decimal::Decimal;
 use schema_core::{
-    Aggregate, AggregateOp, Column, ColumnName, Direction, Field, FieldSource, Filter, FilterOp,
-    FilterValue, FlussoType, GenericValue, Geo, Join, JoinKey, JoinType, NullCheckFilter, NullOp,
-    OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, Direction, Field, FieldSource,
+    Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join, JoinKind, NullCheckFilter,
+    NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
     Transform, ValueOpFilter,
 };
 
@@ -28,7 +28,7 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
                 source: FieldSource::Group(fields),
             })
         }
-        entities::Field::Join(join_type, body) => convert_join_field(join_type, *body),
+        entities::Field::Join(verb, body) => convert_join_field(verb, *body),
         entities::Field::Aggregate(op, body) => convert_aggregate_field(op, *body),
         entities::Field::Constant(body) => Ok(Field {
             field: body.field,
@@ -99,10 +99,24 @@ fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
 }
 
 fn convert_join_field(
-    join_type: entities::JoinType,
+    verb: entities::JoinVerb,
     body: entities::JoinBody,
 ) -> Result<Field, ConversionError> {
-    let key = join_key(body.foreign_key, body.through)?;
+    let kind = join_kind(verb, &body)?;
+    // Ordering/limiting is only meaningful when there are rows to choose among.
+    // `has_one` keeps `order_by` (it picks *which* row becomes the object);
+    // `belongs_to` targets a unique row by primary key, so neither applies, and
+    // both to-one verbs imply their own LIMIT 1.
+    if matches!(verb, entities::JoinVerb::BelongsTo) && body.order_by.is_some() {
+        return Err(sibling_not_allowed(verb, "order_by"));
+    }
+    if matches!(
+        verb,
+        entities::JoinVerb::BelongsTo | entities::JoinVerb::HasOne
+    ) && body.limit.is_some()
+    {
+        return Err(sibling_not_allowed(verb, "limit"));
+    }
     let fields = body
         .fields
         .into_iter()
@@ -110,9 +124,8 @@ fn convert_join_field(
         .collect::<Result<_, _>>()?;
     let join = Join {
         table: body.table,
-        join_type: convert_join_type(join_type),
+        kind,
         primary_key: body.primary_key,
-        key,
         filters: convert_filters_opt(body.filters)?,
         order_by: body
             .order_by
@@ -127,12 +140,105 @@ fn convert_join_field(
     })
 }
 
+/// Build the join's [`JoinKind`] from its verb, enforcing that exactly the key
+/// sibling that verb takes is present: `column` for `belongs_to` (defaulting to
+/// the field name, the same way scalar fields default), `foreign_key` for
+/// `has_one`/`has_many`, `through` for `many_to_many`.
+fn join_kind(
+    verb: entities::JoinVerb,
+    body: &entities::JoinBody,
+) -> Result<JoinKind, ConversionError> {
+    use entities::JoinVerb;
+
+    // Reject the siblings the verb does not take, with a pointer to the right one.
+    let allowed: &[&str] = match verb {
+        JoinVerb::BelongsTo => &["column"],
+        JoinVerb::HasOne | JoinVerb::HasMany => &["foreign_key"],
+        JoinVerb::ManyToMany => &["through"],
+    };
+    let present: [(&str, bool); 3] = [
+        ("column", body.column.is_some()),
+        ("foreign_key", body.foreign_key.is_some()),
+        ("through", body.through.is_some()),
+    ];
+    for (sibling, is_present) in present {
+        if is_present && !allowed.contains(&sibling) {
+            return Err(ConversionError::UnexpectedJoinKey {
+                verb: verb.as_str(),
+                sibling,
+                expected: key_hint(verb),
+            });
+        }
+    }
+
+    Ok(match verb {
+        JoinVerb::BelongsTo => JoinKind::BelongsTo {
+            column: match body.column.clone() {
+                Some(column) => column,
+                None => default_column(&body.field)?,
+            },
+        },
+        JoinVerb::HasOne => JoinKind::HasOne {
+            foreign_key: require_join_key(verb, body.foreign_key.clone())?,
+        },
+        JoinVerb::HasMany => JoinKind::HasMany {
+            foreign_key: require_join_key(verb, body.foreign_key.clone())?,
+        },
+        JoinVerb::ManyToMany => JoinKind::ManyToMany {
+            through: match body.through.clone() {
+                Some(t) => Through {
+                    table: t.table,
+                    left_key: t.left_key,
+                    right_key: t.right_key,
+                },
+                None => {
+                    return Err(ConversionError::MissingJoinKey {
+                        verb: verb.as_str(),
+                        expected: key_hint(verb),
+                    });
+                }
+            },
+        },
+    })
+}
+
+/// What the verb's key sibling is, for error messages.
+fn key_hint(verb: entities::JoinVerb) -> &'static str {
+    match verb {
+        entities::JoinVerb::BelongsTo => {
+            "`column` — this table's column pointing at the related row \
+             (defaults to the field name)"
+        }
+        entities::JoinVerb::HasOne | entities::JoinVerb::HasMany => {
+            "`foreign_key` — the related table's column pointing back at this row"
+        }
+        entities::JoinVerb::ManyToMany => "`through` — the junction table and its two keys",
+    }
+}
+
+fn require_join_key(
+    verb: entities::JoinVerb,
+    foreign_key: Option<ColumnName>,
+) -> Result<ColumnName, ConversionError> {
+    foreign_key.ok_or(ConversionError::MissingJoinKey {
+        verb: verb.as_str(),
+        expected: key_hint(verb),
+    })
+}
+
+fn sibling_not_allowed(verb: entities::JoinVerb, sibling: &'static str) -> ConversionError {
+    ConversionError::UnexpectedJoinSibling {
+        verb: verb.as_str(),
+        sibling,
+    }
+}
+
 fn convert_aggregate_field(
     op: entities::AggregateOp,
     body: entities::AggregateBody,
 ) -> Result<Field, ConversionError> {
     let (op, value_type) = convert_aggregate_op(op, body.column, body.value_type)?;
-    let key = join_key(body.foreign_key, body.through)?;
+    let key = aggregate_key(body.foreign_key, body.through)?;
     let aggregate = Aggregate {
         table: body.table,
         op,
@@ -175,19 +281,19 @@ fn convert_aggregate_op(
     })
 }
 
-/// A join/aggregate key: exactly one of `foreign_key` or `through`.
-fn join_key(
+/// An aggregate key: exactly one of `foreign_key` or `through`.
+fn aggregate_key(
     foreign_key: Option<ColumnName>,
     through: Option<entities::Through>,
-) -> Result<JoinKey, ConversionError> {
+) -> Result<AggregateKey, ConversionError> {
     match (foreign_key, through) {
-        (Some(fk), None) => Ok(JoinKey::Direct(fk)),
-        (None, Some(t)) => Ok(JoinKey::Through(Through {
+        (Some(fk), None) => Ok(AggregateKey::Direct(fk)),
+        (None, Some(t)) => Ok(AggregateKey::Through(Through {
             table: t.table,
             left_key: t.left_key,
             right_key: t.right_key,
         })),
-        _ => Err(ConversionError::InvalidJoinKey),
+        _ => Err(ConversionError::InvalidAggregateKey),
     }
 }
 
@@ -223,14 +329,6 @@ fn convert_transform(t: entities::Transform) -> Transform {
     match t {
         entities::Transform::Lowercase => Transform::Lowercase,
         entities::Transform::Trim => Transform::Trim,
-    }
-}
-
-fn convert_join_type(jt: entities::JoinType) -> JoinType {
-    match jt {
-        entities::JoinType::OneToOne => JoinType::OneToOne,
-        entities::JoinType::OneToMany => JoinType::OneToMany,
-        entities::JoinType::ManyToMany => JoinType::ManyToMany,
     }
 }
 

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-use super::{Filter, FlussoType, JoinKey};
+use super::{AggregateKey, Filter, FlussoType};
 
 /// Reduces rows from a related `table` to a single value — a count, sum, or
 /// extreme. The `key` connects the tables; `filters` restrict which rows count.
@@ -10,7 +10,7 @@ use super::{Filter, FlussoType, JoinKey};
 pub struct Aggregate {
     pub table: common::TableName,
     pub op: AggregateOp,
-    pub key: JoinKey,
+    pub key: AggregateKey,
     /// The declared result type. Fixed for `count` (`long`) and `avg` (`double`)
     /// and left `None`; required for `sum` / `min` / `max`, whose result mirrors
     /// the aggregated column and so must be stated to stay database-free.

@@ -59,7 +59,11 @@ definitions:
   #     lat: latitude
   #     lon: longitude
   #     required: false
-  #   - one_to_many: orders     # join (cardinality is the key)
+  #   - belongs_to: created_by  # join: MY column points at the related row
+  #     table: users            # (`column` defaults to the field name)
+  #     primary_key: id
+  #     fields: [ … ]
+  #   - has_many: orders        # join: THEIR foreign_key points back at me
   #     table: orders
   #     foreign_key: user_id
   #     primary_key: id
@@ -72,7 +76,9 @@ definitions:
   # rules JSON Schema can't state here: exactly one type key per field, and the
   # per-type sibling set (e.g. `count` takes no `column`; `sum`/`min`/`max`
   # require `column` + `value_type`; a `geo` needs `lat`+`lon` or a single
-  # `column`).
+  # `column`; a join takes exactly the key its verb implies — `column` for
+  # `belongs_to`, `foreign_key` for `has_one`/`has_many`, `through` for
+  # `many_to_many`).
   field:
     type: object
     additionalProperties: false
@@ -98,9 +104,10 @@ definitions:
       custom: { $ref: "#/definitions/field_name" }
       geo: { $ref: "#/definitions/field_name" }
       object: { $ref: "#/definitions/field_name" }
-      # ── joins (cardinality is the key) ────────────────────────────────────
-      one_to_one: { $ref: "#/definitions/field_name" }
-      one_to_many: { $ref: "#/definitions/field_name" }
+      # ── joins (the relationship verb is the key) ──────────────────────────
+      belongs_to: { $ref: "#/definitions/field_name" }
+      has_one: { $ref: "#/definitions/field_name" }
+      has_many: { $ref: "#/definitions/field_name" }
       many_to_many: { $ref: "#/definitions/field_name" }
       # ── aggregates (op is the key) ────────────────────────────────────────
       count: { $ref: "#/definitions/field_name" }
@@ -112,7 +119,8 @@ definitions:
       constant: { $ref: "#/definitions/field_name" }
 
       # ── siblings (which apply depends on the type key) ────────────────────
-      # Leaf / scalar:
+      # Leaf / scalar (`column` also keys a `belongs_to` join — this table's
+      # column pointing at the related row, defaulting to the field name):
       required:
         type: boolean
         description: Whether the field may be null. Mandatory on a scalar leaf.
@@ -144,7 +152,8 @@ definitions:
         type: array
         items:
           $ref: "#/definitions/field"
-      # join / aggregate (related table):
+      # join / aggregate (related table). `foreign_key` is the related table's
+      # column pointing back at this row (`has_one`/`has_many`/aggregates):
       table:
         $ref: "#/definitions/pg_identifier"
       primary_key:

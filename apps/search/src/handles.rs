@@ -2,7 +2,7 @@
 //! exposes only the operators its mapping type supports; every operator builds a
 //! [`Query`]`<S>`.
 //!
-//! Root fields and flattened object / `one_to_one` sub-fields are scope
+//! Root fields and flattened object / to-one-join sub-fields are scope
 //! [`Root`]; a `nested` array's element handles carry the element type as their
 //! scope, so their queries must be lifted with [`Nested::any`]/[`Nested::all`]
 //! before joining a parent query. (The derive picks the right scope; hand-written
@@ -580,7 +580,7 @@ impl NestedProjection {
 
 // ---- Object ----------------------------------------------------------------
 
-/// An `object` sub-document — a `group` or a `one_to_one` join. Objects are
+/// An `object` sub-document — a `group` or a to-one (`belongs_to`/`has_one`) join. Objects are
 /// **flattened**, so their sub-fields are queried by their own scope-`S`
 /// dotted-path handles directly (`Account::tier()`); this handle is for the
 /// object itself. `S` is the enclosing scope (`Root` at the top level).
@@ -599,7 +599,7 @@ impl<S> Object<S> {
         }
     }
 
-    /// The object is present — most useful on a nullable `one_to_one`.
+    /// The object is present — most useful on a nullable to-one join.
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }

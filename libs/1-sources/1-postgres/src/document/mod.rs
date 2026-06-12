@@ -20,13 +20,16 @@
 //!
 //! ## Coverage
 //!
-//! - Resolution: root table; direct foreign-key relations; many-to-many
-//!   (`through`) relations on either the far or junction table; and tables
-//!   reachable through multiple hops of nesting, chained back to the root.
-//! - Assembly: column fields (transforms, defaults); one-to-one / one-to-many /
-//!   many-to-many joins (filters, ordering, limit); joins nested inside joins;
-//!   aggregates, including over a junction; boolean and timestamp soft-delete
-//!   with optional `when` filters.
+//! - Resolution: root table; direct foreign-key relations (`has_one`/
+//!   `has_many`); parent-side-key relations (`belongs_to`, resolved against the
+//!   parent table — so a change to, or deletion of, the *target* row re-emits
+//!   every document pointing at it); many-to-many (`through`) relations on
+//!   either the far or junction table; and tables reachable through multiple
+//!   hops of nesting, chained back to the root.
+//! - Assembly: column fields (transforms, defaults); belongs_to / has_one /
+//!   has_many / many_to_many joins (filters, ordering, limit); joins nested
+//!   inside joins; aggregates, including over a junction; boolean and timestamp
+//!   soft-delete with optional `when` filters.
 //!
 //! Relation targets are matched on each table's real primary key, looked up
 //! from the Postgres catalog and cached (see [`PgDocumentBuilder::table_primary_key`]).

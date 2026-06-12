@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use schema_core::{
-    ColumnName, DatabaseSchema, GenericValue, IndexSchema, JoinKey, Relation, TableName,
+    ColumnName, DatabaseSchema, GenericValue, IndexSchema, Relation, RelationKey, TableName,
 };
 use sources_core::{Result, RowKey, SourceError};
 
@@ -54,7 +54,14 @@ impl PgDocumentBuilder {
             let mut seen = HashSet::new();
             for key in &current_keys {
                 for value in self
-                    .reverse_hop(&schema.db_schema, relation, &current_table, key)
+                    .reverse_hop(
+                        &schema.db_schema,
+                        relation,
+                        &current_table,
+                        &parent_table,
+                        &parent_pk,
+                        key,
+                    )
                     .await?
                 {
                     if seen.insert(value.clone()) {
@@ -73,25 +80,33 @@ impl PgDocumentBuilder {
     }
 
     /// One reverse hop: from a key in `current_table`, find the parent key
-    /// values via `relation`.
+    /// values via `relation`. `parent_table`/`parent_pk` name the hop's parent
+    /// side — a `belongs_to` stores its key *there*, so its reverse query runs
+    /// against the parent table rather than the changed one.
     async fn reverse_hop(
         &self,
         schema: &DatabaseSchema,
         relation: &Relation,
         current_table: &TableName,
+        parent_table: &TableName,
+        parent_pk: &ColumnName,
         key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
-        let (target, join_key) = relation_target(relation);
-        match join_key {
-            JoinKey::Direct(foreign_key) => {
+        let (target, relation_key) = relation_target(relation);
+        match relation_key {
+            RelationKey::Direct(foreign_key) => {
                 self.reverse_direct(schema, target, foreign_key, key).await
             }
-            JoinKey::Through(through) if *current_table == through.table => {
+            RelationKey::Local(column) => {
+                self.reverse_local(schema, relation, parent_table, parent_pk, column, key)
+                    .await
+            }
+            RelationKey::Through(through) if *current_table == through.table => {
                 // The change is on the junction table itself.
                 self.reverse_through_junction(schema, &through.table, &through.left_key, key)
                     .await
             }
-            JoinKey::Through(through) => {
+            RelationKey::Through(through) => {
                 // The key is in the far table; reach roots across the junction.
                 self.reverse_through_far(
                     schema,
@@ -103,6 +118,26 @@ impl PgDocumentBuilder {
                 .await
             }
         }
+    }
+
+    /// `belongs_to`: the **parent** rows hold the changed row's key in
+    /// `column`, so the referrers are found on the parent table itself —
+    /// `SELECT parent_pk FROM parent WHERE column = <changed pk>`. Unlike a
+    /// direct-FK child delete, a deleted *target* still resolves: the parent
+    /// rows pointing at it are alive and rebuild with a null object.
+    async fn reverse_local(
+        &self,
+        schema: &DatabaseSchema,
+        relation: &Relation,
+        parent_table: &TableName,
+        parent_pk: &ColumnName,
+        column: &ColumnName,
+        target_key: &RowKey,
+    ) -> Result<Vec<GenericValue>> {
+        let value = local_target_value(relation, target_key)?.clone();
+        let (sql, params) =
+            query::reverse_query(schema, parent_table, parent_pk, &[(column.clone(), value)])?;
+        self.run_reverse(sql, params, parent_pk.as_ref()).await
     }
 
     /// Direct foreign key: the child row holds the parent key in `foreign_key`.
@@ -174,6 +209,23 @@ impl PgDocumentBuilder {
             }
         }
         Ok(roots)
+    }
+}
+
+/// The changed target row's primary-key value, for matching a `belongs_to`
+/// parent's `column`. Prefer the entry named by the join's declared
+/// `primary_key`; a single-column key is used as-is.
+fn local_target_value<'a>(relation: &Relation, key: &'a RowKey) -> Result<&'a GenericValue> {
+    if let Relation::Join(join) = relation
+        && let Some((_, value)) = key.0.iter().find(|(column, _)| *column == join.primary_key)
+    {
+        return Ok(value);
+    }
+    match key.0.as_slice() {
+        [(_, value)] => Ok(value),
+        _ => Err(SourceError::Unsupported(
+            "belongs_to relations require the changed row's key to carry its primary key".into(),
+        )),
     }
 }
 

@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use schema_core::{
     Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Field, FieldName, FieldSource,
-    FlussoType, GenericValue, Index, IndexName, IndexSchema, Join, JoinKey, JoinType, Relation,
-    Secret, SoftDelete, SoftDeleteColumn, Source, SourceType, TableName,
+    FlussoType, GenericValue, Index, IndexName, IndexSchema, Join, JoinKind, Relation, Secret,
+    SoftDelete, SoftDeleteColumn, Source, SourceType, TableName,
 };
 use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
@@ -165,9 +165,10 @@ fn users_config(connection_url: &str) -> Config {
         options: Default::default(),
         source: FieldSource::Relation(Relation::Join(Join {
             table: table("orders"),
-            join_type: JoinType::OneToMany,
             primary_key: column("id"),
-            key: JoinKey::Direct(column("user_id")),
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
             filters: None,
             order_by: None,
             limit: None,

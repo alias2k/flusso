@@ -67,11 +67,11 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use engine::{BatchPolicy, Engine};
 use futures::stream::{self, BoxStream};
 use schema_core::{
-    Aggregate, AggregateOp, Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Direction,
-    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Index,
-    IndexMapping, IndexName, IndexSchema, Join, JoinKey, JoinType, OrderBy, Relation, Secret,
-    SinkName, SoftDelete, SoftDeleteColumn, Source, SourceType, TableName, Through, Transform,
-    ValueOpFilter,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, Config, ConnectionSpec,
+    DatabaseSchema, Direction, Field, FieldName, FieldSource, Filter, FilterOp, FilterValue,
+    FlussoType, GenericValue, Index, IndexMapping, IndexName, IndexSchema, Join, JoinKind, OrderBy,
+    Relation, Secret, SinkName, SoftDelete, SoftDeleteColumn, Source, SourceType, TableName,
+    Through, Transform, ValueOpFilter,
 };
 use sinks_core::{Result as SinkResult, Sink};
 use sinks_opensearch::OpensearchSink;
@@ -562,8 +562,9 @@ fn config(connection_url: &str) -> Config {
         Join {
             table: table("profiles"),
             primary_key: column("id"),
-            join_type: JoinType::OneToOne,
-            key: JoinKey::Direct(column("user_id")),
+            kind: JoinKind::HasOne {
+                foreign_key: column("user_id"),
+            },
             filters: None,
             order_by: None,
             limit: None,
@@ -576,9 +577,10 @@ fn config(connection_url: &str) -> Config {
         "orders",
         Join {
             table: table("orders"),
-            join_type: JoinType::OneToMany,
             primary_key: column("id"),
-            key: JoinKey::Direct(column("user_id")),
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
             filters: None,
             order_by: Some(vec![order_by("placed_at", Direction::Desc)]),
             limit: None,
@@ -590,9 +592,10 @@ fn config(connection_url: &str) -> Config {
                     "items",
                     Join {
                         table: table("order_items"),
-                        join_type: JoinType::OneToMany,
                         primary_key: column("id"),
-                        key: JoinKey::Direct(column("order_id")),
+                        kind: JoinKind::HasMany {
+                            foreign_key: column("order_id"),
+                        },
                         filters: None,
                         order_by: Some(vec![order_by("sku", Direction::Asc)]),
                         limit: None,
@@ -608,13 +611,14 @@ fn config(connection_url: &str) -> Config {
         "tags",
         Join {
             table: table("tags"),
-            join_type: JoinType::ManyToMany,
             primary_key: column("id"),
-            key: JoinKey::Through(Through {
-                table: table("user_tags"),
-                left_key: column("user_id"),
-                right_key: column("tag_id"),
-            }),
+            kind: JoinKind::ManyToMany {
+                through: Through {
+                    table: table("user_tags"),
+                    left_key: column("user_id"),
+                    right_key: column("tag_id"),
+                },
+            },
             filters: None,
             order_by: Some(vec![order_by("label", Direction::Asc)]),
             limit: None,
@@ -683,7 +687,7 @@ fn config(connection_url: &str) -> Config {
             Aggregate {
                 table: table("tags"),
                 op: AggregateOp::Count,
-                key: JoinKey::Through(Through {
+                key: AggregateKey::Through(Through {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
@@ -785,7 +789,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
     Aggregate {
         table: table("orders"),
         op,
-        key: JoinKey::Direct(column("user_id")),
+        key: AggregateKey::Direct(column("user_id")),
         value_type: None,
         filters,
     }

@@ -8,8 +8,8 @@
 //! Parsing and conversion tests for the type-as-key field format.
 
 use schema_core::{
-    AggregateOp, Column, Field, FieldSource, FilterValue, FlussoType, Geo, IndexSchema, JoinKey,
-    JoinType, ParseFrom, Relation,
+    AggregateOp, Column, Field, FieldSource, FilterValue, FlussoType, Geo, IndexSchema, JoinKind,
+    ParseFrom, Relation,
 };
 use schema_index_yaml::{ConversionError, ParseError, SchemaYaml};
 
@@ -144,18 +144,38 @@ fn object_becomes_a_group() {
 }
 
 #[test]
-fn join_cardinality_comes_from_the_tag() {
+fn join_verb_comes_from_the_tag() {
     let schema = convert(include_str!("user.schema.yml")).unwrap();
     assert!(matches!(
         &field(&schema, "profile").source,
-        FieldSource::Relation(Relation::Join(j)) if j.join_type == JoinType::OneToOne
+        FieldSource::Relation(Relation::Join(j)) if matches!(j.kind, JoinKind::HasOne { .. })
+    ));
+    assert!(matches!(
+        &field(&schema, "organization").source,
+        FieldSource::Relation(Relation::Join(j))
+            if matches!(&j.kind, JoinKind::BelongsTo { column } if column.as_ref() == "organization_id")
     ));
     match &field(&schema, "orders").source {
         FieldSource::Relation(Relation::Join(j)) => {
-            assert_eq!(j.join_type, JoinType::OneToMany);
-            assert!(matches!(j.key, JoinKey::Direct(_)));
+            assert!(matches!(j.kind, JoinKind::HasMany { .. }));
             assert!(j.filters.as_ref().is_some_and(|f| f.len() == 1));
             assert!(j.order_by.as_ref().is_some_and(|o| o.len() == 1));
+        }
+        other => panic!("expected a join, got {other:?}"),
+    }
+}
+
+#[test]
+fn belongs_to_column_defaults_to_the_field_name() {
+    let schema = convert(
+        "version: 1\ntable: tickets\nfields:\n  - belongs_to: created_by\n    table: users\n    primary_key: id\n    fields:\n      - keyword: email\n        required: true",
+    )
+    .unwrap();
+    match &field(&schema, "created_by").source {
+        FieldSource::Relation(Relation::Join(j)) => {
+            assert!(
+                matches!(&j.kind, JoinKind::BelongsTo { column } if column.as_ref() == "created_by")
+            );
         }
         other => panic!("expected a join, got {other:?}"),
     }
@@ -198,7 +218,7 @@ fn between_and_in_filter_values() {
 version: 1
 table: users
 fields:
-  - one_to_many: orders
+  - has_many: orders
     table: orders
     foreign_key: user_id
     primary_key: id
@@ -285,12 +305,62 @@ fn aggregate_value_type_rejects_geo_point() {
 }
 
 #[test]
-fn join_without_key_is_an_error() {
+fn join_without_its_key_is_an_error() {
     let err = convert(
-        "version: 1\ntable: t\nfields:\n  - one_to_many: o\n    table: orders\n    primary_key: id\n    fields:\n      - keyword: x\n        required: true",
+        "version: 1\ntable: t\nfields:\n  - has_many: o\n    table: orders\n    primary_key: id\n    fields:\n      - keyword: x\n        required: true",
     )
     .unwrap_err();
-    assert!(matches!(err, ConversionError::InvalidJoinKey));
+    assert!(matches!(
+        err,
+        ConversionError::MissingJoinKey {
+            verb: "has_many",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn join_with_the_wrong_key_sibling_is_an_error() {
+    // `belongs_to` reads its key from this table's `column`, not `foreign_key`.
+    let err = convert(
+        "version: 1\ntable: t\nfields:\n  - belongs_to: owner\n    table: users\n    foreign_key: owner_id\n    primary_key: id\n    fields:\n      - keyword: email\n        required: true",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::UnexpectedJoinKey {
+            verb: "belongs_to",
+            sibling: "foreign_key",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn belongs_to_rejects_order_by_and_limit() {
+    let err = convert(
+        "version: 1\ntable: t\nfields:\n  - belongs_to: owner\n    table: users\n    primary_key: id\n    order_by:\n      - { column: id }\n    fields:\n      - keyword: email\n        required: true",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::UnexpectedJoinSibling {
+            verb: "belongs_to",
+            sibling: "order_by",
+        }
+    ));
+
+    let err = convert(
+        "version: 1\ntable: t\nfields:\n  - has_one: profile\n    table: profiles\n    foreign_key: user_id\n    primary_key: id\n    limit: 3\n    fields:\n      - keyword: bio\n        required: false",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::UnexpectedJoinSibling {
+            verb: "has_one",
+            sibling: "limit",
+        }
+    ));
 }
 
 // ── error messages are clear: location snippet + field-aware phrasing ────────

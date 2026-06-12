@@ -7,7 +7,7 @@ use schema::{IndexMapping, IndexName, MappingType, ResolvedField};
 
 /// The query **scope** a struct's handles live in (see `query::Root`).
 ///
-/// `Root` for the document root and for any `object`/`one_to_one` reached only
+/// `Root` for the document root and for any `object`/to-one join reached only
 /// through other objects (flattened, dotted, no wrapper). `SelfTagged` for a
 /// `nested` element: its handles carry the struct's own type as their scope, so
 /// they must be lifted with `Nested::any`/`all`.

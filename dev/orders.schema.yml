@@ -30,7 +30,7 @@ fields:
         required: false
 
   # One-to-many: the line items.
-  - one_to_many: items
+  - has_many: items
     table: order_items
     foreign_key: order_id
     primary_key: id
