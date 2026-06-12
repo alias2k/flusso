@@ -26,6 +26,14 @@ pub trait FlussoDocument: DeserializeOwned {
     /// The schema hash this binding was generated from (the physical-index suffix).
     const SCHEMA_HASH: &'static str;
 
+    /// The physical index this binding addresses — `{INDEX}_{SCHEMA_HASH}`,
+    /// exactly what the sink writes. Useful for logging, admin, and
+    /// hand-written [`FlussoMultiDocument`](crate::FlussoMultiDocument) impls
+    /// dispatching hits by their `_index`.
+    fn physical_index() -> String {
+        format!("{}_{}", Self::INDEX, Self::SCHEMA_HASH)
+    }
+
     /// Start a typed query against this index. No client is involved: the
     /// returned [`Search`] is a plain value — build it anywhere, store it,
     /// clone it, and hand a [`Client`] to a terminal
@@ -251,7 +259,7 @@ impl<T> Search<T> {
     )]
     pub async fn ids(&self, client: &Client) -> Result<Vec<String>> {
         let body = self.ids_body();
-        let response = client.search(&self.index, &self.hash, &body).await?;
+        let response = client.search_at(&self.physical_index(), &body).await?;
         let raw: RawIdsResponse = serde_json::from_value(response)?;
         let ids: Vec<String> = raw.hits.hits.into_iter().map(|hit| hit.id).collect();
         tracing::Span::current().record("returned", ids.len());
@@ -284,7 +292,7 @@ impl<T> Search<T> {
     )]
     pub async fn count(&self, client: &Client) -> Result<u64> {
         let body = self.count_body();
-        let response = client.count(&self.index, &self.hash, &body).await?;
+        let response = client.count_at(&self.physical_index(), &body).await?;
         let raw: RawCount = serde_json::from_value(response)?;
         tracing::Span::current().record("count", raw.count);
         tracing::debug!(count = raw.count, "count completed");
@@ -311,7 +319,7 @@ where
     )]
     pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
         let body = self.body();
-        let mut response = client.search(&self.index, &self.hash, &body).await?;
+        let mut response = client.search_at(&self.physical_index(), &body).await?;
         let paths = self.nested_paths();
         if !paths.is_empty() {
             merge_inner_hits(&mut response, &paths);
@@ -436,10 +444,11 @@ struct RawTotal {
     value: u64,
 }
 
-/// The `_count` response envelope (`{ "count": N, "_shards": … }`).
+/// The `_count` response envelope (`{ "count": N, "_shards": … }`) — shared
+/// with the combined-search [`count`](crate::MultiSearch::count).
 #[derive(Deserialize)]
-struct RawCount {
-    count: u64,
+pub(crate) struct RawCount {
+    pub(crate) count: u64,
 }
 
 /// A `_search` response read for its hit ids only (`_source: false`, so hits

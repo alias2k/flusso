@@ -1,0 +1,17 @@
+error: FlussoMultiDocument requires single-field tuple variants (`Unit(SomeDocument)`) — the payload is the document type this variant decodes into
+ --> tests/ui/multi_bad_variants.rs:7:5
+  |
+7 |     Unit,
+  |     ^^^^
+
+error: FlussoMultiDocument requires single-field tuple variants (`Named(SomeDocument)`) — the payload is the document type this variant decodes into
+ --> tests/ui/multi_bad_variants.rs:8:5
+  |
+8 |     Named { name: String },
+  |     ^^^^^
+
+error: FlussoMultiDocument requires single-field tuple variants (`Wide(SomeDocument)`) — the payload is the document type this variant decodes into
+ --> tests/ui/multi_bad_variants.rs:9:5
+  |
+9 |     Wide(String, String),
+  |     ^^^^

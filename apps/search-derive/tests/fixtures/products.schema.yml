@@ -1,0 +1,11 @@
+version: 1
+table: products
+primary_key: id
+
+# A second, minimal index so the FlussoMultiDocument tests have a real
+# two-index union to span.
+fields:
+  - keyword: sku
+    required: true
+  - text: name
+    required: false

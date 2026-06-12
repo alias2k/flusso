@@ -24,6 +24,10 @@
 //! - Several searches in one round-trip: [`Client::msearch`] (a tuple of
 //!   `&Search<T>`, mixed document types, one typed response per slot) and
 //!   [`Client::msearch_all`] (a slice of one type).
+//! - Combined (blended) search: [`FlussoMultiDocument`] — a caller-owned enum
+//!   with one variant per document type — and its [`MultiSearch`] builder. One
+//!   query across all the union's indexes, one relevance-ranked result list,
+//!   each hit decoded into the variant matching its physical `_index`.
 //! - Typed [`SearchResponse`] / [`Hit`].
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/to-one-join
@@ -36,9 +40,10 @@
 //!
 //! # Not yet built (see CLIENT.md for the endgame)
 //!
-//! - The `#[derive(FlussoDocument)]` proc-macro lives in `flusso-search-derive`
-//!   (the `derive` feature). Without it, document structs + handles are written
-//!   by hand — exactly the calls this crate exposes (see the integration tests).
+//! - The `#[derive(FlussoDocument)]` and `#[derive(FlussoMultiDocument)]`
+//!   proc-macros live in `flusso-search-derive` (the `derive` feature). Without
+//!   them, document structs + handles and union impls are written by hand —
+//!   exactly the calls this crate exposes (see the integration tests).
 //! - `filter_nested`'s `keep_source()` opt-out (it always replaces the array in
 //!   `source` today) and a typed `hit.nested(handle)` accessor.
 //!
@@ -81,6 +86,7 @@ mod client;
 mod error;
 mod handles;
 mod msearch;
+mod multi;
 mod query;
 mod search;
 
@@ -90,6 +96,7 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use msearch::MsearchBundle;
+pub use multi::{FlussoMultiDocument, MultiSearch};
 pub use handles::{
     Binary, Bool, Date, FlussoValue, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection,
     Number, Object, Sort, SortOrder, Text, kind, multi_match,
@@ -111,6 +118,20 @@ pub use flusso_search_derive::FlussoDocument;
 /// in a [`FlussoDocument`] struct. Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_search_derive::FlussoValue;
+
+/// `#[derive(FlussoMultiDocument)]` — implements [`trait@FlussoMultiDocument`]
+/// for an enum with one single-field variant per document type (the
+/// combined-search union): the generated impl lists every variant's index and
+/// decodes each hit into the variant matching its physical `_index`. Enabled
+/// by the `derive` feature.
+#[cfg(feature = "derive")]
+pub use flusso_search_derive::FlussoMultiDocument;
+
+// The multi-document derive's generated code deserializes variant payloads;
+// routing it through this re-export keeps it on this crate's `serde_json`.
+// Hidden: not API.
+#[doc(hidden)]
+pub use serde_json as __serde_json;
 
 /// `rust_decimal::Decimal`, re-exported for `decimal` fields. Enabled by the
 /// `decimal` feature.

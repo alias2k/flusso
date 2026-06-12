@@ -1,0 +1,5 @@
+error: duplicate document type `User` — each variant must decode a distinct type, or the index dispatch is ambiguous
+  --> tests/ui/multi_duplicate_type.rs:14:13
+   |
+14 |     Dormant(User),
+   |             ^^^^

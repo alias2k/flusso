@@ -122,3 +122,63 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     assert!(json.contains(r#""paid""#), "{json}");
     Ok(())
 }
+
+// `#[derive(FlussoMultiDocument)]` — the combined-search union over two
+// document types from two indexes. Purely syntactic: the generated impl
+// references each payload's derive-baked `INDEX`/`SCHEMA_HASH`.
+
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct Product {
+    sku: String,
+    name: Option<String>,
+}
+
+#[derive(flusso_search::FlussoMultiDocument)]
+enum SearchItem {
+    User(User),
+    Product(Product),
+}
+
+#[test]
+fn multi_document_derive_lists_targets_and_dispatches_hits() -> Result {
+    use flusso_search::FlussoMultiDocument as _;
+
+    // TARGETS: one (logical index, schema hash) per variant, in order.
+    assert_eq!(
+        SearchItem::TARGETS,
+        [
+            ("users", User::SCHEMA_HASH),
+            ("products", Product::SCHEMA_HASH),
+        ]
+    );
+
+    // A hit decodes into the variant matching its physical index.
+    let hit = SearchItem::decode(
+        &User::physical_index(),
+        serde_json::json!({
+            "id": 1, "email": "ada@example.com",
+            "full_name": null, "orders": [], "order_count": 0
+        }),
+    )?;
+    assert!(matches!(hit, SearchItem::User(_)));
+
+    let hit = SearchItem::decode(
+        &Product::physical_index(),
+        serde_json::json!({ "sku": "C-01234", "name": "keyboard" }),
+    )?;
+    match hit {
+        SearchItem::Product(product) => assert_eq!(product.sku, "C-01234"),
+        SearchItem::User(_) => return Err("expected a product hit".into()),
+    }
+
+    // A hit from an index no variant claims is an error, not a skip.
+    match SearchItem::decode("ghosts_zzzzzz", serde_json::json!({})) {
+        Err(flusso_search::Error::UnexpectedIndex { index }) => {
+            assert_eq!(index, "ghosts_zzzzzz");
+        }
+        Err(other) => return Err(format!("wrong error: {other}").into()),
+        Ok(_) => return Err("expected an unexpected-index error".into()),
+    }
+    Ok(())
+}

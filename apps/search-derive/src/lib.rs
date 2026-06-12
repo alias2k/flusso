@@ -7,10 +7,15 @@
 //!    `FLUSSO_CONFIG`) and resolves the named index's mapping — no database;
 //! 2. validates each declared field against that mapping (exists / type /
 //!    nullability), reporting every problem at once with precise spans;
-//! 3. generates the typed query surface (`Type::field()` handles, `get`/`search`,
+//! 3. generates the typed query surface (`Type::field()` handles, `get`/`query`,
 //!    `SCHEMA_HASH`) that targets the `flusso-search` runtime.
 //!
-//! Use it through `flusso-search`'s `derive` feature: `use flusso_search::FlussoDocument`.
+//! Two companion derives ship alongside it: [`FlussoValue`](derive_flusso_value)
+//! (a Rust enum/newtype standing in for a leaf field) and
+//! [`FlussoMultiDocument`](derive_flusso_multi_document) (the combined-search
+//! union over several document types).
+//!
+//! Use them through `flusso-search`'s `derive` feature: `use flusso_search::FlussoDocument`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -19,6 +24,7 @@ use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, LitStr, parse_macro_input};
 
 mod doc;
+mod multi;
 mod resolve;
 mod value;
 
@@ -52,6 +58,26 @@ pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
 pub fn derive_flusso_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     value::expand(input).into()
+}
+
+/// Implement `flusso_search::FlussoMultiDocument` for an enum of document
+/// types — the combined-search union. Each variant is a single-field tuple
+/// variant whose payload implements `FlussoDocument`; the generated impl
+/// lists every variant's index (`TARGETS`) and decodes each hit into the
+/// variant matching its physical `_index`. Purely syntactic — no
+/// `flusso.toml`, no schema resolution.
+///
+/// ```ignore
+/// #[derive(serde::Serialize, FlussoMultiDocument)]
+/// enum SearchItem {
+///     User(User),
+///     Product(Product),
+/// }
+/// ```
+#[proc_macro_derive(FlussoMultiDocument)]
+pub fn derive_flusso_multi_document(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    multi::expand(input).into()
 }
 
 /// The `#[flusso(…)]` container attributes, plus serde's container `rename_all`.
@@ -220,5 +246,6 @@ fn expand(input: DeriveInput) -> TokenStream2 {
 mod dev_deps {
     use flusso_search as _;
     use serde as _;
+    use serde_json as _;
     use trybuild as _;
 }

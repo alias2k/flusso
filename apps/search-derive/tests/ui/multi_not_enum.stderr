@@ -1,0 +1,5 @@
+error: FlussoMultiDocument can only be derived for an enum (one single-field variant per document type)
+ --> tests/ui/multi_not_enum.rs:5:8
+  |
+5 | struct SearchItem {
+  |        ^^^^^^^^^^

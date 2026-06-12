@@ -14,6 +14,8 @@
 //! GET /products/3
 //! GET /orders?status=delivered&user_id=2&min_total=100
 //! GET /orders/10
+//! GET /search?q=ada                  — blended: one ranked list across users + products
+//! GET /overview?q=ada&status=paid    — sectioned: three queries, one _msearch round-trip
 //! GET /health
 //! ```
 //!
@@ -21,8 +23,10 @@
 //! dev/flusso.toml` to populate), then `cargo run -p flusso-dev-search-api`.
 //!
 //! Layout: one module per index ([`users`], [`products`], [`orders`]) holding
-//! its document types, filter, and handler; [`response`] and [`error`] are
-//! shared. Each index module exposes a `routes()` the router merges.
+//! its document types, filter, and handler, plus [`global`] for the
+//! cross-index endpoints (`/search` blended via a `FlussoMultiDocument` union,
+//! `/overview` sectioned via `msearch`); [`response`] and [`error`] are
+//! shared. Each module exposes a `routes()` the router merges.
 
 use axum::Router;
 use axum::routing::get;
@@ -30,6 +34,7 @@ use flusso_search::Client;
 use tracing_subscriber::EnvFilter;
 
 mod error;
+mod global;
 mod orders;
 mod products;
 mod response;
@@ -60,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(users::routes())
         .merge(products::routes())
         .merge(orders::routes())
+        .merge(global::routes())
         .with_state(client);
 
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());

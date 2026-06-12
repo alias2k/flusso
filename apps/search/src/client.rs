@@ -55,32 +55,35 @@ impl Client {
         }
     }
 
-    /// POST a search body to `<index>_<hash>/_search` and return the parsed response
-    /// JSON. Crate-internal: [`crate::Search::send`] drives this.
+    /// POST a search body to `{path}/_search` and return the parsed response
+    /// JSON. `path` is one physical index (`users_<hash>`) or a comma-joined
+    /// list of them (combined search). Crate-internal: [`crate::Search::send`]
+    /// and [`crate::MultiSearch::send`] drive this.
     #[tracing::instrument(
         name = "search.request",
         level = "debug",
         skip_all,
-        fields(index, hash, status = tracing::field::Empty),
+        fields(path, status = tracing::field::Empty),
         err,
     )]
-    pub(crate) async fn search(&self, index: &str, hash: &str, body: &Value) -> Result<Value> {
-        let endpoint = format!("{}/{index}_{hash}/_search", self.base);
+    pub(crate) async fn search_at(&self, path: &str, body: &Value) -> Result<Value> {
+        let endpoint = format!("{}/{path}/_search", self.base);
         tracing::debug!(%endpoint, "POST _search");
         self.post_json(&endpoint, body).await
     }
 
-    /// POST a query body to `<index>_<hash>/_count` and return the parsed response
-    /// JSON. Crate-internal: [`crate::Search::count`] drives this.
+    /// POST a query body to `{path}/_count` and return the parsed response
+    /// JSON. `path` as in [`search_at`](Self::search_at). Crate-internal:
+    /// [`crate::Search::count`] and [`crate::MultiSearch::count`] drive this.
     #[tracing::instrument(
         name = "count.request",
         level = "debug",
         skip_all,
-        fields(index, hash, status = tracing::field::Empty),
+        fields(path, status = tracing::field::Empty),
         err,
     )]
-    pub(crate) async fn count(&self, index: &str, hash: &str, body: &Value) -> Result<Value> {
-        let endpoint = format!("{}/{index}_{hash}/_count", self.base);
+    pub(crate) async fn count_at(&self, path: &str, body: &Value) -> Result<Value> {
+        let endpoint = format!("{}/{path}/_count", self.base);
         tracing::debug!(%endpoint, "POST _count");
         self.post_json(&endpoint, body).await
     }

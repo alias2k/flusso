@@ -39,6 +39,14 @@ pub enum Error {
         body: String,
     },
 
+    /// A combined-search hit came from an index no
+    /// [`FlussoMultiDocument`](crate::FlussoMultiDocument) variant claims.
+    #[error("combined-search hit from unexpected index `{index}`")]
+    UnexpectedIndex {
+        /// The physical index name the hit reported.
+        index: String,
+    },
+
     /// A response could not be decoded into the expected shape.
     #[error("decoding response: {0}")]
     Decode(#[from] serde_json::Error),

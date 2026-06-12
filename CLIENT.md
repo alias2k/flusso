@@ -334,6 +334,57 @@ its own type. A slot-level failure fails the whole call with an error naming
 the slot (no partial results). For many searches of *one* type there's
 `client.msearch_all(&searches)` → `Vec<SearchResponse<T>>`.
 
+### One blended result list (combined search)
+
+The other multi-index shape: **one** query over several indexes, hits ranked
+together in a single list — the "one search box over everything" primitive.
+You declare which document types blend by writing an enum with one variant per
+type. The enum is yours — name it after the surface it serves, like your
+document structs:
+
+```rust
+/// One item in the storefront's global search.
+#[derive(Debug, FlussoMultiDocument)]          // the `derive` feature, like FlussoDocument
+enum StoreItem {
+    User(User),
+    Order(Order),
+}
+
+let page = StoreItem::query()                  // MultiSearch<StoreItem> — client-free too
+    .query(multi_match("ada", [User::full_name(), Order::customer_name()]))
+    .size(20)
+    .send(&client)
+    .await?;
+
+for hit in page.hits {
+    match hit.source {                         // dispatched by the hit's `_index`
+        StoreItem::User(u) => render_user(u, hit.score),
+        StoreItem::Order(o) => render_order(o, hit.score),
+    }
+}
+```
+
+The pieces that make this safe are the ones the crate already has: root-scope
+queries compose across document types (`Query<Root>` carries no document
+type), and every hit names its physical index — exactly `{INDEX}_{HASH}` — so
+decoding into the right variant is precise, no read alias involved. A hit from
+an index no variant claims is an error, not a skip. `count(&client)` works on
+the union too (`_count` accepts the index list).
+
+Two semantics to know:
+
+- A *query* on a field that exists in only one of the indexes is fine — it
+  just doesn't match in the others.
+- A *sort* on such a field is **rejected by OpenSearch** unless it carries an
+  `unmapped_type`. Sort the blended list by relevance, or on fields all the
+  union's indexes share.
+
+The derive validates the enum's shape (single-field tuple variants, no
+duplicate payload types) and generates the trait's two members. Without the
+`derive` feature, the impl is two short members written by hand — a `TARGETS`
+const listing each variant's `(INDEX, SCHEMA_HASH)` and a `decode` that
+matches on `Type::physical_index()`; the trait docs show the exact pattern.
+
 ### Building a child filter and merging it into the parent
 
 Because the scope is part of the type, a query is a value you can build, name,
@@ -787,12 +838,11 @@ So the target is unambiguous about where the line is:
   them in the meantime.
 - **Writes.** flusso owns the index; the client never upserts or deletes. It is a
   query client by construction.
-- **Blended cross-index search.** One *combined* result list over several
-  indexes (one query, hits ranked together) needs a sum type and per-hit
-  dispatch — a planned follow-on (`FlussoUnion`). Running several independent
-  typed searches in one round-trip is already covered by
-  [`_msearch`](#several-searches-one-round-trip-_msearch); true joining across
-  indexes remains the caller's job, above this crate.
+- **Joining across indexes.** Both multi-index shapes are built — [one blended
+  result list](#one-blended-result-list-combined-search) over a derived
+  `FlussoMultiDocument` union, and independent searches in one round-trip via
+  [`_msearch`](#several-searches-one-round-trip-_msearch) — but *correlating*
+  hits across indexes remains the caller's job, above this crate.
 - **Scroll / `search_after` pagination.** `from`/`size` first; deep pagination is
   a follow-on once the typed cursor shape is settled.
 - **Generating the document struct.** By design — the developer owns the struct.

@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::ApiError;
 use crate::response::Page;
 
+// `pub(crate)`: the cross-index endpoints in `global` reuse this document and
+// its generated handles (same for `Profile`, `Product`, and `Order`).
 #[derive(Debug, Serialize, Deserialize, FlussoDocument)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "users")]
-struct User {
+pub(crate) struct User {
     id: i32,
     email: String,
     full_name: Option<String>,
@@ -58,7 +60,7 @@ enum AccountTier {
 #[derive(Debug, Serialize, Deserialize, FlussoDocument)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "users", path = "profile")]
-struct Profile {
+pub(crate) struct Profile {
     bio: Option<String>,
     avatar_url: Option<String>,
     birth_date: Option<String>,

@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::ApiError;
 use crate::response::Page;
 
+// `pub(crate)`: reused by the cross-index endpoints in `global`.
 #[derive(Debug, Serialize, Deserialize, FlussoDocument)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "orders")]
-struct Order {
+pub(crate) struct Order {
     id: i32,
     user_id: i32,
     status: String,

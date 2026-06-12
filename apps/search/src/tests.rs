@@ -13,8 +13,8 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    Date, Geo, GeoPoint, Keyword, MsearchBundle, Nested, Number, Query, Search, SearchResponse,
-    SortOrder, Text, multi_match,
+    Date, FlussoDocument, FlussoMultiDocument, Geo, GeoPoint, Keyword, MsearchBundle, Nested,
+    Number, Query, Search, SearchResponse, SortOrder, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -483,6 +483,132 @@ fn msearch_decodes_each_slot_with_its_own_type() -> Result {
         "open"
     );
     Ok(())
+}
+
+impl FlussoDocument for DecodedUser {
+    const INDEX: &'static str = "users";
+    const SCHEMA_HASH: &'static str = "xxxxxx";
+}
+
+impl FlussoDocument for DecodedOrder {
+    const INDEX: &'static str = "orders";
+    const SCHEMA_HASH: &'static str = "yyyyyy";
+}
+
+/// A hand-written union over the two decoded types — exactly what the
+/// `FlussoMultiDocument` derive will generate.
+#[derive(Debug)]
+enum StoreItem {
+    User(DecodedUser),
+    Order(DecodedOrder),
+}
+
+impl FlussoMultiDocument for StoreItem {
+    const TARGETS: &'static [(&'static str, &'static str)] = &[
+        (DecodedUser::INDEX, DecodedUser::SCHEMA_HASH),
+        (DecodedOrder::INDEX, DecodedOrder::SCHEMA_HASH),
+    ];
+
+    fn decode(physical_index: &str, source: serde_json::Value) -> crate::Result<Self> {
+        if physical_index == DecodedUser::physical_index() {
+            return Ok(Self::User(serde_json::from_value(source)?));
+        }
+        if physical_index == DecodedOrder::physical_index() {
+            return Ok(Self::Order(serde_json::from_value(source)?));
+        }
+        Err(crate::Error::UnexpectedIndex {
+            index: physical_index.to_owned(),
+        })
+    }
+}
+
+#[test]
+fn multi_search_addresses_every_target_index() {
+    let search = StoreItem::query()
+        .filter(User::email().eq("ada@example.com"))
+        .size(20);
+
+    assert_eq!(search.physical_path(), "users_xxxxxx,orders_yyyyyy");
+    assert_eq!(
+        search.body(),
+        json!({
+            "query": { "bool": { "filter": [
+                { "term": { "email": "ada@example.com" } }
+            ] } },
+            "size": 20
+        })
+    );
+    assert_eq!(
+        search.count_body(),
+        json!({ "query": { "bool": { "filter": [
+            { "term": { "email": "ada@example.com" } }
+        ] } } })
+    );
+}
+
+#[test]
+fn multi_decode_dispatches_hits_by_physical_index() -> Result {
+    // A blended, interleaved page: order, user, order — ranked together.
+    let response = json!({
+        "took": 4,
+        "hits": {
+            "total": { "value": 3 },
+            "max_score": 2.0,
+            "hits": [
+                { "_index": "orders_yyyyyy", "_id": "9", "_score": 2.0,
+                  "_source": { "status": "open" } },
+                { "_index": "users_xxxxxx", "_id": "1", "_score": 1.5,
+                  "_source": { "email": "ada@example.com", "orderCount": 2 } },
+                { "_index": "orders_yyyyyy", "_id": "7", "_score": 1.0,
+                  "_source": { "status": "shipped" } }
+            ]
+        }
+    });
+
+    let page: SearchResponse<StoreItem> = crate::multi::decode_response(response)?;
+    assert_eq!(page.total, 3);
+    assert_eq!(page.max_score, Some(2.0));
+
+    let kinds: Vec<&str> = page
+        .hits
+        .iter()
+        .map(|hit| match &hit.source {
+            StoreItem::User(_) => "user",
+            StoreItem::Order(_) => "order",
+        })
+        .collect();
+    assert_eq!(kinds, ["order", "user", "order"]);
+
+    let first = page.hits.first().ok_or("expected a hit")?;
+    assert_eq!(first.id, "9");
+    match &first.source {
+        StoreItem::Order(order) => assert_eq!(order.status, "open"),
+        StoreItem::User(_) => panic!("expected the top hit to be an order"),
+    }
+
+    let second = page.hits.get(1).ok_or("expected a second hit")?;
+    match &second.source {
+        StoreItem::User(user) => assert_eq!(user.email, "ada@example.com"),
+        StoreItem::Order(_) => panic!("expected the second hit to be a user"),
+    }
+    Ok(())
+}
+
+#[test]
+fn multi_decode_rejects_a_hit_from_an_unclaimed_index() {
+    let response = json!({
+        "took": 1,
+        "hits": { "total": { "value": 1 }, "hits": [
+            { "_index": "ghosts_zzzzzz", "_id": "1", "_score": 1.0, "_source": {} }
+        ] }
+    });
+
+    match crate::multi::decode_response::<StoreItem>(response) {
+        Err(crate::Error::UnexpectedIndex { index }) => {
+            assert_eq!(index, "ghosts_zzzzzz");
+        }
+        other => panic!("expected an unexpected-index error, got {other:?}"),
+    }
 }
 
 #[test]
