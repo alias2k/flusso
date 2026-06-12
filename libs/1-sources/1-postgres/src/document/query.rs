@@ -103,9 +103,12 @@ pub(super) fn document_query(
     if conditions.is_empty() {
         conditions.push("true".to_owned());
     }
+    // Root filters scope which rows are documents at all; a row outside the
+    // set returns nothing → a tombstone, exactly like soft-delete.
+    let root_filters = builder.filters(schema.filters.as_deref(), ROOT, &schema.table)?;
 
     let sql = format!(
-        "SELECT {object} AS \"document\" FROM {} AS \"{ROOT}\" WHERE {}",
+        "SELECT {object} AS \"document\" FROM {} AS \"{ROOT}\" WHERE {}{root_filters}",
         qtable(&schema.db_schema, &schema.table),
         conditions.join(" AND "),
     );
@@ -149,6 +152,10 @@ pub(super) fn documents_query(
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
         predicate = format!("{predicate} AND NOT ({soft_delete})");
     }
+    // Root filters: a requested key outside the set comes back as no row,
+    // which the caller reads as a tombstone.
+    let root_filters = builder.filters(schema.filters.as_deref(), ROOT, &schema.table)?;
+    predicate.push_str(&root_filters);
 
     let sql = format!(
         "SELECT to_json({key}) AS \"doc_key\", {object} AS \"document\" \
@@ -722,6 +729,7 @@ mod tests {
             primary_key: primary_key.map(c),
             doc_id: None,
             soft_delete,
+            filters: None,
             fields,
         }
     }
@@ -745,6 +753,52 @@ mod tests {
             r#"SELECT json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
         );
         assert_eq!(params, vec![GenericValue::Int(7)]);
+    }
+
+    #[test]
+    fn root_filters_fold_into_both_query_forms() {
+        let mut schema = index(Some("id"), None, vec![col_field("id", "id")]);
+        schema.filters = Some(vec![Filter::ValueOp(ValueOpFilter {
+            column: c("status"),
+            op: FilterOp::Eq,
+            value: FilterValue::Single("active".to_owned()),
+        })]);
+        let mut col_types = HashMap::new();
+        col_types.insert(("users".to_owned(), "status".to_owned()), "text".to_owned());
+
+        let (sql, params) = document_query(
+            &schema,
+            &[(c("id"), GenericValue::Int(7))],
+            &HashMap::new(),
+            &col_types,
+        )
+        .unwrap();
+        assert_eq!(
+            sql.as_str(),
+            r#"SELECT json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1 AND ("root"."status" = $2::text)"#
+        );
+        assert_eq!(
+            params,
+            vec![
+                GenericValue::Int(7),
+                GenericValue::String("active".to_owned())
+            ]
+        );
+
+        let (sql, _) = documents_query(
+            &schema,
+            &c("id"),
+            &[GenericValue::Int(7)],
+            &HashMap::new(),
+            &col_types,
+        )
+        .unwrap();
+        assert!(
+            sql.as_str()
+                .ends_with(r#"WHERE "root"."id" IN ($1) AND ("root"."status" = $2::text)"#),
+            "{}",
+            sql.as_str()
+        );
     }
 
     #[test]

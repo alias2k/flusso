@@ -249,6 +249,7 @@ fn users_config(connection_url: &str) -> Config {
         primary_key: Some(column("id")),
         doc_id: None,
         soft_delete: None,
+        filters: None,
         fields: vec![column_field("id", "id"), column_field("email", "email")],
     };
     Config {

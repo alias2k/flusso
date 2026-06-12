@@ -825,6 +825,7 @@ async fn belongs_to_assembles_and_reverse_resolves() {
         primary_key: Some(column("id")),
         doc_id: None,
         soft_delete: None,
+        filters: None,
         fields: vec![
             col("id", "id"),
             join_field(
@@ -875,6 +876,51 @@ async fn belongs_to_assembles_and_reverse_resolves() {
 }
 
 // ---------------------------------------------------------------------------
+// Root filters: only matching root rows become documents; a row leaving the
+// set tombstones, exactly like soft-delete. Covers both the single-document
+// and batched build paths.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn root_filters_scope_which_rows_become_documents() {
+    let (_pg, url) = start_seeded().await;
+
+    // Documents exist only for active, non-archived users.
+    let mut schema = users_schema(vec![col("id", "id"), col("name", "name")], None);
+    schema.filters = Some(vec![
+        eq("status", "active"),
+        value_op("archived", FilterOp::Eq, single("false")),
+    ]);
+    let builder = builder(&url, schema).await;
+
+    // User 1 (active, not archived) is a document.
+    let body = upsert(&builder, 1).await;
+    assert_eq!(str_of(&body, "name"), "Ada Lovelace");
+
+    // User 2 (banned) and user 3 (archived) are outside the set → tombstones.
+    assert!(is_tombstone(&builder, 2).await);
+    assert!(is_tombstone(&builder, 3).await);
+
+    // The batched path agrees: requested keys outside the set come back as
+    // tombstones, matching keys as upserts.
+    let documents = builder.build_many(&[doc(1), doc(2), doc(3)]).await.unwrap();
+    let upserts = documents
+        .iter()
+        .filter(|d| matches!(d, Document::Upsert { .. }))
+        .count();
+    assert_eq!((documents.len(), upserts), (3, 1));
+
+    // A row that leaves the set on UPDATE tombstones on its next rebuild.
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    sqlx::query("UPDATE users SET status = 'banned' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(is_tombstone(&builder, 1).await);
+}
+
+// ---------------------------------------------------------------------------
 // Builders for config, schema, fields, filters, and the value assertions.
 // ---------------------------------------------------------------------------
 
@@ -905,6 +951,7 @@ fn users_schema(fields: Vec<Field>, soft_delete: Option<SoftDelete>) -> IndexSch
         primary_key: Some(column("id")),
         doc_id: None,
         soft_delete,
+        filters: None,
         fields,
     }
 }

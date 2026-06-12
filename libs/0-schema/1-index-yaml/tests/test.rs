@@ -245,6 +245,24 @@ fields:
     ));
 }
 
+#[test]
+fn root_filters_parse_and_convert() {
+    let schema = convert(
+        "version: 1\ntable: users\nfilters:\n  - { column: status, op: eq, value: active }\n  - { column: deleted_at, op: is_null }\nfields:\n  - integer: id\n    required: false",
+    )
+    .unwrap();
+    let filters = schema.filters.as_deref().unwrap();
+    assert_eq!(filters.len(), 2);
+    assert!(matches!(
+        filters.first(),
+        Some(schema_core::Filter::ValueOp(_))
+    ));
+    assert!(matches!(
+        filters.get(1),
+        Some(schema_core::Filter::NullCheck(_))
+    ));
+}
+
 fn filter_value(filter: &schema_core::Filter) -> Option<&FilterValue> {
     match filter {
         schema_core::Filter::ValueOp(v) => Some(&v.value),

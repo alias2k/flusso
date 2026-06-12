@@ -708,6 +708,7 @@ fn config(connection_url: &str) -> Config {
             column: column("archived"),
             when: None,
         })),
+        filters: None,
         fields,
     };
     Config {

@@ -100,6 +100,9 @@ pub struct SchemaYaml {
     pub doc_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub soft_delete: Option<SoftDelete>,
+    /// Root filters: only matching root rows become documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Vec<Filter>>,
     pub fields: Vec<Field>,
 }
 
@@ -120,6 +123,7 @@ impl TryFrom<SchemaYaml> for schema_core::IndexSchema {
             .soft_delete
             .map(conversion::convert_soft_delete)
             .transpose()?;
+        let filters = conversion::convert_filters_opt(yaml.filters)?;
         let fields = yaml
             .fields
             .into_iter()
@@ -133,6 +137,7 @@ impl TryFrom<SchemaYaml> for schema_core::IndexSchema {
             primary_key,
             doc_id,
             soft_delete,
+            filters,
             fields,
         })
     }

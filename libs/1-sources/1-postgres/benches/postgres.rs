@@ -212,6 +212,7 @@ fn config(connection_url: &str) -> Config {
             column: column("deleted"),
             when: None,
         })),
+        filters: None,
         fields: vec![
             column_field("id", "id"),
             column_field("email", "email"),

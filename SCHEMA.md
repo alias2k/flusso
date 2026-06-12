@@ -141,6 +141,7 @@ document shape — no surprises.
 | `primary_key` | Postgres identifier | no | — | The root table's primary-key column. Used to derive the document id and to resolve which documents a related-row change affects. Relations and reverse-resolution require it. |
 | `doc_id` | string | no | — | Column whose value becomes the document id. Parsed and validated by the schema layer; the current Postgres source derives the id from `primary_key`. |
 | `soft_delete` | object | no | — | Treat rows as deleted based on a column/field rather than a physical `DELETE`. See [below](#soft_delete). |
+| `filters` | list | no | — | Root filters: only root rows matching every filter become documents. See [below](#root-filters). |
 | `fields` | list | **yes** | — | The document's fields. See [Fields](#fields). |
 
 ```yaml
@@ -173,6 +174,30 @@ soft_delete:
 | --- | --- | --- |
 | `column` **or** `field` | exactly one | The column (Postgres identifier) or mapped field (field name) signalling deletion. |
 | `when` | no | A list of [filters](#filters); the soft-delete applies only to matching rows. |
+
+### Root filters
+
+Sometimes only a *subset* of a table should be an index at all — sale classes
+out of `class`, parent rows out of `quotation_row`, serialized items out of
+`item`. A top-level `filters` list (same [filter forms](#filters) as joins use)
+scopes which root rows become documents:
+
+```yaml
+version: 1
+table: item
+primary_key: id
+filters:
+  - { column: item_type, op: eq, value: serialized }
+  - { column: archived_at, op: is_null }
+```
+
+A row outside the set never produces a document; a row that *leaves* the set
+(an `UPDATE` that stops matching) emits a **tombstone** on its next rebuild,
+exactly like [`soft_delete`](#soft_delete) — both fold into the document
+query's `WHERE`, so "no row came back" means "this document should not exist".
+Conversely a row that enters the set upserts. Backfill walks the whole root
+table and lets the same predicate decide, so filtered-out rows cost a no-op
+delete during seeding rather than a wrong document.
 
 ---
 
@@ -508,8 +533,10 @@ take no `value_type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
 
 ### Filters
 
-Filters narrow which related rows a join or aggregate sees (and which rows a
-`soft_delete` applies to). Three forms:
+Filters narrow which related rows a join or aggregate sees, which rows a
+`soft_delete` applies to, and — as the top-level
+[`filters` key](#root-filters) — which root rows become documents at all.
+Three forms:
 
 **Raw SQL** — an escape hatch for conditions the structured forms can't express
 (with great power, etc.):

@@ -34,6 +34,11 @@ properties:
             $ref: "#/definitions/pg_identifier"
           when:
             $ref: "#/definitions/filters"
+  filters:
+    $ref: "#/definitions/filters"
+    description: >-
+      Root filters: only root rows matching every filter become documents. A
+      row that stops matching emits a tombstone, like soft_delete.
   fields:
     type: array
     items:

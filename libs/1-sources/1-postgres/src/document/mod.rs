@@ -262,13 +262,14 @@ impl PgDocumentBuilder {
         let mut columns = Vec::new();
         fields::collect_filter_columns(&schema.fields, &mut columns);
 
-        // Soft-delete `when` filters run against the root table.
+        // Soft-delete `when` filters and root filters run against the root table.
         let when = match &schema.soft_delete {
             Some(SoftDelete::Column(c)) => c.when.as_deref(),
             Some(SoftDelete::Field(f)) => f.when.as_deref(),
             None => None,
         };
-        for filter in when.unwrap_or_default() {
+        let root_filters = schema.filters.as_deref().unwrap_or_default();
+        for filter in when.unwrap_or_default().iter().chain(root_filters) {
             if let Filter::ValueOp(value_op) = filter {
                 columns.push((&schema.table, &value_op.column));
             }

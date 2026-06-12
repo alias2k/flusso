@@ -65,5 +65,12 @@ pub struct IndexSchema {
     pub doc_id: Option<common::ColumnName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub soft_delete: Option<SoftDelete>,
+    /// Root filters: only root rows matching every filter become documents.
+    /// A row that stops matching emits a tombstone, exactly like
+    /// [`soft_delete`](Self::soft_delete) — both fold into the document
+    /// query's `WHERE`, so "no row came back" means "this document should not
+    /// exist".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Vec<Filter>>,
     pub fields: Vec<Field>,
 }
