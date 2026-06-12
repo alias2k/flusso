@@ -62,9 +62,30 @@ check-offline:
 run: up
     cargo run -- run --config {{config}} --http-addr {{http_addr}}
 
+# Bring the stack up, then backfill + follow live changes; serves /status + /metrics.
+help:
+    cargo run -- help
+
 # Same as `run` but skip the backfill (resume live capture only).
 run-live: up
     cargo run -- run --config {{config}} --http-addr {{http_addr}} --skip-backfill
+
+# Serve the dev read API (axum, dev/search-api) over the synced indexes (:8080).
+api: up
+    cargo run -p flusso-dev-search-api
+
+# Full dev suite: the sync engine + the axum search API together; Ctrl-C stops both.
+dev: up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p flusso-cli -p flusso-dev-search-api
+    trap 'kill 0 2>/dev/null' INT TERM EXIT
+    cargo run -p flusso-dev-search-api &
+    cargo run -p flusso-cli -- run --config {{config}} --http-addr {{http_addr}}
+
+# Install the flusso CLI locally (into ~/.cargo/bin).
+install:
+    cargo install --path apps/cli --locked
 
 # Compile config + schemas into a portable flusso.lock (no DB, no secrets baked in).
 build-lock:
