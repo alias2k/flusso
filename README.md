@@ -239,7 +239,9 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
   `flusso_meta` index where it records "this one's seeded". flusso owns the index
   lifecycle: it derives a strict typed mapping per schema and names each index from
   a hash of that schema (`users_<hash>`), so a structural change rolls onto a fresh
-  index and re-seeds instead of fighting a mismatched one.
+  index and re-seeds instead of fighting a mismatched one. The plain logical name
+  (`users`) is kept as an alias on the current index, so you can always query it
+  without knowing the hash.
 
 ## Deploying it
 
@@ -281,7 +283,7 @@ layer** — a crate only depends on lower-numbered ones.
 | `sources-postgres` | `libs/1-sources/1-postgres` | Postgres source: WAL capture, backfill, document building. |
 | `sinks-core` | `libs/1-sinks/0-core` | The `Sink` trait, JSON rendering, and a fan-out sink. |
 | `sinks-stdout` | `libs/1-sinks/1-stdout` | Writes each operation to stdout (NDJSON or pretty). |
-| `sinks-opensearch` | `libs/1-sinks/2-opensearch` | OpenSearch sink: bulk API, typed mappings, hashed index names, seeding markers. |
+| `sinks-opensearch` | `libs/1-sinks/2-opensearch` | OpenSearch sink: bulk API, typed mappings, hashed index names + latest-alias, seeding markers. |
 | `engine` | `libs/2-engine` | The sync engine — capture → queue → build → sink, batched, at-least-once. |
 | `daemon` | `libs/3-daemon` | Wires a `Config` into a running pipeline and exposes live `Status`. |
 | `flusso-cli` | `apps/cli` | The `flusso` binary: transport, telemetry, signals. |

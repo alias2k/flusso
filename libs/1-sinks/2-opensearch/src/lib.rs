@@ -9,6 +9,15 @@
 //!   index (re-seeded from scratch) rather than into the old, now-mismatched
 //!   shape. The logical name remains the pipeline's identity; the sink
 //!   translates it to the physical name on every call.
+//! - **Convenience alias.** The logical name is also maintained as an alias
+//!   pointing at the *current* physical index, repointed atomically whenever
+//!   the schema hash moves, so a human (or an ad-hoc tool) can always query
+//!   `{logical}` without knowing the hash. The alias is write-only from the
+//!   sink's perspective: flusso itself always addresses the physical name —
+//!   both here and in the `flusso-search` client — and never reads or writes
+//!   through the alias. Alias upkeep is best-effort: a failure (say, the
+//!   cluster already has a real index named `{logical}`) is logged and
+//!   ignored, because correctness never depends on it.
 //! - **Explicit mapping.** Field types come from the schema, not OpenSearch's
 //!   dynamic guesses, and the index is created `dynamic: strict` so only
 //!   configured fields are accepted. An index that already exists is left
@@ -305,6 +314,98 @@ impl OpensearchSink {
         Err(Self::status_error(resp, "index check failed").await)
     }
 
+    /// `PUT /{index}` with the explicit mapping body. Tolerates losing a
+    /// creation race — a concurrent creator winning is fine, the index exists.
+    async fn create_index(&self, index: &str, mapping: &IndexMapping) -> Result<()> {
+        let url = format!("{}/{index}", self.base_url);
+        let req = self
+            .client
+            .put(&url)
+            .header("Content-Type", "application/json")
+            .json(&build_index_body(&mapping.fields, &self.index_options));
+
+        let resp = self
+            .maybe_auth(req)
+            .send()
+            .await
+            .map_err(|e| SinkError::Write(format!("index create failed: {e}")))?;
+
+        if resp.status().is_success() {
+            debug!(index, "created index with explicit mapping");
+            return Ok(());
+        }
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if text.contains("resource_already_exists_exception") {
+            return Ok(());
+        }
+        Err(SinkError::Write(format!(
+            "index create failed: HTTP {status}: {text}"
+        )))
+    }
+
+    /// Point the convenience alias `alias` (the logical index name) at
+    /// `target` (the current physical index), removing it from any stale
+    /// physical indexes in the same atomic `_aliases` call. Best-effort: a
+    /// failure is logged and swallowed, because nothing in flusso reads or
+    /// writes through the alias (see the module docs).
+    async fn ensure_alias(&self, alias: &str, target: &str) {
+        if let Err(e) = self.try_ensure_alias(alias, target).await {
+            warn!(
+                alias,
+                index = target,
+                error = %e,
+                "could not point the convenience alias at the index; writes are unaffected",
+            );
+        }
+    }
+
+    /// The fallible body of [`ensure_alias`](Self::ensure_alias).
+    async fn try_ensure_alias(&self, alias: &str, target: &str) -> Result<()> {
+        let holders = self.alias_holders(alias).await?;
+        let Some(actions) = plan_alias_actions(alias, target, &holders) else {
+            return Ok(()); // Already pointing at exactly the target.
+        };
+
+        let url = format!("{}/_aliases", self.base_url);
+        let req = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&actions);
+        self.send_ok(req, "alias update failed").await?;
+        debug!(alias, index = target, "pointed alias at the current index");
+        Ok(())
+    }
+
+    /// The indexes currently holding `alias`. An alias that exists nowhere is
+    /// an empty list (404 from the lookup), not an error.
+    async fn alias_holders(&self, alias: &str) -> Result<Vec<String>> {
+        let url = format!("{}/_alias/{alias}", self.base_url);
+        let resp = self
+            .maybe_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| SinkError::Write(format!("alias lookup failed: {e}")))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !resp.status().is_success() {
+            return Err(Self::status_error(resp, "alias lookup failed").await);
+        }
+
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| SinkError::Write(format!("failed to parse alias response: {e}")))?;
+        Ok(body
+            .as_object()
+            .map(|indexes| indexes.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
     /// Force a one-off refresh so everything written to `index` so far becomes
     /// searchable, regardless of the index's refresh interval.
     async fn refresh_index(&self, index: &str) -> Result<()> {
@@ -401,36 +502,15 @@ impl Sink for OpensearchSink {
 
         if self.index_exists(&index).await? {
             debug!(index, "index exists; leaving its mapping untouched");
-            return Ok(());
+        } else {
+            self.create_index(&index, mapping).await?;
         }
 
-        let url = format!("{}/{index}", self.base_url);
-        let req = self
-            .client
-            .put(&url)
-            .header("Content-Type", "application/json")
-            .json(&build_index_body(&mapping.fields, &self.index_options));
-
-        let resp = self
-            .maybe_auth(req)
-            .send()
-            .await
-            .map_err(|e| SinkError::Write(format!("index create failed: {e}")))?;
-
-        if resp.status().is_success() {
-            debug!(index, "created index with explicit mapping");
-            return Ok(());
-        }
-
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        // A concurrent creator winning the race is fine — the index now exists.
-        if text.contains("resource_already_exists_exception") {
-            return Ok(());
-        }
-        Err(SinkError::Write(format!(
-            "index create failed: HTTP {status}: {text}"
-        )))
+        // The convenience alias `{logical}` → current physical index. Purely
+        // for humans and ad-hoc tooling; flusso itself always addresses the
+        // physical name, so a failure here is logged, not propagated.
+        self.ensure_alias(logical, &index).await;
+        Ok(())
     }
 
     async fn upsert(&self, index: &IndexName, id: &str, document: &GenericValue) -> Result<()> {
@@ -768,6 +848,25 @@ fn keyword_subfields() -> Value {
 /// [`MappingType::name`], which is also what the type serializes as.
 fn opensearch_type(mapping_type: &MappingType) -> String {
     mapping_type.name().to_owned()
+}
+
+/// Build the `POST /_aliases` body that moves `alias` to point at exactly
+/// `target`: one `remove` per stale holder plus an `add` for the target, all
+/// in a single atomic call (no window where the alias dangles). Returns `None`
+/// when the alias already points at exactly the target, so the caller can skip
+/// the request entirely.
+fn plan_alias_actions(alias: &str, target: &str, holders: &[String]) -> Option<Value> {
+    if holders.len() == 1 && holders.iter().all(|h| h == target) {
+        return None;
+    }
+
+    let mut actions: Vec<Value> = holders
+        .iter()
+        .filter(|holder| holder.as_str() != target)
+        .map(|holder| json!({ "remove": { "index": holder, "alias": alias } }))
+        .collect();
+    actions.push(json!({ "add": { "index": target, "alias": alias } }));
+    Some(json!({ "actions": actions }))
 }
 
 /// Build the `/_bulk` URL with optional pipeline and refresh parameters.
@@ -1149,6 +1248,55 @@ mod tests {
         assert!(first_meta.get("index").is_some());
         let delete_meta: Value = serde_json::from_str(lines[2]).unwrap();
         assert!(delete_meta.get("delete").is_some());
+    }
+
+    #[test]
+    fn alias_actions_skip_when_already_on_target() {
+        let holders = vec!["users_abc123".to_owned()];
+        assert!(plan_alias_actions("users", "users_abc123", &holders).is_none());
+    }
+
+    #[test]
+    fn alias_actions_add_when_alias_is_absent() {
+        let actions = plan_alias_actions("users", "users_abc123", &[]).unwrap();
+        assert_eq!(
+            actions,
+            json!({ "actions": [
+                { "add": { "index": "users_abc123", "alias": "users" } },
+            ]})
+        );
+    }
+
+    #[test]
+    fn alias_actions_move_off_stale_indexes_atomically() {
+        // A schema change left the alias on the old physical index (plus a
+        // hypothetical second straggler): one call removes both and adds the
+        // current target.
+        let holders = vec!["users_old111".to_owned(), "users_old222".to_owned()];
+        let actions = plan_alias_actions("users", "users_new333", &holders).unwrap();
+        assert_eq!(
+            actions,
+            json!({ "actions": [
+                { "remove": { "index": "users_old111", "alias": "users" } },
+                { "remove": { "index": "users_old222", "alias": "users" } },
+                { "add": { "index": "users_new333", "alias": "users" } },
+            ]})
+        );
+    }
+
+    #[test]
+    fn alias_actions_keep_target_while_dropping_stragglers() {
+        // Target already holds the alias but a stale index does too: no remove
+        // for the target, just the straggler, and the (idempotent) add.
+        let holders = vec!["users_new333".to_owned(), "users_old111".to_owned()];
+        let actions = plan_alias_actions("users", "users_new333", &holders).unwrap();
+        assert_eq!(
+            actions,
+            json!({ "actions": [
+                { "remove": { "index": "users_old111", "alias": "users" } },
+                { "add": { "index": "users_new333", "alias": "users" } },
+            ]})
+        );
     }
 
     #[test]

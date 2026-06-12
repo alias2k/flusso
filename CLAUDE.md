@@ -247,7 +247,7 @@ belongs in the linked docs.
 | Postgres WAL capture / backfill / doc building | `libs/1-sources/1-postgres/src/` — `cdc/`, `document/` |
 | Source trait abstractions (`ChangeCapture`, `DocumentBuilder`) | `libs/1-sources/0-core/src/` |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
-| OpenSearch sink (bulk, mappings, seeding) | `libs/1-sinks/2-opensearch/src/lib.rs` |
+| OpenSearch sink (bulk, mappings, seeding, latest-alias) | `libs/1-sinks/2-opensearch/src/lib.rs` |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
 | CLI subcommands (`build`/`run`/`check`/`schema`) | `apps/cli/src/` — `main.rs` dispatches; one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves HTTP, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`), plus `telemetry.rs`/`metrics.rs`/`http.rs` and `print.rs` |
 | Query client (`flusso-search`) | `apps/search/src/` |
