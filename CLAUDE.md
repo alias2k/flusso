@@ -153,8 +153,12 @@ touching the loop. Key invariants to preserve when editing the engine:
 
 ### The daemon (`libs/3-daemon/src/lib.rs`) — domain only
 
-The daemon owns the **domain**: it builds the pluggable parts from a `Config` (`build.rs`,
-the wiring `run.rs` used to do inline), wires a `StatusObserver` (`observer.rs`) that updates a
+The daemon owns the **domain**: it assembles the pipeline from a `Config` — but it does
+**not** name concrete backends. Backend construction is a seam: the `Backends` trait
+(`backends.rs`, returning `SourceParts` = capture + document builder, and the `Sink`) is
+supplied to `Daemon::new`, so the daemon depends only on `sources-core`/`sinks-core`, never
+on Postgres/OpenSearch. The CLI is the one place that implements it (see below). The daemon
+wires a `StatusObserver` (`observer.rs`) that updates a
 shared `Status` (`status.rs`), runs the engine, and polls source capture lag out-of-band
 (`lag.rs` over `ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
 engine's `Observer` trait, not on any metrics backend — and owns **no transport**: no HTTP
@@ -166,7 +170,12 @@ observer via `Daemon::with_observer`; the engine drives a `FanOut` (`engine::Fan
 status observer plus any attached ones. So the daemon's public contract is *data*: the
 backend-agnostic `Observer` events and the `Status` handle.
 
-The CLI (`apps/cli`) is the **composition root** for transport and telemetry: it installs the
+The CLI (`apps/cli`) is the **composition root**. It is the single crate that names concrete
+backends: `backends.rs`'s `FlussoBackends` implements the daemon's `Backends` trait, resolving
+the connection (in the running environment) and building the Postgres source + the configured
+sinks (the source-type dispatch and the OpenSearch/stdout/fan-out `match` live here, not in the
+daemon). Adding a backend = a new match arm here plus its crate; the daemon and engine are
+untouched. It is also the composition root for transport and telemetry: it installs the
 meter provider (`metrics.rs` — one `SdkMeterProvider` feeding a Prometheus reader scraped at
 `/metrics` when `--http-addr` is set, and an OTLP periodic push when the standard
 `OTEL_EXPORTER_OTLP_*` env vars configure an endpoint, matching the trace export in
@@ -238,7 +247,8 @@ belongs in the linked docs.
 | --- | --- |
 | The sync loop / batching / ack ordering | `libs/2-engine/src/lib.rs` |
 | Pipeline observability trait (`Observer`, `BatchStats`, `FanOut`) | `libs/2-engine/src/observer.rs` |
-| Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `observer.rs`, `status.rs`, `lag.rs`, `build.rs` |
+| Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `backends.rs` (`Backends` trait + `SourceParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
+| Backend assembly (which concrete source/sink): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surface, signals | `apps/cli/src/` — `telemetry.rs` (traces), `metrics.rs` (meter provider + `in_flight` gauge), `observer.rs` (`OtelObserver`), `http.rs` (`/healthz` `/readyz` `/status` `/metrics`), `run.rs` (orchestration + signals) |
 | Config loading entry point | `libs/0-schema/src/lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`) |
 | Validated domain model (the shared types) | `libs/0-schema/0-core/src/` — `config/`, `common/` (newtypes), `GenericValue` |

@@ -810,13 +810,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sinks-core",
- "sinks-opensearch",
- "sinks-stdout",
  "sources-core",
- "sources-postgres",
  "tokio",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -1045,6 +1041,7 @@ name = "flusso-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "daemon",
@@ -1055,12 +1052,16 @@ dependencies = [
  "prometheus",
  "schema",
  "serde_json",
+ "sinks-core",
+ "sinks-opensearch",
+ "sinks-stdout",
  "sources-core",
  "sources-postgres",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

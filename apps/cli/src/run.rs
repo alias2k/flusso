@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::DEFAULT_ARTIFACT;
+use crate::backends::FlussoBackends;
 use crate::observer::OtelObserver;
 use crate::{http, metrics, telemetry};
 
@@ -103,7 +104,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     // Attach the metrics observer (records to the meter installed above; a no-op
     // if none). Metric definitions live in the binary — the daemon is agnostic.
     let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new());
-    let running = Daemon::new(config)
+    let running = Daemon::new(config, Arc::new(FlussoBackends))
         .with_options(options)
         .with_observer(otel_observer)
         .start()

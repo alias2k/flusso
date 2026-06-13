@@ -18,6 +18,7 @@
 //!   `flusso.toml` config schema or the `*.schema.yml` index schema — so a user
 //!   can pin the schema that matches their installed version.
 
+mod backends;
 mod build;
 mod check;
 mod http;

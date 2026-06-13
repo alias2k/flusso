@@ -18,11 +18,12 @@
 //!    └── shutdown future (signals) ─▶ RunningDaemon::run(shutdown)
 //! ```
 
-mod build;
+mod backends;
 mod lag;
 mod observer;
 pub mod status;
 
+pub use backends::{Backends, SourceParts};
 pub use observer::StatusObserver;
 pub use status::{IndexState, Phase, Status, StatusSnapshot};
 
@@ -36,11 +37,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use engine::{Engine, FanOut};
-use schema::{Config, SourceType};
+use schema::Config;
 use sources_core::cdc::ChangeCapture;
-use sources_postgres::WalChangeCapture;
 
 /// How a [`Daemon`] run is parameterized — the pipeline knobs the CLI exposes as
 /// flags. Transport settings (HTTP address, …) are the binary's concern, not the
@@ -79,15 +79,21 @@ impl Default for DaemonOptions {
 pub struct Daemon {
     config: Config,
     options: DaemonOptions,
+    backends: Arc<dyn Backends>,
     extra_observers: Vec<Arc<dyn Observer>>,
 }
 
 impl Daemon {
     /// Create a daemon for `config` with default [`DaemonOptions`].
-    pub fn new(config: Config) -> Self {
+    ///
+    /// `backends` builds the concrete source/sink the engine drives; the daemon
+    /// itself never names a backend (see [`Backends`]). The composition root
+    /// supplies it.
+    pub fn new(config: Config, backends: Arc<dyn Backends>) -> Self {
         Self {
             config,
             options: DaemonOptions::default(),
+            backends,
             extra_observers: Vec::new(),
         }
     }
@@ -118,16 +124,9 @@ impl Daemon {
         let Daemon {
             config,
             options,
+            backends,
             extra_observers,
         } = self;
-        ensure!(
-            config.source.source_type == SourceType::Postgres,
-            "only postgres sources are supported",
-        );
-
-        let connection_url = build::resolve_connection_url(&config)?;
-        let replication =
-            build::replication_config(&connection_url, &options.slot, &options.publication)?;
 
         tracing::info!(
             slot = %options.slot,
@@ -144,13 +143,15 @@ impl Daemon {
         observers.extend(extra_observers);
         let observer: Arc<dyn Observer> = Arc::new(FanOut::new(observers));
 
+        // The concrete source/sink are the composition root's choice — built
+        // here through the `Backends` seam, resolving connection/credentials in
+        // this (the running) environment.
         let config = Arc::new(config);
-        let source: Arc<dyn ChangeCapture> =
-            Arc::new(WalChangeCapture::new(replication, connection_url.clone()));
-        let documents = build::build_documents(&connection_url, Arc::clone(&config)).await?;
-        let sink = build::build_sink(&config, options.pretty)?;
+        let SourceParts { capture, documents } =
+            backends.source(Arc::clone(&config), &options).await?;
+        let sink = backends.sink(&config, &options).await?;
 
-        let engine = Engine::new(Arc::clone(&source), documents, sink)
+        let engine = Engine::new(Arc::clone(&capture), documents, sink)
             .with_observer(Arc::clone(&observer))
             .with_queue_capacity(options.queue_capacity)
             .skip_backfill(options.skip_backfill);
@@ -158,7 +159,7 @@ impl Daemon {
         Ok(RunningDaemon {
             status,
             engine,
-            source,
+            source: capture,
             observer,
             lag_poll_interval: options.lag_poll_interval,
         })

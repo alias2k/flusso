@@ -1,23 +1,68 @@
-//! Building the pluggable pipeline parts from a validated [`Config`] — the
-//! source/sink/document-builder wiring the CLI's `run` command used to do
-//! inline. Connection and credentials are resolved here, in the running
-//! environment (a compiled `flusso.lock` carries no secrets it wasn't given
-//! literally).
+//! The backend assembler — the composition root's wiring of concrete backends.
+//!
+//! [`FlussoBackends`] is the one place in the codebase that names Postgres and
+//! the concrete sinks: it turns a validated [`Config`] into the source capture,
+//! its document builder, and the sink the daemon drives. Connection and
+//! credentials are resolved here, in the running environment (a compiled
+//! `flusso.lock` carries no secrets it wasn't given literally).
+//!
+//! Adding a backend means a new match arm here (plus its crate); the daemon and
+//! engine are untouched.
 
 use std::sync::Arc;
 
 use anyhow::{Context, ensure};
-use schema::{Config, Sink as SinkConfig};
+use async_trait::async_trait;
+use daemon::{Backends, DaemonOptions, SourceParts};
+use schema::{Config, Sink as SinkConfig, SourceType};
 use sinks_core::{FanOutSink, Sink};
 use sinks_opensearch::OpensearchSink;
 use sinks_stdout::StdoutSink;
+use sources_core::cdc::ChangeCapture;
 use sources_core::document::DocumentBuilder;
-use sources_postgres::{PgDocumentBuilder, ReplicationConfig};
+use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use url::Url;
+
+/// The composition root's backend assembler: a Postgres source plus the
+/// configured sinks.
+#[derive(Debug, Default)]
+pub(crate) struct FlussoBackends;
+
+#[async_trait]
+impl Backends for FlussoBackends {
+    async fn source(
+        &self,
+        config: Arc<Config>,
+        options: &DaemonOptions,
+    ) -> anyhow::Result<SourceParts> {
+        ensure!(
+            config.source.source_type == SourceType::Postgres,
+            "only postgres sources are supported",
+        );
+
+        let connection_url = resolve_connection_url(&config)?;
+        let replication =
+            replication_config(&connection_url, &options.slot, &options.publication)?;
+
+        let capture: Arc<dyn ChangeCapture> =
+            Arc::new(WalChangeCapture::new(replication, connection_url.clone()));
+        let documents = build_documents(&connection_url, Arc::clone(&config)).await?;
+
+        Ok(SourceParts { capture, documents })
+    }
+
+    async fn sink(
+        &self,
+        config: &Config,
+        options: &DaemonOptions,
+    ) -> anyhow::Result<Arc<dyn Sink>> {
+        build_sink(config, options.pretty)
+    }
+}
 
 /// Resolve the source connection URL in this environment (applying
 /// `DATABASE_URL`).
-pub(crate) fn resolve_connection_url(config: &Config) -> anyhow::Result<String> {
+fn resolve_connection_url(config: &Config) -> anyhow::Result<String> {
     let url = config
         .source
         .resolve_connection_url()
@@ -27,7 +72,7 @@ pub(crate) fn resolve_connection_url(config: &Config) -> anyhow::Result<String> 
 
 /// Build the replication client config from the source connection URL plus the
 /// slot and publication names.
-pub(crate) fn replication_config(
+fn replication_config(
     connection_url: &str,
     slot: &str,
     publication: &str,
@@ -49,7 +94,7 @@ pub(crate) fn replication_config(
 }
 
 /// Connect the Postgres document builder.
-pub(crate) async fn build_documents(
+async fn build_documents(
     connection_url: &str,
     config: Arc<Config>,
 ) -> anyhow::Result<Arc<dyn DocumentBuilder>> {
@@ -62,7 +107,7 @@ pub(crate) async fn build_documents(
 /// Build the sink from config: a single configured sink directly, several as a
 /// [`FanOutSink`], or stdout when none are configured. `pretty` only affects the
 /// no-sink-configured stdout fallback.
-pub(crate) fn build_sink(config: &Config, pretty: bool) -> anyhow::Result<Arc<dyn Sink>> {
+fn build_sink(config: &Config, pretty: bool) -> anyhow::Result<Arc<dyn Sink>> {
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
     for (name, sink_config) in &config.sinks {
         let sink: Arc<dyn Sink> = match sink_config {
