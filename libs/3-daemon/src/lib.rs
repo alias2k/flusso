@@ -220,14 +220,20 @@ impl RunningDaemon {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
     use engine::BatchStats;
     use futures::stream::{self, BoxStream};
-    use schema_core::IndexName;
-    use sources_core::cdc::Change;
+    use schema::{Source, SourceType};
+    use schema_core::{ColumnName, DatabaseSchema, GenericValue, IndexName, TableName};
+    use sinks_core::Sink;
+    use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
+    use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
+    use sources_core::{RowKey, SnapshotTable};
     use tokio::sync::Notify;
 
     use crate::observer::StatusObserver;
@@ -363,5 +369,269 @@ mod tests {
         handle.abort();
 
         assert_eq!(*observer.last.lock().unwrap(), Some(8192));
+    }
+
+    // --- The daemon driven end-to-end over injected backends -----------------
+    //
+    // These exercise `Daemon::start`/`run` with no Postgres/OpenSearch by
+    // supplying a `Backends` that hands back test doubles — the seam the
+    // pluggable-backends refactor exists to enable.
+
+    /// A `Backends` that returns pre-built test doubles, ignoring the `Config`.
+    /// Counts how often each edge was asked for, to prove the daemon builds its
+    /// backends *through* the seam rather than naming any concrete one.
+    #[derive(Debug)]
+    struct MockBackends {
+        capture: Arc<dyn ChangeCapture>,
+        documents: Arc<dyn DocumentBuilder>,
+        sink: Arc<dyn Sink>,
+        source_built: Arc<AtomicU64>,
+        sink_built: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl Backends for MockBackends {
+        async fn source(
+            &self,
+            _config: Arc<Config>,
+            _options: &DaemonOptions,
+        ) -> anyhow::Result<SourceParts> {
+            self.source_built.fetch_add(1, Ordering::SeqCst);
+            Ok(SourceParts {
+                capture: Arc::clone(&self.capture),
+                documents: Arc::clone(&self.documents),
+            })
+        }
+
+        async fn sink(
+            &self,
+            _config: &Config,
+            _options: &DaemonOptions,
+        ) -> anyhow::Result<Arc<dyn Sink>> {
+            self.sink_built.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::clone(&self.sink))
+        }
+    }
+
+    /// Replays a fixed list of changes on the live stream, once, then ends — so
+    /// `engine.run()` completes on its own without a shutdown signal.
+    #[derive(Debug)]
+    struct ScriptedSource {
+        changes: Mutex<Option<Vec<Change>>>,
+    }
+
+    #[async_trait]
+    impl ChangeCapture for ScriptedSource {
+        async fn live(
+            &self,
+        ) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
+            let changes = self.changes.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(stream::iter(
+                changes
+                    .into_iter()
+                    .map(Ok::<Change, sources_core::SourceError>),
+            )))
+        }
+
+        async fn lag(&self) -> sources_core::Result<Option<u64>> {
+            Ok(None)
+        }
+    }
+
+    /// Resolves each change to one `users` document; key value `2` is a delete.
+    #[derive(Debug)]
+    struct ScriptedDocuments;
+
+    #[async_trait]
+    impl DocumentBuilder for ScriptedDocuments {
+        async fn resolve(
+            &self,
+            _table: &TableName,
+            key: &RowKey,
+        ) -> sources_core::Result<Vec<DocumentId>> {
+            Ok(vec![DocumentId {
+                index: users(),
+                key: key.clone(),
+            }])
+        }
+
+        async fn build(&self, id: &DocumentId) -> sources_core::Result<Document> {
+            let deleted = matches!(id.key.0.first(), Some((_, GenericValue::Int(2))));
+            Ok(if deleted {
+                Document::Delete { id: id.clone() }
+            } else {
+                Document::Upsert {
+                    id: id.clone(),
+                    body: GenericValue::Map(Default::default()),
+                }
+            })
+        }
+
+        fn backfill_scopes(&self) -> Vec<IndexScope> {
+            vec![IndexScope {
+                index: users(),
+                root: SnapshotTable {
+                    db_schema: DatabaseSchema::try_new("public").unwrap(),
+                    table: TableName::try_new("users").unwrap(),
+                },
+            }]
+        }
+    }
+
+    /// Records the sink ops it receives, in order.
+    #[derive(Debug, Default)]
+    struct RecordingSink {
+        ops: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Sink for RecordingSink {
+        async fn upsert(
+            &self,
+            index: &IndexName,
+            id: &str,
+            _document: &GenericValue,
+        ) -> sinks_core::Result<()> {
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("upsert {} {id}", index.as_ref()));
+            Ok(())
+        }
+
+        async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("delete {} {id}", index.as_ref()));
+            Ok(())
+        }
+
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Counts the changes confirmed back to the source.
+    #[derive(Debug)]
+    struct CountingAck(Arc<AtomicU64>);
+
+    impl AckSink for CountingAck {
+        fn confirm(&self, _seq: u64) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn row_change(delete: bool, id: i64, seq: u64, acks: &Arc<AtomicU64>) -> Change {
+        let table = TableName::try_new("users").unwrap();
+        let key = RowKey(vec![(
+            ColumnName::try_new("id").unwrap(),
+            GenericValue::Int(id),
+        )]);
+        let event = if delete {
+            ChangeEvent::Delete { table, key }
+        } else {
+            ChangeEvent::Upsert { table, key }
+        };
+        Change {
+            event,
+            ack: Ack::new(seq, Arc::new(CountingAck(Arc::clone(acks)))),
+        }
+    }
+
+    /// A config the `MockBackends` ignores — only `indexes` is read by the
+    /// daemon (for the status surface), and it's intentionally empty.
+    fn backendless_config() -> Config {
+        Config {
+            source: Source {
+                source_type: SourceType::Postgres,
+                connection: None,
+            },
+            sinks: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+        }
+    }
+
+    fn daemon_over(backends: Arc<MockBackends>) -> Daemon {
+        Daemon::new(backendless_config(), backends).with_options(DaemonOptions {
+            // No backfill: the test drives the live path directly.
+            skip_backfill: true,
+            ..DaemonOptions::default()
+        })
+    }
+
+    /// `Daemon::start` builds both edges **through** the injected `Backends`
+    /// (never naming a concrete backend itself), and a run over an empty live
+    /// stream returns cleanly with the status surface left at `Stopped`.
+    #[tokio::test]
+    async fn start_builds_backends_through_the_seam() {
+        let source_built = Arc::new(AtomicU64::new(0));
+        let sink_built = Arc::new(AtomicU64::new(0));
+
+        let backends = Arc::new(MockBackends {
+            capture: Arc::new(ScriptedSource {
+                changes: Mutex::new(Some(Vec::new())),
+            }),
+            documents: Arc::new(ScriptedDocuments),
+            sink: Arc::new(RecordingSink::default()),
+            source_built: Arc::clone(&source_built),
+            sink_built: Arc::clone(&sink_built),
+        });
+
+        let running = daemon_over(backends).start().await.unwrap();
+        let status = running.status();
+
+        // The daemon asked the seam — not a hardcoded backend — for each edge.
+        assert_eq!(source_built.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_built.load(Ordering::SeqCst), 1);
+
+        // An empty live stream completes on its own; the shutdown never fires.
+        running.run(std::future::pending::<()>()).await.unwrap();
+
+        let snap = status.snapshot();
+        assert_eq!(snap.phase, Phase::Stopped);
+        assert_eq!(snap.changes_committed, 0);
+    }
+
+    /// A run over a non-empty live stream drives changes all the way through the
+    /// injected document builder and sink — capture, build, write, flush, ack —
+    /// with no real source or sink, and the status counters reflect it.
+    #[tokio::test]
+    async fn drives_changes_through_injected_backends() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let ops = Arc::new(Mutex::new(Vec::new()));
+
+        let changes = vec![
+            row_change(false, 1, 0, &acks),
+            row_change(true, 2, 1, &acks),
+        ];
+
+        let backends = Arc::new(MockBackends {
+            capture: Arc::new(ScriptedSource {
+                changes: Mutex::new(Some(changes)),
+            }),
+            documents: Arc::new(ScriptedDocuments),
+            sink: Arc::new(RecordingSink {
+                ops: Arc::clone(&ops),
+            }),
+            source_built: Arc::new(AtomicU64::new(0)),
+            sink_built: Arc::new(AtomicU64::new(0)),
+        });
+
+        let running = daemon_over(backends).start().await.unwrap();
+        let status = running.status();
+        running.run(std::future::pending::<()>()).await.unwrap();
+
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec!["upsert users 1".to_owned(), "delete users 2".to_owned()],
+        );
+        assert_eq!(acks.load(Ordering::SeqCst), 2, "both changes acked");
+
+        let snap = status.snapshot();
+        assert_eq!(snap.changes_captured, 2);
+        assert_eq!(snap.changes_committed, 2);
+        assert_eq!(snap.changes_in_flight, 0);
+        assert_eq!(snap.phase, Phase::Stopped);
     }
 }
