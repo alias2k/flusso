@@ -81,9 +81,16 @@ jobs:
       # A time-boxed smoke run, not an exhaustive campaign: a regression that
       # makes the decoder panic on malformed bytes fails CI here. A crash is
       # written to fuzz/artifacts/ and uploaded below for reproduction.
+      #
+      # `--target` is pinned to the gnu host on purpose. cargo-fuzz defaults the
+      # fuzz target to the triple it was *itself* built for (`current_platform`),
+      # and the prebuilt binary `taiki-e/install-action` fetches is a static musl
+      # build — so without this it tries to fuzz for `x86_64-unknown-linux-musl`,
+      # which isn't installed and whose static crt is incompatible with the ASan
+      # the fuzzer needs ("sanitizer is incompatible with statically linked libc").
       - name: Fuzz pgoutput decoder (60s)
         working-directory: libs/1-sources/1-postgres
-        run: cargo +nightly fuzz run pgoutput_decode -- -max_total_time=60
+        run: cargo +nightly fuzz run pgoutput_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60
 
       - name: Upload crash artifacts
         if: failure()
