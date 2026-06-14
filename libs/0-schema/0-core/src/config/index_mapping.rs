@@ -8,8 +8,8 @@ use super::{ContentHash, Mapping};
 /// sink to translate into its native mapping format.
 ///
 /// A source produces this from the [`IndexSchema`](super::IndexSchema) — using
-/// each field's explicit [`mapping`](super::Field::mapping) where one is given,
-/// and the database's own column types where it is not. The result has a
+/// each field's explicit [`Mapping`] where one is given, and the database's own
+/// column types where it is not. The result has a
 /// concrete type for every field, which is what a sink needs to create the
 /// index up front rather than leaving the destination to guess.
 #[derive(Debug, Clone, Serialize)]

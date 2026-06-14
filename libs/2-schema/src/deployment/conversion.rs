@@ -5,14 +5,16 @@
 //! mirror the file; turning those into a `Config` is a composition step, so it
 //! lives here next to `Config` rather than in the parser. Secrets are **not**
 //! resolved here — a `{ env = "VAR" }` / literal becomes a deferred
-//! [`Secret`](schema_core::Secret), read in the environment that runs the
+//! [`Secret`], read in the environment that runs the
 //! pipeline. The `index` entries are left empty; the loader fills them in by
 //! reading each referenced YAML schema.
 
 use std::collections::BTreeMap;
 
 use schema_config_toml::{ConfigToml, EnvOrValue, entities};
-use schema_core::{ConnectionSpec, OpensearchSink, Secret, StdoutSink, TextAnalysis, common::SourceType};
+use schema_core::{
+    ConnectionSpec, OpensearchSink, Secret, StdoutSink, TextAnalysis, common::SourceType,
+};
 
 use super::{Config, Sink, Source};
 

@@ -3,7 +3,7 @@
 //! Lag (a replication slot's distance behind the server's WAL) isn't on the
 //! change path — it's sampled out-of-band on a timer and reported to the
 //! [`Observer`]. The poll uses the source's own
-//! [`ChangeCapture::lag`](sources_core::cdc::ChangeCapture::lag), so it stays
+//! [`ChangeCapture::lag`], so it stays
 //! source-agnostic: a mechanism with no notion of lag returns `None` and this
 //! loop simply records nothing.
 

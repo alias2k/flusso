@@ -26,8 +26,8 @@
 //!   definitions, and (unless `auto_subfields` is off) each `text`/`keyword`
 //!   field is enriched with a good case/accent-insensitive analyzer plus
 //!   `keyword` (exact), `keyword_lowercase` (sortable), and `text` (searchable)
-//!   subfields. A field's explicit mapping always wins. See
-//!   [`build_analysis`] and [`build_property`].
+//!   subfields. A field's explicit mapping always wins. See the crate-private
+//!   `build_analysis` and `build_property`.
 //! - **Refresh adapts to the pipeline's backlog.** The index is created with
 //!   auto-refresh disabled (`refresh_interval: -1`) for fast bulk seeding;
 //!   writes during backfill accumulate without per-flush refresh churn. When
@@ -623,7 +623,10 @@ impl Sink for OpensearchSink {
             // A caught-up flush is small (it drained the queue), so forcing the
             // refresh on each of its chunks — rather than only the last — keeps
             // every touched index searchable with negligible extra cost.
-            rejected.extend(self.send_bulk_chunk(&body, chunk_actions, caught_up).await?);
+            rejected.extend(
+                self.send_bulk_chunk(&body, chunk_actions, caught_up)
+                    .await?,
+            );
             start = end;
         }
 
@@ -636,8 +639,10 @@ impl Sink for OpensearchSink {
                 .index_names
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            let to_logical: std::collections::HashMap<&str, &str> =
-                names.iter().map(|(l, p)| (p.as_str(), l.as_str())).collect();
+            let to_logical: std::collections::HashMap<&str, &str> = names
+                .iter()
+                .map(|(l, p)| (p.as_str(), l.as_str()))
+                .collect();
             for doc in &mut rejected {
                 if let Some(&logical) = to_logical.get(doc.index.as_str()) {
                     doc.index = logical.to_owned();
@@ -947,8 +952,8 @@ fn build_bulk_body(actions: &[BulkAction]) -> Result<String> {
 
 /// Serialize one [`BulkAction`] into its NDJSON fragment — the metadata line
 /// and, for an index op, the source line, each newline-terminated. This is the
-/// single place the bulk wire format is produced; [`build_bulk_body`] and the
-/// byte-aware chunking in [`flush`](OpensearchSink::flush) both go through it.
+/// single place the bulk wire format is produced; the crate-private `build_bulk_body`
+/// and the byte-aware chunking in [`flush`](OpensearchSink::flush) both go through it.
 fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
     let mut fragment = String::new();
     match action {
@@ -1046,8 +1051,14 @@ fn bulk_rejected(response: &Value, actions: &[BulkAction]) -> Vec<RejectedDocume
         let (index, id) = match actions.get(i) {
             Some(action) => (action.index().to_owned(), action.id().to_owned()),
             None => (
-                op.get("_index").and_then(|v| v.as_str()).unwrap_or_default().to_owned(),
-                op.get("_id").and_then(|v| v.as_str()).unwrap_or_default().to_owned(),
+                op.get("_index")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                op.get("_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
             ),
         };
         rejected.push(RejectedDocument { index, id, reason });
@@ -1423,8 +1434,15 @@ mod tests {
         // Two actions; the second is rejected. The rejection carries the
         // action's index/id (by position), not just the response's echo.
         let actions = [
-            BulkAction::Delete { index: "users_ab12".to_owned(), id: "1".to_owned() },
-            BulkAction::Index { index: "users_ab12".to_owned(), id: "2".to_owned(), doc: json!({}) },
+            BulkAction::Delete {
+                index: "users_ab12".to_owned(),
+                id: "1".to_owned(),
+            },
+            BulkAction::Index {
+                index: "users_ab12".to_owned(),
+                id: "2".to_owned(),
+                doc: json!({}),
+            },
         ];
         let resp = json!({
             "errors": true,

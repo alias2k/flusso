@@ -524,7 +524,7 @@ async fn buffer(
 ///
 /// Source acks confirm out of order safely — the mechanism advances its resume
 /// point only to the highest *contiguous* confirmed sequence (see
-/// [`Ack`](sources_core::cdc::Ack)) — so confirming a batch advances the slot to
+/// [`Ack`]) — so confirming a batch advances the slot to
 /// the batch's last change and no further.
 ///
 /// `caught_up` is forwarded to [`Sink::flush`]: it tells the sink no backlog is
@@ -1634,8 +1634,8 @@ mod tests {
     /// `resolve` returns an index's override if set, else the global default.
     #[test]
     fn failure_policies_resolve_override_then_default() {
-        let policies =
-            FailurePolicies::new(FailurePolicy::Stop).with_override("analytics", FailurePolicy::Skip);
+        let policies = FailurePolicies::new(FailurePolicy::Stop)
+            .with_override("analytics", FailurePolicy::Skip);
         assert_eq!(policies.resolve("analytics"), FailurePolicy::Skip);
         assert_eq!(policies.resolve("users"), FailurePolicy::Stop);
     }
@@ -1661,7 +1661,11 @@ mod tests {
         let quarantined = observer.quarantined.lock().unwrap();
         assert_eq!(quarantined.len(), 2, "both rejected documents quarantined");
         assert!(quarantined.iter().all(|(index, _)| index == "users"));
-        assert_eq!(acks.load(Ordering::SeqCst), 2, "the batch is acked despite rejections");
+        assert_eq!(
+            acks.load(Ordering::SeqCst),
+            2,
+            "the batch is acked despite rejections"
+        );
     }
 
     /// Under `stop` (the default), a rejected document stops the run and the
@@ -1677,7 +1681,11 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, EngineError::DocumentsRejected(1, _)));
-        assert_eq!(acks.load(Ordering::SeqCst), 0, "nothing is acked when the run stops");
+        assert_eq!(
+            acks.load(Ordering::SeqCst),
+            0,
+            "nothing is acked when the run stops"
+        );
     }
 
     /// A per-index `stop` override halts the run even when the global default is

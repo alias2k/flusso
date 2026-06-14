@@ -19,9 +19,9 @@ use schema_core::{IndexMapping, IndexName, IndexSchema};
 
 /// The enabled indexes a source must build, each paired with its schema.
 ///
-/// Everything here is treated as live — disabled indexes are dropped during
-/// translation (see [`from_config`](Self::from_config)), so the source never has
-/// to re-check an `enabled` flag.
+/// Everything here is treated as live — disabled indexes are dropped by the
+/// composition root when it translates the config into this spec, so the source
+/// never has to re-check an `enabled` flag.
 #[derive(Debug, Clone, Default)]
 pub struct SourceSpec {
     indexes: BTreeMap<IndexName, IndexSchema>,

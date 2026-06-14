@@ -2,8 +2,8 @@
 //!
 //! [`compile`] runs the whole load pipeline — read `flusso.toml`, parse every
 //! referenced schema, validate and convert into a [`Config`] — and wraps the
-//! result in a [`Compiled`] envelope. [`write`] serializes that envelope to
-//! MessagePack; [`load_compiled`] reads it back.
+//! result in a [`Compiled`] envelope. [`write`](fn@write) serializes that
+//! envelope to MessagePack; [`load_compiled`] reads it back.
 //!
 //! The point is deployment: a compiled artifact is one file that carries the
 //! full, validated configuration with no scattered YAML and no source tree. It

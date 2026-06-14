@@ -2,7 +2,7 @@
 //! OpenTelemetry instruments.
 //!
 //! This is *telemetry*, so it lives in the binary, not the daemon: the daemon
-//! emits backend-agnostic [`Observer`](daemon::Observer) events and updates its
+//! emits backend-agnostic [`Observer`] events and updates its
 //! own status; this attaches alongside (via [`Daemon::with_observer`](daemon::Daemon::with_observer))
 //! to record metrics. The metric names, labels, and units are defined here
 //! because they're a presentation choice, like the exporter.

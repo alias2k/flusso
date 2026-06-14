@@ -52,5 +52,5 @@ pub enum Error {
     Decode(#[from] serde_json::Error),
 }
 
-/// A `Result` whose error is this crate's [`Error`].
+/// A `Result` whose error is this crate's [`Error`](enum@Error).
 pub type Result<T> = std::result::Result<T, Error>;

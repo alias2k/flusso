@@ -73,10 +73,7 @@ type FieldName = schema_core::common::FieldName;
 /// Validate every index in `spec` against the store behind `catalog`, returning
 /// the disagreements found. An empty result means the declared schema matches
 /// the database. The spec already holds only enabled indexes.
-pub async fn validate_indexes(
-    spec: &SourceSpec,
-    catalog: &dyn Catalog,
-) -> Result<Vec<Diagnostic>> {
+pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Result<Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
     for (name, schema) in spec.indexes() {
         validate_fields(

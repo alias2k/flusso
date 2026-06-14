@@ -109,7 +109,11 @@ fn append_lines<T>(search: &Search<T>, ndjson: &mut String) -> Result<()> {
 
 /// Decode one slot: surface its per-slot error if present, merge inner hits
 /// for the slot's own nested projections, then decode the typed page.
-fn decode_slot<T>(search: &Search<T>, slot: usize, entry: Option<Value>) -> Result<SearchResponse<T>>
+fn decode_slot<T>(
+    search: &Search<T>,
+    slot: usize,
+    entry: Option<Value>,
+) -> Result<SearchResponse<T>>
 where
     T: DeserializeOwned,
 {

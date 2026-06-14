@@ -33,10 +33,21 @@ jobs:
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # `--all-targets` is intentionally omitted: several test crates use
-      # `.unwrap()`, which the workspace lints deny on non-test targets.
+      - name: Format
+        run: cargo fmt --all --check
+
+      # `--all-targets` is intentionally omitted from clippy: several test crates
+      # use `.unwrap()`, which the workspace lints deny on non-test targets.
       - name: Clippy
         run: cargo clippy --workspace
+
+      # Clippy (above, no `--all-targets`) and nextest only compile lib/bin and
+      # test targets — benches and examples are built by neither, so a broken one
+      # would slip through. A plain `cargo check --all-targets` compiles them too;
+      # it's rustc (not clippy), so the `unwrap_used` clippy lint doesn't fire on
+      # the test/bench `.unwrap()`s.
+      - name: Check all targets (benches, examples)
+        run: cargo check --workspace --all-targets
 
       # `--run-ignored all` includes the `#[ignore]`d container-backed e2e
       # tests; the `ci` profile gives them retries and a longer timeout. The
@@ -47,6 +58,13 @@ jobs:
       # nextest does not run doctests; run them separately.
       - name: Doctests
         run: cargo test --workspace --doc
+
+      # The crate docs are a living reference (lots of intra-doc `[`links`]`), so
+      # gate on them resolving: `-D warnings` turns a broken/ambiguous/redundant
+      # link into a build error. `--document-private-items` checks internal docs
+      # too, since much of the documentation is on private items.
+      - name: Doc links
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 
       - name: Upload test report
         if: always()

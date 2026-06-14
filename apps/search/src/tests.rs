@@ -390,7 +390,6 @@ fn geo_distance_sort_in_search_body() -> Result {
 
 #[test]
 fn optional_filters_apply_only_when_some() -> Result {
-
     let email: Option<&str> = Some("ada@example.com");
     let min_orders: Option<i64> = None;
 
@@ -474,12 +473,22 @@ fn msearch_decodes_each_slot_with_its_own_type() -> Result {
     let (users_page, orders_page) = (&users, &orders).decode(responses)?;
     assert_eq!(users_page.total, 7);
     assert_eq!(
-        users_page.hits.first().ok_or("expected a user hit")?.source.email,
+        users_page
+            .hits
+            .first()
+            .ok_or("expected a user hit")?
+            .source
+            .email,
         "ada@example.com"
     );
     assert_eq!(orders_page.total, 3);
     assert_eq!(
-        orders_page.hits.first().ok_or("expected an order hit")?.source.status,
+        orders_page
+            .hits
+            .first()
+            .ok_or("expected an order hit")?
+            .source
+            .status,
         "open"
     );
     Ok(())

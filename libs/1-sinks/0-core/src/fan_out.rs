@@ -49,7 +49,9 @@ impl Sink for FanOutSink {
     async fn flush(&self, caught_up: bool) -> Result<FlushReport> {
         let mut report = FlushReport::default();
         for sink in &self.sinks {
-            report.rejected.extend(sink.flush(caught_up).await?.rejected);
+            report
+                .rejected
+                .extend(sink.flush(caught_up).await?.rejected);
         }
         Ok(report)
     }

@@ -20,7 +20,7 @@ use super::{backfill, stream};
 ///   `confirmed_flush_lsn` is the durable cursor on the server, advanced as the
 ///   engine confirms changes (see [`Ack`](sources_core::cdc::Ack)).
 /// - [`snapshot`](ChangeCapture::snapshot) reads current rows over an ordinary
-///   SQL connection for an initial backfill (see [`backfill`]). The engine calls
+///   SQL connection for an initial backfill (see the crate-private `backfill`). The engine calls
 ///   it only for tables backing an index the sink reports as unseeded.
 ///
 /// # Prerequisites

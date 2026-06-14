@@ -18,9 +18,9 @@ use schema::{Config, Sink as SinkConfig, SourceType};
 use sinks_core::{FanOutSink, Sink};
 use sinks_opensearch::OpensearchSink;
 use sinks_stdout::StdoutSink;
+use sources_core::SourceSpec;
 use sources_core::cdc::ChangeCapture;
 use sources_core::document::DocumentBuilder;
-use sources_core::SourceSpec;
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use url::Url;
 
@@ -42,8 +42,7 @@ impl Backends for FlussoBackends {
         );
 
         let connection_url = resolve_connection_url(&config)?;
-        let replication =
-            replication_config(&connection_url, &options.slot, &options.publication)?;
+        let replication = replication_config(&connection_url, &options.slot, &options.publication)?;
 
         let capture: Arc<dyn ChangeCapture> =
             Arc::new(WalChangeCapture::new(replication, connection_url.clone()));

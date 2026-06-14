@@ -1,4 +1,6 @@
-use schema_core::{ConnectionSpec, ConnectionUrl, ResolveError, SourceType, resolve_connection_url};
+use schema_core::{
+    ConnectionSpec, ConnectionUrl, ResolveError, SourceType, resolve_connection_url,
+};
 use serde::{Deserialize, Serialize};
 
 /// The database documents are read from. Today that's always Postgres.

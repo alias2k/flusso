@@ -11,7 +11,7 @@
 //! - [`document`] — *what to build?* Turns a changed row (named by table and
 //!   key) into the target documents it affects, and assembles each one.
 //!
-//! Alongside them, [`validation`](crate::validation) is the source-independent
+//! Alongside them, [`validate_indexes`] is the source-independent
 //! half of a check every source can offer: a self-describing schema states its
 //! own types, so the mapping is derived without a database, and a reachable
 //! database is used only to confirm the declared types and nullability match

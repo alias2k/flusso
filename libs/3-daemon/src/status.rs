@@ -1,7 +1,8 @@
 //! The live operational state of a running daemon.
 //!
-//! [`Status`] is the shared handle the [`DaemonObserver`](crate::observer) writes
-//! to as the engine emits events, and the HTTP `/status` endpoint reads from. It
+//! [`Status`] is the shared handle the crate's status observer (`StatusObserver`)
+//! writes to as the engine emits events, and the HTTP `/status` endpoint reads
+//! from. It
 //! holds only fast, lock-light state (atomics for counters, short-held mutexes
 //! for the phase, the per-index map, and the last error) so updating it never
 //! blocks the pipeline's hot path.

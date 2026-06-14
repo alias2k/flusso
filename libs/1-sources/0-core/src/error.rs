@@ -3,8 +3,8 @@ use thiserror::Error;
 /// Result alias for source operations.
 pub type Result<T> = std::result::Result<T, SourceError>;
 
-/// Why a [`ChangeCapture`](crate::ChangeCapture) failed to start or to produce
-/// the next change.
+/// Why a [`ChangeCapture`](crate::cdc::ChangeCapture) failed to start or to
+/// produce the next change.
 ///
 /// The split that matters to the engine is transient vs. fatal:
 /// [`Connection`](Self::Connection) is worth retrying (resume picks up from the
@@ -25,7 +25,7 @@ pub enum SourceError {
     #[error("setup error: {0}")]
     Setup(String),
 
-    /// A raw change could not be decoded into a [`Change`](crate::Change).
+    /// A raw change could not be decoded into a [`Change`](crate::cdc::Change).
     #[error("decode error: {0}")]
     Decode(String),
 

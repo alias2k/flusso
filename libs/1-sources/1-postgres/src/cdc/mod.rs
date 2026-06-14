@@ -1,7 +1,7 @@
 //! Postgres change capture over logical replication (WAL / pgoutput).
 //!
 //! Implements [`sources_core::cdc::ChangeCapture`] on top of `pgwire-replication`.
-//! [`WalChangeCapture::start`] connects to a replication slot and yields a
+//! [`WalChangeCapture`]'s `start` connects to a replication slot and yields a
 //! stream of thin [`Change`](sources_core::cdc::Change)s — table name and primary
 //! key per committed row change — that the engine re-reads and assembles.
 //!

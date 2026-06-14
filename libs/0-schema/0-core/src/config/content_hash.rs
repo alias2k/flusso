@@ -29,8 +29,8 @@ impl std::fmt::Display for ContentHash {
     }
 }
 
-/// Serializes as the eight-hex-digit string (its [`Display`]) — the same form
-/// that suffixes a physical index name — rather than the raw `u32`.
+/// Serializes as the eight-hex-digit string (its [`Display`](std::fmt::Display)) —
+/// the same form that suffixes a physical index name — rather than the raw `u32`.
 impl serde::Serialize for ContentHash {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)

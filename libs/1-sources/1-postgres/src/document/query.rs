@@ -28,9 +28,9 @@ type PgQuery<'q> = sqlx::query::Query<'q, Postgres, PgArguments>;
 const ROOT: &str = "root";
 
 /// SQL assembled by this module's query builder, ready to hand to
-/// [`sqlx::query`].
+/// [`sqlx::query`](fn@sqlx::query).
 ///
-/// Since sqlx 0.9, [`sqlx::query`] only accepts strings that implement
+/// Since sqlx 0.9, [`sqlx::query`](fn@sqlx::query) only accepts strings that implement
 /// [`SqlSafeStr`](sqlx::SqlSafeStr) — natively just `&'static str` — to stop
 /// dynamic data being interpolated into SQL. Everything we build here is
 /// dynamic, so wrapping it in this type is the single audit point: a value of
@@ -1014,7 +1014,14 @@ mod proptests {
     // reused across tables, and the metadata maps below can cover all of it.
     const TABLES: &[&str] = &["users", "orders", "orgs", "items"];
     const COLUMNS: &[&str] = &[
-        "id", "name", "email", "total", "status", "user_id", "org_id", "created_at",
+        "id",
+        "name",
+        "email",
+        "total",
+        "status",
+        "user_id",
+        "org_id",
+        "created_at",
     ];
     const FIELDS: &[&str] = &["a", "b", "c", "d", "e", "f", "g"];
 
@@ -1105,13 +1112,12 @@ mod proptests {
                 op,
                 value: FilterValue::List(vs),
             });
-        let between = (column(), safe_string(), safe_string()).prop_map(|(column, lo, hi)| {
-            ValueOpFilter {
+        let between =
+            (column(), safe_string(), safe_string()).prop_map(|(column, lo, hi)| ValueOpFilter {
                 column,
                 op: FilterOp::Between,
                 value: FilterValue::Range(lo, hi),
-            }
-        });
+            });
         // No `Filter::Raw` — its SQL is passed through verbatim and would
         // legitimately defeat the paren/quote invariants; the builder doesn't
         // shape it, so it isn't what these tests are checking.
@@ -1198,19 +1204,20 @@ mod proptests {
                 ),
                 prop::option::of(scalar_value()),
             )
-                .prop_map(|(column, transforms, default)| FieldSource::Column(Column {
-                    column,
-                    ty: FlussoType::Keyword,
-                    nullable: true,
-                    transforms,
-                    default,
-                })),
-            (column(), column())
-                .prop_map(|(lat, lon)| FieldSource::Geo(Geo {
-                    lat,
-                    lon,
-                    nullable: true
-                })),
+                .prop_map(|(column, transforms, default)| FieldSource::Column(
+                    Column {
+                        column,
+                        ty: FlussoType::Keyword,
+                        nullable: true,
+                        transforms,
+                        default,
+                    }
+                )),
+            (column(), column()).prop_map(|(lat, lon)| FieldSource::Geo(Geo {
+                lat,
+                lon,
+                nullable: true
+            })),
             scalar_value().prop_map(FieldSource::Constant),
             aggregate().prop_map(|a| FieldSource::Relation(Relation::Aggregate(a))),
         ];
@@ -1267,8 +1274,9 @@ mod proptests {
             prop::collection::vec(field(), 1..5),
             filters_opt(),
             prop::option::of(
-                (column(), filters_opt())
-                    .prop_map(|(column, when)| SoftDelete::Column(SoftDeleteColumn { column, when })),
+                (column(), filters_opt()).prop_map(|(column, when)| {
+                    SoftDelete::Column(SoftDeleteColumn { column, when })
+                }),
             ),
         )
             .prop_map(|(table, fields, filters, soft_delete)| IndexSchema {

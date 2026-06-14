@@ -5,7 +5,7 @@ use crate::SUPPORTED_VERSIONS;
 #[derive(thiserror::Error, Debug)]
 pub enum ParseError {
     /// A YAML syntax or shape error, rendered with the offending source line and
-    /// a caret pointing at it (see [`render_yaml_error`]).
+    /// a caret pointing at it (see the crate-private `render_yaml_error`).
     #[error("{0}")]
     Syntax(String),
     #[error("unsupported schema version {got}; supported versions: {supported}")]

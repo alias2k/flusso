@@ -1,5 +1,5 @@
 //! `#[derive(FlussoValue)]` — opts a Rust type into `flusso_search::FlussoValue<K>`,
-//! so it may stand in for a field of kind `K` in a [`FlussoDocument`] struct.
+//! so it may stand in for a field of kind `K` in a `FlussoDocument` struct.
 //!
 //! The kind is chosen with a `#[flusso(…)]` attribute and defaults to `keyword`:
 //!

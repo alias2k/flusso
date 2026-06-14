@@ -95,12 +95,12 @@ mod tests;
 
 pub use client::Client;
 pub use error::{Error, Result};
-pub use msearch::MsearchBundle;
-pub use multi::{FlussoMultiDocument, MultiSearch};
 pub use handles::{
     Binary, Bool, Date, FlussoValue, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection,
     Number, Object, Sort, SortOrder, Text, kind, multi_match,
 };
+pub use msearch::MsearchBundle;
+pub use multi::{FlussoMultiDocument, MultiSearch};
 pub use query::{AsQuery, Query, Root};
 pub use search::{FlussoDocument, Hit, Search, SearchResponse};
 

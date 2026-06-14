@@ -40,7 +40,7 @@ pub struct BatchStats {
 
 /// A sink for the engine's lifecycle and progress events.
 ///
-/// See the [module docs](self) for the hot-path contract. All methods default
+/// See this module's docs for the hot-path contract. All methods default
 /// to no-ops.
 pub trait Observer: std::fmt::Debug + Send + Sync {
     /// The target indexes have been ensured at the sink (`count` of them),

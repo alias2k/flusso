@@ -4,4 +4,4 @@
 # Bump deliberately, then re-bless the `.stderr` files (TRYBUILD=overwrite).
 [toolchain]
 channel = "1.95.0"
-components = ["clippy", "rust-analyzer"]
+components = ["clippy", "rustfmt", "rust-analyzer"]

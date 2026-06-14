@@ -45,10 +45,14 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its own process so it's
   fine there; under plain `cargo test` use `cargo test -p schema -- --test-threads=1`.
   Intermittent `MissingConnectionUrl` / wrong-override failures are this race, not a regression.
-- CI runs `cargo clippy --workspace` then `cargo nextest run --profile ci --run-ignored all`
-  then `cargo test --doc`. Match this before assuming green. A separate `fuzz` job runs a
-  60-second `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need
-  no special handling — they're ordinary tests caught by the nextest step.
+- CI's `test` job runs, in order: `cargo fmt --all --check` → `cargo clippy --workspace` →
+  `cargo check --workspace --all-targets` (compiles benches + examples, which clippy and nextest
+  skip — clippy omits `--all-targets`, nextest only builds test targets) → `cargo nextest run
+  --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
+  --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
+  the build). Match these before assuming green. A separate `fuzz` job runs a 60-second
+  `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
+  handling — they're ordinary tests caught by the nextest step.
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
   `flusso-search-derive`'s trybuild UI tests (`apps/search-derive/tests/ui/*.stderr`) compare
