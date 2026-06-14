@@ -70,6 +70,28 @@ and swapping the alias on completion. Because it mutates, it needs an
 authentication story the read-only endpoints don't — that gate is part of the
 work, not an afterthought.
 
+## Decouple backends from `Config`
+
+The `schema-core` vocabulary (`GenericValue`, the identifier newtypes,
+`IndexMapping`, `Field`, `Filter`) is genuinely cross-cutting and belongs at the
+bottom layer — every layer trades values and mappings in it. The *assembled*
+`Config`, though, is a composition concern that has leaked downward: the Postgres
+source's `PgDocumentBuilder` holds an `Arc<Config>`
+(`libs/1-sources/1-postgres/src/document/mod.rs`), so the lowest-layer backend
+depends on the whole top-level application config. The OpenSearch sink is already
+clean — it takes `IndexMapping`/`Mapping` only — so this is half-done.
+
+The plan is dependency inversion: the source owns the shape of *its own* input — a
+`SourceSpec` (its tables, field sources, filters, expressed in `schema-core`
+types it already speaks) — and the composition root (CLI/daemon) translates
+`Config → SourceSpec`. `Config` then sits above the backends, next to the daemon,
+and the backends know nothing about how the app is configured. This makes
+source/sink reusable and unit-testable without constructing a full `Config`, and
+lets the `flusso.toml` shape evolve without recompiling the backends. The risk to
+watch is over-splitting: `SourceSpec` is worth it only if it's a genuine subset of
+`Config` (it is — the source needs neither the sink list nor OpenSearch URLs); if
+it ends up a near-copy, the seam earns nothing.
+
 ## Fuzz the WAL decoder
 
 `libs/1-sources/1-postgres/src/cdc/pgoutput.rs` is a hand-written parser over
