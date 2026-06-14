@@ -53,6 +53,10 @@ impl Observer for StatusObserver {
         );
     }
 
+    fn on_document_quarantined(&self, _index: &str, _id: &str, _reason: &str) {
+        self.status.record_quarantine();
+    }
+
     fn on_slot_lag(&self, bytes: u64) {
         self.status.record_lag(bytes);
     }

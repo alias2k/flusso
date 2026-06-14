@@ -938,8 +938,10 @@ fn config(connection_url: &str, schema: IndexSchema) -> Config {
             Index {
                 enabled: true,
                 schema,
+                on_error: None,
             },
         )]),
+        on_error: Default::default(),
     }
 }
 

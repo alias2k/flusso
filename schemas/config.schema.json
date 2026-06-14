@@ -236,9 +236,20 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "on_error": {
+            "type": "string",
+            "enum": ["stop", "skip"],
+            "description": "Per-index override of the global on_error policy (stop | skip). Omitted inherits the global default."
           }
         }
       }
+    },
+    "on_error": {
+      "type": "string",
+      "enum": ["stop", "skip"],
+      "default": "stop",
+      "description": "What to do when a sink rejects a document at the item level (a mapping conflict, a malformed value): stop the run (default) or skip the document and continue. Override per index under [[index]]."
     }
   }
 }

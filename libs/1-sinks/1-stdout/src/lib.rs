@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use schema_core::{GenericValue, IndexName};
 use serde_json::{Value, json};
-use sinks_core::{Result, Sink, SinkError, to_json};
+use sinks_core::{FlushReport, Result, Sink, SinkError, to_json};
 
 /// Identifies this sink in every envelope's `sink` field.
 const SINK_NAME: &str = "stdout";
@@ -95,13 +95,15 @@ impl Sink for StdoutSink {
         self.write_line(&line)
     }
 
-    async fn flush(&self, _caught_up: bool) -> Result<()> {
+    async fn flush(&self, _caught_up: bool) -> Result<FlushReport> {
         // stdout has no visibility/durability split, so the caught-up hint is
-        // irrelevant — just flush the writer.
+        // irrelevant — just flush the writer. It never rejects a document: a
+        // line either writes or the whole flush errors.
         std::io::stdout()
             .lock()
             .flush()
-            .map_err(|e| SinkError::Write(e.to_string()))
+            .map_err(|e| SinkError::Write(e.to_string()))?;
+        Ok(FlushReport::clean())
     }
 }
 

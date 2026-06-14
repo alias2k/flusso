@@ -444,6 +444,7 @@ fn populated_config_json() -> Value {
         name = "i"
         schema = "i.schema.yml"
         enabled = true
+        on_error = "skip"
     "#;
     let config = schema_config_toml::ConfigToml::try_parse(toml).expect("sample config parses");
     serde_json::to_value(&config).expect("config serializes")
@@ -527,4 +528,22 @@ fn config_index_entry_fields_match_parser() {
     let rust = object_keys(cfg.pointer("/index/0").expect("index entry"));
     let schema = schema_keys(&config_schema(), "/properties/index/items/properties");
     assert_eq!(rust, schema, "index entry fields drifted");
+}
+
+#[test]
+fn config_on_error_enum_matches_parser() {
+    let rust = tokens(&[schema::FailurePolicy::Stop, schema::FailurePolicy::Skip]);
+    assert_eq!(
+        rust,
+        schema_enum(&config_schema(), "/properties/on_error/enum"),
+        "global on_error tokens drifted from config.schema.json",
+    );
+    assert_eq!(
+        rust,
+        schema_enum(
+            &config_schema(),
+            "/properties/index/items/properties/on_error/enum",
+        ),
+        "per-index on_error tokens drifted from config.schema.json",
+    );
 }

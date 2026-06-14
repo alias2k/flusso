@@ -95,6 +95,7 @@ pub fn load(config_path: impl AsRef<Path>) -> Result<Config, LoadError> {
         let index = Index {
             enabled: entry.enabled,
             schema,
+            on_error: entry.on_error,
         };
 
         if config.indexes.insert(entry.name.clone(), index).is_some() {

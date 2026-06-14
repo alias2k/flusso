@@ -24,4 +24,13 @@ pub enum EngineError {
     /// A spawned task failed to join (panicked).
     #[error("task failed: {0}")]
     Task(String),
+
+    /// The sink rejected one or more documents at the item level and the
+    /// failure policy is [`Stop`](crate::FailurePolicy::Stop). Switch to
+    /// `skip` to quarantine such documents and keep the pipeline running.
+    #[error(
+        "sink rejected {0} document(s) (e.g. {1}); stopping. \
+         set on-error=skip to quarantine rejected documents and continue"
+    )]
+    DocumentsRejected(usize, String),
 }

@@ -145,6 +145,17 @@ touching the loop. Key invariants to preserve when editing the engine:
   seeded index sharing a table isn't rewritten, then `mark_seeded`.
 - `BatchPolicy` (default 256 changes / 50ms) controls flush grouping; `max_changes: 1`
   reproduces flush-per-change.
+- **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:
+  `Err` is flush-wide (transport down, whole request refused) and always stops the run;
+  an `Ok` report instead lists documents the destination *applied the batch but rejected*
+  individually (a mapping conflict, a malformed value). The `FailurePolicies` (a global
+  `FailurePolicy` default + per-index overrides, from config `on_error`, resolved by **logical**
+  index name) decide each rejection in `commit`: `Stop` halts (batch left unconfirmed →
+  redelivered); `Skip` quarantines it (`Observer::on_document_quarantined` → metric/status/log)
+  and acks the batch so the slot advances and the poison isn't redelivered. A single `Stop`
+  rejection halts the whole batch, decided before any quarantine event is emitted. The
+  OpenSearch sink does *not* retry item-level rejections (re-sending re-rejects); it maps each
+  back to its logical index. Guarded by `skip_policy_*`/`stop_policy_*`/`per_index_stop_*` tests.
 - **Observability is a trait, not baked in.** The engine reports lifecycle/progress to an
   `Observer` (`libs/2-engine/src/observer.rs`) — sync, cheap, no-op by default, set via
   `with_observer`. It depends only on the trait, never on metrics or a status backend. The

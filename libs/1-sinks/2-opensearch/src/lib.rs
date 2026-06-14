@@ -60,7 +60,7 @@ use schema_core::{
     GenericValue, IndexMapping, IndexName, MappingType, ResolvedField, SinkName, TextAnalysis,
 };
 use serde_json::{Map, Value, json};
-use sinks_core::{Result, Sink, SinkError, to_json};
+use sinks_core::{FlushReport, RejectedDocument, Result, Sink, SinkError, to_json};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -79,6 +79,22 @@ enum BulkAction {
         index: String,
         id: String,
     },
+}
+
+impl BulkAction {
+    /// The physical index this action targets.
+    fn index(&self) -> &str {
+        match self {
+            BulkAction::Index { index, .. } | BulkAction::Delete { index, .. } => index,
+        }
+    }
+
+    /// The document id this action targets.
+    fn id(&self) -> &str {
+        match self {
+            BulkAction::Index { id, .. } | BulkAction::Delete { id, .. } => id,
+        }
+    }
 }
 
 /// Writes document operations to an OpenSearch cluster using the bulk API.
@@ -195,26 +211,38 @@ impl OpensearchSink {
             .unwrap_or_else(|| logical.to_owned())
     }
 
-    /// Send one prebuilt NDJSON `body` (`count` actions) as a single bulk
-    /// request. The caller (`flush`) is responsible for keeping `body` within
-    /// the count and byte caps; this just transmits it.
+    /// Send one prebuilt NDJSON `body` (the actions in `actions`, in order) as a
+    /// single bulk request. The caller (`flush`) is responsible for keeping
+    /// `body` within the count and byte caps; this just transmits it.
     ///
     /// When `refresh` is `true`, appends `?refresh=true` to the URL so
     /// OpenSearch performs a segment refresh after the request completes and
     /// all documents become immediately searchable. Pass `false` for
     /// intermediate chunks; the final chunk in a flush carries the refresh.
     ///
-    /// Retries on transient failures with exponential backoff.
+    /// **Transport and request-wide failures** (connection error, a non-2xx
+    /// status for the whole request) are transient and **retried** with
+    /// exponential backoff. **Item-level rejections** — a 2xx bulk response in
+    /// which OpenSearch accepted some actions and refused others (a mapping
+    /// conflict, a malformed value) — are **not** retried: re-sending the same
+    /// document yields the same rejection. They are returned as
+    /// [`RejectedDocument`]s for the engine's failure policy to handle, while
+    /// the accepted actions in the same request stay applied.
     #[tracing::instrument(
         name = "os.bulk",
         level = "debug",
         skip_all,
-        fields(count, bytes = body.len(), refresh),
+        fields(count = actions.len(), bytes = body.len(), refresh),
         err,
     )]
-    async fn send_bulk_chunk(&self, body: &str, count: usize, refresh: bool) -> Result<()> {
-        if count == 0 {
-            return Ok(());
+    async fn send_bulk_chunk(
+        &self,
+        body: &str,
+        actions: &[BulkAction],
+        refresh: bool,
+    ) -> Result<Vec<RejectedDocument>> {
+        if actions.is_empty() {
+            return Ok(Vec::new());
         }
 
         let url = build_bulk_url(&self.base_url, self.pipeline.as_deref(), refresh);
@@ -240,15 +268,14 @@ impl OpensearchSink {
                         SinkError::Write(format!("failed to read bulk response: {e}"))
                     })?;
 
-                    if bulk_has_errors(&result) {
-                        last_err = Some(SinkError::Write(
-                            "bulk request completed with item-level errors".to_owned(),
-                        ));
-                        continue;
-                    }
-
-                    debug!(count, refresh, "bulk request succeeded");
-                    return Ok(());
+                    let rejected = bulk_rejected(&result, actions);
+                    debug!(
+                        count = actions.len(),
+                        rejected = rejected.len(),
+                        refresh,
+                        "bulk request applied",
+                    );
+                    return Ok(rejected);
                 }
                 Ok(resp) => {
                     let status = resp.status();
@@ -548,14 +575,14 @@ impl Sink for OpensearchSink {
     /// `refresh_interval`, keeping bulk indexing fast so the backlog clears (see
     /// the module docs).
     #[tracing::instrument(name = "os.flush", skip_all, fields(caught_up), err)]
-    async fn flush(&self, caught_up: bool) -> Result<()> {
+    async fn flush(&self, caught_up: bool) -> Result<FlushReport> {
         let actions = {
             let mut buf = self.buffer.lock().await;
             std::mem::take(&mut *buf)
         };
 
         if actions.is_empty() {
-            return Ok(());
+            return Ok(FlushReport::clean());
         }
 
         // Serialize each action's NDJSON fragment once, then group fragments
@@ -583,21 +610,42 @@ impl Sink for OpensearchSink {
             "flushing buffered operations",
         );
 
-        let mut fragments = fragments.into_iter();
+        let mut rejected: Vec<RejectedDocument> = Vec::new();
+        let mut start = 0usize;
         for &count in &plan {
-            let mut body = String::new();
-            for _ in 0..count {
-                if let Some(fragment) = fragments.next() {
-                    body.push_str(&fragment);
-                }
+            let end = start + count;
+            let chunk_fragments = fragments.get(start..end).unwrap_or_default();
+            let chunk_actions = actions.get(start..end).unwrap_or_default();
+            let mut body = String::with_capacity(chunk_fragments.iter().map(String::len).sum());
+            for fragment in chunk_fragments {
+                body.push_str(fragment);
             }
             // A caught-up flush is small (it drained the queue), so forcing the
             // refresh on each of its chunks — rather than only the last — keeps
             // every touched index searchable with negligible extra cost.
-            self.send_bulk_chunk(&body, count, caught_up).await?;
+            rejected.extend(self.send_bulk_chunk(&body, chunk_actions, caught_up).await?);
+            start = end;
         }
 
-        Ok(())
+        // Rejections carry the *physical* index (what the bulk request used);
+        // map each back to its *logical* name so the engine can resolve a
+        // per-index failure policy. Reverse the logical→physical table learned
+        // at `ensure_index`; fall back to the physical name if it's unknown.
+        if !rejected.is_empty() {
+            let names = self
+                .index_names
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let to_logical: std::collections::HashMap<&str, &str> =
+                names.iter().map(|(l, p)| (p.as_str(), l.as_str())).collect();
+            for doc in &mut rejected {
+                if let Some(&logical) = to_logical.get(doc.index.as_str()) {
+                    doc.index = logical.to_owned();
+                }
+            }
+        }
+
+        Ok(FlushReport { rejected })
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {
@@ -953,33 +1001,58 @@ fn plan_chunks(sizes: &[usize], batch_size: usize, max_bytes: usize) -> Vec<usiz
 
 /// Returns `true` if the bulk response indicates at least one item-level error
 /// (HTTP 4xx/5xx on an individual operation).
-fn bulk_has_errors(response: &Value) -> bool {
+/// Extract the item-level rejections from a 2xx bulk response.
+///
+/// A bulk response is `errors: true` when *any* item failed, but its accepted
+/// items are still applied. Each entry in `items` reports a per-document status;
+/// those `>= 400` are rejections. They are matched **by position** to `actions`
+/// (the bulk API preserves order), so the rejection carries the originating
+/// document's index and id; if the arrays ever disagree, the response's own
+/// `_index`/`_id` are used as a fallback. Returns empty when nothing failed.
+fn bulk_rejected(response: &Value, actions: &[BulkAction]) -> Vec<RejectedDocument> {
     let has_errors = response
         .get("errors")
-        .and_then(|v| v.as_bool())
+        .and_then(Value::as_bool)
         .unwrap_or(false);
-
     if !has_errors {
-        return false;
+        return Vec::new();
     }
 
-    response
-        .get("items")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items.iter().any(|item| {
-                let op = item
-                    .get("index")
-                    .or_else(|| item.get("create"))
-                    .or_else(|| item.get("delete"))
-                    .or_else(|| item.get("update"));
-                op.and_then(|o| o.get("status"))
-                    .and_then(|s| s.as_u64())
-                    .map(|status| status >= 400)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    let Some(items) = response.get("items").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut rejected = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let op = item
+            .get("index")
+            .or_else(|| item.get("create"))
+            .or_else(|| item.get("delete"))
+            .or_else(|| item.get("update"));
+        let Some(op) = op else { continue };
+
+        let status = op.get("status").and_then(Value::as_u64).unwrap_or(0);
+        if status < 400 {
+            continue;
+        }
+
+        let reason = op
+            .get("error")
+            .and_then(|e| e.get("reason"))
+            .and_then(|r| r.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("rejected with status {status}"));
+
+        let (index, id) = match actions.get(i) {
+            Some(action) => (action.index().to_owned(), action.id().to_owned()),
+            None => (
+                op.get("_index").and_then(|v| v.as_str()).unwrap_or_default().to_owned(),
+                op.get("_id").and_then(|v| v.as_str()).unwrap_or_default().to_owned(),
+            ),
+        };
+        rejected.push(RejectedDocument { index, id, reason });
+    }
+    rejected
 }
 
 #[cfg(test)]
@@ -1324,27 +1397,56 @@ mod tests {
     }
 
     #[test]
-    fn bulk_has_errors_returns_false_when_no_errors_flag() {
+    fn bulk_rejected_is_empty_when_no_errors_flag() {
         let resp = json!({ "errors": false, "items": [] });
-        assert!(!bulk_has_errors(&resp));
+        assert!(bulk_rejected(&resp, &[]).is_empty());
     }
 
     #[test]
-    fn bulk_has_errors_returns_true_when_item_has_4xx_status() {
+    fn bulk_rejected_reports_the_item_with_a_4xx_status_and_its_reason() {
         let resp = json!({
             "errors": true,
-            "items": [{ "index": { "_index": "x", "_id": "1", "status": 429 } }]
+            "items": [{ "index": {
+                "_index": "users_ab12", "_id": "1", "status": 400,
+                "error": { "type": "mapper_parsing_exception", "reason": "failed to parse field" }
+            } }]
         });
-        assert!(bulk_has_errors(&resp));
+        let rejected = bulk_rejected(&resp, &[]);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].index, "users_ab12");
+        assert_eq!(rejected[0].id, "1");
+        assert_eq!(rejected[0].reason, "failed to parse field");
     }
 
     #[test]
-    fn bulk_has_errors_returns_false_when_all_items_succeed() {
+    fn bulk_rejected_maps_position_to_the_originating_action() {
+        // Two actions; the second is rejected. The rejection carries the
+        // action's index/id (by position), not just the response's echo.
+        let actions = [
+            BulkAction::Delete { index: "users_ab12".to_owned(), id: "1".to_owned() },
+            BulkAction::Index { index: "users_ab12".to_owned(), id: "2".to_owned(), doc: json!({}) },
+        ];
+        let resp = json!({
+            "errors": true,
+            "items": [
+                { "delete": { "_index": "users_ab12", "_id": "1", "status": 200 } },
+                { "index": { "_index": "users_ab12", "_id": "2", "status": 400,
+                             "error": { "reason": "boom" } } }
+            ]
+        });
+        let rejected = bulk_rejected(&resp, &actions);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].id, "2");
+        assert_eq!(rejected[0].reason, "boom");
+    }
+
+    #[test]
+    fn bulk_rejected_is_empty_when_all_items_succeed() {
         let resp = json!({
             "errors": true,
             "items": [{ "index": { "_index": "x", "_id": "1", "status": 200 } }]
         });
-        assert!(!bulk_has_errors(&resp));
+        assert!(bulk_rejected(&resp, &[]).is_empty());
     }
 
     #[test]

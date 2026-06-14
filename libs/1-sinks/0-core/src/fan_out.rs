@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use schema_core::{GenericValue, IndexMapping, IndexName};
 
-use crate::{Result, Sink};
+use crate::{FlushReport, Result, Sink};
 
 /// Dispatches every sink operation to a set of inner sinks in declaration order.
 ///
@@ -46,11 +46,12 @@ impl Sink for FanOutSink {
         Ok(())
     }
 
-    async fn flush(&self, caught_up: bool) -> Result<()> {
+    async fn flush(&self, caught_up: bool) -> Result<FlushReport> {
+        let mut report = FlushReport::default();
         for sink in &self.sinks {
-            sink.flush(caught_up).await?;
+            report.rejected.extend(sink.flush(caught_up).await?.rejected);
         }
-        Ok(())
+        Ok(report)
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {

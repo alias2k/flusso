@@ -56,8 +56,8 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> SinkResult<()> {
-        Ok(())
+    async fn flush(&self, _caught_up: bool) -> SinkResult<sinks_core::FlushReport> {
+        Ok(sinks_core::FlushReport::clean())
     }
 }
 
@@ -265,8 +265,10 @@ fn users_config(connection_url: &str) -> Config {
             Index {
                 enabled: true,
                 schema,
+                on_error: None,
             },
         )]),
+        on_error: Default::default(),
     }
 }
 

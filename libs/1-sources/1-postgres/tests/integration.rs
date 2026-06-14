@@ -205,8 +205,10 @@ fn users_config(connection_url: &str) -> Config {
             Index {
                 enabled: true,
                 schema,
+                on_error: None,
             },
         )]),
+        on_error: Default::default(),
     }
 }
 

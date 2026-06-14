@@ -26,6 +26,7 @@ pub(crate) struct OtelObserver {
     documents_built: Counter<u64>,
     batches: Counter<u64>,
     indexes_seeded: Counter<u64>,
+    documents_quarantined: Counter<u64>,
     errors: Counter<u64>,
     flush_duration: Histogram<f64>,
     slot_lag: Gauge<u64>,
@@ -55,6 +56,13 @@ impl OtelObserver {
             indexes_seeded: meter
                 .u64_counter("flusso.indexes.seeded")
                 .with_description("Indexes whose backfill completed this run")
+                .build(),
+            documents_quarantined: meter
+                .u64_counter("flusso.documents.quarantined")
+                .with_description(
+                    "Documents the sink rejected and the engine skipped (on_error = skip). \
+                     A non-zero value means data is being dropped — alert on it.",
+                )
                 .build(),
             errors: meter
                 .u64_counter("flusso.errors")
@@ -104,6 +112,11 @@ impl Observer for OtelObserver {
                 &[KeyValue::new("index", index.as_ref().to_owned())],
             );
         }
+    }
+
+    fn on_document_quarantined(&self, index: &str, _id: &str, _reason: &str) {
+        self.documents_quarantined
+            .add(1, &[KeyValue::new("index", index.to_owned())]);
     }
 
     fn on_slot_lag(&self, bytes: u64) {

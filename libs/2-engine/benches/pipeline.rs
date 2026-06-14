@@ -151,7 +151,7 @@ impl Sink for AlwaysUnseeded {
     async fn delete(&self, index: &IndexName, id: &str) -> SinkResult<()> {
         self.inner.delete(index, id).await
     }
-    async fn flush(&self, caught_up: bool) -> SinkResult<()> {
+    async fn flush(&self, caught_up: bool) -> SinkResult<sinks_core::FlushReport> {
         self.inner.flush(caught_up).await
     }
     // `is_seeded` / `mark_seeded` deliberately keep the trait defaults
@@ -724,8 +724,10 @@ fn config(connection_url: &str) -> Config {
             Index {
                 enabled: true,
                 schema,
+                on_error: None,
             },
         )]),
+        on_error: Default::default(),
     }
 }
 

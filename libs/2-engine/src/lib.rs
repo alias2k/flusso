@@ -101,6 +101,43 @@ impl Default for BatchPolicy {
     }
 }
 
+// The policy *vocabulary* (`Stop`/`Skip`) is a config-domain type, so it lives
+// in `schema-core` and is re-exported here for engine callers.
+pub use schema_core::FailurePolicy;
+
+/// How the engine resolves the [`FailurePolicy`] for a rejected document: a
+/// global `default` plus per-index overrides, keyed by **logical** index name.
+///
+/// The engine governs only *item-level rejections* (a sink accepted the batch
+/// but refused specific documents). Transport failures, a source decode error,
+/// or a flush returning `Err` always stop the run regardless of this.
+#[derive(Debug, Clone, Default)]
+pub struct FailurePolicies {
+    default: FailurePolicy,
+    overrides: HashMap<String, FailurePolicy>,
+}
+
+impl FailurePolicies {
+    /// A policy set with `default` applied to every index and no overrides.
+    pub fn new(default: FailurePolicy) -> Self {
+        Self {
+            default,
+            overrides: HashMap::new(),
+        }
+    }
+
+    /// Override the policy for one logical index, leaving others on the default.
+    pub fn with_override(mut self, index: impl Into<String>, policy: FailurePolicy) -> Self {
+        self.overrides.insert(index.into(), policy);
+        self
+    }
+
+    /// The effective policy for `index` (its override, else the default).
+    pub fn resolve(&self, index: &str) -> FailurePolicy {
+        self.overrides.get(index).copied().unwrap_or(self.default)
+    }
+}
+
 /// Drives changes from a source through to a sink.
 #[derive(Debug)]
 pub struct Engine {
@@ -111,6 +148,7 @@ pub struct Engine {
     queue_capacity: usize,
     batch: BatchPolicy,
     skip_backfill: bool,
+    failure_policies: FailurePolicies,
 }
 
 impl Engine {
@@ -128,6 +166,7 @@ impl Engine {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             batch: BatchPolicy::default(),
             skip_backfill: false,
+            failure_policies: FailurePolicies::default(),
         }
     }
 
@@ -162,6 +201,14 @@ impl Engine {
         self
     }
 
+    /// Set how the engine resolves the policy for documents a sink rejects at
+    /// the item level (see [`FailurePolicies`]). Defaults to
+    /// [`FailurePolicy::Stop`] for every index.
+    pub fn with_failure_policies(mut self, policies: FailurePolicies) -> Self {
+        self.failure_policies = policies;
+        self
+    }
+
     /// Run until the live change stream ends or an error stops the pipeline.
     ///
     /// First seeds any unseeded index (unless [`skip_backfill`](Self::skip_backfill)
@@ -185,6 +232,7 @@ impl Engine {
             queue_capacity,
             batch,
             skip_backfill,
+            failure_policies,
         } = self;
         let pipeline = Pipeline {
             documents: documents.as_ref(),
@@ -192,6 +240,7 @@ impl Engine {
             observer: &observer,
             queue_capacity,
             batch,
+            failure_policies: &failure_policies,
         };
         let result = run_inner(pipeline, source.as_ref(), skip_backfill).await;
         if let Err(error) = &result {
@@ -212,6 +261,7 @@ struct Pipeline<'a> {
     observer: &'a Arc<dyn Observer>,
     queue_capacity: usize,
     batch: BatchPolicy,
+    failure_policies: &'a FailurePolicies,
 }
 
 /// The body of [`Engine::run`], over borrowed parts, so [`run`](Engine::run) can
@@ -509,8 +559,46 @@ async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch, caught_up: bool) ->
         }
     }
     let flush_start = Instant::now();
-    pipeline.sink.flush(caught_up).await?;
+    let report = pipeline.sink.flush(caught_up).await?;
     let flush = flush_start.elapsed();
+
+    // The flush succeeded, but the sink may have rejected individual documents
+    // (a mapping conflict, a malformed value). Retrying redelivers the same
+    // poison, so the per-index failure policy decides each one: stop the run, or
+    // quarantine it and ack the batch anyway so the slot advances past it.
+    //
+    // Resolve all of them first. A single `stop`-policy rejection stops the run
+    // — and we must decide that *before* emitting any quarantine event, so a
+    // `skip` document in the same batch isn't double-counted when the
+    // unconfirmed batch is redelivered on the next run.
+    if !report.is_clean() {
+        let mut stop_count = 0usize;
+        let mut stop_example = String::new();
+        for doc in &report.rejected {
+            if pipeline.failure_policies.resolve(&doc.index) == FailurePolicy::Stop {
+                if stop_count == 0 {
+                    stop_example = format!("{}/{}: {}", doc.index, doc.id, doc.reason);
+                }
+                stop_count += 1;
+            }
+        }
+        if stop_count > 0 {
+            return Err(EngineError::DocumentsRejected(stop_count, stop_example));
+        }
+        // Every rejection is `skip`: quarantine and continue.
+        for doc in &report.rejected {
+            tracing::warn!(
+                index = %doc.index,
+                id = %doc.id,
+                reason = %doc.reason,
+                "document rejected by sink; quarantining and continuing",
+            );
+            pipeline
+                .observer
+                .on_document_quarantined(&doc.index, &doc.id, &doc.reason);
+        }
+    }
+
     for ack in pending.source.drain(..) {
         ack.confirm();
     }
@@ -664,8 +752,8 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
-            Ok(())
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+            Ok(sinks_core::FlushReport::clean())
         }
     }
 
@@ -750,9 +838,9 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
             self.ops.lock().unwrap().push("flush".to_owned());
-            Ok(())
+            Ok(sinks_core::FlushReport::clean())
         }
     }
 
@@ -901,9 +989,9 @@ mod tests {
         async fn delete(&self, _index: &IndexName, _id: &str) -> sinks_core::Result<()> {
             Ok(())
         }
-        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(sinks_core::FlushReport::clean())
         }
     }
 
@@ -1060,8 +1148,8 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
-            Ok(())
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+            Ok(sinks_core::FlushReport::clean())
         }
 
         async fn is_seeded(&self, _index: &IndexName) -> sinks_core::Result<bool> {
@@ -1287,7 +1375,7 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
             if self.fail_next_flush.swap(false, Ordering::SeqCst) {
                 // Crash before durability: the staged ops never reach the store.
                 return Err(sinks_core::SinkError::Write(
@@ -1305,7 +1393,7 @@ mod tests {
                     }
                 }
             }
-            Ok(())
+            Ok(sinks_core::FlushReport::clean())
         }
     }
 
@@ -1410,9 +1498,9 @@ mod tests {
         async fn delete(&self, _index: &IndexName, _id: &str) -> sinks_core::Result<()> {
             Ok(())
         }
-        async fn flush(&self, caught_up: bool) -> sinks_core::Result<()> {
+        async fn flush(&self, caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
             self.flushes.lock().unwrap().push(caught_up);
-            Ok(())
+            Ok(sinks_core::FlushReport::clean())
         }
     }
 
@@ -1439,6 +1527,7 @@ mod tests {
         }
         drop(producer);
 
+        let failure_policies = FailurePolicies::default();
         let pipeline = Pipeline {
             documents: &documents,
             sink: &sink,
@@ -1450,6 +1539,7 @@ mod tests {
                 // early, never the timer — so the split is purely backlog-driven.
                 max_delay: Duration::from_secs(10),
             },
+            failure_policies: &failure_policies,
         };
         work(pipeline, &mut consumer, None).await.unwrap();
 
@@ -1458,5 +1548,156 @@ mod tests {
             &[false, false, true],
             "a flush is caught up only once it has drained the queue behind it",
         );
+    }
+
+    // ── item-level rejection / failure policy ────────────────────────────────
+
+    /// A sink that rejects every document it's given at the item level: it
+    /// stages each write and reports them all as rejected on flush (the flush
+    /// itself succeeds). All land in the `users` index (what `MockDocuments`
+    /// builds), so a per-index policy keyed on `users` applies.
+    #[derive(Debug, Default)]
+    struct RejectingSink {
+        staged: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl Sink for RejectingSink {
+        async fn upsert(
+            &self,
+            index: &IndexName,
+            id: &str,
+            _document: &GenericValue,
+        ) -> sinks_core::Result<()> {
+            self.staged
+                .lock()
+                .unwrap()
+                .push((index.as_ref().to_owned(), id.to_owned()));
+            Ok(())
+        }
+
+        async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+            self.staged
+                .lock()
+                .unwrap()
+                .push((index.as_ref().to_owned(), id.to_owned()));
+            Ok(())
+        }
+
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+            let rejected = self
+                .staged
+                .lock()
+                .unwrap()
+                .drain(..)
+                .map(|(index, id)| sinks_core::RejectedDocument {
+                    index,
+                    id,
+                    reason: "simulated item-level rejection".to_owned(),
+                })
+                .collect();
+            Ok(sinks_core::FlushReport { rejected })
+        }
+    }
+
+    /// Records the `(index, id)` of every document the engine quarantines.
+    #[derive(Debug, Default)]
+    struct QuarantineObserver {
+        quarantined: Mutex<Vec<(String, String)>>,
+    }
+
+    impl Observer for QuarantineObserver {
+        fn on_document_quarantined(&self, index: &str, id: &str, _reason: &str) {
+            self.quarantined
+                .lock()
+                .unwrap()
+                .push((index.to_owned(), id.to_owned()));
+        }
+    }
+
+    fn engine_over(
+        changes: Vec<Change>,
+        observer: Arc<dyn Observer>,
+        policies: FailurePolicies,
+    ) -> Engine {
+        Engine::new(
+            Arc::new(MockSource {
+                changes: Mutex::new(Some(changes)),
+            }),
+            Arc::new(MockDocuments),
+            Arc::new(RejectingSink::default()),
+        )
+        .with_observer(observer)
+        .with_failure_policies(policies)
+    }
+
+    /// `resolve` returns an index's override if set, else the global default.
+    #[test]
+    fn failure_policies_resolve_override_then_default() {
+        let policies =
+            FailurePolicies::new(FailurePolicy::Stop).with_override("analytics", FailurePolicy::Skip);
+        assert_eq!(policies.resolve("analytics"), FailurePolicy::Skip);
+        assert_eq!(policies.resolve("users"), FailurePolicy::Stop);
+    }
+
+    /// Under `skip`, rejected documents are quarantined (reported to the
+    /// observer) and the batch is still acked — so the slot advances and the
+    /// poison is not redelivered into a crash loop.
+    #[tokio::test]
+    async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let changes = vec![upsert_change(1, 0, &acks), upsert_change(3, 1, &acks)];
+        let observer = Arc::new(QuarantineObserver::default());
+
+        engine_over(
+            changes,
+            Arc::clone(&observer) as Arc<dyn Observer>,
+            FailurePolicies::new(FailurePolicy::Skip),
+        )
+        .run()
+        .await
+        .unwrap();
+
+        let quarantined = observer.quarantined.lock().unwrap();
+        assert_eq!(quarantined.len(), 2, "both rejected documents quarantined");
+        assert!(quarantined.iter().all(|(index, _)| index == "users"));
+        assert_eq!(acks.load(Ordering::SeqCst), 2, "the batch is acked despite rejections");
+    }
+
+    /// Under `stop` (the default), a rejected document stops the run and the
+    /// batch is left unconfirmed (not acked), so it is redelivered on restart.
+    #[tokio::test]
+    async fn stop_policy_errors_and_leaves_the_batch_unconfirmed() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let changes = vec![upsert_change(1, 0, &acks)];
+
+        let err = engine_over(changes, Arc::new(NoopObserver), FailurePolicies::default())
+            .run()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, EngineError::DocumentsRejected(1, _)));
+        assert_eq!(acks.load(Ordering::SeqCst), 0, "nothing is acked when the run stops");
+    }
+
+    /// A per-index `stop` override halts the run even when the global default is
+    /// `skip` — proving `commit` consults the per-index policy, not just the
+    /// global one.
+    #[tokio::test]
+    async fn per_index_stop_override_halts_even_when_global_is_skip() {
+        let acks = Arc::new(AtomicU64::new(0));
+        let changes = vec![upsert_change(1, 0, &acks)];
+
+        let err = engine_over(
+            changes,
+            Arc::new(NoopObserver),
+            FailurePolicies::new(FailurePolicy::Skip).with_override("users", FailurePolicy::Stop),
+        )
+        .run()
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, EngineError::DocumentsRejected(..)));
+        assert_eq!(acks.load(Ordering::SeqCst), 0);
     }
 }

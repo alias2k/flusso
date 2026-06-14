@@ -59,6 +59,10 @@ pub struct ConfigToml {
     pub sinks: BTreeMap<common::SinkName, Sink>,
     #[serde(default)]
     pub index: Vec<IndexEntry>,
+    /// Global item-level rejection policy; per-index overrides live on each
+    /// [`IndexEntry`]. Defaults to [`FailurePolicy::Stop`](schema_core::FailurePolicy::Stop).
+    #[serde(default)]
+    pub on_error: schema_core::FailurePolicy,
 }
 
 /// Converts source and sinks. `indexes` is left empty — the loader populates
@@ -80,6 +84,7 @@ impl From<ConfigToml> for schema_core::Config {
             source,
             sinks,
             indexes: BTreeMap::new(),
+            on_error: toml.on_error,
         }
     }
 }

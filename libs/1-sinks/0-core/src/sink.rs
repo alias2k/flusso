@@ -3,6 +3,50 @@ use schema_core::{GenericValue, IndexMapping, IndexName};
 
 use crate::Result;
 
+/// The outcome of a [`flush`](Sink::flush): which buffered documents the
+/// destination **rejected at the item level**.
+///
+/// This is distinct from a flush returning `Err`. An `Err` is a flush-wide
+/// failure (transport down, the whole request refused) — nothing in the batch
+/// is known durable, so the engine stops and the batch is redelivered. A
+/// `FlushReport` instead means the flush *succeeded* and the destination applied
+/// the batch, but rejected specific documents (a mapping conflict, a malformed
+/// value) while accepting the rest. Those rejections are the document's fault,
+/// not the destination's, so retrying redelivers the same poison — the engine
+/// handles them per its failure policy (stop, or quarantine and continue)
+/// instead of looping. An empty report means everything flushed cleanly.
+#[derive(Debug, Clone, Default)]
+pub struct FlushReport {
+    /// Documents the destination accepted the batch but rejected individually.
+    pub rejected: Vec<RejectedDocument>,
+}
+
+impl FlushReport {
+    /// A report with no rejections — everything in the flush was applied.
+    pub fn clean() -> Self {
+        Self::default()
+    }
+
+    /// Whether the flush applied every buffered document (no item-level
+    /// rejections).
+    pub fn is_clean(&self) -> bool {
+        self.rejected.is_empty()
+    }
+}
+
+/// One document a sink rejected at the item level during a [`flush`](Sink::flush).
+/// The names are the destination's own (e.g. an OpenSearch physical index), for
+/// diagnostics and quarantine records.
+#[derive(Debug, Clone)]
+pub struct RejectedDocument {
+    /// The destination index the document was bound for.
+    pub index: String,
+    /// The document's id within that index (the search engine's `_id`).
+    pub id: String,
+    /// Why the destination rejected it.
+    pub reason: String,
+}
+
 /// A destination for assembled documents.
 ///
 /// The engine calls [`upsert`](Self::upsert) / [`delete`](Self::delete) as it
@@ -38,7 +82,12 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// (the pipeline is idle), skip it while a backlog is draining. Sinks with
     /// no such distinction ignore it. See the OpenSearch sink, which forces an
     /// index refresh only when `caught_up`.
-    async fn flush(&self, caught_up: bool) -> Result<()>;
+    ///
+    /// Returns a [`FlushReport`]: `Ok` with an empty report means every buffered
+    /// document was applied; `Ok` with rejections means the flush succeeded but
+    /// the destination refused specific documents (see [`FlushReport`] for why
+    /// that differs from an `Err`). `Err` is a flush-wide failure.
+    async fn flush(&self, caught_up: bool) -> Result<FlushReport>;
 
     /// Whether `index` has already been seeded — its initial backfill completed
     /// and durably applied here. The engine asks this at startup and skips the

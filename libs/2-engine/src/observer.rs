@@ -81,6 +81,16 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = bytes;
     }
 
+    /// A document was **quarantined**: the sink rejected it at the item level
+    /// and the engine's failure policy is to skip and continue (see
+    /// [`FailurePolicy::Skip`](crate::FailurePolicy)). The document is not
+    /// applied and the batch proceeds, so it is *not* redelivered — this is the
+    /// signal to surface it (a metric, a log, a dead-letter record). `index` and
+    /// `id` are the destination's names for it; `reason` is why it was rejected.
+    fn on_document_quarantined(&self, index: &str, id: &str, reason: &str) {
+        let _ = (index, id, reason);
+    }
+
     /// The pipeline stopped on an error (rendered to a string, since the engine's
     /// error type is not part of this neutral surface).
     fn on_error(&self, error: &str) {
@@ -158,6 +168,12 @@ impl Observer for FanOut {
     fn on_slot_lag(&self, bytes: u64) {
         for observer in &self.observers {
             observer.on_slot_lag(bytes);
+        }
+    }
+
+    fn on_document_quarantined(&self, index: &str, id: &str, reason: &str) {
+        for observer in &self.observers {
+            observer.on_document_quarantined(index, id, reason);
         }
     }
 

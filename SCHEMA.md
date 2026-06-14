@@ -59,6 +59,34 @@ flusso will quietly do something reasonable if you leave it out.
 | `[source]` | **yes** | The database to read from. |
 | `[sinks.<name>]` | no | Named destinations. Zero or more; each key is a sink name (a Postgres identifier). |
 | `[[index]]` | no | The indexes to build. Zero or more array entries. |
+| `on_error` | no | What to do when a sink rejects a document at the item level: `"stop"` (default) or `"skip"`. See [`on_error`](#on_error). |
+
+### `on_error`
+
+When a sink accepts a flush but rejects a *specific* document — a mapping
+conflict, a value the destination can't index — `on_error` decides what happens.
+It governs only these **item-level rejections**; a flush-wide failure (the
+destination unreachable, the whole request refused) always stops the run.
+
+| Value | Behavior |
+| --- | --- |
+| `"stop"` (default) | Stop the run. The batch is left unconfirmed and redelivered on restart, so a persistently-bad document halts sync until the data is fixed or the policy changes. Dropping data is opt-in. |
+| `"skip"` | Quarantine the document (logged, counted in `flusso.documents.quarantined` and the `/status` `documents_quarantined`) and continue. The rest of the batch is applied and acked; the document never lands until its source row changes again. |
+
+A global `on_error` at the top level is the default for every index; override it
+per index with `on_error` inside an `[[index]]` entry (see below). The policy is
+operational, not part of the document shape, so changing it never triggers a
+reindex.
+
+```toml
+on_error = "stop"   # global default
+
+[[index]]
+name = "analytics"
+schema = "analytics.schema.yml"
+enabled = true
+on_error = "skip"   # this index tolerates bad rows
+```
 
 ### `[source]`
 
@@ -115,6 +143,7 @@ One array entry per index to build.
 | `name` | Postgres identifier | yes | The logical index name — the pipeline's stable identity. |
 | `schema` | path | yes | Path to the index's `*.schema.yml`, relative to the config file. Must end in `.yml`/`.yaml`. |
 | `enabled` | bool | yes | Whether this index is built on this run. |
+| `on_error` | `"stop"` \| `"skip"` | no | Override the global [`on_error`](#on_error) for this index. Omitted inherits the global default. |
 
 ```toml
 [[index]]

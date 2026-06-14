@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use engine::{Engine, FanOut};
+use engine::{Engine, FailurePolicies, FanOut};
 use schema::Config;
 use sources_core::cdc::ChangeCapture;
 
@@ -151,10 +151,20 @@ impl Daemon {
             backends.source(Arc::clone(&config), &options).await?;
         let sink = backends.sink(&config, &options).await?;
 
+        // The item-level failure policy is config-driven: a global default plus
+        // optional per-index overrides, keyed by logical index name.
+        let mut failure_policies = FailurePolicies::new(config.on_error);
+        for (name, index) in &config.indexes {
+            if let Some(policy) = index.on_error {
+                failure_policies = failure_policies.with_override(name.as_ref(), policy);
+            }
+        }
+
         let engine = Engine::new(Arc::clone(&capture), documents, sink)
             .with_observer(Arc::clone(&observer))
             .with_queue_capacity(options.queue_capacity)
-            .skip_backfill(options.skip_backfill);
+            .skip_backfill(options.skip_backfill)
+            .with_failure_policies(failure_policies);
 
         Ok(RunningDaemon {
             status,
@@ -230,7 +240,7 @@ mod tests {
     use futures::stream::{self, BoxStream};
     use schema::{Source, SourceType};
     use schema_core::{ColumnName, DatabaseSchema, GenericValue, IndexName, TableName};
-    use sinks_core::Sink;
+    use sinks_core::{FlushReport, Sink};
     use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
     use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
     use sources_core::{RowKey, SnapshotTable};
@@ -507,8 +517,8 @@ mod tests {
             Ok(())
         }
 
-        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<()> {
-            Ok(())
+        async fn flush(&self, _caught_up: bool) -> sinks_core::Result<FlushReport> {
+            Ok(FlushReport::clean())
         }
     }
 
@@ -549,6 +559,7 @@ mod tests {
             },
             sinks: BTreeMap::new(),
             indexes: BTreeMap::new(),
+            on_error: Default::default(),
         }
     }
 

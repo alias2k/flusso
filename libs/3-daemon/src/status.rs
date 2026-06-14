@@ -59,6 +59,7 @@ pub struct Status {
     changes_captured: AtomicU64,
     changes_committed: AtomicU64,
     documents_built: AtomicU64,
+    documents_quarantined: AtomicU64,
     batches: AtomicU64,
     last_flush_micros: AtomicU64,
     slot_lag_bytes: AtomicU64,
@@ -82,6 +83,7 @@ impl Status {
             changes_captured: AtomicU64::new(0),
             changes_committed: AtomicU64::new(0),
             documents_built: AtomicU64::new(0),
+            documents_quarantined: AtomicU64::new(0),
             batches: AtomicU64::new(0),
             last_flush_micros: AtomicU64::new(0),
             slot_lag_bytes: AtomicU64::new(0),
@@ -138,6 +140,10 @@ impl Status {
             .saturating_sub(self.changes_committed.load(Ordering::Relaxed))
     }
 
+    pub(crate) fn record_quarantine(&self) {
+        self.documents_quarantined.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn record_lag(&self, bytes: u64) {
         self.slot_lag_bytes.store(bytes, Ordering::Relaxed);
         self.slot_lag_known.store(true, Ordering::Relaxed);
@@ -163,6 +169,7 @@ impl Status {
             changes_committed: committed,
             changes_in_flight: captured.saturating_sub(committed),
             documents_built: self.documents_built.load(Ordering::Relaxed),
+            documents_quarantined: self.documents_quarantined.load(Ordering::Relaxed),
             batches: self.batches.load(Ordering::Relaxed),
             last_flush_micros: self.last_flush_micros.load(Ordering::Relaxed),
             slot_lag_bytes: self
@@ -185,6 +192,9 @@ pub struct StatusSnapshot {
     pub changes_committed: u64,
     pub changes_in_flight: u64,
     pub documents_built: u64,
+    /// Documents the sink rejected and the engine skipped (failure policy
+    /// `skip`). A non-zero value means data is being dropped — alert on it.
+    pub documents_quarantined: u64,
     pub batches: u64,
     pub last_flush_micros: u64,
     /// `None` until the source first reports lag (e.g. the slot doesn't exist
