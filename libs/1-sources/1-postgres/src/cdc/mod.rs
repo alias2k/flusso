@@ -26,3 +26,14 @@ mod pgoutput;
 mod stream;
 
 pub use capture::WalChangeCapture;
+
+/// Run the pgoutput decoder over arbitrary bytes, discarding the result.
+///
+/// The decoder must never panic on malformed input (an `Err` is the correct
+/// outcome) — a panic here is a denial of service on the replication stream.
+/// This wrapper exists only so the `fuzz/` crate can reach the otherwise
+/// crate-private [`pgoutput::decode`]; gated behind the `fuzzing` feature.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_decode(data: &[u8]) {
+    let _ = pgoutput::decode(data);
+}

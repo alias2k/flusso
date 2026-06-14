@@ -28,8 +28,15 @@ cargo nextest run -E 'test(name_substr)'   # a single test by name
 cargo test --doc                           # doctests — nextest does NOT run these
 cargo clippy --workspace                   # lint (NOT --all-targets; see below)
 cargo bench                                # Criterion benches (engine, opensearch, postgres)
+cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-sources/1-postgres)
 ```
 
+- **Fuzzing** needs nightly + `cargo install cargo-fuzz --locked`. The one target,
+  `pgoutput_decode`, lives in `libs/1-sources/1-postgres/fuzz/` (its own workspace, kept out
+  of the strict `[workspace.lints]`) and drives the otherwise crate-private pgoutput decoder
+  via the `sources-postgres` `fuzzing` feature (`fuzz_pgoutput_decode`). Contract: the
+  decoder must never panic on arbitrary bytes — an `Err` is the correct outcome. Run from the
+  crate dir; a crash lands in `fuzz/artifacts/`.
 - The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration`, `wal`, and
   `config_coverage` binaries; `testcontainers` spins up Postgres. `.config/nextest.toml`
   caps their concurrency and retries them — they're legitimately slow/flaky.
@@ -39,7 +46,9 @@ cargo bench                                # Criterion benches (engine, opensear
   `cargo test -p schema-config-toml -- --test-threads=1`. Intermittent `MissingConnectionUrl`
   / wrong-override failures are this race, not a regression.
 - CI runs `cargo clippy --workspace` then `cargo nextest run --profile ci --run-ignored all`
-  then `cargo test --doc`. Match this before assuming green.
+  then `cargo test --doc`. Match this before assuming green. A separate `fuzz` job runs a
+  60-second `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need
+  no special handling — they're ordinary tests caught by the nextest step.
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
   `flusso-search-derive`'s trybuild UI tests (`apps/search-derive/tests/ui/*.stderr`) compare

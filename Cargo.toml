@@ -120,6 +120,7 @@ serde_json = { version = "1.*" }
 reqwest = { version = "0.12.*", default-features = false }
 testcontainers-modules = { version = "0.15.*" }
 criterion = { version = "0.8.*", features = ["async_tokio"] }
+proptest = { version = "1.*" }
 axum = { version = "0.8.*" }
 # OpenTelemetry stack, shared by the CLI (traces) and the daemon (metrics).
 # Per-crate feature sets differ and are added at the use site; Cargo unifies

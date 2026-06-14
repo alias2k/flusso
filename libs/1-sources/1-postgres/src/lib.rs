@@ -12,3 +12,12 @@ pub use document::PgDocumentBuilder;
 // Re-exported so callers can build a capture without depending on
 // `pgwire-replication` directly.
 pub use pgwire_replication::{Lsn, ReplicationConfig, SslMode, TlsConfig};
+
+/// Fuzzing entry point for the pgoutput decoder — feeds arbitrary bytes through
+/// it and asserts (by not panicking) that malformed input is rejected rather
+/// than crashing. Used by the `fuzz/` cargo-fuzz crate; gated behind the
+/// `fuzzing` feature and not part of the stable API.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_pgoutput_decode(data: &[u8]) {
+    cdc::fuzz_decode(data);
+}

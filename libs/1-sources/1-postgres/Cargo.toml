@@ -6,6 +6,11 @@ edition = "2024"
 [lints]
 workspace = true
 
+[features]
+# Exposes a public entry point into the otherwise-internal pgoutput decoder for
+# the `fuzz/` cargo-fuzz crate. Off by default; not part of the stable API.
+fuzzing = []
+
 [dependencies]
 sources-core.workspace = true
 schema-core.workspace = true
@@ -30,6 +35,7 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 testcontainers-modules = { workspace = true, features = ["postgres"] }
 criterion.workspace = true
+proptest.workspace = true
 
 # Real-service benchmark: document assembly against a live Postgres.
 # Spins up Postgres in a container, so requires Docker. Run with `cargo bench`.

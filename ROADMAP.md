@@ -91,18 +91,3 @@ lets the `flusso.toml` shape evolve without recompiling the backends. The risk t
 watch is over-splitting: `SourceSpec` is worth it only if it's a genuine subset of
 `Config` (it is — the source needs neither the sink list nor OpenSearch URLs); if
 it ends up a near-copy, the seam earns nothing.
-
-## Fuzz the WAL decoder
-
-`libs/1-sources/1-postgres/src/cdc/pgoutput.rs` is a hand-written parser over
-binary bytes arriving from the replication stream — the textbook target for
-fuzzing, and a place where a panic is a denial of service on the whole pipeline.
-There's already a `truncated_message_errors_without_panicking` unit test; the
-instinct is right, it just needs to be made exhaustive.
-
-A `cargo-fuzz` target that feeds arbitrary bytes to the message decoder and
-asserts it never panics (returning an error is fine) would harden it cheaply. A
-property test for the document-query SQL builder
-(`libs/1-sources/1-postgres/src/document/query.rs`) is a natural companion — its
-join, aggregate, and filter generation is intricate and currently covered only
-by example-based tests.

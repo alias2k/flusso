@@ -39,7 +39,8 @@ jobs:
         run: cargo clippy --workspace
 
       # `--run-ignored all` includes the `#[ignore]`d container-backed e2e
-      # tests; the `ci` profile gives them retries and a longer timeout.
+      # tests; the `ci` profile gives them retries and a longer timeout. The
+      # `query.rs` proptests are ordinary `#[test]`s, so they run here too.
       - name: Test (unit + integration + e2e)
         run: cargo nextest run --profile ci --workspace --run-ignored all
 
@@ -53,4 +54,39 @@ jobs:
         with:
           name: nextest-junit
           path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  fuzz:
+    name: fuzz (pgoutput decoder)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # cargo-fuzz needs nightly (sanitizer/coverage instrumentation). The
+      # repo's rust-toolchain.toml pins stable; the explicit `+nightly` below
+      # overrides it just for the fuzz invocation.
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libs/1-sources/1-postgres/fuzz
+
+      # A time-boxed smoke run, not an exhaustive campaign: a regression that
+      # makes the decoder panic on malformed bytes fails CI here. A crash is
+      # written to fuzz/artifacts/ and uploaded below for reproduction.
+      - name: Fuzz pgoutput decoder (60s)
+        working-directory: libs/1-sources/1-postgres
+        run: cargo +nightly fuzz run pgoutput_decode -- -max_total_time=60
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: libs/1-sources/1-postgres/fuzz/artifacts/
           if-no-files-found: ignore
