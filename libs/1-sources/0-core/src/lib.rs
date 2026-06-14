@@ -24,6 +24,9 @@
 //! - [`RowKey`] — a row's primary key as ordered column/value pairs.
 //! - [`SnapshotTable`] — a schema-qualified table the engine asks a mechanism
 //!   to snapshot when seeding an index.
+//! - [`SourceSpec`] — the source's own view of what to build (the enabled
+//!   indexes and their schemas), a subset of the top-level config translated by
+//!   the composition root so the backend never sees `Config`.
 //! - [`SourceError`] / [`Result`] — the common error type.
 //!
 //! Keeping the two abstractions apart means a deployment can mix any change
@@ -33,6 +36,7 @@
 mod error;
 mod row_key;
 mod snapshot_table;
+mod spec;
 mod validation;
 
 pub mod cdc;
@@ -41,4 +45,5 @@ pub mod document;
 pub use error::*;
 pub use row_key::*;
 pub use snapshot_table::*;
+pub use spec::*;
 pub use validation::*;

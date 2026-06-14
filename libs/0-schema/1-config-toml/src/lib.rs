@@ -1,28 +1,18 @@
-//! Parse `flusso.toml` into the core [`Config`](schema_core::Config) model.
+//! Parse `flusso.toml` into neutral [`ConfigToml`] entities.
 //!
 //! A config file declares the Postgres source, the sinks documents are written
-//! to, and the indexes to build. Parsing happens in two stages:
-//!
-//! 1. [`ConfigToml`] deserializes the file verbatim, rejecting unknown fields.
-//! 2. `TryFrom<ConfigToml>` converts it into [`Config`](schema_core::Config),
-//!    mapping each `{ env = "VAR" }` / literal into a deferred
-//!    [`Secret`](schema_core::Secret).
+//! to, and the indexes to build. This crate handles only the **parse** stage:
+//! [`ConfigToml`] deserializes the file verbatim, rejecting unknown fields, into
+//! entity types that mirror the file 1:1 and reference only the `schema-core`
+//! vocabulary. Lifting these entities into the assembled `Config` is a
+//! composition step that lives in the `schema` crate (`From<ConfigToml>`), so
+//! this parser sits at the bottom layer and never depends on `Config`.
 //!
 //! Secrets are **not** resolved here. Any string value may be given literally or
-//! as `{ env = "VAR" }`; conversion carries that choice through unchanged, and
-//! the value is read in the environment that runs the pipeline. That is what lets
-//! a compiled config travel without baking in its secrets.
-//!
-//! The reserved deployment-override variables (`DATABASE_URL`,
-//! `<SINK>_OPENSEARCH_URL` / `_USERNAME` / `_PASSWORD`) are likewise applied at
-//! resolution time — see [`schema_core`]'s `resolve_*` functions — not here.
-//!
-//! The `index` entries are left untouched here — the conversion yields an empty
-//! index map, which the `schema` crate's loader fills in by reading each
-//! referenced YAML schema. This crate owns only the source and sinks.
+//! as `{ env = "VAR" }`; the entities carry that choice through unchanged so the
+//! value can be read in the environment that runs the pipeline.
 
-mod conversion;
-mod entities;
+pub mod entities;
 mod env_value;
 mod parser;
 
@@ -39,17 +29,11 @@ pub const CONFIG_SCHEMA: &str = include_str!(concat!(
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 
 use entities::IndexEntry;
 use entities::Sink;
 use entities::Source;
 use schema_core::common;
-
-/// Conversion no longer fails: secrets are deferred (not resolved) and URLs are
-/// validated at resolution time, so mapping the parsed config into the core
-/// model is infallible. The alias keeps the loader's error plumbing stable.
-pub type ConversionError = Infallible;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,28 +47,4 @@ pub struct ConfigToml {
     /// [`IndexEntry`]. Defaults to [`FailurePolicy::Stop`](schema_core::FailurePolicy::Stop).
     #[serde(default)]
     pub on_error: schema_core::FailurePolicy,
-}
-
-/// Converts source and sinks. `indexes` is left empty — the loader populates
-/// it by loading each YAML file referenced in `ConfigToml.index`.
-///
-/// Infallible (secrets are deferred, URLs validated at resolution time), so this
-/// is a `From`; the standard blanket impl still gives callers a
-/// `TryFrom<ConfigToml>` whose error is [`ConversionError`] (`Infallible`).
-impl From<ConfigToml> for schema_core::Config {
-    fn from(toml: ConfigToml) -> Self {
-        let source = conversion::convert_source(toml.source);
-        let sinks = toml
-            .sinks
-            .into_iter()
-            .map(|(name, sink)| (name, conversion::convert_sink(sink)))
-            .collect();
-
-        schema_core::Config {
-            source,
-            sinks,
-            indexes: BTreeMap::new(),
-            on_error: toml.on_error,
-        }
-    }
 }

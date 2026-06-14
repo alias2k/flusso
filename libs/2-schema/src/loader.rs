@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use schema_config_toml::ConfigToml;
 use schema_core::common::IndexName;
-use schema_core::{Config, Index, IndexSchema, ParseFrom};
+use schema_core::{IndexSchema, ParseFrom};
 use schema_index_yaml::SchemaYaml;
+
+use crate::{Config, Index};
 
 #[derive(thiserror::Error, Debug)]
 pub enum LoadError {

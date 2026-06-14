@@ -3,7 +3,7 @@ members = [
   "libs/0-schema/0-core",
   "libs/0-schema/1-config-toml",
   "libs/0-schema/1-index-yaml",
-  "libs/0-schema",
+  "libs/2-schema",
   "libs/1-queue/0-core",
   "libs/1-queue/1-channel",
   "libs/1-sinks/0-core",
@@ -132,7 +132,7 @@ opentelemetry-prometheus = { version = "0.32.*" }
 tracing-opentelemetry = { version = "0.33.*" }
 prometheus = { version = "0.14.*" }
 
-schema = { path = "libs/0-schema" }
+schema = { path = "libs/2-schema" }
 schema-core = { path = "libs/0-schema/0-core" }
 schema-config-toml = { path = "libs/0-schema/1-config-toml" }
 schema-index-yaml = { path = "libs/0-schema/1-index-yaml" }

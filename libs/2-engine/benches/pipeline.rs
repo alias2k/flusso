@@ -67,17 +67,16 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use engine::{BatchPolicy, Engine};
 use futures::stream::{self, BoxStream};
 use schema_core::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, Config, ConnectionSpec,
-    DatabaseSchema, Direction, Field, FieldName, FieldSource, Filter, FilterOp, FilterValue,
-    FlussoType, GenericValue, Index, IndexMapping, IndexName, IndexSchema, Join, JoinKind, OrderBy,
-    Relation, Secret, SinkName, SoftDelete, SoftDeleteColumn, Source, SourceType, TableName,
-    Through, Transform, ValueOpFilter,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Direction, Field,
+    FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, IndexMapping,
+    IndexName, IndexSchema, Join, JoinKind, OrderBy, Relation, Secret, SinkName, SoftDelete,
+    SoftDeleteColumn, TableName, Through, Transform, ValueOpFilter,
 };
 use sinks_core::{Result as SinkResult, Sink};
 use sinks_opensearch::OpensearchSink;
 use sources_core::cdc::{Ack, AckSink, Change, ChangeCapture, ChangeEvent};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
-use sources_core::{Result as SourceResult, RowKey, SnapshotTable};
+use sources_core::{Result as SourceResult, RowKey, SnapshotTable, SourceSpec};
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -355,7 +354,7 @@ async fn setup() -> Services {
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     seed(&pool).await;
 
-    let builder = PgDocumentBuilder::connect(&url, Arc::new(config(&url)))
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec()))
         .await
         .unwrap();
     let documents: Arc<dyn DocumentBuilder> = Arc::new(builder);
@@ -555,7 +554,7 @@ fn doc_id_string(id: &DocumentId) -> String {
 }
 
 /// The most complex `users` document the builder supports — see the module docs.
-fn config(connection_url: &str) -> Config {
+fn spec() -> SourceSpec {
     // 1:1 join to the user's profile.
     let profile = join_field(
         "profile",
@@ -711,24 +710,7 @@ fn config(connection_url: &str) -> Config {
         filters: None,
         fields,
     };
-    Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: Some(ConnectionSpec::Url(Secret::Value(
-                connection_url.to_owned(),
-            ))),
-        },
-        sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(
-            index_name("users"),
-            Index {
-                enabled: true,
-                schema,
-                on_error: None,
-            },
-        )]),
-        on_error: Default::default(),
-    }
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }
 
 // --- schema construction helpers (mirroring the config_coverage test) --------

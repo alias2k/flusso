@@ -1,12 +1,42 @@
-use schema_core::{
-    ConnectionSpec, OpensearchSink, Secret, Sink, Source, StdoutSink, TextAnalysis,
-    common::SourceType,
-};
+//! Lifting the parsed `flusso.toml` ([`ConfigToml`]) into the assembled
+//! [`Config`].
+//!
+//! The toml parser ([`schema_config_toml`]) produces neutral entity types that
+//! mirror the file; turning those into a `Config` is a composition step, so it
+//! lives here next to `Config` rather than in the parser. Secrets are **not**
+//! resolved here — a `{ env = "VAR" }` / literal becomes a deferred
+//! [`Secret`](schema_core::Secret), read in the environment that runs the
+//! pipeline. The `index` entries are left empty; the loader fills them in by
+//! reading each referenced YAML schema.
 
-use crate::EnvOrValue;
-use crate::entities;
+use std::collections::BTreeMap;
 
-pub(crate) fn convert_source(source: entities::Source) -> Source {
+use schema_config_toml::{ConfigToml, EnvOrValue, entities};
+use schema_core::{ConnectionSpec, OpensearchSink, Secret, StdoutSink, TextAnalysis, common::SourceType};
+
+use super::{Config, Sink, Source};
+
+/// Infallible (secrets are deferred, URLs validated at resolution time), so this
+/// is a `From`; the blanket impl still gives callers a `TryFrom<ConfigToml>`.
+impl From<ConfigToml> for Config {
+    fn from(toml: ConfigToml) -> Self {
+        let source = convert_source(toml.source);
+        let sinks = toml
+            .sinks
+            .into_iter()
+            .map(|(name, sink)| (name, convert_sink(sink)))
+            .collect();
+
+        Config {
+            source,
+            sinks,
+            indexes: BTreeMap::new(),
+            on_error: toml.on_error,
+        }
+    }
+}
+
+fn convert_source(source: entities::Source) -> Source {
     match source {
         entities::Source::Postgres(pg) => Source {
             source_type: SourceType::Postgres,
@@ -37,7 +67,7 @@ fn convert_connection_spec(url: entities::ConnectionUrl) -> ConnectionSpec {
     }
 }
 
-pub(crate) fn convert_sink(sink: entities::Sink) -> Sink {
+fn convert_sink(sink: entities::Sink) -> Sink {
     match sink {
         entities::Sink::Opensearch(s) => Sink::Opensearch(OpensearchSink {
             url: to_secret(s.url),

@@ -12,23 +12,9 @@
 use crate::common::{ColumnName, GenericValue, IndexName};
 
 use super::{
-    Aggregate, AggregateOp, Column, Config, ContentHash, Field, FieldSource, IndexMapping,
-    IndexSchema, Mapping, MappingType, Relation, ResolvedField,
+    Aggregate, AggregateOp, Column, ContentHash, Field, FieldSource, IndexMapping, IndexSchema,
+    Mapping, MappingType, Relation, ResolvedField,
 };
-
-impl Config {
-    /// Project every **enabled** index into a fully-typed [`IndexMapping`],
-    /// using only the declared schema. This is the database-free counterpart to
-    /// the source's old enrichment: the engine runs it up front so the index is
-    /// created from a complete description.
-    pub fn resolve_mappings(&self) -> Vec<IndexMapping> {
-        self.indexes
-            .iter()
-            .filter(|(_, index)| index.enabled)
-            .map(|(name, index)| resolve_index(name.clone(), &index.schema))
-            .collect()
-    }
-}
 
 impl IndexSchema {
     /// Project this schema into its fully-typed [`IndexMapping`].

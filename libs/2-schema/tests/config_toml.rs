@@ -2,8 +2,9 @@
 #![allow(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use schema::{Config, Sink};
 use schema_config_toml::{ConfigToml, ParseError};
-use schema_core::{Config, ConnectionSpec, ParseFrom, Secret, Sink, SinkName};
+use schema_core::{ConnectionSpec, ParseFrom, Secret, SinkName};
 
 fn parse(toml: &str) -> Result<ConfigToml, ParseError> {
     ConfigToml::try_parse(toml)

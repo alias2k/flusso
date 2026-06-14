@@ -31,12 +31,11 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use schema_core::{
-    Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Field, FieldName, FieldSource,
-    FlussoType, GenericValue, Index, IndexName, IndexSchema, Join, JoinKind, Relation, Secret,
-    SoftDelete, SoftDeleteColumn, Source, SourceType, TableName,
+    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
+    IndexName, IndexSchema, Join, JoinKind, Relation, SoftDelete, SoftDeleteColumn, TableName,
 };
-use sources_core::RowKey;
 use sources_core::document::{DocumentBuilder, DocumentId};
+use sources_core::{RowKey, SourceSpec};
 use sources_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -100,7 +99,7 @@ async fn setup() -> (
         }
     }
 
-    let builder = PgDocumentBuilder::connect(&url, Arc::new(config(&url)))
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec()))
         .await
         .unwrap();
     (container, builder, pool)
@@ -182,7 +181,7 @@ fn bench(c: &mut Criterion) {
 /// A `users` index whose documents fold in their `orders` as a nested
 /// one-to-many array, with a soft-delete column — the shape the dev dataset and
 /// integration tests use.
-fn config(connection_url: &str) -> Config {
+fn spec() -> SourceSpec {
     let orders = Field {
         field: field("orders"),
         options: Default::default(),
@@ -220,24 +219,7 @@ fn config(connection_url: &str) -> Config {
             orders,
         ],
     };
-    Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: Some(ConnectionSpec::Url(Secret::Value(
-                connection_url.to_owned(),
-            ))),
-        },
-        sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(
-            index_name("users"),
-            Index {
-                enabled: true,
-                schema,
-                on_error: None,
-            },
-        )]),
-        on_error: Default::default(),
-    }
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }
 
 fn column_field(name: &str, col: &str) -> Field {

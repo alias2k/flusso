@@ -51,11 +51,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use schema_core::{
-    ColumnName, Config, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
-    TableName,
+    ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete, TableName,
 };
 use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use sources_core::{Catalog, ColumnInfo, Result, RowKey, SnapshotTable, SourceError};
+use sources_core::{Catalog, ColumnInfo, Result, RowKey, SnapshotTable, SourceError, SourceSpec};
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
@@ -78,13 +77,14 @@ struct ColumnMeta {
     nullable: bool,
 }
 
-/// Builds index documents from a Postgres database, driven by the loaded
-/// [`Config`]. Cheap to clone — the pool, config, and primary-key cache are
-/// shared.
+/// Builds index documents from a Postgres database, driven by a [`SourceSpec`] —
+/// the enabled indexes and their schemas, translated from the top-level config
+/// by the composition root. Cheap to clone — the pool, spec, and primary-key
+/// cache are shared.
 #[derive(Debug, Clone)]
 pub struct PgDocumentBuilder {
     pool: PgPool,
-    config: Arc<Config>,
+    spec: Arc<SourceSpec>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
@@ -93,11 +93,11 @@ pub struct PgDocumentBuilder {
 }
 
 impl PgDocumentBuilder {
-    /// Create a builder over a connection pool and the resolved config.
-    pub fn new(pool: PgPool, config: Arc<Config>) -> Self {
+    /// Create a builder over a connection pool and the source spec.
+    pub fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
         Self {
             pool,
-            config,
+            spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -105,13 +105,13 @@ impl PgDocumentBuilder {
 
     /// Connect a pool from a Postgres connection URL and build over it.
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
-    pub async fn connect(connection_url: &str, config: Arc<Config>) -> Result<Self> {
+    pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect(connection_url)
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
-        tracing::info!(indexes = config.indexes.len(), "connected to Postgres");
-        Ok(Self::new(pool, config))
+        tracing::info!(indexes = spec.indexes().count(), "connected to Postgres");
+        Ok(Self::new(pool, spec))
     }
 
     /// The single-column primary key of a table, from the Postgres catalog
@@ -320,12 +320,7 @@ impl DocumentBuilder for PgDocumentBuilder {
     )]
     async fn resolve(&self, table: &TableName, key: &RowKey) -> Result<Vec<DocumentId>> {
         let mut ids = Vec::new();
-        for (name, index) in &self.config.indexes {
-            if !index.enabled {
-                continue;
-            }
-            let schema = &index.schema;
-
+        for (name, schema) in self.spec.indexes() {
             // Change on the document's own root table: the key is the id.
             if schema.table == *table {
                 ids.push(DocumentId {
@@ -374,12 +369,10 @@ impl DocumentBuilder for PgDocumentBuilder {
         err,
     )]
     async fn build(&self, id: &DocumentId) -> Result<Document> {
-        let index = self
-            .config
-            .indexes
-            .get(&id.index)
+        let schema = self
+            .spec
+            .schema(&id.index)
             .ok_or_else(|| SourceError::Query(format!("unknown index `{}`", id.index)))?;
-        let schema = &index.schema;
 
         let pks = self.relation_pks(schema).await?;
         let col_types = self.filter_column_types(schema).await?;
@@ -418,12 +411,10 @@ impl DocumentBuilder for PgDocumentBuilder {
 
         let mut out = Vec::with_capacity(ids.len());
         for (index_name, group) in by_index {
-            let index = self
-                .config
-                .indexes
-                .get(index_name)
+            let schema = self
+                .spec
+                .schema(index_name)
                 .ok_or_else(|| SourceError::Query(format!("unknown index `{index_name}`")))?;
-            let schema = &index.schema;
 
             // The batched query keys the root with `IN (…)` on a single column,
             // so it needs both a declared single-column primary key and ids that
@@ -492,15 +483,13 @@ impl DocumentBuilder for PgDocumentBuilder {
     fn backfill_scopes(&self) -> Vec<IndexScope> {
         // A document is keyed by its root row, so the root table alone seeds the
         // whole index — `build` assembles the joins and aggregates per root row.
-        self.config
-            .indexes
-            .iter()
-            .filter(|(_, index)| index.enabled)
-            .map(|(name, index)| IndexScope {
+        self.spec
+            .indexes()
+            .map(|(name, schema)| IndexScope {
                 index: name.clone(),
                 root: SnapshotTable {
-                    db_schema: index.schema.db_schema.clone(),
-                    table: index.schema.table.clone(),
+                    db_schema: schema.db_schema.clone(),
+                    table: schema.table.clone(),
                 },
             })
             .collect()
@@ -509,7 +498,7 @@ impl DocumentBuilder for PgDocumentBuilder {
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {
         // The schema is self-describing, so the mapping is projected from it
         // without touching the database.
-        Ok(self.config.resolve_mappings())
+        Ok(self.spec.index_mappings())
     }
 }
 

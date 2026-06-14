@@ -13,6 +13,8 @@ use clap::{Args, ValueEnum};
 use schema::SourceType;
 use sources_postgres::PgDocumentBuilder;
 
+use crate::backends::source_spec;
+
 use crate::DEFAULT_CONFIG;
 use crate::print;
 
@@ -64,11 +66,12 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             .source
             .resolve_connection_url()
             .context("resolving the source connection URL")?;
-        let documents = PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&config))
+        let spec = Arc::new(source_spec(&config));
+        let documents = PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec))
             .await
             .context("connecting to the database")?;
         Some(
-            sources_core::validate_indexes(&config, &documents)
+            sources_core::validate_indexes(&spec, &documents)
                 .await
                 .context("validating schemas against the database")?,
         )

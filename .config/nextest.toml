@@ -2,7 +2,8 @@
 #
 # Why nextest here:
 #   * Each test runs in its own process, so the env-var mutation in the
-#     config-toml tests can't race across tests.
+#     `schema` crate's config tests (libs/2-schema/tests/config_toml.rs) can't
+#     race across tests.
 #   * The Postgres e2e tests (testcontainers) get their own concurrency cap and
 #     retries — container startup is occasionally flaky and legitimately slow.
 #

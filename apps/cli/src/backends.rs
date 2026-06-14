@@ -20,6 +20,7 @@ use sinks_opensearch::OpensearchSink;
 use sinks_stdout::StdoutSink;
 use sources_core::cdc::ChangeCapture;
 use sources_core::document::DocumentBuilder;
+use sources_core::SourceSpec;
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use url::Url;
 
@@ -46,7 +47,7 @@ impl Backends for FlussoBackends {
 
         let capture: Arc<dyn ChangeCapture> =
             Arc::new(WalChangeCapture::new(replication, connection_url.clone()));
-        let documents = build_documents(&connection_url, Arc::clone(&config)).await?;
+        let documents = build_documents(&connection_url, &config).await?;
 
         Ok(SourceParts { capture, documents })
     }
@@ -93,15 +94,31 @@ fn replication_config(
     Ok(ReplicationConfig::new(host, user, password, database, slot, publication).with_port(port))
 }
 
-/// Connect the Postgres document builder.
+/// Connect the Postgres document builder, translating the config into the
+/// source's own [`SourceSpec`] so the backend never sees the full `Config`.
 async fn build_documents(
     connection_url: &str,
-    config: Arc<Config>,
+    config: &Config,
 ) -> anyhow::Result<Arc<dyn DocumentBuilder>> {
-    let builder = PgDocumentBuilder::connect(connection_url, config)
+    let spec = Arc::new(source_spec(config));
+    let builder = PgDocumentBuilder::connect(connection_url, spec)
         .await
         .context("connecting to Postgres")?;
     Ok(Arc::new(builder))
+}
+
+/// Translate a [`Config`] into the source's [`SourceSpec`]: the **enabled**
+/// indexes and their schemas, dropping disabled ones. This is the composition
+/// root's job — the backend depends only on the resulting spec, never on
+/// `Config`.
+pub(crate) fn source_spec(config: &Config) -> SourceSpec {
+    let indexes = config
+        .indexes
+        .iter()
+        .filter(|(_, index)| index.enabled)
+        .map(|(name, index)| (name.clone(), index.schema.clone()))
+        .collect();
+    SourceSpec::new(indexes)
 }
 
 /// Build the sink from config: a single configured sink directly, several as a

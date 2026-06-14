@@ -14,8 +14,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use schema_core::Config;
-
+use crate::Config;
 use crate::loader::{self, LoadError};
 
 /// The artifact format version. Bumped on any incompatible change to the

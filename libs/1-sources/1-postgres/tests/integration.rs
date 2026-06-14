@@ -14,12 +14,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use schema_core::{
-    Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Field, FieldName, FieldSource,
-    FlussoType, GenericValue, Index, IndexName, IndexSchema, Join, JoinKind, Relation, Secret,
-    SoftDelete, SoftDeleteColumn, Source, SourceType, TableName,
+    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
+    IndexName, IndexSchema, Join, JoinKind, Relation, SoftDelete, SoftDeleteColumn, TableName,
 };
-use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
+use sources_core::{RowKey, SourceSpec};
 use sources_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -43,7 +42,7 @@ async fn assembles_documents_resolves_and_tombstones() {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
 
-    let builder = PgDocumentBuilder::connect(&url, Arc::new(users_config(&url)))
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(users_spec()))
         .await
         .unwrap();
 
@@ -106,7 +105,7 @@ async fn build_many_assembles_a_set_and_tombstones_absent_keys() {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
 
-    let builder = PgDocumentBuilder::connect(&url, Arc::new(users_config(&url)))
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(users_spec()))
         .await
         .unwrap();
 
@@ -159,7 +158,7 @@ async fn build_many_assembles_a_set_and_tombstones_absent_keys() {
     );
 }
 
-fn users_config(connection_url: &str) -> Config {
+fn users_spec() -> SourceSpec {
     let orders = Field {
         field: field("orders"),
         options: Default::default(),
@@ -192,24 +191,7 @@ fn users_config(connection_url: &str) -> Config {
             orders,
         ],
     };
-    Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: Some(ConnectionSpec::Url(Secret::Value(
-                connection_url.to_owned(),
-            ))),
-        },
-        sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(
-            index_name("users"),
-            Index {
-                enabled: true,
-                schema,
-                on_error: None,
-            },
-        )]),
-        on_error: Default::default(),
-    }
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }
 
 fn column_field(name: &str, col: &str) -> Field {

@@ -4,15 +4,9 @@ use crate::common::{HttpUrl, SinkName};
 
 use super::{ResolveError, Secret, http_url, resolve_optional, resolve_required, sink_var_prefix};
 
-/// A destination for built documents: an OpenSearch cluster, or `stdout` for
-/// inspecting output during development.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Sink {
-    Opensearch(OpensearchSink),
-    Stdout(StdoutSink),
-}
-
+/// Per-backend configuration for an OpenSearch destination. The `Sink` enum that
+/// selects between this and [`StdoutSink`] is a composition concern and lives in
+/// the `schema` crate; the backend sinks read these settings directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpensearchSink {
     /// Cluster URL, resolved at runtime (`<NAME>_OPENSEARCH_URL` overrides).

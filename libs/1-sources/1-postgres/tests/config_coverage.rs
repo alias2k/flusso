@@ -22,14 +22,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use schema_core::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, Config, ConnectionSpec,
-    DatabaseSchema, Direction, Field, FieldName, FieldSource, Filter, FilterOp, FilterValue,
-    FlussoType, GenericValue, Index, IndexName, IndexSchema, Join, JoinKind, NullCheckFilter,
-    NullOp, OrderBy, RawFilter, RawFilterValue, Relation, Secret, SoftDelete, SoftDeleteColumn,
-    SoftDeleteField, Source, SourceType, TableName, Through, Transform, ValueOpFilter,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Direction, Field,
+    FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, IndexName,
+    IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, OrderBy, RawFilter, RawFilterValue,
+    Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, TableName, Through, Transform,
+    ValueOpFilter,
 };
-use sources_core::RowKey;
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
+use sources_core::{RowKey, SourceSpec};
 use sources_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -108,7 +108,7 @@ async fn start_seeded() -> (ContainerAsync<Postgres>, String) {
 }
 
 async fn builder(url: &str, schema: IndexSchema) -> PgDocumentBuilder {
-    PgDocumentBuilder::connect(url, Arc::new(config(url, schema)))
+    PgDocumentBuilder::connect(url, Arc::new(spec(schema)))
         .await
         .unwrap()
 }
@@ -924,25 +924,8 @@ async fn root_filters_scope_which_rows_become_documents() {
 // Builders for config, schema, fields, filters, and the value assertions.
 // ---------------------------------------------------------------------------
 
-fn config(connection_url: &str, schema: IndexSchema) -> Config {
-    Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: Some(ConnectionSpec::Url(Secret::Value(
-                connection_url.to_owned(),
-            ))),
-        },
-        sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(
-            index_name("users"),
-            Index {
-                enabled: true,
-                schema,
-                on_error: None,
-            },
-        )]),
-        on_error: Default::default(),
-    }
+fn spec(schema: IndexSchema) -> SourceSpec {
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }
 
 fn users_schema(fields: Vec<Field>, soft_delete: Option<SoftDelete>) -> IndexSchema {

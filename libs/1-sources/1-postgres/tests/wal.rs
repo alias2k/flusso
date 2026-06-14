@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use engine::Engine;
 use schema_core::{
-    Column, ColumnName, Config, ConnectionSpec, DatabaseSchema, Field, FieldName, FieldSource,
-    FlussoType, GenericValue, Index, IndexName, IndexSchema, Secret, Source, SourceType, TableName,
+    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
+    IndexName, IndexSchema, TableName,
 };
 use sinks_core::{Result as SinkResult, Sink};
+use sources_core::SourceSpec;
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -107,7 +108,7 @@ async fn wal_changes_flow_through_the_engine() {
     )
     .with_port(port);
     let documents = Arc::new(
-        PgDocumentBuilder::connect(&url, Arc::new(users_config(&url)))
+        PgDocumentBuilder::connect(&url, Arc::new(users_spec()))
             .await
             .unwrap(),
     );
@@ -184,7 +185,7 @@ async fn backfill_seeds_preexisting_rows() {
     )
     .with_port(port);
     let documents = Arc::new(
-        PgDocumentBuilder::connect(&url, Arc::new(users_config(&url)))
+        PgDocumentBuilder::connect(&url, Arc::new(users_spec()))
             .await
             .unwrap(),
     );
@@ -241,7 +242,7 @@ async fn poll_for(recorded: &Arc<Mutex<Vec<String>>>, op: &str) {
     }
 }
 
-fn users_config(connection_url: &str) -> Config {
+fn users_spec() -> SourceSpec {
     let schema = IndexSchema {
         version: 1,
         table: table("users"),
@@ -252,24 +253,7 @@ fn users_config(connection_url: &str) -> Config {
         filters: None,
         fields: vec![column_field("id", "id"), column_field("email", "email")],
     };
-    Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: Some(ConnectionSpec::Url(Secret::Value(
-                connection_url.to_owned(),
-            ))),
-        },
-        sinks: BTreeMap::new(),
-        indexes: BTreeMap::from([(
-            index_name("users"),
-            Index {
-                enabled: true,
-                schema,
-                on_error: None,
-            },
-        )]),
-        on_error: Default::default(),
-    }
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }
 
 fn column_field(name: &str, col: &str) -> Field {

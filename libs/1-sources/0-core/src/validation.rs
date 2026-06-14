@@ -2,7 +2,7 @@
 //!
 //! The schema now states every field's type and nullability itself, so the
 //! mapping is derived without a database (see
-//! [`Config::resolve_mappings`](schema_core::Config::resolve_mappings)). A
+//! [`SourceSpec::index_mappings`](crate::SourceSpec::index_mappings)). A
 //! database, *when reachable*, is still useful as a check: does each column
 //! exist, and does its real type and nullability agree with what the schema
 //! declares? That is this module's job — it reports disagreements as
@@ -19,11 +19,10 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use schema_core::common::{ColumnName, IndexName};
 use schema_core::{
-    AggregateOp, Column, Config, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation,
-    TableName,
+    AggregateOp, Column, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation, TableName,
 };
 
-use crate::Result;
+use crate::{Result, SourceSpec};
 
 /// How a store reports one base-table column: its native type name (as the
 /// store spells it, e.g. Postgres `character varying(255)`) and whether it
@@ -71,16 +70,15 @@ pub struct Diagnostic {
 
 type FieldName = schema_core::common::FieldName;
 
-/// Validate every **enabled** index in `config` against the store behind
-/// `catalog`, returning the disagreements found. An empty result means the
-/// declared schema matches the database.
-pub async fn validate_indexes(config: &Config, catalog: &dyn Catalog) -> Result<Vec<Diagnostic>> {
+/// Validate every index in `spec` against the store behind `catalog`, returning
+/// the disagreements found. An empty result means the declared schema matches
+/// the database. The spec already holds only enabled indexes.
+pub async fn validate_indexes(
+    spec: &SourceSpec,
+    catalog: &dyn Catalog,
+) -> Result<Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
-    for (name, index) in &config.indexes {
-        if !index.enabled {
-            continue;
-        }
-        let schema = &index.schema;
+    for (name, schema) in spec.indexes() {
         validate_fields(
             name,
             &schema.db_schema,

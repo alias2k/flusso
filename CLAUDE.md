@@ -40,11 +40,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
 - The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration`, `wal`, and
   `config_coverage` binaries; `testcontainers` spins up Postgres. `.config/nextest.toml`
   caps their concurrency and retries them — they're legitimately slow/flaky.
-- **`schema-config-toml` env-var tests must run single-threaded**: they mutate
-  process-wide env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its
-  own process so it's fine there; under plain `cargo test` use
-  `cargo test -p schema-config-toml -- --test-threads=1`. Intermittent `MissingConnectionUrl`
-  / wrong-override failures are this race, not a regression.
+- **The `schema` crate's config env-var tests must run single-threaded**: the
+  `flusso.toml` parse/convert tests (`libs/2-schema/tests/config_toml.rs`) mutate process-wide
+  env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its own process so it's
+  fine there; under plain `cargo test` use `cargo test -p schema -- --test-threads=1`.
+  Intermittent `MissingConnectionUrl` / wrong-override failures are this race, not a regression.
 - CI runs `cargo clippy --workspace` then `cargo nextest run --profile ci --run-ignored all`
   then `cargo test --doc`. Match this before assuming green. A separate `fuzz` job runs a
   60-second `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need
@@ -124,8 +124,17 @@ time uses `#![cfg_attr(test, allow(unused_crate_dependencies))]` (see `libs/2-en
 
 Crates live under `libs/` and `apps/`; the **numeric prefix is the dependency layer** — a
 crate only depends on lower-numbered ones (`0-schema` → `1-{queue,sources,sinks}` →
-`2-engine` → `3-daemon` → `apps`). Within a layer, `0-core` holds the abstraction/domain
+`2-{engine,schema}` → `3-daemon` → `apps`). Within a layer, `0-core` holds the abstraction/domain
 types and higher numbers are concrete backends. Keep this acyclic when adding crates.
+
+The split between `0-schema` and `2-schema` is deliberate: `0-schema` holds the **cross-cutting
+vocabulary** every layer trades in (`schema-core` — `GenericValue`, the newtypes, `IndexMapping`,
+`IndexSchema`, `Field`/`Filter`, `FailurePolicy`, the per-sink configs — plus the two file
+*parsers*, `schema-config-toml`/`schema-index-yaml`, which produce neutral entities). The
+**assembled `Config`** (and `Index`/`Source`/the `Sink` enum + the loader and `Config`→entity
+conversion) is a *composition* concern and lives a layer up in `2-schema` (crate name `schema`),
+so the backends can't reach it — they depend only on the layer-0 vocabulary. See "Config layer"
+below.
 
 ### The pipeline (`libs/2-engine/src/lib.rs`)
 
@@ -195,7 +204,14 @@ backends: `backends.rs`'s `FlussoBackends` implements the daemon's `Backends` tr
 the connection (in the running environment) and building the Postgres source + the configured
 sinks (the source-type dispatch and the OpenSearch/stdout/fan-out `match` live here, not in the
 daemon). Adding a backend = a new match arm here plus its crate; the daemon and engine are
-untouched. It is also the composition root for transport and telemetry: it installs the
+untouched. The composition root is also where `Config` is translated into the backend-facing
+subsets it needs: the Postgres source builder takes a `SourceSpec` (the enabled indexes +
+their schemas, in `schema-core` types — `sources_core::SourceSpec`), never the whole `Config`.
+The `Config`→`SourceSpec` translation lives here, in `backends.rs`'s `source_spec` helper (it
+filters out disabled indexes); `check.rs` calls the same helper to drive `validate_indexes`,
+which is `SourceSpec`-based. So the source crate has no dependency on `Config` at all (nor can
+it — `Config` lives at layer 2 in `schema`, above the backends), and the OpenSearch sink already
+takes only `IndexMapping`/`Mapping`. It is also the composition root for transport and telemetry: it installs the
 meter provider (`metrics.rs` — one `SdkMeterProvider` feeding a Prometheus reader scraped at
 `/metrics` when `--http-addr` is set, and an OTLP periodic push when the standard
 `OTEL_EXPORTER_OTLP_*` env vars configure an endpoint, matching the trace export in
@@ -213,16 +229,20 @@ admin pool (`WalChangeCapture::admin_pool`) so periodic lag probes reuse connect
 
 ### Config layer — two-stage parse then convert
 
-`schema::load(path)` is the front door: it reads `flusso.toml`, resolves+parses every
-referenced `*.schema.yml`, and returns one validated `Config`. Downstream crates depend
-only on `schema` and reach core types via its re-export of `schema-core`. Each format crate
-(`schema-config-toml`, `schema-index-yaml`) works in two stages:
+`schema::load(path)` is the front door (in `libs/2-schema`, layer 2): it reads `flusso.toml`,
+resolves+parses every referenced `*.schema.yml`, and returns one validated `Config`. Downstream
+crates that legitimately compose a deployment (the daemon, the CLI) depend on `schema` and reach
+the vocabulary via its re-export of `schema-core`. Each file *parser* (`schema-config-toml`,
+`schema-index-yaml`, both layer 0) works in two stages:
 
 1. **Parse** — `serde` deserializes into permissive *entity* types that mirror the file
-   1:1; unknown fields are rejected.
-2. **Convert** — entities are lifted into `schema-core` types and rules the format can't
-   express are applied (identifier validation, join/aggregate arity, declared-type
-   placement, filter shapes).
+   1:1; unknown fields are rejected. This is all the layer-0 parser crates do.
+2. **Convert** — entities are lifted into the model and rules the format can't express are
+   applied (identifier validation, join/aggregate arity, declared-type placement, filter
+   shapes). For `*.schema.yml` → `IndexSchema` (a `schema-core` vocabulary type) this lives in
+   `schema-index-yaml`. For `flusso.toml` → the assembled `Config` the conversion is a
+   *composition* step, so it lives in the `schema` crate (`libs/2-schema/src/deployment/conversion.rs`,
+   the `From<ConfigToml>` impl), next to `Config` — the layer-0 toml parser stays free of `Config`.
 
 **Secrets are deferred, never resolved at parse/convert time.** A `{ env = "VAR" }`
 reference becomes a `Secret` and is read in the environment that *runs* the pipeline — so a
@@ -270,12 +290,12 @@ belongs in the linked docs.
 | Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `backends.rs` (`Backends` trait + `SourceParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
 | Backend assembly (which concrete source/sink): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surface, signals | `apps/cli/src/` — `telemetry.rs` (traces), `metrics.rs` (meter provider + `in_flight` gauge), `observer.rs` (`OtelObserver`), `http.rs` (`/healthz` `/readyz` `/status` `/metrics`), `run.rs` (orchestration + signals) |
-| Config loading entry point | `libs/0-schema/src/lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`) |
-| Validated domain model (the shared types) | `libs/0-schema/0-core/src/` — `config/`, `common/` (newtypes), `GenericValue` |
-| `flusso.toml` parsing | `libs/0-schema/1-config-toml/src/` (`entities/`, `conversion.rs`) |
+| Config loading + the assembled `Config`/`Index`/`Source`/`Sink` (layer 2) | `libs/2-schema/src/` — `lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`), `deployment/` (the `Config` family + `From<ConfigToml>` conversion + `resolve_mappings`) |
+| Validated domain model / vocabulary (the shared types) | `libs/0-schema/0-core/src/` — `config/` (`IndexSchema`, `FailurePolicy`, per-sink configs, …), `common/` (newtypes), `GenericValue` |
+| `flusso.toml` parsing (entities only; conversion is in `2-schema`) | `libs/0-schema/1-config-toml/src/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/0-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building | `libs/1-sources/1-postgres/src/` — `cdc/`, `document/` |
-| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`) | `libs/1-sources/0-core/src/` |
+| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec`, `validate_indexes`) | `libs/1-sources/0-core/src/` |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding, latest-alias) | `libs/1-sinks/2-opensearch/src/lib.rs` |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
@@ -297,7 +317,7 @@ belongs in the linked docs.
   and `schema_index_yaml::INDEX_SCHEMA` (`schemas/index.schema.yml`), both re-exported from
   `schema` and emitted by `flusso schema config|index`. The files stay at repo root so the
   `# yaml-language-server: $schema=…` refs and external registries keep working.
-  `libs/0-schema/tests/schema_drift.rs` guards their enumerable sets — field type tags, field
+  `libs/2-schema/tests/schema_drift.rs` guards their enumerable sets — field type tags, field
   siblings, enum tokens, sink fields — against the parsers (reading the embedded consts), so
   adding a tag/sibling/variant fails CI until the schema matches. It does **not** check
   descriptions, defaults, the permissive `field` union, or the identifier `pattern`s (which

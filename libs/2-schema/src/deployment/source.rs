@@ -1,8 +1,5 @@
+use schema_core::{ConnectionSpec, ConnectionUrl, ResolveError, SourceType, resolve_connection_url};
 use serde::{Deserialize, Serialize};
-
-use crate::common::{self, ConnectionUrl};
-
-use super::{ConnectionSpec, ResolveError, resolve_connection_url};
 
 /// The database documents are read from. Today that's always Postgres.
 ///
@@ -11,7 +8,7 @@ use super::{ConnectionSpec, ResolveError, resolve_connection_url};
 /// so a compiled config carries no secret it wasn't given literally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
-    pub source_type: common::SourceType,
+    pub source_type: SourceType,
     /// How to reach the database. `None` means "rely entirely on
     /// `DATABASE_URL`", checked when the connection is resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
