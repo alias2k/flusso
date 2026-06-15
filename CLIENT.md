@@ -561,7 +561,7 @@ struct is the result.
 ## Binding to the schema
 
 The macro validates against the **resolved mapping** — flusso's
-[`IndexMapping`](libs/0-schema/0-core/src/config/index_mapping.rs): every field
+[`IndexMapping`](libs/0-core/src/config/index_mapping.rs): every field
 with a concrete type, whether it is **nullable**, and its nested `children`, plus
 the schema `hash`.
 
@@ -858,7 +858,7 @@ schema layer rather than re-implementing it:
 | Crate            | Role                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------- |
 | `flusso-search` | Runtime: the `Client` transport, the field-handle/`Query`/`Search` builder, `SearchResponse`. Generic over the developer's document types. Targets OpenSearch / Elasticsearch (shared DSL). Re-exports the derive behind a `derive` feature (serde-style), so callers `use flusso_search::FlussoDocument`. |
-| `flusso-derive`  | The `#[derive(FlussoDocument)]` proc-macro crate. At compile time it discovers `flusso.toml`, resolves the named index's [`IndexMapping`](libs/0-schema/0-core/src/config/index_mapping.rs) from the self-describing schema (no database), validates the annotated struct against it, and emits the field handles, entry points, and schema hash. Reuses `schema-config-toml`, `schema-index-yaml`, and `schema-core` to load and resolve. |
+| `flusso-derive`  | The `#[derive(FlussoDocument)]` proc-macro crate. At compile time it discovers `flusso.toml`, resolves the named index's [`IndexMapping`](libs/0-core/src/config/index_mapping.rs) from the self-describing schema (no database), validates the annotated struct against it, and emits the field handles, entry points, and schema hash. Reuses `schema-config-toml`, `schema-index-yaml`, and `schema-core` to load and resolve. |
 
 The numeric-layer rule still holds: both new crates sit above `schema-core` and
 depend only downward. The client crate has no dependency on the engine, the

@@ -273,10 +273,10 @@ layer** — a crate only depends on lower-numbered ones.
 
 | Crate | Path | Role |
 | --- | --- | --- |
-| `schema` | `libs/0-schema` | Config entry point. `load()` reads a config + its schemas into one validated `Config`. |
-| `schema-core` | `libs/0-schema/0-core` | The validated domain model every other crate produces and consumes. |
-| `schema-config-toml` | `libs/0-schema/1-config-toml` | Parses `flusso.toml` → core types. |
-| `schema-index-yaml` | `libs/0-schema/1-index-yaml` | Parses `*.schema.yml` → core types. |
+| `schema-core` | `libs/0-core` | The validated domain model every other crate produces and consumes — the sole layer-0 crate. |
+| `schema-config-toml` | `libs/2-schema/1-config-toml` | Parses `flusso.toml` → neutral entities. |
+| `schema-index-yaml` | `libs/2-schema/1-index-yaml` | Parses `*.schema.yml` → core types. |
+| `schema` | `libs/2-schema` | Config entry point. `load()` reads a config + its schemas into one validated `Config`. |
 | `queue-core` | `libs/1-queue/0-core` | The work-queue abstraction, generic over the payload. |
 | `queue-channel` | `libs/1-queue/1-channel` | In-process queue over a bounded `tokio` mpsc channel. |
 | `sources-core` | `libs/1-sources/0-core` | Source abstractions: `cdc` (*what changed?*) and `document` (*what to build?*). |

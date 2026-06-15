@@ -127,18 +127,21 @@ time uses `#![cfg_attr(test, allow(unused_crate_dependencies))]` (see `libs/2-en
 ### Crate layering
 
 Crates live under `libs/` and `apps/`; the **numeric prefix is the dependency layer** — a
-crate only depends on lower-numbered ones (`0-schema` → `1-{queue,sources,sinks}` →
+crate only depends on lower-numbered ones (`0-core` → `1-{queue,sources,sinks}` →
 `2-{engine,schema}` → `3-daemon` → `apps`). Within a layer, `0-core` holds the abstraction/domain
 types and higher numbers are concrete backends. Keep this acyclic when adding crates.
 
-The split between `0-schema` and `2-schema` is deliberate: `0-schema` holds the **cross-cutting
-vocabulary** every layer trades in (`schema-core` — `GenericValue`, the newtypes, `IndexMapping`,
-`IndexSchema`, `Field`/`Filter`, `FailurePolicy`, the per-sink configs — plus the two file
-*parsers*, `schema-config-toml`/`schema-index-yaml`, which produce neutral entities). The
-**assembled `Config`** (and `Index`/`Source`/the `Sink` enum + the loader and `Config`→entity
-conversion) is a *composition* concern and lives a layer up in `2-schema` (crate name `schema`),
-so the backends can't reach it — they depend only on the layer-0 vocabulary. See "Config layer"
-below.
+Layer 0 is a single crate, `schema-core` (`libs/0-core`): the **cross-cutting vocabulary**
+every layer trades in — `GenericValue`, the newtypes, `IndexMapping`, `IndexSchema`,
+`Field`/`Filter`, `FailurePolicy`, the per-sink configs. Everything that turns config *files*
+into that vocabulary lives a layer up, in the `2-schema` group (crate name `schema`): the two
+file *parsers* (`schema-config-toml`/`schema-index-yaml`, nested at
+`libs/2-schema/1-{config-toml,index-yaml}`, which produce neutral entities), the **assembled
+`Config`** (plus `Index`/`Source`/the `Sink` enum), the `Config`→entity conversion, and the
+loader. Keeping the parsers out of layer 0 is deliberate — it's the one place a layer-1
+backend *could* otherwise reach config-loading machinery; with them at layer 2 the backends
+depend only on the layer-0 vocabulary and *cannot* see the assembled `Config` or the file
+parsers. See "Config layer" below.
 
 ### The pipeline (`libs/2-engine/src/lib.rs`)
 
@@ -237,16 +240,16 @@ admin pool (`WalChangeCapture::admin_pool`) so periodic lag probes reuse connect
 resolves+parses every referenced `*.schema.yml`, and returns one validated `Config`. Downstream
 crates that legitimately compose a deployment (the daemon, the CLI) depend on `schema` and reach
 the vocabulary via its re-export of `schema-core`. Each file *parser* (`schema-config-toml`,
-`schema-index-yaml`, both layer 0) works in two stages:
+`schema-index-yaml`, both in the `2-schema` group) works in two stages:
 
 1. **Parse** — `serde` deserializes into permissive *entity* types that mirror the file
-   1:1; unknown fields are rejected. This is all the layer-0 parser crates do.
+   1:1; unknown fields are rejected. This is all the parser crates do.
 2. **Convert** — entities are lifted into the model and rules the format can't express are
    applied (identifier validation, join/aggregate arity, declared-type placement, filter
    shapes). For `*.schema.yml` → `IndexSchema` (a `schema-core` vocabulary type) this lives in
    `schema-index-yaml`. For `flusso.toml` → the assembled `Config` the conversion is a
    *composition* step, so it lives in the `schema` crate (`libs/2-schema/src/deployment/conversion.rs`,
-   the `From<ConfigToml>` impl), next to `Config` — the layer-0 toml parser stays free of `Config`.
+   the `From<ConfigToml>` impl), next to `Config` — the toml parser stays free of `Config`.
 
 **Secrets are deferred, never resolved at parse/convert time.** A `{ env = "VAR" }`
 reference becomes a `Secret` and is read in the environment that *runs* the pipeline — so a
@@ -261,7 +264,7 @@ split by relationship verb, which names where the key lives: `belongs_to` (this 
 `column` pointing at the target, defaulting to the field name), `has_one`/`has_many`
 (the related table's `foreign_key`), `many_to_many` (`through` a junction). Aggregates
 split by op (`count`/`sum`/`avg`/`min`/`max`). Parsing lives in
-`libs/0-schema/1-index-yaml/src/entities/field.rs`; the core model is `schema_core::FieldSource`
+`libs/2-schema/1-index-yaml/src/entities/field.rs`; the core model is `schema_core::FieldSource`
 (`Join.kind: JoinKind`, with reverse resolution per kind in
 `libs/1-sources/1-postgres/src/document/resolve.rs`).
 
@@ -295,9 +298,9 @@ belongs in the linked docs.
 | Backend assembly (which concrete source/sink): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surface, signals | `apps/cli/src/` — `telemetry.rs` (traces), `metrics.rs` (meter provider + `in_flight` gauge), `observer.rs` (`OtelObserver`), `http.rs` (`/healthz` `/readyz` `/status` `/metrics`), `run.rs` (orchestration + signals) |
 | Config loading + the assembled `Config`/`Index`/`Source`/`Sink` (layer 2) | `libs/2-schema/src/` — `lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`), `deployment/` (the `Config` family + `From<ConfigToml>` conversion + `resolve_mappings`) |
-| Validated domain model / vocabulary (the shared types) | `libs/0-schema/0-core/src/` — `config/` (`IndexSchema`, `FailurePolicy`, per-sink configs, …), `common/` (newtypes), `GenericValue` |
-| `flusso.toml` parsing (entities only; conversion is in `2-schema`) | `libs/0-schema/1-config-toml/src/` (`entities/`) |
-| `*.schema.yml` parsing / field syntax | `libs/0-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
+| Validated domain model / vocabulary (the shared types — the sole layer-0 crate) | `libs/0-core/src/` — `config/` (`IndexSchema`, `FailurePolicy`, per-sink configs, …), `common/` (newtypes), `GenericValue` |
+| `flusso.toml` parsing (entities only; conversion is in the `schema` loader) | `libs/2-schema/1-config-toml/src/` (`entities/`) |
+| `*.schema.yml` parsing / field syntax | `libs/2-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building | `libs/1-sources/1-postgres/src/` — `cdc/`, `document/` |
 | Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec`, `validate_indexes`) | `libs/1-sources/0-core/src/` |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
@@ -313,7 +316,7 @@ belongs in the linked docs.
 ## Conventions
 
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
-  `libs/0-schema/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
+  `libs/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - `dev/` is a runnable example, not shipping code; `schemas/*.json|yml` are hand-curated JSON
   Schemas for editor completion. Each is owned by the format crate that defines its shape and
