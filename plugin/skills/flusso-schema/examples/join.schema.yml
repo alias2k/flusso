@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=./index.schema.yml
+#
+# Worked example: every join verb in one document.
+# The verb names WHERE the key lives — that's the whole mental model.
+version: 1
+table: users
+schema: public
+primary_key: id          # required once any relation exists
+
+fields:
+  - integer: id
+  - keyword: email
+    required: true
+
+  # belongs_to — MY column points at the related row. Key sibling: `column`
+  # (defaults to the field name, so this reads the `created_by` column).
+  - belongs_to: created_by
+    table: users
+    primary_key: id
+    fields:
+      - keyword: email
+        required: true
+      - text: name
+
+  # has_one — the RELATED table points back at me. Key sibling: `foreign_key`.
+  # order_by picks which single row becomes the object.
+  - has_one: primaryAddress
+    table: addresses
+    foreign_key: user_id
+    primary_key: id
+    order_by:
+      - { column: is_primary, direction: desc }
+    fields:
+      - keyword: city
+        required: true
+
+  # has_many — many related rows point back at me. Renders as a nested array.
+  - has_many: orders
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    order_by:
+      - { column: created_at, direction: desc }
+    limit: 5
+    filters:
+      - { column: status, op: in, value: [paid, shipped] }
+    fields:
+      - integer: id
+      - double: total
+        required: true
+      - keyword: status
+        required: true
+
+  # many_to_many — connected through a junction table. Key sibling: `through`.
+  - many_to_many: tags
+    table: tags
+    through:
+      table: user_tags
+      left_key: user_id
+      right_key: tag_id
+    primary_key: id
+    fields:
+      - keyword: name
+        required: true

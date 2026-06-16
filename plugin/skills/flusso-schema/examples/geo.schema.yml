@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=./index.schema.yml
+#
+# Worked example: geo points (-> OpenSearch geo_point), both forms, plus an
+# object that shapes same-row columns without reading a related table.
+version: 1
+table: stores
+primary_key: id
+
+fields:
+  - integer: id
+  - identifier: code        # store code: searchable by parts (ST-001 <-> 001)
+    required: true
+
+  # Two-column form: a latitude column + a longitude column. A missing
+  # coordinate makes the whole point null (never {lat:null, lon:null}).
+  - geo: location
+    lat: latitude
+    lon: longitude
+    required: false
+
+  # Single-column form: a column already holding a geo-shaped value —
+  # jsonb {"lat":..,"lon":..}, [lon,lat], or text "lat,lon".
+  # NOTE: PostGIS `geometry` / PG `point` are NOT accepted; expose a generated
+  # jsonb/text column in one of those shapes.
+  - geo: warehouse
+    column: warehouse_point
+    required: false
+
+  # object — nests SAME-ROW columns under one key (no related table read).
+  # Never null; members declare their own types.
+  - object: address
+    fields:
+      - keyword: street
+        column: address_street
+        required: true
+      - keyword: city
+        column: address_city
+        required: true
+      - keyword: zip
+        column: address_zip

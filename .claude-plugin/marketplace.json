@@ -1,0 +1,17 @@
+{
+  "name": "flusso",
+  "owner": {
+    "name": "alias2k",
+    "url": "https://github.com/alias2k/flusso"
+  },
+  "metadata": {
+    "description": "Plugins for working with flusso — the Postgres → OpenSearch sync tool."
+  },
+  "plugins": [
+    {
+      "name": "flusso",
+      "source": "./plugin",
+      "description": "Author and maintain flusso schemas, and integrate flusso into a new project."
+    }
+  ]
+}

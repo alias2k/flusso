@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=./index.schema.yml
+#
+# Worked example: aggregates (the op is the type key) + a custom scaled_float
+# for exact money (decimal -> double is lossy).
+version: 1
+table: users
+primary_key: id
+
+fields:
+  - integer: id
+  - keyword: email
+    required: true
+
+  # count — always a non-null `long`. No column / value_type.
+  - count: orderCount
+    table: orders
+    foreign_key: user_id
+
+  # avg — nullable `double`. Takes a `column` but no `value_type`.
+  - avg: avgOrderTotal
+    table: orders
+    column: total
+    foreign_key: user_id
+
+  # sum/min/max — MUST declare both `column` and `value_type` (mirrors the column).
+  # Filters restrict which rows count.
+  - sum: lifetimeValue
+    table: orders
+    column: total
+    value_type: decimal
+    foreign_key: user_id
+    filters:
+      - { column: status, op: eq, value: paid }
+
+  - max: lastOrderAt
+    table: orders
+    column: created_at
+    value_type: timestamp
+    foreign_key: user_id
+
+  # Aggregating across a many-to-many uses `through` INSTEAD of `foreign_key`
+  # (exactly one of the two).
+  - count: tagCount
+    table: tags
+    through:
+      table: user_tags
+      left_key: user_id
+      right_key: tag_id
+
+  # Exact money: decimal -> double loses precision, so declare a custom field.
+  - custom: balance
+    postgres: [numeric]
+    opensearch: scaled_float
+    options: { scaling_factor: 100 }
