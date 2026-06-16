@@ -3,6 +3,7 @@
 //! `main` dispatches to one `execute` per subcommand; [`print`](mod@print) is the pretty
 //! output helper they share.
 
+pub(crate) mod admin;
 pub(crate) mod build;
 pub(crate) mod check;
 pub(crate) mod print;

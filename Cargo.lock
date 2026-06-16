@@ -1072,6 +1072,7 @@ dependencies = [
  "opentelemetry-prometheus",
  "opentelemetry_sdk",
  "prometheus",
+ "reqwest 0.12.28",
  "schema",
  "serde_json",
  "sinks-core",

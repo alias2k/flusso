@@ -49,6 +49,10 @@ spec:
             - run
             - --public-address
             - "0.0.0.0:{{ .Values.http.port }}"
+            # Private control surface on localhost only (reach via port-forward);
+            # set FLUSSO_ADMIN_PASSWORD via `secrets` before relying on it.
+            - --private-address
+            - "127.0.0.1:{{ .Values.http.privatePort }}"
             {{- if $useConfig }}
             - --config
             - "{{ .Values.config.mountPath }}/flusso.toml"

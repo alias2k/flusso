@@ -307,9 +307,10 @@ belongs in the linked docs.
 | Postgres WAL capture / backfill / doc building | `libs/1-sources/1-postgres/src/` — `cdc/`, `document/` |
 | Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec`, `validate_indexes`) | `libs/1-sources/0-core/src/` |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
-| OpenSearch sink (bulk, mappings, seeding, latest-alias) | `libs/1-sinks/2-opensearch/src/lib.rs` |
+| OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/1-sinks/2-opensearch/src/lib.rs` |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
-| CLI subcommands (`build`/`run`/`check`/`schema`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
+| CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives the `Daemon::start`/`run` **restart loop**, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
+| On-demand reindex (alias-over-generations + restart trigger) | sink: `libs/1-sinks/2-opensearch/src/lib.rs` (`reindex`/`ensure_index`/`mark_seeded`, generation helpers); engine `CaptureGuard` + daemon `LagGuard` (clean cancel) + `Daemon::with_status`; CLI `commands/run.rs` (restart loop), `http/mod.rs` (`POST /reindex`), `commands/admin.rs` (client). Design: `ROADMAP.md` |
 | Query client (`flusso-query`) | `apps/query/src/` |
 | `#[derive(FlussoDocument)]` proc-macro | `apps/query-derive/src/` (+ the `flusso-query-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |

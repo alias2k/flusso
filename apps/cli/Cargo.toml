@@ -36,3 +36,6 @@ tracing-opentelemetry.workspace = true
 prometheus.workspace = true
 axum.workspace = true
 base64.workspace = true
+# HTTP client for the `indexes`/`reindex` subcommands talking to a running
+# flusso's private control surface.
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }

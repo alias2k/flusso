@@ -3,21 +3,22 @@
 //! The sink owns each index it writes to and creates it up front from an
 //! explicit, fully-typed mapping ([`ensure_index`](OpensearchSink::ensure_index)):
 //!
-//! - **Hashed physical name.** The actual index is named `{logical}_{hash}`,
-//!   where the hash is derived from the parsed index schema. A structural
-//!   change to the schema changes the hash, so the sink writes to a fresh
-//!   index (re-seeded from scratch) rather than into the old, now-mismatched
-//!   shape. The logical name remains the pipeline's identity; the sink
-//!   translates it to the physical name on every call.
-//! - **Convenience alias.** The logical name is also maintained as an alias
-//!   pointing at the *current* physical index, repointed atomically whenever
-//!   the schema hash moves, so a human (or an ad-hoc tool) can always query
-//!   `{logical}` without knowing the hash. The alias is write-only from the
-//!   sink's perspective: flusso itself always addresses the physical name —
-//!   both here and in the `flusso-query` client — and never reads or writes
-//!   through the alias. Alias upkeep is best-effort: a failure (say, the
-//!   cluster already has a real index named `{logical}`) is logged and
-//!   ignored, because correctness never depends on it.
+//! - **Hash alias over generations.** The addressable name `{logical}_{hash}`
+//!   (hash derived from the parsed schema) is an **alias**; the data lives in a
+//!   concrete *generation* index `{logical}_{hash}_{gen}` behind it. A structural
+//!   schema change moves the hash — a fresh alias + generation, re-seeded from
+//!   scratch. An on-demand [`reindex`](OpensearchSink::reindex) (same schema)
+//!   builds the *next* generation while the current one keeps serving reads, then
+//!   [`mark_seeded`](OpensearchSink::mark_seeded) atomically repoints the alias
+//!   and drops the old generation — so reads never see a half-built index. flusso
+//!   and the `flusso-query` client address `{logical}_{hash}` (reading through an
+//!   alias is transparent); the active generation + seeded-state live in a
+//!   per-index meta doc.
+//! - **Convenience alias.** The logical name `{logical}` is *also* kept as an
+//!   alias on the current generation, so a human or ad-hoc tool can query
+//!   `{logical}` without knowing the hash. Best-effort: a failure (say, the
+//!   cluster already has a real index named `{logical}`) is logged and ignored,
+//!   because correctness never depends on it.
 //! - **Explicit mapping.** Field types come from the schema, not OpenSearch's
 //!   dynamic guesses, and the index is created `dynamic: strict` so only
 //!   configured fields are accepted. An index that already exists is left

@@ -119,7 +119,11 @@ where stuffing things into the environment beats juggling an args array.
 | `FLUSSO_SKIP_BACKFILL` | `--skip-backfill` | `run` |
 | `FLUSSO_PRETTY` | `--pretty` | `run` |
 | `FLUSSO_QUEUE_CAPACITY` | `--queue-capacity` | `run` |
-| `FLUSSO_HTTP_ADDR` | `--http-addr` | `run` |
+| `FLUSSO_PUBLIC_ADDRESS` | `--public-address` | `run` |
+| `FLUSSO_PRIVATE_ADDRESS` | `--private-address` | `run` |
+| `FLUSSO_ADMIN_USER` | `--admin-user` | `run`, `indexes`, `reindex` |
+| `FLUSSO_ADMIN_PASSWORD` | `--admin-password` | `run`, `indexes`, `reindex` |
+| `FLUSSO_SERVER` | `--server` | `indexes`, `reindex` |
 | `FLUSSO_LAG_POLL_SECS` | `--lag-poll-secs` | `run` |
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
 | `FLUSSO_FORMAT` | `--format` | `check` |
@@ -127,6 +131,17 @@ where stuffing things into the environment beats juggling an args array.
 
 `flusso <cmd> --help` always shows the matching `[env: FLUSSO_…]` next to each
 flag, so you never have to guess.
+
+The two operational HTTP surfaces (see the [reindex roadmap](ROADMAP.md)) have an
+extra fallback layer for their bind addresses: a `[server]` table in
+`flusso.toml`. So the precedence for `--public-address` / `--private-address` is
+**flag > `FLUSSO_*` env > `[server]` config > built-in default**
+(`127.0.0.1:9464` for the public read-only surface, `127.0.0.1:9465` for the
+private control surface). The Basic-auth credentials (`--admin-user` /
+`--admin-password`, default **`admin` / `flusso`** — change them before exposing
+the private port) are flag/env only, never the config file, because they're
+secrets. The `indexes` / `reindex` client subcommands reuse those credentials and
+take `--server` / `FLUSSO_SERVER` to address a running server's private surface.
 
 ## Logging & telemetry
 
@@ -145,7 +160,7 @@ standard `OTEL_*` variables (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`,
 `OTEL_EXPORTER_OTLP_PROTOCOL`, …) are honored by the OpenTelemetry SDK as usual.
 
 > Prometheus metrics are a separate, pull-based path: they're served at
-> `/metrics` whenever you pass `--http-addr`, no env var required.
+> `/metrics` on the public surface (default `127.0.0.1:9464`), no env var required.
 
 ## The derive (compile-time)
 
@@ -170,7 +185,10 @@ PRIMARY_OPENSEARCH_PASSWORD=…           # plus any names you used in { env = "
 FLUSSO_CONFIG=flusso.toml
 FLUSSO_SLOT=flusso
 FLUSSO_PUBLICATION=flusso
-FLUSSO_HTTP_ADDR=0.0.0.0:9464
+FLUSSO_PUBLIC_ADDRESS=0.0.0.0:9464      # read-only surface (health/status/metrics)
+FLUSSO_PRIVATE_ADDRESS=0.0.0.0:9465     # control surface (indexes/reindex), Basic auth
+FLUSSO_ADMIN_USER=admin                 # change these before exposing the private port!
+FLUSSO_ADMIN_PASSWORD=change-me
 FLUSSO_SKIP_BACKFILL=true
 
 # logging & telemetry

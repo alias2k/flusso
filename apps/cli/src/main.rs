@@ -1,6 +1,7 @@
 //! `flusso` — keep a search index in sync with Postgres from a config file.
 //!
-//! Four subcommands, one module each:
+//! Subcommands (under `commands/`). The first four are local/offline; the last
+//! two are thin HTTP clients to a *running* server's private control surface:
 //!
 //! - [`build`](commands::build) reads a `flusso.toml`, parses and validates every schema it
 //!   references, and writes the whole validated configuration to a single
@@ -17,6 +18,11 @@
 //! - [`schema_cmd`](commands::schema_cmd) prints an embedded JSON Schema for editor assist — the
 //!   `flusso.toml` config schema or the `*.schema.yml` index schema — so a user
 //!   can pin the schema that matches their installed version.
+//! - [`indexes`](commands::admin::indexes) lists a running server's indexes and
+//!   their lifecycle state.
+//! - [`reindex`](commands::admin::reindex) triggers a from-scratch rebuild of one
+//!   index on a running server (zero read-downtime; reads stay on the old copy
+//!   until the rebuild swaps in).
 
 mod backends;
 mod commands;
@@ -25,6 +31,7 @@ mod telemetry;
 
 use clap::{Parser, Subcommand};
 
+use commands::admin::{IndexesArgs, ReindexArgs};
 use commands::build::BuildArgs;
 use commands::check::CheckArgs;
 use commands::run::RunArgs;
@@ -55,6 +62,10 @@ enum Command {
     Check(CheckArgs),
     /// Print an embedded JSON Schema for editor assist.
     Schema(SchemaArgs),
+    /// List a running server's indexes and their state.
+    Indexes(IndexesArgs),
+    /// Trigger a from-scratch rebuild of one index on a running server.
+    Reindex(ReindexArgs),
 }
 
 #[tokio::main]
@@ -64,5 +75,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(args) => commands::run::execute(args).await,
         Command::Check(args) => commands::check::execute(args).await,
         Command::Schema(args) => commands::schema_cmd::execute(args),
+        Command::Indexes(args) => commands::admin::indexes(args).await,
+        Command::Reindex(args) => commands::admin::reindex(args).await,
     }
 }

@@ -60,9 +60,17 @@ run:
   # Any extra raw args appended verbatim, e.g. ["--pretty"].
   extraArgs: []
 
-# The operational HTTP surface port (health, readiness, status, metrics).
+# The operational HTTP surfaces.
 http:
+  # Public, read-only surface (health, readiness, status, metrics). Exposed via
+  # the Service and scraped by Prometheus. Bound to 0.0.0.0 in the pod.
   port: 9464
+  # Private control surface (indexes, reindex), Basic-auth protected. Bound to
+  # localhost only — reach it with `kubectl port-forward` — so it is never
+  # cluster-exposed by default. Set credentials via `secrets` below
+  # (FLUSSO_ADMIN_USER / FLUSSO_ADMIN_PASSWORD); the defaults are admin/flusso
+  # and the pod logs a warning until you change the password.
+  privatePort: 9465
 
 # Secrets injected as environment variables (resolved by `{ env = "VAR" }`
 # references in the config). Use `create` to manage a Secret from `data`, or
