@@ -45,6 +45,9 @@ RUN apt-get update \
 
 COPY --from=builder /usr/local/bin/flusso /usr/local/bin/flusso
 
+# Apache-2.0 §4(a): ship the license text with the distributed binary.
+COPY --from=builder /usr/src/flusso/LICENSE /usr/share/doc/flusso/LICENSE
+
 WORKDIR /app
 USER 65532:65532
 

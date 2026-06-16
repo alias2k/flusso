@@ -317,3 +317,9 @@ example schemas already reference them via a `yaml-language-server` modeline.
 Want to hack on it? [`CLAUDE.md`](CLAUDE.md) has the architecture tour and the
 house rules (the lints are strict — no `unwrap`, no `println!`, and yes, they fail
 the build).
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Unless you explicitly
+state otherwise, any contribution intentionally submitted for inclusion in this
+work shall be licensed as above, without any additional terms or conditions.
