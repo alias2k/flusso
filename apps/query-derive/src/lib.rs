@@ -1,4 +1,4 @@
-//! `#[derive(FlussoDocument)]` — the proc-macro behind `flusso-search`.
+//! `#[derive(FlussoDocument)]` — the proc-macro behind `flusso-query`.
 //!
 //! It does **not** generate the document struct. The developer writes the struct;
 //! this derive, at compile time:
@@ -8,14 +8,14 @@
 //! 2. validates each declared field against that mapping (exists / type /
 //!    nullability), reporting every problem at once with precise spans;
 //! 3. generates the typed query surface (`Type::field()` handles, `get`/`query`,
-//!    `SCHEMA_HASH`) that targets the `flusso-search` runtime.
+//!    `SCHEMA_HASH`) that targets the `flusso-query` runtime.
 //!
 //! Two companion derives ship alongside it: [`FlussoValue`](derive_flusso_value)
 //! (a Rust enum/newtype standing in for a leaf field) and
 //! [`FlussoMultiDocument`](derive_flusso_multi_document) (the combined-search
 //! union over several document types).
 //!
-//! Use them through `flusso-search`'s `derive` feature: `use flusso_search::FlussoDocument`.
+//! Use them through `flusso-query`'s `derive` feature: `use flusso_query::FlussoDocument`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -43,7 +43,7 @@ pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
     expand(input).into()
 }
 
-/// Implement `flusso_search::FlussoValue<K>` for an enum or newtype wrapper, so
+/// Implement `flusso_query::FlussoValue<K>` for an enum or newtype wrapper, so
 /// it may stand in for a field of kind `K` in a `FlussoDocument` struct. The
 /// kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
 /// `#[flusso(number)]`, or `#[flusso(date)]`.
@@ -60,7 +60,7 @@ pub fn derive_flusso_value(input: TokenStream) -> TokenStream {
     value::expand(input).into()
 }
 
-/// Implement `flusso_search::FlussoMultiDocument` for an enum of document
+/// Implement `flusso_query::FlussoMultiDocument` for an enum of document
 /// types — the combined-search union. Each variant is a single-field tuple
 /// variant whose payload implements `FlussoDocument`; the generated impl
 /// lists every variant's index (`TARGETS`) and decodes each hit into the
@@ -198,7 +198,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
     // The scope this struct's handles live in: `Root` (untagged) at the root and
     // through flattened objects; the struct's own type under a `nested` array.
     let scope_tag = match resolved.scope_at(attrs.path.as_deref()) {
-        Ok(Scope::Root) => quote! { ::flusso_search::Root },
+        Ok(Scope::Root) => quote! { ::flusso_query::Root },
         Ok(Scope::SelfTagged) => quote! { Self },
         Err(message) => return syn::Error::new(attrs.path_span, message).to_compile_error(),
     };
@@ -244,7 +244,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
 // reference them here so the lib's own test target doesn't flag them as unused.
 #[cfg(test)]
 mod dev_deps {
-    use flusso_search as _;
+    use flusso_query as _;
     use serde as _;
     use serde_json as _;
     use trybuild as _;

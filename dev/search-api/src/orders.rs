@@ -6,7 +6,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_search::{Client, FlussoDocument};
+use flusso_query::{Client, FlussoDocument};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;

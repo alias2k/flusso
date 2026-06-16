@@ -103,8 +103,12 @@ flag**, then the **`FLUSSO_*` env var**, then the **`flusso.toml` config** —
 extending flusso's existing flag-over-env rule with a config layer beneath it.
 The Basic-auth credentials resolve from the **CLI flag** and **env var only**,
 never the config file: they are secrets, and flusso never bakes a secret into a
-compiled `flusso.lock`. The private surface is **fail-closed** — with no
-credentials configured it is not mounted at all.
+compiled `flusso.lock`. They **default to `admin` / `flusso`** so the private
+surface works out of the box, and flusso logs a prominent warning on every start
+while the password is still the default — so an unconfigured deployment is usable
+but never *quietly* insecure. Because those defaults are public, changing them is
+mandatory for any network-reachable deployment, and the private port should stay
+gated (localhost / NetworkPolicy / TLS) regardless.
 
 **Why reindex (an *unchanged* schema) at all** — a schema *change* already
 re-indexes itself, since a new hash yields a fresh physical index. The reasons to

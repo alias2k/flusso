@@ -1090,7 +1090,7 @@ name = "flusso-dev-search-api"
 version = "0.1.0"
 dependencies = [
  "axum",
- "flusso-search",
+ "flusso-query",
  "serde",
  "serde_json",
  "tokio",
@@ -1099,11 +1099,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "flusso-search"
+name = "flusso-query"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "flusso-search-derive",
+ "flusso-query-derive",
  "reqwest 0.12.28",
  "rust_decimal",
  "serde",
@@ -1114,10 +1114,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "flusso-search-derive"
+name = "flusso-query-derive"
 version = "0.1.0"
 dependencies = [
- "flusso-search",
+ "flusso-query",
  "proc-macro2",
  "quote",
  "schema",

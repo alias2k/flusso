@@ -1,6 +1,6 @@
 # flusso-dev-search-api
 
-A small HTTP API over the dev indexes, built with `flusso-search` +
+A small HTTP API over the dev indexes, built with `flusso-query` +
 `#[derive(FlussoDocument)]`. It's the read side of the dev stack: the engine
 keeps OpenSearch in sync from Postgres, and this serves typed, filterable
 queries over the result.

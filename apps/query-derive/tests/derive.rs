@@ -2,7 +2,7 @@
 //! `flusso.toml` fixture → a generated query surface that builds real requests.
 #![allow(dead_code, unused_crate_dependencies)]
 
-use flusso_search::{FlussoDocument, FlussoValue, GeoPoint};
+use flusso_query::{FlussoDocument, FlussoValue, GeoPoint};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -134,7 +134,7 @@ struct Product {
     name: Option<String>,
 }
 
-#[derive(flusso_search::FlussoMultiDocument)]
+#[derive(flusso_query::FlussoMultiDocument)]
 enum SearchItem {
     User(User),
     Product(Product),
@@ -142,7 +142,7 @@ enum SearchItem {
 
 #[test]
 fn multi_document_derive_lists_targets_and_dispatches_hits() -> Result {
-    use flusso_search::FlussoMultiDocument as _;
+    use flusso_query::FlussoMultiDocument as _;
 
     // TARGETS: one (logical index, schema hash) per variant, in order.
     assert_eq!(
@@ -174,7 +174,7 @@ fn multi_document_derive_lists_targets_and_dispatches_hits() -> Result {
 
     // A hit from an index no variant claims is an error, not a skip.
     match SearchItem::decode("ghosts_zzzzzz", serde_json::json!({})) {
-        Err(flusso_search::Error::UnexpectedIndex { index }) => {
+        Err(flusso_query::Error::UnexpectedIndex { index }) => {
             assert_eq!(index, "ghosts_zzzzzz");
         }
         Err(other) => return Err(format!("wrong error: {other}").into()),

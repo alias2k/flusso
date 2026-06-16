@@ -109,32 +109,32 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     let targets = variants.iter().map(|(_, ty)| {
         quote_spanned! { ty.span() =>
             (
-                <#ty as ::flusso_search::FlussoDocument>::INDEX,
-                <#ty as ::flusso_search::FlussoDocument>::SCHEMA_HASH,
+                <#ty as ::flusso_query::FlussoDocument>::INDEX,
+                <#ty as ::flusso_query::FlussoDocument>::SCHEMA_HASH,
             )
         }
     });
 
     let arms = variants.iter().map(|(variant, ty)| {
         quote_spanned! { ty.span() =>
-            if physical_index == <#ty as ::flusso_search::FlussoDocument>::physical_index() {
-                return ::flusso_search::__serde_json::from_value::<#ty>(source)
+            if physical_index == <#ty as ::flusso_query::FlussoDocument>::physical_index() {
+                return ::flusso_query::__serde_json::from_value::<#ty>(source)
                     .map(Self::#variant)
-                    .map_err(::flusso_search::Error::from);
+                    .map_err(::flusso_query::Error::from);
             }
         }
     });
 
     quote! {
-        impl ::flusso_search::FlussoMultiDocument for #ident {
+        impl ::flusso_query::FlussoMultiDocument for #ident {
             const TARGETS: &'static [(&'static str, &'static str)] = &[ #(#targets),* ];
 
             fn decode(
                 physical_index: &str,
-                source: ::flusso_search::__serde_json::Value,
-            ) -> ::flusso_search::Result<Self> {
+                source: ::flusso_query::__serde_json::Value,
+            ) -> ::flusso_query::Result<Self> {
                 #(#arms)*
-                ::core::result::Result::Err(::flusso_search::Error::UnexpectedIndex {
+                ::core::result::Result::Err(::flusso_query::Error::UnexpectedIndex {
                     index: ::std::borrow::ToOwned::to_owned(physical_index),
                 })
             }

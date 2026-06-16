@@ -1,4 +1,4 @@
-use flusso_search::FlussoDocument;
+use flusso_query::FlussoDocument;
 
 // No `#[flusso(index = "…")]` — the derive can't know which index to bind to.
 #[derive(serde::Deserialize, FlussoDocument)]

@@ -1,4 +1,4 @@
-use flusso_search::FlussoMultiDocument;
+use flusso_query::FlussoMultiDocument;
 
 // Every variant must be a single-field tuple variant carrying the document
 // type it decodes into; all offenders are reported at once.

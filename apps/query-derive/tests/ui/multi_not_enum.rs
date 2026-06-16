@@ -1,4 +1,4 @@
-use flusso_search::FlussoMultiDocument;
+use flusso_query::FlussoMultiDocument;
 
 // The union is an enum by construction — one variant per document type.
 #[derive(FlussoMultiDocument)]

@@ -1,4 +1,4 @@
-//! `#[derive(FlussoValue)]` — opts a Rust type into `flusso_search::FlussoValue<K>`,
+//! `#[derive(FlussoValue)]` — opts a Rust type into `flusso_query::FlussoValue<K>`,
 //! so it may stand in for a field of kind `K` in a `FlussoDocument` struct.
 //!
 //! The kind is chosen with a `#[flusso(…)]` attribute and defaults to `keyword`:
@@ -9,7 +9,7 @@
 //! - `#[flusso(number)]` / `#[flusso(date)]` — a **newtype** wrapper over a
 //!   numeric / timestamp value (an enum serializes to a string, not a number).
 //!
-//! On success it emits `impl ::flusso_search::FlussoValue<#kind> for #ident {}`.
+//! On success it emits `impl ::flusso_query::FlussoValue<#kind> for #ident {}`.
 //! The leaf value's actual serde form is enforced by serde at the boundary;
 //! this derive guarantees the *shape* fits the kind.
 
@@ -28,15 +28,15 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    /// The `flusso_search::kind::…` marker this resolves to. The single place
+    /// The `flusso_query::kind::…` marker this resolves to. The single place
     /// these marker paths are written — both this derive and the field-validation
     /// codegen route their kind through here.
     pub(crate) fn marker(self) -> TokenStream {
         match self {
-            Kind::Keyword => quote! { ::flusso_search::kind::Keyword },
-            Kind::Text => quote! { ::flusso_search::kind::Text },
-            Kind::Number => quote! { ::flusso_search::kind::Number },
-            Kind::Date => quote! { ::flusso_search::kind::Date },
+            Kind::Keyword => quote! { ::flusso_query::kind::Keyword },
+            Kind::Text => quote! { ::flusso_query::kind::Text },
+            Kind::Number => quote! { ::flusso_query::kind::Number },
+            Kind::Date => quote! { ::flusso_query::kind::Date },
         }
     }
 
@@ -76,7 +76,7 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     let ident = &input.ident;
     let marker = kind.marker();
     quote! {
-        impl ::flusso_search::FlussoValue<#marker> for #ident {}
+        impl ::flusso_query::FlussoValue<#marker> for #ident {}
     }
 }
 

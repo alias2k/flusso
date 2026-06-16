@@ -41,7 +41,7 @@ use crate::search::{Hit, RawCount, SearchResponse};
 /// derive, the impl is written by hand — exactly what the derive generates:
 ///
 /// ```no_run
-/// use flusso_search::{FlussoDocument, FlussoMultiDocument, Error, Result};
+/// use flusso_query::{FlussoDocument, FlussoMultiDocument, Error, Result};
 /// use serde_json::Value;
 /// # #[derive(serde::Deserialize)] struct User { email: String }
 /// # impl FlussoDocument for User {

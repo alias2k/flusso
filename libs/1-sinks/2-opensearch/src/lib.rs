@@ -14,7 +14,7 @@
 //!   the schema hash moves, so a human (or an ad-hoc tool) can always query
 //!   `{logical}` without knowing the hash. The alias is write-only from the
 //!   sink's perspective: flusso itself always addresses the physical name —
-//!   both here and in the `flusso-search` client — and never reads or writes
+//!   both here and in the `flusso-query` client — and never reads or writes
 //!   through the alias. Alias upkeep is best-effort: a failure (say, the
 //!   cluster already has a real index named `{logical}`) is logged and
 //!   ignored, because correctness never depends on it.

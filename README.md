@@ -231,7 +231,7 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
 **OpenSearch (the sink):**
 
 - **OpenSearch 2.x** (also speaks Elasticsearch 7.x on the query side via
-  [`flusso-search`](CLIENT.md)).
+  [`flusso-query`](CLIENT.md)).
 - **A reachable HTTP(S) endpoint** as the sink `url`. Optional HTTP basic auth
   (`username` / `password`); `tls_verify` defaults to `true` — flip it off only
   for self-signed dev clusters.
@@ -261,7 +261,7 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
 | [`SCHEMA.md`](SCHEMA.md) | Every config + schema key: field types, joins, aggregates, filters, validation rules |
 | [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md) | Every source and sink option — batch sizes, retries, analysis modes |
 | [`CONFIG.md`](CONFIG.md) | Every environment variable in one place — secrets, `FLUSSO_*` flags, logging & telemetry |
-| [`CLIENT.md`](CLIENT.md) | `flusso-search`, the typed query-side client and its `#[derive(FlussoDocument)]` |
+| [`CLIENT.md`](CLIENT.md) | `flusso-query`, the typed query-side client and its `#[derive(FlussoDocument)]` |
 | [`dev/README.md`](dev/README.md) | The dev stack walk-through |
 | [`deploy/helm/flusso/README.md`](deploy/helm/flusso/README.md) | The Helm chart |
 | [`CLAUDE.md`](CLAUDE.md) | Architecture + contributor notes (also where the AI takes its instructions) |

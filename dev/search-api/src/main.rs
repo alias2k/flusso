@@ -1,6 +1,6 @@
 //! A small but production-shaped HTTP API over a flusso-maintained search index.
 //!
-//! It uses `flusso-search` + `#[derive(FlussoDocument)]` against the **same**
+//! It uses `flusso-query` + `#[derive(FlussoDocument)]` against the **same**
 //! `../flusso.toml` the engine builds from (auto-discovered at compile time), so
 //! the document types are checked against the schema and the query surface is
 //! generated. Each index gets a filterable list endpoint plus a fetch-by-id
@@ -30,7 +30,7 @@
 
 use axum::Router;
 use axum::routing::get;
-use flusso_search::Client;
+use flusso_query::Client;
 use tracing_subscriber::EnvFilter;
 
 mod error;
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,flusso_search=debug")),
+                .unwrap_or_else(|_| EnvFilter::new("info,flusso_query=debug")),
         )
         .with_writer(std::io::stderr)
         .init();

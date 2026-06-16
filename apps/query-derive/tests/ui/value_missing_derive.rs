@@ -1,4 +1,4 @@
-use flusso_search::FlussoDocument;
+use flusso_query::FlussoDocument;
 
 // `email` is a `keyword` in the schema. A user enum is allowed *only* if it
 // implements `FlussoValue<kind::Keyword>` (via `#[derive(FlussoValue)]`). This

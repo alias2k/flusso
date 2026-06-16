@@ -1,4 +1,4 @@
-# Pinned so every build — local and CI — uses one rustc. The `flusso-search-derive`
+# Pinned so every build — local and CI — uses one rustc. The `flusso-query-derive`
 # trybuild UI tests compare against exact compiler diagnostics, whose wording changes
 # between releases; a floating `stable` makes those tests fail spuriously on upgrade.
 # Bump deliberately, then re-bless the `.stderr` files (TRYBUILD=overwrite).

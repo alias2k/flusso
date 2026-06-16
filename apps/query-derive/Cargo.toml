@@ -1,5 +1,5 @@
 [package]
-name = "flusso-search-derive"
+name = "flusso-query-derive"
 version = "0.1.0"
 edition = "2024"
 
@@ -19,7 +19,7 @@ toml = { workspace = true }
 [dev-dependencies]
 # The runtime, with the derive re-exported — the real consumer surface. (A
 # dev-dependency cycle, which Cargo allows.)
-flusso-search = { path = "../search", features = ["derive"] }
+flusso-query = { path = "../query", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 trybuild = "1"

@@ -1,6 +1,6 @@
 //! The JSON response shape, and the physical index-name helper.
 
-use flusso_search::SearchResponse;
+use flusso_query::SearchResponse;
 use serde::Serialize;
 
 /// A page of hits, serialized as `{ "total": …, "hits": [ … ] }`.

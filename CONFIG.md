@@ -22,7 +22,7 @@ for source/sink options. This file is purely the environment around them.
 - [Precedence](#precedence) — who wins when two things disagree
 - [CLI flags as env vars](#cli-flags-as-env-vars) — the `FLUSSO_*` family
 - [Logging & telemetry](#logging--telemetry) — `RUST_LOG`, OTLP, and friends
-- [The derive (compile-time)](#the-derive-compile-time) — `FLUSSO_CONFIG` for `flusso-search`
+- [The derive (compile-time)](#the-derive-compile-time) — `FLUSSO_CONFIG` for `flusso-query`
 - [Cheat sheet](#cheat-sheet) — the whole list on one screen
 
 ## The big picture
@@ -149,7 +149,7 @@ standard `OTEL_*` variables (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`,
 
 ## The derive (compile-time)
 
-`#[derive(FlussoDocument)]` (the [`flusso-search`](CLIENT.md) query client) reads
+`#[derive(FlussoDocument)]` (the [`flusso-query`](CLIENT.md) query client) reads
 **`FLUSSO_CONFIG` at compile time** to locate your `flusso.toml` when it can't be
 found by walking up from the crate's `CARGO_MANIFEST_DIR`. This is the same
 variable name as the CLI flag, just consumed by the proc-macro instead of the

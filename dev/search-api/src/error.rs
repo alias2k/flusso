@@ -6,15 +6,15 @@ use axum::response::{IntoResponse, Response};
 
 /// A handler error.
 pub(crate) enum ApiError {
-    /// A `flusso-search` client error. An upstream OpenSearch status is passed
+    /// A `flusso-query` client error. An upstream OpenSearch status is passed
     /// through; anything else (transport, decode) is a bad gateway.
-    Upstream(flusso_search::Error),
+    Upstream(flusso_query::Error),
     /// A `get`-by-id lookup found nothing → `404`.
     NotFound { resource: &'static str, id: String },
 }
 
-impl From<flusso_search::Error> for ApiError {
-    fn from(error: flusso_search::Error) -> Self {
+impl From<flusso_query::Error> for ApiError {
+    fn from(error: flusso_query::Error) -> Self {
         ApiError::Upstream(error)
     }
 }
@@ -24,7 +24,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::Upstream(error) => {
                 let status = match &error {
-                    flusso_search::Error::Status { status, .. } => {
+                    flusso_query::Error::Status { status, .. } => {
                         StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
                     }
                     _ => StatusCode::BAD_GATEWAY,

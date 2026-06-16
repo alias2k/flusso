@@ -258,7 +258,7 @@ fn value_kind(mapping_type: &MappingType) -> Option<Kind> {
 fn value_assert(ty: &Type, kind: TokenStream) -> TokenStream {
     quote::quote_spanned! {ty.span()=>
         const _: fn() = || {
-            fn __assert_field_value<__T: ::flusso_search::FlussoValue<#kind>>() {}
+            fn __assert_field_value<__T: ::flusso_query::FlussoValue<#kind>>() {}
             __assert_field_value::<#ty>();
         };
     }
@@ -371,7 +371,7 @@ pub(crate) fn codegen(
     // hidden from callers — `Type::query()` just works.
     let entry = if is_root {
         quote! {
-            impl ::flusso_search::FlussoDocument for #ident {
+            impl ::flusso_query::FlussoDocument for #ident {
                 const INDEX: &'static str = #index;
                 const SCHEMA_HASH: &'static str = #hash;
             }
@@ -395,7 +395,7 @@ pub(crate) fn codegen(
 }
 
 /// The handle fn for one schema field (every mapping kind has one now). `scope`
-/// is this level's query scope tag (`::flusso_search::Root` or `Self`), baked
+/// is this level's query scope tag (`::flusso_query::Root` or `Self`), baked
 /// into every emitted handle so its queries land in the right scope.
 fn handle_fn(
     resolved: &ResolvedField,
@@ -413,15 +413,15 @@ fn handle_fn(
     let simple = |ty: &str| {
         let ty = Ident::new(ty, Span::call_site());
         Some((
-            quote! { ::flusso_search::#ty<#scope> },
-            quote! { ::flusso_search::#ty::<#scope>::at(#path) },
+            quote! { ::flusso_query::#ty<#scope> },
+            quote! { ::flusso_query::#ty::<#scope>::at(#path) },
         ))
     };
     let number = |inner: &str| {
         let inner = Ident::new(inner, Span::call_site());
         Some((
-            quote! { ::flusso_search::Number<#inner, #scope> },
-            quote! { ::flusso_search::Number::<#inner, #scope>::at(#path) },
+            quote! { ::flusso_query::Number<#inner, #scope> },
+            quote! { ::flusso_query::Number::<#inner, #scope>::at(#path) },
         ))
     };
 
@@ -443,8 +443,8 @@ fn handle_fn(
         // sub-fields are queried via their own dotted-path child handles). `S` is
         // the enclosing scope, same as the leaf handles at this level.
         MappingType::Object => Some((
-            quote! { ::flusso_search::Object<#scope> },
-            quote! { ::flusso_search::Object::<#scope>::at(#path) },
+            quote! { ::flusso_query::Object<#scope> },
+            quote! { ::flusso_query::Object::<#scope>::at(#path) },
         )),
         // A `nested` array → `Nested<EnclosingScope, ChildScope>`: queries lift
         // from the element scope up to this level. The child scope is the
@@ -452,12 +452,12 @@ fn handle_fn(
         // or the `Nested` default element type when un-projected.
         MappingType::Nested => Some(match nested_element(resolved, fields) {
             Some(elem) => (
-                quote! { ::flusso_search::Nested<#scope, #elem> },
-                quote! { ::flusso_search::Nested::<#scope, #elem>::at(#path) },
+                quote! { ::flusso_query::Nested<#scope, #elem> },
+                quote! { ::flusso_query::Nested::<#scope, #elem>::at(#path) },
             ),
             None => (
-                quote! { ::flusso_search::Nested<#scope> },
-                quote! { ::flusso_search::Nested::<#scope>::at(#path) },
+                quote! { ::flusso_query::Nested<#scope> },
+                quote! { ::flusso_query::Nested::<#scope>::at(#path) },
             ),
         }),
         MappingType::Other(_) => simple("Json"),

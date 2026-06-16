@@ -1,4 +1,4 @@
-//! `flusso-search` — a typed query client for a flusso-maintained search index.
+//! `flusso-query` — a typed query client for a flusso-maintained search index.
 //!
 //! Targets OpenSearch and Elasticsearch 7.x, which share the `_search` query DSL
 //! this crate emits; any future backend divergence is handled on the [`Client`],
@@ -41,7 +41,7 @@
 //! # Not yet built (see CLIENT.md for the endgame)
 //!
 //! - The `#[derive(FlussoDocument)]` and `#[derive(FlussoMultiDocument)]`
-//!   proc-macros live in `flusso-search-derive` (the `derive` feature). Without
+//!   proc-macros live in `flusso-query-derive` (the `derive` feature). Without
 //!   them, document structs + handles and union impls are written by hand —
 //!   exactly the calls this crate exposes (see the integration tests).
 //! - `filter_nested`'s `keep_source()` opt-out (it always replaces the array in
@@ -50,7 +50,7 @@
 //! # Example (hand-written until the derive lands)
 //!
 //! ```no_run
-//! use flusso_search::{Client, Keyword, Number, Nested};
+//! use flusso_query::{Client, Keyword, Number, Nested};
 //!
 //! #[derive(serde::Deserialize)]
 //! struct User {
@@ -62,12 +62,12 @@
 //! impl User {
 //!     fn email() -> Keyword { Keyword::at("email") }
 //!     fn order_count() -> Number<i64> { Number::at("orderCount") }
-//!     fn query() -> flusso_search::Search<User> {
-//!         flusso_search::Search::new("users", "xxxxxx")
+//!     fn query() -> flusso_query::Search<User> {
+//!         flusso_query::Search::new("users", "xxxxxx")
 //!     }
 //! }
 //!
-//! # async fn run() -> flusso_search::Result<()> {
+//! # async fn run() -> flusso_query::Result<()> {
 //! // A query is a plain value — no client involved while building it.
 //! let busy = User::query()
 //!     .filter(User::email().eq("ada@example.com"))
@@ -110,14 +110,14 @@ pub use search::{FlussoDocument, Hit, Search, SearchResponse};
 /// `search`/`get`). See [`CLIENT.md`](../../../CLIENT.md). Enabled by the
 /// `derive` feature.
 #[cfg(feature = "derive")]
-pub use flusso_search_derive::FlussoDocument;
+pub use flusso_query_derive::FlussoDocument;
 
 /// `#[derive(FlussoValue)]` — implements [`trait@FlussoValue`] for an enum or newtype
 /// wrapper, so it may stand in for a field of the chosen kind (`#[flusso(keyword)]`
 /// — the default — `#[flusso(text)]`, `#[flusso(number)]`, or `#[flusso(date)]`)
 /// in a [`FlussoDocument`] struct. Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
-pub use flusso_search_derive::FlussoValue;
+pub use flusso_query_derive::FlussoValue;
 
 /// `#[derive(FlussoMultiDocument)]` — implements [`trait@FlussoMultiDocument`]
 /// for an enum with one single-field variant per document type (the
@@ -125,7 +125,7 @@ pub use flusso_search_derive::FlussoValue;
 /// decodes each hit into the variant matching its physical `_index`. Enabled
 /// by the `derive` feature.
 #[cfg(feature = "derive")]
-pub use flusso_search_derive::FlussoMultiDocument;
+pub use flusso_query_derive::FlussoMultiDocument;
 
 // The multi-document derive's generated code deserializes variant payloads;
 // routing it through this re-export keeps it on this crate's `serde_json`.

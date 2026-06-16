@@ -1,10 +1,10 @@
 [package]
-name = "flusso-search"
+name = "flusso-query"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "flusso_search"
+name = "flusso_query"
 path = "src/lib.rs"
 
 [lints]
@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 # Re-export the `#[derive(FlussoDocument)]` proc-macro (serde/serde_derive pattern).
-derive = ["dep:flusso-search-derive"]
+derive = ["dep:flusso-query-derive"]
 # Make `rust_decimal::Decimal` / `chrono` available for `decimal` / `date` fields.
 decimal = ["dep:rust_decimal"]
 chrono = ["dep:chrono"]
@@ -24,6 +24,6 @@ thiserror = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
-flusso-search-derive = { path = "../search-derive", optional = true }
+flusso-query-derive = { path = "../query-derive", optional = true }
 rust_decimal = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }

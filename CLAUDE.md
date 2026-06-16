@@ -10,7 +10,7 @@ then follows Postgres logical replication so the index stays current. Read `READ
 for the full picture, `SCHEMA.md` for every config/schema key, `SOURCES_AND_SINKS.md`
 for source/sink options, `CONFIG.md` for every environment variable (secrets, the
 `FLUSSO_*` flag overrides, logging/telemetry — centralized there, not in the other docs),
-and `CLIENT.md` for the query-side `flusso-search` crate.
+and `CLIENT.md` for the query-side `flusso-query` crate.
 
 ## Commands
 
@@ -55,10 +55,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   handling — they're ordinary tests caught by the nextest step.
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
-  `flusso-search-derive`'s trybuild UI tests (`apps/search-derive/tests/ui/*.stderr`) compare
+  `flusso-query-derive`'s trybuild UI tests (`apps/query-derive/tests/ui/*.stderr`) compare
   against exact compiler diagnostics, whose wording drifts between releases — a floating
   `stable` breaks them on every rustc bump. To upgrade: bump the channel, then re-bless with
-  `TRYBUILD=overwrite cargo test -p flusso-search-derive`.
+  `TRYBUILD=overwrite cargo test -p flusso-query-derive`.
 
 ### Running the dev stack
 
@@ -268,15 +268,15 @@ split by op (`count`/`sum`/`avg`/`min`/`max`). Parsing lives in
 (`Join.kind: JoinKind`, with reverse resolution per kind in
 `libs/1-sources/1-postgres/src/document/resolve.rs`).
 
-### Query side — `flusso-search` + the derive
+### Query side — `flusso-query` + the derive
 
-`apps/search` (crate `flusso-search`) is a backend-neutral OpenSearch/Elasticsearch query
-client. `apps/search-derive` (`flusso-search-derive`, re-exported as `flusso_search::FlussoDocument`
+`apps/query` (crate `flusso-query`) is a backend-neutral OpenSearch/Elasticsearch query
+client. `apps/query-derive` (`flusso-query-derive`, re-exported as `flusso_query::FlussoDocument`
 behind the `derive` feature) is a proc-macro that, **at compile time and with no DB**,
 discovers `flusso.toml`, resolves the named index mapping, validates the struct against it,
 and generates a typed query surface. `dev/search-api` is a working axum consumer. This is a
 deep subsystem — the proc-macro internals (scope tagging, `FlussoValue<K>` kind markers,
-nested/object handles) are documented in the `flusso-search-derive` memory note; read that
+nested/object handles) are documented in the `flusso-query-derive` memory note; read that
 before changing the derive.
 
 ## Keeping this file current
@@ -307,8 +307,8 @@ belongs in the linked docs.
 | OpenSearch sink (bulk, mappings, seeding, latest-alias) | `libs/1-sinks/2-opensearch/src/lib.rs` |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
 | CLI subcommands (`build`/`run`/`check`/`schema`) | `apps/cli/src/` — `main.rs` dispatches; one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves HTTP, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`), plus `telemetry.rs`/`metrics.rs`/`http.rs` and `print.rs` |
-| Query client (`flusso-search`) | `apps/search/src/` |
-| `#[derive(FlussoDocument)]` proc-macro | `apps/search-derive/src/` (+ the `flusso-search-derive` memory note) |
+| Query client (`flusso-query`) | `apps/query/src/` |
+| `#[derive(FlussoDocument)]` proc-macro | `apps/query-derive/src/` (+ the `flusso-query-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |

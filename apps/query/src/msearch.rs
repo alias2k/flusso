@@ -20,10 +20,10 @@ impl Client {
     /// tuple of `&Search<T>` whose document types may differ:
     ///
     /// ```no_run
-    /// # use flusso_search::{Client, Search};
+    /// # use flusso_query::{Client, Search};
     /// # #[derive(serde::Deserialize)] struct User { email: String }
     /// # #[derive(serde::Deserialize)] struct Order { status: String }
-    /// # async fn run() -> flusso_search::Result<()> {
+    /// # async fn run() -> flusso_query::Result<()> {
     /// # let client = Client::connect("http://localhost:9200")?;
     /// # let users_query = Search::<User>::new("users", "xxxxxx");
     /// # let orders_query = Search::<Order>::new("orders", "yyyyyy");

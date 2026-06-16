@@ -116,7 +116,7 @@ variables; the naming and precedence rules live in
   *current* physical index, repointed atomically when the schema hash moves —
   so `GET /users/_search` always hits the latest index without you knowing the
   hash. It exists purely for humans and ad-hoc tooling: flusso itself (the sink
-  and the `flusso-search` client) always addresses the physical name. Alias
+  and the `flusso-query` client) always addresses the physical name. Alias
   upkeep is best-effort — if it fails (e.g. the cluster already has a real
   index named like the alias), flusso logs a warning and carries on.
 - **Refresh adapts to the backlog.** Created with auto-refresh disabled

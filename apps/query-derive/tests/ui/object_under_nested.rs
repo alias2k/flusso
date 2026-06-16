@@ -1,4 +1,4 @@
-use flusso_search::FlussoDocument;
+use flusso_query::FlussoDocument;
 
 // `orders.shipping` is an `object` (has_one) inside the `orders` nested array.
 // In the "objects-direct" scope model an object is untagged (`Root`), which can't

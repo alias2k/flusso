@@ -1,4 +1,4 @@
-use flusso_search::FlussoDocument;
+use flusso_query::FlussoDocument;
 
 #[derive(serde::Deserialize, FlussoDocument)]
 #[flusso(index = "users")]

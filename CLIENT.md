@@ -24,7 +24,7 @@ hand-writes OpenSearch JSON and hand-deserializes the results, with nothing
 checking either against the schema. It works right up until someone renames a
 field and finds out in production.
 
-`flusso-search` closes that gap. Notably, it does **not** generate the document
+`flusso-query` closes that gap. Notably, it does **not** generate the document
 types for you. You write the document struct by hand and keep full control over
 it: its derives, its field types, which fields it projects, how the doc keys map
 to Rust names. A **derive macro** then does two things against the resolved
@@ -72,7 +72,7 @@ finds `flusso.toml` itself (see [Binding to the schema](#binding-to-the-schema))
 ### The document structs
 
 ```rust
-use flusso_search::{Client, FlussoDocument};
+use flusso_query::{Client, FlussoDocument};
 
 /// A `users` document — *you* write this. It's a **projection**: it deserializes
 /// the fields below and omits the rest of the index (addresses, profile,
@@ -857,7 +857,7 @@ schema layer rather than re-implementing it:
 
 | Crate            | Role                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------- |
-| `flusso-search` | Runtime: the `Client` transport, the field-handle/`Query`/`Search` builder, `SearchResponse`. Generic over the developer's document types. Targets OpenSearch / Elasticsearch (shared DSL). Re-exports the derive behind a `derive` feature (serde-style), so callers `use flusso_search::FlussoDocument`. |
+| `flusso-query` | Runtime: the `Client` transport, the field-handle/`Query`/`Search` builder, `SearchResponse`. Generic over the developer's document types. Targets OpenSearch / Elasticsearch (shared DSL). Re-exports the derive behind a `derive` feature (serde-style), so callers `use flusso_query::FlussoDocument`. |
 | `flusso-derive`  | The `#[derive(FlussoDocument)]` proc-macro crate. At compile time it discovers `flusso.toml`, resolves the named index's [`IndexMapping`](libs/0-core/src/config/index_mapping.rs) from the self-describing schema (no database), validates the annotated struct against it, and emits the field handles, entry points, and schema hash. Reuses `schema-config-toml`, `schema-index-yaml`, and `schema-core` to load and resolve. |
 
 The numeric-layer rule still holds: both new crates sit above `schema-core` and
