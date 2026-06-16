@@ -80,26 +80,23 @@ small web app, in the spirit of `dev/search-api`) is just a Basic-auth client of
 the private port — sessions, users, and the login live there, never in the
 daemon.
 
-**A server and a client, not one binary.** flusso splits into two binaries with
-distinct audiences. The **server** (the daemon — today's `flusso run`) is what
-runs under Kubernetes / Docker / bare metal: it owns the pipeline and serves both
-HTTP surfaces. A separate, lightweight **client CLI** is the operator's tool — it
-talks to a *running* server over the private surface (HTTP + Basic auth) to list
-indexes and trigger reindexes. The client is a thin HTTP client with **no
-privileged channel**: it is an equal peer of the website and of `curl`, holding
-no power the private API doesn't grant any caller. (This is the NATS shape —
-`nats-server` plus the separately-installed `nats` — minus a custom protocol: the
-contract is plain HTTP/JSON, so any client in any language, or a browser, speaks
-it.)
-
-To keep the client thin and the contract drift-free, the request/response types
-of the private API live in a small **shared crate of pure `serde` types** (the
-pattern `daemon::StatusSnapshot` already follows), depended on by both binaries —
-so the client need not pull in the engine/source/sink stack just to speak the
-protocol. The client addresses the server with a `--server` flag / `FLUSSO_SERVER`
-env, supplying the Basic-auth credentials the same way (flag or env, never a
-file). Splitting the binary is *orthogonal* to the mechanism below: the server
-does all the real work; the client only issues authenticated requests.
+**One binary, equal HTTP clients.** flusso stays a single `flusso` binary
+(`apps/cli`). `flusso run` is the daemon — it owns the pipeline and serves both
+HTTP surfaces; `flusso build` / `check` / `schema` remain the config tooling. Two
+new subcommands — `flusso indexes` and `flusso reindex --server … <index>` — are
+the operator's control tools, but they hold **no privileged in-process channel**:
+they make ordinary HTTP calls to the private port, exactly as the website or
+`curl` would. Privilege is the Basic-auth credential, not the caller — so the
+CLI, the website, and a raw HTTP client are equal peers of one authenticated API.
+(That equal-peers, backdoor-free property is what's worth taking from NATS —
+`nats-server` + `nats` over one contract — without paying for a second binary:
+with `run` in the same binary the CLI links the whole engine/source/sink stack
+anyway, so a split would buy no thinner client.) The client subcommands address
+the server with a `--server` flag / `FLUSSO_SERVER` env and supply the Basic-auth
+credentials the same way (flag or env, never a file). The private API's
+request/response types live next to the HTTP handlers and are shared in-process
+by the subcommands — one definition, no drift, no extra crate (the website isn't
+Rust, so nothing else needs them).
 
 **Configuration.** Both ports resolve from, highest precedence first, the **CLI
 flag**, then the **`FLUSSO_*` env var**, then the **`flusso.toml` config** —
