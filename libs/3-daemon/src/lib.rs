@@ -81,6 +81,7 @@ pub struct Daemon {
     options: DaemonOptions,
     backends: Arc<dyn Backends>,
     extra_observers: Vec<Arc<dyn Observer>>,
+    status: Option<Arc<Status>>,
 }
 
 impl Daemon {
@@ -95,6 +96,7 @@ impl Daemon {
             options: DaemonOptions::default(),
             backends,
             extra_observers: Vec::new(),
+            status: None,
         }
     }
 
@@ -112,6 +114,18 @@ impl Daemon {
         self
     }
 
+    /// Provide the [`Status`] handle to update instead of minting a fresh one.
+    ///
+    /// The binary uses this to keep **one** process-lifetime status across
+    /// pipeline restarts (e.g. an on-demand reindex): the long-lived HTTP surface
+    /// and metrics keep reading the same handle, and its counters and uptime
+    /// survive the restart rather than resetting. Without it, [`start`](Self::start)
+    /// creates a new status each time.
+    pub fn with_status(mut self, status: Arc<Status>) -> Self {
+        self.status = Some(status);
+        self
+    }
+
     /// Build the pipeline and its observable state, returning a [`RunningDaemon`]
     /// whose [`status`](RunningDaemon::status) can be read (e.g. served over HTTP)
     /// while it runs.
@@ -126,6 +140,7 @@ impl Daemon {
             options,
             backends,
             extra_observers,
+            status,
         } = self;
 
         tracing::info!(
@@ -135,7 +150,13 @@ impl Daemon {
             "starting sync",
         );
 
-        let status = Arc::new(Status::new(config.indexes.keys().cloned(), Instant::now()));
+        // Reuse a caller-provided status (so it survives restarts) or mint a
+        // fresh one. Either way reset the phase to `Starting`: a reused status may
+        // have been left `Stopped` by a previous run.
+        let status = status.unwrap_or_else(|| {
+            Arc::new(Status::new(config.indexes.keys().cloned(), Instant::now()))
+        });
+        status.set_phase(Phase::Starting);
         // The daemon's own observer updates status; any binary-supplied observers
         // (metrics, …) ride alongside it through one fan-out.
         let mut observers: Vec<Arc<dyn Observer>> =
@@ -208,8 +229,11 @@ impl RunningDaemon {
             lag_poll_interval,
         } = self;
 
-        // Poll capture lag alongside the run; aborted when the run returns.
-        let lag = tokio::spawn(lag::poll(source, observer, lag_poll_interval));
+        // Poll capture lag alongside the run. Held in a guard so it's aborted
+        // however this returns — a normal stop *or* the future being cancelled
+        // (e.g. the binary dropping the run for a reindex restart) — rather than
+        // detaching onto the shared status.
+        let _lag = LagGuard(tokio::spawn(lag::poll(source, observer, lag_poll_interval)));
 
         let result = tokio::select! {
             res = engine.run() => res.context("sync engine stopped"),
@@ -219,9 +243,20 @@ impl RunningDaemon {
             }
         };
 
-        lag.abort();
         status.set_phase(Phase::Stopped);
         result
+    }
+}
+
+/// Aborts the lag poller when dropped — on a normal stop or on cancellation
+/// (the run future being dropped for a restart) alike. Its result is discarded,
+/// so there's nothing to join.
+#[derive(Debug)]
+struct LagGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for LagGuard {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

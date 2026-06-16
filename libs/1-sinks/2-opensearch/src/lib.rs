@@ -500,17 +500,122 @@ impl OpensearchSink {
             Err(Self::status_error(resp, "meta get failed").await)
         }
     }
+
+    /// Typed read of an index's meta doc (keyed by its hash alias): the active
+    /// generation number and whether it has been seeded. `None` if absent (or a
+    /// legacy doc with no generation).
+    async fn read_index_meta(&self, hash_alias: &str) -> Result<Option<(u64, bool)>> {
+        let Some(doc) = self.get_meta(hash_alias).await? else {
+            return Ok(None);
+        };
+        let source = doc.get("_source");
+        let generation = source
+            .and_then(|s| s.get("active_generation"))
+            .and_then(Value::as_u64);
+        let seeded = source
+            .and_then(|s| s.get("seeded"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Ok(generation.map(|g| (g, seeded)))
+    }
+
+    /// Write an index's meta doc: its active generation and seeded-state.
+    async fn write_index_meta(
+        &self,
+        hash_alias: &str,
+        generation: u64,
+        seeded: bool,
+    ) -> Result<()> {
+        self.put_meta(
+            hash_alias,
+            json!({ "active_generation": generation, "seeded": seeded }),
+        )
+        .await
+    }
+
+    /// Concrete index names matching `pattern` (a `_cat/indices` glob, e.g.
+    /// `users_ab12_*`). An alias in the pattern resolves to the indexes behind
+    /// it; a no-match (404) is an empty list, not an error.
+    async fn list_indices(&self, pattern: &str) -> Result<Vec<String>> {
+        let url = format!(
+            "{}/_cat/indices/{pattern}?h=index&format=json",
+            self.base_url
+        );
+        let resp = self
+            .maybe_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| SinkError::Write(format!("listing indices failed: {e}")))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !resp.status().is_success() {
+            return Err(Self::status_error(resp, "listing indices failed").await);
+        }
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| SinkError::Write(format!("failed to parse _cat/indices: {e}")))?;
+        Ok(body
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get("index").and_then(Value::as_str).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// The existing generation indexes of a hash alias (`{hash_alias}_{n}`).
+    async fn list_generations(&self, hash_alias: &str) -> Result<Vec<String>> {
+        self.list_indices(&format!("{hash_alias}_*")).await
+    }
+
+    /// Whether a *concrete index* named exactly `name` exists (as opposed to an
+    /// alias of that name) — detects a legacy `{logical}_{hash}` index that must
+    /// be migrated before the name can become an alias.
+    async fn concrete_index_exists(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .list_indices(name)
+            .await?
+            .iter()
+            .any(|found| found == name))
+    }
+
+    /// Delete an index. A 404 (already gone) is success — dropping a superseded
+    /// generation must be idempotent across retries.
+    async fn delete_index(&self, index: &str) -> Result<()> {
+        let url = format!("{}/{index}", self.base_url);
+        let resp = self
+            .maybe_auth(self.client.delete(&url))
+            .send()
+            .await
+            .map_err(|e| SinkError::Write(format!("index delete failed: {e}")))?;
+        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
+            debug!(index, "dropped superseded generation");
+            Ok(())
+        } else {
+            Err(Self::status_error(resp, "index delete failed").await)
+        }
+    }
 }
 
 #[async_trait]
 impl Sink for OpensearchSink {
-    /// Create the index from its explicit mapping if it does not already exist.
+    /// Ensure a concrete generation index exists for `mapping`, reachable through
+    /// the stable hash alias `{logical}_{hash}`.
     ///
-    /// The index is created `dynamic: strict` (only configured fields are
-    /// accepted) with `refresh_interval: -1` (auto-refresh off) for fast bulk
-    /// seeding — [`mark_seeded`](Self::mark_seeded) restores automatic refresh
-    /// once the backfill completes. An existing index is left untouched, so its
-    /// mapping is never silently rewritten.
+    /// The addressable name `{logical}_{hash}` is an **alias**; the data lives in
+    /// a concrete generation `{logical}_{hash}_{gen}` behind it (created
+    /// `dynamic: strict`, `refresh_interval: -1` for fast bulk seeding). The
+    /// per-index meta doc records the active generation and whether it's seeded:
+    ///
+    /// - **seeded** — reuse that generation; (re)assert the aliases onto it.
+    /// - **unseeded** (fresh, or a [`reindex`](Self::reindex) staged a new
+    ///   generation) — make sure the generation index exists, but point the alias
+    ///   at it *only* when nothing else is serving yet. A reindex leaves the alias
+    ///   on the old generation until [`mark_seeded`](Self::mark_seeded) swaps it,
+    ///   so reads never see a half-built index.
     #[tracing::instrument(
         name = "os.ensure_index",
         skip_all,
@@ -519,24 +624,59 @@ impl Sink for OpensearchSink {
     )]
     async fn ensure_index(&self, mapping: &IndexMapping) -> Result<()> {
         let logical = mapping.index.as_ref();
-        // Physical name = logical name + schema hash, so a structural schema
-        // change yields a new name (and thus a fresh, re-seeded index).
-        let index = format!("{logical}_{}", mapping.hash);
+        let hash_alias = format!("{logical}_{}", mapping.hash);
+
+        // The previous scheme created `{logical}_{hash}` as a *concrete* index;
+        // the new scheme needs that name free for an alias. Refuse rather than
+        // clobber, so an operator migrates deliberately.
+        if self.concrete_index_exists(&hash_alias).await? {
+            return Err(SinkError::Write(format!(
+                "{hash_alias} exists as a concrete index from an older flusso version; \
+                 reindex it into {hash_alias}_1 and delete {hash_alias} so the name can become an alias"
+            )));
+        }
+
+        // Resolve the active generation + seeded-state from meta, or start fresh
+        // at the next free generation number.
+        let (generation, seeded) = match self.read_index_meta(&hash_alias).await? {
+            Some(state) => state,
+            None => {
+                let generation =
+                    next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);
+                (generation, false)
+            }
+        };
+        let index = generation_name(&hash_alias, generation);
+
         self.index_names
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(logical.to_owned(), index.clone());
 
         if self.index_exists(&index).await? {
-            debug!(index, "index exists; leaving its mapping untouched");
+            debug!(index, "generation exists; leaving its mapping untouched");
         } else {
             self.create_index(&index, mapping).await?;
         }
 
-        // The convenience alias `{logical}` → current physical index. Purely
-        // for humans and ad-hoc tooling; flusso itself always addresses the
-        // physical name, so a failure here is logged, not propagated.
-        self.ensure_alias(logical, &index).await;
+        // Persist the active generation for an unseeded index, so a resumed run
+        // targets the same one. A seeded index already has correct meta.
+        if !seeded {
+            self.write_index_meta(&hash_alias, generation, false)
+                .await?;
+        }
+
+        // Point the aliases at this generation when it's the live seeded one, or
+        // the first generation (nothing else serving yet). A reindex of an
+        // already-served index leaves the aliases on the old generation until
+        // mark_seeded swaps them — so reads never hit a half-built index. The
+        // hash alias is load-bearing (the query client reads through it), so its
+        // failure propagates; the `{logical}` convenience alias stays best-effort.
+        let serving = self.alias_holders(&hash_alias).await?;
+        if seeded || serving.is_empty() {
+            self.try_ensure_alias(&hash_alias, &index).await?;
+            self.ensure_alias(logical, &index).await;
+        }
         Ok(())
     }
 
@@ -654,31 +794,80 @@ impl Sink for OpensearchSink {
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {
-        match self.get_meta(&self.physical(index.as_ref())).await? {
-            Some(doc) => {
-                let seeded = doc
-                    .get("_source")
-                    .and_then(|s| s.get("seeded"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                Ok(seeded)
-            }
-            None => Ok(false),
-        }
+        // The active generation was learned at `ensure_index`; its hash alias is
+        // that name minus the generation suffix.
+        let Some(hash_alias) = hash_alias_of(&self.physical(index.as_ref())) else {
+            return Ok(false);
+        };
+        Ok(self
+            .read_index_meta(&hash_alias)
+            .await?
+            .is_some_and(|(_, seeded)| seeded))
     }
 
-    /// Record that `index` has been seeded.
+    /// Record that `index`'s active generation has been seeded, and make it the
+    /// one the aliases serve.
     ///
-    /// First makes the backfilled documents searchable (one refresh) and hands
-    /// the index back to automatic refresh, *then* writes the seed marker. The
-    /// ordering matters: if either step fails, the marker is not written, so the
-    /// next run re-runs the (idempotent) backfill and retries rather than
-    /// stranding the index at `refresh_interval: -1`.
+    /// First makes the freshly-seeded generation searchable (one refresh) and
+    /// hands it back to automatic refresh, *then* atomically repoints the hash
+    /// alias (and the `{logical}` convenience alias) onto it and drops the
+    /// superseded generation(s), *then* writes the seed marker. The ordering
+    /// matters: on a fresh seed the alias is already on this generation (a no-op
+    /// swap); on a reindex the swap is the moment the rebuild becomes visible —
+    /// until here reads stayed on the old generation. If any step fails the
+    /// marker isn't written, so the next run re-runs the (idempotent) backfill.
     async fn mark_seeded(&self, index: &IndexName) -> Result<()> {
-        let physical = self.physical(index.as_ref());
-        self.refresh_index(&physical).await?;
-        self.restore_auto_refresh(&physical).await?;
-        self.put_meta(&physical, json!({ "seeded": true })).await
+        let logical = index.as_ref();
+        let generation = self.physical(logical);
+        let Some(hash_alias) = hash_alias_of(&generation) else {
+            return Err(SinkError::Write(format!(
+                "cannot mark {logical} seeded: it has no active generation (ensure_index not run?)"
+            )));
+        };
+        let active = parse_generation(&hash_alias, &generation).unwrap_or(1);
+
+        self.refresh_index(&generation).await?;
+        self.restore_auto_refresh(&generation).await?;
+
+        // The generations the hash alias is about to move off — drop them once
+        // both aliases have swapped. Computed before the swap.
+        let superseded: Vec<String> = self
+            .alias_holders(&hash_alias)
+            .await?
+            .into_iter()
+            .filter(|holder| {
+                holder != &generation && parse_generation(&hash_alias, holder).is_some()
+            })
+            .collect();
+
+        self.try_ensure_alias(&hash_alias, &generation).await?;
+        self.ensure_alias(logical, &generation).await;
+
+        for stale in &superseded {
+            self.delete_index(stale).await?;
+        }
+
+        self.write_index_meta(&hash_alias, active, true).await
+    }
+
+    /// Stage a from-scratch rebuild of `index` into a fresh generation, leaving
+    /// the current one serving reads. Only flips meta to the next (unseeded)
+    /// generation; the next run's [`ensure_index`](Self::ensure_index) builds it,
+    /// the backfill seeds it, and [`mark_seeded`](Self::mark_seeded) swaps the
+    /// alias and drops the old generation. Creating the index is deferred to
+    /// `ensure_index` because that's where the mapping is available.
+    async fn reindex(&self, mapping: &IndexMapping) -> Result<()> {
+        let logical = mapping.index.as_ref();
+        let hash_alias = format!("{logical}_{}", mapping.hash);
+        // Past everything that currently exists, so a crashed earlier reindex
+        // can't make us reuse a live generation's name.
+        let next = next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);
+        self.write_index_meta(&hash_alias, next, false).await?;
+        debug!(
+            logical,
+            hash_alias, next, "staged reindex into a new generation"
+        );
+        Ok(())
     }
 }
 
@@ -920,6 +1109,45 @@ fn plan_alias_actions(alias: &str, target: &str, holders: &[String]) -> Option<V
         .collect();
     actions.push(json!({ "add": { "index": target, "alias": alias } }));
     Some(json!({ "actions": actions }))
+}
+
+/// The concrete index name for generation `gen` behind a hash alias — what the
+/// alias `{hash_alias}` points at. A reindex builds the *next* generation
+/// alongside the current one, then atomically repoints the alias.
+fn generation_name(hash_alias: &str, generation: u64) -> String {
+    format!("{hash_alias}_{generation}")
+}
+
+/// Parse the generation number out of a concrete index name, given its hash
+/// alias — the inverse of [`generation_name`]. `None` for anything that isn't
+/// `{hash_alias}_{n}` with a numeric suffix, so a legacy concrete index named
+/// exactly `{hash_alias}`, an unrelated index, or a prefix-collision is ignored.
+fn parse_generation(hash_alias: &str, index: &str) -> Option<u64> {
+    index
+        .strip_prefix(hash_alias)?
+        .strip_prefix('_')?
+        .parse::<u64>()
+        .ok()
+}
+
+/// The hash alias an active generation belongs to — the name minus its
+/// `_{n}` suffix (the inverse of [`generation_name`]). `None` if the name has no
+/// numeric generation suffix.
+fn hash_alias_of(generation: &str) -> Option<String> {
+    let (prefix, suffix) = generation.rsplit_once('_')?;
+    suffix.parse::<u64>().ok()?;
+    Some(prefix.to_owned())
+}
+
+/// The generation to build next, given the existing generation indexes of a hash
+/// alias: one past the highest existing generation, or `1` when none exist — so a
+/// generation number is never reused, even if a crashed reindex left an orphan.
+fn next_generation(existing: &[String], hash_alias: &str) -> u64 {
+    existing
+        .iter()
+        .filter_map(|name| parse_generation(hash_alias, name))
+        .max()
+        .map_or(1, |highest| highest + 1)
 }
 
 /// Build the `/_bulk` URL with optional pipeline and refresh parameters.
@@ -1506,5 +1734,63 @@ mod tests {
     #[test]
     fn plan_chunks_of_nothing_is_no_requests() {
         assert!(plan_chunks(&[], 10, 100).is_empty());
+    }
+
+    // ── generation naming (alias-over-generations reindex) ───────────────────
+
+    #[test]
+    fn generation_name_appends_the_number() {
+        assert_eq!(generation_name("users_ab12", 3), "users_ab12_3");
+    }
+
+    #[test]
+    fn parse_generation_reads_a_numeric_suffix_only() {
+        assert_eq!(parse_generation("users_ab12", "users_ab12_3"), Some(3));
+        // A legacy concrete index named exactly the hash alias is not a generation.
+        assert_eq!(parse_generation("users_ab12", "users_ab12"), None);
+        // Non-numeric suffix.
+        assert_eq!(parse_generation("users_ab12", "users_ab12_x"), None);
+        // A different hash that merely shares a prefix (no `_` after the alias).
+        assert_eq!(parse_generation("users_ab12", "users_ab12x_1"), None);
+        // A shorter alias that prefixes a longer hash.
+        assert_eq!(parse_generation("users_ab", "users_ab12_3"), None);
+    }
+
+    #[test]
+    fn hash_alias_of_strips_the_generation_suffix() {
+        assert_eq!(hash_alias_of("users_ab12_3").as_deref(), Some("users_ab12"));
+        // A logical name with underscores: only the trailing `_{n}` is stripped.
+        assert_eq!(
+            hash_alias_of("user_events_ab12_10").as_deref(),
+            Some("user_events_ab12")
+        );
+        // No numeric suffix → not a generation name.
+        assert_eq!(hash_alias_of("users"), None);
+        assert_eq!(hash_alias_of("users_abcd"), None);
+    }
+
+    #[test]
+    fn next_generation_is_one_past_the_highest_existing() {
+        assert_eq!(next_generation(&[], "users_ab12"), 1);
+        assert_eq!(
+            next_generation(
+                &["users_ab12_1".to_owned(), "users_ab12_2".to_owned()],
+                "users_ab12"
+            ),
+            3
+        );
+        // A leftover from a crashed reindex: go past it, never reuse.
+        assert_eq!(
+            next_generation(&["users_ab12_5".to_owned()], "users_ab12"),
+            6
+        );
+        // Unrelated indexes are ignored.
+        assert_eq!(
+            next_generation(
+                &["other_9".to_owned(), "users_ab12_2".to_owned()],
+                "users_ab12"
+            ),
+            3
+        );
     }
 }

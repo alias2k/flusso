@@ -363,17 +363,46 @@ async fn pump(
 
     // Capture runs concurrently with the worker; the worker borrows the shared
     // builder and sink. The observer's events are `&self`, so capture takes an
-    // `Arc` clone it can move into the spawned `'static` task.
-    let capture = tokio::spawn(capture(stream, producer, Arc::clone(pipeline.observer)));
+    // `Arc` clone it can move into the spawned `'static` task. The guard aborts
+    // it if this future is *cancelled* (e.g. dropped for an on-demand reindex
+    // restart) — otherwise a capture parked on an idle source stream would
+    // linger, holding the source connection / replication slot and blocking the
+    // next run from acquiring it. On the normal path the handle is taken out and
+    // joined below, so the guard's drop is a no-op.
+    let mut capture = CaptureGuard(Some(tokio::spawn(capture(
+        stream,
+        producer,
+        Arc::clone(pipeline.observer),
+    ))));
     let worker = work(pipeline, &mut consumer, filter).await;
 
-    capture.abort();
-    let captured = capture.await;
+    let captured = match capture.0.take() {
+        Some(handle) => {
+            handle.abort();
+            handle.await
+        }
+        None => Ok(Ok(())),
+    };
     worker?;
     match captured {
         Ok(result) => result,
         Err(join) if join.is_cancelled() => Ok(()),
         Err(join) => Err(EngineError::Task(join.to_string())),
+    }
+}
+
+/// Aborts the spawned capture task when dropped, so cancelling [`pump`] (e.g.
+/// dropping the engine future for a reindex restart) doesn't leave it running
+/// and holding the source's replication slot. On the normal path the handle is
+/// `take`n out and joined, leaving the guard empty so its drop is a no-op.
+#[derive(Debug)]
+struct CaptureGuard(Option<tokio::task::JoinHandle<Result<()>>>);
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
     }
 }
 

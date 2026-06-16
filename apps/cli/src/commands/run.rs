@@ -15,9 +15,9 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Args;
 use daemon::{Daemon, DaemonOptions};
-use schema::Config;
+use schema::{Config, IndexName};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::DEFAULT_ARTIFACT;
 use crate::backends::FlussoBackends;
@@ -138,21 +138,22 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
     };
 
-    // Attach the metrics observer (records to the meter installed above; a no-op
-    // if none). Metric definitions live in the binary — the daemon is agnostic.
-    let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new());
-    let running = Daemon::new(config, Arc::new(FlussoBackends))
-        .with_options(options)
-        .with_observer(otel_observer)
-        .start()
-        .await?;
-    let status = running.status();
-
-    // `in_flight` is derived from the status, so it's an observable gauge
-    // registered now that the handle exists. Kept alive for the run's duration.
+    // One status for the whole process, reused by every (re)started daemon run —
+    // so the long-lived HTTP surface + metrics keep reading the same handle and
+    // its counters/uptime survive a reindex restart. (`config` is moved into the
+    // daemon below, so read its index names first.)
+    let status = Arc::new(daemon::Status::new(
+        config.indexes.keys().cloned(),
+        std::time::Instant::now(),
+    ));
+    // `in_flight` is derived from the status, registered now that it exists.
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
 
-    // Serve both surfaces (graceful drain on their shutdown signals).
+    // Reindex requests from the private surface drive pipeline restarts.
+    let (reindex_tx, mut reindex_rx) = mpsc::channel::<IndexName>(8);
+
+    // Serve both surfaces once, for the whole process lifetime (they read the
+    // shared status, so restarts don't disturb them). Graceful drain on shutdown.
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
     let (private_shutdown, private_rx) = oneshot::channel::<()>();
     let public = tokio::spawn(http::serve(
@@ -167,12 +168,44 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let private = tokio::spawn(http::serve(
         "private",
         private_listener,
-        http::private_router(Arc::clone(&status), Arc::clone(&basic_auth)),
+        http::private_router(
+            http::PrivateState {
+                status: Arc::clone(&status),
+                reindex: reindex_tx,
+            },
+            Arc::clone(&basic_auth),
+        ),
         private_rx,
     ));
 
-    // Run until the stream ends, an error stops it, or a signal arrives.
-    let result = running.run(shutdown_signal()).await;
+    let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends);
+    let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new());
+
+    // Run the pipeline, restarting it whenever a reindex is requested. A reindex
+    // stages a fresh generation (on a throwaway sink) and the restarted run's
+    // backfill seeds it; the alias swaps on completion. Otherwise the run ends
+    // only when the stream stops, an error halts it, or a signal arrives.
+    let result = loop {
+        let running = Daemon::new(config.clone(), Arc::clone(&backends))
+            .with_options(options.clone())
+            .with_observer(Arc::clone(&otel_observer))
+            .with_status(Arc::clone(&status))
+            .start()
+            .await?;
+
+        let index = tokio::select! {
+            outcome = running.run(shutdown_signal()) => break outcome,
+            Some(index) = reindex_rx.recv() => index,
+        };
+
+        tracing::info!(
+            index = index.as_ref(),
+            "reindex requested; staging a fresh generation and restarting"
+        );
+        if let Err(error) = stage_reindex(&config, &options, backends.as_ref(), &index).await {
+            tracing::error!(%error, index = index.as_ref(), "failed to stage reindex; restarting without it");
+        }
+    };
 
     // Drain both HTTP servers, then flush telemetry — on success or error alike.
     let _ = public_shutdown.send(());
@@ -190,6 +223,26 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
 
     result
+}
+
+/// Stage a reindex of `index`: resolve its mapping from the config, build a sink,
+/// and ask it to prepare a fresh generation. The mapping (with its schema hash)
+/// is all the sink needs — it doesn't touch the running engine's in-memory state,
+/// so a throwaway sink built here is enough.
+async fn stage_reindex(
+    config: &Config,
+    options: &DaemonOptions,
+    backends: &dyn daemon::Backends,
+    index: &IndexName,
+) -> anyhow::Result<()> {
+    let mapping = config
+        .resolve_mappings()
+        .into_iter()
+        .find(|mapping| &mapping.index == index)
+        .with_context(|| format!("no such index {}", index.as_ref()))?;
+    let sink = backends.sink(config, options).await?;
+    sink.reindex(&mapping).await?;
+    Ok(())
 }
 
 /// Load the configuration a `run` should use: compiled fresh from `--config`, or

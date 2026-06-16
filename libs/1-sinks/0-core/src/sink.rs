@@ -107,4 +107,22 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     async fn mark_seeded(&self, _: &IndexName) -> Result<()> {
         Ok(())
     }
+
+    /// Request a from-scratch rebuild of `index` on the next backfill: mark it
+    /// unseeded so [`is_seeded`](Self::is_seeded) reports `false` again, *without*
+    /// disturbing what currently serves reads. A sink that builds into a fresh,
+    /// swappable target (e.g. the OpenSearch sink's per-generation indexes behind
+    /// a stable alias) prepares that target here so the seeding path rebuilds it
+    /// and atomically swaps on completion — the live copy is untouched until then.
+    ///
+    /// This only flips the seeded-state and stages the target; the actual reseed
+    /// runs through the normal [`ensure_index`](Self::ensure_index) → backfill →
+    /// [`mark_seeded`](Self::mark_seeded) path on the next run. The default is a
+    /// no-op (correct for sinks that re-seed every run anyway). Takes the full
+    /// [`IndexMapping`] (not just the name) so a freshly-built sink can stage the
+    /// reindex without having run [`ensure_index`](Self::ensure_index) — it needs
+    /// the schema hash to address the index, not the running engine's state.
+    async fn reindex(&self, _: &IndexMapping) -> Result<()> {
+        Ok(())
+    }
 }
