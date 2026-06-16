@@ -1,7 +1,15 @@
 [package]
 name = "flusso-query-derive"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macro generating a typed, compile-time-validated query surface for flusso indexes."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
 
 [lib]
 proc-macro = true

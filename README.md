@@ -310,9 +310,11 @@ The e2e tests are `#[ignore]`d by default and legitimately slow/flaky, so
 carry [Criterion](https://bheisler.github.io/criterion.rs/) benchmarks
 (`cargo bench`) — the engine, the OpenSearch sink, and the Postgres source.
 
-Editor support: point your editor at `schemas/config.schema.json` and
-`schemas/index.schema.yml` for completion and inline validation — the bundled
-example schemas already reference them via a `yaml-language-server` modeline.
+Editor support: point your editor at
+`libs/2-schema/1-config-toml/schemas/config.schema.json` and
+`libs/2-schema/1-index-yaml/schemas/index.schema.yml` for completion and inline
+validation — the bundled example schemas already reference them via a
+`yaml-language-server` modeline.
 
 Want to hack on it? [`CLAUDE.md`](CLAUDE.md) has the architecture tour and the
 house rules (the lints are strict — no `unwrap`, no `println!`, and yes, they fail

@@ -19,13 +19,10 @@ mod parser;
 pub use env_value::EnvOrValue;
 pub use parser::ParseError;
 
-/// The JSON Schema describing a `flusso.toml` config file, embedded from the
-/// repo's `schemas/` directory for editor assist and programmatic access. Kept
+/// The JSON Schema describing a `flusso.toml` config file, embedded from this
+/// crate's `schemas/` directory for editor assist and programmatic access. Kept
 /// in lockstep with this parser by `schema`'s `schema_drift` test.
-pub const CONFIG_SCHEMA: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../schemas/config.schema.json"
-));
+pub const CONFIG_SCHEMA: &str = include_str!("../schemas/config.schema.json");
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

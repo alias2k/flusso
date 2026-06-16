@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.sources-postgres]
 path = ".."
+package = "flusso-sources-postgres"
 features = ["fuzzing"]
 
 [[bin]]

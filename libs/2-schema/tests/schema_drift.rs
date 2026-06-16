@@ -8,7 +8,7 @@
 
 //! Drift guard between the parsers and the editor-assist JSON Schemas.
 //!
-//! The schemas in `schemas/` (`config.schema.json` for `flusso.toml`,
+//! The schemas the parser crates embed (`config.schema.json` for `flusso.toml`,
 //! `index.schema.yml` for `*.schema.yml`) are hand-curated for editor UX, but
 //! the **sets** they enumerate — field type tags, field siblings, enum tokens,
 //! and sink fields — must stay in lockstep with what the parsers accept. Each

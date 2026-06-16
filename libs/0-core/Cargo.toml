@@ -1,7 +1,18 @@
 [package]
-name = "schema-core"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-schema-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared domain vocabulary for flusso: values, validated newtypes, and index mappings."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "schema_core"
 
 [lints]
 workspace = true

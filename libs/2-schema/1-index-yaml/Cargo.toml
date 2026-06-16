@@ -1,7 +1,18 @@
 [package]
-name = "schema-index-yaml"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-schema-index-yaml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parser for flusso's *.schema.yml index definitions."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["parser-implementations"]
+readme.workspace = true
+
+[lib]
+name = "schema_index_yaml"
 
 [lints]
 workspace = true

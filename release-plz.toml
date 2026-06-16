@@ -1,0 +1,16 @@
+# release-plz configuration — https://release-plz.dev/docs/config
+#
+# Defaults fit this workspace: every crate shares the version in
+# Cargo.toml [workspace.package], release-plz bumps it from conventional
+# commits, updates CHANGELOG.md, and publishes all 16 publishable crates to
+# crates.io in dependency order. `flusso-dev-search-api` is publish = false in
+# its manifest, so release-plz skips it automatically.
+
+[workspace]
+# Surface accidental SemVer breakage as a note in the release PR.
+semver_check = true
+# Maintain CHANGELOG.md from conventional commits.
+changelog_update = true
+# Create the GitHub Release (the dist + docker workflows attach their artifacts
+# to the tag it pushes). Set to false if you'd rather dist own the release.
+git_release_enable = true

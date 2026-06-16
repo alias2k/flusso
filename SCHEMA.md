@@ -33,8 +33,8 @@ live in [**Sources and sinks**](SOURCES_AND_SINKS.md). Environment variables
 
 > Two JSON Schemas ship alongside this reference and are the machine-readable
 > source of truth for the file formats:
-> [`schemas/config.schema.json`](schemas/config.schema.json) and
-> [`schemas/index.schema.yml`](schemas/index.schema.yml). Point your editor at
+> [`config.schema.json`](libs/2-schema/1-config-toml/schemas/config.schema.json) and
+> [`index.schema.yml`](libs/2-schema/1-index-yaml/schemas/index.schema.yml). Point your editor at
 > them for completion and inline validation.
 
 ## Contents

@@ -73,6 +73,11 @@ Use the issue templates — pick "Bug report" or "Feature request". For anything
 security-sensitive, do **not** open a public issue; follow
 [`SECURITY.md`](SECURITY.md) instead.
 
+## Releasing
+
+Releases are automated. Maintainers: see [`RELEASING.md`](RELEASING.md) for the
+crates.io / binary / Docker release flow.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the

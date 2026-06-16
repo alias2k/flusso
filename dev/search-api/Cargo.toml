@@ -1,7 +1,11 @@
 [package]
 name = "flusso-dev-search-api"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Development example: an axum search API consuming a flusso index."
+publish = false
 
 [[bin]]
 name = "search-api"

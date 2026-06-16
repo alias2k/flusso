@@ -22,7 +22,7 @@ discussions, or pull requests.**
 
 Instead, report them privately through GitHub Security Advisories:
 
-1. Go to the [Security Advisories page](https://github.com/alias2k/pgsync_rs/security/advisories).
+1. Go to the [Security Advisories page](https://github.com/alias2k/flusso/security/advisories).
 2. Click **Report a vulnerability**.
 3. Provide as much detail as you can (see below).
 

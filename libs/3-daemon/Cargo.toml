@@ -1,7 +1,18 @@
 [package]
+name = "flusso-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Daemon that assembles and runs the flusso pipeline from a Config."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
 name = "daemon"
-version = "0.1.0"
-edition = "2024"
 
 [lints]
 workspace = true

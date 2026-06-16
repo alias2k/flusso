@@ -813,24 +813,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "engine",
- "futures",
- "schema",
- "schema-core",
- "serde",
- "serde_json",
- "sinks-core",
- "sources-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -955,28 +937,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "criterion",
- "futures",
- "queue-channel",
- "queue-core",
- "rust_decimal",
- "schema-core",
- "sinks-core",
- "sinks-opensearch",
- "sources-core",
- "sources-postgres",
- "sqlx",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1066,25 +1026,43 @@ dependencies = [
  "axum",
  "base64",
  "clap",
- "daemon",
+ "flusso-daemon",
+ "flusso-schema",
+ "flusso-sinks-core",
+ "flusso-sinks-opensearch",
+ "flusso-sinks-stdout",
+ "flusso-sources-core",
+ "flusso-sources-postgres",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
  "opentelemetry_sdk",
  "prometheus",
  "reqwest 0.12.28",
- "schema",
  "serde_json",
- "sinks-core",
- "sinks-opensearch",
- "sinks-stdout",
- "sources-core",
- "sources-postgres",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "flusso-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "flusso-engine",
+ "flusso-schema",
+ "flusso-schema-core",
+ "flusso-sinks-core",
+ "flusso-sources-core",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1098,6 +1076,28 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "flusso-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "criterion",
+ "flusso-queue-channel",
+ "flusso-queue-core",
+ "flusso-schema-core",
+ "flusso-sinks-core",
+ "flusso-sinks-opensearch",
+ "flusso-sources-core",
+ "flusso-sources-postgres",
+ "futures",
+ "rust_decimal",
+ "sqlx",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1120,14 +1120,149 @@ name = "flusso-query-derive"
 version = "0.1.0"
 dependencies = [
  "flusso-query",
+ "flusso-schema",
  "proc-macro2",
  "quote",
- "schema",
  "serde",
  "serde_json",
  "syn 2.0.117",
  "toml",
  "trybuild",
+]
+
+[[package]]
+name = "flusso-queue-channel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "flusso-queue-core",
+ "tokio",
+]
+
+[[package]]
+name = "flusso-queue-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "flusso-schema"
+version = "0.1.0"
+dependencies = [
+ "flusso-schema-config-toml",
+ "flusso-schema-core",
+ "flusso-schema-index-yaml",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "flusso-schema-config-toml"
+version = "0.1.0"
+dependencies = [
+ "flusso-schema-core",
+ "serde",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
+name = "flusso-schema-core"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "nutype",
+ "regex",
+ "rust_decimal",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "flusso-schema-index-yaml"
+version = "0.1.0"
+dependencies = [
+ "flusso-schema-core",
+ "rust_decimal",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "flusso-sinks-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "flusso-schema-core",
+ "rust_decimal",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "flusso-sinks-opensearch"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "criterion",
+ "flusso-schema-core",
+ "flusso-sinks-core",
+ "reqwest 0.12.28",
+ "serde_json",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "flusso-sinks-stdout"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "flusso-schema-core",
+ "flusso-sinks-core",
+ "futures",
+ "serde_json",
+]
+
+[[package]]
+name = "flusso-sources-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "flusso-schema-core",
+ "futures",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "flusso-sources-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "criterion",
+ "flusso-engine",
+ "flusso-schema-core",
+ "flusso-sinks-core",
+ "flusso-sources-core",
+ "futures",
+ "pgwire-replication",
+ "proptest",
+ "rust_decimal",
+ "serde_json",
+ "sqlx",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2549,23 +2684,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "queue-channel"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "queue-core",
- "tokio",
-]
-
-[[package]]
-name = "queue-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3133,53 +3251,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "schema"
-version = "0.1.0"
-dependencies = [
- "rmp-serde",
- "schema-config-toml",
- "schema-core",
- "schema-index-yaml",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "schema-config-toml"
-version = "0.1.0"
-dependencies = [
- "schema-core",
- "serde",
- "thiserror 2.0.18",
- "toml",
-]
-
-[[package]]
-name = "schema-core"
-version = "0.1.0"
-dependencies = [
- "bon",
- "nutype",
- "regex",
- "rust_decimal",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "schema-index-yaml"
-version = "0.1.0"
-dependencies = [
- "rust_decimal",
- "schema-core",
- "serde",
- "serde_yaml",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "schemars"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3450,44 +3521,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "sinks-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "rust_decimal",
- "schema-core",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "sinks-opensearch"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "criterion",
- "reqwest 0.12.28",
- "schema-core",
- "serde_json",
- "sinks-core",
- "testcontainers-modules",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sinks-stdout"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "schema-core",
- "serde_json",
- "sinks-core",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3510,39 +3543,6 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "sources-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "schema-core",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "sources-postgres"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "criterion",
- "engine",
- "futures",
- "pgwire-replication",
- "proptest",
- "rust_decimal",
- "schema-core",
- "serde_json",
- "sinks-core",
- "sources-core",
- "sqlx",
- "testcontainers-modules",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

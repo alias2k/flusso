@@ -1,7 +1,18 @@
 [package]
-name = "sinks-opensearch"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-sinks-opensearch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenSearch sink for flusso: bulk writes, mappings, seeding, and reindex."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "sinks_opensearch"
 
 [lints]
 workspace = true

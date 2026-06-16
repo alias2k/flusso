@@ -1,7 +1,15 @@
 [package]
 name = "flusso-query"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Backend-neutral OpenSearch/Elasticsearch query client for flusso indexes."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
 
 [lib]
 name = "flusso_query"
@@ -24,6 +32,6 @@ thiserror = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
-flusso-query-derive = { path = "../query-derive", optional = true }
+flusso-query-derive = { path = "../query-derive", version = "0.1.0", optional = true }
 rust_decimal = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }

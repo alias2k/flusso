@@ -1,7 +1,18 @@
 [package]
-name = "sources-postgres"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-sources-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Postgres logical-replication source for flusso: WAL capture, backfill, and document building."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "sources_postgres"
 
 [lints]
 workspace = true

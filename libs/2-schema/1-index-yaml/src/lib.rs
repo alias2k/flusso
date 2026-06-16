@@ -31,13 +31,10 @@ use serde::Deserialize;
 pub const SUPPORTED_VERSIONS: &[u8] = &[1];
 
 /// The JSON Schema (authored as YAML) describing a `*.schema.yml` index file,
-/// embedded from the repo's `schemas/` directory for editor assist and
+/// embedded from this crate's `schemas/` directory for editor assist and
 /// programmatic access. Kept in lockstep with this parser by `schema`'s
 /// `schema_drift` test.
-pub const INDEX_SCHEMA: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../schemas/index.schema.yml"
-));
+pub const INDEX_SCHEMA: &str = include_str!("../schemas/index.schema.yml");
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConversionError {

@@ -1,7 +1,18 @@
 [package]
-name = "schema-config-toml"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-schema-config-toml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parser for flusso's flusso.toml configuration files."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["parser-implementations"]
+readme.workspace = true
+
+[lib]
+name = "schema_config_toml"
 
 [lints]
 workspace = true

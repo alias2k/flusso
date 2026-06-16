@@ -322,12 +322,29 @@ belongs in the linked docs.
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
   `libs/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
-- `dev/` is a runnable example, not shipping code; `schemas/*.json|yml` are hand-curated JSON
-  Schemas for editor completion. Each is owned by the format crate that defines its shape and
-  embedded via `include_str!`: `schema_config_toml::CONFIG_SCHEMA` (`schemas/config.schema.json`)
-  and `schema_index_yaml::INDEX_SCHEMA` (`schemas/index.schema.yml`), both re-exported from
-  `schema` and emitted by `flusso schema config|index`. The files stay at repo root so the
-  `# yaml-language-server: $schema=…` refs and external registries keep working.
+- **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
+  `flusso-*` package namespace. Every crate is published **except** `dev/search-api`
+  (`flusso-dev-search-api`, `publish = false` — a runnable example, not shipping code). The
+  catch: a crate's published **package name** (`flusso-engine`, `flusso-schema-core`, …) differs
+  from the **extern name** code uses (`engine`, `schema_core`, …). Two mechanisms keep that split
+  so the rename needs **no source change**: each lib sets `[lib] name = "<extern>"`, and each
+  `[workspace.dependencies]` entry keeps its short key plus `package = "flusso-…"` + `version`.
+  So `use schema_core::…`, `package(flusso-sources-postgres)` in `.config/nextest.toml`, and the
+  fuzz crate's `package = "flusso-sources-postgres"` path-dep all coexist. Shared listing metadata
+  (license, repo, authors, keywords, readme) lives in `[workspace.package]`; crates inherit it
+  with `.workspace = true`, and set their own `description` + `categories`. **Publish order is
+  bottom-up** (a dep must be on crates.io before its dependents): `flusso-schema-core` → parsers →
+  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-query-derive` →
+  `flusso-query` → `flusso-cli`.
+- `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
+  completion live **inside the parser crate that owns each** (so they ship in the published
+  `.crate`): `schema_config_toml::CONFIG_SCHEMA`
+  (`libs/2-schema/1-config-toml/schemas/config.schema.json`) and `schema_index_yaml::INDEX_SCHEMA`
+  (`libs/2-schema/1-index-yaml/schemas/index.schema.yml`), each embedded via a crate-local
+  `include_str!`, both re-exported from `schema` and emitted by `flusso schema config|index`.
+  They sit in-crate (not repo root) because `cargo package` only bundles files under the crate
+  dir — an out-of-crate `include_str!` would break the published crate. Editor `# yaml-language-server:
+  $schema=…` modelines and registry refs point at these in-crate paths.
   `libs/2-schema/tests/schema_drift.rs` guards their enumerable sets — field type tags, field
   siblings, enum tokens, sink fields — against the parsers (reading the embedded consts), so
   adding a tag/sibling/variant fails CI until the schema matches. It does **not** check

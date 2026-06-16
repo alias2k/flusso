@@ -1,7 +1,18 @@
 [package]
-name = "queue-core"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-queue-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Queue abstraction for the flusso change-processing pipeline."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "queue_core"
 
 [lints]
 workspace = true

@@ -1,7 +1,18 @@
 [package]
-name = "sinks-core"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-sinks-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sink trait, JSON rendering, and fan-out for flusso."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "sinks_core"
 
 [lints]
 workspace = true

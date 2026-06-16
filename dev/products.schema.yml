@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../schemas/index.schema.yml
+# yaml-language-server: $schema=../libs/2-schema/1-index-yaml/schemas/index.schema.yml
 # The `products` search document: a catalog product with its tags (many-to-many),
 # its reviews (one-to-many), pricing grouped into a sub-object, and rating
 # rollups. A change to the product, a tag link, or a review rebuilds it.

@@ -2,4 +2,4 @@
 include = ["**/flusso.toml"]
 
 [rule.schema]
-path = "schemas/config.schema.json"
+path = "libs/2-schema/1-config-toml/schemas/config.schema.json"

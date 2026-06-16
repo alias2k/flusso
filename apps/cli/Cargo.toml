@@ -1,7 +1,15 @@
 [package]
 name = "flusso-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "flusso command-line interface: keep OpenSearch in sync with Postgres from declarative config."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "database"]
+readme.workspace = true
 
 [[bin]]
 name = "flusso"

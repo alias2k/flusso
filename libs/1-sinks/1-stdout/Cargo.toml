@@ -1,7 +1,18 @@
 [package]
-name = "sinks-stdout"
-version = "0.1.0"
-edition = "2024"
+name = "flusso-sinks-stdout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "stdout sink for flusso, for debugging and development."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "sinks_stdout"
 
 [lints]
 workspace = true
