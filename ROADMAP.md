@@ -106,14 +106,58 @@ never the config file: they are secrets, and flusso never bakes a secret into a
 compiled `flusso.lock`. The private surface is **fail-closed** — with no
 credentials configured it is not mounted at all.
 
-**Mechanism.** A reindex preserves the engine's race-free backfill-*then*-live
-ordering by scoping a pipeline restart rather than mutating the live loop: clear
-the target index (a new `Sink::unseed` — delete the physical index plus its seed
-marker, so the rebuild starts empty and drops documents for rows since deleted in
-Postgres), then tear down and rebuild the run. The engine re-backfills only that
-index through the existing seed machinery (`is_seeded` / `snapshot` /
-`mark_seeded`); other indexes stay seeded and keep serving, and the live changes
-that accumulate during the rebuild are retained in the replication slot and
-applied when live resumes. So the reindex reuses the tested backfill path end to
-end instead of adding a second, concurrent seeding path with its own ordering
-hazards.
+**Why reindex (an *unchanged* schema) at all** — a schema *change* already
+re-indexes itself, since a new hash yields a fresh physical index. The reasons to
+trigger a rebuild without a schema change are all recovery/repair, and they shape
+the mechanism:
+
+1. **Drift repair** — the index diverged from Postgres (a bug, a missed change, a
+   partial flush, a hand-edit) and you want to guarantee index == current Postgres.
+2. **Slot / WAL-gap recovery** — the slot was dropped, flusso was down past WAL
+   retention, or a failover left an unknown amount of staleness (ties to the HA
+   and resumable-backfill items above).
+3. **Quarantine recovery** — `on_error = "skip"` dropped poison documents; after
+   fixing the data or mapping you want the missing ones back.
+4. **Out-of-band change** — an en-masse correction that bypassed the WAL
+   (`pg_restore`, pre-slot data, a replica promotion), or an index someone
+   dropped/truncated.
+5. **Build-logic change the hash doesn't cover** — a custom transform/enrichment
+   changed in *code*, not schema, so the hash didn't move but documents need
+   rebuilding.
+
+Three requirements fall out: it must be a **true rebuild that removes orphaned
+documents** (an upsert-only reseed leaves stale docs for since-deleted rows —
+insufficient for #1/#2/#4); the index is usually **serving reads** while it runs,
+so **read downtime must be zero**; and it is **rare and operator-initiated**, so
+it must impose **no permanent cost on normal operation**.
+
+**Mechanism — alias indirection + a fresh generation, swapped atomically.** The
+config-derived `{logical}_{hash}` stops being a concrete index and becomes a
+stable **alias** (still computed from config alone, so the `flusso-query` client
+keeps resolving it at compile time with no DB). Behind it sits a concrete,
+swappable generation `{logical}_{hash}_{gen}`. A reindex:
+
+1. Creates a new empty generation `{logical}_{hash}_{gen+1}` and seeds it through
+   the existing race-free backfill path (`snapshot` → build → sink), addressing it
+   directly; reads and writes keep flowing to the current generation the whole
+   time, so **reads never go dark**.
+2. On completion, repoints `{logical}_{hash}` (and the convenience `{logical}`
+   alias) from the old generation to the new in one atomic `_aliases` call, then
+   drops the old generation.
+
+Because the new generation is built from empty, orphaned documents are gone — a
+true rebuild. `flusso-query` is unaffected: reading through an alias is
+transparent. Two known wrinkles to handle: an alias and an index **cannot share a
+name**, so existing deployments need a one-time migration (the concrete
+`{logical}_{hash}` is reindexed into its first generation and the name freed for
+the alias); and that index's *writes* lag briefly while its generation seeds
+(reads do not) — acceptable, because the operation is rare and reads stay live.
+
+**Deferred — true write-side zero-downtime.** Eliminating even the brief write
+lag would mean dual-writing live changes to both generations during the seed,
+which reintroduces a snapshot-vs-live ordering race; the clean fix is OpenSearch
+**external versioning** (a per-write version = WAL LSN, so a stale snapshot write
+loses to a newer live write). That is deliberately **not** in scope: it taxes
+*every* write, forever, on the hot path to make a *rare* operation lag-free —
+which none of the reasons above justify. It stays a documented follow-on, purely
+additive on top of the alias scheme.
