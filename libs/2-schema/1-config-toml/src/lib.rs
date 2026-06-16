@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use entities::IndexEntry;
+use entities::Server;
 use entities::Sink;
 use entities::Source;
 use schema_core::common;
@@ -47,4 +48,8 @@ pub struct ConfigToml {
     /// [`IndexEntry`]. Defaults to [`FailurePolicy::Stop`](schema_core::FailurePolicy::Stop).
     #[serde(default)]
     pub on_error: schema_core::FailurePolicy,
+    /// Bind addresses for the operational HTTP surfaces. The binary layers
+    /// `FLUSSO_*` env vars and CLI flags on top (which win); see `CONFIG.md`.
+    #[serde(default)]
+    pub server: Server,
 }

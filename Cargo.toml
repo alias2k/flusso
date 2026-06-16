@@ -122,6 +122,7 @@ testcontainers-modules = { version = "0.15.*" }
 criterion = { version = "0.8.*", features = ["async_tokio"] }
 proptest = { version = "1.*" }
 axum = { version = "0.8.*" }
+base64 = "0.22"
 # OpenTelemetry stack, shared by the CLI (traces) and the daemon (metrics).
 # Per-crate feature sets differ and are added at the use site; Cargo unifies
 # them. Keep these versions in lockstep — the otel crates release together.

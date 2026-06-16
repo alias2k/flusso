@@ -20,6 +20,7 @@ pub use sink::Sink;
 pub use source::Source;
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 
 use schema_core::{FailurePolicy, IndexSchema, common};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,26 @@ pub struct Config {
     /// for every index; override per index with [`Index::on_error`].
     #[serde(default)]
     pub on_error: FailurePolicy,
+    /// Bind addresses for the operational HTTP surfaces. Read by the binary, not
+    /// the daemon — transport is the binary's concern. Env/flag overrides win;
+    /// see [`ServerConfig`].
+    #[serde(default)]
+    pub server: ServerConfig,
+}
+
+/// Bind addresses for the two operational HTTP surfaces, as configured in
+/// `flusso.toml`'s `[server]` table. Parsed and validated at config-read time
+/// (see `schema_config_toml`'s `BindAddress`), so these are real socket
+/// addresses by the time they reach the binary, which layers `FLUSSO_*` env vars
+/// and CLI flags on top (which win).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_address: Option<SocketAddr>,
+    /// Private, Basic-auth control surface (`/indexes`, `/reindex`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_address: Option<SocketAddr>,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

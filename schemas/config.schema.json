@@ -250,6 +250,21 @@
       "enum": ["stop", "skip"],
       "default": "stop",
       "description": "What to do when a sink rejects a document at the item level (a mapping conflict, a malformed value): stop the run (default) or skip the document and continue. Override per index under [[index]]."
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Bind addresses for the operational HTTP surfaces. The FLUSSO_* environment variables and CLI flags override these (CLI > env > config).",
+      "properties": {
+        "public_address": {
+          "type": "string",
+          "description": "Bind address for the public, read-only surface (/healthz, /readyz, /status, /metrics). E.g. 0.0.0.0:9464."
+        },
+        "private_address": {
+          "type": "string",
+          "description": "Bind address for the private, Basic-auth control surface (/indexes, /reindex). E.g. 0.0.0.0:9465."
+        }
+      }
     }
   }
 }

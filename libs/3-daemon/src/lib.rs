@@ -560,6 +560,7 @@ mod tests {
             sinks: BTreeMap::new(),
             indexes: BTreeMap::new(),
             on_error: Default::default(),
+            server: Default::default(),
         }
     }
 

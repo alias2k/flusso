@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Args;
 
-use crate::print;
+use crate::commands::print;
 use crate::{DEFAULT_ARTIFACT, DEFAULT_CONFIG};
 
 #[derive(Debug, Args)]

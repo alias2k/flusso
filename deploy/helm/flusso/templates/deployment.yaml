@@ -47,7 +47,7 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           args:
             - run
-            - --http-addr
+            - --public-address
             - "0.0.0.0:{{ .Values.http.port }}"
             {{- if $useConfig }}
             - --config

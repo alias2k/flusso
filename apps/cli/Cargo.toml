@@ -35,3 +35,4 @@ opentelemetry-prometheus.workspace = true
 tracing-opentelemetry.workspace = true
 prometheus.workspace = true
 axum.workspace = true
+base64.workspace = true

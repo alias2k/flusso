@@ -2,12 +2,12 @@
 //!
 //! The daemon owns the pipeline and exposes its live [`Status`](daemon::Status);
 //! this command owns the *transport* around it: telemetry export (traces +
-//! metrics), the operational HTTP surface, and process signals. It binds the
-//! HTTP listener, installs the meter provider, starts the daemon, serves its
-//! status/metrics, and runs until the stream ends, an error stops it, or a
-//! signal arrives — then drains the server and flushes telemetry.
+//! metrics), the two operational HTTP surfaces, and process signals. It binds
+//! both listeners, installs the meter provider, starts the daemon, serves its
+//! public status/metrics + private control surface, and runs until the stream
+//! ends, an error stops it, or a signal arrives — then drains and flushes.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +21,17 @@ use tokio::sync::oneshot;
 
 use crate::DEFAULT_ARTIFACT;
 use crate::backends::FlussoBackends;
-use crate::observer::OtelObserver;
-use crate::{http, metrics, telemetry};
+use crate::http::{self, BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
+use crate::telemetry::observer::OtelObserver;
+use crate::telemetry::{self, metrics};
+
+/// Default bind address for the public surface — localhost, so an unconfigured
+/// run is reachable for local ops without being exposed; deployments set
+/// `0.0.0.0` explicitly.
+const DEFAULT_PUBLIC_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9464);
+/// Default bind address for the private control surface — localhost, which
+/// matters because it ships with default Basic-auth credentials.
+const DEFAULT_PRIVATE_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9465);
 
 #[derive(Debug, Args)]
 pub(crate) struct RunArgs {
@@ -56,10 +65,26 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_QUEUE_CAPACITY", default_value_t = 1024)]
     queue_capacity: usize,
 
-    /// Serve the operational HTTP surface (`/healthz`, `/readyz`, `/status`,
-    /// `/metrics`) on this address. Omit to disable it.
-    #[arg(long, env = "FLUSSO_HTTP_ADDR")]
-    http_addr: Option<SocketAddr>,
+    /// Bind address for the public, read-only HTTP surface (`/healthz`,
+    /// `/readyz`, `/status`, `/metrics`). Overrides `[server].public_address`
+    /// from config; defaults to `127.0.0.1:9464`.
+    #[arg(long, env = "FLUSSO_PUBLIC_ADDRESS")]
+    public_address: Option<SocketAddr>,
+
+    /// Bind address for the private, Basic-auth control surface (`/indexes`,
+    /// `/reindex`). Overrides `[server].private_address` from config; defaults
+    /// to `127.0.0.1:9465`.
+    #[arg(long, env = "FLUSSO_PRIVATE_ADDRESS")]
+    private_address: Option<SocketAddr>,
+
+    /// Username for the private control surface (HTTP Basic auth).
+    #[arg(long, env = "FLUSSO_ADMIN_USER", default_value = DEFAULT_ADMIN_USER)]
+    admin_user: String,
+
+    /// Password for the private control surface (HTTP Basic auth). Change it
+    /// from the default before exposing the private surface.
+    #[arg(long, env = "FLUSSO_ADMIN_PASSWORD", default_value = DEFAULT_ADMIN_PASSWORD)]
+    admin_password: String,
 
     /// How often, in seconds, to sample replication slot lag.
     #[arg(long, env = "FLUSSO_LAG_POLL_SECS", default_value_t = 15)]
@@ -71,26 +96,38 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
     let config = load_run_config(&args)?;
 
-    // Bind the HTTP listener up front: an unusable `--http-addr` should fail fast,
-    // before we open database connections or start the pipeline.
-    let listener = match args.http_addr {
-        Some(addr) => Some(
-            TcpListener::bind(addr)
-                .await
-                .with_context(|| format!("binding HTTP surface to {addr}"))?,
-        ),
-        None => None,
-    };
+    // Resolve each surface's bind address with the precedence CLI flag / env
+    // (merged by clap) > `[server]` config > built-in default.
+    let public_addr = args
+        .public_address
+        .or(config.server.public_address)
+        .unwrap_or(DEFAULT_PUBLIC_ADDRESS);
+    let private_addr = args
+        .private_address
+        .or(config.server.private_address)
+        .unwrap_or(DEFAULT_PRIVATE_ADDRESS);
 
-    // Install the meter provider *before* starting the daemon, so its observer's
-    // instruments bind to the readers. Prometheus reader when serving HTTP; OTLP
-    // when an endpoint is configured. With neither, the global meter is a no-op.
-    let metrics = if args.http_addr.is_some() || metrics::otlp_configured() {
-        Some(metrics::init(args.http_addr.is_some())?)
-    } else {
-        None
-    };
-    let registry = metrics.as_ref().and_then(|m| m.registry.clone());
+    // Bind both listeners up front: an unusable address should fail fast, before
+    // we open database connections or start the pipeline.
+    let public_listener = TcpListener::bind(public_addr)
+        .await
+        .with_context(|| format!("binding public HTTP surface to {public_addr}"))?;
+    let private_listener = TcpListener::bind(private_addr)
+        .await
+        .with_context(|| format!("binding private HTTP surface to {private_addr}"))?;
+
+    let basic_auth = Arc::new(BasicAuth::new(args.admin_user, args.admin_password));
+    if basic_auth.uses_default_password() {
+        tracing::warn!(
+            "the private control surface is using the DEFAULT admin password ({DEFAULT_ADMIN_PASSWORD:?}); \
+             set --admin-password / FLUSSO_ADMIN_PASSWORD before exposing it"
+        );
+    }
+
+    // The public surface always serves `/metrics`, so install the Prometheus
+    // reader (plus an OTLP push reader when the env configures one).
+    let metrics = metrics::init(true)?;
+    let registry = metrics.registry.clone();
 
     let options = DaemonOptions {
         slot: args.slot,
@@ -115,29 +152,37 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     // registered now that the handle exists. Kept alive for the run's duration.
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
 
-    // Serve the status/metrics surface (graceful drain on `http_shutdown`).
-    let (http_shutdown, http_rx) = oneshot::channel::<()>();
-    let http = listener.map(|listener| {
-        let state = http::AppState {
+    // Serve both surfaces (graceful drain on their shutdown signals).
+    let (public_shutdown, public_rx) = oneshot::channel::<()>();
+    let (private_shutdown, private_rx) = oneshot::channel::<()>();
+    let public = tokio::spawn(http::serve(
+        "public",
+        public_listener,
+        http::public_router(http::PublicState {
             status: Arc::clone(&status),
-            registry: registry.clone(),
-        };
-        tokio::spawn(http::serve(listener, state, http_rx))
-    });
+            registry,
+        }),
+        public_rx,
+    ));
+    let private = tokio::spawn(http::serve(
+        "private",
+        private_listener,
+        http::private_router(Arc::clone(&status), Arc::clone(&basic_auth)),
+        private_rx,
+    ));
 
     // Run until the stream ends, an error stops it, or a signal arrives.
     let result = running.run(shutdown_signal()).await;
 
-    // Drain the HTTP server, then flush telemetry — on success or error alike.
-    let _ = http_shutdown.send(());
-    if let Some(http) = http
-        && let Err(error) = http.await
-    {
-        tracing::warn!(%error, "HTTP server task did not shut down cleanly");
+    // Drain both HTTP servers, then flush telemetry — on success or error alike.
+    let _ = public_shutdown.send(());
+    let _ = private_shutdown.send(());
+    for (task, surface) in [(public, "public"), (private, "private")] {
+        if let Err(error) = task.await {
+            tracing::warn!(%error, surface, "HTTP server task did not shut down cleanly");
+        }
     }
-    if let Some(metrics) = &metrics {
-        metrics.shutdown();
-    }
+    metrics.shutdown();
     if let Some(provider) = tracer_provider
         && let Err(error) = provider.shutdown()
     {

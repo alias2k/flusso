@@ -31,7 +31,7 @@ mod loader;
 pub use compiled::{
     CompileError, Compiled, FORMAT_VERSION, compile, from_bytes, load_compiled, to_bytes, write,
 };
-pub use deployment::{Config, Index, Sink, Source};
+pub use deployment::{Config, Index, ServerConfig, Sink, Source};
 pub use loader::{LoadError, load};
 
 // Re-export the canonical schema vocabulary so downstream crates depend only on

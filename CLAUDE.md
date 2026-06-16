@@ -65,12 +65,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
 ```sh
 docker compose up -d                       # Postgres + OpenSearch + Dashboards + Prometheus + Grafana
 cargo run -- check --config dev/flusso.toml   # validate config/schemas against the DB
-cargo run -- run   --config dev/flusso.toml --http-addr 127.0.0.1:9464   # backfill + follow; serve metrics/status
+cargo run -- run   --config dev/flusso.toml --public-address 127.0.0.1:9464   # backfill + follow; serve metrics/status
 ```
 
 The compose stack adds **Prometheus** (`:9090`) and **Grafana** (`:3000`, anonymous admin,
 pre-provisioned with a flusso dashboard). Prometheus scrapes flusso's `/metrics` on the
-*host* via `host.docker.internal:9464`, so run `flusso run` with `--http-addr 127.0.0.1:9464`.
+*host* via `host.docker.internal:9464`, so run `flusso run` with `--public-address 127.0.0.1:9464`.
 Prometheus config and Grafana provisioning live under `dev/prometheus/` and `dev/grafana/`.
 
 The `Dockerfile` is a **registry-ready, config-less** image (its default `runtime` target
@@ -96,7 +96,7 @@ baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `
 only), `schema` (print an embedded editor-assist JSON Schema: `schema config` or `schema
 index`; no DB). See `dev/README.md` for the walk-through. **Every flag also reads a
 `FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.
-`FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_HTTP_ADDR` — so the binary configures cleanly from
+`FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_PUBLIC_ADDRESS` — so the binary configures cleanly from
 the environment (Helm/compose). This is separate from the config's own reserved env vars
 (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`) and `{ env = "VAR" }` secret refs.
 
@@ -218,20 +218,23 @@ The `Config`→`SourceSpec` translation lives here, in `backends.rs`'s `source_s
 filters out disabled indexes); `check.rs` calls the same helper to drive `validate_indexes`,
 which is `SourceSpec`-based. So the source crate has no dependency on `Config` at all (nor can
 it — `Config` lives at layer 2 in `schema`, above the backends), and the OpenSearch sink already
-takes only `IndexMapping`/`Mapping`. It is also the composition root for transport and telemetry: it installs the
-meter provider (`metrics.rs` — one `SdkMeterProvider` feeding a Prometheus reader scraped at
-`/metrics` when `--http-addr` is set, and an OTLP periodic push when the standard
+takes only `IndexMapping`/`Mapping`. It is also the composition root for transport and telemetry (grouped under `apps/cli/src/` as
+`telemetry/` and `http/`): it installs the
+meter provider (`telemetry/metrics.rs` — one `SdkMeterProvider` feeding a Prometheus reader scraped
+at `/metrics`, and an OTLP periodic push when the standard
 `OTEL_EXPORTER_OTLP_*` env vars configure an endpoint, matching the trace export in
-`telemetry.rs`), defines the metrics and records them (`observer.rs`'s `OtelObserver`, attached
-via `with_observer`; metric names/labels/buckets live here because they're a presentation
-choice), serves the HTTP surface (`http.rs`: `/healthz` `/readyz` `/status` `/metrics`, reading
-the daemon's `Status` + the Prometheus registry), and owns SIGINT/SIGTERM. It binds the
-listener up front (a bad `--http-addr` fails fast), then `Daemon::with_observer(otel).start()`
-→ register the `in_flight` observable gauge (read from `Status` at collection) → serve →
+`telemetry/mod.rs`), defines the metrics and records them (`telemetry/observer.rs`'s `OtelObserver`,
+attached via `with_observer`; metric names/labels/buckets live here because they're a presentation
+choice), serves **two** HTTP surfaces (`http/mod.rs`): a **public** one (`/healthz` `/readyz`
+`/status` `/metrics`, unauthenticated) and a **private** one (`/indexes`, later `/reindex`; HTTP
+Basic auth in `http/auth.rs`, default `admin`/`flusso` with a loud startup warning), both reading
+the daemon's `Status`, and owns SIGINT/SIGTERM. It binds **both** listeners up front (a bad
+`--public-address`/`--private-address` fails fast), then `Daemon::with_observer(otel).start()`
+→ register the `in_flight` observable gauge (read from `Status` at collection) → serve both →
 `run(shutdown_signal())` → drain. With no meter provider installed the global meter is a no-op
 and the instruments cost nothing — which is why the daemon tests run with no setup. A view in
-`metrics.rs` overrides the flush-duration histogram buckets to seconds (OTel's defaults assume
-milliseconds). The Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened
+`telemetry/metrics.rs` overrides the flush-duration histogram buckets to seconds (OTel's defaults
+assume milliseconds). The Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened
 admin pool (`WalChangeCapture::admin_pool`) so periodic lag probes reuse connections.
 
 ### Config layer — two-stage parse then convert
@@ -296,7 +299,7 @@ belongs in the linked docs.
 | Pipeline observability trait (`Observer`, `BatchStats`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `backends.rs` (`Backends` trait + `SourceParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
 | Backend assembly (which concrete source/sink): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
-| Transport + telemetry (binary): exporters, metrics recording, HTTP surface, signals | `apps/cli/src/` — `telemetry.rs` (traces), `metrics.rs` (meter provider + `in_flight` gauge), `observer.rs` (`OtelObserver`), `http.rs` (`/healthz` `/readyz` `/status` `/metrics`), `run.rs` (orchestration + signals) |
+| Transport + telemetry (binary): exporters, metrics recording, HTTP surfaces, auth, signals | `apps/cli/src/` — `telemetry/mod.rs` (traces), `telemetry/metrics.rs` (meter provider + `in_flight` gauge), `telemetry/observer.rs` (`OtelObserver`), `http/mod.rs` (public + private routers + `serve`), `http/auth.rs` (Basic auth), `commands/run.rs` (orchestration + signals) |
 | Config loading + the assembled `Config`/`Index`/`Source`/`Sink` (layer 2) | `libs/2-schema/src/` — `lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`), `deployment/` (the `Config` family + `From<ConfigToml>` conversion + `resolve_mappings`) |
 | Validated domain model / vocabulary (the shared types — the sole layer-0 crate) | `libs/0-core/src/` — `config/` (`IndexSchema`, `FailurePolicy`, per-sink configs, …), `common/` (newtypes), `GenericValue` |
 | `flusso.toml` parsing (entities only; conversion is in the `schema` loader) | `libs/2-schema/1-config-toml/src/` (`entities/`) |
@@ -306,7 +309,7 @@ belongs in the linked docs.
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding, latest-alias) | `libs/1-sinks/2-opensearch/src/lib.rs` |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
-| CLI subcommands (`build`/`run`/`check`/`schema`) | `apps/cli/src/` — `main.rs` dispatches; one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves HTTP, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`), plus `telemetry.rs`/`metrics.rs`/`http.rs` and `print.rs` |
+| CLI subcommands (`build`/`run`/`check`/`schema`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | Query client (`flusso-query`) | `apps/query/src/` |
 | `#[derive(FlussoDocument)]` proc-macro | `apps/query-derive/src/` (+ the `flusso-query-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |

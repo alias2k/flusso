@@ -42,6 +42,80 @@ fn parse_fixture() {
     parse(include_str!("config.toml")).unwrap();
 }
 
+// ── [server] surface addresses ───────────────────────────────────────────────
+
+#[test]
+fn server_addresses_convert() {
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgresql://localhost/db"
+
+        [server]
+        public_address = "0.0.0.0:9464"
+        private_address = "127.0.0.1:9465"
+    "#,
+    );
+    assert_eq!(
+        config.server.public_address,
+        Some("0.0.0.0:9464".parse().unwrap())
+    );
+    assert_eq!(
+        config.server.private_address,
+        Some("127.0.0.1:9465".parse().unwrap())
+    );
+}
+
+#[test]
+fn server_bad_address_is_rejected_at_parse() {
+    let err = parse(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgresql://localhost/db"
+
+        [server]
+        public_address = "not-an-address"
+    "#,
+    )
+    .unwrap_err();
+    // `SocketAddr`'s own deserializer rejects it at config-read time, with the
+    // toml span pointing at the offending line.
+    let msg = err.to_string();
+    assert!(msg.contains("socket address"), "{msg}");
+}
+
+#[test]
+fn server_section_is_optional() {
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgresql://localhost/db"
+    "#,
+    );
+    assert!(config.server.public_address.is_none());
+    assert!(config.server.private_address.is_none());
+}
+
+#[test]
+fn server_rejects_unknown_field() {
+    let err = parse(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgresql://localhost/db"
+
+        [server]
+        public_address = "0.0.0.0:9464"
+        bogus = "nope"
+    "#,
+    )
+    .unwrap_err();
+    assert!(format!("{err}").contains("bogus") || format!("{err:?}").contains("unknown"));
+}
+
 #[test]
 fn parse_source_direct_url() {
     parse(

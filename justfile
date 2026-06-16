@@ -8,9 +8,10 @@
 
 set shell := ["bash", "-c"]
 
-config    := "dev/flusso.toml"
-http_addr := "127.0.0.1:9464"
-db_url    := "postgres://postgres:postgres@127.0.0.1:5432/flusso"
+config          := "dev/flusso.toml"
+public_address  := "127.0.0.1:9464"
+private_address := "127.0.0.1:9465"
+db_url          := "postgres://postgres:postgres@127.0.0.1:5432/flusso"
 prom      := "127.0.0.1:9090"
 
 # Show the menu when run with no recipe.
@@ -60,7 +61,7 @@ check-offline:
 
 # Bring the stack up, then backfill + follow live changes; serves /status + /metrics.
 run: up
-    cargo run -- run --config {{config}} --http-addr {{http_addr}}
+    cargo run -- run --config {{config}} --public-address {{public_address}}
 
 # Bring the stack up, then backfill + follow live changes; serves /status + /metrics.
 help:
@@ -68,7 +69,7 @@ help:
 
 # Same as `run` but skip the backfill (resume live capture only).
 run-live: up
-    cargo run -- run --config {{config}} --http-addr {{http_addr}} --skip-backfill
+    cargo run -- run --config {{config}} --public-address {{public_address}} --skip-backfill
 
 # Serve the dev read API (axum, dev/search-api) over the synced indexes (:8080).
 api: up
@@ -81,7 +82,7 @@ dev: up
     cargo build -p flusso-cli -p flusso-dev-search-api
     trap 'kill 0 2>/dev/null' INT TERM EXIT
     cargo run -p flusso-dev-search-api &
-    cargo run -p flusso-cli -- run --config {{config}} --http-addr {{http_addr}}
+    cargo run -p flusso-cli -- run --config {{config}} --public-address {{public_address}}
 
 # Install the flusso CLI locally (into ~/.cargo/bin).
 install:
@@ -128,11 +129,11 @@ bench users="20000": up
 
 # Live pipeline status (phase, in-flight, slot lag, counters).
 status:
-    @curl -s http://{{http_addr}}/status | python3 -m json.tool
+    @curl -s http://{{public_address}}/status | python3 -m json.tool
 
 # Raw Prometheus metrics exposition.
 metrics:
-    @curl -s http://{{http_addr}}/metrics
+    @curl -s http://{{public_address}}/metrics
 
 # Backlog drain ETA, from the Prometheus recording rule.
 eta:

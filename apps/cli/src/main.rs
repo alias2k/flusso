@@ -2,39 +2,33 @@
 //!
 //! Four subcommands, one module each:
 //!
-//! - [`build`] reads a `flusso.toml`, parses and validates every schema it
+//! - [`build`](commands::build) reads a `flusso.toml`, parses and validates every schema it
 //!   references, and writes the whole validated configuration to a single
 //!   portable binary artifact (`flusso.lock`). No database is needed: the schema
 //!   is self-describing, and secrets are kept as references, not baked in.
-//! - [`run`] streams Postgres changes through the engine to the configured
+//! - [`run`](commands::run) streams Postgres changes through the engine to the configured
 //!   sink(s). With no `--config` it loads the compiled artifact; with `--config`
 //!   it compiles the source afresh and runs that. Connection and credentials are
 //!   resolved here, in the running environment. The replication slot is created
 //!   automatically if it does not exist. Logs go to stderr.
-//! - [`check`] validates the config and every schema, prints the fully-typed
+//! - [`check`](commands::check) validates the config and every schema, prints the fully-typed
 //!   mapping (database-free), and — unless `--offline` — also confirms the
 //!   declared types and nullability agree with the live database.
-//! - [`schema_cmd`] prints an embedded JSON Schema for editor assist — the
+//! - [`schema_cmd`](commands::schema_cmd) prints an embedded JSON Schema for editor assist — the
 //!   `flusso.toml` config schema or the `*.schema.yml` index schema — so a user
 //!   can pin the schema that matches their installed version.
 
 mod backends;
-mod build;
-mod check;
+mod commands;
 mod http;
-mod metrics;
-mod observer;
-mod print;
-mod run;
-mod schema_cmd;
 mod telemetry;
 
 use clap::{Parser, Subcommand};
 
-use build::BuildArgs;
-use check::CheckArgs;
-use run::RunArgs;
-use schema_cmd::SchemaArgs;
+use commands::build::BuildArgs;
+use commands::check::CheckArgs;
+use commands::run::RunArgs;
+use commands::schema_cmd::SchemaArgs;
 
 /// The default config-file path, by convention `flusso.toml`.
 pub(crate) const DEFAULT_CONFIG: &str = "flusso.toml";
@@ -66,9 +60,9 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Build(args) => build::execute(args),
-        Command::Run(args) => run::execute(args).await,
-        Command::Check(args) => check::execute(args).await,
-        Command::Schema(args) => schema_cmd::execute(args),
+        Command::Build(args) => commands::build::execute(args),
+        Command::Run(args) => commands::run::execute(args).await,
+        Command::Check(args) => commands::check::execute(args).await,
+        Command::Schema(args) => commands::schema_cmd::execute(args),
     }
 }

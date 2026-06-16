@@ -55,7 +55,7 @@ EXPOSE 9464
 # mounted flusso.toml, or bake a lock into a child image. Bind to all interfaces
 # so a sidecar/Prometheus can reach the surface.
 ENTRYPOINT ["flusso"]
-CMD ["run", "--http-addr", "0.0.0.0:9464"]
+CMD ["run", "--public-address", "0.0.0.0:9464"]
 
 # OCI metadata — CI stamps the dynamic values: --build-arg VERSION=… REVISION=… CREATED=…
 ARG VERSION=0.0.0-dev

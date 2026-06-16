@@ -16,7 +16,7 @@ use schema_core::{
     ConnectionSpec, OpensearchSink, Secret, StdoutSink, TextAnalysis, common::SourceType,
 };
 
-use super::{Config, Sink, Source};
+use super::{Config, ServerConfig, Sink, Source};
 
 /// Infallible (secrets are deferred, URLs validated at resolution time), so this
 /// is a `From`; the blanket impl still gives callers a `TryFrom<ConfigToml>`.
@@ -34,6 +34,10 @@ impl From<ConfigToml> for Config {
             sinks,
             indexes: BTreeMap::new(),
             on_error: toml.on_error,
+            server: ServerConfig {
+                public_address: toml.server.public_address,
+                private_address: toml.server.private_address,
+            },
         }
     }
 }

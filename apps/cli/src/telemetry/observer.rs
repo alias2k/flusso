@@ -8,7 +8,7 @@
 //! because they're a presentation choice, like the exporter.
 //!
 //! `flusso.changes.in_flight` is deliberately *not* here — it's derived from the
-//! status, so it's registered as an observable gauge in [`metrics`](crate::metrics)
+//! status, so it's registered as an observable gauge in [`metrics`](crate::telemetry::metrics)
 //! once the status handle exists.
 
 use daemon::{BatchStats, IndexName, Observer};

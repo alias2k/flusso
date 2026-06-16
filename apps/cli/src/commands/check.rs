@@ -16,7 +16,7 @@ use sources_postgres::PgDocumentBuilder;
 use crate::backends::source_spec;
 
 use crate::DEFAULT_CONFIG;
-use crate::print;
+use crate::commands::print;
 
 #[derive(Debug, Args)]
 pub(crate) struct CheckArgs {

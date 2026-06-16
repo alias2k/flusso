@@ -1,4 +1,10 @@
-//! Logging and OpenTelemetry tracing setup for the `run` command.
+//! Logging and OpenTelemetry tracing setup for the `run` command — plus, as
+//! submodules, the binary's other telemetry concerns: [`metrics`] (the meter
+//! provider and instruments) and [`observer`] (the engine observer that records
+//! into them).
+
+pub(crate) mod metrics;
+pub(crate) mod observer;
 
 use anyhow::Context;
 use opentelemetry::trace::TracerProvider as _;
