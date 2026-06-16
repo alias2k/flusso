@@ -7,11 +7,8 @@
 > documentation.** Every single line of code has been manually reviewed and
 > revised by a human software developer.
 
-flusso is driven entirely by declarative files — there is no imperative setup,
-no "first run a wizard, then click these seven things." You write the files;
-flusso does the rest.
-
-A deployment is described by two kinds of file:
+flusso is driven entirely by declarative files. A deployment is described by two
+kinds:
 
 | File | Count | Format | Describes |
 | --- | --- | --- | --- |
@@ -19,40 +16,26 @@ A deployment is described by two kinds of file:
 | [`*.schema.yml`](#schemayml) | one per index | YAML | a single search document — its root table, fields, and how related tables fold in |
 
 `schema::load("flusso.toml")` is the front door: it reads the config and every
-schema it references, validates both layers, and hands back one fully-validated
-`Config`. Schema paths in `flusso.toml` are resolved **relative to the config
-file's directory**, so you can move the whole tree around without rewriting
-paths.
+schema it references, validates both layers, and returns one fully-validated
+`Config`. Schema paths in `flusso.toml` resolve **relative to the config file's
+directory**.
 
-This file covers the config *structure* and the index document *format*. The
-supported source and sink **types** — their connection options and behavior —
-live in [**Sources and sinks**](SOURCES_AND_SINKS.md). Environment variables
-(secrets, connection overrides, CLI-flag twins) live in
-[**`CONFIG.md`**](CONFIG.md). For the big-picture tour, start with the
-[README](README.md); for the query side, see [`CLIENT.md`](CLIENT.md).
+This file covers the config *structure* and the index document *format*. Source
+and sink **types** live in [Sources and sinks](SOURCES_AND_SINKS.md); environment
+variables (secrets, overrides, CLI-flag twins) in [`CONFIG.md`](CONFIG.md); the
+query side in [`CLIENT.md`](CLIENT.md).
 
 > Two JSON Schemas ship alongside this reference and are the machine-readable
 > source of truth for the file formats:
 > [`config.schema.json`](libs/2-schema/1-config-toml/schemas/config.schema.json) and
-> [`index.schema.yml`](libs/2-schema/1-index-yaml/schemas/index.schema.yml). Point your editor at
-> them for completion and inline validation.
-
-## Contents
-
-- [`flusso.toml`](#flussotoml) — the deployment config: source, sinks, indexes
-- [`*.schema.yml`](#schemayml) — the per-index document definition
-- [Fields](#fields) — types, objects, joins, aggregates, filters
-- [Conventions](#conventions) — identifiers and `env_or_value`
-- [Validation, in one place](#validation-in-one-place) — what the loader enforces
-- [Compiling](#compiling) — building a portable `flusso.lock`
-- [A complete example](#a-complete-example) — config + schema, end to end
+> [`index.schema.yml`](libs/2-schema/1-index-yaml/schemas/index.schema.yml). Point
+> your editor at them for completion and inline validation.
 
 ---
 
 ## `flusso.toml`
 
-Top-level table. Only `[source]` is required — everything else is optional, and
-flusso will quietly do something reasonable if you leave it out.
+Top-level table. Only `[source]` is required.
 
 | Key | Required | Description |
 | --- | --- | --- |
@@ -73,10 +56,9 @@ destination unreachable, the whole request refused) always stops the run.
 | `"stop"` (default) | Stop the run. The batch is left unconfirmed and redelivered on restart, so a persistently-bad document halts sync until the data is fixed or the policy changes. Dropping data is opt-in. |
 | `"skip"` | Quarantine the document (logged, counted in `flusso.documents.quarantined` and the `/status` `documents_quarantined`) and continue. The rest of the batch is applied and acked; the document never lands until its source row changes again. |
 
-A global `on_error` at the top level is the default for every index; override it
-per index with `on_error` inside an `[[index]]` entry (see below). The policy is
-operational, not part of the document shape, so changing it never triggers a
-reindex.
+A global `on_error` is the default for every index; override it per index with
+`on_error` inside an `[[index]]` entry. The policy is operational, not part of the
+document shape, so changing it never triggers a reindex.
 
 ```toml
 on_error = "stop"   # global default
@@ -103,17 +85,16 @@ type = "postgres"
 connection_url = "postgresql://user:pass@localhost:5432/mydb"
 ```
 
-Connection options (the full-URL and individual-parts forms, the `DATABASE_URL`
+Connection options (full-URL and individual-parts forms, the `DATABASE_URL`
 override) and capture behavior live in
-[**Sources and sinks**](SOURCES_AND_SINKS.md#sources). The `DATABASE_URL`
-override itself is documented in [`CONFIG.md`](CONFIG.md).
+[Sources and sinks](SOURCES_AND_SINKS.md#sources) and [`CONFIG.md`](CONFIG.md).
 
 ### `[sinks.<name>]`
 
 Named destinations; each key is a sink name (a Postgres identifier) and `type`
 selects the kind. Define more than one and flusso **fans out** — every document
-is written to all of them. If no sinks are defined at all, the CLI falls back to
-a stdout sink, so you always have *somewhere* for documents to go.
+is written to all of them. If no sinks are defined, the CLI falls back to a stdout
+sink.
 
 | `type` | Reference |
 | --- | --- |
@@ -132,7 +113,7 @@ pretty = true
 ```
 
 Each type's full option set and behavior is documented in
-[**Sources and sinks**](SOURCES_AND_SINKS.md#sinks).
+[Sources and sinks](SOURCES_AND_SINKS.md#sinks).
 
 ### `[[index]]`
 
@@ -157,8 +138,7 @@ enabled = true
 ## `*.schema.yml`
 
 Each schema file describes **one** search document: the root table it is built
-from, the fields it contains, and how related tables fold in. One file, one
-document shape — no surprises.
+from, the fields it contains, and how related tables fold in.
 
 ### Top-level keys
 
@@ -182,10 +162,9 @@ primary_key: id
 
 ### soft_delete
 
-Sometimes a row isn't really gone — it's just marked dead. When `soft_delete` is
-set, a row matching the soft-delete condition emits a **tombstone** (a `delete`
-to the sink) instead of an upsert. Key it off either a mapped field or a raw
-column, and optionally narrow it with `when` filters.
+When `soft_delete` is set, a row matching the soft-delete condition emits a
+**tombstone** (a `delete` to the sink) instead of an upsert. Key it off either a
+mapped field or a raw column, and optionally narrow it with `when` filters.
 
 ```yaml
 # Off a column: users.deleted = true → delete.
@@ -206,10 +185,9 @@ soft_delete:
 
 ### Root filters
 
-Sometimes only a *subset* of a table should be an index at all — sale classes
-out of `class`, parent rows out of `quotation_row`, serialized items out of
-`item`. A top-level `filters` list (same [filter forms](#filters) as joins use)
-scopes which root rows become documents:
+When only a *subset* of a table should be an index, a top-level `filters` list
+(same [filter forms](#filters) as joins use) scopes which root rows become
+documents:
 
 ```yaml
 version: 1
@@ -220,22 +198,19 @@ filters:
   - { column: archived_at, op: is_null }
 ```
 
-A row outside the set never produces a document; a row that *leaves* the set
-(an `UPDATE` that stops matching) emits a **tombstone** on its next rebuild,
-exactly like [`soft_delete`](#soft_delete) — both fold into the document
-query's `WHERE`, so "no row came back" means "this document should not exist".
-Conversely a row that enters the set upserts. Backfill walks the whole root
-table and lets the same predicate decide, so filtered-out rows cost a no-op
-delete during seeding rather than a wrong document.
+A row outside the set never produces a document; a row that *leaves* the set (an
+`UPDATE` that stops matching) emits a **tombstone** on its next rebuild, exactly
+like [`soft_delete`](#soft_delete) — both fold into the document query's `WHERE`,
+so "no row came back" means "this document should not exist". A row that enters
+the set upserts. Backfill walks the whole root table and lets the same predicate
+decide, so filtered-out rows cost a no-op delete during seeding.
 
 ---
 
 ## Fields
 
 `fields` is a list. Each item is written **type-first**: a single **type key**
-whose value is the document key, plus the siblings that type allows. If you've
-ever wished a schema language would just tell you the type up front instead of
-burying it three keys deep — this is that.
+whose value is the document key, plus the siblings that type allows.
 
 ```yaml
 fields:
@@ -261,8 +236,8 @@ The type key is one of:
   [Aggregates](#aggregates));
 - `constant` — a fixed value.
 
-There is exactly one type key per field. Which siblings a field accepts depends
-on that type:
+There is exactly one type key per field. Which siblings a field accepts depends on
+that type:
 
 | Sibling | Applies to | Description |
 | --- | --- | --- |
@@ -291,9 +266,8 @@ fields:
 ### Objects
 
 An `object` nests sibling columns of the **same row** under one document key,
-without reading a related table — for shaping a wide, flat table into a tidy
-object. It renders as an OpenSearch `object` and is never null; its members
-declare their own types.
+without reading a related table. It renders as an OpenSearch `object` and is never
+null; its members declare their own types.
 
 ```yaml
 - object: address
@@ -319,9 +293,8 @@ Optional `options` pass extra properties to the `object` mapping.
 
 A scalar field declares its **`type`** from a fixed set. Each type bridges a
 Postgres column type and an OpenSearch mapping type, so the schema describes the
-document fully — flusso derives the index mapping (and validates a config)
-without a database. Shorthand fields and columns with no `type` default to
-`keyword`.
+document fully — flusso derives the index mapping (and validates a config) without
+a database. Shorthand fields and columns with no `type` default to `keyword`.
 
 | `type` | Postgres | OpenSearch | Notes |
 | --- | --- | --- | --- |
@@ -356,17 +329,16 @@ OpenSearch type and the Postgres types it accepts:
   options: { scaling_factor: 100 }
 ```
 
-`options` carries any extra OpenSearch mapping properties (analyzers, formats,
-…) merged beside the derived type. Objects, joins, aggregates, and geo points
-carry their own type keys (`object`, `belongs_to`/…, `count`/…, `geo`) rather
-than a scalar type; their shape is structural.
+`options` carries any extra OpenSearch mapping properties (analyzers, formats, …)
+merged beside the derived type. Objects, joins, aggregates, and geo points carry
+their own type keys rather than a scalar type; their shape is structural.
 
 > **Production-ready defaults.** The OpenSearch sink does **not** emit your
-> `text`/`keyword` fields bare. By default it attaches a strong analyzer and a
-> set of subfields (`keyword`, `keyword_lowercase`, `text`) so search, exact
+> `text`/`keyword` fields bare. By default it attaches a strong analyzer and a set
+> of subfields (`keyword`, `keyword_lowercase`, `text`) so search, exact
 > filtering, and case-insensitive sort all work out of the box — see
 > [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
-> Anything you put in `options` overrides the default for that field.
+> Anything in `options` overrides the default for that field.
 
 #### `text` vs `identifier`
 
@@ -387,10 +359,10 @@ fields:
     required: false
 ```
 
-(Use `keyword` instead when you want exact match, sort, or aggregation rather
-than full-text search.) Both apply only to scalar column fields, and an explicit
-`analyzer` in `options` always wins over the type's default. The analyzers
-themselves are documented in
+(Use `keyword` instead for exact match, sort, or aggregation rather than full-text
+search.) Both apply only to scalar column fields, and an explicit `analyzer` in
+`options` always wins over the type's default. The analyzers themselves are
+documented in
 [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
 
 ### Geo points
@@ -399,7 +371,7 @@ A `geo` field is a geographic point → OpenSearch `geo_point`. Two forms:
 
 **Two columns** — a latitude and a longitude column assembled into a point. A
 missing coordinate makes the whole point null (never `{lat: null, lon: null}`,
-which OpenSearch would reject outright):
+which OpenSearch rejects):
 
 ```yaml
 - geo: location
@@ -417,10 +389,10 @@ which OpenSearch would reject outright):
   required: false
 ```
 
-PostGIS `geometry` and PG-native `point` aren't accepted directly (they
-serialize as WKB / `(x,y)`, which OpenSearch politely declines); expose a
-generated `jsonb`/`text` column in one of the shapes above. The two-column form
-needs no such column — flusso assembles the point in the document query.
+PostGIS `geometry` and PG-native `point` aren't accepted directly (they serialize
+as WKB / `(x,y)`, which OpenSearch won't take); expose a generated `jsonb`/`text`
+column in one of the shapes above. The two-column form needs no such column —
+flusso assembles the point in the document query.
 
 ### Transforms
 
@@ -439,9 +411,9 @@ A list applied in order to a column value before it lands in the document:
 
 ### Joins
 
-Fold rows from a related table into the document as nested documents. The
-join's **relationship verb is its type key**, and the verb names the one thing
-that matters: **which table holds the key.**
+Fold rows from a related table into the document as nested documents. The join's
+**relationship verb is its type key**, and the verb names **which table holds the
+key.**
 
 | Type key | The key lives on… | Reads as | Renders as |
 | --- | --- | --- | --- |
@@ -451,9 +423,8 @@ that matters: **which table holds the key.**
 | `many_to_many` | a junction table (`through`) | "we connect through a junction" | nested array (never null) |
 
 The `fields` — the projection from each related row — and the related table's
-`primary_key` are siblings of the type key. The field reading that
-`primary_key` is marked non-null automatically, the same way the root
-`primary_key` works.
+`primary_key` are siblings of the type key. The field reading that `primary_key`
+is marked non-null automatically, like the root `primary_key`.
 
 ```yaml
 # My column points at them: embed the user a `created_by` column references.
@@ -498,13 +469,13 @@ The `fields` — the projection from each related row — and the related table'
 | `fields` | list | yes | The fields projected from each related row. |
 
 **Key arity rule:** a join takes *exactly* the key sibling its verb implies —
-`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, `through`
-for `many_to_many`. Anything else is a load-time error naming the right one.
+`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, `through` for
+`many_to_many`. Anything else is a load-time error naming the right one.
 
 A `belongs_to` target that changes — or is deleted — re-emits every document
 pointing at it: flusso finds the referrers on the parent table itself
-(`WHERE column = <changed key>`), so a deleted target rebuilds those documents
-with a null object rather than leaving them stale.
+(`WHERE column = <changed key>`), so a deleted target rebuilds those documents with
+a null object rather than leaving them stale.
 
 The `through` object (junction table for many-to-many):
 
@@ -529,8 +500,8 @@ The `through` object (junction table for many-to-many):
 
 ### Aggregates
 
-Reduce rows from a related table to a single scalar — a count or an extreme. The
-**operation is the type key**: `count`, `sum`, `avg`, `min`, or `max`.
+Reduce rows from a related table to a single scalar. The **operation is the type
+key**: `count`, `sum`, `avg`, `min`, or `max`.
 
 A `count` is always a non-null `long` and an `avg` a nullable `double`, so they
 take no `value_type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
@@ -563,12 +534,10 @@ take no `value_type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
 ### Filters
 
 Filters narrow which related rows a join or aggregate sees, which rows a
-`soft_delete` applies to, and — as the top-level
-[`filters` key](#root-filters) — which root rows become documents at all.
-Three forms:
+`soft_delete` applies to, and — as the top-level [`filters` key](#root-filters) —
+which root rows become documents at all. Three forms:
 
-**Raw SQL** — an escape hatch for conditions the structured forms can't express
-(with great power, etc.):
+**Raw SQL** — an escape hatch for conditions the structured forms can't express:
 
 ```yaml
 - { raw: "amount > 0 AND currency = 'USD'" }
@@ -597,8 +566,7 @@ Three forms:
 | `is_null`, `is_not_null` | *(no value)* |
 
 A value op with a missing value, a list op given a scalar, or a `between` with
-other than two values is a load-time error — flusso would rather complain now
-than do something surprising later.
+other than two values is a load-time error.
 
 ---
 
@@ -613,14 +581,14 @@ Two distinct identifier rules apply depending on what is being named:
 | **Postgres identifier** | table, column, schema, index, and sink names | `^[a-z_][a-z0-9_]*$`, max 63 chars | Lowercased and trimmed on load, matching Postgres' folding of unquoted identifiers. A name that isn't a valid identifier this way must be addressed explicitly (e.g. set `column:`). |
 | **Field name** | the document key a field lands under (`field:`) | `^[a-zA-Z_][a-zA-Z0-9_]*$`, max 63 chars | Case is **preserved** — `field: orderCount` stays camelCase in the emitted document. Only trimmed. |
 
-This split is deliberate, not an accident of two people writing two parsers: the
-value comes from a Postgres column (lowercase identifier) but lands under a
-document key you choose (which may be camelCase to suit the search index).
+The split is deliberate: the value comes from a Postgres column (lowercase
+identifier) but lands under a document key you choose (which may be camelCase to
+suit the search index).
 
 ### env_or_value
 
-Anywhere a secret or connection string is expected in `flusso.toml`, you may
-give either a literal string or a reference to an environment variable:
+Anywhere a secret or connection string is expected in `flusso.toml`, give either a
+literal string or a reference to an environment variable:
 
 ```toml
 password = "literal-secret"          # literal
@@ -628,15 +596,10 @@ password = { env = "OS_PASSWORD" }   # read from $OS_PASSWORD at run time
 ```
 
 Either form is accepted wherever this doc says a value is an `env_or_value`.
-Resolution is **deferred to run time** — which is what lets a
-[compiled artifact](#compiling) travel without baking in its secrets. The full
-story (resolution timing, the reserved deployment-override variables, and the
-precedence rules when several sources could supply a value) lives in
-[**`CONFIG.md`**](CONFIG.md#secret--connection-values).
-
-In short: secrets and connection values can come from the environment, and the
-same `flusso.toml` travels across environments via reserved overrides — see
-[`CONFIG.md`](CONFIG.md) for the precedence table.
+Resolution is **deferred to run time** — which lets a [compiled
+artifact](#compiling) travel without baking in its secrets. The full story
+(resolution timing, the reserved deployment-override variables, the precedence
+rules) lives in [`CONFIG.md`](CONFIG.md#secret--connection-values).
 
 ---
 
@@ -650,18 +613,18 @@ Loading enforces — beyond what the file format itself can express — that:
 - each field has **exactly one** type key, and only the siblings that type allows;
 - a join carries exactly the key sibling its verb implies — `column` for
   `belongs_to` (defaulting to the field name), `foreign_key` for
-  `has_one`/`has_many`, `through` for `many_to_many` — and the to-one verbs
-  take no `limit` (nor `order_by`, for `belongs_to`);
+  `has_one`/`has_many`, `through` for `many_to_many` — and the to-one verbs take
+  no `limit` (nor `order_by`, for `belongs_to`);
 - an aggregate specifies **exactly one** of `foreign_key` or `through`;
-- `sum`/`avg`/`min`/`max` aggregates carry a `column`, and `sum`/`min`/`max`
-  also declare a `value_type` (it mirrors the column);
+- `sum`/`avg`/`min`/`max` aggregates carry a `column`, and `sum`/`min`/`max` also
+  declare a `value_type` (it mirrors the column);
 - a `geo` field gives either `lat` **and** `lon`, or a single `column`;
 - a `between` filter has **exactly two** values, and `in`/`not_in` get a list.
 
-A failure at any of these stops the load with a specific error naming the cause
-— no riddles. None of it needs a database. When the source **is** reachable,
-`flusso check` additionally confirms each declared type and nullability against
-the live columns and reports any disagreement.
+A failure at any of these stops the load with a specific error naming the cause.
+None of it needs a database. When the source **is** reachable, `flusso check`
+additionally confirms each declared type and nullability against the live columns
+and reports any disagreement.
 
 ---
 
@@ -669,15 +632,15 @@ the live columns and reports any disagreement.
 
 `flusso build --config config.toml -o flusso.lock` runs everything above and
 writes the whole validated configuration — every schema inlined — to a single
-binary artifact (MessagePack). Because schemas are self-describing and secrets
-are [deferred](#env_or_value), compiling needs no database and bakes in no
-secret: `{ env = … }` references travel as references, not values.
+binary artifact (MessagePack). Because schemas are self-describing and secrets are
+[deferred](#env_or_value), compiling needs no database and bakes in no secret:
+`{ env = … }` references travel as references, not values.
 
 `flusso run` with no `--config` loads that artifact and resolves the connection
-and credentials in its own environment; `flusso run --config flusso.toml`
-compiles from source and runs that. So a deployment ships one file — no YAML
-tree, no source checkout — and the same artifact runs anywhere its environment
-provides the secrets.
+and credentials in its own environment; `flusso run --config flusso.toml` compiles
+from source and runs that. So a deployment ships one file — no YAML tree, no source
+checkout — and the same artifact runs anywhere its environment provides the
+secrets.
 
 ---
 
@@ -744,7 +707,6 @@ fields:
     foreign_key: user_id
 ```
 
-A change to a `users` row — or to any of that user's `orders` — rebuilds the
-whole `users` document and re-emits it to every sink. Setting `users.deleted =
-true` emits a tombstone instead. You never tell flusso what to update; it works
-it out.
+A change to a `users` row — or to any of that user's `orders` — rebuilds the whole
+`users` document and re-emits it to every sink. Setting `users.deleted = true`
+emits a tombstone instead.

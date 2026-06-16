@@ -7,44 +7,23 @@
 > documentation.** Every single line of code has been manually reviewed and
 > revised by a human software developer.
 
-flusso connects one **source** — where rows come from — to one or more **sinks**,
-where the built documents go. You configure them under `[source]` and
-`[sinks.<name>]` in `flusso.toml`, and this document is the reference for every
-supported type and its options.
+flusso connects one **source** (where rows come from) to one or more **sinks**
+(where built documents go), configured under `[source]` and `[sinks.<name>]` in
+`flusso.toml`. This is the reference for every supported type and its options.
+Today: Postgres in, OpenSearch (or stdout) out.
 
-The cast is short today: Postgres in, OpenSearch (or stdout) out. The seams are
-trait objects, so the menu can grow without the engine noticing — but this page
-only documents what actually ships.
-
-For the overall `flusso.toml` structure and the index document format, see
-[`SCHEMA.md`](SCHEMA.md). For how environment variables resolve and override these
-values — the `{ env = "VAR" }` form, the reserved deployment-override names, and
-who wins when two of them disagree — see [`CONFIG.md`](CONFIG.md). For the
-query-side client that reads what flusso writes, see [`CLIENT.md`](CLIENT.md). The
-big-picture tour lives in [`README.md`](README.md).
-
-## Contents
-
-- [The model](#the-model) — one source, many sinks
-- [Sinks](#sinks) — where documents land
-  - [OpenSearch](#opensearch) — the real sink, with all the knobs
-  - [Index analysis & subfields](#index-analysis--subfields) — what flusso bakes into every index
-  - [Stdout](#stdout) — the development sink
-- [Sources](#sources) — where rows come from
-  - [Postgres](#postgres) — connection shapes and change capture
+For the `flusso.toml` structure and index document format see
+[`SCHEMA.md`](SCHEMA.md); for how env vars resolve and override these values see
+[`CONFIG.md`](CONFIG.md); for the query-side client see [`CLIENT.md`](CLIENT.md).
 
 ## The model
 
 **One source, many sinks.** A deployment reads from a single source and writes
-every document to *all* configured sinks. That's the fan-out: define as many
-destinations as you need, and the same document lands in each. Define none and the
-CLI quietly falls back to a single [stdout](#stdout) sink, which is more useful
-than it sounds when you're poking at things.
+every document to *all* configured sinks (fan-out). Define none and the CLI falls
+back to a single [stdout](#stdout) sink.
 
-**Pluggable.** Source, sink, and the in-process queue are all trait objects, so
-the backend choices below swap without touching the engine. The types documented
-here are the ones implemented today; the abstraction is ready for more, the
-authors are not.
+Source, sink, and the in-process queue are all trait objects, so the backends
+below swap without touching the engine. Only what ships today is documented here.
 
 ---
 
@@ -74,15 +53,13 @@ password = { env = "OS_PASSWORD" }
 batch_size = 2000
 ```
 
-Writes documents to an OpenSearch cluster via the bulk API. This is the sink you
-actually deploy.
+Writes documents to an OpenSearch cluster via the bulk API — the sink you deploy.
 
 `url`, `username`, and `password` each accept an
-[`env_or_value`](CONFIG.md#secret--connection-values) — a literal, or a
-`{ env = "VAR" }` reference resolved when the pipeline runs. These three fields can
-also be supplied or overridden per sink via reserved deployment-override
-variables; the naming and precedence rules live in
-[`CONFIG.md`](CONFIG.md#secret--connection-values).
+[`env_or_value`](CONFIG.md#secret--connection-values) (a literal or a
+`{ env = "VAR" }` reference resolved at run time), and can also be supplied or
+overridden per sink via reserved deployment-override variables — naming and
+precedence in [`CONFIG.md`](CONFIG.md#secret--connection-values).
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -122,25 +99,23 @@ variables; the naming and precedence rules live in
 - **Refresh adapts to the backlog.** Created with auto-refresh disabled
   (`refresh_interval: -1`) for fast bulk seeding; on seeding completion the index
   is handed the configured `refresh_interval` (default `"10s"`) — the
-  steady-state visibility ceiling. On top of that, a `flush` forces an immediate
-  refresh whenever the pipeline has *caught up* (no backlog behind the batch), so
-  search is fresh when traffic is light but bulk indexing stays cheap while a
-  backlog drains. The `refresh_interval` only bounds staleness during sustained
-  backlog, when a caught-up flush never happens — raise it for more write
-  throughput under load, lower it (toward `1s`) for fresher search while behind.
+  steady-state visibility ceiling. A `flush` also forces an immediate refresh
+  whenever the pipeline has *caught up* (no backlog behind the batch), so search
+  is fresh when traffic is light but bulk indexing stays cheap while a backlog
+  drains. The `refresh_interval` only bounds staleness during sustained backlog —
+  raise it for more write throughput under load, lower it (toward `1s`) for
+  fresher search while behind.
 - **Production-ready defaults.** Created indexes ship a tuned `analysis` block
   and, unless `auto_subfields` is off, well-shaped `text`/`keyword` fields — see
   [Index analysis & subfields](#index-analysis--subfields).
 - **Seeding markers.** Seeded state is persisted in a hidden `flusso_meta` index,
-  so a restart skips a completed backfill instead of redoing all that work for
-  old times' sake.
+  so a restart skips a completed backfill instead of redoing it.
 
 #### Index analysis & subfields
 
 The sink creates every index with a good search setup out of the box. flusso owns
 the **index** (mapping + analyzers + subfields); your application owns the
-**queries**. The notes below say which subfield to target for each job, so you
-don't have to reverse-engineer it later.
+**queries**. The notes below say which subfield to target for each job.
 
 **Analyzers** (always defined, named `flusso_*`):
 
@@ -166,10 +141,9 @@ plugins.
 
 `keyword` subfields cap at `ignore_above: 256`. Other types (`long`, `date`,
 `boolean`, …) and the `object`/`nested` containers are emitted as-is. Any key you
-set in a field's `mapping` overrides the auto default for that field — e.g.
-supplying your own `analyzer` replaces `flusso_code`, and supplying `fields`
-replaces the auto subfields wholesale. flusso has opinions, but they yield to
-yours.
+set in a field's `mapping` overrides the auto default for that field — e.g. your
+own `analyzer` replaces `flusso_code`, and your own `fields` replaces the auto
+subfields wholesale.
 
 Example query against a `text` field `name`, precise (all terms must match) and
 case/punctuation-insensitive:
@@ -186,18 +160,18 @@ type = "stdout"
 pretty = true
 ```
 
-Writes each operation to standard output as a JSON envelope — handy for
-development and for piping into `jq` at 2am to find out why a document looks wrong.
+Writes each operation to standard output as a JSON envelope — for development and
+piping into `jq`.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `pretty` | bool | `false` | Pretty-print JSON instead of compact one-line NDJSON. |
 
-Every envelope carries provenance and bookkeeping so a stream is
-self-describing: which sink and version produced it (`sink`, `version`), when
-(`ts`), in what order (`seq`), the `index`, the `op` (`upsert` / `delete`) and
-`id`, plus a `meta` summary (top-level field count and serialized byte size).
-An `upsert` carries the `document`; a `delete` does not.
+Every envelope carries provenance and bookkeeping so a stream is self-describing:
+which sink and version produced it (`sink`, `version`), when (`ts`), in what order
+(`seq`), the `index`, the `op` (`upsert` / `delete`) and `id`, plus a `meta`
+summary (top-level field count and serialized byte size). An `upsert` carries the
+`document`; a `delete` does not.
 
 ```text
 {"document":{"email":"ada@x.io"},"id":"42","index":"users","meta":{"bytes":20,"fields":1},"op":"upsert","seq":1,"sink":"stdout","ts":"2026-06-03T10:20:30.123Z","version":"0.1.0"}
@@ -210,8 +184,8 @@ An `upsert` carries the `document`; a `delete` does not.
 
 ## Sources
 
-A source is where rows come from. There is exactly one per deployment, and exactly
-one type today.
+A source is where rows come from. There is exactly one per deployment, and one
+type today.
 
 ### Postgres
 
@@ -221,14 +195,12 @@ type = "postgres"
 connection_url = "postgresql://user:pass@localhost:5432/mydb"
 ```
 
-The only source type today. flusso follows Postgres' **logical replication**
-stream to capture changes, and snapshots tables to seed an index before following
-live changes.
+flusso follows Postgres' **logical replication** stream to capture changes, and
+snapshots tables to seed an index before following live changes.
 
 #### Connection
 
-`connection_url` takes one of two shapes — pick whichever you find less annoying
-to template.
+`connection_url` takes one of two shapes.
 
 **A full URL** — a string or
 [`env_or_value`](CONFIG.md#secret--connection-values). Must match
@@ -239,7 +211,7 @@ connection_url = "postgresql://user:pass@localhost:5432/mydb"
 connection_url = { env = "DATABASE_URL" }
 ```
 
-**Individual parts** — a table. `database` is required; the rest default:
+**Individual parts** — `database` is required; the rest default:
 
 | Part | Type | Default | |
 | --- | --- | --- | --- |
@@ -258,8 +230,8 @@ password = { env = "PGPASSWORD" }
 database = "mydb"
 ```
 
-Whichever shape you choose can be overridden by a reserved deployment variable, so
-the same config travels across environments unedited — see
+Either shape can be overridden by a reserved deployment variable, so the same
+config travels across environments unedited — see
 [`CONFIG.md`](CONFIG.md#secret--connection-values) for the override and precedence
 rules.
 
@@ -267,12 +239,10 @@ rules.
 
 - **Logical replication (WAL).** flusso consumes a logical replication slot. The
   slot is **created automatically** if it does not exist; the **publication must
-  already exist** (it decides which tables are streamed — a schema decision, not
-  a runtime one). Slot and publication names are CLI flags (`--slot`,
-  `--publication`, both defaulting to `flusso`).
+  already exist** (it decides which tables are streamed). Slot and publication
+  names are CLI flags (`--slot`, `--publication`, both defaulting to `flusso`).
 - **Backfill.** Before live capture, the engine asks each sink whether an index
   is already seeded and, for those that aren't, snapshots the root tables to seed
   them. `--skip-backfill` resumes live capture only.
-- Requires `wal_level = logical` on the server. See the
-  [`dev/`](dev/README.md) environment for a ready-to-run Postgres configured for
-  this, so you don't have to discover the requirement the hard way.
+- Requires `wal_level = logical` on the server. See the [`dev/`](dev/README.md)
+  environment for a ready-to-run Postgres configured for this.
