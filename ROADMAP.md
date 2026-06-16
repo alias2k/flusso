@@ -53,7 +53,7 @@ likely both:
 Either way the engine gains one well-defined hook (post-build, pre-sink) and the
 transform vocabulary stops being closed.
 
-## On-demand reindex over HTTP
+## On-demand reindex over a private control API
 
 Reindexing happens automatically when a schema changes (a new mapping hash
 yields a fresh physical index), but there is no way to *trigger* a rebuild of an
@@ -61,11 +61,62 @@ unchanged index without restarting the process. After fixing data behind
 quarantined documents (`on_error = "skip"`), correcting a source row en masse, or
 recovering from an operator mistake, the only recourse today is a restart.
 
-The operational HTTP surface (`apps/cli/src/http.rs`) is currently read-only —
-`/healthz`, `/readyz`, `/status`, `/metrics`. A guarded, mutating control
-endpoint (e.g. `POST /admin/reindex?index=…`) would re-run an index's backfill
-on demand against the existing seed machinery (`Sink::is_seeded` /
-`mark_seeded`, `ChangeCapture::snapshot`), reseeding into a fresh physical index
-and swapping the alias on completion. Because it mutates, it needs an
-authentication story the read-only endpoints don't — that gate is part of the
-work, not an afterthought.
+**Two HTTP surfaces, two ports.** The single operational surface
+(`apps/cli/src/http.rs`) splits in two, gating by *port* (a physical trust
+boundary) rather than by path prefix:
+
+- **Public surface** — read-only, unauthenticated, network-gated exactly as
+  today: `/healthz`, `/readyz`, `/status`, `/metrics`. This is what Prometheus
+  scrapes. Default port **9464** (unchanged — the scrape config, Helm, and the
+  Dockerfile already point there).
+- **Private surface** — the mutating control plane: `GET /indexes` (list logical
+  indexes with their seeded/physical state) and `POST /reindex?index=…` (rebuild
+  one index). Protected by **HTTP Basic auth**. Default port **9465**. Because it
+  is a separate port, the routes need no `/admin` prefix.
+
+Expose the public port to the metrics scraper; keep the private port on
+localhost / behind a NetworkPolicy / behind TLS. The separate human-facing UI (a
+small web app, in the spirit of `dev/search-api`) is just a Basic-auth client of
+the private port — sessions, users, and the login live there, never in the
+daemon.
+
+**A server and a client, not one binary.** flusso splits into two binaries with
+distinct audiences. The **server** (the daemon — today's `flusso run`) is what
+runs under Kubernetes / Docker / bare metal: it owns the pipeline and serves both
+HTTP surfaces. A separate, lightweight **client CLI** is the operator's tool — it
+talks to a *running* server over the private surface (HTTP + Basic auth) to list
+indexes and trigger reindexes. The client is a thin HTTP client with **no
+privileged channel**: it is an equal peer of the website and of `curl`, holding
+no power the private API doesn't grant any caller. (This is the NATS shape —
+`nats-server` plus the separately-installed `nats` — minus a custom protocol: the
+contract is plain HTTP/JSON, so any client in any language, or a browser, speaks
+it.)
+
+To keep the client thin and the contract drift-free, the request/response types
+of the private API live in a small **shared crate of pure `serde` types** (the
+pattern `daemon::StatusSnapshot` already follows), depended on by both binaries —
+so the client need not pull in the engine/source/sink stack just to speak the
+protocol. The client addresses the server with a `--server` flag / `FLUSSO_SERVER`
+env, supplying the Basic-auth credentials the same way (flag or env, never a
+file). Splitting the binary is *orthogonal* to the mechanism below: the server
+does all the real work; the client only issues authenticated requests.
+
+**Configuration.** Both ports resolve from, highest precedence first, the **CLI
+flag**, then the **`FLUSSO_*` env var**, then the **`flusso.toml` config** —
+extending flusso's existing flag-over-env rule with a config layer beneath it.
+The Basic-auth credentials resolve from the **CLI flag** and **env var only**,
+never the config file: they are secrets, and flusso never bakes a secret into a
+compiled `flusso.lock`. The private surface is **fail-closed** — with no
+credentials configured it is not mounted at all.
+
+**Mechanism.** A reindex preserves the engine's race-free backfill-*then*-live
+ordering by scoping a pipeline restart rather than mutating the live loop: clear
+the target index (a new `Sink::unseed` — delete the physical index plus its seed
+marker, so the rebuild starts empty and drops documents for rows since deleted in
+Postgres), then tear down and rebuild the run. The engine re-backfills only that
+index through the existing seed machinery (`is_seeded` / `snapshot` /
+`mark_seeded`); other indexes stay seeded and keep serving, and the live changes
+that accumulate during the rebuild are retained in the replication slot and
+applied when live resumes. So the reindex reuses the tested backfill path end to
+end instead of adding a second, concurrent seeding path with its own ordering
+hazards.
