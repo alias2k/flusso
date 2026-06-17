@@ -1,0 +1,12 @@
+# Code owners for flusso.
+#
+# Owners listed here are automatically requested for review on PRs that touch
+# matching paths. This is pre-wired for future contributors — a review is NOT
+# currently required to merge (branch protection on `main` requires a PR and
+# passing CI, but zero approvals, so the sole maintainer isn't deadlocked).
+#
+# To make these reviews mandatory once there are other maintainers, enable
+# "Require review from Code Owners" in the `main` branch protection rule.
+
+# Default owner for everything in the repo.
+*       @JakubWasilczyk-Alias2k
