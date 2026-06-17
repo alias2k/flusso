@@ -37,9 +37,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   via the `sources-postgres` `fuzzing` feature (`fuzz_pgoutput_decode`). Contract: the
   decoder must never panic on arbitrary bytes — an `Err` is the correct outcome. Run from the
   crate dir; a crash lands in `fuzz/artifacts/`.
-- The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration`, `wal`, and
-  `config_coverage` binaries; `testcontainers` spins up Postgres. `.config/nextest.toml`
-  caps their concurrency and retries them — they're legitimately slow/flaky.
+- The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration` and
+  `config_coverage` binaries plus `engine`'s `wal` binary (the full source→engine→sink
+  e2e lives in `engine` — a leaf source crate must not dev-depend on the engine, or it
+  can't be published before the engine and the layering is violated); `testcontainers`
+  spins up Postgres. `.config/nextest.toml` caps their concurrency and retries them —
+  they're legitimately slow/flaky.
 - **The `schema` crate's config env-var tests must run single-threaded**: the
   `flusso.toml` parse/convert tests (`libs/2-schema/tests/config_toml.rs`) mutate process-wide
   env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its own process so it's

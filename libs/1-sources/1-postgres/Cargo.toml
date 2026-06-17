@@ -39,8 +39,6 @@ serde_json.workspace = true
 [dev-dependencies]
 sources-core.workspace = true
 schema-core.workspace = true
-sinks-core.workspace = true
-engine.workspace = true
 sqlx.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

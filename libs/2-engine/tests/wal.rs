@@ -5,7 +5,7 @@
 //! Requires Docker. Ignored by default; run with:
 //!
 //! ```text
-//! cargo test -p sources-postgres --test wal -- --ignored
+//! cargo test -p engine --test wal -- --ignored
 //! ```
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
