@@ -1,0 +1,92 @@
+name: roadmap
+
+# Drives the lifecycle of a roadmap item on the org Project board:
+#   * issue opened  (label `roadmap`)            -> add to board, Status = Todo
+#   * PR opened/ready that says `Closes #<n>`    -> linked issues Status = In Progress
+#   * issue closed as completed (e.g. PR merged) -> Status = Done
+#
+# "Released" is handled separately by roadmap-released.yml when a version ships.
+#
+# Requires a repo secret PROJECTS_TOKEN (a PAT with org Projects read/write — the
+# default GITHUB_TOKEN cannot write org-level Projects v2) and a repo variable
+# ROADMAP_PROJECT_NUMBER (the integer in the Project's URL).
+
+on:
+  issues:
+    types: [opened, closed]
+  # pull_request_target so the PROJECTS_TOKEN secret is available even for PRs from
+  # forks. We never check out or run PR code here — we only read the PR body and call
+  # the API — so this is not the usual pull_request_target code-execution risk.
+  pull_request_target:
+    types: [opened, ready_for_review, reopened]
+
+# One run per issue/PR at a time; never race two status writes on the same item.
+concurrency:
+  group: roadmap-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  todo:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'roadmap') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/roadmap-status
+        with:
+          token: ${{ secrets.PROJECTS_TOKEN }}
+          owner: ${{ github.repository_owner }}
+          project-number: ${{ vars.ROADMAP_PROJECT_NUMBER }}
+          content-id: ${{ github.event.issue.node_id }}
+          status: Todo
+
+  done:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'closed' && github.event.issue.state_reason == 'completed' && contains(github.event.issue.labels.*.name, 'roadmap') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/roadmap-status
+        with:
+          token: ${{ secrets.PROJECTS_TOKEN }}
+          owner: ${{ github.repository_owner }}
+          project-number: ${{ vars.ROADMAP_PROJECT_NUMBER }}
+          content-id: ${{ github.event.issue.node_id }}
+          status: Done
+
+  in-progress:
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Discover linked roadmap issues
+        id: discover
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          REPO: ${{ github.repository }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          # Pull `closes/fixes/resolves #<n>` references out of the PR body.
+          numbers=$(printf '%s' "$BODY" \
+            | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+            | grep -oE '[0-9]+' | sort -u || true)
+          node_ids=""
+          for n in $numbers; do
+            # Only act on issues that are actually roadmap items.
+            if gh issue view "$n" --repo "$REPO" --json labels \
+                 --jq '.labels[].name' 2>/dev/null | grep -qx 'roadmap'; then
+              node=$(gh api "repos/$REPO/issues/$n" --jq '.node_id')
+              node_ids="$node_ids $node"
+              echo "Linked roadmap issue #$n ($node)"
+            else
+              echo "Issue #$n is not a roadmap item; skipping."
+            fi
+          done
+          echo "node_ids=$(echo $node_ids | xargs)" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/roadmap-status
+        if: ${{ steps.discover.outputs.node_ids != '' }}
+        with:
+          token: ${{ secrets.PROJECTS_TOKEN }}
+          owner: ${{ github.repository_owner }}
+          project-number: ${{ vars.ROADMAP_PROJECT_NUMBER }}
+          content-id: ${{ steps.discover.outputs.node_ids }}
+          status: In Progress

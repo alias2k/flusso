@@ -1,0 +1,70 @@
+name: roadmap-released
+
+# When a release ships, close the loop on its roadmap items: comment "shipped in
+# v<x>" on every roadmap issue closed since the previous release and move it to the
+# "Released" column.
+#
+# Keyed off the umbrella `flusso-cli-v*` tag that release-plz pushes for each
+# workspace version, so it fires once per release rather than once per per-crate tag.
+#
+# Requires the same PROJECTS_TOKEN secret and ROADMAP_PROJECT_NUMBER variable as
+# roadmap.yml.
+
+on:
+  push:
+    tags:
+      - 'flusso-cli-v*'
+
+concurrency:
+  group: roadmap-released-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  released:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need tag history to find the previous release
+      - name: Notify roadmap issues shipped in this release
+        id: discover
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          REPO: ${{ github.repository }}
+          CUR: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${CUR#flusso-cli-v}"
+
+          # Previous umbrella tag (the one before CUR); empty on the first release.
+          PREV=$(git describe --tags --abbrev=0 --match 'flusso-cli-v*' "${CUR}^" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            SINCE=$(git log -1 --format=%cI "$PREV")
+            echo "Issues closed since $PREV ($SINCE)"
+          else
+            SINCE="1970-01-01T00:00:00Z"
+            echo "First release; considering all closed roadmap issues."
+          fi
+
+          # Roadmap issues closed as completed since the previous release.
+          numbers=$(gh issue list --repo "$REPO" --label roadmap --state closed \
+            --limit 200 --json number,closedAt,stateReason \
+            --jq "[.[] | select(.stateReason == \"COMPLETED\" and .closedAt > \"$SINCE\") | .number] | .[]")
+
+          node_ids=""
+          for n in $numbers; do
+            gh issue comment "$n" --repo "$REPO" \
+              --body "🚀 Shipped in **v${VERSION}** — see the [release](https://github.com/${REPO}/releases/tag/${CUR})."
+            node=$(gh api "repos/$REPO/issues/$n" --jq '.node_id')
+            node_ids="$node_ids $node"
+            echo "Notified roadmap issue #$n"
+          done
+          echo "node_ids=$(echo $node_ids | xargs)" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/roadmap-status
+        if: ${{ steps.discover.outputs.node_ids != '' }}
+        with:
+          token: ${{ secrets.PROJECTS_TOKEN }}
+          owner: ${{ github.repository_owner }}
+          project-number: ${{ vars.ROADMAP_PROJECT_NUMBER }}
+          content-id: ${{ steps.discover.outputs.node_ids }}
+          status: Released
