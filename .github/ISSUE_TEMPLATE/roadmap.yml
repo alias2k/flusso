@@ -1,0 +1,43 @@
+name: Roadmap feature
+description: Propose a feature for the roadmap — opens a tracked item on the project board
+title: "feat: "
+labels: ["enhancement", "roadmap"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        This opens a **tracked roadmap item**. Once filed it is added to the project
+        board automatically, moves to *In Progress* when a PR links it (`Closes #<n>`),
+        to *Done* when that PR merges, and to *Released* when it ships in a release.
+        Use a `feat:` title so the eventual changelog entry reads well.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what's getting in the way?
+      placeholder: A clear description of the limitation motivating this feature.
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: >
+        A sketch of the solution — not a committed API. If it touches config or
+        schema syntax, show what that would look like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds, and why they fall short.
+    validations:
+      required: false
+  - type: input
+    id: area
+    attributes:
+      label: Area / crate
+      description: Which part of the workspace does this touch (e.g. `sources-postgres`, engine, Helm chart)?
+    validations:
+      required: false
