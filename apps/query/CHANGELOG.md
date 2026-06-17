@@ -1,0 +1,38 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0](https://github.com/alias2k/flusso/releases/tag/flusso-query-v0.1.0) - 2026-06-17
+
+### Added
+
+- correct workflows for deployment, code quality corrections
+- license, security, coc, contributing and github templates
+- rename flusso-search to flusso-query
+- move files to correctly reflect dependencies
+- create alias pointing to the latest index
+- add belong_to
+- start client, add geo
+- rename config.toml to flusso.toml and flusso.bin to flusso.lock
+- add compile functionality
+- better opensearch defaults
+- improve env vars handling and readme about sinks and sources
+- backfill and renaming
+- rebranding to storno
+- update deps
+- documentation
+
+### Other
+
+- preparation for going public
+- documentation
+- add requirements section
+- add SCHEMA.md
+- readme
+- readme and cleanup
+- README
