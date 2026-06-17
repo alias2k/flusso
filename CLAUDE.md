@@ -143,7 +143,7 @@ backend *could* otherwise reach config-loading machinery; with them at layer 2 t
 depend only on the layer-0 vocabulary and *cannot* see the assembled `Config` or the file
 parsers. See "Config layer" below.
 
-### The pipeline (`libs/2-engine/src/lib.rs`)
+### The pipeline (`libs/2-engine/src/pipeline.rs`)
 
 ```text
 ChangeCapture ─▶ queue ─▶ resolve ─▶ build ─▶ Sink ─▶ flush ─▶ ack
@@ -295,7 +295,7 @@ belongs in the linked docs.
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loop / batching / ack ordering | `libs/2-engine/src/lib.rs` |
+| The sync loop / batching / ack ordering | `libs/2-engine/src/` — `lib.rs` (the `Engine` builder + public API), `pipeline.rs` (the `Pipeline` run machinery: `run_inner`/`backfill`/`pump`/`work`/`commit`/`CaptureGuard`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` |
 | Pipeline observability trait (`Observer`, `BatchStats`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `backends.rs` (`Backends` trait + `SourceParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
 | Backend assembly (which concrete source/sink): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
