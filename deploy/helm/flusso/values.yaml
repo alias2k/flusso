@@ -23,6 +23,9 @@ replicaCount: 1
 #                   contain flusso.toml and any referenced schema files).
 #   create: false + no existingConfigMap → run nothing extra; the image must
 #                   already carry a /app/flusso.lock (a custom/baked image).
+# In the `--config` modes `run` recompiles the lock from the config on every
+# start (cargo-style); the chart points it at a writable `lock-state` emptyDir,
+# so the ConfigMap stays the source of truth and the lock there is ephemeral.
 config:
   create: true
   existingConfigMap: ""

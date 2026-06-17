@@ -89,7 +89,8 @@ when both are set** — env is the fallback.
 | --- | --- | --- |
 | `FLUSSO_CONFIG` | `--config` | `build`, `check`, `run` |
 | `FLUSSO_OUT` | `--out` | `build` |
-| `FLUSSO_ARTIFACT` | `--artifact` | `run` |
+| `FLUSSO_LOCK` | `--lock` | `run` |
+| `FLUSSO_LOCKED` | `--locked` | `run` |
 | `FLUSSO_SLOT` | `--slot` | `run` |
 | `FLUSSO_PUBLICATION` | `--publication` | `run` |
 | `FLUSSO_SKIP_BACKFILL` | `--skip-backfill` | `run` |

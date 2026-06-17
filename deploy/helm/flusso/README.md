@@ -60,7 +60,10 @@ config:
   /config/flusso.toml`. Schema `schema =` paths resolve relative to that file —
   i.e. against the `schemas` keys. Use `config.existingConfigMap` to bring your
   own, or set `config.create=false` with no ConfigMap when the image already
-  carries a baked `/app/flusso.lock`.
+  carries a baked `/app/flusso.lock`. In the `--config` modes `run` recompiles
+  the lock from the config on each start; the chart points `--lock` at a writable
+  `lock-state` emptyDir (the root filesystem is read-only), so the ConfigMap
+  remains the source of truth and the recompiled lock is ephemeral.
 - **Secrets** (`secrets.*`): connection/sink URLs in the config should be
   `{ env = "VAR" }` references. The matching env vars come from a Secret mounted
   via `envFrom` — either managed here (`secrets.create=true` + `secrets.data`)
