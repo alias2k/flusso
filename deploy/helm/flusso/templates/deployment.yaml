@@ -56,6 +56,12 @@ spec:
             {{- if $useConfig }}
             - --config
             - "{{ .Values.config.mountPath }}/flusso.toml"
+            # `run` recompiles the lock from the config on every start. The
+            # ConfigMap mount is read-only and the root filesystem is read-only,
+            # so point the lock at the writable `lock-state` emptyDir below. The
+            # lock there is ephemeral — the ConfigMap is the source of truth.
+            - --lock
+            - "/var/lib/flusso/flusso.lock"
             {{- end }}
             - --slot
             - {{ .Values.run.slot | quote }}
@@ -101,12 +107,17 @@ spec:
             - name: config
               mountPath: {{ .Values.config.mountPath }}
               readOnly: true
+            # Writable scratch for the recompiled lock (root fs is read-only).
+            - name: lock-state
+              mountPath: /var/lib/flusso
           {{- end }}
       {{- if $useConfig }}
       volumes:
         - name: config
           configMap:
             name: {{ include "flusso.configMapName" . }}
+        - name: lock-state
+          emptyDir: {}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -163,9 +163,12 @@ wins when both are set) — handy for containers.
   `flusso.lock`. No database, no secrets baked in (`{ env = "VAR" }` refs are
   carried through and resolved wherever it runs). Ship one file instead of a tree
   of YAML.
-- **`flusso run`** — stream changes through the engine. Bare `run` loads
-  `flusso.lock`; `--config` compiles from source and runs that. Credentials are
-  resolved here, in the running environment.
+- **`flusso run`** — stream changes through the engine. Like `cargo run`, it
+  compiles first: when a `flusso.toml` is present (the default, or `--config`) it
+  recompiles and **rewrites `flusso.lock`**, then runs — so the committed lock
+  stays current for free. With no config it loads the existing `flusso.lock`, and
+  `--locked` runs the lock as-is without recompiling. Credentials are resolved
+  here, in the running environment.
 - **`flusso check`** — validate the config and print the fully-typed mapping, with
   no database. Drop `--offline` and it also confirms the declared types match the
   live database and grumbles about any that don't.

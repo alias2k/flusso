@@ -7,7 +7,7 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::commands::print;
-use crate::{DEFAULT_ARTIFACT, DEFAULT_CONFIG};
+use crate::{DEFAULT_CONFIG, DEFAULT_LOCK};
 
 #[derive(Debug, Args)]
 pub(crate) struct BuildArgs {
@@ -16,7 +16,7 @@ pub(crate) struct BuildArgs {
     config: PathBuf,
 
     /// Where to write the compiled artifact.
-    #[arg(short, long, env = "FLUSSO_OUT", default_value = DEFAULT_ARTIFACT)]
+    #[arg(short, long, env = "FLUSSO_OUT", default_value = DEFAULT_LOCK)]
     out: PathBuf,
 }
 

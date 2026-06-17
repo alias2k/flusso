@@ -95,10 +95,13 @@ and the container at once (same replication slot).
 
 `default-members = ["apps/cli"]`, so bare `cargo run` is the `flusso` binary. CLI
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
-baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run` (loads
-`flusso.lock` by default, or `--config` to compile-and-run; `--skip-backfill` resumes live
-only), `schema` (print an embedded editor-assist JSON Schema: `schema config` or `schema
-index`; no DB). See `dev/README.md` for the walk-through. **Every flag also reads a
+baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run`
+(cargo-style: when a `flusso.toml` is present — the default path, or `--config` — it
+recompiles and **rewrites the `flusso.lock`** then runs that, so the committed lock stays
+current; with no config it loads the existing `--lock`; `--locked` runs the lock as-is with
+no recompile; a lock-write failure is fatal; `--skip-backfill` resumes live only — see
+`resolve_config`/`plan_config` in `apps/cli/src/commands/run.rs`), `schema` (print an embedded
+editor-assist JSON Schema: `schema config` or `schema index`; no DB). See `dev/README.md` for the walk-through. **Every flag also reads a
 `FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.
 `FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_PUBLIC_ADDRESS` — so the binary configures cleanly from
 the environment (Helm/compose). This is separate from the config's own reserved env vars

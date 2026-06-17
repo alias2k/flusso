@@ -1,5 +1,12 @@
 //! `flusso run` — the composition root for a sync run.
 //!
+//! Like `cargo run`, this command compiles before it runs: when a `flusso.toml`
+//! is present (the default path, or `--config`) it compiles the config + schemas,
+//! **writes the `flusso.lock`**, and runs that — so a dev who edits the config
+//! gets a fresh, committable lock for free. With no config it falls back to the
+//! existing lock, and `--locked` runs the lock as-is without recompiling. See
+//! [`resolve_config`].
+//!
 //! The daemon owns the pipeline and exposes its live [`Status`](daemon::Status);
 //! this command owns the *transport* around it: telemetry export (traces +
 //! metrics), the two operational HTTP surfaces, and process signals. It binds
@@ -8,7 +15,7 @@
 //! ends, an error stops it, or a signal arrives — then drains and flushes.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +26,7 @@ use schema::{Config, IndexName};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::DEFAULT_ARTIFACT;
+use crate::DEFAULT_LOCK;
 use crate::backends::FlussoBackends;
 use crate::http::{self, BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
 use crate::telemetry::observer::OtelObserver;
@@ -35,14 +42,21 @@ const DEFAULT_PRIVATE_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr:
 
 #[derive(Debug, Args)]
 pub(crate) struct RunArgs {
-    /// Source config to compile and run. When omitted, the compiled artifact at
-    /// `--artifact` is loaded instead.
+    /// Source config to compile and run. Defaults to `flusso.toml` in the working
+    /// directory; when that is absent the compiled `--lock` is loaded instead.
+    /// An explicitly given path that does not exist is an error.
     #[arg(short, long, env = "FLUSSO_CONFIG")]
     config: Option<PathBuf>,
 
-    /// Compiled artifact to run when `--config` is not given.
-    #[arg(long, env = "FLUSSO_ARTIFACT", default_value = DEFAULT_ARTIFACT)]
-    artifact: PathBuf,
+    /// Compiled lock path: rewritten from the config on every start (cargo-style),
+    /// and loaded directly when there is no config to compile.
+    #[arg(long, env = "FLUSSO_LOCK", default_value = DEFAULT_LOCK)]
+    lock: PathBuf,
+
+    /// Run the existing `--lock` as-is: skip compiling the config and skip
+    /// rewriting the lock. Use for deterministic deploys off a committed lock.
+    #[arg(long, env = "FLUSSO_LOCKED")]
+    locked: bool,
 
     /// Logical replication slot to consume. Must already exist.
     #[arg(long, env = "FLUSSO_SLOT", default_value = "flusso")]
@@ -94,7 +108,7 @@ pub(crate) struct RunArgs {
 pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let tracer_provider = telemetry::init_tracing();
 
-    let config = load_run_config(&args)?;
+    let config = resolve_config(&args)?;
 
     // Resolve each surface's bind address with the precedence CLI flag / env
     // (merged by clap) > `[server]` config > built-in default.
@@ -245,15 +259,141 @@ async fn stage_reindex(
     Ok(())
 }
 
-/// Load the configuration a `run` should use: compiled fresh from `--config`, or
-/// read back from the compiled artifact.
-fn load_run_config(args: &RunArgs) -> anyhow::Result<Config> {
-    match &args.config {
-        Some(path) => {
-            schema::load(path).with_context(|| format!("loading config from {}", path.display()))
+/// What `run` does to obtain its [`Config`], decided purely from the flags plus
+/// whether the candidate config file exists. Split out from the IO in
+/// [`resolve_config`] so the branching is unit-testable without a filesystem.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigPlan {
+    /// `--locked`: load the existing lock as-is, no compile, no write.
+    UseLock,
+    /// Compile this config path, (re)write the lock, then run the result.
+    Compile(PathBuf),
+    /// No config to compile: fall back to loading the existing lock.
+    Fallback,
+    /// An explicit `--config` was given but does not exist — fatal.
+    Missing(PathBuf),
+}
+
+/// Decide the [`ConfigPlan`] cargo-style: `--locked` wins; otherwise an explicit
+/// `--config` is compiled when it exists and is an error when it doesn't, while a
+/// missing default `flusso.toml` is allowed and falls back to the lock.
+fn plan_config(
+    locked: bool,
+    config: Option<&Path>,
+    default_config: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> ConfigPlan {
+    if locked {
+        return ConfigPlan::UseLock;
+    }
+    match config {
+        Some(path) if exists(path) => ConfigPlan::Compile(path.to_path_buf()),
+        Some(path) => ConfigPlan::Missing(path.to_path_buf()),
+        None if exists(default_config) => ConfigPlan::Compile(default_config.to_path_buf()),
+        None => ConfigPlan::Fallback,
+    }
+}
+
+/// Resolve the configuration a `run` should use, cargo-style: compile the config
+/// and **(re)write the lock** when one is present, fall back to the existing lock
+/// otherwise, or run the lock as-is under `--locked`. A lock write failure is
+/// fatal — the committed lock must reflect the config it was compiled from.
+fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
+    let default_config = PathBuf::from(crate::DEFAULT_CONFIG);
+    match plan_config(
+        args.locked,
+        args.config.as_deref(),
+        &default_config,
+        |path| path.exists(),
+    ) {
+        ConfigPlan::UseLock => load_lock(&args.lock),
+        ConfigPlan::Compile(config_path) => {
+            let compiled = schema::compile(&config_path)
+                .with_context(|| format!("compiling config from {}", config_path.display()))?;
+            schema::write(&compiled, &args.lock)
+                .with_context(|| format!("writing compiled lock to {}", args.lock.display()))?;
+            tracing::info!(
+                indexes = compiled.config.indexes.len(),
+                lock = %args.lock.display(),
+                "compiled config and wrote lock"
+            );
+            Ok(compiled.config)
         }
-        None => schema::load_compiled(&args.artifact)
-            .with_context(|| format!("loading compiled config from {}", args.artifact.display())),
+        ConfigPlan::Fallback => load_lock(&args.lock).with_context(|| {
+            format!(
+                "no {} to compile and no compiled lock at {}; create a config or build a lock first",
+                crate::DEFAULT_CONFIG,
+                args.lock.display()
+            )
+        }),
+        ConfigPlan::Missing(config_path) => {
+            anyhow::bail!("config file {} not found", config_path.display())
+        }
+    }
+}
+
+/// Read back a previously compiled lock from `path`.
+fn load_lock(path: &Path) -> anyhow::Result<Config> {
+    schema::load_compiled(path)
+        .with_context(|| format!("loading compiled lock from {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigPlan, plan_config};
+    use std::path::{Path, PathBuf};
+
+    const DEFAULT: &str = "flusso.toml";
+
+    /// Helper: an `exists` predicate matching exactly the given paths.
+    fn present<'a>(paths: &'a [&'a str]) -> impl Fn(&Path) -> bool + 'a {
+        move |p| paths.iter().any(|present| Path::new(present) == p)
+    }
+
+    #[test]
+    fn locked_uses_the_lock_and_ignores_the_config() {
+        // Even with a config present, `--locked` short-circuits to the lock.
+        let plan = plan_config(
+            true,
+            Some(Path::new("flusso.toml")),
+            Path::new(DEFAULT),
+            present(&["flusso.toml"]),
+        );
+        assert_eq!(plan, ConfigPlan::UseLock);
+    }
+
+    #[test]
+    fn explicit_config_present_is_compiled() {
+        let plan = plan_config(
+            false,
+            Some(Path::new("dev/flusso.toml")),
+            Path::new(DEFAULT),
+            present(&["dev/flusso.toml"]),
+        );
+        assert_eq!(plan, ConfigPlan::Compile(PathBuf::from("dev/flusso.toml")));
+    }
+
+    #[test]
+    fn explicit_config_missing_is_fatal() {
+        let plan = plan_config(
+            false,
+            Some(Path::new("nope.toml")),
+            Path::new(DEFAULT),
+            present(&[]),
+        );
+        assert_eq!(plan, ConfigPlan::Missing(PathBuf::from("nope.toml")));
+    }
+
+    #[test]
+    fn default_config_present_is_compiled() {
+        let plan = plan_config(false, None, Path::new(DEFAULT), present(&[DEFAULT]));
+        assert_eq!(plan, ConfigPlan::Compile(PathBuf::from(DEFAULT)));
+    }
+
+    #[test]
+    fn default_config_absent_falls_back_to_the_lock() {
+        let plan = plan_config(false, None, Path::new(DEFAULT), present(&[]));
+        assert_eq!(plan, ConfigPlan::Fallback);
     }
 }
 

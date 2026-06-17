@@ -8,10 +8,13 @@
 //!   portable binary artifact (`flusso.lock`). No database is needed: the schema
 //!   is self-describing, and secrets are kept as references, not baked in.
 //! - [`run`](commands::run) streams Postgres changes through the engine to the configured
-//!   sink(s). With no `--config` it loads the compiled artifact; with `--config`
-//!   it compiles the source afresh and runs that. Connection and credentials are
-//!   resolved here, in the running environment. The replication slot is created
-//!   automatically if it does not exist. Logs go to stderr.
+//!   sink(s). Like `cargo run`, it compiles first: when a `flusso.toml` is present
+//!   (the default path, or `--config`) it compiles it afresh, **writes the
+//!   `flusso.lock`**, and runs that — so the committed lock stays current with no
+//!   extra step. With no config it falls back to loading the existing lock, and
+//!   `--locked` runs the lock as-is without recompiling. Connection and
+//!   credentials are resolved here, in the running environment. The replication
+//!   slot is created automatically if it does not exist. Logs go to stderr.
 //! - [`check`](commands::check) validates the config and every schema, prints the fully-typed
 //!   mapping (database-free), and — unless `--offline` — also confirms the
 //!   declared types and nullability agree with the live database.
@@ -40,9 +43,9 @@ use commands::schema_cmd::SchemaArgs;
 /// The default config-file path, by convention `flusso.toml`.
 pub(crate) const DEFAULT_CONFIG: &str = "flusso.toml";
 
-/// The default compiled-artifact path, written by `build` and loaded by a
-/// bare `run`.
-pub(crate) const DEFAULT_ARTIFACT: &str = "flusso.lock";
+/// The default compiled-lock path: written by `build` and by `run` (which
+/// recompiles it on start), and loaded by a `run` that has no config to compile.
+pub(crate) const DEFAULT_LOCK: &str = "flusso.lock";
 
 /// Keep a search index in sync with Postgres, driven by a config file.
 #[derive(Debug, Parser)]

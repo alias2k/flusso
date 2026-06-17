@@ -54,9 +54,10 @@ USER 65532:65532
 # Operational HTTP surface (/healthz /readyz /status /metrics).
 EXPOSE 9464
 
-# `flusso run` loads /app/flusso.lock by default; override with `--config` to a
-# mounted flusso.toml, or bake a lock into a child image. Bind to all interfaces
-# so a sidecar/Prometheus can reach the surface.
+# Bare `flusso run` loads /app/flusso.lock when no flusso.toml is present (the
+# config-less runtime image, or a child image with a baked lock). Pass `--config`
+# to a mounted flusso.toml and it recompiles + rewrites the lock on start, like
+# `cargo run`. Bind to all interfaces so a sidecar/Prometheus can reach the surface.
 ENTRYPOINT ["flusso"]
 CMD ["run", "--public-address", "0.0.0.0:9464"]
 
