@@ -17,6 +17,8 @@ jobs:
   docker:
     name: build & push image
     runs-on: ubuntu-latest
+    # Same Production gate as the crates.io publish, for approval parity.
+    environment: Production
     permissions:
       contents: read
       packages: write

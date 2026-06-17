@@ -1,25 +1,22 @@
 name: release-plz
 
-# release-plz drives crates.io: on every push to main it opens/updates a
-# "release" PR (version bumps + CHANGELOG). Merging that PR publishes every
-# crate to crates.io in dependency order and pushes per-crate git tags
-# (e.g. `flusso-cli-v0.1.0`). The docker + dist release workflows trigger off
-# the `flusso-cli-v*` tag to build the image and the prebuilt binaries.
+# release-plz drives crates.io. Split into two jobs so only the publish step is
+# gated behind the `Production` environment:
+#   * release-pr — opens/updates the "release" PR (version bumps + CHANGELOG) on
+#     every push to main. Ungated; no registry token needed.
+#   * release    — on push to main, publishes any crate whose version isn't yet
+#     on crates.io (i.e. right after the release PR merges), then pushes
+#     per-crate tags incl. `flusso-cli-v<version>`. Runs in the `Production`
+#     environment, so its `CARGO_REGISTRY_TOKEN` lives there and any environment
+#     protection rules (e.g. required reviewers) gate the publish.
 #
-# Requires the `CARGO_REGISTRY_TOKEN` repository secret (a crates.io API token).
-#
-# NOTE: the release PR is opened with the default GITHUB_TOKEN, so pushes from
-# it do NOT trigger the CI workflow (GitHub suppresses Actions-on-Actions). If
-# you want CI to run on the release PR, swap GITHUB_TOKEN for a fine-grained PAT
-# or the release-plz GitHub App token. See https://release-plz.dev/docs/github.
+# NOTE: the release PR is opened with the default GITHUB_TOKEN, so pushes from it
+# do NOT trigger CI. For CI on the release PR, use a fine-grained PAT or the
+# release-plz GitHub App token. See https://release-plz.dev/docs/github.
 
 on:
   push:
     branches: [main]
-
-permissions:
-  contents: write
-  pull-requests: write
 
 # Never run two release jobs concurrently — they both touch tags/releases.
 concurrency:
@@ -27,21 +24,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release-plz:
-    name: release-plz
+  release-pr:
+    name: release-pr
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # rust-toolchain.toml is honored automatically.
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run release-plz
+      - name: Open/update release PR
         uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    # Gate the crates.io publish behind the Production environment (this is where
+    # CARGO_REGISTRY_TOKEN lives, and where approval/branch rules apply).
+    environment: Production
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish unpublished crates
+        uses: release-plz/action@v0.5
+        with:
+          command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

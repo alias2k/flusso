@@ -46,6 +46,11 @@ debug = 2
 [profile.dev.package."*"]
 opt-level = 1
 
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [workspace.lints.rust]
 # Turn ALL warnings from rustc into errors.
 warnings = "deny"

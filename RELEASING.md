@@ -30,10 +30,21 @@ Every crate shares one version (`Cargo.toml` `[workspace.package]`), so a releas
 ### crates.io
 1. Create a [crates.io](https://crates.io) account, verify your email.
 2. Generate an API token (Account Settings → API Tokens) scoped to publish-new + publish-update.
-3. Add it as the repo secret **`CARGO_REGISTRY_TOKEN`** (Settings → Secrets and variables → Actions).
+3. Add it as a secret named **`CARGO_REGISTRY_TOKEN`** in the **`Production`** GitHub
+   environment (Settings → Environments → Production → Environment secrets), **not** as a
+   plain repository secret. The `release` job declares `environment: Production`, so it reads
+   the token from there — and any environment protection rules (e.g. required reviewers) gate
+   the publish. The ungated `release-pr` job needs no token.
+
+### Environment gating
+Both publish jobs run in the `Production` environment: `release-plz`'s `release` job (crates.io)
+and the `docker` job (GHCR image). Add **required reviewers** to the environment if you want a
+human to approve each publish. The `release-pr` job and the CI workflow stay ungated.
 
 ### GHCR (Docker)
-Nothing — the `docker` workflow authenticates with the built-in `GITHUB_TOKEN`. After the first push, set the `ghcr.io/alias2k/flusso` package to public (Package settings) if you want anonymous `docker pull`.
+No secret needed — the `docker` workflow authenticates with the built-in `GITHUB_TOKEN`. After the
+first push, set the `ghcr.io/alias2k/flusso` package to public (Package settings) if you want
+anonymous `docker pull`.
 
 ### dist (prebuilt binaries) — generates its own workflow
 `dist`'s release workflow is **machine-generated**; don't hand-edit it.
