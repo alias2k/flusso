@@ -30,14 +30,14 @@ Every crate shares one version (`Cargo.toml` `[workspace.package]`), so a releas
 ### crates.io
 1. Create a [crates.io](https://crates.io) account, verify your email.
 2. Generate an API token (Account Settings → API Tokens) scoped to publish-new + publish-update.
-3. Add it as a secret named **`CARGO_REGISTRY_TOKEN`** in the **`Production`** GitHub
-   environment (Settings → Environments → Production → Environment secrets), **not** as a
-   plain repository secret. The `release` job declares `environment: Production`, so it reads
+3. Add it as a secret named **`CARGO_REGISTRY_TOKEN`** in the **`release`** GitHub
+   environment (Settings → Environments → release → Environment secrets), **not** as a
+   plain repository secret. The `release` job declares `environment: release`, so it reads
    the token from there — and any environment protection rules (e.g. required reviewers) gate
    the publish. The ungated `release-pr` job needs no token.
 
 ### Environment gating
-Both publish jobs run in the `Production` environment: `release-plz`'s `release` job (crates.io)
+Both publish jobs run in the `release` environment: `release-plz`'s `release` job (crates.io)
 and the `docker` job (GHCR image). Add **required reviewers** to the environment if you want a
 human to approve each publish. The `release-pr` job and the CI workflow stay ungated.
 
@@ -74,6 +74,13 @@ Then:
 2. release-plz opens/updates the **release PR**. Review the version bumps and `CHANGELOG.md`.
 3. Merge the release PR. release-plz publishes to crates.io and pushes the tags; the `docker` and `dist` workflows fire off `flusso-cli-v<version>`.
 4. Verify: crates on crates.io, the GitHub Release has binaries + installers, and `docker pull ghcr.io/alias2k/flusso:<version>` works.
+
+### Pushing to main without publishing
+A push to main only publishes when a version bump has landed (release-plz publishes just the crates
+whose version isn't already on crates.io), so ordinary feature pushes publish nothing. To be explicit
+— or to suppress a publish even when a bump is present — include **`[skip release]`** in the head
+commit message; the `release` job is skipped entirely (and with it the downstream `docker`/`dist`
+tag builds, which only fire off tags the `release` job pushes).
 
 ## First release — read once
 

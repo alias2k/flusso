@@ -1,14 +1,20 @@
 name: release-plz
 
 # release-plz drives crates.io. Split into two jobs so only the publish step is
-# gated behind the `Production` environment:
+# gated behind the `release` environment:
 #   * release-pr — opens/updates the "release" PR (version bumps + CHANGELOG) on
 #     every push to main. Ungated; no registry token needed.
 #   * release    — on push to main, publishes any crate whose version isn't yet
 #     on crates.io (i.e. right after the release PR merges), then pushes
-#     per-crate tags incl. `flusso-cli-v<version>`. Runs in the `Production`
+#     per-crate tags incl. `flusso-cli-v<version>`. Runs in the `release`
 #     environment, so its `CARGO_REGISTRY_TOKEN` lives there and any environment
 #     protection rules (e.g. required reviewers) gate the publish.
+#
+# Skipping a publish: the `release` job is skipped when the head commit message
+# contains `[skip release]`, so you can push ordinary changes to main without
+# publishing. (release-plz only publishes crates whose version isn't already on
+# crates.io, so a push without a version bump publishes nothing regardless — the
+# marker is the explicit, belt-and-braces opt-out.)
 #
 # NOTE: the release PR is opened with the default GITHUB_TOKEN, so pushes from it
 # do NOT trigger CI. For CI on the release PR, use a fine-grained PAT or the
@@ -49,9 +55,11 @@ jobs:
   release:
     name: release
     runs-on: ubuntu-latest
-    # Gate the crates.io publish behind the Production environment (this is where
+    # Skip publishing when the head commit opts out with `[skip release]`.
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    # Gate the crates.io publish behind the release environment (this is where
     # CARGO_REGISTRY_TOKEN lives, and where approval/branch rules apply).
-    environment: Production
+    environment: release
     permissions:
       contents: write
     steps:
