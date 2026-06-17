@@ -248,7 +248,9 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
 - **Container image** — the [`Dockerfile`](Dockerfile) builds a registry-ready,
   config-less image (you mount a config or bake your own `flusso.lock`). It also
   has a `demo` target with the dev config baked in, which is what `just demo`
-  runs.
+  runs. [`DEPLOY.md`](DEPLOY.md) has the recipes for shipping the smallest
+  possible image — bake your own lock, or compile one in-Docker even when your
+  schemas are scattered across a monorepo.
 - **Kubernetes** — the [Helm chart](deploy/helm/flusso/) deploys flusso as a
   single instance (it consumes one replication slot, so it's *firmly* a party of
   one) with config via ConfigMap, secrets via env, a Service, and an optional
@@ -262,6 +264,7 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
 | [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md) | Every source and sink option — batch sizes, retries, analysis modes |
 | [`CONFIG.md`](CONFIG.md) | Every environment variable in one place — secrets, `FLUSSO_*` flags, logging & telemetry |
 | [`CLIENT.md`](CLIENT.md) | `flusso-query`, the typed query-side client and its `#[derive(FlussoDocument)]` |
+| [`DEPLOY.md`](DEPLOY.md) | Docker recipes — smallest image, baking/compiling a `flusso.lock`, scoped `.dockerignore` |
 | [`dev/README.md`](dev/README.md) | The dev stack walk-through |
 | [`deploy/helm/flusso/README.md`](deploy/helm/flusso/README.md) | The Helm chart |
 | [`CLAUDE.md`](CLAUDE.md) | Architecture + contributor notes (also where the AI takes its instructions) |

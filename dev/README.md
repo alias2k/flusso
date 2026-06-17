@@ -1,12 +1,5 @@
 # Local dev environment
 
-> [!IMPORTANT]
-> ## 🤖 Generative AI disclosure
->
-> **Generative AI was used in this project to produce boilerplate and
-> documentation.** Every single line of code has been manually reviewed and
-> revised by a human software developer.
-
 A real, running flusso you can poke at: Postgres wired for logical replication,
 OpenSearch, pre-seeded data, the publication flusso consumes, and a config +
 schema. Change a row and watch the document stream into OpenSearch — and to

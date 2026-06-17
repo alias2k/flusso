@@ -1,12 +1,5 @@
 # flusso environment & runtime configuration
 
-> [!IMPORTANT]
-> ## 🤖 Generative AI disclosure
->
-> **Generative AI was used in this project to produce boilerplate and
-> documentation.** Every single line of code has been manually reviewed and
-> revised by a human software developer.
-
 Every environment variable flusso reads, in one place. File formats live
 elsewhere: [`SCHEMA.md`](SCHEMA.md) for `flusso.toml` and `*.schema.yml`,
 [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md) for source/sink options.

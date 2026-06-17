@@ -1,8 +1,9 @@
 name: docker
 
 # Builds the registry-ready `runtime` image from the Dockerfile and pushes it to
-# GitHub Container Registry (ghcr.io). Triggers on the CLI's release tag
-# (`flusso-cli-v*`, created by release-plz) and can be run manually.
+# both GitHub Container Registry (ghcr.io) and Docker Hub (docker.io). Triggers on
+# the CLI's release tag (`flusso-cli-v*`, created by release-plz) and can be run
+# manually.
 
 on:
   push:
@@ -12,6 +13,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Docker Hub target — the alias2k org namespace (not the login username).
+  DOCKERHUB_IMAGE: docker.io/alias2k/flusso
 
 jobs:
   docker:
@@ -51,11 +54,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Personal access token of an alias2k org member with write access; namespace
+      # is the org (DOCKERHUB_IMAGE below), not the login username.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Image metadata (tags + OCI labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=${{ steps.ver.outputs.version }}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
