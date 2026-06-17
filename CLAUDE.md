@@ -10,7 +10,8 @@ then follows Postgres logical replication so the index stays current. Read `READ
 for the full picture, `SCHEMA.md` for every config/schema key, `SOURCES_AND_SINKS.md`
 for source/sink options, `CONFIG.md` for every environment variable (secrets, the
 `FLUSSO_*` flag overrides, logging/telemetry — centralized there, not in the other docs),
-and `CLIENT.md` for the query-side `flusso-query` crate.
+`CLIENT.md` for the query-side `flusso-query` crate, and `DEPLOY.md` for the Docker
+shipping recipes (bake/compile a `flusso.lock`, scoped per-Dockerfile `.dockerignore`).
 
 ## Commands
 
@@ -317,7 +318,7 @@ belongs in the linked docs.
 | Query client (`flusso-query`) | `apps/query/src/` |
 | `#[derive(FlussoDocument)]` proc-macro | `apps/query-derive/src/` (+ the `flusso-query-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
-| Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore` |
+| Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `DEPLOY.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 
 ## Conventions

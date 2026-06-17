@@ -1,12 +1,5 @@
 # flusso-query — the typed query client
 
-> [!IMPORTANT]
-> ## 🤖 Generative AI disclosure
->
-> **Generative AI was used in this project to produce boilerplate and
-> documentation.** Every single line of code has been manually reviewed and
-> revised by a human software developer.
-
 flusso keeps an OpenSearch index in sync with Postgres from a declarative schema
 (the write side; see [`README.md`](README.md)). That schema is a contract: it
 fixes the shape of every document — which fields exist, their types, which are

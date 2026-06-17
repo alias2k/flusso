@@ -1,12 +1,5 @@
 # flusso sources and sinks
 
-> [!IMPORTANT]
-> ## 🤖 Generative AI disclosure
->
-> **Generative AI was used in this project to produce boilerplate and
-> documentation.** Every single line of code has been manually reviewed and
-> revised by a human software developer.
-
 flusso connects one **source** (where rows come from) to one or more **sinks**
 (where built documents go), configured under `[source]` and `[sinks.<name>]` in
 `flusso.toml`. This is the reference for every supported type and its options.

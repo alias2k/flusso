@@ -1,12 +1,5 @@
 # flusso configuration reference
 
-> [!IMPORTANT]
-> ## 🤖 Generative AI disclosure
->
-> **Generative AI was used in this project to produce boilerplate and
-> documentation.** Every single line of code has been manually reviewed and
-> revised by a human software developer.
-
 flusso is driven entirely by declarative files. A deployment is described by two
 kinds:
 
