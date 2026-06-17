@@ -4,7 +4,7 @@ flusso ships three ways from one release flow:
 
 - **crates.io** — all 16 publishable crates (`cargo install flusso-cli`, or depend on `flusso-query`)
 - **prebuilt binaries** — GitHub Release assets + installers (via `dist`)
-- **Docker image** — `ghcr.io/alias2k/flusso` (via the `docker` workflow)
+- **Docker image** — `ghcr.io/alias2k/flusso` **and** `docker.io/alias2k/flusso` (via the `docker` workflow)
 
 ## How it fits together
 
@@ -19,7 +19,7 @@ push to main ──▶ release-plz opens a "release" PR (version bump + CHANGELO
                                           │
                         ┌─────────────────┴─────────────────┐
                 docker workflow                      dist workflow
-            (build & push ghcr image)        (build binaries + installers,
+        (build & push ghcr + Docker Hub)     (build binaries + installers,
                                               attach to the GitHub Release)
 ```
 
@@ -38,13 +38,26 @@ Every crate shares one version (`Cargo.toml` `[workspace.package]`), so a releas
 
 ### Environment gating
 Both publish jobs run in the `release` environment: `release-plz`'s `release` job (crates.io)
-and the `docker` job (GHCR image). Add **required reviewers** to the environment if you want a
+and the `docker` job (GHCR + Docker Hub images). Add **required reviewers** to the environment if you want a
 human to approve each publish. The `release-pr` job and the CI workflow stay ungated.
 
 ### GHCR (Docker)
 No secret needed — the `docker` workflow authenticates with the built-in `GITHUB_TOKEN`. After the
 first push, set the `ghcr.io/alias2k/flusso` package to public (Package settings) if you want
 anonymous `docker pull`.
+
+### Docker Hub
+The `docker` workflow also pushes to `docker.io/alias2k/flusso`. It authenticates with a Docker Hub
+**personal access token** (Read & Write) of a user who belongs to the **alias2k** org with write
+access to the `flusso` repo — the org namespace is the publish target, the login is just the
+member. Add two secrets to the **`release`** environment (Settings → Environments → release →
+Environment secrets):
+- **`DOCKERHUB_USERNAME`** — the member's personal Docker Hub username (not `alias2k`).
+- **`DOCKERHUB_TOKEN`** — that personal access token.
+
+The image namespace is hardcoded as `DOCKERHUB_IMAGE: docker.io/alias2k/flusso` in the workflow
+`env`, so the username secret is used only for auth. After the first push, set the repo's
+visibility to public on Docker Hub for anonymous `docker pull`.
 
 ### dist (prebuilt binaries) — generates its own workflow
 `dist`'s release workflow is **machine-generated**; don't hand-edit it.
