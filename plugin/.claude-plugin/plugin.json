@@ -1,7 +1,7 @@
 {
   "name": "flusso",
   "version": "0.1.0",
-  "description": "Work with flusso (Postgres → OpenSearch declarative sync) end to end: author schemas (*.schema.yml + flusso.toml), integrate/migrate a deployment, query the index from Rust with #[derive(FlussoDocument)], and contribute to the flusso codebase.",
+  "description": "Work with flusso (Postgres → OpenSearch declarative sync) end to end. Type /flusso:expert for an expert that explains how it works and drives the work: author schemas (*.schema.yml + flusso.toml), understand the Postgres source and OpenSearch sink, query the index from Rust with #[derive(FlussoDocument)], integrate/migrate a deployment, and contribute to the codebase.",
   "author": {
     "name": "flusso"
   },

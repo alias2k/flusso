@@ -14,18 +14,15 @@ flusso syncs OpenSearch from Postgres off declarative files. You write two kinds
 
 ## First: get live validation, never guess the format
 
-The binary emits the authoritative JSON Schemas. Generate them and wire your editor to them:
-
-```sh
-flusso schema index  > index.schema.yml   # the *.schema.yml format
-flusso schema config > config.schema.json # the flusso.toml format
-```
-
-Then add the language-server line to the **top of every `*.schema.yml`**:
+Wire your editor to the schema's authoritative copy, published in the flusso repo. Add this line to the **top of every `*.schema.yml`**:
 
 ```yaml
-# yaml-language-server: $schema=./index.schema.yml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
 ```
+
+Portable — no generated file, nothing on disk to maintain, and it never points outside the project. The `flusso.toml` companion schema is `https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-config-toml/schemas/config.schema.json`.
+
+(Offline only: `flusso schema index > index.schema.yml` writes a local copy you can point `$schema=./index.schema.yml` at instead — but never reference a schema in another repo/checkout via a `../../…` path that escapes this project.)
 
 Validate the whole deployment before declaring done:
 
@@ -53,7 +50,7 @@ There is **exactly one type key per field**. There is **no** `- field: x` + `typ
 ## Schema file skeleton
 
 ```yaml
-# yaml-language-server: $schema=./index.schema.yml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
 version: 1            # required; only 1 is supported
 table: users          # required; the root table
 schema: public        # optional; defaults to public

@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=./index.schema.yml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
 #
 # Worked example: every join verb in one document.
 # The verb names WHERE the key lives — that's the whole mental model.
