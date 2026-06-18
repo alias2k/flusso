@@ -93,10 +93,11 @@ Scalar/`geo` siblings: `required`, `column` (source column, defaults to the docu
 
 ## Aggregates — reduce a related table to a scalar. The op is the type key.
 
-`count` `sum` `avg` `min` `max`. Each needs `table` and **exactly one** of `foreign_key` xor `through`.
+`count` `sum` `avg` `min` `max` `ids`. Each needs `table` and **exactly one** of `foreign_key` xor `through`.
 
 - `count` → non-null `long`; `avg` → nullable `double` → neither takes `column`/`value_type`.
 - `sum`/`min`/`max` → **must** declare both `column` and `value_type` (it mirrors the column).
+- `ids` → a **flat array of the related table's primary keys** (never null; `[]` when empty), not a nested body. **Must** declare `element_type` (the scalar type of each key, e.g. `long` for integer PKs, `keyword` for uuid/string PKs); takes **no** `column`/`value_type` — the key column is the related table's PK. Works over `foreign_key` (one-to-many) or `through` (many-to-many).
 
 See `examples/aggregate.schema.yml`.
 

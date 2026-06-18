@@ -47,6 +47,23 @@ fields:
       left_key: user_id
       right_key: tag_id
 
+  # ids — a flat array of the related table's PRIMARY KEYS (never null; [] when
+  # empty), not a nested body. MUST declare `element_type` (the scalar type of
+  # each key); takes no `column`/`value_type`.
+  - ids: orderIds
+    table: orders
+    foreign_key: user_id
+    element_type: long
+
+  # ids across a many-to-many: `through` instead of `foreign_key`.
+  - ids: tagIds
+    table: tags
+    through:
+      table: user_tags
+      left_key: user_id
+      right_key: tag_id
+    element_type: long
+
   # Exact money: decimal -> double loses precision, so declare a custom field.
   - custom: balance
     postgres: [numeric]

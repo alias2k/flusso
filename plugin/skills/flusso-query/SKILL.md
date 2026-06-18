@@ -37,6 +37,8 @@ pub struct User {
     pub orders: Vec<Order>,             // has_many join → nested, never null
     #[serde(rename = "orderCount")]
     pub order_count: i64,               // count aggregate → long, never null
+    #[serde(rename = "orderIds")]
+    pub order_ids: Vec<i64>,            // ids aggregate → flat array of PKs, never null
 }
 
 // A nested/child struct names its dotted PATH in the same index. It contributes
@@ -192,12 +194,13 @@ Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Ki
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `object` / `belongs_to` / `has_one` | struct / `Option<struct>` | `Object` |
 | `has_many` / `many_to_many` | `Vec<struct>` | `Nested<S,T>` |
+| `ids` aggregate | `Vec<i64>` / `Vec<String>` (per `element_type`) | `Number<T>` / `Keyword` (scalar handle — term queries match arrays) |
 
 Matching is by **leaf identifier + `Option` shape** — the macro compares the final type segment, not aliases. Exact money: declare a `custom` `scaled_float` in the schema and the derive accepts `rust_decimal::Decimal` (with the `decimal` feature).
 
 ## Nullability is checked, not guessed
 
-`T` vs `Option<T>` must match the schema. Non-null: root/join `primary_key`, `required: true` leaf, `object`/group, `count`, to-many joins (empty `Vec`, never null). Nullable: `required: false` leaf, `belongs_to`/`has_one`, `avg`/`sum`/`min`/`max`. Declaring the wrong shape is a derive compile error.
+`T` vs `Option<T>` must match the schema. Non-null: root/join `primary_key`, `required: true` leaf, `object`/group, `count`, `ids` (a flat `Vec`, empty never null), to-many joins (empty `Vec`, never null). Nullable: `required: false` leaf, `belongs_to`/`has_one`, `avg`/`sum`/`min`/`max`. Declaring the wrong shape is a derive compile error.
 
 Escape hatches from validation: a `serde_json::Value` field skips type-checking; `#[flusso(skip)]` drops a field entirely (pair with `#[serde(skip)]`/`#[serde(default)]`).
 
