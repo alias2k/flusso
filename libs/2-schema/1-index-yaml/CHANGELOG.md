@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/alias2k/flusso/compare/flusso-schema-index-yaml-v0.2.0...flusso-schema-index-yaml-v0.3.0) - 2026-06-18
+
+### Added
+
+- add the ids field support
+
 ## [0.2.0](https://github.com/alias2k/flusso/compare/flusso-schema-index-yaml-v0.1.1...flusso-schema-index-yaml-v0.2.0) - 2026-06-18
 
 ### Added
