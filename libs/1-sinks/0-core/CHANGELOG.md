@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/alias2k/flusso/compare/flusso-sinks-core-v0.1.1...flusso-sinks-core-v0.2.0) - 2026-06-18
+
+### Added
+
+- add the publication management
+
 ## [0.1.1](https://github.com/alias2k/flusso/compare/flusso-sinks-core-v0.1.0...flusso-sinks-core-v0.1.1) - 2026-06-17
 
 ### Added
