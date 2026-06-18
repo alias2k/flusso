@@ -243,7 +243,7 @@ that type:
 | `lat` / `lon` | `geo` | The two coordinate columns (two-column form). |
 | `fields` | `object`, joins | The nested projection. |
 | `table`, `primary_key`, `column`/`foreign_key`/`through`, `order_by`, `filters`, `limit` | joins | Which key sibling applies depends on the verb. See [Joins](#joins). |
-| `table`, `column`, `value_type`, `foreign_key`, `through`, `filters` | aggregates | See [Aggregates](#aggregates). |
+| `table`, `column`, `value_type`, `element_type`, `foreign_key`, `through`, `filters` | aggregates | See [Aggregates](#aggregates). |
 | `value` | `constant` | The fixed value (`null`/absent renders as JSON null). |
 
 ```yaml
@@ -493,8 +493,8 @@ The `through` object (junction table for many-to-many):
 
 ### Aggregates
 
-Reduce rows from a related table to a single scalar. The **operation is the type
-key**: `count`, `sum`, `avg`, `min`, or `max`.
+Reduce rows from a related table to a single value. The **operation is the type
+key**: `count`, `sum`, `avg`, `min`, `max`, or `ids`.
 
 A `count` is always a non-null `long` and an `avg` a nullable `double`, so they
 take no `value_type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
@@ -516,13 +516,37 @@ take no `value_type`. A `sum`/`min`/`max` mirrors the aggregated column, so it
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
-| *(type key)* | field name | yes | `count`/`sum`/`avg`/`min`/`max`; its value is the document key. |
+| *(type key)* | field name | yes | `count`/`sum`/`avg`/`min`/`max`/`ids`; its value is the document key. |
 | `table` | Postgres identifier | yes | The related table. |
-| `column` | Postgres identifier | conditional | The column to reduce. **Required** for `sum`/`avg`/`min`/`max`; not used by `count`. |
-| `value_type` | type name | conditional | The result type. **Required** for `sum`/`min`/`max` (it mirrors the column); not used by `count`/`avg`. |
+| `column` | Postgres identifier | conditional | The column to reduce. **Required** for `sum`/`avg`/`min`/`max`; not used by `count`/`ids`. |
+| `value_type` | type name | conditional | The result type. **Required** for `sum`/`min`/`max` (it mirrors the column); not used by `count`/`avg`/`ids`. |
+| `element_type` | type name | conditional | **Required** for `ids` (and only `ids`): the scalar type of each collected primary key — `long` or `keyword`. |
 | `foreign_key` | Postgres identifier | conditional | The aggregated table's column pointing back at the parent (exactly one of `foreign_key` **xor** `through`). |
 | `through` | object | conditional | Junction table for aggregating across many-to-many. |
 | `filters` | list | no | [Filters](#filters) restricting which rows count. |
+
+#### `ids` — a flat array of a related table's primary keys
+
+`ids` collects the related table's **primary key** into a flat scalar array (it
+takes no `column` — the key is always the related table's PK). OpenSearch has no
+array type, so the field's mapping type is just the element type
+(`element_type: long` → `type: long`, `keyword` → `type: keyword`); the value is
+multi-valued. An empty relation yields `[]`, never null, so the field is non-null
+(project it as a bare `Vec<…>`, not `Option<Vec<…>>`).
+
+```yaml
+# one-to-many: orders.user_id points back at this row
+- ids: orderIds
+  table: orders
+  foreign_key: user_id
+  element_type: long
+
+# many-to-many: collected straight off the junction's right_key
+- ids: tagIds
+  table: tags
+  through: { table: post_tags, left_key: post_id, right_key: tag_id }
+  element_type: long
+```
 
 ### Filters
 
@@ -611,6 +635,8 @@ Loading enforces — beyond what the file format itself can express — that:
 - an aggregate specifies **exactly one** of `foreign_key` or `through`;
 - `sum`/`avg`/`min`/`max` aggregates carry a `column`, and `sum`/`min`/`max` also
   declare a `value_type` (it mirrors the column);
+- an `ids` aggregate declares an `element_type` (a scalar type) and takes no
+  `column` or `value_type`; `element_type` is rejected on every other op;
 - a `geo` field gives either `lat` **and** `lon`, or a single `column`;
 - a `between` filter has **exactly two** values, and `in`/`not_in` get a list.
 

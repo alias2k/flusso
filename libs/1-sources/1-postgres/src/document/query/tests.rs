@@ -218,6 +218,73 @@ fn aggregate_count() {
 }
 
 #[test]
+fn aggregate_ids_direct_collects_the_related_pk() {
+    let ids = Field {
+        field: f("order_ids"),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: t("orders"),
+            op: AggregateOp::Ids {
+                element_type: schema_core::FlussoType::Long,
+            },
+            key: AggregateKey::Direct(c("user_id")),
+            value_type: None,
+            filters: None,
+        })),
+    };
+    let schema = index(Some("id"), None, vec![ids]);
+    let mut pks = HashMap::new();
+    pks.insert("orders".to_owned(), c("id"));
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(1))],
+        &pks,
+        &HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT json_build_object('order_ids', (SELECT coalesce(json_agg("rel1"."id"), '[]'::json) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
+    );
+}
+
+#[test]
+fn aggregate_ids_through_collects_off_the_junction() {
+    let ids = Field {
+        field: f("tag_ids"),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: t("tags"),
+            op: AggregateOp::Ids {
+                element_type: schema_core::FlussoType::Long,
+            },
+            key: AggregateKey::Through(schema_core::Through {
+                table: t("post_tags"),
+                left_key: c("post_id"),
+                right_key: c("tag_id"),
+            }),
+            value_type: None,
+            filters: None,
+        })),
+    };
+    let schema = index(Some("id"), None, vec![ids]);
+    let mut pks = HashMap::new();
+    pks.insert("tags".to_owned(), c("id"));
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(1))],
+        &pks,
+        &HashMap::new(),
+    )
+    .unwrap();
+    // The junction's right_key already holds the far PK, so no join to `tags`.
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT json_build_object('tag_ids', (SELECT coalesce(json_agg("rel1"."tag_id"), '[]'::json) FROM "public"."post_tags" AS "rel1" WHERE "rel1"."post_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1"#
+    );
+}
+
+#[test]
 fn soft_delete_folds_into_where() {
     let schema = index(
         Some("id"),

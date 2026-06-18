@@ -41,7 +41,7 @@ flusso creates every index with a tuned `analysis` block and well-shaped fields.
 | `text` | `.keyword` + `.keyword_lowercase` (base analyzer `flusso_code`) | base field → full-text search; `.keyword` → exact filter / aggregation / exact sort; `.keyword_lowercase` → case-insensitive sort & exact lookup |
 | `keyword` | `.text` (`flusso_code`) + `.keyword_lowercase` | base field → exact term / aggregation; `.text` → full-text search; `.keyword_lowercase` → case-insensitive sort |
 
-`keyword` subfields cap at `ignore_above: 256`. Other types (`long`, `date`, `boolean`, …) and `object`/`nested` containers map as-is. **Anything you set in a field's `mapping` overrides the auto default** — your own `analyzer` replaces `flusso_code`, your own `fields` replaces the auto subfields wholesale.
+`keyword` subfields cap at `ignore_above: 256`. Other types (`long`, `date`, `boolean`, …) and `object`/`nested` containers map as-is. An **`ids` aggregate** maps to its bare `element_type` (`keyword` or `long`) — OpenSearch has no array type, so a flat array of values is just the element type (a `keyword` id array still gets the keyword auto subfields; query/aggregate it like a single `keyword`/`long`, term queries match any element). **Anything you set in a field's `mapping` overrides the auto default** — your own `analyzer` replaces `flusso_code`, your own `fields` replaces the auto subfields wholesale.
 
 > When querying by hand (not via `flusso-query`), pick the subfield deliberately: filtering/sorting a `text` field → use `.keyword`; full-text over a `keyword` field → use `.text`. The **flusso-query** derive picks the right subfield for each operator automatically.
 

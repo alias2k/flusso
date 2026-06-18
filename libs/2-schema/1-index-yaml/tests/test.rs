@@ -8,8 +8,8 @@
 //! Parsing and conversion tests for the type-as-key field format.
 
 use schema_core::{
-    AggregateOp, Column, Field, FieldSource, FilterValue, FlussoType, Geo, IndexSchema, JoinKind,
-    ParseFrom, Relation,
+    AggregateKey, AggregateOp, Column, Field, FieldSource, FilterValue, FlussoType, Geo,
+    IndexSchema, JoinKind, ParseFrom, Relation,
 };
 use schema_index_yaml::{ConversionError, ParseError, SchemaYaml};
 
@@ -198,6 +198,80 @@ fn aggregates_come_from_the_op_tag() {
         }
         other => panic!("expected an aggregate, got {other:?}"),
     }
+}
+
+#[test]
+fn ids_direct_collects_related_primary_keys() {
+    let schema = convert(
+        "version: 1\ntable: users\nfields:\n  - ids: orderIds\n    table: orders\n    foreign_key: user_id\n    element_type: long",
+    )
+    .unwrap();
+    match &field(&schema, "orderIds").source {
+        FieldSource::Relation(Relation::Aggregate(a)) => {
+            assert!(
+                matches!(&a.op, AggregateOp::Ids { element_type } if *element_type == FlussoType::Long)
+            );
+            assert!(matches!(&a.key, AggregateKey::Direct(fk) if fk.as_ref() == "user_id"));
+            assert!(a.value_type.is_none());
+        }
+        other => panic!("expected an aggregate, got {other:?}"),
+    }
+}
+
+#[test]
+fn ids_through_uses_a_junction() {
+    let schema = convert(
+        "version: 1\ntable: posts\nfields:\n  - ids: tagIds\n    table: tags\n    through:\n      table: post_tags\n      left_key: post_id\n      right_key: tag_id\n    element_type: long",
+    )
+    .unwrap();
+    match &field(&schema, "tagIds").source {
+        FieldSource::Relation(Relation::Aggregate(a)) => {
+            assert!(matches!(&a.op, AggregateOp::Ids { .. }));
+            assert!(matches!(
+                &a.key,
+                AggregateKey::Through(t)
+                    if t.table.as_ref() == "post_tags"
+                        && t.left_key.as_ref() == "post_id"
+                        && t.right_key.as_ref() == "tag_id"
+            ));
+        }
+        other => panic!("expected an aggregate, got {other:?}"),
+    }
+}
+
+#[test]
+fn ids_requires_element_type() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - ids: orderIds\n    table: orders\n    foreign_key: user_id",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::MissingElementType));
+}
+
+#[test]
+fn ids_rejects_a_column_sibling() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - ids: orderIds\n    table: orders\n    foreign_key: user_id\n    element_type: long\n    column: total",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::UnexpectedIdsSibling { sibling: "column" }
+    ));
+}
+
+#[test]
+fn element_type_rejected_on_non_ids_aggregate() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - count: orderCount\n    table: orders\n    foreign_key: user_id\n    element_type: long",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::UnexpectedAggregateSibling {
+            sibling: "element_type"
+        }
+    ));
 }
 
 #[test]

@@ -282,7 +282,9 @@ siblings are whatever that type allows. There is no `- field: x` + `type:` form.
 split by relationship verb, which names where the key lives: `belongs_to` (this table's
 `column` pointing at the target, defaulting to the field name), `has_one`/`has_many`
 (the related table's `foreign_key`), `many_to_many` (`through` a junction). Aggregates
-split by op (`count`/`sum`/`avg`/`min`/`max`). Parsing lives in
+split by op (`count`/`sum`/`avg`/`min`/`max`, plus `ids` — a flat scalar array of the
+related table's primary keys, typed by an explicit `element_type`; `ResolvedField.array`
+flags it). Parsing lives in
 `libs/2-schema/1-index-yaml/src/entities/field.rs`; the core model is `schema_core::FieldSource`
 (`Join.kind: JoinKind`, with reverse resolution per kind in
 `libs/1-sources/1-postgres/src/document/resolve.rs`).

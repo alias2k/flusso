@@ -233,7 +233,7 @@ fn convert_aggregate_field(
     op: entities::AggregateOp,
     body: entities::AggregateBody,
 ) -> Result<Field, ConversionError> {
-    let (op, value_type) = convert_aggregate_op(op, body.column, body.value_type)?;
+    let (op, value_type) = convert_aggregate_op(op, &body)?;
     let key = aggregate_key(body.foreign_key, body.through)?;
     let aggregate = Aggregate {
         table: body.table,
@@ -250,12 +250,19 @@ fn convert_aggregate_field(
 }
 
 /// `count`/`avg` have fixed result types (`long`/`double`); `sum`/`min`/`max`
-/// mirror the aggregated column, so they require a `column` and a `value_type`.
+/// mirror the aggregated column, so they require a `column` and a `value_type`;
+/// `ids` collects the related primary key (no `column`) into an array of an
+/// explicit `element_type`, carried on the op itself.
 fn convert_aggregate_op(
     op: entities::AggregateOp,
-    column: Option<ColumnName>,
-    value_type: Option<FlussoType>,
+    body: &entities::AggregateBody,
 ) -> Result<(AggregateOp, Option<FlussoType>), ConversionError> {
+    let column = body.column.clone();
+    if body.element_type.is_some() && op != entities::AggregateOp::Ids {
+        return Err(ConversionError::UnexpectedAggregateSibling {
+            sibling: "element_type",
+        });
+    }
     Ok(match op {
         entities::AggregateOp::Count => (AggregateOp::Count, None),
         entities::AggregateOp::Avg => (
@@ -264,16 +271,28 @@ fn convert_aggregate_op(
         ),
         entities::AggregateOp::Sum => (
             AggregateOp::Sum(require_aggregate_column(column, "sum")?),
-            Some(require_aggregate_type(value_type, "sum")?),
+            Some(require_aggregate_type(body.value_type.clone(), "sum")?),
         ),
         entities::AggregateOp::Min => (
             AggregateOp::Min(require_aggregate_column(column, "min")?),
-            Some(require_aggregate_type(value_type, "min")?),
+            Some(require_aggregate_type(body.value_type.clone(), "min")?),
         ),
         entities::AggregateOp::Max => (
             AggregateOp::Max(require_aggregate_column(column, "max")?),
-            Some(require_aggregate_type(value_type, "max")?),
+            Some(require_aggregate_type(body.value_type.clone(), "max")?),
         ),
+        entities::AggregateOp::Ids => {
+            if body.column.is_some() {
+                return Err(ConversionError::UnexpectedIdsSibling { sibling: "column" });
+            }
+            if body.value_type.is_some() {
+                return Err(ConversionError::UnexpectedIdsSibling {
+                    sibling: "value_type",
+                });
+            }
+            let element_type = require_element_type(body.element_type.clone())?;
+            (AggregateOp::Ids { element_type }, None)
+        }
     })
 }
 
@@ -355,6 +374,17 @@ fn require_aggregate_type(
     match ty.ok_or(ConversionError::MissingAggregateType { op })? {
         FlussoType::GeoPoint | FlussoType::Custom { .. } => {
             Err(ConversionError::InvalidAggregateType { op })
+        }
+        scalar => Ok(scalar),
+    }
+}
+
+/// The `element_type` of an `ids` aggregate — the scalar type of each collected
+/// primary key. Required and scalar; `geo_point` and `custom` are rejected.
+fn require_element_type(ty: Option<FlussoType>) -> Result<FlussoType, ConversionError> {
+    match ty.ok_or(ConversionError::MissingElementType)? {
+        FlussoType::GeoPoint | FlussoType::Custom { .. } => {
+            Err(ConversionError::InvalidElementType)
         }
         scalar => Ok(scalar),
     }

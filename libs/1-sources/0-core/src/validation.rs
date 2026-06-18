@@ -135,7 +135,7 @@ async fn validate_field(
         FieldSource::Relation(Relation::Aggregate(aggregate)) => {
             let column = match &aggregate.op {
                 AggregateOp::Sum(c) | AggregateOp::Min(c) | AggregateOp::Max(c) => Some(c),
-                AggregateOp::Count | AggregateOp::Avg(_) => None,
+                AggregateOp::Count | AggregateOp::Avg(_) | AggregateOp::Ids { .. } => None,
             };
             if let (Some(column), Some(value_type)) = (column, &aggregate.value_type) {
                 check_type(

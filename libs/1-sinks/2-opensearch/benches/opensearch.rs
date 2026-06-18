@@ -110,6 +110,7 @@ fn mapping() -> IndexMapping {
             extra: BTreeMap::new(),
         },
         nullable: true,
+        array: false,
         children: Vec::new(),
     };
     IndexMapping {

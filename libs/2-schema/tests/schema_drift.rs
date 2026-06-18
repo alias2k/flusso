@@ -161,10 +161,10 @@ fn all_aggregate_ops() -> Vec<schema_index_yaml::AggregateOp> {
     fn _exhaustive(a: schema_index_yaml::AggregateOp) {
         use schema_index_yaml::AggregateOp::*;
         match a {
-            Count | Sum | Avg | Min | Max => {}
+            Count | Sum | Avg | Min | Max | Ids => {}
         }
     }
-    vec![Count, Sum, Avg, Min, Max]
+    vec![Count, Sum, Avg, Min, Max, Ids]
 }
 
 fn all_text_analyses() -> Vec<schema::TextAnalysis> {
@@ -260,6 +260,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             table: _,
             column: _,
             value_type: _,
+            element_type: _,
             foreign_key: _,
             through: _,
             filters: _,
@@ -284,9 +285,10 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "through",
         "filters",
         "order_by",
-        "limit",      // join
-        "value_type", // aggregate
-        "value",      // constant
+        "limit",        // join
+        "value_type",   // aggregate (sum/min/max)
+        "element_type", // aggregate (ids)
+        "value",        // constant
     ])
 }
 

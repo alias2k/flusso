@@ -51,7 +51,7 @@ The engine is the only orchestrator; everything it drives is a **trait object**.
 
 **Secrets are deferred** — `{ env = "VAR" }` becomes a `Secret`, resolved in the running environment, never at parse time. A compiled `flusso.lock` carries no baked secret.
 
-Schema YAML is **type-first**: `- <type>: <name>`. Joins split by verb (`belongs_to`/`has_one`/`has_many`/`many_to_many`), aggregates by op. Parsing: `libs/2-schema/1-index-yaml/src/entities/field.rs`; core model `schema_core::FieldSource`; reverse resolution per kind in `libs/1-sources/1-postgres/src/document/resolve.rs`.
+Schema YAML is **type-first**: `- <type>: <name>`. Joins split by verb (`belongs_to`/`has_one`/`has_many`/`many_to_many`), aggregates by op (`count`/`sum`/`avg`/`min`/`max`/`ids`). The `ids` op is `AggregateOp::Ids { element_type }` — a flat array of the related table's PK; it reuses the aggregate `Relation`/`AggregateKey` machinery (so CDC/reverse-resolution/publication are automatic) and sets `ResolvedField.array` so the mapping is the bare element type and the query derive expects `Vec<T>`. Parsing: `libs/2-schema/1-index-yaml/src/entities/field.rs`; core model `schema_core::FieldSource`; reverse resolution per kind in `libs/1-sources/1-postgres/src/document/resolve.rs`.
 
 ## Query derive (`apps/query` + `apps/query-derive`)
 

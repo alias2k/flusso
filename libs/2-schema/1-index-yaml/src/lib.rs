@@ -78,6 +78,22 @@ pub enum ConversionError {
     )]
     InvalidAggregateType { op: &'static str },
     #[error(
+        "aggregate op 'ids' requires an `element_type` (`long` or `keyword`) — it states the \
+         element type of the collected primary keys"
+    )]
+    MissingElementType,
+    #[error(
+        "aggregate op 'ids' `element_type` must be a scalar type — `geo_point` and `custom` \
+         are not valid element types"
+    )]
+    InvalidElementType,
+    #[error(
+        "aggregate op 'ids' does not take `{sibling}` (it always collects the related table's primary key)"
+    )]
+    UnexpectedIdsSibling { sibling: &'static str },
+    #[error("aggregate does not take `{sibling}` (only `ids` does)")]
+    UnexpectedAggregateSibling { sibling: &'static str },
+    #[error(
         "a `geo` field needs either both `lat` and `lon` (two columns) or a single `column` \
          holding a combined value — not a mix"
     )]

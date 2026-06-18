@@ -209,6 +209,16 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             if expected.is_empty() {
                 return Ok(None);
             }
+            // OpenSearch has no array type, so an array field's mapping type is
+            // its element type — projected as `Vec<element>`. Peel one layer.
+            let inner = if resolved.array {
+                match vec_inner(inner) {
+                    Some(elem) => elem,
+                    None => return Err(shape_error(field, os, "a `Vec<…>` (a flat array)")),
+                }
+            } else {
+                inner
+            };
             let found = leaf_ident(inner);
             if found.as_deref().is_some_and(|f| expected.contains(&f)) {
                 return Ok(None);
