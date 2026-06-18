@@ -25,9 +25,21 @@ pub(crate) struct CheckArgs {
     config: std::path::PathBuf,
 
     /// Validate the files only; do not connect to the database. The mapping is
-    /// shown either way; `--offline` skips confirming it against the database.
+    /// shown either way; `--offline` skips confirming it against the database
+    /// and skips the publication-coverage report.
     #[arg(long, env = "FLUSSO_OFFLINE")]
     offline: bool,
+
+    /// Publication whose coverage to report. Matches `flusso run`'s default, so
+    /// the report reflects the publication a run would use.
+    #[arg(long, env = "FLUSSO_PUBLICATION", default_value = "flusso")]
+    publication: String,
+
+    /// Whether `flusso run` would auto-create/extend the publication. Controls
+    /// the coverage report's phrasing only (check never mutates). Overrides the
+    /// `[source] manage_publication` config option.
+    #[arg(long, env = "FLUSSO_MANAGE_PUBLICATION")]
+    manage_publication: Option<bool>,
 
     /// Output format: a human-readable report, or JSON for piping.
     #[arg(long, env = "FLUSSO_FORMAT", value_enum, default_value_t = OutputFormat::Human)]
@@ -77,6 +89,25 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         )
     };
 
+    // Publication coverage: does the source stream every table the indexes read?
+    // Read-only — `check` never mutates; it reports what `run` would do.
+    let coverage = if args.offline {
+        None
+    } else {
+        let provisioning = crate::backends::build_provisioning(&config, &args.publication)?;
+        let required = source_spec(&config).all_tables();
+        Some(
+            provisioning
+                .inspect_coverage(&required)
+                .await
+                .context("inspecting publication coverage")?,
+        )
+    };
+    // The effective management setting `run` would use, for the report phrasing.
+    let manage = args
+        .manage_publication
+        .unwrap_or(config.source.manage_publication);
+
     let has_errors = diagnostics.as_ref().is_some_and(|ds| {
         ds.iter()
             .any(|d| d.severity == sources_core::Severity::Error)
@@ -97,6 +128,15 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                         "message": d.message,
                     }))
                     .collect::<Vec<_>>()),
+                "coverage": coverage.as_ref().map(|c| serde_json::json!({
+                    "satisfied": c.satisfied,
+                    "manageable": c.manageable,
+                    "will_manage": manage,
+                    "present": c.present.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                    "missing": c.missing.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                    "blockers": c.blockers,
+                    "remediation": c.remediation,
+                })),
             });
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         }
@@ -120,6 +160,9 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                 }
                 Some(diagnostics) => {
                     print::diagnostics(&mut out, pen, diagnostics)?;
+                    if let Some(coverage) = &coverage {
+                        print::coverage(&mut out, pen, coverage, manage)?;
+                    }
                     writeln!(out)?;
                     if has_errors {
                         print::warning(&mut out, pen, "failed", "schema disagrees with database")?;

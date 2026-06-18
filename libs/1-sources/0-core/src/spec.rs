@@ -13,9 +13,48 @@
 //! up), so a source is reusable and unit-testable without constructing one, and
 //! the `flusso.toml` shape can evolve without recompiling the backend.
 
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
-use schema_core::{IndexMapping, IndexName, IndexSchema};
+use schema_core::{
+    DatabaseSchema, Field, IndexMapping, IndexName, IndexSchema, RelationKey, TableName,
+};
+
+/// A schema-qualified table, the unit a source needs to reason about coverage
+/// (which tables it must be able to stream). Ordered by `(schema, table)` so a
+/// [`BTreeSet`] of them is deterministic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QualifiedTable {
+    pub schema: DatabaseSchema,
+    pub table: TableName,
+}
+
+impl QualifiedTable {
+    pub fn new(schema: DatabaseSchema, table: TableName) -> Self {
+        Self { schema, table }
+    }
+}
+
+impl fmt::Display for QualifiedTable {
+    /// Renders `schema.table` — the form Postgres accepts in `FOR TABLE` lists.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.schema.as_ref(), self.table.as_ref())
+    }
+}
+
+impl PartialOrd for QualifiedTable {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for QualifiedTable {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.schema.as_ref(), self.table.as_ref())
+            .cmp(&(other.schema.as_ref(), other.table.as_ref()))
+    }
+}
 
 /// The enabled indexes a source must build, each paired with its schema.
 ///
@@ -54,6 +93,50 @@ impl SourceSpec {
             .map(|(name, schema)| schema.resolve(name.clone()))
             .collect()
     }
+
+    /// Every table any enabled index reads — each index's root table plus every
+    /// table a join or aggregate (and any `through` junction) pulls from.
+    ///
+    /// Relations carry no schema of their own; the resolver qualifies a related
+    /// table with the *index's* `db_schema` (see the Postgres `resolve` module),
+    /// so this does the same. This is the set a source must be able to stream —
+    /// what [`CaptureProvisioning`](crate::CaptureProvisioning) checks coverage
+    /// against.
+    pub fn all_tables(&self) -> BTreeSet<QualifiedTable> {
+        let mut tables = BTreeSet::new();
+        for schema in self.indexes.values() {
+            tables.insert(QualifiedTable::new(
+                schema.db_schema.clone(),
+                schema.table.clone(),
+            ));
+            collect_relation_tables(&schema.fields, &schema.db_schema, &mut tables);
+        }
+        tables
+    }
+}
+
+/// Walk the field tree, adding every relation target table (and any `through`
+/// junction table) under `db_schema` to `out`.
+fn collect_relation_tables(
+    fields: &[Field],
+    db_schema: &DatabaseSchema,
+    out: &mut BTreeSet<QualifiedTable>,
+) {
+    for field in fields {
+        if let Some(relation) = field.relation() {
+            out.insert(QualifiedTable::new(
+                db_schema.clone(),
+                relation.table().clone(),
+            ));
+            if let RelationKey::Through(through) = relation.key() {
+                out.insert(QualifiedTable::new(
+                    db_schema.clone(),
+                    through.table.clone(),
+                ));
+            }
+        }
+        collect_relation_tables(field.children(), db_schema, out);
+    }
 }
 
 #[cfg(test)]
@@ -62,13 +145,28 @@ mod tests {
     use std::collections::BTreeMap;
 
     use schema_core::{
-        Column, DatabaseSchema, Field, FieldSource, FlussoType, IndexName, IndexSchema,
+        Column, DatabaseSchema, Field, FieldSource, FlussoType, IndexName, IndexSchema, Join,
+        JoinKind, Relation, TableName, Through,
     };
 
-    use super::SourceSpec;
+    use super::{QualifiedTable, SourceSpec};
 
     fn index_name(name: &str) -> IndexName {
         IndexName::try_new(name).unwrap()
+    }
+
+    fn column_field(name: &str) -> Field {
+        Field {
+            field: schema_core::FieldName::try_new(name).unwrap(),
+            options: Default::default(),
+            source: FieldSource::Column(Column {
+                column: schema_core::ColumnName::try_new(name).unwrap(),
+                ty: FlussoType::Keyword,
+                nullable: false,
+                transforms: Vec::new(),
+                default: None,
+            }),
+        }
     }
 
     /// A one-column schema over `public.<table>`, enough to resolve a mapping.
@@ -110,5 +208,69 @@ mod tests {
         let mappings = spec.index_mappings();
         assert_eq!(mappings.len(), 2);
         assert_eq!(mappings.first().unwrap().index.as_ref(), "a");
+    }
+
+    #[test]
+    fn all_tables_collects_roots_relations_and_junctions() {
+        // `books` over public.books with a has_many join to `reviews` and a
+        // many_to_many to `tags` through the `book_tags` junction.
+        let mut books = schema("books");
+        books.fields.push(Field {
+            field: schema_core::FieldName::try_new("reviews").unwrap(),
+            options: Default::default(),
+            source: FieldSource::Relation(Relation::Join(Join {
+                table: TableName::try_new("reviews").unwrap(),
+                kind: JoinKind::HasMany {
+                    foreign_key: schema_core::ColumnName::try_new("book_id").unwrap(),
+                },
+                primary_key: schema_core::ColumnName::try_new("id").unwrap(),
+                filters: None,
+                order_by: None,
+                limit: None,
+                fields: vec![column_field("body")],
+            })),
+        });
+        books.fields.push(Field {
+            field: schema_core::FieldName::try_new("tags").unwrap(),
+            options: Default::default(),
+            source: FieldSource::Relation(Relation::Join(Join {
+                table: TableName::try_new("tags").unwrap(),
+                kind: JoinKind::ManyToMany {
+                    through: Through {
+                        table: TableName::try_new("book_tags").unwrap(),
+                        left_key: schema_core::ColumnName::try_new("book_id").unwrap(),
+                        right_key: schema_core::ColumnName::try_new("tag_id").unwrap(),
+                    },
+                },
+                primary_key: schema_core::ColumnName::try_new("id").unwrap(),
+                filters: None,
+                order_by: None,
+                limit: None,
+                fields: vec![column_field("name")],
+            })),
+        });
+
+        let mut indexes = BTreeMap::new();
+        indexes.insert(index_name("books"), books);
+        // A second index sharing no tables, to prove the set spans all indexes.
+        indexes.insert(index_name("ants"), schema("ants"));
+        let spec = SourceSpec::new(indexes);
+
+        let public = DatabaseSchema::try_new("public").unwrap();
+        let qt = |t: &str| QualifiedTable::new(public.clone(), TableName::try_new(t).unwrap());
+        let tables = spec.all_tables();
+
+        assert_eq!(
+            tables,
+            [
+                qt("ants"),
+                qt("book_tags"),
+                qt("books"),
+                qt("reviews"),
+                qt("tags"),
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 }

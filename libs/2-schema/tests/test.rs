@@ -108,6 +108,7 @@ fn compiled_artifact_keeps_env_secret_unresolved() {
         source: Source {
             source_type: SourceType::Postgres,
             connection: Some(ConnectionSpec::Url(Secret::Env("DATABASE_URL".to_owned()))),
+            manage_publication: true,
         },
         sinks: Default::default(),
         indexes: Default::default(),

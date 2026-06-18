@@ -51,6 +51,10 @@ pub struct DaemonOptions {
     pub slot: String,
     /// Publication to subscribe to.
     pub publication: String,
+    /// Auto-create/extend the publication to cover every table the indexes read
+    /// when the source role is privileged enough. When false, a coverage gap is
+    /// only reported (the source still streams whatever the publication covers).
+    pub manage_publication: bool,
     /// Skip the initial backfill and resume live capture only.
     pub skip_backfill: bool,
     /// Changes buffered between capture and processing.
@@ -66,6 +70,7 @@ impl Default for DaemonOptions {
         Self {
             slot: "flusso".to_owned(),
             publication: "flusso".to_owned(),
+            manage_publication: true,
             skip_backfill: false,
             queue_capacity: 1024,
             pretty: false,
@@ -591,6 +596,7 @@ mod tests {
             source: Source {
                 source_type: SourceType::Postgres,
                 connection: None,
+                manage_publication: true,
             },
             sinks: BTreeMap::new(),
             indexes: BTreeMap::new(),

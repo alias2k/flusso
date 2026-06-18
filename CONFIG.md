@@ -85,7 +85,8 @@ when both are set** — env is the fallback.
 | `FLUSSO_LOCK` | `--lock` | `run` |
 | `FLUSSO_LOCKED` | `--locked` | `run` |
 | `FLUSSO_SLOT` | `--slot` | `run` |
-| `FLUSSO_PUBLICATION` | `--publication` | `run` |
+| `FLUSSO_PUBLICATION` | `--publication` | `run`, `check` |
+| `FLUSSO_MANAGE_PUBLICATION` | `--manage-publication` | `run`, `check` |
 | `FLUSSO_SKIP_BACKFILL` | `--skip-backfill` | `run` |
 | `FLUSSO_PRETTY` | `--pretty` | `run` |
 | `FLUSSO_QUEUE_CAPACITY` | `--queue-capacity` | `run` |
@@ -151,6 +152,7 @@ PRIMARY_OPENSEARCH_PASSWORD=…           # plus any names you used in { env = "
 FLUSSO_CONFIG=flusso.toml
 FLUSSO_SLOT=flusso
 FLUSSO_PUBLICATION=flusso
+FLUSSO_MANAGE_PUBLICATION=false         # off = never issue publication DDL, only warn
 FLUSSO_PUBLIC_ADDRESS=0.0.0.0:9464      # read-only surface (health/status/metrics)
 FLUSSO_PRIVATE_ADDRESS=0.0.0.0:9465     # control surface (indexes/reindex), Basic auth
 FLUSSO_ADMIN_USER=admin                 # change these before exposing the private port!

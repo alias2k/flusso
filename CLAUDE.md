@@ -200,7 +200,16 @@ The daemon owns the **domain**: it assembles the pipeline from a `Config` — bu
 **not** name concrete backends. Backend construction is a seam: the `Backends` trait
 (`backends.rs`, returning `SourceParts` = capture + document builder, and the `Sink`) is
 supplied to `Daemon::new`, so the daemon depends only on `sources-core`/`sinks-core`, never
-on Postgres/OpenSearch. The CLI is the one place that implements it (see below). The daemon
+on Postgres/OpenSearch. The CLI is the one place that implements it (see below). A second
+source-neutral capability lives beside `validate_indexes`: `CaptureProvisioning`
+(`libs/1-sources/0-core/src/provisioning.rs`) — given the tables an index reads
+(`SourceSpec::all_tables`), a source reports coverage + a privilege verdict (`CoverageReport`)
+and, when allowed, provisions the gap. Postgres backs it with a **publication**
+(`libs/1-sources/1-postgres/src/cdc/publication.rs`, `impl CaptureProvisioning for
+WalChangeCapture`): `run` auto-creates/extends it on `live` (after `ensure_slot`) when the role
+is privileged enough and `manage_publication` isn't opted out, else warns with the exact SQL;
+`check` inspects read-only and prints the same. The trait/report never name "publication", so
+the daemon/CLI/printer stay backend-neutral. The daemon
 wires a `StatusObserver` (`observer.rs`) that updates a
 shared `Status` (`status.rs`), runs the engine, and polls source capture lag out-of-band
 (`lag.rs` over `ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
@@ -311,8 +320,8 @@ belongs in the linked docs.
 | Validated domain model / vocabulary (the shared types — the sole layer-0 crate) | `libs/0-core/src/` — `config/` (`IndexSchema`, `FailurePolicy`, per-sink configs, …), `common/` (newtypes), `GenericValue` |
 | `flusso.toml` parsing (entities only; conversion is in the `schema` loader) | `libs/2-schema/1-config-toml/src/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/2-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
-| Postgres WAL capture / backfill / doc building | `libs/1-sources/1-postgres/src/` — `cdc/`, `document/` |
-| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec`, `validate_indexes`) | `libs/1-sources/0-core/src/` |
+| Postgres WAL capture / backfill / doc building / publication management | `libs/1-sources/1-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
+| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for the last two) |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/1-sinks/2-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |

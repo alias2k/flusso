@@ -62,9 +62,17 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_SLOT", default_value = "flusso")]
     slot: String,
 
-    /// Publication to subscribe to. Must already exist and cover the tables.
+    /// Publication to subscribe to. flusso creates/extends it to cover every
+    /// table the indexes read when the source role is privileged enough.
     #[arg(long, env = "FLUSSO_PUBLICATION", default_value = "flusso")]
     publication: String,
+
+    /// Whether flusso may auto-create/extend the publication. Overrides the
+    /// `[source] manage_publication` config option; defaults to that, then to
+    /// enabled. Set `false` to keep flusso from ever issuing publication DDL
+    /// (it then only warns about coverage gaps).
+    #[arg(long, env = "FLUSSO_MANAGE_PUBLICATION")]
+    manage_publication: Option<bool>,
 
     /// Skip the initial backfill and resume live capture only. Use after the
     /// index has already been seeded, to avoid re-reading every existing row.
@@ -146,6 +154,10 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let options = DaemonOptions {
         slot: args.slot,
         publication: args.publication,
+        // CLI flag wins, then the config's `[source] manage_publication`.
+        manage_publication: args
+            .manage_publication
+            .unwrap_or(config.source.manage_publication),
         skip_backfill: args.skip_backfill,
         queue_capacity: args.queue_capacity,
         pretty: args.pretty,

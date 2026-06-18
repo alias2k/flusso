@@ -26,7 +26,7 @@ max-threads = 4
 # `#[ignore]`d by default (run with `--run-ignored all`). Put them in the
 # `docker` group, retry transient failures, and allow a slow startup.
 [[profile.default.overrides]]
-filter = 'package(flusso-sources-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-sources-postgres) & binary(config_coverage) | package(flusso-sinks-opensearch) & binary(reindex)'
+filter = 'package(flusso-sources-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-sources-postgres) & binary(config_coverage) | package(flusso-sources-postgres) & binary(publication) | package(flusso-sinks-opensearch) & binary(reindex)'
 test-group = 'docker'
 retries = 2
 slow-timeout = { period = "90s", terminate-after = 4 }
@@ -40,7 +40,7 @@ fail-fast = false
 path = "junit.xml"
 
 [[profile.ci.overrides]]
-filter = 'package(flusso-sources-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-sources-postgres) & binary(config_coverage) | package(flusso-sinks-opensearch) & binary(reindex)'
+filter = 'package(flusso-sources-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-sources-postgres) & binary(config_coverage) | package(flusso-sources-postgres) & binary(publication) | package(flusso-sinks-opensearch) & binary(reindex)'
 test-group = 'docker'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }

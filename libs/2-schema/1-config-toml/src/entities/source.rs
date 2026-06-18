@@ -13,6 +13,12 @@ pub enum Source {
 #[serde(deny_unknown_fields)]
 pub struct PostgresSource {
     pub connection_url: Option<ConnectionUrl>,
+    /// Whether flusso may auto-create/extend the publication to cover every
+    /// table the indexes read (when the source role is privileged enough).
+    /// Omitted means enabled; set `false` to make flusso only report coverage
+    /// gaps and never issue publication DDL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manage_publication: Option<bool>,
 }
 
 /// How the source database is reached: a full URL (literal or `{ env = "VAR" }`)

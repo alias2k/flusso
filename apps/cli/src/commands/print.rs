@@ -13,7 +13,7 @@ use std::io::{IsTerminal, Write};
 
 use anyhow::Result;
 use schema::{Config, ConnectionSpec, IndexMapping, ResolvedField, Secret, Sink, SoftDelete};
-use sources_core::{Diagnostic, Severity};
+use sources_core::{CoverageReport, Diagnostic, Severity};
 
 // ── color ───────────────────────────────────────────────────────────────────
 
@@ -75,6 +75,75 @@ pub(crate) fn warning(out: &mut impl Write, pen: Pen, scope: &str, message: &str
 fn section(out: &mut impl Write, pen: Pen, title: &str) -> Result<()> {
     writeln!(out, "\n{}", pen.bold(title))?;
     writeln!(out, "{}", pen.dim(&"─".repeat(title.chars().count())))?;
+    Ok(())
+}
+
+/// Report whether the source streams every table the indexes read, and — when it
+/// doesn't — whether `flusso run` will fix it automatically or the operator must.
+///
+/// `manage` is the effective publication-management setting `run` would use, so
+/// the phrasing matches what running would actually do; the remediation SQL is
+/// always printed when there's a gap, copy-pasteable for the manual path.
+pub(crate) fn coverage(
+    out: &mut impl Write,
+    pen: Pen,
+    report: &CoverageReport,
+    manage: bool,
+) -> Result<()> {
+    section(out, pen, "Publication coverage")?;
+
+    if report.satisfied {
+        writeln!(
+            out,
+            "  {} source streams all {} required table(s)",
+            pen.green("✓"),
+            report.present.len(),
+        )?;
+        return Ok(());
+    }
+
+    writeln!(
+        out,
+        "  {} {} table(s) the indexes read are not yet streamed:",
+        pen.yellow("!"),
+        report.missing.len(),
+    )?;
+    for table in &report.missing {
+        writeln!(out, "    {} {}", pen.dim("•"), table)?;
+    }
+
+    if report.manageable && manage {
+        writeln!(
+            out,
+            "  {}",
+            pen.green("→ will be added automatically on the next `flusso run`"),
+        )?;
+    } else if report.manageable {
+        writeln!(
+            out,
+            "  {}",
+            pen.yellow(
+                "→ the source role CAN add these, but automatic management is disabled \
+                 (manage_publication = false) — run the SQL below",
+            ),
+        )?;
+    } else {
+        writeln!(
+            out,
+            "  {}",
+            pen.bold(&pen.yellow("→ flusso will NOT create these automatically:")),
+        )?;
+        for blocker in &report.blockers {
+            writeln!(out, "    {} {}", pen.dim("-"), blocker)?;
+        }
+    }
+
+    if !report.remediation.is_empty() {
+        section(out, pen, "Run to stream every table")?;
+        for sql in &report.remediation {
+            writeln!(out, "  {sql}")?;
+        }
+    }
     Ok(())
 }
 
