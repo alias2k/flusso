@@ -21,8 +21,6 @@ fn keyword_term(value: &impl serde::Serialize) -> Value {
     }
 }
 
-// ---- Keyword ---------------------------------------------------------------
-
 /// An exact, aggregatable string field (`keyword`, `enum`, `uuid`).
 #[derive(Debug, Clone)]
 pub struct Keyword<S = Root> {
@@ -31,7 +29,6 @@ pub struct Keyword<S = Root> {
 }
 
 impl<S> Keyword<S> {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -80,18 +77,14 @@ impl<S> Keyword<S> {
         exists_q(&self.path)
     }
 
-    /// Sort ascending on this field.
     pub fn asc(&self) -> Sort {
         Sort::new(&self.path, SortOrder::Asc)
     }
 
-    /// Sort descending on this field.
     pub fn desc(&self) -> Sort {
         Sort::new(&self.path, SortOrder::Desc)
     }
 }
-
-// ---- Text ------------------------------------------------------------------
 
 /// An analyzed full-text field (`text`, `identifier`). No exact `eq`.
 #[derive(Debug, Clone)]
@@ -101,7 +94,6 @@ pub struct Text<S = Root> {
 }
 
 impl<S> Text<S> {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),

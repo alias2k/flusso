@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-// The policy *vocabulary* (`Stop`/`Skip`) is a config-domain type, so it lives
-// in `schema-core` and is re-exported here for engine callers.
 pub use schema_core::FailurePolicy;
 
 /// How the worker groups changes into one sink flush.

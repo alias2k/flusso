@@ -184,7 +184,6 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         Err(error) => return error.to_compile_error(),
     };
 
-    // Resolve flusso.toml + the index. A failure here blocks codegen entirely.
     let resolved = match resolve::resolve(&attrs.index, attrs.config.as_deref()) {
         Ok(resolved) => resolved,
         Err(message) => return syn::Error::new(attrs.index_span, message).to_compile_error(),

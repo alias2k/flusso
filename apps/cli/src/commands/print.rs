@@ -13,9 +13,7 @@ use std::io::{IsTerminal, Write};
 
 use anyhow::Result;
 use schema::{Config, ConnectionSpec, IndexMapping, ResolvedField, Secret, Sink, SoftDelete};
-use sources_core::{Diagnostic, Severity};
-
-// ── color ───────────────────────────────────────────────────────────────────
+use sources_core::{CoverageReport, Diagnostic, Severity};
 
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
 /// threaded by value through the render functions.
@@ -57,8 +55,6 @@ impl Pen {
     }
 }
 
-// ── status lines ──────────────────────────────────────────────────────────────
-
 /// A green check mark followed by a bold message.
 pub(crate) fn success(out: &mut impl Write, pen: Pen, message: &str) -> Result<()> {
     writeln!(out, "{} {}", pen.green("✓"), pen.bold(message))?;
@@ -78,7 +74,74 @@ fn section(out: &mut impl Write, pen: Pen, title: &str) -> Result<()> {
     Ok(())
 }
 
-// ── configuration summary ─────────────────────────────────────────────────────
+/// Report whether the source streams every table the indexes read, and — when it
+/// doesn't — whether `flusso run` will fix it automatically or the operator must.
+///
+/// `manage` is the effective publication-management setting `run` would use, so
+/// the phrasing matches what running would actually do; the remediation SQL is
+/// always printed when there's a gap, copy-pasteable for the manual path.
+pub(crate) fn coverage(
+    out: &mut impl Write,
+    pen: Pen,
+    report: &CoverageReport,
+    manage: bool,
+) -> Result<()> {
+    section(out, pen, "Publication coverage")?;
+
+    if report.satisfied {
+        writeln!(
+            out,
+            "  {} source streams all {} required table(s)",
+            pen.green("✓"),
+            report.present.len(),
+        )?;
+        return Ok(());
+    }
+
+    writeln!(
+        out,
+        "  {} {} table(s) the indexes read are not yet streamed:",
+        pen.yellow("!"),
+        report.missing.len(),
+    )?;
+    for table in &report.missing {
+        writeln!(out, "    {} {}", pen.dim("•"), table)?;
+    }
+
+    if report.manageable && manage {
+        writeln!(
+            out,
+            "  {}",
+            pen.green("→ will be added automatically on the next `flusso run`"),
+        )?;
+    } else if report.manageable {
+        writeln!(
+            out,
+            "  {}",
+            pen.yellow(
+                "→ the source role CAN add these, but automatic management is disabled \
+                 (manage_publication = false) — run the SQL below",
+            ),
+        )?;
+    } else {
+        writeln!(
+            out,
+            "  {}",
+            pen.bold(&pen.yellow("→ flusso will NOT create these automatically:")),
+        )?;
+        for blocker in &report.blockers {
+            writeln!(out, "    {} {}", pen.dim("-"), blocker)?;
+        }
+    }
+
+    if !report.remediation.is_empty() {
+        section(out, pen, "Run to stream every table")?;
+        for sql in &report.remediation {
+            writeln!(out, "  {sql}")?;
+        }
+    }
+    Ok(())
+}
 
 /// The deployment at a glance: where data comes from, where it goes, and which
 /// indexes are declared. Field detail is left to the schema trees.
@@ -160,8 +223,6 @@ fn aligned_rows(out: &mut impl Write, pen: Pen, rows: &[(String, String, String)
     Ok(())
 }
 
-// ── field trees ───────────────────────────────────────────────────────────────
-
 /// One rendered line of a field tree: its indented name and the columns that
 /// describe it (type + nullability, or a source description). Built with
 /// *uncolored* text so widths align; colored at print time.
@@ -216,9 +277,9 @@ pub(crate) fn diagnostics(
 fn flatten_resolved(fields: &[ResolvedField], depth: usize, rows: &mut Vec<Row>) {
     for field in fields {
         let nullability = if field.nullable {
-            ("optional".to_owned(), "33") // yellow — stands out
+            ("optional".to_owned(), "33")
         } else {
-            ("required".to_owned(), "2") // dim
+            ("required".to_owned(), "2")
         };
         rows.push(Row {
             depth,
@@ -256,7 +317,6 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
     for row in rows {
         let pad = "  ".repeat(row.depth);
         let used = indent(row.depth) + row.name.chars().count();
-        // Dotted leader from the name to the type column (min two dots).
         let dots = name_w + 3 - used;
         let leader = pen.dim(&format!(" {} ", ".".repeat(dots.max(2) - 2)));
 
@@ -266,7 +326,6 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
                 write!(out, "  ")?;
             }
             write!(out, "{}", pen.paint(code, text))?;
-            // Pad every column but the last, so lines carry no trailing space.
             if i + 1 < row.cells.len() {
                 let col = cell_w.get(i).copied().unwrap_or(0);
                 write!(
@@ -280,8 +339,6 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
     }
     Ok(())
 }
-
-// ── descriptions ──────────────────────────────────────────────────────────────
 
 fn describe_sink(sink: &Sink) -> (&'static str, String) {
     match sink {

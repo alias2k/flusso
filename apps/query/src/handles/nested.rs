@@ -39,7 +39,6 @@ pub struct Nested<E = Root, C = serde_json::Value> {
 }
 
 impl<E, C> Nested<E, C> {
-    /// Build a handle for the nested array at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),

@@ -34,7 +34,7 @@ impl OpensearchSink {
     pub(crate) async fn try_ensure_alias(&self, alias: &str, target: &str) -> Result<()> {
         let holders = self.alias_holders(alias).await?;
         let Some(actions) = plan_alias_actions(alias, target, &holders) else {
-            return Ok(()); // Already pointing at exactly the target.
+            return Ok(());
         };
 
         let url = format!("{}/_aliases", self.base_url);
@@ -75,7 +75,6 @@ impl OpensearchSink {
             .unwrap_or_default())
     }
 
-    /// Write a document to `META_INDEX` under the given id.
     async fn put_meta(&self, id: &str, doc: Value) -> Result<()> {
         let url = format!("{}/{META_INDEX}/_doc/{id}", self.base_url);
         let req = self

@@ -23,7 +23,6 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{Aggregation, PeriodicReader, SdkMeterProvider, Stream};
 use prometheus::Registry;
 
-/// How often the OTLP reader pushes, when enabled.
 const OTLP_PUSH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Histogram buckets for `flusso.flush.duration`, in **seconds** — OTel's
@@ -63,9 +62,6 @@ impl Metrics {
 /// configures an endpoint. With neither, the provider has no readers and every
 /// instrument is a cheap no-op.
 pub(crate) fn init(prometheus: bool) -> anyhow::Result<Metrics> {
-    // Override the flush histogram's buckets with seconds-appropriate ones; the
-    // view matches by instrument name and leaves every other instrument on its
-    // default aggregation.
     let flush_view = |instrument: &opentelemetry_sdk::metrics::Instrument| {
         (instrument.name() == "flusso.flush.duration")
             .then(|| {

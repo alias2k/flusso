@@ -96,10 +96,8 @@ fn handle(state: &mut State, event: ReplicationEvent) -> std::result::Result<(),
         // Worker handles keepalive feedback; logical messages are not changes.
         ReplicationEvent::KeepAlive { .. } | ReplicationEvent::Message { .. } => {}
 
-        // A fresh transaction: nothing buffered should remain from a prior one.
         ReplicationEvent::Begin { .. } => state.open_txn.clear(),
 
-        // Commit closes the transaction: release its changes at the commit LSN.
         ReplicationEvent::Commit { end_lsn, .. } => {
             let lsn = end_lsn.as_u64();
             for change in state.open_txn.drain(..) {

@@ -1,8 +1,6 @@
 use std::hash::{Hash, Hasher};
 
-/// FNV-1a offset basis.
 const FNV_OFFSET: u32 = 2_166_136_261;
-/// FNV-1a prime.
 const FNV_PRIME: u32 = 16_777_619;
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]

@@ -51,8 +51,6 @@ impl Sink for OpensearchSink {
             )));
         }
 
-        // Resolve the active generation + seeded-state from meta, or start fresh
-        // at the next free generation number.
         let (generation, seeded) = match self.read_index_meta(&hash_alias).await? {
             Some(state) => state,
             None => {
@@ -140,8 +138,6 @@ impl Sink for OpensearchSink {
             return Ok(FlushReport::clean());
         }
 
-        // Serialize each action's NDJSON fragment once, then group fragments
-        // into requests honoring the count and byte caps (see `plan_chunks`).
         let mut fragments = Vec::with_capacity(actions.len());
         for action in &actions {
             let fragment = bulk_action_fragment(action)?;
@@ -175,9 +171,6 @@ impl Sink for OpensearchSink {
             for fragment in chunk_fragments {
                 body.push_str(fragment);
             }
-            // A caught-up flush is small (it drained the queue), so forcing the
-            // refresh on each of its chunks — rather than only the last — keeps
-            // every touched index searchable with negligible extra cost.
             rejected.extend(
                 self.send_bulk_chunk(&body, chunk_actions, caught_up)
                     .await?,
@@ -209,8 +202,6 @@ impl Sink for OpensearchSink {
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {
-        // The active generation was learned at `ensure_index`; its hash alias is
-        // that name minus the generation suffix.
         let Some(hash_alias) = hash_alias_of(&self.physical(index.as_ref())) else {
             return Ok(false);
         };

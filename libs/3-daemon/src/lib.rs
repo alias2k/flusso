@@ -51,6 +51,10 @@ pub struct DaemonOptions {
     pub slot: String,
     /// Publication to subscribe to.
     pub publication: String,
+    /// Auto-create/extend the publication to cover every table the indexes read
+    /// when the source role is privileged enough. When false, a coverage gap is
+    /// only reported (the source still streams whatever the publication covers).
+    pub manage_publication: bool,
     /// Skip the initial backfill and resume live capture only.
     pub skip_backfill: bool,
     /// Changes buffered between capture and processing.
@@ -66,6 +70,7 @@ impl Default for DaemonOptions {
         Self {
             slot: "flusso".to_owned(),
             publication: "flusso".to_owned(),
+            manage_publication: true,
             skip_backfill: false,
             queue_capacity: 1024,
             pretty: false,
@@ -100,7 +105,6 @@ impl Daemon {
         }
     }
 
-    /// Override the run options.
     pub fn with_options(mut self, options: DaemonOptions) -> Self {
         self.options = options;
         self
@@ -150,30 +154,22 @@ impl Daemon {
             "starting sync",
         );
 
-        // Reuse a caller-provided status (so it survives restarts) or mint a
-        // fresh one. Either way reset the phase to `Starting`: a reused status may
+        // Reset the phase to `Starting`: a reused status may
         // have been left `Stopped` by a previous run.
         let status = status.unwrap_or_else(|| {
             Arc::new(Status::new(config.indexes.keys().cloned(), Instant::now()))
         });
         status.set_phase(Phase::Starting);
-        // The daemon's own observer updates status; any binary-supplied observers
-        // (metrics, …) ride alongside it through one fan-out.
         let mut observers: Vec<Arc<dyn Observer>> =
             vec![Arc::new(StatusObserver::new(Arc::clone(&status)))];
         observers.extend(extra_observers);
         let observer: Arc<dyn Observer> = Arc::new(FanOut::new(observers));
 
-        // The concrete source/sink are the composition root's choice — built
-        // here through the `Backends` seam, resolving connection/credentials in
-        // this (the running) environment.
         let config = Arc::new(config);
         let SourceParts { capture, documents } =
             backends.source(Arc::clone(&config), &options).await?;
         let sink = backends.sink(&config, &options).await?;
 
-        // The item-level failure policy is config-driven: a global default plus
-        // optional per-index overrides, keyed by logical index name.
         let mut failure_policies = FailurePolicies::new(config.on_error);
         for (name, index) in &config.indexes {
             if let Some(policy) = index.on_error {
@@ -229,10 +225,9 @@ impl RunningDaemon {
             lag_poll_interval,
         } = self;
 
-        // Poll capture lag alongside the run. Held in a guard so it's aborted
-        // however this returns — a normal stop *or* the future being cancelled
-        // (e.g. the binary dropping the run for a reindex restart) — rather than
-        // detaching onto the shared status.
+        // Held in a guard so it's aborted however this returns — a normal stop
+        // *or* the future being cancelled (e.g. the binary dropping the run for a
+        // reindex restart) — rather than detaching onto the shared status.
         let _lag = LagGuard(tokio::spawn(lag::poll(source, observer, lag_poll_interval)));
 
         let result = tokio::select! {
@@ -591,6 +586,7 @@ mod tests {
             source: Source {
                 source_type: SourceType::Postgres,
                 connection: None,
+                manage_publication: true,
             },
             sinks: BTreeMap::new(),
             indexes: BTreeMap::new(),

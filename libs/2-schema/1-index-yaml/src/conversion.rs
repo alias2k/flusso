@@ -68,13 +68,11 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
 fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
     let options = convert_options(body.options);
     let source = match (body.lat, body.lon, body.column) {
-        // Two coordinate columns → a `{lat, lon}` point.
         (Some(lat), Some(lon), None) => FieldSource::Geo(Geo {
             lat,
             lon,
             nullable: !body.required,
         }),
-        // A single column (or the field name) already holding a geo value.
         (None, None, column) => {
             let column = match column {
                 Some(column) => column,
@@ -88,7 +86,6 @@ fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
                 default: None,
             })
         }
-        // Any other mix (a stray `lat` without `lon`, `lat` + `column`, …).
         _ => return Err(ConversionError::InvalidGeoSource),
     };
     Ok(Field {
@@ -150,7 +147,6 @@ fn join_kind(
 ) -> Result<JoinKind, ConversionError> {
     use entities::JoinVerb;
 
-    // Reject the siblings the verb does not take, with a pointer to the right one.
     let allowed: &[&str] = match verb {
         JoinVerb::BelongsTo => &["column"],
         JoinVerb::HasOne | JoinVerb::HasMany => &["foreign_key"],

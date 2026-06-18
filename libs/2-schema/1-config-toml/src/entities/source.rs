@@ -13,6 +13,12 @@ pub enum Source {
 #[serde(deny_unknown_fields)]
 pub struct PostgresSource {
     pub connection_url: Option<ConnectionUrl>,
+    /// Whether flusso may auto-create/extend the publication to cover every
+    /// table the indexes read (when the source role is privileged enough).
+    /// Omitted means enabled; set `false` to make flusso only report coverage
+    /// gaps and never issue publication DDL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manage_publication: Option<bool>,
 }
 
 /// How the source database is reached: a full URL (literal or `{ env = "VAR" }`)
@@ -25,8 +31,6 @@ pub struct PostgresSource {
 #[serde(untagged)]
 pub enum ConnectionUrl {
     Url(EnvOrValue),
-    // Defaults and unknown-field rejection are applied when deserializing through
-    // the `Parts` helper below; this arm only holds the resolved values.
     Parts {
         host: String,
         port: u16,
@@ -58,9 +62,8 @@ const EXPECTED: &str = "a connection URL string, an env reference `{ env = \"VAR
 impl<'de> Deserialize<'de> for ConnectionUrl {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Dispatch on the value's shape, then re-deserialize the matching arm so
-        // its own (clear) errors surface. A bare string is a literal URL; a table
-        // with an `env` key is an env reference; any other table is the parts
-        // form.
+        // its own (clear) errors surface, instead of `#[serde(untagged)]`'s opaque
+        // "data did not match any variant".
         let value = toml::Value::deserialize(deserializer)?;
         match value {
             toml::Value::String(url) => Ok(ConnectionUrl::Url(EnvOrValue::Value(url))),

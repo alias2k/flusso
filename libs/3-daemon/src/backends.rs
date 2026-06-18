@@ -38,7 +38,6 @@ pub struct SourceParts {
 /// so a compiled `flusso.lock` carries no secret it wasn't given literally.
 #[async_trait::async_trait]
 pub trait Backends: std::fmt::Debug + Send + Sync {
-    /// Build the source capture and its document builder.
     async fn source(
         &self,
         config: Arc<Config>,

@@ -15,6 +15,17 @@ pub struct Source {
     /// `DATABASE_URL`", checked when the connection is resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionSpec>,
+    /// Whether flusso may auto-create/extend the publication to cover every
+    /// table the indexes read. Defaults to `true`; a CLI flag can override it
+    /// per run. See [`crate`] docs and the publication-management design.
+    #[serde(default = "default_manage_publication")]
+    pub manage_publication: bool,
+}
+
+/// Publication management is on unless explicitly disabled — and a default keeps
+/// older compiled locks (written before this field existed) deserializing.
+fn default_manage_publication() -> bool {
+    true
 }
 
 impl Source {

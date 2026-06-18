@@ -41,8 +41,5 @@ pub use loader::{LoadError, load};
 // configs — is the cross-cutting vocabulary from `schema-core`.
 pub use schema_core::*;
 
-// The embedded editor-assist JSON Schemas, owned by the format crates that
-// define each file's shape. Exposed here so the CLI (and any consumer) reaches
-// them through `schema`.
 pub use schema_config_toml::CONFIG_SCHEMA;
 pub use schema_index_yaml::INDEX_SCHEMA;

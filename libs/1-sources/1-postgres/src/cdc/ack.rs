@@ -80,7 +80,6 @@ impl AckShared {
             return;
         }
 
-        // seq == lowest_unconfirmed: clear it and any contiguous successors.
         let mut current = seq;
         loop {
             if let Some(lsn) = inner.lsn_by_seq.remove(&current)

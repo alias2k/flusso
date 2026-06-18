@@ -4,7 +4,6 @@
 
 use schema_core::{ColumnName, Field, FieldName, Filter, Relation, RelationKey, TableName};
 
-/// The target table and key of a relation.
 pub(super) fn relation_target(relation: &Relation) -> (&TableName, RelationKey<'_>) {
     (relation.table(), relation.key())
 }
@@ -69,7 +68,6 @@ pub(super) fn collect_relation_tables(fields: &[Field], out: &mut Vec<TableName>
     }
 }
 
-/// Resolve a document field name back to the column it reads from.
 pub(super) fn field_column<'a>(fields: &'a [Field], name: &FieldName) -> Option<&'a ColumnName> {
     for field in fields {
         if &field.field == name {

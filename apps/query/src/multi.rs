@@ -332,11 +332,6 @@ pub(crate) fn decode_response<U: FlussoMultiDocument>(value: Value) -> Result<Se
     })
 }
 
-// ---- wire types ------------------------------------------------------------
-//
-// Mirrors `search.rs`'s response shapes, but keeps each hit's `_index` (the
-// dispatch key) and defers `_source` to `Value` (decoded per variant).
-
 #[derive(Deserialize)]
 struct RawMultiResponse {
     #[serde(default)]

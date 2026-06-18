@@ -47,6 +47,7 @@ fn convert_source(source: entities::Source) -> Source {
         entities::Source::Postgres(pg) => Source {
             source_type: SourceType::Postgres,
             connection: pg.connection_url.map(convert_connection_spec),
+            manage_publication: pg.manage_publication.unwrap_or(true),
         },
     }
 }

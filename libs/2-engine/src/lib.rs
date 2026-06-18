@@ -91,7 +91,6 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Assemble an engine from its pluggable parts.
     pub fn new(
         source: Arc<dyn ChangeCapture>,
         documents: Arc<dyn DocumentBuilder>,

@@ -18,9 +18,9 @@ use schema::{Config, Sink as SinkConfig, SourceType};
 use sinks_core::{FanOutSink, Sink};
 use sinks_opensearch::OpensearchSink;
 use sinks_stdout::StdoutSink;
-use sources_core::SourceSpec;
 use sources_core::cdc::ChangeCapture;
 use sources_core::document::DocumentBuilder;
+use sources_core::{CaptureProvisioning, SourceSpec};
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use url::Url;
 
@@ -44,8 +44,14 @@ impl Backends for FlussoBackends {
         let connection_url = resolve_connection_url(&config)?;
         let replication = replication_config(&connection_url, &options.slot, &options.publication)?;
 
-        let capture: Arc<dyn ChangeCapture> =
-            Arc::new(WalChangeCapture::new(replication, connection_url.clone()));
+        // The capture provisions its own publication on `live`: it must cover
+        // every table the enabled indexes read (root + join/aggregate sources).
+        let capture: Arc<dyn ChangeCapture> = Arc::new(
+            WalChangeCapture::new(replication, connection_url.clone()).with_publication_management(
+                source_spec(&config).all_tables(),
+                options.manage_publication,
+            ),
+        );
         let documents = build_documents(&connection_url, &config).await?;
 
         Ok(SourceParts { capture, documents })
@@ -60,6 +66,21 @@ impl Backends for FlussoBackends {
     }
 }
 
+/// Build a read-only [`CaptureProvisioning`] handle for `check` to inspect
+/// publication coverage with, without starting the pipeline. Keeps the Postgres
+/// type named here (the composition root), handing `check` only the neutral
+/// trait object. Inspection touches the publication and the catalog, never the
+/// replication slot, so a placeholder slot name satisfies the config shape.
+pub(crate) fn build_provisioning(
+    config: &Config,
+    publication: &str,
+) -> anyhow::Result<Arc<dyn CaptureProvisioning>> {
+    let connection_url = resolve_connection_url(config)?;
+    let replication = replication_config(&connection_url, "flusso", publication)?;
+    let capture = WalChangeCapture::new(replication, connection_url);
+    Ok(Arc::new(capture))
+}
+
 /// Resolve the source connection URL in this environment (applying
 /// `DATABASE_URL`).
 fn resolve_connection_url(config: &Config) -> anyhow::Result<String> {
@@ -70,8 +91,6 @@ fn resolve_connection_url(config: &Config) -> anyhow::Result<String> {
     Ok(url.as_ref().to_owned())
 }
 
-/// Build the replication client config from the source connection URL plus the
-/// slot and publication names.
 fn replication_config(
     connection_url: &str,
     slot: &str,

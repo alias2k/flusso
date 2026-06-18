@@ -91,9 +91,7 @@ impl Builder<'_> {
                 column.default.as_ref(),
                 parent_alias,
             )),
-            // Same-row nested group: same row, same key.
             FieldSource::Group(nested) => self.object(nested, parent_alias, parent_pk),
-            // Two same-row columns assembled into a `{lat, lon}` point.
             FieldSource::Geo(geo) => Ok(geo_value(geo, parent_alias)),
             FieldSource::Constant(value) => Ok(literal_or_null(value)),
         }

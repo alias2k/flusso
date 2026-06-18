@@ -145,6 +145,11 @@
               "type": "string",
               "const": "postgres"
             },
+            "manage_publication": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether flusso may auto-create/extend the Postgres publication to cover every table the indexes read (when the source role is privileged enough). Set false to only report coverage gaps and never issue publication DDL."
+            },
             "connection_url": {
               "description": "How to connect to the source database. Either a full URL or individual connection parts.",
               "oneOf": [

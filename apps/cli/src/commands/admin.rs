@@ -76,7 +76,6 @@ pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
     if !status.is_success() {
         bail!("server returned {status}: {}", body.trim());
     }
-    // Pretty-print the JSON body if it parses; otherwise show it raw.
     let mut out = std::io::stdout().lock();
     match serde_json::from_str::<serde_json::Value>(&body) {
         Ok(value) => writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?,

@@ -8,8 +8,6 @@ use serde_json::Value;
 use super::{Sort, SortOrder, exists_q, range_q, single};
 use crate::query::{Query, Root};
 
-// ---- Bool ------------------------------------------------------------------
-
 /// A boolean field.
 #[derive(Debug, Clone)]
 pub struct Bool<S = Root> {
@@ -18,7 +16,6 @@ pub struct Bool<S = Root> {
 }
 
 impl<S> Bool<S> {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -37,8 +34,6 @@ impl<S> Bool<S> {
     }
 }
 
-// ---- Number ----------------------------------------------------------------
-
 /// A numeric field. `T` is the Rust scalar; `S` is the scope (defaults to
 /// [`Root`], so `Number<i64>` is a root-scope handle).
 #[derive(Debug, Clone)]
@@ -51,7 +46,6 @@ impl<T, S> Number<T, S>
 where
     T: Into<Value> + Copy,
 {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -100,18 +94,14 @@ where
         exists_q(&self.path)
     }
 
-    /// Sort ascending on this field.
     pub fn asc(&self) -> Sort {
         Sort::new(&self.path, SortOrder::Asc)
     }
 
-    /// Sort descending on this field.
     pub fn desc(&self) -> Sort {
         Sort::new(&self.path, SortOrder::Desc)
     }
 }
-
-// ---- Date ------------------------------------------------------------------
 
 /// A `date`/`timestamp` field. Bounds are ISO-8601 strings.
 #[derive(Debug, Clone)]
@@ -121,7 +111,6 @@ pub struct Date<S = Root> {
 }
 
 impl<S> Date<S> {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -170,12 +159,10 @@ impl<S> Date<S> {
         exists_q(&self.path)
     }
 
-    /// Sort ascending on this field.
     pub fn asc(&self) -> Sort {
         Sort::new(&self.path, SortOrder::Asc)
     }
 
-    /// Sort descending on this field.
     pub fn desc(&self) -> Sort {
         Sort::new(&self.path, SortOrder::Desc)
     }

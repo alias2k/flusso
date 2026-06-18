@@ -1,15 +1,18 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use pgwire_replication::{ReplicationClient, ReplicationConfig};
 use sources_core::cdc::{AckSink, Change, ChangeCapture};
-use sources_core::{Result, SnapshotTable, SourceError};
+use sources_core::{
+    CaptureProvisioning, CoverageReport, QualifiedTable, Result, SnapshotTable, SourceError,
+};
 use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
 use super::ack::{AckShared, WalAckSink};
-use super::{backfill, stream};
+use super::{backfill, publication, stream};
 
 /// Postgres change capture over logical replication (pgoutput).
 ///
@@ -25,9 +28,11 @@ use super::{backfill, stream};
 ///
 /// # Prerequisites
 ///
-/// The server must have `wal_level = logical` and the configured **publication**
-/// must already exist and cover every table any index reads from. The replication
-/// **slot** is created automatically on first connect if it does not exist yet.
+/// The server must have `wal_level = logical`. The replication **slot** is
+/// created automatically on first connect if it does not exist yet, and the
+/// **publication** is created/extended to cover every table any index reads —
+/// see [`CaptureProvisioning`] — when the role is privileged enough and
+/// management is not opted out; otherwise flusso warns with the SQL to run.
 #[derive(Debug, Clone)]
 pub struct WalChangeCapture {
     config: ReplicationConfig,
@@ -40,6 +45,12 @@ pub struct WalChangeCapture {
     /// across clones (an `Arc`), opened on first use. The bulk snapshot read
     /// stays on its own connection (see [`snapshot`](Self::snapshot)).
     admin_pool: Arc<OnceCell<PgPool>>,
+    /// Every table the enabled indexes read — the set the publication must
+    /// cover. Empty unless set via [`with_publication_management`](Self::with_publication_management).
+    required_tables: BTreeSet<QualifiedTable>,
+    /// Whether to auto-create/extend the publication on [`live`](Self::live).
+    /// When false, a coverage gap is only reported, never provisioned.
+    manage_publication: bool,
 }
 
 impl WalChangeCapture {
@@ -54,7 +65,23 @@ impl WalChangeCapture {
             config,
             connection_url: connection_url.into(),
             admin_pool: Arc::new(OnceCell::new()),
+            required_tables: BTreeSet::new(),
+            manage_publication: false,
         }
+    }
+
+    /// Declare the tables the publication must cover and whether to provision
+    /// the gap automatically on [`live`](Self::live). `required` is typically
+    /// [`SourceSpec::all_tables`](sources_core::SourceSpec::all_tables); the
+    /// composition root supplies it along with the `manage` opt-out.
+    pub fn with_publication_management(
+        mut self,
+        required: BTreeSet<QualifiedTable>,
+        manage: bool,
+    ) -> Self {
+        self.required_tables = required;
+        self.manage_publication = manage;
+        self
     }
 
     /// The shared admin pool, opened on first call and reused thereafter. Kept
@@ -124,6 +151,8 @@ impl ChangeCapture for WalChangeCapture {
     #[tracing::instrument(name = "wal.live", skip_all, err)]
     async fn live(&self) -> Result<BoxStream<'static, Result<Change>>> {
         self.ensure_slot().await?;
+        self.ensure_coverage(&self.required_tables, self.manage_publication)
+            .await?;
 
         let client = ReplicationClient::connect(self.config.clone())
             .await
@@ -178,5 +207,67 @@ impl ChangeCapture for WalChangeCapture {
             None => None,
         };
         Ok(lag)
+    }
+}
+
+#[async_trait]
+impl CaptureProvisioning for WalChangeCapture {
+    async fn inspect_coverage(
+        &self,
+        required: &BTreeSet<QualifiedTable>,
+    ) -> Result<CoverageReport> {
+        let pool = self.admin_pool().await?;
+        publication::inspect_publication(pool, &self.config.publication, required).await
+    }
+
+    #[tracing::instrument(name = "wal.ensure_coverage", skip_all, err)]
+    async fn ensure_coverage(
+        &self,
+        required: &BTreeSet<QualifiedTable>,
+        manage: bool,
+    ) -> Result<CoverageReport> {
+        let pool = self.admin_pool().await?;
+        let report =
+            publication::inspect_publication(pool, &self.config.publication, required).await?;
+
+        if report.satisfied {
+            tracing::debug!(
+                publication = %self.config.publication,
+                "publication covers every required table",
+            );
+            return Ok(report);
+        }
+
+        let missing = report
+            .missing
+            .iter()
+            .map(|table| table.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if manage && report.manageable {
+            publication::apply_publication(pool, &self.config.publication, &report.missing).await?;
+            tracing::info!(
+                publication = %self.config.publication,
+                tables = %missing,
+                "provisioned publication for missing tables",
+            );
+        } else {
+            let reason = if !manage {
+                "automatic publication management is disabled".to_owned()
+            } else {
+                report.blockers.join("; ")
+            };
+            tracing::warn!(
+                publication = %self.config.publication,
+                missing = %missing,
+                reason = %reason,
+                remediation = %report.remediation.join(" "),
+                "publication is missing tables and flusso will not create them automatically; \
+                 run the printed SQL to stream every table (changes to missing tables are dropped)",
+            );
+        }
+
+        Ok(report)
     }
 }

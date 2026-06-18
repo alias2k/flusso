@@ -29,8 +29,6 @@ impl PgDocumentBuilder {
                 .get(depth)
                 .ok_or_else(|| SourceError::Query("internal: path index".into()))?;
 
-            // The parent at this hop is the previous relation's table, or the
-            // root table at the top.
             let parent_table = if depth == 0 {
                 schema.table.clone()
             } else {
@@ -102,12 +100,10 @@ impl PgDocumentBuilder {
                     .await
             }
             RelationKey::Through(through) if *current_table == through.table => {
-                // The change is on the junction table itself.
                 self.reverse_through_junction(schema, &through.table, &through.left_key, key)
                     .await
             }
             RelationKey::Through(through) => {
-                // The key is in the far table; reach roots across the junction.
                 self.reverse_through_far(
                     schema,
                     &through.table,

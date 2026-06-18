@@ -23,6 +23,7 @@ mod ack;
 mod backfill;
 mod capture;
 mod pgoutput;
+mod publication;
 mod stream;
 
 pub use capture::WalChangeCapture;

@@ -14,7 +14,6 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
-/// Default username for the private surface.
 pub(crate) const DEFAULT_ADMIN_USER: &str = "admin";
 /// Default password for the private surface. Running with it unchanged triggers
 /// a startup warning.

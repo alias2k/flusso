@@ -62,9 +62,17 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_SLOT", default_value = "flusso")]
     slot: String,
 
-    /// Publication to subscribe to. Must already exist and cover the tables.
+    /// Publication to subscribe to. flusso creates/extends it to cover every
+    /// table the indexes read when the source role is privileged enough.
     #[arg(long, env = "FLUSSO_PUBLICATION", default_value = "flusso")]
     publication: String,
+
+    /// Whether flusso may auto-create/extend the publication. Overrides the
+    /// `[source] manage_publication` config option; defaults to that, then to
+    /// enabled. Set `false` to keep flusso from ever issuing publication DDL
+    /// (it then only warns about coverage gaps).
+    #[arg(long, env = "FLUSSO_MANAGE_PUBLICATION")]
+    manage_publication: Option<bool>,
 
     /// Skip the initial backfill and resume live capture only. Use after the
     /// index has already been seeded, to avoid re-reading every existing row.
@@ -110,8 +118,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
     let config = resolve_config(&args)?;
 
-    // Resolve each surface's bind address with the precedence CLI flag / env
-    // (merged by clap) > `[server]` config > built-in default.
     let public_addr = args
         .public_address
         .or(config.server.public_address)
@@ -121,8 +127,8 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         .or(config.server.private_address)
         .unwrap_or(DEFAULT_PRIVATE_ADDRESS);
 
-    // Bind both listeners up front: an unusable address should fail fast, before
-    // we open database connections or start the pipeline.
+    // Bind both listeners before opening DB connections or starting the pipeline,
+    // so a bad address fails fast.
     let public_listener = TcpListener::bind(public_addr)
         .await
         .with_context(|| format!("binding public HTTP surface to {public_addr}"))?;
@@ -138,14 +144,15 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         );
     }
 
-    // The public surface always serves `/metrics`, so install the Prometheus
-    // reader (plus an OTLP push reader when the env configures one).
     let metrics = metrics::init(true)?;
     let registry = metrics.registry.clone();
 
     let options = DaemonOptions {
         slot: args.slot,
         publication: args.publication,
+        manage_publication: args
+            .manage_publication
+            .unwrap_or(config.source.manage_publication),
         skip_backfill: args.skip_backfill,
         queue_capacity: args.queue_capacity,
         pretty: args.pretty,
@@ -160,14 +167,10 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         config.indexes.keys().cloned(),
         std::time::Instant::now(),
     ));
-    // `in_flight` is derived from the status, registered now that it exists.
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
 
-    // Reindex requests from the private surface drive pipeline restarts.
     let (reindex_tx, mut reindex_rx) = mpsc::channel::<IndexName>(8);
 
-    // Serve both surfaces once, for the whole process lifetime (they read the
-    // shared status, so restarts don't disturb them). Graceful drain on shutdown.
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
     let (private_shutdown, private_rx) = oneshot::channel::<()>();
     let public = tokio::spawn(http::serve(
@@ -221,7 +224,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         }
     };
 
-    // Drain both HTTP servers, then flush telemetry — on success or error alike.
     let _ = public_shutdown.send(());
     let _ = private_shutdown.send(());
     for (task, surface) in [(public, "public"), (private, "private")] {
@@ -332,7 +334,6 @@ fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
     }
 }
 
-/// Read back a previously compiled lock from `path`.
 fn load_lock(path: &Path) -> anyhow::Result<Config> {
     schema::load_compiled(path)
         .with_context(|| format!("loading compiled lock from {}", path.display()))

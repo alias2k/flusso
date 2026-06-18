@@ -129,7 +129,6 @@ impl<T> Search<T> {
         self
     }
 
-    /// Append a sort key.
     #[must_use]
     pub fn sort(mut self, sort: Sort) -> Self {
         self.sort.push(sort);
@@ -421,8 +420,6 @@ pub struct Hit<T> {
     /// The fully-typed document.
     pub source: T,
 }
-
-// ---- wire types ------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct RawResponse<T> {

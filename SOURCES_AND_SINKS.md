@@ -186,10 +186,16 @@ type today.
 [source]
 type = "postgres"
 connection_url = "postgresql://user:pass@localhost:5432/mydb"
+manage_publication = true   # optional; default true
 ```
 
 flusso follows Postgres' **logical replication** stream to capture changes, and
 snapshots tables to seed an index before following live changes.
+
+| Key | Type | Default | |
+| --- | --- | --- | --- |
+| `connection_url` | URL / parts | — | see below |
+| `manage_publication` | bool | `true` | auto-create/extend the publication when privileged; see [capture](#how-it-captures-changes) |
 
 #### Connection
 
@@ -231,9 +237,16 @@ rules.
 #### How it captures changes
 
 - **Logical replication (WAL).** flusso consumes a logical replication slot. The
-  slot is **created automatically** if it does not exist; the **publication must
-  already exist** (it decides which tables are streamed). Slot and publication
-  names are CLI flags (`--slot`, `--publication`, both defaulting to `flusso`).
+  slot is **created automatically** if it does not exist. The **publication** is
+  also **managed automatically**: flusso derives the full table set from your
+  schema (root tables plus every table a join or aggregate reads) and creates or
+  extends the publication to cover it — provided the source role can (it must own
+  those tables and hold `CREATE` on the database, or be superuser). When it
+  can't, flusso logs the exact `CREATE`/`ALTER PUBLICATION` SQL instead and keeps
+  going; `flusso check` prints the same coverage report. Set `manage_publication
+  = false` (or `FLUSSO_MANAGE_PUBLICATION=false` / `--manage-publication false`)
+  to opt out and manage the publication yourself. Slot and publication names are
+  CLI flags (`--slot`, `--publication`, both defaulting to `flusso`).
 - **Backfill.** Before live capture, the engine asks each sink whether an index
   is already seeded and, for those that aren't, snapshots the root tables to seed
   them. `--skip-backfill` resumes live capture only.

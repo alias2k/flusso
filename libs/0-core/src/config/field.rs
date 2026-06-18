@@ -104,7 +104,6 @@ impl Field {
         }
     }
 
-    /// The relation this field draws on, if it draws on a related table.
     pub fn relation(&self) -> Option<&Relation> {
         match &self.source {
             FieldSource::Relation(relation) => Some(relation),
@@ -138,7 +137,6 @@ pub enum RelationKey<'a> {
 }
 
 impl Relation {
-    /// The related table this relation targets.
     pub fn table(&self) -> &common::TableName {
         match self {
             Relation::Join(join) => &join.table,

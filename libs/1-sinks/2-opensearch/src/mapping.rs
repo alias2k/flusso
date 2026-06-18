@@ -79,8 +79,6 @@ fn build_analysis(mode: TextAnalysis) -> Value {
         "filter": ["flusso_word_delimiter", "flatten_graph", "lowercase", code_fold],
     });
 
-    // `flusso_text`: natural language. Built-in standard tokenizer + fold, or the ICU
-    // tokenizer/normalizer/folding which segment CJK/Thai and fold every script.
     let text_analyzer = match mode {
         TextAnalysis::Builtin => json!({
             "type": "custom",
@@ -125,7 +123,6 @@ fn build_analysis(mode: TextAnalysis) -> Value {
     })
 }
 
-/// Translate resolved fields into an OpenSearch `properties` object.
 fn build_properties(fields: &[ResolvedField], options: &IndexOptions) -> Value {
     let mut props = Map::new();
     for field in fields {
@@ -151,8 +148,6 @@ fn build_property(field: &ResolvedField, options: &IndexOptions) -> Value {
         Value::String(opensearch_type(&field.mapping.mapping_type)),
     );
 
-    // Auto-enrichment applies only to scalar string fields; container types
-    // (object/nested, which carry children) and numerics are left as-is.
     if options.auto_subfields && field.children.is_empty() {
         match field.mapping.mapping_type {
             MappingType::Text => {
@@ -166,8 +161,6 @@ fn build_property(field: &ResolvedField, options: &IndexOptions) -> Value {
         }
     }
 
-    // The field's explicit mapping wins, key by key — overriding the analyzer,
-    // replacing the auto subfields wholesale, etc.
     for (key, value) in &field.mapping.extra {
         prop.insert(key.clone(), to_json(value));
     }
