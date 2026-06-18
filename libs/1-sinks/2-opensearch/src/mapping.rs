@@ -237,6 +237,7 @@ mod tests {
                 extra: BTreeMap::new(),
             },
             nullable: true,
+            array: false,
             children,
         }
     }
@@ -375,6 +376,7 @@ mod tests {
                 extra,
             },
             nullable: true,
+            array: false,
             children: vec![],
         };
         let body = build_index_body(&[name], &opts());
@@ -414,6 +416,7 @@ mod tests {
                 extra,
             },
             nullable: true,
+            array: false,
             children: vec![],
         };
         let body = build_index_body(&[amount], &opts());

@@ -28,4 +28,10 @@ pub enum AggregateOp {
     Avg(common::ColumnName),
     Min(common::ColumnName),
     Max(common::ColumnName),
+    /// Collect the related table's primary keys into a flat scalar array. The
+    /// element type is stated explicitly (the schema names it) so the array's
+    /// mapping is known without touching the database.
+    Ids {
+        element_type: FlussoType,
+    },
 }

@@ -39,6 +39,12 @@ pub struct ResolvedField {
     /// it exists for consumers that turn the mapping into typed bindings, where
     /// `nullable` is the difference between `T` and `Option<T>`.
     pub nullable: bool,
+    /// Whether this field's value is a flat scalar array (the `mapping_type` is
+    /// then the element type — OpenSearch has no array type). True only for
+    /// `ids`; a consumer turning the mapping into typed bindings reads it as the
+    /// difference between `T` and `Vec<T>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub array: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ResolvedField>,
 }

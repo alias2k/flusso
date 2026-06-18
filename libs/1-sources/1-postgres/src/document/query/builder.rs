@@ -11,15 +11,15 @@
 use std::collections::HashMap;
 
 use schema_core::{
-    Aggregate, AggregateKey, ColumnName, DatabaseSchema, Field, FieldSource, Filter, FilterOp,
-    FilterValue, GenericValue, IndexSchema, Join, JoinKind, NullOp, Relation, SoftDelete,
+    Aggregate, AggregateKey, AggregateOp, ColumnName, DatabaseSchema, Field, FieldSource, Filter,
+    FilterOp, FilterValue, GenericValue, IndexSchema, Join, JoinKind, NullOp, Relation, SoftDelete,
     TableName, ValueOpFilter,
 };
 use sources_core::{Result, SourceError};
 
 use super::ROOT;
 use super::sql::{
-    agg_function, column_value, geo_value, json_agg_subquery, json_key, limit_clause,
+    agg_function, column_value, geo_value, ids_agg, json_agg_subquery, json_key, limit_clause,
     literal_or_null, order_clause, qcol, qident, qtable,
 };
 use crate::document::fields::field_column;
@@ -199,10 +199,15 @@ impl Builder<'_> {
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
         let parent_pk = require_pk(parent_pk)?;
+        let is_ids = matches!(&aggregate.op, AggregateOp::Ids { .. });
         match &aggregate.key {
             AggregateKey::Direct(foreign_key) => {
                 let alias = self.alias();
-                let function = agg_function(&aggregate.op, &alias);
+                let function = if is_ids {
+                    ids_agg(&alias, &self.pk_of(&aggregate.table)?)
+                } else {
+                    agg_function(&aggregate.op, &alias)
+                };
                 let filters =
                     self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
                 Ok(format!(
@@ -211,6 +216,20 @@ impl Builder<'_> {
                     qident(&alias),
                     qcol(&alias, foreign_key),
                     qcol(parent_alias, parent_pk),
+                ))
+            }
+            // `ids` over a junction needs no far-table join: the junction's
+            // `right_key` already holds the far table's primary-key values, so
+            // collect them straight off the junction.
+            AggregateKey::Through(through) if is_ids => {
+                let junction_alias = self.alias();
+                let function = ids_agg(&junction_alias, &through.right_key);
+                Ok(format!(
+                    "(SELECT {function} FROM {} AS {ja} WHERE {} = {})",
+                    qtable(self.db, &through.table),
+                    qcol(&junction_alias, &through.left_key),
+                    qcol(parent_alias, parent_pk),
+                    ja = qident(&junction_alias),
                 ))
             }
             AggregateKey::Through(through) => {

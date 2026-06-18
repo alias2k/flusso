@@ -126,7 +126,8 @@ pub struct JoinBody {
 }
 
 /// An aggregate field (its op is the type key). `value_type` is required for
-/// `sum`/`min`/`max`.
+/// `sum`/`min`/`max`; `element_type` is required for `ids` (and forbidden on the
+/// other ops).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateBody {
@@ -136,6 +137,8 @@ pub struct AggregateBody {
     pub column: Option<common::ColumnName>,
     #[serde(default)]
     pub value_type: Option<FlussoType>,
+    #[serde(default)]
+    pub element_type: Option<FlussoType>,
     #[serde(default)]
     pub foreign_key: Option<common::ColumnName>,
     #[serde(default)]
@@ -183,6 +186,7 @@ fn classify(key: &str) -> Option<TagKind> {
         "avg" => TagKind::Aggregate(AggregateOp::Avg),
         "min" => TagKind::Aggregate(AggregateOp::Min),
         "max" => TagKind::Aggregate(AggregateOp::Max),
+        "ids" => TagKind::Aggregate(AggregateOp::Ids),
         "constant" => TagKind::Constant,
         _ => return None,
     })
@@ -240,7 +244,7 @@ fn find_tag<E: de::Error>(map: &serde_yaml::Mapping) -> Result<(String, TagKind)
             "field is missing a type tag{here}; expected one of: a scalar type like \
              `keyword`/`text`/`integer`, or `custom`, `geo`, `object`, \
              `belongs_to`/`has_one`/`has_many`/`many_to_many`, \
-             `count`/`sum`/`avg`/`min`/`max`, `constant`"
+             `count`/`sum`/`avg`/`min`/`max`/`ids`, `constant`"
         ))
     })
 }

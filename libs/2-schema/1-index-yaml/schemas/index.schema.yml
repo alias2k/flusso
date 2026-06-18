@@ -120,6 +120,7 @@ definitions:
       avg: { $ref: "#/definitions/field_name" }
       min: { $ref: "#/definitions/field_name" }
       max: { $ref: "#/definitions/field_name" }
+      ids: { $ref: "#/definitions/field_name" }
       # ── constant ──────────────────────────────────────────────────────────
       constant: { $ref: "#/definitions/field_name" }
 
@@ -176,6 +177,9 @@ definitions:
         minimum: 1
       # aggregate (sum/min/max result type):
       value_type:
+        $ref: "#/definitions/flusso_type"
+      # aggregate (ids element type — the scalar type of each collected key):
+      element_type:
         $ref: "#/definitions/flusso_type"
       # constant:
       value: {}

@@ -119,6 +119,9 @@ pub(super) fn limit_clause(limit: Option<u64>) -> String {
     limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default()
 }
 
+/// The scalar aggregate expression for `op` over rows aliased `alias`. `ids` is
+/// handled separately ([`ids_agg`]) because its emitted SQL shape varies by key
+/// (direct vs through) — only the column-folding ops flow through here.
 pub(super) fn agg_function(op: &AggregateOp, alias: &str) -> String {
     match op {
         AggregateOp::Count => "count(*)".to_owned(),
@@ -126,5 +129,14 @@ pub(super) fn agg_function(op: &AggregateOp, alias: &str) -> String {
         AggregateOp::Avg(c) => format!("avg({})", qcol(alias, c)),
         AggregateOp::Min(c) => format!("min({})", qcol(alias, c)),
         AggregateOp::Max(c) => format!("max({})", qcol(alias, c)),
+        // The `ids` arms emit through `ids_agg`; reaching here is a builder bug.
+        AggregateOp::Ids { .. } => "null".to_owned(),
     }
+}
+
+/// `coalesce(json_agg(<alias>.<column>), '[]'::json)` — the flat array of a
+/// related table's keys an `ids` aggregate collects, never null for an empty
+/// relation.
+pub(super) fn ids_agg(alias: &str, column: &ColumnName) -> String {
+    format!("coalesce(json_agg({}), '[]'::json)", qcol(alias, column))
 }
