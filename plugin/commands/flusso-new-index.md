@@ -11,7 +11,7 @@ Follow the **flusso-schema** skill for the field syntax. Do this:
 2. Create `$1.schema.yml` next to it, starting from this skeleton, then fill in fields by inspecting the root table's columns (ask the user for the column list or a `\d <table>` dump if no DB access):
 
    ```yaml
-   # yaml-language-server: $schema=./index.schema.yml
+   # yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
    version: 1
    table: $2
    primary_key: id
@@ -31,4 +31,4 @@ Follow the **flusso-schema** skill for the field syntax. Do this:
 
 4. Run `flusso check --config flusso.toml` (add `--offline` if no DB is reachable) and fix any errors before finishing.
 
-Report what was created and the next command to run.
+Report what was created and the next command to run. Then, unless the user already said otherwise, **offer the next step**: if a `Cargo.toml` is present, ask whether to generate the Rust query side for `$1` (`/flusso-doc-struct` + the **flusso-query** skill); if this index replaces an existing search/indexer, ask whether to switch that implementation over. One question, then act.

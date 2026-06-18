@@ -11,7 +11,7 @@
     {
       "name": "flusso",
       "source": "./plugin",
-      "description": "Author and maintain flusso schemas, and integrate flusso into a new project."
+      "description": "Type /flusso:expert for an expert on flusso — author and maintain schemas, query the index from Rust, understand the Postgres/OpenSearch substrate, and integrate flusso into a project."
     }
   ]
 }
