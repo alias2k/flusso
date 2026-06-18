@@ -164,7 +164,6 @@ fn bench(c: &mut Criterion) {
     let (_container, base_url) = rt.block_on(start_opensearch());
     let index = IndexName::try_new(INDEX).unwrap();
 
-    // Create the index once with auto-refresh disabled (the seeding path).
     rt.block_on(async {
         sink(&base_url, 1000)
             .ensure_index(&mapping())
@@ -172,9 +171,6 @@ fn bench(c: &mut Criterion) {
             .unwrap();
     });
 
-    // Throughput of flushing N documents at the default batch size of 1000.
-    // n=1 is the per-request floor: one bulk round-trip with a single doc, the
-    // fixed cost every flush pays before any per-document work.
     let mut group = c.benchmark_group("bulk_index");
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(5));
@@ -190,7 +186,6 @@ fn bench(c: &mut Criterion) {
     }
     group.finish();
 
-    // Effect of bulk chunk size: a fixed 5000-document flush, varied batch size.
     let mut group = c.benchmark_group("batch_size");
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(5));

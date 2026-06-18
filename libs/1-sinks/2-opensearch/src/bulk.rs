@@ -21,14 +21,12 @@ pub(crate) enum BulkAction {
 }
 
 impl BulkAction {
-    /// The physical index this action targets.
     pub(crate) fn index(&self) -> &str {
         match self {
             BulkAction::Index { index, .. } | BulkAction::Delete { index, .. } => index,
         }
     }
 
-    /// The document id this action targets.
     pub(crate) fn id(&self) -> &str {
         match self {
             BulkAction::Index { id, .. } | BulkAction::Delete { id, .. } => id,
@@ -118,8 +116,6 @@ pub(crate) fn plan_chunks(sizes: &[usize], batch_size: usize, max_bytes: usize) 
     chunks
 }
 
-/// Returns `true` if the bulk response indicates at least one item-level error
-/// (HTTP 4xx/5xx on an individual operation).
 /// Extract the item-level rejections from a 2xx bulk response.
 ///
 /// A bulk response is `errors: true` when *any* item failed, but its accepted

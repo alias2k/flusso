@@ -49,8 +49,6 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         .to_compile_error();
     }
 
-    // Collect each variant's payload type, accumulating shape errors so every
-    // bad variant is reported at once (bon-style, like the other derives).
     let mut errors = TokenStream::new();
     let mut variants: Vec<(&Ident, &Type)> = Vec::new();
     for variant in &data.variants {

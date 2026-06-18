@@ -79,7 +79,6 @@ impl SourceSpec {
         self.indexes.iter()
     }
 
-    /// The schema for one index, if the spec carries it.
     pub fn schema(&self, index: &IndexName) -> Option<&IndexSchema> {
         self.indexes.get(index)
     }

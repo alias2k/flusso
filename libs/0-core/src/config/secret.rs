@@ -87,13 +87,10 @@ pub enum ConnectionSpec {
 pub fn resolve_connection_url(
     spec: Option<&ConnectionSpec>,
 ) -> Result<ConnectionUrl, ResolveError> {
-    // An explicit `{ env = "X" }` reference wins and is not overridden.
     if let Some(ConnectionSpec::Url(env @ Secret::Env(_))) = spec {
         return Ok(ConnectionUrl::try_new(env.read()?)?);
     }
 
-    // Otherwise the reserved variable overrides a configured value or fills an
-    // omitted one.
     if let Ok(url) = std::env::var(SOURCE_URL_VAR) {
         return Ok(ConnectionUrl::try_new(url)?);
     }

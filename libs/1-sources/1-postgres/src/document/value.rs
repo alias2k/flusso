@@ -55,7 +55,6 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
             GenericValue::String,
             name,
         ),
-        // Types without a native GenericValue are carried as their text form.
         "TIMESTAMP" => finish(
             row.try_get::<Option<chrono::NaiveDateTime>, _>(idx),
             |v| GenericValue::String(v.to_string()),
@@ -81,7 +80,6 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
             |v| GenericValue::String(v.to_string()),
             name,
         ),
-        // JSON maps straight onto the value tree.
         "JSON" | "JSONB" => finish(
             row.try_get::<Option<serde_json::Value>, _>(idx),
             json_to_generic,

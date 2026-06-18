@@ -8,8 +8,6 @@ use serde_json::Value;
 use super::exists_q;
 use crate::query::{Query, Root};
 
-// ---- Object ----------------------------------------------------------------
-
 /// An `object` sub-document — a `group` or a to-one (`belongs_to`/`has_one`) join. Objects are
 /// **flattened**, so their sub-fields are queried by their own scope-`S`
 /// dotted-path handles directly (`Account::tier()`); this handle is for the
@@ -21,7 +19,6 @@ pub struct Object<S = Root> {
 }
 
 impl<S> Object<S> {
-    /// Build a handle for the object at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -35,8 +32,6 @@ impl<S> Object<S> {
     }
 }
 
-// ---- Binary ----------------------------------------------------------------
-
 /// A `binary` field — base64-encoded, not searchable. Only existence.
 #[derive(Debug, Clone)]
 pub struct Binary<S = Root> {
@@ -45,7 +40,6 @@ pub struct Binary<S = Root> {
 }
 
 impl<S> Binary<S> {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -59,8 +53,6 @@ impl<S> Binary<S> {
     }
 }
 
-// ---- Json ------------------------------------------------------------------
-
 /// An untyped `object`/`json` field. The escape hatch: existence, or a raw
 /// clause spliced in verbatim.
 #[derive(Debug, Clone)]
@@ -70,7 +62,6 @@ pub struct Json<S = Root> {
 }
 
 impl<S> Json<S> {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),

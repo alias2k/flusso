@@ -111,8 +111,6 @@ fn parse_kind(input: &DeriveInput) -> syn::Result<Kind> {
 fn validate(input: &DeriveInput, kind: Kind) -> syn::Result<()> {
     match &input.data {
         Data::Enum(data) => {
-            // Only string-valued kinds accept enums — a unit variant serializes
-            // to a string, which is wrong for a numeric/date field.
             if !kind.is_string() {
                 return Err(syn::Error::new(
                     input.ident.span(),

@@ -132,8 +132,6 @@ async fn validate_field(
             )
             .await?;
         }
-        // A `sum`/`min`/`max` result mirrors the aggregated column; check the
-        // declared `value_type` against that column in the related table.
         FieldSource::Relation(Relation::Aggregate(aggregate)) => {
             let column = match &aggregate.op {
                 AggregateOp::Sum(c) | AggregateOp::Min(c) | AggregateOp::Max(c) => Some(c),
@@ -153,8 +151,6 @@ async fn validate_field(
                 .await?;
             }
         }
-        // A group stays on the same row (root key still applies); a join crosses
-        // into a related table.
         FieldSource::Group(fields) => {
             validate_fields(index, db_schema, table, fields, primary_key, catalog, out).await?;
         }
@@ -170,7 +166,6 @@ async fn validate_field(
             )
             .await?;
         }
-        // A geo point reads two same-row columns; both must exist and be numeric.
         FieldSource::Geo(geo) => {
             validate_geo(index, db_schema, table, &field.field, geo, catalog, out).await?;
         }

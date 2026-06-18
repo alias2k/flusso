@@ -38,8 +38,6 @@ pub use scalar::{Bool, Date, Number};
 pub use sort::{Sort, SortOrder};
 pub use string::{Keyword, Text, multi_match};
 
-// ---- shared leaf builders (generic over scope) -----------------------------
-
 /// `{ "<wrapper>": { "<path>": <value> } }`.
 fn single<S>(wrapper: &str, path: &str, value: Value) -> Query<S> {
     let mut inner = Map::new();
@@ -73,8 +71,6 @@ pub(crate) fn match_all_value() -> Value {
     outer.insert("match_all".to_string(), Value::Object(Map::new()));
     Value::Object(outer)
 }
-
-// ---- FlussoValue ------------------------------------------------------------
 
 /// Field-category markers for [`trait@FlussoValue`]. Zero-size and uninhabited — they
 /// exist only as the `K` type parameter, so one type can be a valid value for

@@ -154,8 +154,6 @@ pub struct ConstantBody {
     pub value: serde_yaml::Value,
 }
 
-// ── custom deserialize: find the type tag, parse the body ────────────────────
-
 /// Which kind of field a type tag denotes.
 enum TagKind {
     Scalar(FlussoType),

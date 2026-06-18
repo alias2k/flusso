@@ -49,7 +49,6 @@ impl StdoutSink {
         }
     }
 
-    /// Build a sink from the schema's stdout sink configuration.
     pub fn from_config(config: &schema_core::StdoutSink) -> Self {
         Self::new(config.pretty)
     }
@@ -59,7 +58,6 @@ impl StdoutSink {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Serialize one envelope to a single output line.
     fn render(&self, envelope: &Value) -> Result<String> {
         let json = if self.pretty {
             serde_json::to_string_pretty(envelope)

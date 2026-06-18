@@ -143,7 +143,6 @@ fn bench(c: &mut Criterion) {
     });
     group.finish();
 
-    // build: server-side document assembly across nesting depth.
     let mut group = c.benchmark_group("build");
     group.warm_up_time(Duration::from_secs(5));
     group.measurement_time(Duration::from_secs(15));
@@ -157,7 +156,6 @@ fn bench(c: &mut Criterion) {
     }
     group.finish();
 
-    // resolve: changed row -> affected document ids.
     let mut group = c.benchmark_group("resolve");
     group.warm_up_time(Duration::from_secs(5));
     group.measurement_time(Duration::from_secs(15));
@@ -168,7 +166,6 @@ fn bench(c: &mut Criterion) {
             builder.resolve(&table("users"), &key).await.unwrap();
         });
     });
-    // A change on a related table — the reverse lookup back to the root.
     group.bench_function("related_table", |b| {
         let key = row_key(4000);
         b.to_async(&rt).iter(|| async {

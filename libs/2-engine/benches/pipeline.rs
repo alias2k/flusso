@@ -153,8 +153,6 @@ impl Sink for AlwaysUnseeded {
     async fn flush(&self, caught_up: bool) -> SinkResult<sinks_core::FlushReport> {
         self.inner.flush(caught_up).await
     }
-    // `is_seeded` / `mark_seeded` deliberately keep the trait defaults
-    // (`false` / no-op) so the backfill runs on every iteration.
 }
 
 /// A capture whose `live` stream yields a fixed burst of `count` upsert changes
@@ -271,8 +269,6 @@ async fn seed(pool: &sqlx::PgPool) {
     );
 
     // Static SQL with bound counts (sqlx 0.9 rejects dynamic strings).
-    // Emails carry surrounding whitespace + uppercase to exercise trim+lowercase;
-    // bio is null on even ids to exercise the column default.
     sqlx::query(
         "INSERT INTO users (id, name, email, status, bio, archived)
          SELECT g, 'Customer ' || g, '  USER' || g || '@EXAMPLE.IO  ',
@@ -295,7 +291,6 @@ async fn seed(pool: &sqlx::PgPool) {
     .await
     .unwrap();
 
-    // order id = user*1000 + n; half fulfilled, half pending.
     sqlx::query(
         "INSERT INTO orders (id, user_id, total, status, placed_at)
          SELECT u * 1000 + n, u, (n + 1) * 10.50,
@@ -309,7 +304,6 @@ async fn seed(pool: &sqlx::PgPool) {
     .await
     .unwrap();
 
-    // item id = order_id*100 + k.
     sqlx::query(
         "INSERT INTO order_items (id, order_id, sku, qty, price)
          SELECT (u * 1000 + n) * 100 + k, u * 1000 + n, 'sku-' || k, k + 1, (k + 1) * 2.25
@@ -441,10 +435,8 @@ fn bench(c: &mut Criterion) {
     let _guard = rt.enter();
     let services = rt.block_on(setup());
 
-    // baseline: the two fixed I/O floors the figures below are built on.
     let mut group = c.benchmark_group("baseline");
     group.measurement_time(Duration::from_secs(10));
-    // Postgres round-trip floor (resolve + build each pay at least this).
     group.bench_function("pg_select_1", |b| {
         b.to_async(&rt).iter(|| async {
             sqlx::query("SELECT 1")
@@ -453,7 +445,6 @@ fn bench(c: &mut Criterion) {
                 .unwrap();
         });
     });
-    // OpenSearch bulk round-trip floor: a single-document upsert + flush.
     group.bench_function("os_flush_1", |b| {
         let index = index_name("users");
         let mut body = BTreeMap::new();
@@ -470,9 +461,6 @@ fn bench(c: &mut Criterion) {
     });
     group.finish();
 
-    // Steady state: an order_item change propagated end to end (hand-composed;
-    // see the module docs). Resolving it walks item → order → user (multi-hop)
-    // before the complex document is reassembled.
     let mut group = c.benchmark_group("change");
     group.warm_up_time(Duration::from_secs(5));
     group.measurement_time(Duration::from_secs(15));
@@ -485,12 +473,6 @@ fn bench(c: &mut Criterion) {
     });
     group.finish();
 
-    // Live-path throughput under volume: a burst of `BURST` changes drained
-    // through the real `Engine::run` live loop, at several batch sizes.
-    // `max_changes = 1` is flush-per-change (the pre-batching cost); larger
-    // values collapse the burst into ⌈BURST / max_changes⌉ bulk flushes. The
-    // wide `max_delay` never fires — the burst is already queued, so batches
-    // fill on count, not time.
     let mut group = c.benchmark_group("change_burst");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(25));
@@ -522,8 +504,6 @@ fn bench(c: &mut Criterion) {
     }
     group.finish();
 
-    // Backfill: the real `Engine::run` seeding every complex document through
-    // the engine's queue → worker → resolve → build → sink → flush path.
     let mut group = c.benchmark_group("backfill");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
@@ -555,7 +535,6 @@ fn doc_id_string(id: &DocumentId) -> String {
 
 /// The most complex `users` document the builder supports — see the module docs.
 fn spec() -> SourceSpec {
-    // 1:1 join to the user's profile.
     let profile = join_field(
         "profile",
         Join {
@@ -571,7 +550,6 @@ fn spec() -> SourceSpec {
         },
     );
 
-    // 1:N join to orders (newest first), each folding in its items (nested 1:N).
     let orders = join_field(
         "orders",
         Join {
@@ -605,7 +583,6 @@ fn spec() -> SourceSpec {
         },
     );
 
-    // M:N join to tags through the user_tags junction, labels A→Z.
     let tags = join_field(
         "tags",
         Join {
@@ -625,8 +602,6 @@ fn spec() -> SourceSpec {
         },
     );
 
-    // A group sub-object: a transformed column plus a constant, nested without
-    // reading another table.
     let contact = group_field(
         "contact",
         vec![
@@ -712,8 +687,6 @@ fn spec() -> SourceSpec {
     };
     SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }
-
-// --- schema construction helpers (mirroring the config_coverage test) --------
 
 fn col(name: &str, source_column: &str) -> Field {
     col_full(name, source_column, Vec::new(), None)

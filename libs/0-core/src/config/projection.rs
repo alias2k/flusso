@@ -44,10 +44,6 @@ fn resolve_fields(fields: &[Field], primary_key: Option<&ColumnName>) -> Vec<Res
 }
 
 fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedField {
-    // A group stays on the same row (the root key still applies); a join crosses
-    // into a related table and brings its own primary key, so that table's key
-    // forces its projected key column non-null — exactly as the root key does.
-    // Columns/aggregates/constants have no children.
     let (child_fields, child_pk): (&[Field], Option<&ColumnName>) = match &field.source {
         FieldSource::Relation(Relation::Join(join)) => (&join.fields, Some(&join.primary_key)),
         FieldSource::Group(fields) => (fields, primary_key),
@@ -69,11 +65,8 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
     }
 }
 
-/// The OpenSearch type and nullability of one field, from the declared schema.
 fn type_and_nullability(field: &Field, primary_key: Option<&ColumnName>) -> (MappingType, bool) {
     match &field.source {
-        // A column's declared type and nullability — except a primary key is
-        // never null (it backs the id) and a `default` coalesces null away.
         FieldSource::Column(Column {
             column,
             ty,
@@ -84,19 +77,12 @@ fn type_and_nullability(field: &Field, primary_key: Option<&ColumnName>) -> (Map
             let forced_non_null = primary_key == Some(column) || default.is_some();
             (ty.opensearch(), *nullable && !forced_non_null)
         }
-        // A group is always assembled — an object, never null.
         FieldSource::Group(_) => (MappingType::Object, false),
-        // A geo point resolves to `geo_point`; its nullability is declared (a
-        // `required` point is non-null, otherwise it may be absent).
         FieldSource::Geo(geo) => (MappingType::Other("geo_point".to_owned()), geo.nullable),
-        // A constant is null exactly when the value is null.
         FieldSource::Constant(value) => (
             constant_mapping_type(value),
             matches!(value, GenericValue::Null),
         ),
-        // A join's verb decides its shape and nullability: a to-one join
-        // (`belongs_to`/`has_one`) is an object that may be absent; a to-many
-        // join is a nested array, never null.
         FieldSource::Relation(Relation::Join(join)) => {
             if join.kind.is_to_many() {
                 (MappingType::Nested, false)
@@ -104,8 +90,6 @@ fn type_and_nullability(field: &Field, primary_key: Option<&ColumnName>) -> (Map
                 (MappingType::Object, true)
             }
         }
-        // An aggregate's type follows its op; only `count` is guaranteed
-        // non-null. `sum`/`min`/`max` carry a declared `value_type`.
         FieldSource::Relation(Relation::Aggregate(aggregate)) => aggregate_type(aggregate),
     }
 }

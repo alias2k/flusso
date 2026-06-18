@@ -44,11 +44,7 @@ pub(crate) async fn run_inner(
     source: &dyn ChangeCapture,
     skip_backfill: bool,
 ) -> Result<()> {
-    // Enrich the thin config into fully-typed mappings: the source fills the
-    // gaps a human config leaves (field types, nullability) from what it
-    // knows about its store. This runs by design on every start, before any
-    // document flows, so the destination is created from a complete
-    // description rather than guessing on first write — idempotent
+    // ensure_index runs on every start, before any document flows — idempotent
     // (create-if-absent), so it is safe across resumes and backfills alike.
     let mappings = pipeline.documents.index_mappings().await?;
     tracing::info!(indexes = mappings.len(), "ensuring target indexes");
@@ -134,8 +130,7 @@ async fn pump(
 ) -> Result<()> {
     let (producer, mut consumer) = channel::<Change>(pipeline.queue_capacity);
 
-    // Capture runs concurrently with the worker; the worker borrows the shared
-    // builder and sink. The observer's events are `&self`, so capture takes an
+    // The observer's events are `&self`, so capture takes an
     // `Arc` clone it can move into the spawned `'static` task. The guard aborts
     // it if this future is *cancelled* (e.g. dropped for an on-demand reindex
     // restart) — otherwise a capture parked on an idle source stream would
@@ -222,23 +217,21 @@ pub(crate) async fn work(
     let mut pending: Batch = Batch::with_capacity(batch.max_changes);
 
     'batches: loop {
-        // Block for the batch's first change (no busy-wait on an idle stream).
         let Some(delivery) = consumer.recv().await? else {
             break;
         };
         buffer(delivery, pipeline.documents, filter, &mut pending).await?;
 
-        // Fill the batch until it is full or its time window closes. `recv` is
-        // cancel-safe, so dropping it on timeout never drops a queued change.
+        // `recv` is cancel-safe, so dropping it on timeout never drops a queued
+        // change.
         let deadline = Instant::now() + batch.max_delay;
         while pending.len() < batch.max_changes {
             match timeout_at(deadline, consumer.recv()).await {
-                Err(_elapsed) => break, // window closed: flush a partial batch
+                Err(_elapsed) => break,
                 Ok(Ok(Some(delivery))) => {
                     buffer(delivery, pipeline.documents, filter, &mut pending).await?;
                 }
                 Ok(Ok(None)) => {
-                    // Stream ended: flush what we have, then stop.
                     commit(pipeline, &mut pending, consumer.is_empty()).await?;
                     break 'batches;
                 }
@@ -247,7 +240,6 @@ pub(crate) async fn work(
         }
         commit(pipeline, &mut pending, consumer.is_empty()).await?;
     }
-    // A batch left buffered when the stream ended mid-fill.
     commit(pipeline, &mut pending, consumer.is_empty()).await
 }
 
@@ -340,8 +332,6 @@ async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch, caught_up: bool) ->
     }
     let changes = pending.len();
     let documents_built = pending.ids.len();
-    // Tally documents per target index for per-index metrics, before the ids
-    // are cleared below.
     let mut by_index: HashMap<IndexName, usize> = HashMap::new();
     for id in &pending.ids {
         *by_index.entry(id.index.clone()).or_insert(0) += 1;
@@ -364,12 +354,7 @@ async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch, caught_up: bool) ->
     let report = pipeline.sink.flush(caught_up).await?;
     let flush = flush_start.elapsed();
 
-    // The flush succeeded, but the sink may have rejected individual documents
-    // (a mapping conflict, a malformed value). Retrying redelivers the same
-    // poison, so the per-index failure policy decides each one: stop the run, or
-    // quarantine it and ack the batch anyway so the slot advances past it.
-    //
-    // Resolve all of them first. A single `stop`-policy rejection stops the run
+    // A single `stop`-policy rejection stops the run
     // — and we must decide that *before* emitting any quarantine event, so a
     // `skip` document in the same batch isn't double-counted when the
     // unconfirmed batch is redelivered on the next run.
@@ -387,7 +372,6 @@ async fn commit(pipeline: Pipeline<'_>, pending: &mut Batch, caught_up: bool) ->
         if stop_count > 0 {
             return Err(EngineError::DocumentsRejected(stop_count, stop_example));
         }
-        // Every rejection is `skip`: quarantine and continue.
         for doc in &report.rejected {
             tracing::warn!(
                 index = %doc.index,

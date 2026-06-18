@@ -335,6 +335,16 @@ belongs in the linked docs.
 
 ## Conventions
 
+- **Code is self-descriptive; comments are the exception, not the rule.** The code itself —
+  names, types, structure — must carry the meaning. Do **not** write comments that narrate or
+  restate what the code already says. The only inline comments that belong in production code
+  are: (1) doc comments (`///`/`//!`) on items/modules — always keep and write these for the
+  published API surface; and (2) comments that explain genuinely *non-obvious* behavior the code
+  cannot express — a correctness invariant or ordering that would otherwise look like a bug,
+  cancel-safety/concurrency rationale, why an unused/`_`-bound value or a deliberate no-op must
+  stay, an upstream-bug workaround, or a "must happen before X" constraint. If a comment could be
+  deleted by renaming a variable or extracting a function, do that instead of commenting. When
+  reviewing or editing, strip narration; keep only the genuine gotchas.
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
   `libs/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.

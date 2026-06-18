@@ -55,18 +55,13 @@ enum OutputFormat {
 }
 
 pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
-    // File-format validation: everything `schema::load` enforces (identifier
-    // shapes, join/aggregate arity, declared types, filter value shapes).
     let config = Arc::new(
         schema::load(&args.config)
             .with_context(|| format!("loading config from {}", args.config.display()))?,
     );
 
-    // The mapping is derived from the schema alone — no database needed.
     let mappings = config.resolve_mappings();
 
-    // Source validation (skipped by `--offline`): connect and confirm the
-    // declared schema matches the live database, collecting disagreements.
     let diagnostics = if args.offline {
         None
     } else {
@@ -89,8 +84,6 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         )
     };
 
-    // Publication coverage: does the source stream every table the indexes read?
-    // Read-only — `check` never mutates; it reports what `run` would do.
     let coverage = if args.offline {
         None
     } else {
@@ -103,7 +96,6 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                 .context("inspecting publication coverage")?,
         )
     };
-    // The effective management setting `run` would use, for the report phrasing.
     let manage = args
         .manage_publication
         .unwrap_or(config.source.manage_publication);

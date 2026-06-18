@@ -15,8 +15,6 @@ use anyhow::Result;
 use schema::{Config, ConnectionSpec, IndexMapping, ResolvedField, Secret, Sink, SoftDelete};
 use sources_core::{CoverageReport, Diagnostic, Severity};
 
-// ── color ───────────────────────────────────────────────────────────────────
-
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
 /// threaded by value through the render functions.
 #[derive(Clone, Copy)]
@@ -56,8 +54,6 @@ impl Pen {
         self.paint("35", t)
     }
 }
-
-// ── status lines ──────────────────────────────────────────────────────────────
 
 /// A green check mark followed by a bold message.
 pub(crate) fn success(out: &mut impl Write, pen: Pen, message: &str) -> Result<()> {
@@ -147,8 +143,6 @@ pub(crate) fn coverage(
     Ok(())
 }
 
-// ── configuration summary ─────────────────────────────────────────────────────
-
 /// The deployment at a glance: where data comes from, where it goes, and which
 /// indexes are declared. Field detail is left to the schema trees.
 pub(crate) fn config(out: &mut impl Write, pen: Pen, config: &Config) -> Result<()> {
@@ -229,8 +223,6 @@ fn aligned_rows(out: &mut impl Write, pen: Pen, rows: &[(String, String, String)
     Ok(())
 }
 
-// ── field trees ───────────────────────────────────────────────────────────────
-
 /// One rendered line of a field tree: its indented name and the columns that
 /// describe it (type + nullability, or a source description). Built with
 /// *uncolored* text so widths align; colored at print time.
@@ -285,9 +277,9 @@ pub(crate) fn diagnostics(
 fn flatten_resolved(fields: &[ResolvedField], depth: usize, rows: &mut Vec<Row>) {
     for field in fields {
         let nullability = if field.nullable {
-            ("optional".to_owned(), "33") // yellow — stands out
+            ("optional".to_owned(), "33")
         } else {
-            ("required".to_owned(), "2") // dim
+            ("required".to_owned(), "2")
         };
         rows.push(Row {
             depth,
@@ -325,7 +317,6 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
     for row in rows {
         let pad = "  ".repeat(row.depth);
         let used = indent(row.depth) + row.name.chars().count();
-        // Dotted leader from the name to the type column (min two dots).
         let dots = name_w + 3 - used;
         let leader = pen.dim(&format!(" {} ", ".".repeat(dots.max(2) - 2)));
 
@@ -335,7 +326,6 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
                 write!(out, "  ")?;
             }
             write!(out, "{}", pen.paint(code, text))?;
-            // Pad every column but the last, so lines carry no trailing space.
             if i + 1 < row.cells.len() {
                 let col = cell_w.get(i).copied().unwrap_or(0);
                 write!(
@@ -349,8 +339,6 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
     }
     Ok(())
 }
-
-// ── descriptions ──────────────────────────────────────────────────────────────
 
 fn describe_sink(sink: &Sink) -> (&'static str, String) {
     match sink {

@@ -46,8 +46,8 @@ pub(crate) fn init_tracing() -> Option<SdkTracerProvider> {
     };
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![fmt_layer];
 
-    // Add the OTLP layer only when a collector is configured. Capture any setup
-    // error to log *after* the subscriber is installed (we have no logging yet).
+    // Capture any setup error to log *after* the subscriber is installed (we have
+    // no logging yet).
     let mut otlp_error: Option<String> = None;
     let provider = match otlp_provider() {
         Ok(Some(provider)) => {

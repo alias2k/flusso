@@ -73,7 +73,6 @@ fn doc_key(
     })
 }
 
-/// Read `#[serde(rename = "…")]` on a field, if present.
 fn serde_rename(field: &Field) -> syn::Result<Option<String>> {
     let mut renamed = None;
     for attr in &field.attrs {
@@ -116,8 +115,6 @@ fn flusso_field_attr(field: &Field) -> syn::Result<(bool, Option<String>)> {
     }
     Ok((skip, rename))
 }
-
-// ── validation ───────────────────────────────────────────────────────────────
 
 /// Validate each declared field against the resolved fields at this level.
 /// Returns *every* problem (not just the first) so one build surfaces them all,
@@ -189,7 +186,6 @@ fn check_nullability(field: &DocField, resolved: &ResolvedField) -> syn::Result<
 /// generated code), `Err` = a definite mismatch reported with a precise span.
 fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<TokenStream>> {
     let inner = option_inner(field.ty).unwrap_or(field.ty);
-    // `serde_json::Value` opts out of type checking.
     if leaf_ident(inner).as_deref() == Some("Value") {
         return Ok(None);
     }
@@ -201,7 +197,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             }
             Ok(None)
         }
-        MappingType::Object if resolved.children.is_empty() => Ok(None), // json → anything
+        MappingType::Object if resolved.children.is_empty() => Ok(None),
         MappingType::Object => {
             if vec_inner(inner).is_some() || is_primitive(leaf_ident(inner).as_deref()) {
                 return Err(shape_error(field, os, "a struct (a sub-object)"));
@@ -211,7 +207,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
         scalar => {
             let expected = expected_leaves(scalar);
             if expected.is_empty() {
-                return Ok(None); // unrecognized OpenSearch type → accept anything
+                return Ok(None);
             }
             let found = leaf_ident(inner);
             if found.as_deref().is_some_and(|f| expected.contains(&f)) {
@@ -341,8 +337,6 @@ fn is_primitive(ident: Option<&str>) -> bool {
         )
     )
 }
-
-// ── codegen ──────────────────────────────────────────────────────────────────
 
 /// Generate the field-handle `impl` (a handle per schema field at this level),
 /// plus — at the root — the `FlussoDocument` trait impl (`INDEX`/`SCHEMA_HASH`,
@@ -477,8 +471,6 @@ fn nested_element(resolved: &ResolvedField, fields: &[DocField]) -> Option<Token
     Some(quote! { #elem })
 }
 
-// ── type helpers ─────────────────────────────────────────────────────────────
-
 /// The last path segment ident of a type, e.g. `Option<String>` → `Option`,
 /// `rust_decimal::Decimal` → `Decimal`.
 fn leaf_ident(ty: &Type) -> Option<String> {
@@ -488,12 +480,10 @@ fn leaf_ident(ty: &Type) -> Option<String> {
     }
 }
 
-/// The `T` of an `Option<T>`.
 fn option_inner(ty: &Type) -> Option<&Type> {
     single_generic(ty, "Option")
 }
 
-/// The `T` of a `Vec<T>`.
 fn vec_inner(ty: &Type) -> Option<&Type> {
     single_generic(ty, "Vec")
 }
@@ -546,7 +536,6 @@ fn apply_rename_all(name: &str, rule: &str) -> String {
         "SCREAMING-KEBAB-CASE" => words.join("-").to_ascii_uppercase(),
         "lowercase" => words.concat().to_ascii_lowercase(),
         "UPPERCASE" => words.concat().to_ascii_uppercase(),
-        // "snake_case" and anything unrecognized → unchanged.
         _ => name.to_string(),
     }
 }

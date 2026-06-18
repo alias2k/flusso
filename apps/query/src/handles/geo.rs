@@ -41,7 +41,6 @@ pub struct Geo<S = Root> {
 }
 
 impl<S> Geo<S> {
-    /// Build a handle for the field at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),

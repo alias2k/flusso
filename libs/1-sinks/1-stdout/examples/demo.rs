@@ -15,8 +15,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index = IndexName::try_new("users").map_err(|e| e.to_string())?;
     let sink = StdoutSink::new(false);
 
-    // A document shaped like what the Postgres builder assembles: a root with a
-    // nested one-to-many relation.
     let document = GenericValue::Map(BTreeMap::from([
         ("id".to_owned(), GenericValue::Int(42)),
         (

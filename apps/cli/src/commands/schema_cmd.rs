@@ -30,7 +30,6 @@ pub(crate) fn execute(args: SchemaArgs) -> anyhow::Result<()> {
         SchemaKind::Index => schema::INDEX_SCHEMA,
     };
     let mut out = std::io::stdout().lock();
-    // Normalize to exactly one trailing newline regardless of the file's.
     writeln!(out, "{}", body.trim_end())?;
     Ok(())
 }

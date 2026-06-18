@@ -91,8 +91,6 @@ fn resolve_connection_url(config: &Config) -> anyhow::Result<String> {
     Ok(url.as_ref().to_owned())
 }
 
-/// Build the replication client config from the source connection URL plus the
-/// slot and publication names.
 fn replication_config(
     connection_url: &str,
     slot: &str,

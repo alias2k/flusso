@@ -93,7 +93,6 @@ pub struct PgDocumentBuilder {
 }
 
 impl PgDocumentBuilder {
-    /// Create a builder over a connection pool and the source spec.
     pub fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
         Self {
             pool,
@@ -103,7 +102,6 @@ impl PgDocumentBuilder {
         }
     }
 
-    /// Connect a pool from a Postgres connection URL and build over it.
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -321,7 +319,6 @@ impl DocumentBuilder for PgDocumentBuilder {
     async fn resolve(&self, table: &TableName, key: &RowKey) -> Result<Vec<DocumentId>> {
         let mut ids = Vec::new();
         for (name, schema) in self.spec.indexes() {
-            // Change on the document's own root table: the key is the id.
             if schema.table == *table {
                 ids.push(DocumentId {
                     index: name.clone(),
@@ -330,7 +327,6 @@ impl DocumentBuilder for PgDocumentBuilder {
                 continue;
             }
 
-            // Change on a related table: resolve every path back to the root.
             let mut paths = Vec::new();
             let mut prefix = Vec::new();
             find_paths(&schema.fields, table, &mut prefix, &mut paths);
@@ -403,7 +399,6 @@ impl DocumentBuilder for PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.build_many", level = "debug", skip_all, fields(ids = ids.len()))]
     async fn build_many(&self, ids: &[DocumentId]) -> Result<Vec<Document>> {
-        // Group by index: each index has its own schema, root table, and key.
         let mut by_index: HashMap<&IndexName, Vec<&DocumentId>> = HashMap::new();
         for id in ids {
             by_index.entry(&id.index).or_default().push(id);
