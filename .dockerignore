@@ -1,5 +1,7 @@
 # Keep the build context small and the build reproducible.
-target/
+# `**/target/` (not just `target/`) so nested build dirs are excluded too — e.g.
+# the fuzz crate's own workspace at libs/1-sources/1-postgres/fuzz/target/ (~1GB).
+**/target/
 .git/
 .github/
 **/*.md

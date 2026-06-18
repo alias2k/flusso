@@ -17,20 +17,39 @@
 #
 #   docker build --target demo -t flusso:dev .
 
-# ---- builder ----
-FROM rust:1-bookworm AS builder
+# ---- chef (shared build base: official Rust + cargo-chef) ----
+# cargo-chef distills the dependency graph into a recipe and compiles ONLY the
+# dependencies as a standalone layer, so the CI `cache-to/from: type=gha` layer
+# cache reuses the expensive dependency build on every build where Cargo.toml /
+# Cargo.lock are unchanged. (Plain `--mount=type=cache` dirs are NOT exported by
+# the gha cache, so the previous Dockerfile recompiled cold on every release.)
+FROM rust:1-bookworm AS chef
 WORKDIR /usr/src/flusso
+RUN cargo install cargo-chef --locked
 
-# The whole workspace (see .dockerignore for what's excluded). The pinned
-# toolchain in rust-toolchain.toml is honored by rustup automatically.
+# ---- planner (distill the dependency graph into recipe.json) ----
+FROM chef AS planner
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Build the release binary (default-members = apps/cli → the `flusso` binary).
-# Cache the cargo registry and target dir across builds; the binary lives inside
-# the cached target mount, so copy it out to a real path in the same RUN.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/src/flusso/target \
-    cargo build --release --locked \
+# ---- builder ----
+FROM chef AS builder
+# The pinned toolchain must be in place BEFORE cooking: the cached dependency
+# layer has to be compiled with the SAME rustc as the final build, or a
+# toolchain mismatch re-fingerprints every artifact and the cache buys nothing.
+# rust-toolchain.toml is not part of the recipe, so copy it in explicitly.
+COPY rust-toolchain.toml .
+COPY --from=planner /usr/src/flusso/recipe.json recipe.json
+
+# Compile dependencies only. This is the layer the gha cache persists — keyed on
+# recipe.json, it is reused until a dependency in Cargo.toml/Cargo.lock changes.
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Now the workspace itself. Its dependencies are already compiled in target/, so
+# this only builds flusso's own crates (default-members = apps/cli → the `flusso`
+# binary). Copy the binary out to a real path for the runtime stage.
+COPY . .
+RUN cargo build --release --locked \
     && cp target/release/flusso /usr/local/bin/flusso
 
 # ---- runtime (the published image) ----
