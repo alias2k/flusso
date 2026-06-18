@@ -1,6 +1,8 @@
 # flusso plugin
 
-A Claude Code plugin that teaches an agent to work with [flusso](https://github.com/alias2k/flusso) — declarative Postgres → OpenSearch sync. It covers all three sides: **authoring** config/schemas, **integrating/migrating** a deployment, **querying** the index from Rust, and **contributing** to the flusso codebase.
+A Claude Code plugin that teaches an agent to work with [flusso](https://github.com/alias2k/flusso) — declarative Postgres → OpenSearch sync. It covers the whole stack: **authoring** config/schemas, the **Postgres** source and **OpenSearch** sink substrate, **querying** the index from Rust, **integrating/migrating** a deployment, and **contributing** to the flusso codebase.
+
+Type **`/flusso:expert`** to drop into an expert that answers "how does X work?" and drives real work (new index → query it, update an existing one), backed by the knowledge skills below.
 
 ## Install
 
@@ -13,13 +15,17 @@ A Claude Code plugin that teaches an agent to work with [flusso](https://github.
 
 ## What's inside
 
-### Skills (model-invoked, loaded on demand)
+### Skills (model-invoked, loaded on demand) — the knowledge corpus
+
+One module per domain, layered the way flusso is (source → bridge → sink). They auto-trigger on a matching question, and they double as the `flusso-expert` agent's reference corpus.
 
 | Skill | Use when |
 | --- | --- |
+| `flusso-postgres` | Understanding/debugging the **source** — logical replication, the slot, the publication (`manage_publication`), `REPLICA IDENTITY`, relational→join mapping, privileges. |
 | `flusso-schema` | Creating/editing a `*.schema.yml` or `flusso.toml` — type-first fields, joins, aggregates, geo, filters, soft-delete, validation. |
-| `flusso-integrate` | Standing flusso up in a project or migrating from a hand-rolled indexer — prerequisites, config, first index, `check`, `run`, `build`. |
 | `flusso-query` | Writing read-side Rust with `flusso-query` + `#[derive(FlussoDocument)]` — typed query surface, nested filtering, custom value types, multi-index. |
+| `flusso-opensearch` | Understanding the **sink** — `dynamic:strict` ownership, hashed index + alias, generations/reindex, the `flusso_*` analyzers + subfields (which to query), refresh. |
+| `flusso-integrate` | Standing flusso up in a project or migrating from a hand-rolled indexer — prerequisites, config, first index, `check`, `run`, `build`. |
 | `flusso-internals` | Modifying the flusso Rust codebase — crate layering, the sync pipeline, engine invariants, the query derive, the strict lints, CI order. |
 
 Each schema/query skill ships worked `examples/` you can copy from.
@@ -28,13 +34,14 @@ Each schema/query skill ships worked `examples/` you can copy from.
 
 | Command | Does |
 | --- | --- |
+| `/flusso:expert [question or task]` | **Enter expert mode** — answer questions or drive flusso work, backed by the skills; escalates heavy multi-file work to the `flusso-expert` agent. |
 | `/flusso-new-index <name> [table]` | Scaffold a new index: a `*.schema.yml` + its `[[index]]` entry. |
 | `/flusso-check [path]` | Run `flusso check` and triage any validation errors. |
 | `/flusso-doc-struct <index> [Struct]` | Scaffold a typed `#[derive(FlussoDocument)]` query struct. |
 
 ### Agent
 
-`flusso-expert` — a subagent with the full mental model, for multi-file flusso tasks (designing a schema, planning a migration, query-side Rust, codebase changes). Delegate to it when a task spans several files.
+`flusso-expert` — a subagent with the full mental model, for multi-file flusso tasks (designing a schema, planning a migration, query-side Rust, substrate debugging, codebase changes). Its knowledge base is the skills above, which it **reads** from `${CLAUDE_PLUGIN_ROOT}/skills/` (agents can't invoke skills), with the repo docs and the `flusso` binary as fallback/ground truth. `/flusso:expert` delegates to it when a task spans several files.
 
 ### Hook — auto-validation
 
@@ -49,5 +56,7 @@ A `PostToolUse` hook (`hooks/flusso_validate.py`) runs **after any edit** to a `
 
 ## Design notes
 
+- **One corpus, three consumers.** The skills are the single knowledge source. They auto-trigger for the dev (ambient "how does X work?"), they're the body `/flusso:expert` routes through, and they're what the `flusso-expert` agent reads (`${CLAUDE_PLUGIN_ROOT}/skills/`) since agents can't invoke skills. No duplicated knowledge — `/flusso:expert` and the agent are thin layers over the same files.
+- **Substrate is scoped, not copied.** `flusso-postgres` and `flusso-opensearch` carry only the *flusso-relevant slice* of each system and link out to the official docs for the rest — flusso's own behavior is documented in full; Postgres/OpenSearch are not re-manualed.
 - **Self-contained.** Skills point at `flusso schema index|config` to generate live JSON Schemas for editor validation, and at the repo docs (`SCHEMA.md`, `SOURCES_AND_SINKS.md`, `CONFIG.md`, `CLIENT.md`, `CLAUDE.md`) as the source of truth — they don't bundle stale copies, and they assume **none** of the repo's `dev/` paths.
 - **Validation-first.** Every authoring/config workflow ends in `flusso check`; codebase work ends by matching CI order under the strict workspace lints.

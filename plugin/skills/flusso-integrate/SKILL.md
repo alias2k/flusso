@@ -53,7 +53,7 @@ Define multiple `[sinks.<name>]` and flusso **fans out** — every document land
 One `*.schema.yml` per `[[index]]`. Use the **flusso-schema** skill for the field syntax. Minimal:
 
 ```yaml
-# yaml-language-server: $schema=./index.schema.yml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
 version: 1
 table: users
 primary_key: id
