@@ -27,7 +27,7 @@ toml = { workspace = true }
 [dev-dependencies]
 # The runtime, with the derive re-exported — the real consumer surface. (A
 # dev-dependency cycle, which Cargo allows.)
-flusso-query = { path = "../query", features = ["derive"] }
+flusso-query = { path = "../query", features = ["derive", "uuid"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 trybuild = "1"

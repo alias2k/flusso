@@ -24,6 +24,8 @@ use serde_json::{Map, Value};
 
 use crate::query::Query;
 
+mod compound;
+mod extra;
 mod geo;
 mod nested;
 mod object;
@@ -31,20 +33,113 @@ mod scalar;
 mod sort;
 mod string;
 
-pub use geo::{Geo, GeoPoint};
-pub use nested::{Nested, NestedProjection};
+pub use compound::{
+    BoostingQuery, ConstantScoreQuery, DisMaxQuery, FunctionScoreQuery, boosting, constant_score,
+    dis_max, function_score,
+};
+pub use extra::{
+    CombinedFieldsQuery, DistanceFeatureQuery, IdsQuery, MoreLikeThisQuery, QueryStringQuery,
+    RankFeatureQuery, ScriptQuery, ScriptScoreQuery, SimpleQueryStringQuery, combined_fields,
+    distance_feature, ids, more_like_this, query_string, rank_feature, script, script_score,
+    simple_query_string,
+};
+pub use geo::{Geo, GeoDistanceQuery, GeoPoint};
+pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
-pub use scalar::{Bool, Date, Number};
-pub use sort::{Sort, SortOrder};
-pub use string::{Keyword, Text, multi_match};
+pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
+pub use sort::{Sort, SortMode, SortOrder};
+pub use string::{
+    FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, PrefixQuery, RegexpQuery, TermQuery, Text,
+    WildcardQuery, multi_match,
+};
 
 /// `{ "<wrapper>": { "<path>": <value> } }`.
 fn single<S>(wrapper: &str, path: &str, value: Value) -> Query<S> {
     let mut inner = Map::new();
     inner.insert(path.to_string(), value);
+    wrap(wrapper, inner)
+}
+
+/// `{ "<wrapper>": { <body> } }`.
+fn wrap<S>(wrapper: &str, body: Map<String, Value>) -> Query<S> {
     let mut outer = Map::new();
-    outer.insert(wrapper.to_string(), Value::Object(inner));
+    outer.insert(wrapper.to_string(), Value::Object(body));
     Query::leaf(Value::Object(outer))
+}
+
+/// The universal leaf-query modifiers every builder carries: `boost` (a
+/// relevance multiplier) and `name` (`_name`, surfaced in a hit's
+/// `matched_queries`). Builders embed one and call [`Common::write`] when
+/// rendering.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Common {
+    boost: Option<f32>,
+    name: Option<String>,
+}
+
+impl Common {
+    pub(crate) fn set_boost(&mut self, boost: f32) {
+        self.boost = Some(boost);
+    }
+
+    pub(crate) fn set_name(&mut self, name: String) {
+        self.name = Some(name);
+    }
+
+    /// Whether neither modifier is set (so a builder may render the shorthand).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.boost.is_none() && self.name.is_none()
+    }
+
+    /// Write `boost` / `_name` into an option map, if set.
+    pub(crate) fn write(&self, map: &mut Map<String, Value>) {
+        if let Some(boost) = self.boost {
+            map.insert("boost".to_string(), Value::from(boost));
+        }
+        if let Some(name) = &self.name {
+            map.insert("_name".to_string(), Value::String(name.clone()));
+        }
+    }
+}
+
+/// Emit the universal `boost` / `name` setters on a builder whose [`Common`]
+/// lives in `self.$field`. Keeps the two methods identical across every builder.
+macro_rules! common_opts {
+    ($field:ident) => {
+        /// Multiply this clause's relevance score by `boost`.
+        #[must_use]
+        pub fn boost(mut self, boost: f32) -> Self {
+            self.$field.set_boost(boost);
+            self
+        }
+
+        /// Tag this clause with `_name`, surfaced in a hit's `matched_queries`.
+        #[must_use]
+        pub fn name(mut self, name: impl Into<String>) -> Self {
+            self.$field.set_name(name.into());
+            self
+        }
+    };
+}
+pub(crate) use common_opts;
+
+/// Render `{ wrapper: { path: <value> } }` (the DSL shorthand) when `opts` is
+/// empty, else `{ wrapper: { path: { <key>: <value>, ...opts } } }`. The shared
+/// shape for the value-bearing leaf queries (`term`/`prefix`/`wildcard`/… with
+/// `key = "value"`; `match`/`match_phrase`/… with `key = "query"`).
+fn keyed_value_query<S>(
+    wrapper: &str,
+    path: &str,
+    key: &str,
+    value: Value,
+    mut opts: Map<String, Value>,
+) -> Query<S> {
+    if opts.is_empty() {
+        single(wrapper, path, value)
+    } else {
+        opts.insert(key.to_string(), value);
+        single(wrapper, path, Value::Object(opts))
+    }
 }
 
 /// `{ "exists": { "field": "<path>" } }`.
@@ -54,15 +149,6 @@ fn exists_q<S>(path: &str) -> Query<S> {
     let mut outer = Map::new();
     outer.insert("exists".to_string(), Value::Object(inner));
     Query::leaf(Value::Object(outer))
-}
-
-/// `{ "range": { "<path>": { <bounds…> } } }`.
-fn range_q<S>(path: &str, bounds: Vec<(&str, Value)>) -> Query<S> {
-    let mut body = Map::new();
-    for (key, value) in bounds {
-        body.insert(key.to_string(), value);
-    }
-    single("range", path, Value::Object(body))
 }
 
 /// `{ "match_all": {} }`.
@@ -110,6 +196,10 @@ pub trait FlussoValue<K> {}
 
 impl FlussoValue<kind::Keyword> for String {}
 impl FlussoValue<kind::Keyword> for &str {}
+#[cfg(feature = "uuid")]
+impl FlussoValue<kind::Keyword> for uuid::Uuid {}
+#[cfg(feature = "uuid")]
+impl FlussoValue<kind::Keyword> for &uuid::Uuid {}
 
 impl FlussoValue<kind::Text> for String {}
 impl FlussoValue<kind::Text> for &str {}

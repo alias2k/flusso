@@ -96,13 +96,20 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
-    Binary, Bool, Date, FlussoValue, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection,
-    Number, Object, Sort, SortOrder, Text, kind, multi_match,
+    Binary, Bool, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DisMaxQuery,
+    DistanceFeatureQuery, EqQuery, FlussoValue, FunctionScoreQuery, FuzzyQuery, Geo,
+    GeoDistanceQuery, GeoPoint, IdsQuery, Json, Keyword, MatchQuery, MoreLikeThisQuery,
+    MultiMatchQuery, Nested, NestedProjection, NestedQuery, Number, Object, PrefixQuery,
+    QueryStringQuery, RangeQuery, RankFeatureQuery, RegexpQuery, ScriptQuery, ScriptScoreQuery,
+    SimpleQueryStringQuery, Sort, SortMode, SortOrder, TermQuery, TermsQuery, Text, WildcardQuery,
+    boosting, combined_fields, constant_score, dis_max, distance_feature, function_score, ids,
+    kind, more_like_this, multi_match, query_string, rank_feature, script, script_score,
+    simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};
 pub use query::{AsQuery, Query, Root};
-pub use search::{FlussoDocument, Hit, Search, SearchResponse};
+pub use search::{FlussoDocument, Highlight, Hit, Search, SearchResponse};
 
 /// `#[derive(FlussoDocument)]` — generates the typed query surface for a
 /// hand-written document struct (its field handles) and implements the
@@ -142,3 +149,9 @@ pub use rust_decimal::Decimal;
 /// feature.
 #[cfg(feature = "chrono")]
 pub use chrono;
+
+/// `uuid`, re-exported for `keyword` id / foreign-key fields. With this feature
+/// a `uuid::Uuid` field needs no `#[flusso(skip)]` and `id().eq(some_uuid)`
+/// works without `.to_string()`. Enabled by the `uuid` feature.
+#[cfg(feature = "uuid")]
+pub use uuid;

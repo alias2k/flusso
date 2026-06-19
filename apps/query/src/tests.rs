@@ -13,8 +13,8 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    Date, FlussoDocument, FlussoMultiDocument, Geo, GeoPoint, Keyword, MsearchBundle, Nested,
-    Number, Query, Search, SearchResponse, SortOrder, Text, multi_match,
+    AsQuery, Date, FlussoDocument, FlussoMultiDocument, Geo, GeoPoint, Keyword, MsearchBundle,
+    Nested, Number, Query, Search, SearchResponse, SortOrder, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -310,6 +310,462 @@ fn extended_term_and_text_operators() {
     assert_eq!(
         Text::<Root>::at("bio").matches_fuzzy("enginer").to_value(),
         json!({ "match": { "bio": { "query": "enginer", "fuzziness": "AUTO" } } })
+    );
+}
+
+#[test]
+fn builders_render_shorthand_without_options() {
+    // With no options a leaf builder still emits the DSL shorthand.
+    assert_eq!(
+        Keyword::<Root>::at("status").eq("paid").to_value(),
+        json!({ "term": { "status": "paid" } })
+    );
+    assert_eq!(
+        Number::<i64, Root>::at("n").gte(5).to_value(),
+        json!({ "range": { "n": { "gte": 5 } } })
+    );
+}
+
+#[test]
+fn universal_boost_and_name_expand_the_clause() {
+    assert_eq!(
+        Keyword::<Root>::at("status")
+            .eq("paid")
+            .boost(2.0)
+            .name("paid_clause")
+            .to_value(),
+        json!({ "term": { "status": {
+            "value": "paid", "boost": 2.0, "_name": "paid_clause"
+        } } })
+    );
+
+    // `terms` carries boost beside the field, not inside it.
+    assert_eq!(
+        Keyword::<Root>::at("status")
+            .in_(["paid", "shipped"])
+            .boost(1.5)
+            .to_value(),
+        json!({ "terms": { "status": ["paid", "shipped"], "boost": 1.5 } })
+    );
+
+    // `range` merges options into the bounds object.
+    assert_eq!(
+        Number::<i64, Root>::at("n").gte(5).boost(2.0).to_value(),
+        json!({ "range": { "n": { "gte": 5, "boost": 2.0 } } })
+    );
+}
+
+#[test]
+fn string_query_options_render() {
+    assert_eq!(
+        Keyword::<Root>::at("code")
+            .wildcard("*acme*")
+            .case_insensitive()
+            .boost(3.0)
+            .to_value(),
+        json!({ "wildcard": { "code": {
+            "value": "*acme*", "case_insensitive": true, "boost": 3.0
+        } } })
+    );
+
+    assert_eq!(
+        Keyword::<Root>::at("city")
+            .fuzzy("bostn")
+            .fuzziness("AUTO")
+            .prefix_length(1)
+            .to_value(),
+        json!({ "fuzzy": { "city": {
+            "value": "bostn", "fuzziness": "AUTO", "prefix_length": 1
+        } } })
+    );
+
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("ada")
+            .fuzziness("AUTO")
+            .operator("AND")
+            .to_value(),
+        json!({ "match": { "bio": {
+            "query": "ada", "fuzziness": "AUTO", "operator": "AND"
+        } } })
+    );
+
+    assert_eq!(
+        Text::<Root>::at("title")
+            .match_phrase("ada lovelace")
+            .slop(2)
+            .to_value(),
+        json!({ "match_phrase": { "title": { "query": "ada lovelace", "slop": 2 } } })
+    );
+}
+
+#[test]
+fn multi_match_carries_field_weights_and_options() {
+    let query = multi_match(
+        "acme",
+        [
+            Text::<Root>::at("name").boosted(3.0),
+            Text::<Root>::at("code"),
+        ],
+    )
+    .match_type("best_fields")
+    .tie_breaker(0.5)
+    .minimum_should_match("1");
+    assert_eq!(
+        query.to_value(),
+        json!({ "multi_match": {
+            "query": "acme",
+            "fields": ["name^3", "code"],
+            "type": "best_fields",
+            "tie_breaker": 0.5,
+            "minimum_should_match": "1"
+        } })
+    );
+}
+
+#[test]
+fn nested_query_options_render() {
+    let q = User::orders()
+        .any(Order::status().eq("delivered"))
+        .score_mode("max")
+        .ignore_unmapped(true);
+    assert_eq!(
+        q.to_value(),
+        json!({ "nested": {
+            "path": "orders",
+            "query": { "term": { "orders.status": "delivered" } },
+            "score_mode": "max",
+            "ignore_unmapped": true
+        } })
+    );
+}
+
+#[test]
+fn geo_distance_options_render() {
+    let here = GeoPoint::new(52.37, 4.90);
+    assert_eq!(
+        Geo::<Root>::at("location")
+            .within("10km", here)
+            .distance_type("plane")
+            .to_value(),
+        json!({ "geo_distance": {
+            "distance": "10km",
+            "location": { "lat": 52.37, "lon": 4.90 },
+            "distance_type": "plane"
+        } })
+    );
+}
+
+#[test]
+fn sort_builder_options_render() {
+    assert_eq!(
+        crate::Sort::score().to_value(),
+        json!({ "_score": { "order": "desc" } })
+    );
+
+    let body = Search::<User>::new("users", "xxxxxx")
+        .sort(
+            User::order_count()
+                .desc()
+                .missing_first()
+                .mode(crate::SortMode::Max),
+        )
+        .body();
+    assert_eq!(
+        body.pointer("/sort/0").cloned().unwrap_or_default(),
+        json!({ "orderCount": { "order": "desc", "missing": "_first", "mode": "max" } })
+    );
+}
+
+#[test]
+fn builder_or_composes_into_a_should_bool() {
+    // `.or()` on a builder lifts both sides into a should-bool.
+    let q = Text::<Root>::at("name")
+        .matches("acme")
+        .boost(2.0)
+        .or(Keyword::<Root>::at("code")
+            .wildcard("*acme*")
+            .case_insensitive());
+    assert_eq!(
+        q.to_value(),
+        json!({ "bool": { "should": [
+            { "match": { "name": { "query": "acme", "boost": 2.0 } } },
+            { "wildcard": { "code": { "value": "*acme*", "case_insensitive": true } } }
+        ] } })
+    );
+}
+
+#[test]
+fn min_should_match_makes_a_should_group_constraining() -> Result {
+    let body = User::query()
+        .filter(User::email().eq("ada@example.com"))
+        .should(User::full_name().matches("ada"))
+        .should(User::full_name().matches("lovelace"))
+        .min_should_match(1)
+        .body();
+    assert_eq!(
+        body.pointer("/query/bool/minimum_should_match")
+            .cloned()
+            .unwrap_or_default(),
+        json!(1)
+    );
+    Ok(())
+}
+
+#[test]
+fn query_min_should_match_and_boost_on_a_should_group() {
+    let q = Keyword::<Root>::at("a")
+        .eq("x")
+        .or(Keyword::<Root>::at("b").eq("y"))
+        .min_should_match(1)
+        .boost(2.0);
+    assert_eq!(
+        q.to_value(),
+        json!({ "bool": {
+            "should": [ { "term": { "a": "x" } }, { "term": { "b": "y" } } ],
+            "minimum_should_match": 1,
+            "boost": 2.0
+        } })
+    );
+}
+
+#[test]
+fn compound_queries_render() {
+    assert_eq!(
+        crate::constant_score(Keyword::<Root>::at("status").eq("paid"))
+            .boost(1.5)
+            .to_value(),
+        json!({ "constant_score": {
+            "filter": { "term": { "status": "paid" } },
+            "boost": 1.5
+        } })
+    );
+
+    assert_eq!(
+        crate::dis_max([
+            Text::<Root>::at("title").matches("ada"),
+            Text::<Root>::at("body").matches("ada"),
+        ])
+        .tie_breaker(0.5)
+        .to_value(),
+        json!({ "dis_max": {
+            "queries": [
+                { "match": { "title": "ada" } },
+                { "match": { "body": "ada" } }
+            ],
+            "tie_breaker": 0.5
+        } })
+    );
+
+    assert_eq!(
+        crate::boosting(
+            Text::<Root>::at("title").matches("ada"),
+            Keyword::<Root>::at("status").eq("archived"),
+            0.5,
+        )
+        .to_value(),
+        json!({ "boosting": {
+            "positive": { "match": { "title": "ada" } },
+            "negative": { "term": { "status": "archived" } },
+            "negative_boost": 0.5
+        } })
+    );
+
+    assert_eq!(
+        crate::function_score(Text::<Root>::at("title").matches("ada"))
+            .weight_when(2.0, Keyword::<Root>::at("status").eq("featured"))
+            .boost_mode("sum")
+            .to_value(),
+        json!({ "function_score": {
+            "query": { "match": { "title": "ada" } },
+            "functions": [ { "weight": 2.0, "filter": { "term": { "status": "featured" } } } ],
+            "boost_mode": "sum"
+        } })
+    );
+}
+
+#[test]
+fn ids_and_fulltext_queries_render() {
+    assert_eq!(
+        crate::ids::<Root>(["1", "2", "3"]).to_value(),
+        json!({ "ids": { "values": ["1", "2", "3"] } })
+    );
+
+    assert_eq!(
+        crate::query_string::<Root>("ada AND lovelace")
+            .default_field("bio")
+            .default_operator("AND")
+            .to_value(),
+        json!({ "query_string": {
+            "query": "ada AND lovelace",
+            "default_field": "bio",
+            "default_operator": "AND"
+        } })
+    );
+
+    assert_eq!(
+        crate::simple_query_string::<Root>("ada +lovelace")
+            .fields([
+                Text::<Root>::at("bio").boosted(2.0),
+                Text::<Root>::at("name")
+            ])
+            .to_value(),
+        json!({ "simple_query_string": {
+            "query": "ada +lovelace",
+            "fields": ["bio^2", "name"]
+        } })
+    );
+
+    assert_eq!(
+        crate::combined_fields("ada", [Text::<Root>::at("title"), Text::<Root>::at("body")])
+            .operator("AND")
+            .to_value(),
+        json!({ "combined_fields": {
+            "query": "ada",
+            "fields": ["title", "body"],
+            "operator": "AND"
+        } })
+    );
+}
+
+#[test]
+fn relevance_queries_render() {
+    assert_eq!(
+        crate::script_score(
+            Text::<Root>::at("title").matches("ada"),
+            "doc['boost'].value"
+        )
+        .to_value(),
+        json!({ "script_score": {
+            "query": { "match": { "title": "ada" } },
+            "script": { "source": "doc['boost'].value" }
+        } })
+    );
+
+    assert_eq!(
+        crate::distance_feature::<Root>("createdAt", "now", "7d")
+            .boost(2.0)
+            .to_value(),
+        json!({ "distance_feature": {
+            "field": "createdAt",
+            "origin": "now",
+            "pivot": "7d",
+            "boost": 2.0
+        } })
+    );
+
+    assert_eq!(
+        crate::rank_feature::<Root>("pagerank")
+            .saturation(8.0)
+            .to_value(),
+        json!({ "rank_feature": { "field": "pagerank", "saturation": { "pivot": 8.0 } } })
+    );
+}
+
+#[test]
+fn search_level_features_render() -> Result {
+    let body = User::query()
+        .query(User::full_name().matches("ada"))
+        .min_score(1.5)
+        .track_total_hits(true)
+        .track_scores(true)
+        .collapse("email")
+        .search_after([json!("ada"), json!(42)])
+        .post_filter(User::email().eq("ada@example.com"))
+        .highlight(
+            crate::Highlight::new()
+                .field("fullName")
+                .pre_tags(["<em>"])
+                .post_tags(["</em>"]),
+        )
+        .body();
+
+    assert_eq!(
+        body.pointer("/min_score").cloned().unwrap_or_default(),
+        json!(1.5)
+    );
+    assert_eq!(
+        body.pointer("/track_total_hits")
+            .cloned()
+            .unwrap_or_default(),
+        json!(true)
+    );
+    assert_eq!(
+        body.pointer("/collapse").cloned().unwrap_or_default(),
+        json!({ "field": "email" })
+    );
+    assert_eq!(
+        body.pointer("/search_after").cloned().unwrap_or_default(),
+        json!(["ada", 42])
+    );
+    assert_eq!(
+        body.pointer("/post_filter").cloned().unwrap_or_default(),
+        json!({ "term": { "email": "ada@example.com" } })
+    );
+    assert_eq!(
+        body.pointer("/highlight").cloned().unwrap_or_default(),
+        json!({ "fields": { "fullName": {} }, "pre_tags": ["<em>"], "post_tags": ["</em>"] })
+    );
+    Ok(())
+}
+
+#[test]
+fn ids_body_includes_search_level_but_not_highlight() -> Result {
+    let body = User::query()
+        .min_score(2.0)
+        .highlight(crate::Highlight::new().field("fullName"))
+        .ids_body();
+    assert_eq!(
+        body.pointer("/min_score").cloned().unwrap_or_default(),
+        json!(2.0)
+    );
+    assert!(body.pointer("/highlight").is_none());
+    Ok(())
+}
+
+#[cfg(feature = "uuid")]
+#[test]
+fn uuid_is_a_keyword_value() {
+    let id = crate::uuid::Uuid::nil();
+    assert_eq!(
+        Keyword::<Root>::at("ownerId").eq(id).to_value(),
+        json!({ "term": { "ownerId": "00000000-0000-0000-0000-000000000000" } })
+    );
+    // `in_` over uuids works too.
+    assert_eq!(
+        Keyword::<Root>::at("ownerId").in_([id]).to_value(),
+        json!({ "terms": { "ownerId": ["00000000-0000-0000-0000-000000000000"] } })
+    );
+}
+
+#[test]
+fn subfield_accessors_target_the_right_subfield() {
+    // Exact / wildcard go to the `.keyword` subfield of a text field.
+    assert_eq!(
+        User::full_name().keyword().eq("Ada Lovelace").to_value(),
+        json!({ "term": { "fullName.keyword": "Ada Lovelace" } })
+    );
+    assert_eq!(
+        User::full_name()
+            .keyword()
+            .wildcard("*lovelace*")
+            .case_insensitive()
+            .to_value(),
+        json!({ "wildcard": { "fullName.keyword": {
+            "value": "*lovelace*", "case_insensitive": true
+        } } })
+    );
+
+    // Case-insensitive sort goes to `.keyword_lowercase`.
+    assert_eq!(
+        User::full_name().keyword_lowercase().asc().to_value(),
+        json!({ "fullName.keyword_lowercase": { "order": "asc" } })
+    );
+
+    // A keyword field's `.text` subfield is full-text searchable.
+    assert_eq!(
+        User::email().text().matches("ada").to_value(),
+        json!({ "match": { "email.text": "ada" } })
     );
 }
 

@@ -7,7 +7,7 @@ Generate a hand-written `#[derive(FlussoDocument)]` projection struct for the fl
 
 1. Locate `flusso.toml` and the `[[index]]` named `$1`; open its `schema:` file to read the field list (ask if it can't be found).
 2. For each schema field, emit a struct field using the flusso-type → Rust-type table:
-   - keyword/enum/text/identifier/uuid → `String`; numbers → `i16/i32/i64/f32/f64`; `boolean` → `bool`; `date`/`timestamp` → a date leaf (`time`/`chrono` feature) or `String`; `json` → `serde_json::Value`; `geo` → `GeoPoint`.
+   - keyword/text/identifier → `String` (or a `#[derive(FlussoValue)]` newtype/enum); `enum` → `String` or a `#[derive(FlussoValue)]` enum; `uuid` → `String` or `uuid::Uuid` (`uuid` feature) — never `#[flusso(skip)]`; numbers → `i16/i32/i64/f32/f64`; `boolean` → `bool`; `date`/`timestamp` → a date leaf (`time`/`chrono` feature) or `String`; `json` → `serde_json::Value`; `geo` → `GeoPoint`.
    - `object`/`belongs_to`/`has_one` → a child struct (`Option<_>` for the to-one joins); `has_many`/`many_to_many` → `Vec<ChildStruct>`.
    - **Nullability:** non-null for primary keys, `required: true`, objects, `count`, and to-many joins; `Option<_>` for `required: false`, to-one joins, and `avg`/`sum`/`min`/`max`.
    - Add `#[serde(rename = "docKey")]` when the document key (case-preserved, often camelCase) differs from the snake_case Rust field.

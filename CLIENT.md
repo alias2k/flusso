@@ -181,19 +181,38 @@ Each operator's argument is typed too: `User::order_count().gte(_)` takes an
 `i64`, `.between(_, _)` takes two; `User::email().in_(_)` takes an
 `IntoIterator<Item = impl Into<String>>`.
 
+**Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields
+(`auto_subfields`, on by default) with exact / sortable / searchable subfields,
+and the handles expose them — no `Keyword::at("code.keyword")` string path:
+
+```rust
+User::full_name()                      // Text   → analyzed full-text match
+User::full_name().keyword()            // Keyword → exact / wildcard / prefix
+User::full_name().keyword_lowercase()  // Keyword → case-insensitive match / sort
+User::email().text()                   // Text    → full-text over a keyword field
+```
+
+(A `wildcard` belongs on `.keyword()`, not the analyzed handle, which matches
+tokens not the whole value.) These are valid when `auto_subfields` is on and the
+field defines no custom `fields`.
+
 Sorting is the same — `sort(…)` only accepts handles whose type is sortable
 (numbers, dates, keywords, booleans), so `sort(User::full_name().desc())` on a
-`text` field is a compile error.
+`text` field is a compile error (use `User::full_name().keyword().desc()` for an
+exact sort, or `.keyword_lowercase()` for a case-insensitive one).
 
 A few clauses span more than one field, so they're free functions:
 `multi_match("ada", [User::full_name(), User::bio()])` runs one analyzed query
-across several `Text` fields.
+across several `Text` fields (weight one with `User::full_name().boosted(3.0)`).
 
-Anything outside the typed surface — `knn`, `function_score`, `script`,
-`geo_shape`, span queries — stays reachable through the
-[`raw`](#the-escape-hatch) hatch. Lifting every clause into a typed handle would
-dilute the type guarantee (a `regexp` on a number is meaningless), so the typed
-surface is the operators that fit a field's type, and nothing more.
+The typed surface is broad — see [Query options and extra query
+types](#query-options-and-extra-query-types) for the per-query options
+(`boost`/`case_insensitive`/`fuzziness`/…), the compound/scoring queries
+(`constant_score`/`dis_max`/`function_score`/`boosting`), the standalone ones
+(`ids`/`query_string`/`simple_query_string`/`script_score`/…), and the
+search-level controls (`min_score`/`collapse`/`search_after`/`highlight`/…).
+What's left for the [`raw`](#the-escape-hatch) hatch is `knn`, `geo_shape`, span
+and parent/child queries — types with no corresponding flusso field.
 
 ### Composing queries
 
@@ -252,6 +271,65 @@ let user_ids: Vec<String> = User::query()
     .ids(&client)
     .await?;
 ```
+
+### Query options and extra query types
+
+Each leaf operator returns a small **builder** that carries that query's options
+plus the universal `boost(f32)` and `name(&str)` (`_name`, surfaced in a hit's
+`matched_queries`). With no option set it renders the DSL shorthand; set one and
+it expands. A builder drops straight into a clause (it's an `AsQuery`), so no
+`.build()` is needed:
+
+```rust
+User::query()
+    .should(User::full_name().matches("acme").boost(2.0))         // weighted text
+    .should(User::full_name().keyword().wildcard("*acme*").case_insensitive())
+    .should(User::full_name().matches("acme").fuzziness("AUTO"))  // typo-tolerant
+    .min_should_match(1)                                          // make should a real filter
+    .filter(User::owner_id().eq(owner_uuid))                      // uuid keyword (feature)
+    .filter(User::tier().eq(Tier::Pro))                           // enum keyword
+    .sort(User::created_at().desc().missing_first())              // null-aware sort
+    .send(&client).await?;
+```
+
+The options per query type (all optional): `case_insensitive` on
+`term`/`prefix`/`wildcard`/`regexp`; `rewrite` on `prefix`/`wildcard`;
+`flags`/`max_determinized_states` on `regexp`;
+`fuzziness`/`prefix_length`/`max_expansions`/`transpositions` on `fuzzy`;
+`fuzziness`/`operator`/`minimum_should_match`/`prefix_length`/`analyzer`/
+`zero_terms_query`/`lenient` on `matches`; `slop`/`analyzer` on the phrase
+matches; `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` on
+`multi_match`; `format`/`time_zone`/`relation` on a range; `distance_type`/
+`validation_method` on `within` (geo); `score_mode`/`ignore_unmapped` on a
+nested `any`.
+
+> **`.or()` / `.and()` on a builder** need `use flusso_query::AsQuery;` in scope
+> (the combinators are provided methods on that trait). Composing via the
+> `Search` clauses (`.should()`/`.filter()`/…) needs no import.
+
+**Bool / compound & scoring.** `Search::min_should_match(n)` (or
+`Query::min_should_match` on an `or`-group) turns a top-level free-text `should`
+group into a real constraint instead of scoring-only. The scoring wrappers are
+free functions: `constant_score(filter)`, `dis_max([..]).tie_breaker(..)`,
+`boosting(positive, negative, negative_boost)`, and
+`function_score(query).weight(..)/.weight_when(.., filter)/.boost_mode(..)`.
+
+**Standalone query types** (free functions, each an `AsQuery`): `ids([..])`
+(get-many-by-`_id`), `query_string(..)` / `simple_query_string(..)` /
+`combined_fields(.., [fields])` (user-facing full-text), and the relevance ones
+`script(..)`, `script_score(query, source)`, `distance_feature(..)`,
+`rank_feature(..)`, `more_like_this([fields], [like])`. `match_bool_prefix` is a
+`Text` operator (search-as-you-type).
+
+**Sort.** `.asc()`/`.desc()` on a sortable handle return a `Sort` builder:
+chain `.missing_first()`/`.missing_last()`/`.missing(v)`, `.mode(SortMode::..)`,
+`.unmapped_type(..)`/`.numeric_type(..)`/`.format(..)`, or
+`.nested(path)`/`.nested_filtered(path, q)`. Also `Sort::score()` (by `_score`)
+and `Sort::script(type, source, order)`.
+
+**Search-level** controls on the `Search` builder: `min_score`,
+`track_total_hits`, `track_scores`, `search_after([..])` (deep pagination),
+`collapse(field)`, `post_filter(q)`, and `highlight(Highlight::new().field(..))`.
 
 ### Queries are values; the client appears once
 
@@ -642,9 +720,9 @@ else and it won't compile (modulo the leaf-identifier rule above).
 | ----------------- | ---------- | -------------------------------- | --------------- |
 | `text`            | `text`     | `String`                         | `Text`          |
 | `identifier`      | `text`     | `String`                         | `Text`          |
-| `keyword`         | `keyword`  | `String`                         | `Keyword`       |
-| `enum`            | `keyword`  | `String`                         | `Keyword`       |
-| `uuid`            | `keyword`  | `String` (or `uuid::Uuid`, feature) | `Keyword`    |
+| `keyword`         | `keyword`  | `String` (or a `FlussoValue` newtype) | `Keyword`  |
+| `enum`            | `keyword`  | `String` or a `#[derive(FlussoValue)]` enum | `Keyword` |
+| `uuid`            | `keyword`  | `String`, or `uuid::Uuid` (`uuid` feature) | `Keyword` |
 | `boolean`         | `boolean`  | `bool`                           | `Bool`          |
 | `short`           | `short`    | `i16`                            | `Number<i16>`   |
 | `integer`         | `integer`  | `i32`                            | `Number<i32>`   |
@@ -671,6 +749,29 @@ scaled_float } }`, `options: { scaling_factor: 100 }`); the derive then accepts
 **Dates** are behind a feature so a caller picks `time` or `chrono` (or `String`
 for raw ISO-8601); the derive accepts whichever leaf type the chosen feature settles
 on.
+
+**Enum keyword fields stay typed — never `#[flusso(skip)]`.** A status/type
+field is a Rust enum that derives `FlussoValue`; the derive accepts it for the
+field, and (with `Serialize`) it passes as a query value matched against its
+serde string form:
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+#[serde(rename_all = "camelCase")]
+#[flusso(keyword)]                 // the default kind; also text/number/date
+enum Tier { Pro, Enterprise, Free }
+
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "customers")]
+struct Customer { tier: Tier /* … */ }
+
+Customer::tier().eq(Tier::Pro);    // term against "pro"
+```
+
+**`uuid::Uuid` is a keyword value behind the `uuid` feature** — id / foreign-key
+fields stay in the struct as `Uuid` (no `#[flusso(skip)]`, no
+`Keyword::at("…")`), and `Customer::owner_id().eq(some_uuid)` works without
+`.to_string()`.
 
 ### Nullability is declared, not guessed
 
@@ -706,15 +807,17 @@ into the typed struct:
 ```rust
 let page: SearchResponse<User> = User::query()
     .raw(serde_json::json!({
-        "function_score": { "query": { "match_all": {} }, "random_score": {} }
+        "knn": { "embedding": { "vector": [/* … */], "k": 10 } }
     }))
     .send(&client)
     .await?;
 ```
 
-`raw` takes the OpenSearch query DSL verbatim — the pressure-release valve for geo
-queries, `function_score`, percolators, and anything else not in the typed surface
-— without dropping to an untyped client or losing typed results.
+`raw` takes the OpenSearch query DSL verbatim — the pressure-release valve for the
+few types with no flusso field (`knn`/vector, `geo_shape`, span and parent/child
+queries) and for percolators — without dropping to an untyped client or losing
+typed results. Most of what used to need it (`function_score`, `script`,
+`constant_score`, `query_string`, `search_after`, …) is now in the typed surface.
 
 ---
 
@@ -749,8 +852,8 @@ admin, or a hand-built `Search`.)
   result list](#one-blended-result-list-combined-search) and independent searches
   via [`_msearch`](#several-searches-one-round-trip-_msearch) — but *correlating*
   hits across indexes remains the caller's job.
-- **Scroll / `search_after` pagination.** `from`/`size` first; deep pagination is a
-  follow-on once the typed cursor shape is settled.
+- **Scroll pagination.** `from`/`size` and `search_after` (deep pagination) ship;
+  a scroll cursor is a follow-on.
 - **Generating the document struct.** By design — the developer owns the struct.
 
 ---

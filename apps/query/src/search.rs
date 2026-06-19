@@ -72,6 +72,13 @@ pub struct Search<T> {
     from: Option<u64>,
     size: Option<u64>,
     nested: Vec<NestedProjection>,
+    min_score: Option<f32>,
+    track_total_hits: Option<Value>,
+    track_scores: Option<bool>,
+    search_after: Option<Vec<Value>>,
+    collapse: Option<Value>,
+    post_filter: Option<Value>,
+    highlight: Option<Highlight>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -87,6 +94,13 @@ impl<T> Search<T> {
             from: None,
             size: None,
             nested: Vec::new(),
+            min_score: None,
+            track_total_hits: None,
+            track_scores: None,
+            search_after: None,
+            collapse: None,
+            post_filter: None,
+            highlight: None,
             _marker: PhantomData,
         }
     }
@@ -129,9 +143,75 @@ impl<T> Search<T> {
         self
     }
 
+    /// Require at least this many `should` clauses to match. Beside `query` /
+    /// `filter` clauses, `should` defaults to non-constraining (scoring only);
+    /// setting this makes a top-level `should`-group a real filter. Accepts an
+    /// integer (`1`) or an expression string (`"75%"`).
+    #[must_use]
+    pub fn min_should_match(mut self, value: impl Into<Value>) -> Self {
+        self.bool_query.set_min_should_match(value.into());
+        self
+    }
+
     #[must_use]
     pub fn sort(mut self, sort: Sort) -> Self {
         self.sort.push(sort);
+        self
+    }
+
+    /// Drop hits scoring below `min_score`.
+    #[must_use]
+    pub fn min_score(mut self, min_score: f32) -> Self {
+        self.min_score = Some(min_score);
+        self
+    }
+
+    /// Control how the hit total is counted. `true` counts exactly, `false`
+    /// disables counting, an integer caps accuracy at that many (e.g. `10_000`).
+    #[must_use]
+    pub fn track_total_hits(mut self, track: impl Into<Value>) -> Self {
+        self.track_total_hits = Some(track.into());
+        self
+    }
+
+    /// Compute relevance scores even when sorting by a field.
+    #[must_use]
+    pub fn track_scores(mut self, track: bool) -> Self {
+        self.track_scores = Some(track);
+        self
+    }
+
+    /// Deep-paginate after the given sort values (the last hit's `sort` array
+    /// from the previous page). Pair with a deterministic [`sort`](Self::sort).
+    #[must_use]
+    pub fn search_after(mut self, values: impl IntoIterator<Item = impl Into<Value>>) -> Self {
+        self.search_after = Some(values.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Collapse hits so only the top hit per `field` value is returned.
+    #[must_use]
+    pub fn collapse(mut self, field: impl Into<String>) -> Self {
+        let mut body = Map::new();
+        body.insert("field".to_string(), Value::String(field.into()));
+        self.collapse = Some(Value::Object(body));
+        self
+    }
+
+    /// A filter applied **after** scoring/aggregation — narrows the returned
+    /// hits without affecting scores or aggregations.
+    #[must_use]
+    pub fn post_filter(mut self, query: impl AsQuery<Root>) -> Self {
+        if let Some(query) = query.into_query() {
+            self.post_filter = Some(query.to_value());
+        }
+        self
+    }
+
+    /// Attach match highlighting (see [`Highlight`]).
+    #[must_use]
+    pub fn highlight(mut self, highlight: Highlight) -> Self {
+        self.highlight = Some(highlight);
         self
     }
 
@@ -202,6 +282,7 @@ impl<T> Search<T> {
         let mut root = Map::new();
         root.insert("query".to_string(), query);
         self.insert_page_params(&mut root);
+        self.insert_search_level(&mut root, true);
         Value::Object(root)
     }
 
@@ -217,6 +298,36 @@ impl<T> Search<T> {
         }
         if let Some(size) = self.size {
             root.insert("size".to_string(), Value::from(size));
+        }
+    }
+
+    /// Add the search-level keys that shape *which* hits return and how the
+    /// total/scores are reported (`min_score`, `track_total_hits`,
+    /// `track_scores`, `search_after`, `collapse`, `post_filter`, and —
+    /// `with_highlight` only — `highlight`). Shared by [`body`](Self::body) and
+    /// [`ids_body`](Self::ids_body); `highlight` is skipped for ids (no source
+    /// to highlight). `_count` gets none of these.
+    fn insert_search_level(&self, root: &mut Map<String, Value>, with_highlight: bool) {
+        if let Some(min_score) = self.min_score {
+            root.insert("min_score".to_string(), Value::from(min_score));
+        }
+        if let Some(track) = &self.track_total_hits {
+            root.insert("track_total_hits".to_string(), track.clone());
+        }
+        if let Some(track) = self.track_scores {
+            root.insert("track_scores".to_string(), Value::Bool(track));
+        }
+        if let Some(values) = &self.search_after {
+            root.insert("search_after".to_string(), Value::Array(values.clone()));
+        }
+        if let Some(collapse) = &self.collapse {
+            root.insert("collapse".to_string(), collapse.clone());
+        }
+        if let Some(post_filter) = &self.post_filter {
+            root.insert("post_filter".to_string(), post_filter.clone());
+        }
+        if with_highlight && let Some(highlight) = &self.highlight {
+            root.insert("highlight".to_string(), highlight.to_value());
         }
     }
 
@@ -241,6 +352,7 @@ impl<T> Search<T> {
         let mut root = Map::new();
         root.insert("query".to_string(), self.query_value());
         self.insert_page_params(&mut root);
+        self.insert_search_level(&mut root, false);
         root.insert("_source".to_string(), Value::Bool(false));
         Value::Object(root)
     }
@@ -368,6 +480,90 @@ pub(crate) fn merge_inner_hits(response: &mut Value, paths: &[&str]) {
                 .unwrap_or_default();
             source.insert((*path).to_string(), Value::Array(subset));
         }
+    }
+}
+
+/// Match highlighting for a [`Search`] (the `highlight` block). Name the fields
+/// to highlight and tune the tags / fragments; pass it to
+/// [`Search::highlight`].
+#[derive(Debug, Clone, Default)]
+pub struct Highlight {
+    fields: Map<String, Value>,
+    opts: Map<String, Value>,
+}
+
+impl Highlight {
+    /// An empty highlight config — add fields with [`field`](Self::field).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Highlight `field` with the default settings.
+    #[must_use]
+    pub fn field(mut self, field: impl Into<String>) -> Self {
+        self.fields.insert(field.into(), Value::Object(Map::new()));
+        self
+    }
+
+    /// Highlight `field` with explicit per-field settings (e.g. a custom
+    /// `fragment_size` / `matched_fields`).
+    #[must_use]
+    pub fn field_with(mut self, field: impl Into<String>, settings: Value) -> Self {
+        self.fields.insert(field.into(), settings);
+        self
+    }
+
+    /// Tags wrapping each highlighted snippet's start.
+    #[must_use]
+    pub fn pre_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.opts.insert(
+            "pre_tags".to_string(),
+            Value::Array(tags.into_iter().map(|t| Value::String(t.into())).collect()),
+        );
+        self
+    }
+
+    /// Tags wrapping each highlighted snippet's end.
+    #[must_use]
+    pub fn post_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.opts.insert(
+            "post_tags".to_string(),
+            Value::Array(tags.into_iter().map(|t| Value::String(t.into())).collect()),
+        );
+        self
+    }
+
+    /// Character length of each highlighted fragment.
+    #[must_use]
+    pub fn fragment_size(mut self, fragment_size: u32) -> Self {
+        self.opts
+            .insert("fragment_size".to_string(), Value::from(fragment_size));
+        self
+    }
+
+    /// Maximum number of fragments returned per field.
+    #[must_use]
+    pub fn number_of_fragments(mut self, number_of_fragments: u32) -> Self {
+        self.opts.insert(
+            "number_of_fragments".to_string(),
+            Value::from(number_of_fragments),
+        );
+        self
+    }
+
+    /// Only highlight fields that the query matched (default `true`).
+    #[must_use]
+    pub fn require_field_match(mut self, require: bool) -> Self {
+        self.opts
+            .insert("require_field_match".to_string(), Value::Bool(require));
+        self
+    }
+
+    fn to_value(&self) -> Value {
+        let mut body = self.opts.clone();
+        body.insert("fields".to_string(), Value::Object(self.fields.clone()));
+        Value::Object(body)
     }
 }
 

@@ -41,6 +41,8 @@ pub(crate) struct BoolInner {
     filter: Vec<Inner>,
     should: Vec<Inner>,
     must_not: Vec<Inner>,
+    minimum_should_match: Option<Value>,
+    boost: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,6 +95,12 @@ impl BoolInner {
         insert_clause(&mut body, "filter", &self.filter);
         insert_clause(&mut body, "should", &self.should);
         insert_clause(&mut body, "must_not", &self.must_not);
+        if let Some(msm) = &self.minimum_should_match {
+            body.insert("minimum_should_match".to_string(), msm.clone());
+        }
+        if let Some(boost) = self.boost {
+            body.insert("boost".to_string(), Value::from(boost));
+        }
         let mut outer = Map::new();
         outer.insert("bool".to_string(), Value::Object(body));
         Value::Object(outer)
@@ -135,6 +143,17 @@ fn combine(a: Inner, b: Inner, clause: Clause) -> Inner {
     Inner::Bool(combined)
 }
 
+/// Combine two optional clauses under `clause`, treating an absent side as the
+/// identity (so `Some(a).or(None)` is just `a`). Both absent → `match_all`.
+/// Backs the [`AsQuery`] `and`/`or` combinators, which any builder inherits.
+fn combine_opt<S>(a: Option<Query<S>>, b: Option<Query<S>>, clause: Clause) -> Query<S> {
+    match (a, b) {
+        (Some(a), Some(b)) => Query::wrap(combine(a.inner, b.inner, clause)),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => Query::match_all(),
+    }
+}
+
 impl<S> Query<S> {
     /// Wrap a leaf clause value. Crate-internal: handles call this.
     pub(crate) fn leaf(value: Value) -> Self {
@@ -142,6 +161,11 @@ impl<S> Query<S> {
             inner: Inner::Leaf(value),
             _scope: PhantomData,
         }
+    }
+
+    /// A `match_all` clause — the identity when combining absent clauses.
+    pub(crate) fn match_all() -> Self {
+        Query::leaf(crate::handles::match_all_value())
     }
 
     fn wrap(inner: Inner) -> Self {
@@ -179,6 +203,46 @@ impl<S> Query<S> {
         }))
     }
 
+    /// Set `boost` on this clause. On a `bool` (an `and`/`or`/`not` result) it
+    /// becomes the bool's `boost`; a leaf clause is wrapped in a `bool` whose
+    /// single `must` is the leaf (prefer the leaf builder's own `boost` there).
+    #[must_use]
+    pub fn boost(mut self, boost: f32) -> Query<S> {
+        self.inner = match self.inner {
+            Inner::Bool(mut bool_inner) => {
+                bool_inner.boost = Some(boost);
+                Inner::Bool(bool_inner)
+            }
+            leaf => Inner::Bool(BoolInner {
+                must: vec![leaf],
+                boost: Some(boost),
+                ..BoolInner::default()
+            }),
+        };
+        self
+    }
+
+    /// Set `minimum_should_match` on a `should`-group. Use this on an `or`
+    /// chain (or `Search::min_should_match`) so the optional clauses become a
+    /// real constraint — without it, `should` beside `must`/`filter` only
+    /// scores. Accepts an integer (`1`) or an expression string (`"75%"`). A
+    /// leaf clause is wrapped as a single `should`.
+    #[must_use]
+    pub fn min_should_match(mut self, value: impl Into<Value>) -> Query<S> {
+        self.inner = match self.inner {
+            Inner::Bool(mut bool_inner) => {
+                bool_inner.minimum_should_match = Some(value.into());
+                Inner::Bool(bool_inner)
+            }
+            leaf => Inner::Bool(BoolInner {
+                should: vec![leaf],
+                minimum_should_match: Some(value.into()),
+                ..BoolInner::default()
+            }),
+        };
+        self
+    }
+
     /// Render to the OpenSearch query DSL.
     #[must_use]
     pub fn to_value(&self) -> Value {
@@ -213,6 +277,9 @@ impl BoolBuilder {
     pub(crate) fn push_must_not(&mut self, clause: InnerClause) {
         self.bool_inner.push(Clause::MustNot, clause.0);
     }
+    pub(crate) fn set_min_should_match(&mut self, value: Value) {
+        self.bool_inner.minimum_should_match = Some(value);
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self.bool_inner.is_empty()
     }
@@ -224,9 +291,57 @@ impl BoolBuilder {
 /// Anything that can become a query clause in scope `S`. A clause may be absent
 /// ([`into_query`](AsQuery::into_query) returns `None`) — that's what makes an
 /// `Option<Query<S>>` a first-class optional filter.
+///
+/// The leaf-query builders ([`TermQuery`](crate::TermQuery),
+/// [`WildcardQuery`](crate::WildcardQuery), [`MatchQuery`](crate::MatchQuery), …)
+/// implement this, so they drop straight into [`Search`](crate::Search) clauses
+/// and into `and`/`or`/`not` with no explicit `.build()`. The combinators here
+/// are *provided* methods; on a [`Query`] the inherent ones win, so a builder
+/// gains `and`/`or`/`not`/`to_value` for free while `Query`'s behavior is
+/// unchanged.
 pub trait AsQuery<S> {
     /// The clause this produces, or `None` to contribute nothing.
     fn into_query(self) -> Option<Query<S>>;
+
+    /// `self AND other`. An absent side is the identity.
+    #[must_use]
+    fn and(self, other: impl AsQuery<S>) -> Query<S>
+    where
+        Self: Sized,
+    {
+        combine_opt(self.into_query(), other.into_query(), Clause::Must)
+    }
+
+    /// `self OR other`. An absent side is the identity.
+    #[must_use]
+    fn or(self, other: impl AsQuery<S>) -> Query<S>
+    where
+        Self: Sized,
+    {
+        combine_opt(self.into_query(), other.into_query(), Clause::Should)
+    }
+
+    /// `NOT self` (negating an absent clause matches everything).
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    fn not(self) -> Query<S>
+    where
+        Self: Sized,
+    {
+        self.into_query().map_or_else(Query::match_all, Query::not)
+    }
+
+    /// Render this clause to the OpenSearch query DSL. An absent clause renders
+    /// as `match_all`. Handy for tests and debugging.
+    #[must_use]
+    fn to_value(&self) -> Value
+    where
+        Self: Sized + Clone,
+    {
+        self.clone()
+            .into_query()
+            .map_or_else(crate::handles::match_all_value, |q| q.to_value())
+    }
 }
 
 impl<S> AsQuery<S> for Query<S> {
