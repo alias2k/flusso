@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.3.1...flusso-query-derive-v0.3.2) - 2026-06-19
+
+### Other
+
+- document the completed query surface (§1b) + CHANGELOGs
+- *(query-derive)* issue #19 acceptance test (§1b fixture)
+
 ### Added
 
 - Acceptance test for the completed typed query surface (issue #19): a realistic
