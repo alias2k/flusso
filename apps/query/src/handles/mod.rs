@@ -24,6 +24,7 @@ use serde_json::{Map, Value};
 
 use crate::query::Query;
 
+mod compound;
 mod geo;
 mod nested;
 mod object;
@@ -31,6 +32,10 @@ mod scalar;
 mod sort;
 mod string;
 
+pub use compound::{
+    BoostingQuery, ConstantScoreQuery, DisMaxQuery, FunctionScoreQuery, boosting, constant_score,
+    dis_max, function_score,
+};
 pub use geo::{Geo, GeoDistanceQuery, GeoPoint};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};

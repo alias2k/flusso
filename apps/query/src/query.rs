@@ -41,6 +41,8 @@ pub(crate) struct BoolInner {
     filter: Vec<Inner>,
     should: Vec<Inner>,
     must_not: Vec<Inner>,
+    minimum_should_match: Option<Value>,
+    boost: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,6 +95,12 @@ impl BoolInner {
         insert_clause(&mut body, "filter", &self.filter);
         insert_clause(&mut body, "should", &self.should);
         insert_clause(&mut body, "must_not", &self.must_not);
+        if let Some(msm) = &self.minimum_should_match {
+            body.insert("minimum_should_match".to_string(), msm.clone());
+        }
+        if let Some(boost) = self.boost {
+            body.insert("boost".to_string(), Value::from(boost));
+        }
         let mut outer = Map::new();
         outer.insert("bool".to_string(), Value::Object(body));
         Value::Object(outer)
@@ -195,6 +203,46 @@ impl<S> Query<S> {
         }))
     }
 
+    /// Set `boost` on this clause. On a `bool` (an `and`/`or`/`not` result) it
+    /// becomes the bool's `boost`; a leaf clause is wrapped in a `bool` whose
+    /// single `must` is the leaf (prefer the leaf builder's own `boost` there).
+    #[must_use]
+    pub fn boost(mut self, boost: f32) -> Query<S> {
+        self.inner = match self.inner {
+            Inner::Bool(mut bool_inner) => {
+                bool_inner.boost = Some(boost);
+                Inner::Bool(bool_inner)
+            }
+            leaf => Inner::Bool(BoolInner {
+                must: vec![leaf],
+                boost: Some(boost),
+                ..BoolInner::default()
+            }),
+        };
+        self
+    }
+
+    /// Set `minimum_should_match` on a `should`-group. Use this on an `or`
+    /// chain (or `Search::min_should_match`) so the optional clauses become a
+    /// real constraint — without it, `should` beside `must`/`filter` only
+    /// scores. Accepts an integer (`1`) or an expression string (`"75%"`). A
+    /// leaf clause is wrapped as a single `should`.
+    #[must_use]
+    pub fn min_should_match(mut self, value: impl Into<Value>) -> Query<S> {
+        self.inner = match self.inner {
+            Inner::Bool(mut bool_inner) => {
+                bool_inner.minimum_should_match = Some(value.into());
+                Inner::Bool(bool_inner)
+            }
+            leaf => Inner::Bool(BoolInner {
+                should: vec![leaf],
+                minimum_should_match: Some(value.into()),
+                ..BoolInner::default()
+            }),
+        };
+        self
+    }
+
     /// Render to the OpenSearch query DSL.
     #[must_use]
     pub fn to_value(&self) -> Value {
@@ -228,6 +276,9 @@ impl BoolBuilder {
     }
     pub(crate) fn push_must_not(&mut self, clause: InnerClause) {
         self.bool_inner.push(Clause::MustNot, clause.0);
+    }
+    pub(crate) fn set_min_should_match(&mut self, value: Value) {
+        self.bool_inner.minimum_should_match = Some(value);
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.bool_inner.is_empty()

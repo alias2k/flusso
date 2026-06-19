@@ -129,6 +129,16 @@ impl<T> Search<T> {
         self
     }
 
+    /// Require at least this many `should` clauses to match. Beside `query` /
+    /// `filter` clauses, `should` defaults to non-constraining (scoring only);
+    /// setting this makes a top-level `should`-group a real filter. Accepts an
+    /// integer (`1`) or an expression string (`"75%"`).
+    #[must_use]
+    pub fn min_should_match(mut self, value: impl Into<Value>) -> Self {
+        self.bool_query.set_min_should_match(value.into());
+        self
+    }
+
     #[must_use]
     pub fn sort(mut self, sort: Sort) -> Self {
         self.sort.push(sort);

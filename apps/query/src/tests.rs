@@ -496,6 +496,95 @@ fn builder_or_composes_into_a_should_bool() {
 }
 
 #[test]
+fn min_should_match_makes_a_should_group_constraining() -> Result {
+    let body = User::query()
+        .filter(User::email().eq("ada@example.com"))
+        .should(User::full_name().matches("ada"))
+        .should(User::full_name().matches("lovelace"))
+        .min_should_match(1)
+        .body();
+    assert_eq!(
+        body.pointer("/query/bool/minimum_should_match")
+            .cloned()
+            .unwrap_or_default(),
+        json!(1)
+    );
+    Ok(())
+}
+
+#[test]
+fn query_min_should_match_and_boost_on_a_should_group() {
+    let q = Keyword::<Root>::at("a")
+        .eq("x")
+        .or(Keyword::<Root>::at("b").eq("y"))
+        .min_should_match(1)
+        .boost(2.0);
+    assert_eq!(
+        q.to_value(),
+        json!({ "bool": {
+            "should": [ { "term": { "a": "x" } }, { "term": { "b": "y" } } ],
+            "minimum_should_match": 1,
+            "boost": 2.0
+        } })
+    );
+}
+
+#[test]
+fn compound_queries_render() {
+    assert_eq!(
+        crate::constant_score(Keyword::<Root>::at("status").eq("paid"))
+            .boost(1.5)
+            .to_value(),
+        json!({ "constant_score": {
+            "filter": { "term": { "status": "paid" } },
+            "boost": 1.5
+        } })
+    );
+
+    assert_eq!(
+        crate::dis_max([
+            Text::<Root>::at("title").matches("ada"),
+            Text::<Root>::at("body").matches("ada"),
+        ])
+        .tie_breaker(0.5)
+        .to_value(),
+        json!({ "dis_max": {
+            "queries": [
+                { "match": { "title": "ada" } },
+                { "match": { "body": "ada" } }
+            ],
+            "tie_breaker": 0.5
+        } })
+    );
+
+    assert_eq!(
+        crate::boosting(
+            Text::<Root>::at("title").matches("ada"),
+            Keyword::<Root>::at("status").eq("archived"),
+            0.5,
+        )
+        .to_value(),
+        json!({ "boosting": {
+            "positive": { "match": { "title": "ada" } },
+            "negative": { "term": { "status": "archived" } },
+            "negative_boost": 0.5
+        } })
+    );
+
+    assert_eq!(
+        crate::function_score(Text::<Root>::at("title").matches("ada"))
+            .weight_when(2.0, Keyword::<Root>::at("status").eq("featured"))
+            .boost_mode("sum")
+            .to_value(),
+        json!({ "function_score": {
+            "query": { "match": { "title": "ada" } },
+            "functions": [ { "weight": 2.0, "filter": { "term": { "status": "featured" } } } ],
+            "boost_mode": "sum"
+        } })
+    );
+}
+
+#[test]
 fn multi_match_spans_text_fields() {
     let query = multi_match(
         "ada lovelace",
