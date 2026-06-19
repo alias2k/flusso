@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/alias2k/flusso/compare/flusso-query-v0.3.1...flusso-query-v0.3.2) - 2026-06-19
+
+### Added
+
+- *(query)* typed subfield accessors on string handles (§1c)
+- *(query)* uuid cargo feature — Uuid is a keyword value (§1a)
+- *(query)* search-level controls + highlight builder (§6)
+- *(query)* standalone query types (§4)
+- *(query)* bool minimum_should_match + compound queries (§2)
+- *(query)* builder-returning leaf queries with options (§0/§3/§5)
+
+### Other
+
+- document the completed query surface (§1b) + CHANGELOGs
+
 ### Added
 
 - Complete the typed query surface (issue #19): leaf operators now return
