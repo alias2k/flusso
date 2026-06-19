@@ -89,9 +89,9 @@ jobs:
             echo "</ul>"
           } > site/index.html
 
+      # Pages is enabled out-of-band (repo Settings → Pages → Source: GitHub
+      # Actions); the workflow GITHUB_TOKEN can't create the Pages site itself.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
