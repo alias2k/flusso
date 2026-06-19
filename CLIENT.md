@@ -840,6 +840,22 @@ admin, or a hand-built `Search`.)
 > *don't* recompile against the schema — dynamic/scripting use, dashboards. For a
 > derived binding it's unnecessary: the compile-time hash is the stable name.
 
+### Reading a prefixed deployment
+
+If flusso runs with an [index prefix](CONFIG.md#index-prefix) (`FLUSSO_INDEX_PREFIX`,
+e.g. `dev_` so it writes `dev_users_<hash>`), tell the client the same prefix:
+
+```rust
+let client = Client::connect("https://localhost:9200")?
+    .index_prefix(std::env::var("FLUSSO_INDEX_PREFIX").unwrap_or_default());
+```
+
+The prefix is applied **at runtime**, on the transport — the derive still bakes the
+unprefixed `User::INDEX`/`SCHEMA_HASH`, and the client prepends the prefix to every
+request path. So **one compiled consumer binary serves every environment**: point it
+at dev or staging by setting `FLUSSO_INDEX_PREFIX`, no rebuild. It must match the
+writer's prefix exactly, or queries hit an empty (or wrong) index.
+
 ---
 
 ## Out of scope for the first cut

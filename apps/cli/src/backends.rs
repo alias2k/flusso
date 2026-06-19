@@ -148,7 +148,8 @@ fn build_sink(config: &Config, pretty: bool) -> anyhow::Result<Arc<dyn Sink>> {
         let sink: Arc<dyn Sink> = match sink_config {
             SinkConfig::Opensearch(os) => Arc::new(
                 OpensearchSink::from_config(name, os)
-                    .with_context(|| format!("building OpenSearch sink '{name}'"))?,
+                    .with_context(|| format!("building OpenSearch sink '{name}'"))?
+                    .with_index_prefix(&config.prefix),
             ),
             SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(s)),
         };

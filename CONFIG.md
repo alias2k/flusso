@@ -96,6 +96,7 @@ when both are set** — env is the fallback.
 | `FLUSSO_ADMIN_PASSWORD` | `--admin-password` | `run`, `indexes`, `reindex` |
 | `FLUSSO_SERVER` | `--server` | `indexes`, `reindex` |
 | `FLUSSO_LAG_POLL_SECS` | `--lag-poll-secs` | `run` |
+| `FLUSSO_INDEX_PREFIX` | `--index-prefix` | `run` |
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
 | `FLUSSO_FORMAT` | `--format` | `check` |
 | `FLUSSO_SCHEMA` | the schema-kind argument | `schema` |
@@ -111,6 +112,27 @@ The Basic-auth credentials (`--admin-user` / `--admin-password`, default **`admi
 never the config file, because they're secrets. The `indexes` / `reindex` client
 subcommands reuse those credentials and take `--server` / `FLUSSO_SERVER` to
 address a running server's private surface.
+
+## Index prefix
+
+`--index-prefix` / `FLUSSO_INDEX_PREFIX` (also the `prefix` key in `flusso.toml`)
+prepends a literal string to **every** index name flusso owns — the indexes, their
+aliases, and the `flusso_meta` index. Precedence is **flag > env > config > none**.
+Use it to run several deployments against **one** OpenSearch cluster without
+collision: set `dev_`, `staging_`, `nightly_`, and each gets its own
+`dev_users` / `staging_users` / … with independent seed state.
+
+- **You include the separator.** `dev_` → `dev_users`; `dev` → `devusers`.
+- **Validated at startup.** Lowercase, no characters OpenSearch forbids, and a
+  leading letter or digit (an index name can't start with `_`/`-`/`+`). A bad
+  prefix fails the run fast.
+- **Read side must match.** The `flusso-query` consumer applies the prefix at
+  runtime (`Client::index_prefix`, typically wired from the same
+  `FLUSSO_INDEX_PREFIX`) — see [CLIENT.md](CLIENT.md). The compile-time derive is
+  unaffected, so one consumer binary serves every environment.
+- **Changing it re-roots everything.** Turning a prefix on (or changing it) points
+  flusso at brand-new names and triggers a full reseed; the old indexes/aliases are
+  left orphaned.
 
 ## Logging & telemetry
 

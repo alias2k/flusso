@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Deployment-wide `prefix` on `Config` (the index prefix).
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-schema-v0.3.0...flusso-schema-v0.3.1) - 2026-06-19
 
 ### Added

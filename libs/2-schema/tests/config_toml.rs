@@ -68,6 +68,29 @@ fn server_addresses_convert() {
 }
 
 #[test]
+fn index_prefix_converts_and_defaults_to_empty() {
+    let with_prefix = convert(
+        r#"
+        prefix = "dev_"
+
+        [source]
+        type = "postgres"
+        connection_url = "postgresql://localhost/db"
+    "#,
+    );
+    assert_eq!(with_prefix.prefix, "dev_");
+
+    let without = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = "postgresql://localhost/db"
+    "#,
+    );
+    assert_eq!(without.prefix, "");
+}
+
+#[test]
 fn server_bad_address_is_rejected_at_parse() {
     let err = parse(
         r#"

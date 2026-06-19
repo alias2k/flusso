@@ -42,6 +42,12 @@ pub struct ConfigToml {
     pub sinks: BTreeMap<common::SinkName, Sink>,
     #[serde(default)]
     pub index: Vec<IndexEntry>,
+    /// Literal prefix prepended to every index name flusso owns, so several
+    /// deployments can share one OpenSearch cluster without colliding. The
+    /// `--index-prefix` flag / `FLUSSO_INDEX_PREFIX` env var override it at
+    /// runtime (which win); see `CONFIG.md`. Empty (the default) means no prefix.
+    #[serde(default)]
+    pub prefix: String,
     /// Global item-level rejection policy; per-index overrides live on each
     /// [`IndexEntry`]. Defaults to [`FailurePolicy::Stop`](schema_core::FailurePolicy::Stop).
     #[serde(default)]

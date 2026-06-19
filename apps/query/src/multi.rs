@@ -272,7 +272,7 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
     pub async fn send(&self, client: &Client) -> Result<SearchResponse<U>> {
         let body = self.body();
         let response = client.search_at(&self.path, &body).await?;
-        let page = decode_response::<U>(response)?;
+        let page = decode_response::<U>(response, &client.index_prefix)?;
         let span = tracing::Span::current();
         span.record("total", page.total);
         span.record("took_ms", page.took.as_millis() as u64);
@@ -309,18 +309,25 @@ impl<U: FlussoMultiDocument> Default for MultiSearch<U> {
 }
 
 /// Decode a combined `_search` response: the usual envelope, but each hit's
-/// `_source` is dispatched by the hit's `_index` into the union.
-pub(crate) fn decode_response<U: FlussoMultiDocument>(value: Value) -> Result<SearchResponse<U>> {
+/// `_source` is dispatched by the hit's `_index` into the union. `prefix` (the
+/// client's index prefix) is stripped from each hit's `_index` first, so
+/// dispatch matches the union's unprefixed `physical_index()` — empty for an
+/// unprefixed deployment.
+pub(crate) fn decode_response<U: FlussoMultiDocument>(
+    value: Value,
+    prefix: &str,
+) -> Result<SearchResponse<U>> {
     let raw: RawMultiResponse = serde_json::from_value(value)?;
     let hits = raw
         .hits
         .hits
         .into_iter()
         .map(|hit| {
+            let index = hit.index.strip_prefix(prefix).unwrap_or(&hit.index);
             Ok(Hit {
                 id: hit.id,
                 score: hit.score.unwrap_or(0.0),
-                source: U::decode(&hit.index, hit.source)?,
+                source: U::decode(index, hit.source)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;

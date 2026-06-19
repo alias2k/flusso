@@ -256,6 +256,11 @@
       "default": "stop",
       "description": "What to do when a sink rejects a document at the item level (a mapping conflict, a malformed value): stop the run (default) or skip the document and continue. Override per index under [[index]]."
     },
+    "prefix": {
+      "type": "string",
+      "default": "",
+      "description": "Literal prefix prepended to every index name flusso owns (indexes, aliases, and the flusso_meta index), so several deployments (dev/staging/nightly) can share one OpenSearch cluster without colliding — e.g. \"dev_\" gives dev_users. Include any separator yourself. The --index-prefix flag / FLUSSO_INDEX_PREFIX env var override this (CLI > env > config). The flusso-query consumer must apply the same prefix at runtime. Empty (the default) means no prefix."
+    },
     "server": {
       "type": "object",
       "additionalProperties": false,

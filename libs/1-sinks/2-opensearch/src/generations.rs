@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sinks_core::{Result, SinkError};
 use tracing::debug;
 
-use crate::{META_INDEX, OpensearchSink};
+use crate::OpensearchSink;
 
 impl OpensearchSink {
     /// Point the convenience alias `alias` (the logical index name) at
@@ -76,7 +76,7 @@ impl OpensearchSink {
     }
 
     async fn put_meta(&self, id: &str, doc: Value) -> Result<()> {
-        let url = format!("{}/{META_INDEX}/_doc/{id}", self.base_url);
+        let url = format!("{}/{}/_doc/{id}", self.base_url, self.meta_index());
         let req = self
             .client
             .put(&url)
@@ -87,9 +87,9 @@ impl OpensearchSink {
         Ok(())
     }
 
-    /// Fetch a document from `META_INDEX` by id. Returns `None` on 404.
+    /// Fetch a document from the meta index by id. Returns `None` on 404.
     async fn get_meta(&self, id: &str) -> Result<Option<Value>> {
-        let url = format!("{}/{META_INDEX}/_doc/{id}", self.base_url);
+        let url = format!("{}/{}/_doc/{id}", self.base_url, self.meta_index());
         let resp = self
             .maybe_auth(self.client.get(&url))
             .send()
@@ -303,6 +303,24 @@ mod tests {
         // No numeric suffix → not a generation name.
         assert_eq!(hash_alias_of("users"), None);
         assert_eq!(hash_alias_of("users_abcd"), None);
+    }
+
+    #[test]
+    fn naming_round_trips_under_an_index_prefix() {
+        // A prefixed hash alias is just a longer string to the pure naming
+        // functions: generation naming and its inverses still line up, even when
+        // the prefix itself contains underscores or trailing digits.
+        for prefix in ["dev_", "staging-", "env1_"] {
+            let hash_alias = format!("{prefix}users_ab12");
+            let generation = generation_name(&hash_alias, 3);
+            assert_eq!(generation, format!("{prefix}users_ab12_3"));
+            assert_eq!(parse_generation(&hash_alias, &generation), Some(3));
+            assert_eq!(
+                hash_alias_of(&generation).as_deref(),
+                Some(hash_alias.as_str())
+            );
+            assert_eq!(next_generation(&[generation], &hash_alias), 4);
+        }
     }
 
     #[test]

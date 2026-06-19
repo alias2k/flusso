@@ -592,6 +592,7 @@ mod tests {
             indexes: BTreeMap::new(),
             on_error: Default::default(),
             server: Default::default(),
+            prefix: String::new(),
         }
     }
 

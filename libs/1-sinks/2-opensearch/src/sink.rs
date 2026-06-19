@@ -39,7 +39,7 @@ impl Sink for OpensearchSink {
     )]
     async fn ensure_index(&self, mapping: &IndexMapping) -> Result<()> {
         let logical = mapping.index.as_ref();
-        let hash_alias = format!("{logical}_{}", mapping.hash);
+        let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
 
         // The previous scheme created `{logical}_{hash}` as a *concrete* index;
         // the new scheme needs that name free for an alias. Refuse rather than
@@ -88,7 +88,8 @@ impl Sink for OpensearchSink {
         let serving = self.alias_holders(&hash_alias).await?;
         if seeded || serving.is_empty() {
             self.try_ensure_alias(&hash_alias, &index).await?;
-            self.ensure_alias(logical, &index).await;
+            self.ensure_alias(&self.convenience_alias(logical), &index)
+                .await;
         }
         Ok(())
     }
@@ -247,7 +248,8 @@ impl Sink for OpensearchSink {
             .collect();
 
         self.try_ensure_alias(&hash_alias, &generation).await?;
-        self.ensure_alias(logical, &generation).await;
+        self.ensure_alias(&self.convenience_alias(logical), &generation)
+            .await;
 
         for stale in &superseded {
             self.delete_index(stale).await?;
@@ -264,7 +266,7 @@ impl Sink for OpensearchSink {
     /// `ensure_index` because that's where the mapping is available.
     async fn reindex(&self, mapping: &IndexMapping) -> Result<()> {
         let logical = mapping.index.as_ref();
-        let hash_alias = format!("{logical}_{}", mapping.hash);
+        let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
         // Past everything that currently exists, so a crashed earlier reindex
         // can't make us reuse a live generation's name.
         let next = next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);

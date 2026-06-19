@@ -20,6 +20,11 @@ pub struct Client {
     /// Base URL with any trailing slash trimmed.
     base: String,
     auth: Option<(String, String)>,
+    /// Literal prefix prepended to every index name a request addresses, so a
+    /// consumer can read a prefixed deployment's indexes (`dev_users_<hash>`).
+    /// Empty by default; set with [`Client::index_prefix`]. Must match the
+    /// `prefix` the writing flusso instance is running with.
+    pub(crate) index_prefix: String,
 }
 
 impl Client {
@@ -37,6 +42,7 @@ impl Client {
             http,
             base: raw.trim_end_matches('/').to_string(),
             auth: None,
+            index_prefix: String::new(),
         })
     }
 
@@ -45,6 +51,29 @@ impl Client {
     pub fn basic_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
         self.auth = Some((username.into(), password.into()));
         self
+    }
+
+    /// Set the literal index prefix prepended to every index this client
+    /// addresses. Use it to read a prefixed deployment — pass the same prefix
+    /// the writing flusso instance runs with (typically from
+    /// `FLUSSO_INDEX_PREFIX`). Empty (the default) addresses unprefixed indexes.
+    #[must_use]
+    pub fn index_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.index_prefix = prefix.into();
+        self
+    }
+
+    /// Apply the configured index prefix to a request path: one physical index
+    /// or a comma-joined list of them (combined search), prefixing each segment.
+    /// A no-op when no prefix is set.
+    pub(crate) fn prefixed(&self, path: &str) -> String {
+        if self.index_prefix.is_empty() {
+            return path.to_owned();
+        }
+        path.split(',')
+            .map(|segment| format!("{}{segment}", self.index_prefix))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// Apply auth to a request builder, if configured.
@@ -67,7 +96,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn search_at(&self, path: &str, body: &Value) -> Result<Value> {
-        let endpoint = format!("{}/{path}/_search", self.base);
+        let endpoint = format!("{}/{}/_search", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, "POST _search");
         self.post_json(&endpoint, body).await
     }
@@ -83,7 +112,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn count_at(&self, path: &str, body: &Value) -> Result<Value> {
-        let endpoint = format!("{}/{path}/_count", self.base);
+        let endpoint = format!("{}/{}/_count", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, "POST _count");
         self.post_json(&endpoint, body).await
     }
@@ -151,7 +180,11 @@ impl Client {
     where
         T: DeserializeOwned,
     {
-        let endpoint = format!("{}/{index}_{hash}/_doc/{id}", self.base);
+        let endpoint = format!(
+            "{}/{}/_doc/{id}",
+            self.base,
+            self.prefixed(&format!("{index}_{hash}"))
+        );
         tracing::debug!(%endpoint, "GET _doc");
         let response = self.authed(self.http.get(&endpoint)).send().await?;
         let status = response.status();

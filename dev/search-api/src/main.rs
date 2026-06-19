@@ -59,6 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) {
         client = client.basic_auth(user, password);
     }
+    // Read a prefixed deployment: match the `prefix` flusso writes with.
+    if let Ok(prefix) = std::env::var("FLUSSO_INDEX_PREFIX") {
+        client = client.index_prefix(prefix);
+    }
 
     let app = Router::new()
         .route("/health", get(health))

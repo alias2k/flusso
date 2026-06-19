@@ -13,8 +13,8 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, Date, FlussoDocument, FlussoMultiDocument, Geo, GeoPoint, Keyword, MsearchBundle,
-    Nested, Number, Query, Search, SearchResponse, SortOrder, Text, multi_match,
+    AsQuery, Client, Date, FlussoDocument, FlussoMultiDocument, Geo, GeoPoint, Keyword,
+    MsearchBundle, Nested, Number, Query, Search, SearchResponse, SortOrder, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -892,7 +892,7 @@ fn msearch_ndjson_renders_one_header_and_body_per_slot() -> Result {
         .size(5);
     let orders = Search::<DecodedOrder>::new("orders", "yyyyyy");
 
-    let ndjson = (&users, &orders).ndjson()?;
+    let ndjson = (&users, &orders).ndjson("")?;
     let lines: Vec<serde_json::Value> = ndjson
         .lines()
         .map(serde_json::from_str)
@@ -908,6 +908,67 @@ fn msearch_ndjson_renders_one_header_and_body_per_slot() -> Result {
         json!({ "query": { "match_all": {} } }),
     ];
     assert_eq!(lines, expected);
+    Ok(())
+}
+
+#[test]
+fn msearch_ndjson_prepends_the_index_prefix_to_each_header() -> Result {
+    let users = Search::<DecodedUser>::new("users", "xxxxxx");
+    let orders = Search::<DecodedOrder>::new("orders", "yyyyyy");
+
+    let ndjson = (&users, &orders).ndjson("dev_")?;
+    let headers: Vec<serde_json::Value> = ndjson
+        .lines()
+        .step_by(2)
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+
+    assert_eq!(
+        headers,
+        vec![
+            json!({ "index": "dev_users_xxxxxx" }),
+            json!({ "index": "dev_orders_yyyyyy" }),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn client_prefixes_single_and_comma_joined_paths() -> Result {
+    let plain = Client::connect("http://localhost:9200")?;
+    assert_eq!(plain.prefixed("users_xxxxxx"), "users_xxxxxx");
+    assert_eq!(
+        plain.prefixed("users_xxxxxx,orders_yyyyyy"),
+        "users_xxxxxx,orders_yyyyyy"
+    );
+
+    let prefixed = Client::connect("http://localhost:9200")?.index_prefix("dev_");
+    assert_eq!(prefixed.prefixed("users_xxxxxx"), "dev_users_xxxxxx");
+    assert_eq!(
+        prefixed.prefixed("users_xxxxxx,orders_yyyyyy"),
+        "dev_users_xxxxxx,dev_orders_yyyyyy"
+    );
+    Ok(())
+}
+
+#[test]
+fn multi_decode_strips_the_prefix_before_dispatch() -> Result {
+    // A prefixed deployment returns prefixed `_index` values; decode strips the
+    // client prefix so dispatch matches the union's unprefixed physical_index().
+    let response = json!({
+        "took": 1,
+        "hits": { "total": { "value": 1 }, "hits": [
+            { "_index": "dev_orders_yyyyyy", "_id": "9", "_score": 2.0,
+              "_source": { "status": "open" } }
+        ] }
+    });
+
+    let page: SearchResponse<StoreItem> = crate::multi::decode_response(response, "dev_")?;
+    let hit = page.hits.first().ok_or("expected a hit")?;
+    match &hit.source {
+        StoreItem::Order(order) => assert_eq!(order.status, "open"),
+        StoreItem::User(_) => panic!("expected an order"),
+    }
     Ok(())
 }
 
@@ -1030,7 +1091,7 @@ fn multi_decode_dispatches_hits_by_physical_index() -> Result {
         }
     });
 
-    let page: SearchResponse<StoreItem> = crate::multi::decode_response(response)?;
+    let page: SearchResponse<StoreItem> = crate::multi::decode_response(response, "")?;
     assert_eq!(page.total, 3);
     assert_eq!(page.max_score, Some(2.0));
 
@@ -1068,7 +1129,7 @@ fn multi_decode_rejects_a_hit_from_an_unclaimed_index() {
         ] }
     });
 
-    match crate::multi::decode_response::<StoreItem>(response) {
+    match crate::multi::decode_response::<StoreItem>(response, "") {
         Err(crate::Error::UnexpectedIndex { index }) => {
             assert_eq!(index, "ghosts_zzzzzz");
         }

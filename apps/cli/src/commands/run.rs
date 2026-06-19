@@ -111,12 +111,28 @@ pub(crate) struct RunArgs {
     /// How often, in seconds, to sample replication slot lag.
     #[arg(long, env = "FLUSSO_LAG_POLL_SECS", default_value_t = 15)]
     lag_poll_secs: u64,
+
+    /// Literal prefix prepended to every index name flusso owns, so several
+    /// deployments (dev/staging/nightly) can share one OpenSearch cluster
+    /// without colliding. Overrides `prefix` from config; defaults to it, then
+    /// to no prefix. The `flusso-query` consumer must be given the same prefix.
+    #[arg(long, env = "FLUSSO_INDEX_PREFIX")]
+    index_prefix: Option<String>,
 }
 
 pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let tracer_provider = telemetry::init_tracing();
 
-    let config = resolve_config(&args)?;
+    let mut config = resolve_config(&args)?;
+
+    // Runtime override: the flag (or FLUSSO_INDEX_PREFIX) wins over the config
+    // value, which wins over no prefix. Validated before anything touches the
+    // cluster, so a bad prefix fails fast rather than producing odd index names.
+    if let Some(prefix) = args.index_prefix.clone() {
+        config.prefix = prefix;
+    }
+    schema::validate_index_prefix(&config.prefix)
+        .map_err(|reason| anyhow::anyhow!("invalid index prefix: {reason}"))?;
 
     let public_addr = args
         .public_address

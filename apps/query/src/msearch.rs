@@ -41,7 +41,7 @@ impl Client {
         err,
     )]
     pub async fn msearch<B: MsearchBundle>(&self, bundle: B) -> Result<B::Output> {
-        let envelope = self.msearch_raw(bundle.ndjson()?).await?;
+        let envelope = self.msearch_raw(bundle.ndjson(&self.index_prefix)?).await?;
         let raw: RawMsearchResponse = serde_json::from_value(envelope)?;
         bundle.decode(raw.responses)
     }
@@ -64,7 +64,7 @@ impl Client {
         }
         let mut lines = String::new();
         for search in searches {
-            append_lines(search, &mut lines)?;
+            append_lines(search, &self.index_prefix, &mut lines)?;
         }
         let envelope = self.msearch_raw(lines).await?;
         let raw: RawMsearchResponse = serde_json::from_value(envelope)?;
@@ -88,17 +88,20 @@ pub trait MsearchBundle {
     const LEN: usize;
 
     /// Render the bundle as `_msearch` NDJSON: a `{"index": …}` header line
-    /// and a body line per slot.
-    fn ndjson(&self) -> Result<String>;
+    /// and a body line per slot. `prefix` is prepended to each slot's index
+    /// (empty for an unprefixed deployment).
+    fn ndjson(&self, prefix: &str) -> Result<String>;
 
     /// Decode the envelope's `responses` entries, in slot order.
     fn decode(&self, responses: Vec<Value>) -> Result<Self::Output>;
 }
 
 /// Append one search's two NDJSON lines: the `{"index": …}` header (the
-/// physical index, exactly what the sink writes) and the `_search` body.
-fn append_lines<T>(search: &Search<T>, ndjson: &mut String) -> Result<()> {
-    let header = serde_json::to_string(&json!({ "index": search.physical_index() }))?;
+/// physical index `{prefix}{INDEX}_{SCHEMA_HASH}`, exactly what the sink
+/// writes) and the `_search` body.
+fn append_lines<T>(search: &Search<T>, prefix: &str, ndjson: &mut String) -> Result<()> {
+    let index = format!("{prefix}{}", search.physical_index());
+    let header = serde_json::to_string(&json!({ "index": index }))?;
     let body = serde_json::to_string(&search.body())?;
     ndjson.push_str(&header);
     ndjson.push('\n');
@@ -158,9 +161,9 @@ macro_rules! impl_msearch_bundle {
 
             const LEN: usize = $len;
 
-            fn ndjson(&self) -> Result<String> {
+            fn ndjson(&self, prefix: &str) -> Result<String> {
                 let mut lines = String::new();
-                $( append_lines(self.$idx, &mut lines)?; )+
+                $( append_lines(self.$idx, prefix, &mut lines)?; )+
                 Ok(lines)
             }
 

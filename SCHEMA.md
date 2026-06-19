@@ -36,6 +36,7 @@ Top-level table. Only `[source]` is required.
 | `[sinks.<name>]` | no | Named destinations. Zero or more; each key is a sink name (a Postgres identifier). |
 | `[[index]]` | no | The indexes to build. Zero or more array entries. |
 | `on_error` | no | What to do when a sink rejects a document at the item level: `"stop"` (default) or `"skip"`. See [`on_error`](#on_error). |
+| `prefix` | no | Literal string prepended to every index name flusso owns (indexes, aliases, `flusso_meta`), so deployments can share one cluster — e.g. `prefix = "dev_"` → `dev_users`. Overridable at runtime by `--index-prefix` / `FLUSSO_INDEX_PREFIX`. See [CONFIG.md](CONFIG.md#index-prefix). |
 
 ### `on_error`
 
