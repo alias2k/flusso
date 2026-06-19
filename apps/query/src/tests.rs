@@ -663,6 +663,67 @@ fn relevance_queries_render() {
 }
 
 #[test]
+fn search_level_features_render() -> Result {
+    let body = User::query()
+        .query(User::full_name().matches("ada"))
+        .min_score(1.5)
+        .track_total_hits(true)
+        .track_scores(true)
+        .collapse("email")
+        .search_after([json!("ada"), json!(42)])
+        .post_filter(User::email().eq("ada@example.com"))
+        .highlight(
+            crate::Highlight::new()
+                .field("fullName")
+                .pre_tags(["<em>"])
+                .post_tags(["</em>"]),
+        )
+        .body();
+
+    assert_eq!(
+        body.pointer("/min_score").cloned().unwrap_or_default(),
+        json!(1.5)
+    );
+    assert_eq!(
+        body.pointer("/track_total_hits")
+            .cloned()
+            .unwrap_or_default(),
+        json!(true)
+    );
+    assert_eq!(
+        body.pointer("/collapse").cloned().unwrap_or_default(),
+        json!({ "field": "email" })
+    );
+    assert_eq!(
+        body.pointer("/search_after").cloned().unwrap_or_default(),
+        json!(["ada", 42])
+    );
+    assert_eq!(
+        body.pointer("/post_filter").cloned().unwrap_or_default(),
+        json!({ "term": { "email": "ada@example.com" } })
+    );
+    assert_eq!(
+        body.pointer("/highlight").cloned().unwrap_or_default(),
+        json!({ "fields": { "fullName": {} }, "pre_tags": ["<em>"], "post_tags": ["</em>"] })
+    );
+    Ok(())
+}
+
+#[test]
+fn ids_body_includes_search_level_but_not_highlight() -> Result {
+    let body = User::query()
+        .min_score(2.0)
+        .highlight(crate::Highlight::new().field("fullName"))
+        .ids_body();
+    assert_eq!(
+        body.pointer("/min_score").cloned().unwrap_or_default(),
+        json!(2.0)
+    );
+    assert!(body.pointer("/highlight").is_none());
+    Ok(())
+}
+
+#[test]
 fn multi_match_spans_text_fields() {
     let query = multi_match(
         "ada lovelace",
