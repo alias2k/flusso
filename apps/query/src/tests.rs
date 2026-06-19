@@ -723,6 +723,21 @@ fn ids_body_includes_search_level_but_not_highlight() -> Result {
     Ok(())
 }
 
+#[cfg(feature = "uuid")]
+#[test]
+fn uuid_is_a_keyword_value() {
+    let id = crate::uuid::Uuid::nil();
+    assert_eq!(
+        Keyword::<Root>::at("ownerId").eq(id).to_value(),
+        json!({ "term": { "ownerId": "00000000-0000-0000-0000-000000000000" } })
+    );
+    // `in_` over uuids works too.
+    assert_eq!(
+        Keyword::<Root>::at("ownerId").in_([id]).to_value(),
+        json!({ "terms": { "ownerId": ["00000000-0000-0000-0000-000000000000"] } })
+    );
+}
+
 #[test]
 fn multi_match_spans_text_fields() {
     let query = multi_match(

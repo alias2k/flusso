@@ -149,3 +149,9 @@ pub use rust_decimal::Decimal;
 /// feature.
 #[cfg(feature = "chrono")]
 pub use chrono;
+
+/// `uuid`, re-exported for `keyword` id / foreign-key fields. With this feature
+/// a `uuid::Uuid` field needs no `#[flusso(skip)]` and `id().eq(some_uuid)`
+/// works without `.to_string()`. Enabled by the `uuid` feature.
+#[cfg(feature = "uuid")]
+pub use uuid;

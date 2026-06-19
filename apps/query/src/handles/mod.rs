@@ -196,6 +196,10 @@ pub trait FlussoValue<K> {}
 
 impl FlussoValue<kind::Keyword> for String {}
 impl FlussoValue<kind::Keyword> for &str {}
+#[cfg(feature = "uuid")]
+impl FlussoValue<kind::Keyword> for uuid::Uuid {}
+#[cfg(feature = "uuid")]
+impl FlussoValue<kind::Keyword> for &uuid::Uuid {}
 
 impl FlussoValue<kind::Text> for String {}
 impl FlussoValue<kind::Text> for &str {}

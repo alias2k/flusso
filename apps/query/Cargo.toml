@@ -24,6 +24,8 @@ derive = ["dep:flusso-query-derive"]
 # Make `rust_decimal::Decimal` / `chrono` available for `decimal` / `date` fields.
 decimal = ["dep:rust_decimal"]
 chrono = ["dep:chrono"]
+# Make `uuid::Uuid` a valid `keyword` value (id / foreign-key fields).
+uuid = ["dep:uuid"]
 
 [dependencies]
 serde = { workspace = true }
@@ -35,3 +37,4 @@ reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 flusso-query-derive = { path = "../query-derive", version = "0.3.1", optional = true }
 rust_decimal = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true, features = ["serde"] }
