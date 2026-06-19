@@ -14,13 +14,29 @@ flusso syncs OpenSearch from Postgres off declarative files. You write two kinds
 
 ## First: get live validation, never guess the format
 
-Wire your editor to the schema's authoritative copy, published in the flusso repo. Add this line to the **top of every `*.schema.yml`**:
+Wire your editor to flusso's published schema. Add this line to the **top of every `*.schema.yml`**:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
+# yaml-language-server: $schema=https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml
 ```
 
-Portable — no generated file, nothing on disk to maintain, and it never points outside the project. The `flusso.toml` companion schema is `https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-config-toml/schemas/config.schema.json`.
+**Pin to the minor line matching the running flusso — never `main`.** flusso publishes each release's schema to GitHub Pages at an immutable per-version path; the `vMAJOR.MINOR` alias (`v0.3` above) re-resolves to the newest patch in that line, so you get fixes automatically but never a breaking format change — those ride a minor/major bump. The two URLs:
+
+- index schema (`*.schema.yml`): `https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml`
+- config schema (`flusso.toml`, via `.taplo.toml`): `https://alias2k.github.io/flusso/schemas/v0.3/config.schema.json`
+
+Set `vMAJOR.MINOR` to your flusso version (`flusso --version`, or the `flusso`/`flusso-cli` pin in `Cargo.toml`). For a byte-exact pin, use the full version instead — `…/schemas/v0.3.0/index.schema.yml`.
+
+TOML has no in-file modeline, so wire `flusso.toml` once via `.taplo.toml` at the project root (read by taplo / VS Code's Even Better TOML):
+
+```toml
+[[rule]]
+include = ["**/flusso.toml"]
+[rule.schema]
+path = "https://alias2k.github.io/flusso/schemas/v0.3/config.schema.json"
+```
+
+**Offer to add this `.taplo.toml` for the user — but ask first.** When working in a project that has a `flusso.toml`, propose creating/extending `.taplo.toml` with the rule above so their editor validates `flusso.toml` as they type, and add it only once they say yes. Never write or edit `.taplo.toml` unprompted (it's project-wide editor config they own).
 
 (Offline only: `flusso schema index > index.schema.yml` writes a local copy you can point `$schema=./index.schema.yml` at instead — but never reference a schema in another repo/checkout via a `../../…` path that escapes this project.)
 
@@ -50,7 +66,7 @@ There is **exactly one type key per field**. There is **no** `- field: x` + `typ
 ## Schema file skeleton
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
+# yaml-language-server: $schema=https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml
 version: 1            # required; only 1 is supported
 table: users          # required; the root table
 schema: public        # optional; defaults to public

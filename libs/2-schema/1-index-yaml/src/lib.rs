@@ -32,9 +32,10 @@ pub const SUPPORTED_VERSIONS: &[u8] = &[1];
 
 /// The JSON Schema (authored as YAML) describing a `*.schema.yml` index file,
 /// embedded from this crate's `schemas/` directory for editor assist and
-/// programmatic access. Kept in lockstep with this parser by `schema`'s
-/// `schema_drift` test.
-pub const INDEX_SCHEMA: &str = include_str!("../schemas/index.schema.yml");
+/// programmatic access (both re-exported from `schema` and emitted by `flusso
+/// schema index`). Kept in lockstep with this parser by `schema`'s `schema_drift`
+/// test.
+pub const INDEX_SCHEMA: &str = include_str!("../index.schema.yml");
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConversionError {

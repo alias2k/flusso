@@ -11,7 +11,7 @@ Follow the **flusso-schema** skill for the field syntax. Do this:
 2. Create `$1.schema.yml` next to it, starting from this skeleton, then fill in fields by inspecting the root table's columns (ask the user for the column list or a `\d <table>` dump if no DB access):
 
    ```yaml
-   # yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
+   # yaml-language-server: $schema=https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml
    version: 1
    table: $2
    primary_key: id

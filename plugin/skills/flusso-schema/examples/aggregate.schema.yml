@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
+# yaml-language-server: $schema=https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml
 #
 # Worked example: aggregates (the op is the type key) + a custom scaled_float
 # for exact money (decimal -> double is lossy).

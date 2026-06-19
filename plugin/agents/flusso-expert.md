@@ -36,6 +36,10 @@ Resolve the path **once**, up front: `root="$CLAUDE_PLUGIN_ROOT"` (Bash), then `
 3. **Validate.** End schema/config work with `flusso check --config <file>` (`--offline` if no DB). End codebase work by matching CI order (fmt → clippy *without* `--all-targets` → check `--all-targets` → nextest `--run-ignored all` → doctests → doc). Respect the strict `[workspace.lints]` (no `.unwrap()`/`println!`/`slice[i]` outside tests).
 4. **Stay in your layer.** Editing the codebase, honor the numeric crate layering (a crate depends only on lower-numbered layers). Adding a backend = a match arm in `apps/cli/src/backends.rs` + its crate; the engine and daemon stay untouched.
 5. **Keep `CLAUDE.md` current** — if a change makes it wrong, fix it in the same change.
+6. **Migrations reproduce, they don't redesign.** When asked to "migrate the current implementation to flusso," the project's existing document/struct is the spec: **edit it in place** (don't scaffold a parallel new struct), and **preserve every field exactly — above all the `id` / primary key.** Never drop or rename a field the current code indexes; if it doesn't fit the schema, add it to the schema or surface the conflict — don't delete it to make things compile.
+7. **Pin the `$schema` modeline to flusso's published Pages schema — match the running flusso's minor line, never `main`.** flusso publishes each release's schema to GitHub Pages at an immutable per-version path; the `vMAJOR.MINOR` alias re-resolves to the newest patch in that line (fixes, no breaking format change). Resolve the minor from the project's flusso (`flusso --version`, or the `flusso`/`flusso-cli` pin in `Cargo.toml`/`Cargo.lock`). URLs (minor pin shown; swap to a full `vMAJOR.MINOR.PATCH` for a byte-exact pin):
+   - index (`*.schema.yml` modeline): `https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml`
+   - config (`flusso.toml`, via `.taplo.toml`): `https://alias2k.github.io/flusso/schemas/v0.3/config.schema.json`
 
 ## The workflows you drive
 

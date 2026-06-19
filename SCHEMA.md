@@ -20,8 +20,8 @@ query side in [`CLIENT.md`](CLIENT.md).
 
 > Two JSON Schemas ship alongside this reference and are the machine-readable
 > source of truth for the file formats:
-> [`config.schema.json`](libs/2-schema/1-config-toml/schemas/config.schema.json) and
-> [`index.schema.yml`](libs/2-schema/1-index-yaml/schemas/index.schema.yml). Point
+> [`config.schema.json`](libs/2-schema/1-config-toml/config.schema.json) and
+> [`index.schema.yml`](libs/2-schema/1-index-yaml/index.schema.yml). Point
 > your editor at them for completion and inline validation.
 
 ---

@@ -328,8 +328,8 @@ carry [Criterion](https://bheisler.github.io/criterion.rs/) benchmarks
 (`cargo bench`) — the engine, the OpenSearch sink, and the Postgres source.
 
 Editor support: point your editor at
-`libs/2-schema/1-config-toml/schemas/config.schema.json` and
-`libs/2-schema/1-index-yaml/schemas/index.schema.yml` for completion and inline
+`libs/2-schema/1-config-toml/config.schema.json` and
+`libs/2-schema/1-index-yaml/index.schema.yml` for completion and inline
 validation — the bundled example schemas already reference them via a
 `yaml-language-server` modeline.
 
