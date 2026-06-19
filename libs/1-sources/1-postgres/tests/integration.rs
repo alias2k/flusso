@@ -158,6 +158,79 @@ async fn build_many_assembles_a_set_and_tombstones_absent_keys() {
     );
 }
 
+/// Regression for `operator does not exist: uuid = text`: a `uuid` primary key
+/// (and a `uuid` foreign key) must round-trip through every keyed path —
+/// `build` (`id = $1::uuid`), `build_many` (`IN ($1::uuid, …)`), and `resolve`
+/// (reverse `user_id`/`id = $1::uuid`) — not just integer keys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn uuid_keys_round_trip_through_build_build_many_and_resolve() {
+    const U1: &str = "11111111-1111-1111-1111-111111111111";
+    const U2: &str = "22222222-2222-2222-2222-222222222222";
+    const O1: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id uuid PRIMARY KEY, email text, deleted boolean NOT NULL DEFAULT false)",
+        "CREATE TABLE orders (id uuid PRIMARY KEY, user_id uuid NOT NULL, total numeric NOT NULL)",
+        "INSERT INTO users (id, email) VALUES \
+         ('11111111-1111-1111-1111-111111111111', 'ada@x.io'), \
+         ('22222222-2222-2222-2222-222222222222', 'bob@x.io')",
+        "INSERT INTO orders (id, user_id, total) VALUES \
+         ('aaaaaaaa-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 19.99), \
+         ('aaaaaaaa-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 5.00)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(users_spec()))
+        .await
+        .unwrap();
+
+    // build: single uuid key (`WHERE id = $1::uuid`).
+    let Document::Upsert { body, .. } = builder.build(&uuid_document_id(U1)).await.unwrap() else {
+        panic!("expected an upsert for the uuid-keyed root");
+    };
+    let GenericValue::Map(map) = body else {
+        panic!("expected a document object");
+    };
+    let Some(GenericValue::Array(orders)) = map.get("orders") else {
+        panic!("expected an orders array");
+    };
+    assert_eq!(orders.len(), 2, "both uuid-keyed orders nest in");
+
+    // build_many: batched `IN ($1::uuid, $2::uuid)` plus an absent key.
+    let documents = builder
+        .build_many(&[
+            uuid_document_id(U1),
+            uuid_document_id(U2),
+            uuid_document_id("33333333-3333-3333-3333-333333333333"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(documents.len(), 3);
+    let upserts = documents
+        .iter()
+        .filter(|d| matches!(d, Document::Upsert { .. }))
+        .count();
+    assert_eq!(
+        upserts, 2,
+        "both present uuid roots upsert; the absent one tombstones"
+    );
+
+    // resolve: a change to an order reverse-resolves to its user via the uuid FK
+    // (`SELECT user_id FROM orders WHERE id = $1::uuid`).
+    let affected = builder
+        .resolve(&table("orders"), &uuid_row_key(O1))
+        .await
+        .unwrap();
+    assert_eq!(affected, vec![uuid_document_id(U1)]);
+}
+
 fn users_spec() -> SourceSpec {
     let orders = Field {
         field: field("orders"),
@@ -217,6 +290,17 @@ fn document_id(id: i64) -> DocumentId {
 
 fn row_key(id: i64) -> RowKey {
     RowKey(vec![(column("id"), GenericValue::Int(id))])
+}
+
+fn uuid_document_id(id: &str) -> DocumentId {
+    DocumentId {
+        index: index_name("users"),
+        key: uuid_row_key(id),
+    }
+}
+
+fn uuid_row_key(id: &str) -> RowKey {
+    RowKey(vec![(column("id"), GenericValue::String(id.to_owned()))])
 }
 
 fn field(name: &str) -> FieldName {
