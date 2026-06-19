@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `to_json` renders the typed `GenericValue` variants to the JSON a sink ingests:
+  temporals as ISO strings, a UUID as its hyphenated string, and `bytea` as
+  base64 (what an OpenSearch `binary` field wants). The base64 lives here, at the
+  sink boundary — core's value vocabulary stays format-agnostic.
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-sinks-core-v0.3.0...flusso-sinks-core-v0.3.1) - 2026-06-19
 
 ### Added

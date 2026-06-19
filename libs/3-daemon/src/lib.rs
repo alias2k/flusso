@@ -496,7 +496,7 @@ mod tests {
         }
 
         async fn build(&self, id: &DocumentId) -> sources_core::Result<Document> {
-            let deleted = matches!(id.key.0.first(), Some((_, GenericValue::Int(2))));
+            let deleted = matches!(id.key.0.first(), Some((_, GenericValue::BigInt(2))));
             Ok(if deleted {
                 Document::Delete { id: id.clone() }
             } else {
@@ -566,7 +566,7 @@ mod tests {
         let table = TableName::try_new("users").unwrap();
         let key = RowKey(vec![(
             ColumnName::try_new("id").unwrap(),
-            GenericValue::Int(id),
+            GenericValue::BigInt(id),
         )]);
         let event = if delete {
             ChangeEvent::Delete { table, key }

@@ -241,7 +241,7 @@ fn document_id(id: i64) -> DocumentId {
 }
 
 fn row_key(id: i64) -> RowKey {
-    RowKey(vec![(column("id"), GenericValue::Int(id))])
+    RowKey(vec![(column("id"), GenericValue::BigInt(id))])
 }
 
 fn field(name: &str) -> FieldName {

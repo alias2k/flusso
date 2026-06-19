@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `operator does not exist: uuid = text`. Previously only filter operands were
   cast; keys were bound as `text`.
 
+### Changed
+
+- Decode each column into its typed canonical `GenericValue` variant
+  (`uuid`→`Uuid`, `date`→`Date`, `int4`→`Int`, `int8`→`BigInt`, `bytea`→`Bytes`,
+  …) instead of collapsing temporals/uuids to strings, and bind those typed
+  values to Postgres natively. The batched lookup selects its key column raw (not
+  `to_json`-wrapped) so the returned key matches the requested typed key exactly.
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-sources-postgres-v0.3.0...flusso-sources-postgres-v0.3.1) - 2026-06-19
 
 ### Added

@@ -448,7 +448,7 @@ fn bench(c: &mut Criterion) {
     group.bench_function("os_flush_1", |b| {
         let index = index_name("users");
         let mut body = BTreeMap::new();
-        body.insert("id".to_owned(), GenericValue::Int(1));
+        body.insert("id".to_owned(), GenericValue::BigInt(1));
         let body = GenericValue::Map(body);
         b.to_async(&rt).iter(|| async {
             services
@@ -527,7 +527,7 @@ fn bench(c: &mut Criterion) {
 /// The document's `_id` for OpenSearch: the string form of its root key value.
 fn doc_id_string(id: &DocumentId) -> String {
     match id.key.0.first().map(|(_, v)| v) {
-        Some(GenericValue::Int(n)) => n.to_string(),
+        Some(GenericValue::BigInt(n)) => n.to_string(),
         Some(GenericValue::String(s)) => s.clone(),
         other => format!("{other:?}"),
     }
@@ -761,7 +761,7 @@ fn order_by(col: &str, direction: Direction) -> OrderBy {
 }
 
 fn row_key(id: i64) -> RowKey {
-    RowKey(vec![(column("id"), GenericValue::Int(id))])
+    RowKey(vec![(column("id"), GenericValue::BigInt(id))])
 }
 fn field(name: &str) -> FieldName {
     FieldName::try_new(name).unwrap()

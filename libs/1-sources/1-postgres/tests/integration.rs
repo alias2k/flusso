@@ -34,8 +34,8 @@ async fn assembles_documents_resolves_and_tombstones() {
     // Seed schema + data.
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
-        "CREATE TABLE users (id int PRIMARY KEY, email text, deleted boolean NOT NULL DEFAULT false)",
-        "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL, total numeric NOT NULL)",
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text, deleted boolean NOT NULL DEFAULT false)",
+        "CREATE TABLE orders (id bigint PRIMARY KEY, user_id bigint NOT NULL, total numeric NOT NULL)",
         "INSERT INTO users (id, email) VALUES (1, 'ada@x.io')",
         "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 19.99), (11, 1, 5.00)",
     ] {
@@ -95,8 +95,8 @@ async fn build_many_assembles_a_set_and_tombstones_absent_keys() {
 
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
-        "CREATE TABLE users (id int PRIMARY KEY, email text, deleted boolean NOT NULL DEFAULT false)",
-        "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL, total numeric NOT NULL)",
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text, deleted boolean NOT NULL DEFAULT false)",
+        "CREATE TABLE orders (id bigint PRIMARY KEY, user_id bigint NOT NULL, total numeric NOT NULL)",
         "INSERT INTO users (id, email) VALUES (1, 'ada@x.io'), (2, 'bob@x.io'), (3, 'cy@x.io')",
         "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 19.99), (11, 1, 5.00), (20, 2, 7.50)",
         // User 3 is soft-deleted, so it must come back as a tombstone.
@@ -289,7 +289,7 @@ fn document_id(id: i64) -> DocumentId {
 }
 
 fn row_key(id: i64) -> RowKey {
-    RowKey(vec![(column("id"), GenericValue::Int(id))])
+    RowKey(vec![(column("id"), GenericValue::BigInt(id))])
 }
 
 fn uuid_document_id(id: &str) -> DocumentId {
@@ -300,7 +300,10 @@ fn uuid_document_id(id: &str) -> DocumentId {
 }
 
 fn uuid_row_key(id: &str) -> RowKey {
-    RowKey(vec![(column("id"), GenericValue::String(id.to_owned()))])
+    // A uuid column decodes to a typed `Uuid` value (not a string), so both the
+    // change key and the reverse-resolved root key carry that variant.
+    let parsed = uuid::Uuid::parse_str(id).expect("valid uuid");
+    RowKey(vec![(column("id"), GenericValue::Uuid(parsed))])
 }
 
 fn field(name: &str) -> FieldName {

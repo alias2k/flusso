@@ -120,7 +120,7 @@ fn mapping() -> IndexMapping {
 
 fn document(i: usize) -> GenericValue {
     let mut map = BTreeMap::new();
-    map.insert("id".to_owned(), GenericValue::Int(i as i64));
+    map.insert("id".to_owned(), GenericValue::BigInt(i as i64));
     map.insert(
         "email".to_owned(),
         GenericValue::String(format!("user{i}@example.com")),

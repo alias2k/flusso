@@ -394,7 +394,13 @@ belongs in the linked docs.
     concrete, prefer scannable structure (a one-line summary first, then specifics) over dense
     prose. Applies to `///`, `//!`, and the rare inline gotcha alike.
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
-  `libs/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
+  `libs/0-core/src/common/`. `GenericValue` is the **typed canonical value vocabulary** that
+  crosses layers — the middle type a source maps *into* and a sink maps *out of*. It's
+  fine-grained (numerics split by width; `Date`/`Time`/`Timestamp`/`TimestampTz`; `Uuid`;
+  `Bytes`) so no type is erased in transit, and its serde is **derived/format-agnostic** (a
+  queue may encode it however it likes; it round-trips losslessly). A sink converts it to its
+  own representation at its boundary (`sinks_core::to_json` is the OpenSearch JSON translation,
+  where e.g. `bytea`→base64 lives) — core picks no wire format.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`

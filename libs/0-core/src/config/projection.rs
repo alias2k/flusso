@@ -178,13 +178,23 @@ mod tests {
 fn constant_mapping_type(value: &GenericValue) -> MappingType {
     match value {
         GenericValue::Bool(_) => MappingType::Boolean,
-        GenericValue::Int(_) => MappingType::Long,
-        GenericValue::Decimal(_) => MappingType::Double,
+        GenericValue::SmallInt(_) => MappingType::Short,
+        GenericValue::Int(_) => MappingType::Integer,
+        GenericValue::BigInt(_) => MappingType::Long,
+        GenericValue::Float(_) => MappingType::Float,
+        GenericValue::Double(_) | GenericValue::Decimal(_) => MappingType::Double,
+        GenericValue::Date(_)
+        | GenericValue::Time(_)
+        | GenericValue::Timestamp(_)
+        | GenericValue::TimestampTz(_) => MappingType::Date,
+        GenericValue::Bytes(_) => MappingType::Other("binary".to_owned()),
         GenericValue::Array(items) => items
             .first()
             .map(constant_mapping_type)
             .unwrap_or(MappingType::Keyword),
         GenericValue::Map(_) => MappingType::Object,
-        GenericValue::String(_) | GenericValue::Null => MappingType::Keyword,
+        GenericValue::String(_) | GenericValue::Uuid(_) | GenericValue::Null => {
+            MappingType::Keyword
+        }
     }
 }

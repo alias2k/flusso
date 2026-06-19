@@ -1054,7 +1054,7 @@ fn doc(id: i64) -> DocumentId {
 
 fn id_of(document: &DocumentId) -> i64 {
     match document.key.0.first() {
-        Some((_, GenericValue::Int(i))) => *i,
+        Some((_, GenericValue::BigInt(i))) => *i,
         _ => panic!("expected an int document key"),
     }
 }
@@ -1064,7 +1064,7 @@ fn key(id: i64) -> RowKey {
 }
 
 fn row_key(col: &str, id: i64) -> RowKey {
-    RowKey(vec![(column(col), GenericValue::Int(id))])
+    RowKey(vec![(column(col), GenericValue::BigInt(id))])
 }
 
 fn str_of<'a>(map: &'a BTreeMap<String, GenericValue>, key: &str) -> &'a str {
@@ -1083,7 +1083,7 @@ fn arr_of<'a>(map: &'a BTreeMap<String, GenericValue>, key: &str) -> &'a [Generi
 
 fn int_of(value: &GenericValue) -> i64 {
     match value {
-        GenericValue::Int(i) => *i,
+        GenericValue::BigInt(i) => *i,
         other => panic!("expected an int, got {other:?}"),
     }
 }
@@ -1092,7 +1092,7 @@ fn int_of(value: &GenericValue) -> i64 {
 /// comparison — sums and averages come back as decimals.
 fn num_of(value: &GenericValue) -> f64 {
     match value {
-        GenericValue::Int(i) => *i as f64,
+        GenericValue::BigInt(i) => *i as f64,
         GenericValue::Decimal(d) => d.to_string().parse().unwrap(),
         GenericValue::String(s) => s.parse().unwrap(),
         other => panic!("expected a number, got {other:?}"),

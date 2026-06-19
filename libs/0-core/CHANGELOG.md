@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `validate_index_prefix` for the deployment-wide index prefix.
 
+### Changed
+
+- **`GenericValue` is now a fully-typed canonical value vocabulary** — the
+  middle type between a source and a sink. Numerics are split by width
+  (`SmallInt`/`Int`/`BigInt`, `Float`/`Double`, `Decimal`), temporals are split
+  (`Date`/`Time`/`Timestamp`/`TimestampTz`), and `Uuid`/`Bytes` are first-class,
+  so no semantic type is erased to a string in transit. Serde is now the
+  **derived, format-agnostic** representation (externally tagged), so a value
+  round-trips losslessly through any queue encoding — in as a `GenericValue`,
+  out as the same `GenericValue`. Core picks no wire format.
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-schema-core-v0.3.0...flusso-schema-core-v0.3.1) - 2026-06-19
 
 ### Added

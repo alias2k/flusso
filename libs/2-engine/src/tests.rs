@@ -68,7 +68,7 @@ impl DocumentBuilder for MockDocuments {
     }
 
     async fn build(&self, id: &DocumentId) -> sources_core::Result<Document> {
-        let deleted = matches!(id.key.0.first(), Some((_, GenericValue::Int(2))));
+        let deleted = matches!(id.key.0.first(), Some((_, GenericValue::BigInt(2))));
         Ok(if deleted {
             Document::Delete { id: id.clone() }
         } else {
@@ -136,7 +136,7 @@ fn row_change(delete: bool, id: i64, seq: u64, acks: &Arc<AtomicU64>) -> Change 
     let table = TableName::try_new("users").unwrap();
     let key = RowKey(vec![(
         ColumnName::try_new("id").unwrap(),
-        GenericValue::Int(id),
+        GenericValue::BigInt(id),
     )]);
     let event = if delete {
         ChangeEvent::Delete { table, key }
@@ -277,7 +277,7 @@ impl DocumentBuilder for CountingBuilder {
             index: IndexName::try_new("users").unwrap(),
             key: RowKey(vec![(
                 ColumnName::try_new("id").unwrap(),
-                GenericValue::Int(1),
+                GenericValue::BigInt(1),
             )]),
         }])
     }
@@ -385,7 +385,7 @@ fn ordering_change(
     let table = TableName::try_new("users").unwrap();
     let key = RowKey(vec![(
         ColumnName::try_new("id").unwrap(),
-        GenericValue::Int(seq as i64 + 100),
+        GenericValue::BigInt(seq as i64 + 100),
     )]);
     Change {
         event: ChangeEvent::Upsert { table, key },

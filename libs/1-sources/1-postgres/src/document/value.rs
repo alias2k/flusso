@@ -25,15 +25,15 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
     match col.type_info().name() {
         "INT2" => finish(
             row.try_get::<Option<i16>, _>(idx),
-            |v| GenericValue::Int(v.into()),
+            GenericValue::SmallInt,
             name,
         ),
-        "INT4" => finish(
-            row.try_get::<Option<i32>, _>(idx),
-            |v| GenericValue::Int(v.into()),
+        "INT4" => finish(row.try_get::<Option<i32>, _>(idx), GenericValue::Int, name),
+        "INT8" => finish(
+            row.try_get::<Option<i64>, _>(idx),
+            GenericValue::BigInt,
             name,
         ),
-        "INT8" => finish(row.try_get::<Option<i64>, _>(idx), GenericValue::Int, name),
         "BOOL" => finish(
             row.try_get::<Option<bool>, _>(idx),
             GenericValue::Bool,
@@ -41,10 +41,14 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
         ),
         "FLOAT4" => finish(
             row.try_get::<Option<f32>, _>(idx),
-            |v| float(v.into()),
+            GenericValue::Float,
             name,
         ),
-        "FLOAT8" => finish(row.try_get::<Option<f64>, _>(idx), float, name),
+        "FLOAT8" => finish(
+            row.try_get::<Option<f64>, _>(idx),
+            GenericValue::Double,
+            name,
+        ),
         "NUMERIC" => finish(
             row.try_get::<Option<Decimal>, _>(idx),
             GenericValue::Decimal,
@@ -57,27 +61,32 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
         ),
         "TIMESTAMP" => finish(
             row.try_get::<Option<chrono::NaiveDateTime>, _>(idx),
-            |v| GenericValue::String(v.to_string()),
+            GenericValue::Timestamp,
             name,
         ),
         "TIMESTAMPTZ" => finish(
             row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(idx),
-            |v| GenericValue::String(v.to_rfc3339()),
+            GenericValue::TimestampTz,
             name,
         ),
         "DATE" => finish(
             row.try_get::<Option<chrono::NaiveDate>, _>(idx),
-            |v| GenericValue::String(v.to_string()),
+            GenericValue::Date,
             name,
         ),
         "TIME" => finish(
             row.try_get::<Option<chrono::NaiveTime>, _>(idx),
-            |v| GenericValue::String(v.to_string()),
+            GenericValue::Time,
             name,
         ),
         "UUID" => finish(
             row.try_get::<Option<uuid::Uuid>, _>(idx),
-            |v| GenericValue::String(v.to_string()),
+            GenericValue::Uuid,
+            name,
+        ),
+        "BYTEA" => finish(
+            row.try_get::<Option<Vec<u8>>, _>(idx),
+            GenericValue::Bytes,
             name,
         ),
         "JSON" | "JSONB" => finish(
@@ -110,7 +119,7 @@ pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
         serde_json::Value::Null => GenericValue::Null,
         serde_json::Value::Bool(b) => GenericValue::Bool(b),
         serde_json::Value::Number(n) => match n.as_i64() {
-            Some(i) => GenericValue::Int(i),
+            Some(i) => GenericValue::BigInt(i),
             None => n
                 .as_f64()
                 .map_or_else(|| GenericValue::String(n.to_string()), float),

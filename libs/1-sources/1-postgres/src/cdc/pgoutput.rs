@@ -111,10 +111,12 @@ fn typed_value(text: &str, type_oid: u32) -> GenericValue {
             "f" => GenericValue::Bool(false),
             _ => GenericValue::String(text.to_owned()),
         },
-        // int2 / int4 / int8 / oid
-        21 | 23 | 20 | 26 => text
-            .parse::<i64>()
-            .map_or_else(|_| GenericValue::String(text.to_owned()), GenericValue::Int),
+        // int2 / int4 / int8 / oid — a WAL value is a lookup key (re-bound, then
+        // cast to its column type), so a single wide integer is enough here.
+        21 | 23 | 20 | 26 => text.parse::<i64>().map_or_else(
+            |_| GenericValue::String(text.to_owned()),
+            GenericValue::BigInt,
+        ),
         // float4 / float8 / numeric
         700 | 701 | 1700 => rust_decimal::Decimal::from_str_exact(text).map_or_else(
             |_| GenericValue::String(text.to_owned()),
@@ -395,7 +397,7 @@ mod tests {
         let key = row_key(&rel, &new).unwrap();
         assert_eq!(key.0.len(), 1);
         assert_eq!(key.0[0].0.as_ref(), "id");
-        assert_eq!(key.0[0].1, GenericValue::Int(42)); // id is int4 (oid 23)
+        assert_eq!(key.0[0].1, GenericValue::BigInt(42)); // id is int4 (oid 23)
     }
 
     #[test]
@@ -415,7 +417,7 @@ mod tests {
             panic!("expected Delete");
         };
         let key = row_key(&rel, &old).unwrap();
-        assert_eq!(key.0[0].1, GenericValue::Int(42)); // id is int4 (oid 23)
+        assert_eq!(key.0[0].1, GenericValue::BigInt(42)); // id is int4 (oid 23)
     }
 
     #[test]

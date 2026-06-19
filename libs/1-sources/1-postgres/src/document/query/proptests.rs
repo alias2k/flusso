@@ -91,7 +91,7 @@ fn safe_string() -> impl Strategy<Value = String> {
 
 fn scalar_value() -> impl Strategy<Value = GenericValue> {
     prop_oneof![
-        any::<i64>().prop_map(GenericValue::Int),
+        any::<i64>().prop_map(GenericValue::BigInt),
         any::<bool>().prop_map(GenericValue::Bool),
         safe_string().prop_map(GenericValue::String),
         Just(GenericValue::Null),

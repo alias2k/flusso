@@ -375,7 +375,7 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT to_json("root"."id") AS "doc_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::bigint, $2::bigint)"#
+        r#"SELECT "root"."id" AS "doc_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::bigint, $2::bigint)"#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
