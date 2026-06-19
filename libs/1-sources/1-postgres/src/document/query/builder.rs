@@ -24,6 +24,10 @@ use super::sql::{
 };
 use crate::document::fields::field_column;
 
+/// Most `(key, value)` field pairs one `json_build_object` can hold: Postgres
+/// caps a function call at 100 arguments and each pair spends two.
+const MAX_PAIRS_PER_OBJECT: usize = 50;
+
 /// Accumulates parameters and unique aliases while building a document query.
 pub(super) struct Builder<'a> {
     pub(super) db: &'a DatabaseSchema,
@@ -58,6 +62,12 @@ impl Builder<'_> {
 
     /// `json_build_object('field', <expr>, …)` over a set of fields, where
     /// `parent_alias` is the row in scope and `parent_pk` keys its relations.
+    ///
+    /// Postgres caps a function call at 100 arguments, and each field spends two
+    /// (its key and value), so a single `json_build_object` holds at most 50
+    /// fields. Past that the object is built in chunks and stitched together with
+    /// the jsonb `||` operator — `json` has no concatenation, so the chunks use
+    /// `jsonb_build_object`; the consumer decodes `json`/`jsonb` identically.
     pub(super) fn object(
         &mut self,
         fields: &[Field],
@@ -69,7 +79,14 @@ impl Builder<'_> {
             let value = self.field_value(field, parent_alias, parent_pk)?;
             pairs.push(format!("{}, {value}", json_key(field.field.as_ref())));
         }
-        Ok(format!("json_build_object({})", pairs.join(", ")))
+        if pairs.len() <= MAX_PAIRS_PER_OBJECT {
+            return Ok(format!("json_build_object({})", pairs.join(", ")));
+        }
+        let chunks: Vec<String> = pairs
+            .chunks(MAX_PAIRS_PER_OBJECT)
+            .map(|chunk| format!("jsonb_build_object({})", chunk.join(", ")))
+            .collect();
+        Ok(format!("({})", chunks.join(" || ")))
     }
 
     fn field_value(

@@ -404,6 +404,53 @@ fn documents_query_folds_soft_delete_into_where() {
 }
 
 #[test]
+fn wide_document_chunks_into_jsonb_concatenation() {
+    // Postgres caps a function call at 100 arguments; `json_build_object` spends
+    // two per field, so a document past 50 fields must split into chunks stitched
+    // with jsonb `||` rather than overflow a single call.
+    let fields: Vec<Field> = (0..120)
+        .map(|i| col_field(&format!("f{i}"), &format!("c{i}")))
+        .collect();
+    let schema = index(Some("id"), None, fields);
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+    )
+    .unwrap();
+    let sql = sql.as_str();
+    // 120 fields → three chunks of 50/50/20, each its own `jsonb_build_object`.
+    assert_eq!(sql.matches("jsonb_build_object(").count(), 3);
+    assert_eq!(sql.matches(" || ").count(), 2);
+    assert!(!sql.contains("json_build_object("));
+    // No single call exceeds 100 arguments: 50 pairs = 100 args, 49 commas in
+    // the longest chunk between the 50 key/value tokens.
+    assert!(sql.contains("'f0', \"root\".\"c0\""));
+    assert!(sql.contains("'f119', \"root\".\"c119\""));
+}
+
+#[test]
+fn document_at_the_chunk_boundary_stays_a_single_call() {
+    // Exactly 50 fields fits one `json_build_object` (100 args) — no chunking.
+    let fields: Vec<Field> = (0..50)
+        .map(|i| col_field(&format!("f{i}"), &format!("c{i}")))
+        .collect();
+    let schema = index(Some("id"), None, fields);
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+    )
+    .unwrap();
+    let sql = sql.as_str();
+    assert_eq!(sql.matches("json_build_object(").count(), 1);
+    assert!(!sql.contains("jsonb_build_object("));
+    assert!(!sql.contains(" || "));
+}
+
+#[test]
 fn reverse_query_selects_foreign_key() {
     let (sql, params) = reverse_query(
         &db(),
