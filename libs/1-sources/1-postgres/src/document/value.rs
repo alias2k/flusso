@@ -2,10 +2,15 @@
 //! columns (for reverse-resolution lookups) and JSON documents (assembled
 //! server-side).
 
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
-use schema_core::GenericValue;
+use schema_core::{Aggregate, AggregateOp, Field, FieldSource, FlussoType, GenericValue, Relation};
 use sqlx::postgres::{PgColumn, PgRow};
 use sqlx::{Column, Row, TypeInfo};
+use uuid::Uuid;
 
 /// Decode one named column of a row into a [`GenericValue`], or
 /// [`GenericValue::Null`] if the row has no such column.
@@ -137,6 +142,169 @@ pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
     }
 }
 
+/// Coerce a server-assembled JSON document into the **typed** value tree, using
+/// each field's declared type so the values a sink sees are canonical — a `date`
+/// field becomes a [`Date`](GenericValue::Date), a `uuid` a [`Uuid`](GenericValue::Uuid),
+/// not opaque strings. The document is built server-side as one JSON blob (so the
+/// types are erased on the wire); this is where we put them back, guided by the
+/// schema. Anything that fails to parse falls back to the untyped JSON value
+/// rather than failing the document.
+pub(crate) fn coerce_document(value: serde_json::Value, fields: &[Field]) -> GenericValue {
+    let serde_json::Value::Object(mut object) = value else {
+        // A document is always a JSON object; anything else can only be decoded
+        // untyped.
+        return json_to_generic(value);
+    };
+    let mut out = BTreeMap::new();
+    for field in fields {
+        let name = field.field.as_ref();
+        if let Some(json) = object.remove(name) {
+            out.insert(name.to_owned(), coerce_field(json, &field.source));
+        }
+    }
+    GenericValue::Map(out)
+}
+
+/// Coerce one field's JSON value by where it comes from.
+fn coerce_field(json: serde_json::Value, source: &FieldSource) -> GenericValue {
+    match source {
+        FieldSource::Column(column) => coerce_scalar(json, &column.ty),
+        FieldSource::Group(fields) => coerce_document(json, fields),
+        FieldSource::Relation(Relation::Join(join)) => coerce_relation(json, &join.fields),
+        FieldSource::Relation(Relation::Aggregate(aggregate)) => coerce_aggregate(json, aggregate),
+        // A geo point ({lat,lon} / [lon,lat] / "lat,lon") and a bare constant
+        // carry no scalar type to coerce to; keep their natural JSON shape.
+        FieldSource::Geo(_) | FieldSource::Constant(_) => json_to_generic(json),
+    }
+}
+
+/// A joined relation: an array of sub-documents (`has_many` / `many_to_many`), a
+/// single sub-document (`belongs_to` / `has_one`), or null.
+fn coerce_relation(json: serde_json::Value, fields: &[Field]) -> GenericValue {
+    match json {
+        serde_json::Value::Array(items) => GenericValue::Array(
+            items
+                .into_iter()
+                .map(|item| coerce_document(item, fields))
+                .collect(),
+        ),
+        object @ serde_json::Value::Object(_) => coerce_document(object, fields),
+        other => json_to_generic(other),
+    }
+}
+
+/// An aggregate's result, typed by its op: a count is a [`BigInt`](GenericValue::BigInt),
+/// an average a [`Double`](GenericValue::Double), `sum`/`min`/`max` follow the
+/// declared `value_type`, and `ids` is an array of the element type.
+fn coerce_aggregate(json: serde_json::Value, aggregate: &Aggregate) -> GenericValue {
+    match &aggregate.op {
+        AggregateOp::Count => coerce_scalar(json, &FlussoType::Long),
+        AggregateOp::Avg(_) => coerce_scalar(json, &FlussoType::Double),
+        AggregateOp::Sum(_) | AggregateOp::Min(_) | AggregateOp::Max(_) => {
+            match &aggregate.value_type {
+                Some(ty) => coerce_scalar(json, ty),
+                None => json_to_generic(json),
+            }
+        }
+        AggregateOp::Ids { element_type } => match json {
+            serde_json::Value::Array(items) => GenericValue::Array(
+                items
+                    .into_iter()
+                    .map(|item| coerce_scalar(item, element_type))
+                    .collect(),
+            ),
+            other => json_to_generic(other),
+        },
+    }
+}
+
+/// Coerce a JSON scalar to the canonical variant its declared [`FlussoType`]
+/// implies. A null stays null; a value that doesn't fit the declared type falls
+/// back to its untyped JSON shape (never an error).
+fn coerce_scalar(json: serde_json::Value, ty: &FlussoType) -> GenericValue {
+    if json.is_null() {
+        return GenericValue::Null;
+    }
+    match ty {
+        FlussoType::Boolean => match json.as_bool() {
+            Some(b) => GenericValue::Bool(b),
+            None => json_to_generic(json),
+        },
+        FlussoType::Short => match json.as_i64().and_then(|i| i16::try_from(i).ok()) {
+            Some(i) => GenericValue::SmallInt(i),
+            None => json_to_generic(json),
+        },
+        FlussoType::Integer => match json.as_i64().and_then(|i| i32::try_from(i).ok()) {
+            Some(i) => GenericValue::Int(i),
+            None => json_to_generic(json),
+        },
+        FlussoType::Long => match json.as_i64() {
+            Some(i) => GenericValue::BigInt(i),
+            None => json_to_generic(json),
+        },
+        FlussoType::Float => match json.as_f64() {
+            Some(f) => GenericValue::Float(f as f32),
+            None => json_to_generic(json),
+        },
+        FlussoType::Double => match json.as_f64() {
+            Some(f) => GenericValue::Double(f),
+            None => json_to_generic(json),
+        },
+        FlussoType::Decimal => coerce_decimal(json),
+        FlussoType::Uuid => match json.as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            Some(u) => GenericValue::Uuid(u),
+            None => json_to_generic(json),
+        },
+        FlussoType::Date => match json.as_str().and_then(|s| s.parse::<NaiveDate>().ok()) {
+            Some(d) => GenericValue::Date(d),
+            None => json_to_generic(json),
+        },
+        // `timestamp` / `timestamptz` / `time` all declare `Timestamp`; recover
+        // the precise variant from the value's shape.
+        FlussoType::Timestamp => json
+            .as_str()
+            .and_then(parse_temporal)
+            .unwrap_or_else(|| json_to_generic(json)),
+        // Text-family and the structured / escape-hatch types keep their natural
+        // JSON shape.
+        FlussoType::Text
+        | FlussoType::Identifier
+        | FlussoType::Keyword
+        | FlussoType::Enum
+        | FlussoType::Binary
+        | FlussoType::Json
+        | FlussoType::GeoPoint
+        | FlussoType::Custom { .. } => json_to_generic(json),
+    }
+}
+
+/// Parse a `Timestamp`-declared string into the tightest temporal variant: an
+/// offset instant → [`TimestampTz`](GenericValue::TimestampTz), else a naive
+/// datetime, a time, or a date. `None` if it's none of those.
+fn parse_temporal(s: &str) -> Option<GenericValue> {
+    if let Ok(instant) = DateTime::parse_from_rfc3339(s) {
+        return Some(GenericValue::TimestampTz(instant.with_timezone(&Utc)));
+    }
+    if let Ok(naive) = s.parse::<NaiveDateTime>() {
+        return Some(GenericValue::Timestamp(naive));
+    }
+    if let Ok(time) = s.parse::<NaiveTime>() {
+        return Some(GenericValue::Time(time));
+    }
+    s.parse::<NaiveDate>().ok().map(GenericValue::Date)
+}
+
+/// A `numeric`-declared value, kept exact: parse from the JSON number's text (so
+/// precision isn't lost through `f64`) or a string, else fall back untyped.
+fn coerce_decimal(json: serde_json::Value) -> GenericValue {
+    let parsed = match &json {
+        serde_json::Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
+        serde_json::Value::String(s) => Decimal::from_str(s).ok(),
+        _ => None,
+    };
+    parsed.map_or_else(|| json_to_generic(json), GenericValue::Decimal)
+}
+
 /// Resolve a decoded column: SQL `NULL` → [`GenericValue::Null`], a value runs
 /// through `f`, a decode error warns and falls back to null.
 fn finish<T>(
@@ -160,5 +328,98 @@ fn float(v: f64) -> GenericValue {
     match Decimal::try_from(v) {
         Ok(d) => GenericValue::Decimal(d),
         Err(_) => GenericValue::String(v.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use schema_core::{Column, ColumnName, FieldName};
+    use serde_json::json;
+
+    fn column_field(name: &str, ty: FlussoType) -> Field {
+        Field {
+            field: FieldName::try_new(name).unwrap(),
+            options: Default::default(),
+            source: FieldSource::Column(Column {
+                column: ColumnName::try_new(name).unwrap(),
+                ty,
+                nullable: true,
+                transforms: Vec::new(),
+                default: None,
+            }),
+        }
+    }
+
+    fn body(doc: serde_json::Value, fields: &[Field]) -> BTreeMap<String, GenericValue> {
+        match coerce_document(doc, fields) {
+            GenericValue::Map(map) => map,
+            other => panic!("expected a map document, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerces_each_leaf_to_its_declared_type() {
+        let fields = vec![
+            column_field("uid", FlussoType::Uuid),
+            column_field("born", FlussoType::Date),
+            column_field("seen", FlussoType::Timestamp),
+            column_field("clock", FlussoType::Timestamp),
+            column_field("at", FlussoType::Timestamp),
+            column_field("small", FlussoType::Short),
+            column_field("n", FlussoType::Integer),
+            column_field("big", FlussoType::Long),
+            column_field("ratio", FlussoType::Double),
+            column_field("name", FlussoType::Keyword),
+        ];
+        let map = body(
+            json!({
+                "uid": "11111111-1111-1111-1111-111111111111",
+                "born": "2024-01-02",
+                "seen": "2024-01-02T03:04:05+00:00",
+                "clock": "2024-01-02T03:04:05",
+                "at": "03:04:05",
+                "small": 7,
+                "n": 70,
+                "big": 9_000_000_000_i64,
+                "ratio": 1.5,
+                "name": "ada",
+            }),
+            &fields,
+        );
+        assert!(matches!(map.get("uid"), Some(GenericValue::Uuid(_))));
+        assert!(matches!(map.get("born"), Some(GenericValue::Date(_))));
+        assert!(matches!(
+            map.get("seen"),
+            Some(GenericValue::TimestampTz(_))
+        ));
+        assert!(matches!(map.get("clock"), Some(GenericValue::Timestamp(_))));
+        assert!(matches!(map.get("at"), Some(GenericValue::Time(_))));
+        assert_eq!(map.get("small"), Some(&GenericValue::SmallInt(7)));
+        assert_eq!(map.get("n"), Some(&GenericValue::Int(70)));
+        assert_eq!(map.get("big"), Some(&GenericValue::BigInt(9_000_000_000)));
+        assert_eq!(map.get("ratio"), Some(&GenericValue::Double(1.5)));
+        assert_eq!(
+            map.get("name"),
+            Some(&GenericValue::String("ada".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_unparseable_value_falls_back_untyped_rather_than_failing() {
+        let fields = vec![column_field("uid", FlussoType::Uuid)];
+        let map = body(json!({ "uid": "not-a-uuid" }), &fields);
+        assert_eq!(
+            map.get("uid"),
+            Some(&GenericValue::String("not-a-uuid".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_null_leaf_stays_null_for_any_type() {
+        let fields = vec![column_field("born", FlussoType::Date)];
+        let map = body(json!({ "born": null }), &fields);
+        assert_eq!(map.get("born"), Some(&GenericValue::Null));
     }
 }

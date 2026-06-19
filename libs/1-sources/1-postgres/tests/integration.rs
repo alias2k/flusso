@@ -231,6 +231,88 @@ async fn uuid_keys_round_trip_through_build_build_many_and_resolve() {
     assert_eq!(affected, vec![uuid_document_id(U1)]);
 }
 
+/// The document body — assembled server-side as JSON, then coerced by each
+/// field's declared type — reaches the engine as **typed** canonical values, not
+/// strings: a `uuid` is a `Uuid`, a `date` a `Date`, a `timestamptz` a
+/// `TimestampTz`, a `bigint` a `BigInt`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE events (id uuid PRIMARY KEY, name text, born date, seen timestamptz, n bigint)",
+        "INSERT INTO events (id, name, born, seen, n) VALUES \
+         ('11111111-1111-1111-1111-111111111111', 'launch', '2024-01-02', \
+          '2024-01-02T03:04:05Z', 9000000000)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let typed_field = |name: &str, ty: FlussoType| Field {
+        field: field(name),
+        options: Default::default(),
+        source: FieldSource::Column(Column {
+            column: column(name),
+            ty,
+            nullable: true,
+            transforms: Vec::new(),
+            default: None,
+        }),
+    };
+    let schema = IndexSchema {
+        version: 1,
+        table: table("events"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            typed_field("id", FlussoType::Uuid),
+            typed_field("name", FlussoType::Keyword),
+            typed_field("born", FlussoType::Date),
+            typed_field("seen", FlussoType::Timestamp),
+            typed_field("n", FlussoType::Long),
+        ],
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("events"), schema)]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+
+    let id = DocumentId {
+        index: index_name("events"),
+        key: uuid_row_key("11111111-1111-1111-1111-111111111111"),
+    };
+    let Document::Upsert { body, .. } = builder.build(&id).await.unwrap() else {
+        panic!("expected an upsert");
+    };
+    let GenericValue::Map(map) = body else {
+        panic!("expected a document object");
+    };
+    assert!(
+        matches!(map.get("id"), Some(GenericValue::Uuid(_))),
+        "{map:?}"
+    );
+    assert!(
+        matches!(map.get("born"), Some(GenericValue::Date(_))),
+        "{map:?}"
+    );
+    assert!(
+        matches!(map.get("seen"), Some(GenericValue::TimestampTz(_))),
+        "{map:?}"
+    );
+    assert_eq!(map.get("n"), Some(&GenericValue::BigInt(9_000_000_000)));
+    assert_eq!(
+        map.get("name"),
+        Some(&GenericValue::String("launch".to_owned()))
+    );
+}
+
 fn users_spec() -> SourceSpec {
     let orders = Field {
         field: field("orders"),

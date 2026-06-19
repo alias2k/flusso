@@ -417,7 +417,7 @@ impl DocumentBuilder for PgDocumentBuilder {
                 let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
                 Ok(Document::Upsert {
                     id: id.clone(),
-                    body: value::json_to_generic(document),
+                    body: value::coerce_document(document, &schema.fields),
                 })
             }
         }
@@ -482,7 +482,7 @@ impl DocumentBuilder for PgDocumentBuilder {
                 for row in &rows {
                     let key = value::first_column_to_generic(row);
                     let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                    bodies.insert(key, value::json_to_generic(document));
+                    bodies.insert(key, value::coerce_document(document, &schema.fields));
                 }
 
                 // Every requested id yields an outcome: a body present in the
