@@ -404,6 +404,21 @@ impl<S> Keyword<S> {
         FuzzyQuery::new(&self.path, value.into())
     }
 
+    /// The full-text `.text` subfield flusso auto-creates on a `keyword` field
+    /// (analyzed with `flusso_code`), so a keyword is still searchable in a
+    /// search box. Available only when the sink's `auto_subfields` is on (the
+    /// default) and the field defines no custom `fields`.
+    pub fn text(&self) -> Text<S> {
+        Text::at(format!("{}.text", self.path))
+    }
+
+    /// The case/accent-insensitive `.keyword_lowercase` subfield flusso
+    /// auto-creates — for case-insensitive exact match and sort. Available only
+    /// when the sink's `auto_subfields` is on (the default).
+    pub fn keyword_lowercase(&self) -> Keyword<S> {
+        Keyword::at(format!("{}.keyword_lowercase", self.path))
+    }
+
     /// The field has a non-null value.
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
@@ -580,6 +595,22 @@ impl<S> Text<S> {
     /// Analyzed match tolerant of typos — sugar for `matches(v).fuzziness("AUTO")`.
     pub fn matches_fuzzy(&self, value: impl Into<String>) -> MatchQuery<S> {
         self.matches(value).fuzziness("AUTO")
+    }
+
+    /// The exact `.keyword` subfield flusso auto-creates on a `text` field —
+    /// for exact `eq` / `in_`, `wildcard`, `prefix`, and exact sort. (A wildcard
+    /// belongs here, not on the analyzed handle, which matches tokens not the
+    /// whole value.) Available only when the sink's `auto_subfields` is on (the
+    /// default) and the field defines no custom `fields`.
+    pub fn keyword(&self) -> Keyword<S> {
+        Keyword::at(format!("{}.keyword", self.path))
+    }
+
+    /// The case/accent-insensitive `.keyword_lowercase` subfield — for
+    /// case-insensitive exact match and sort. Available only when the sink's
+    /// `auto_subfields` is on (the default).
+    pub fn keyword_lowercase(&self) -> Keyword<S> {
+        Keyword::at(format!("{}.keyword_lowercase", self.path))
     }
 
     /// The field has a non-null value.

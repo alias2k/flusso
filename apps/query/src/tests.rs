@@ -739,6 +739,37 @@ fn uuid_is_a_keyword_value() {
 }
 
 #[test]
+fn subfield_accessors_target_the_right_subfield() {
+    // Exact / wildcard go to the `.keyword` subfield of a text field.
+    assert_eq!(
+        User::full_name().keyword().eq("Ada Lovelace").to_value(),
+        json!({ "term": { "fullName.keyword": "Ada Lovelace" } })
+    );
+    assert_eq!(
+        User::full_name()
+            .keyword()
+            .wildcard("*lovelace*")
+            .case_insensitive()
+            .to_value(),
+        json!({ "wildcard": { "fullName.keyword": {
+            "value": "*lovelace*", "case_insensitive": true
+        } } })
+    );
+
+    // Case-insensitive sort goes to `.keyword_lowercase`.
+    assert_eq!(
+        User::full_name().keyword_lowercase().asc().to_value(),
+        json!({ "fullName.keyword_lowercase": { "order": "asc" } })
+    );
+
+    // A keyword field's `.text` subfield is full-text searchable.
+    assert_eq!(
+        User::email().text().matches("ada").to_value(),
+        json!({ "match": { "email.text": "ada" } })
+    );
+}
+
+#[test]
 fn multi_match_spans_text_fields() {
     let query = multi_match(
         "ada lovelace",
