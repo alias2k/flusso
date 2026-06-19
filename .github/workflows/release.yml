@@ -42,14 +42,13 @@ on:
   pull_request:
   push:
     tags:
-      # NOTE: hand-narrowed from dist's default '**[0-9]+.[0-9]+.[0-9]+*'.
-      # `dist generate` will overwrite this back to the broad glob — re-narrow
-      # after regenerating. flusso-cli is the only dist-able package, and
-      # release-plz pushes a per-crate tag for all 16 crates in lockstep. dist
-      # treats EVERY version tag as the same unified announcement, so the broad
-      # glob makes it build the CLI artifacts once per tag and upload them onto
-      # all 16 releases. Restricting to the cli tag fires dist exactly once, on
-      # the release the binaries actually belong to.
+      # Hand-narrowed from dist's default '**[0-9]+.[0-9]+.[0-9]+*'. flusso-cli is
+      # the only dist-able package, but release-plz pushes a per-crate tag for all
+      # 16 crates in lockstep; the broad glob fires this workflow on every library
+      # tag (which builds nothing, then fails the empty upload). Restricting to the
+      # cli tag fires dist exactly once, on the release the binaries belong to.
+      # Allowed by `allow-dirty = ["ci"]` in dist-workspace.toml (dist skips its
+      # release.yml consistency check); re-narrow if you ever `dist generate`.
       - 'flusso-cli-v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
