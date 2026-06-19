@@ -20,7 +20,7 @@ default-members = ["apps/cli"]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/alias2k/flusso"
@@ -150,20 +150,20 @@ opentelemetry-prometheus = { version = "0.32.*" }
 tracing-opentelemetry = { version = "0.33.*" }
 prometheus = { version = "0.14.*" }
 
-schema = { path = "libs/2-schema", version = "0.3.2", package = "flusso-schema" }
-schema-core = { path = "libs/0-core", version = "0.3.2", package = "flusso-schema-core" }
-schema-config-toml = { path = "libs/2-schema/1-config-toml", version = "0.3.2", package = "flusso-schema-config-toml" }
-schema-index-yaml = { path = "libs/2-schema/1-index-yaml", version = "0.3.2", package = "flusso-schema-index-yaml" }
+schema = { path = "libs/2-schema", version = "0.4.0", package = "flusso-schema" }
+schema-core = { path = "libs/0-core", version = "0.4.0", package = "flusso-schema-core" }
+schema-config-toml = { path = "libs/2-schema/1-config-toml", version = "0.4.0", package = "flusso-schema-config-toml" }
+schema-index-yaml = { path = "libs/2-schema/1-index-yaml", version = "0.4.0", package = "flusso-schema-index-yaml" }
 
-engine = { path = "libs/2-engine", version = "0.3.2", package = "flusso-engine" }
-daemon = { path = "libs/3-daemon", version = "0.3.2", package = "flusso-daemon" }
+engine = { path = "libs/2-engine", version = "0.4.0", package = "flusso-engine" }
+daemon = { path = "libs/3-daemon", version = "0.4.0", package = "flusso-daemon" }
 
-sources-core = { path = "libs/1-sources/0-core", version = "0.3.2", package = "flusso-sources-core" }
-sources-postgres = { path = "libs/1-sources/1-postgres", version = "0.3.2", package = "flusso-sources-postgres" }
+sources-core = { path = "libs/1-sources/0-core", version = "0.4.0", package = "flusso-sources-core" }
+sources-postgres = { path = "libs/1-sources/1-postgres", version = "0.4.0", package = "flusso-sources-postgres" }
 
-sinks-core = { path = "libs/1-sinks/0-core", version = "0.3.2", package = "flusso-sinks-core" }
-sinks-stdout = { path = "libs/1-sinks/1-stdout", version = "0.3.2", package = "flusso-sinks-stdout" }
-sinks-opensearch = { path = "libs/1-sinks/2-opensearch", version = "0.3.2", package = "flusso-sinks-opensearch" }
+sinks-core = { path = "libs/1-sinks/0-core", version = "0.4.0", package = "flusso-sinks-core" }
+sinks-stdout = { path = "libs/1-sinks/1-stdout", version = "0.4.0", package = "flusso-sinks-stdout" }
+sinks-opensearch = { path = "libs/1-sinks/2-opensearch", version = "0.4.0", package = "flusso-sinks-opensearch" }
 
-queue-core = { path = "libs/1-queue/0-core", version = "0.3.2", package = "flusso-queue-core" }
-queue-channel = { path = "libs/1-queue/1-channel", version = "0.3.2", package = "flusso-queue-channel" }
+queue-core = { path = "libs/1-queue/0-core", version = "0.4.0", package = "flusso-queue-core" }
+queue-channel = { path = "libs/1-queue/1-channel", version = "0.4.0", package = "flusso-queue-channel" }

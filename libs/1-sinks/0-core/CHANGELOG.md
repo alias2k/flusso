@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/alias2k/flusso/compare/flusso-sinks-core-v0.3.2...flusso-sinks-core-v0.4.0) - 2026-06-19
+
+### Other
+
+- move inline unit tests into sibling tests.rs modules
+- *(core)* typed canonical value vocabulary between source and sink
+
 ### Changed
 
 - `to_json` renders the typed `GenericValue` variants to the JSON a sink ingests:

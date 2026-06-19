@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/alias2k/flusso/compare/flusso-sinks-opensearch-v0.3.2...flusso-sinks-opensearch-v0.4.0) - 2026-06-19
+
+### Added
+
+- runtime index prefix to namespace all indices ([#24](https://github.com/alias2k/flusso/pull/24))
+
+### Other
+
+- move inline unit tests into sibling tests.rs modules
+- *(core)* typed canonical value vocabulary between source and sink
+- *(opensearch)* e2e coverage for the index prefix
+
 ### Added
 
 - `with_index_prefix`: prepend a prefix to every index, alias, and the meta index.
