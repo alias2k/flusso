@@ -96,11 +96,15 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
-    Binary, Bool, BoostingQuery, ConstantScoreQuery, Date, DisMaxQuery, EqQuery, FlussoValue,
-    FunctionScoreQuery, FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint, Json, Keyword, MatchQuery,
+    Binary, Bool, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DisMaxQuery,
+    DistanceFeatureQuery, EqQuery, FlussoValue, FunctionScoreQuery, FuzzyQuery, Geo,
+    GeoDistanceQuery, GeoPoint, IdsQuery, Json, Keyword, MatchQuery, MoreLikeThisQuery,
     MultiMatchQuery, Nested, NestedProjection, NestedQuery, Number, Object, PrefixQuery,
-    RangeQuery, RegexpQuery, Sort, SortMode, SortOrder, TermQuery, TermsQuery, Text, WildcardQuery,
-    boosting, constant_score, dis_max, function_score, kind, multi_match,
+    QueryStringQuery, RangeQuery, RankFeatureQuery, RegexpQuery, ScriptQuery, ScriptScoreQuery,
+    SimpleQueryStringQuery, Sort, SortMode, SortOrder, TermQuery, TermsQuery, Text, WildcardQuery,
+    boosting, combined_fields, constant_score, dis_max, distance_feature, function_score, ids,
+    kind, more_like_this, multi_match, query_string, rank_feature, script, script_score,
+    simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};

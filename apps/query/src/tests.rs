@@ -585,6 +585,84 @@ fn compound_queries_render() {
 }
 
 #[test]
+fn ids_and_fulltext_queries_render() {
+    assert_eq!(
+        crate::ids::<Root>(["1", "2", "3"]).to_value(),
+        json!({ "ids": { "values": ["1", "2", "3"] } })
+    );
+
+    assert_eq!(
+        crate::query_string::<Root>("ada AND lovelace")
+            .default_field("bio")
+            .default_operator("AND")
+            .to_value(),
+        json!({ "query_string": {
+            "query": "ada AND lovelace",
+            "default_field": "bio",
+            "default_operator": "AND"
+        } })
+    );
+
+    assert_eq!(
+        crate::simple_query_string::<Root>("ada +lovelace")
+            .fields([
+                Text::<Root>::at("bio").boosted(2.0),
+                Text::<Root>::at("name")
+            ])
+            .to_value(),
+        json!({ "simple_query_string": {
+            "query": "ada +lovelace",
+            "fields": ["bio^2", "name"]
+        } })
+    );
+
+    assert_eq!(
+        crate::combined_fields("ada", [Text::<Root>::at("title"), Text::<Root>::at("body")])
+            .operator("AND")
+            .to_value(),
+        json!({ "combined_fields": {
+            "query": "ada",
+            "fields": ["title", "body"],
+            "operator": "AND"
+        } })
+    );
+}
+
+#[test]
+fn relevance_queries_render() {
+    assert_eq!(
+        crate::script_score(
+            Text::<Root>::at("title").matches("ada"),
+            "doc['boost'].value"
+        )
+        .to_value(),
+        json!({ "script_score": {
+            "query": { "match": { "title": "ada" } },
+            "script": { "source": "doc['boost'].value" }
+        } })
+    );
+
+    assert_eq!(
+        crate::distance_feature::<Root>("createdAt", "now", "7d")
+            .boost(2.0)
+            .to_value(),
+        json!({ "distance_feature": {
+            "field": "createdAt",
+            "origin": "now",
+            "pivot": "7d",
+            "boost": 2.0
+        } })
+    );
+
+    assert_eq!(
+        crate::rank_feature::<Root>("pagerank")
+            .saturation(8.0)
+            .to_value(),
+        json!({ "rank_feature": { "field": "pagerank", "saturation": { "pivot": 8.0 } } })
+    );
+}
+
+#[test]
 fn multi_match_spans_text_fields() {
     let query = multi_match(
         "ada lovelace",

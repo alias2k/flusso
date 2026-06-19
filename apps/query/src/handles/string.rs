@@ -549,7 +549,7 @@ impl<S> Text<S> {
 
     /// The field's path as listed in a [`multi_match`] `fields` array —
     /// `field^weight` when [`boosted`](Self::boosted), else the bare path.
-    fn field_spec(&self) -> String {
+    pub(crate) fn field_spec(&self) -> String {
         match self.boost {
             Some(weight) => format!("{}^{weight}", self.path),
             None => self.path.clone(),
