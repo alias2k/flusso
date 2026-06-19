@@ -317,6 +317,20 @@ builder (`sort.rs`); search-level controls + the `Highlight` builder live on `Se
 type for `multi_match`/composition). Issue #19 acceptance test: `apps/query-derive/tests/
 derive.rs::acceptance_realistic_projection_needs_no_escape_hatch`.
 
+**Index prefix (issue #24).** A deployment-wide `prefix` (top-level `Config` field;
+`--index-prefix`/`FLUSSO_INDEX_PREFIX` override it, flag > env > config) is prepended to
+**every** name the OpenSearch sink owns — the hash alias `{prefix}{logical}_{hash}`, its
+generations, the `{prefix}{logical}` convenience alias, and the `{prefix}flusso_meta` index —
+so several deployments (dev/staging/nightly) can share one cluster. Write side: resolved +
+validated in `commands/run.rs` (`schema_core::validate_index_prefix`), threaded via
+`backends.rs` into `OpensearchSink::with_index_prefix`; the sink prefixes at the single
+chokepoint (`hash_alias`/`convenience_alias`/`meta_index` helpers in `lib.rs`). Read side is
+**runtime, not baked**: the derive still emits the unprefixed `INDEX`/`SCHEMA_HASH`, and
+`flusso-query`'s `Client::index_prefix` prepends the prefix to each request path (and strips
+it from `_index` in combined-search decode), so one compiled consumer serves every env. The
+generation naming functions (`generations.rs`) are prefix-agnostic — they operate on whatever
+hash-alias string they're handed.
+
 ## Keeping this file current
 
 This file is a living index — keep it accurate as part of normal work, no separate ask
@@ -380,7 +394,13 @@ belongs in the linked docs.
     concrete, prefer scannable structure (a one-line summary first, then specifics) over dense
     prose. Applies to `///`, `//!`, and the rare inline gotcha alike.
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
-  `libs/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
+  `libs/0-core/src/common/`. `GenericValue` is the **typed canonical value vocabulary** that
+  crosses layers — the middle type a source maps *into* and a sink maps *out of*. It's
+  fine-grained (numerics split by width; `Date`/`Time`/`Timestamp`/`TimestampTz`; `Uuid`;
+  `Bytes`) so no type is erased in transit, and its serde is **derived/format-agnostic** (a
+  queue may encode it however it likes; it round-trips losslessly). A sink converts it to its
+  own representation at its boundary (`sinks_core::to_json` is the OpenSearch JSON translation,
+  where e.g. `bytea`→base64 lives) — core picks no wire format.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`

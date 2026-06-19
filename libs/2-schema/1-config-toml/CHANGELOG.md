@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Parse the top-level `prefix` config key, plus its JSON Schema entry.
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-schema-config-toml-v0.3.0...flusso-schema-config-toml-v0.3.1) - 2026-06-19
 
 ### Added

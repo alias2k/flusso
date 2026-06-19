@@ -76,10 +76,20 @@ impl sqlx::SqlSafeStr for SqlString {
 /// Bind a scalar parameter onto a query, in `params` order.
 pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result<PgQuery<'q>> {
     Ok(match value {
-        GenericValue::Int(i) => query.bind(*i),
         GenericValue::Bool(b) => query.bind(*b),
+        GenericValue::SmallInt(i) => query.bind(*i),
+        GenericValue::Int(i) => query.bind(*i),
+        GenericValue::BigInt(i) => query.bind(*i),
+        GenericValue::Float(f) => query.bind(*f),
+        GenericValue::Double(f) => query.bind(*f),
         GenericValue::Decimal(d) => query.bind(*d),
         GenericValue::String(s) => query.bind(s.clone()),
+        GenericValue::Uuid(u) => query.bind(*u),
+        GenericValue::Date(d) => query.bind(*d),
+        GenericValue::Time(t) => query.bind(*t),
+        GenericValue::Timestamp(ts) => query.bind(*ts),
+        GenericValue::TimestampTz(ts) => query.bind(*ts),
+        GenericValue::Bytes(bytes) => query.bind(bytes.clone()),
         GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => {
             return Err(SourceError::Query(
                 "cannot bind null, array, or map as a parameter".into(),
@@ -108,7 +118,7 @@ pub(super) fn document_query(
 
     let mut conditions = Vec::new();
     for (column, value) in key {
-        let placeholder = builder.placeholder(value.clone())?;
+        let placeholder = builder.typed_placeholder(value.clone(), &schema.table, column)?;
         conditions.push(format!("{} = {placeholder}", qcol(ROOT, column)));
     }
     if let Some(predicate) = builder.soft_delete_predicate(schema)? {
@@ -138,7 +148,10 @@ pub(super) fn document_query(
 /// The document is assembled exactly as in [`document_query`] — same nested
 /// `json_build_object` / `json_agg` — differing only in selecting the key and
 /// matching the root with `IN (…)` instead of a single equality. The key is
-/// wrapped in `to_json` so it decodes through the same path as the document.
+/// selected **raw** (not `to_json`-wrapped) so it decodes by its real column
+/// type into the same typed [`GenericValue`] variant the requested keys carry —
+/// a `uuid` key comes back as a `Uuid`, not a JSON string — so the caller's
+/// key-to-body match is exact.
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
@@ -160,7 +173,7 @@ pub(super) fn documents_query(
 
     let mut placeholders = Vec::with_capacity(keys.len());
     for key in keys {
-        placeholders.push(builder.placeholder(key.clone())?);
+        placeholders.push(builder.typed_placeholder(key.clone(), &schema.table, pk_column)?);
     }
     let mut predicate = format!("{} IN ({})", qcol(ROOT, pk_column), placeholders.join(", "),);
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
@@ -172,7 +185,7 @@ pub(super) fn documents_query(
     predicate.push_str(&root_filters);
 
     let sql = format!(
-        "SELECT to_json({key}) AS \"doc_key\", {object} AS \"document\" \
+        "SELECT {key} AS \"doc_key\", {object} AS \"document\" \
          FROM {} AS \"{ROOT}\" WHERE {predicate}",
         qtable(&schema.db_schema, &schema.table),
         key = qcol(ROOT, pk_column),
@@ -181,11 +194,16 @@ pub(super) fn documents_query(
 }
 
 /// Build a reverse-resolution query: one column from a table, filtered by a key.
+///
+/// Each key column is matched with its operand cast to the column's catalog SQL
+/// type (`= $n::<type>`), so a `uuid`/`date`/… foreign key compares against its
+/// own type rather than `text`. `col_types` must carry every key column's type.
 pub(super) fn reverse_query(
     db: &DatabaseSchema,
     table: &TableName,
     select_column: &ColumnName,
     key: &[(ColumnName, GenericValue)],
+    col_types: &HashMap<(String, String), String>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut params = Vec::new();
     let mut conditions = Vec::new();
@@ -195,8 +213,17 @@ pub(super) fn reverse_query(
                 "cannot bind null, array, or map as a key".into(),
             ));
         }
+        let sql_type = col_types
+            .get(&(table.to_string(), column.to_string()))
+            .ok_or_else(|| {
+                SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
+            })?;
         params.push(value.clone());
-        conditions.push(format!("{} = ${}", qident(column.as_ref()), params.len()));
+        conditions.push(format!(
+            "{} = ${}::{sql_type}",
+            qident(column.as_ref()),
+            params.len()
+        ));
     }
     if conditions.is_empty() {
         conditions.push("true".to_owned());

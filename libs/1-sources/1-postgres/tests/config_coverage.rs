@@ -1054,8 +1054,8 @@ fn doc(id: i64) -> DocumentId {
 
 fn id_of(document: &DocumentId) -> i64 {
     match document.key.0.first() {
-        Some((_, GenericValue::Int(i))) => *i,
-        _ => panic!("expected an int document key"),
+        Some((_, value)) => int_of(value),
+        _ => panic!("expected a document key"),
     }
 }
 
@@ -1063,8 +1063,10 @@ fn key(id: i64) -> RowKey {
     row_key("id", id)
 }
 
+// The fixture tables use `int` (int4) keys, which decode to `Int`; build request
+// keys as the same variant so they compare equal to resolved keys.
 fn row_key(col: &str, id: i64) -> RowKey {
-    RowKey(vec![(column(col), GenericValue::Int(id))])
+    RowKey(vec![(column(col), GenericValue::Int(id as i32))])
 }
 
 fn str_of<'a>(map: &'a BTreeMap<String, GenericValue>, key: &str) -> &'a str {
@@ -1081,18 +1083,26 @@ fn arr_of<'a>(map: &'a BTreeMap<String, GenericValue>, key: &str) -> &'a [Generi
     }
 }
 
+// Width-tolerant: a key decodes to its column's exact integer variant, while an
+// integer in the assembled JSON body comes back `BigInt`.
 fn int_of(value: &GenericValue) -> i64 {
     match value {
-        GenericValue::Int(i) => *i,
+        GenericValue::SmallInt(i) => i64::from(*i),
+        GenericValue::Int(i) => i64::from(*i),
+        GenericValue::BigInt(i) => *i,
         other => panic!("expected an int, got {other:?}"),
     }
 }
 
-/// Coerce a numeric document value (int or decimal) to f64 for tolerant
-/// comparison — sums and averages come back as decimals.
+/// Coerce a numeric document value to f64 for tolerant comparison — counts come
+/// back integer, sums/min/max as decimals, and averages as `Double`.
 fn num_of(value: &GenericValue) -> f64 {
     match value {
-        GenericValue::Int(i) => *i as f64,
+        GenericValue::SmallInt(i) => f64::from(*i),
+        GenericValue::Int(i) => f64::from(*i),
+        GenericValue::BigInt(i) => *i as f64,
+        GenericValue::Float(f) => f64::from(*f),
+        GenericValue::Double(f) => *f,
         GenericValue::Decimal(d) => d.to_string().parse().unwrap(),
         GenericValue::String(s) => s.parse().unwrap(),
         other => panic!("expected a number, got {other:?}"),

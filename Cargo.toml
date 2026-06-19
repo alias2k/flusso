@@ -127,8 +127,8 @@ sqlx = { version = "0.9.*", default-features = false, features = [
   "uuid",
   "json",
 ] }
-chrono = { version = "0.4.*", default-features = false, features = ["std"] }
-uuid = { version = "1.*" }
+chrono = { version = "0.4.*", default-features = false, features = ["std", "serde"] }
+uuid = { version = "1.*", features = ["serde"] }
 serde_json = { version = "1.*" }
 # Our HTTP client stays on 0.12. The OTLP exporter pulls its own reqwest 0.13
 # transitively; deduping would force a 0.13 TLS-feature migration (rustls-tls →

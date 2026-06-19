@@ -284,6 +284,29 @@ impl PgDocumentBuilder {
         }
         Ok(types)
     }
+
+    /// Ensure `types` carries the catalog SQL type of each root-table key column,
+    /// so the keyed lookup can cast every `$n` to it. The keys come back from
+    /// Postgres as values (a `uuid` as a string, say); without the cast the
+    /// re-bound `$n` is `text` and `uuid = text` has no operator.
+    async fn add_key_column_types(
+        &self,
+        schema: &IndexSchema,
+        columns: &[&ColumnName],
+        types: &mut HashMap<(String, String), String>,
+    ) -> Result<()> {
+        for column in columns {
+            let key = (schema.table.to_string(), column.to_string());
+            if types.contains_key(&key) {
+                continue;
+            }
+            let sql_type = self
+                .column_type(&schema.db_schema, &schema.table, column)
+                .await?;
+            types.insert(key, sql_type);
+        }
+        Ok(())
+    }
 }
 
 /// The Postgres source's view of its own catalog. The index mapping is derived
@@ -371,7 +394,10 @@ impl DocumentBuilder for PgDocumentBuilder {
             .ok_or_else(|| SourceError::Query(format!("unknown index `{}`", id.index)))?;
 
         let pks = self.relation_pks(schema).await?;
-        let col_types = self.filter_column_types(schema).await?;
+        let mut col_types = self.filter_column_types(schema).await?;
+        let key_columns: Vec<&ColumnName> = id.key.0.iter().map(|(column, _)| column).collect();
+        self.add_key_column_types(schema, &key_columns, &mut col_types)
+            .await?;
         let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types)?;
 
         let mut statement = sqlx::query(sql);
@@ -391,7 +417,7 @@ impl DocumentBuilder for PgDocumentBuilder {
                 let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
                 Ok(Document::Upsert {
                     id: id.clone(),
-                    body: value::json_to_generic(document),
+                    body: value::coerce_document(document, &schema.fields),
                 })
             }
         }
@@ -432,7 +458,9 @@ impl DocumentBuilder for PgDocumentBuilder {
             };
 
             let pks = self.relation_pks(schema).await?;
-            let col_types = self.filter_column_types(schema).await?;
+            let mut col_types = self.filter_column_types(schema).await?;
+            self.add_key_column_types(schema, &[&pk_column], &mut col_types)
+                .await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<schema_core::GenericValue> =
@@ -454,7 +482,7 @@ impl DocumentBuilder for PgDocumentBuilder {
                 for row in &rows {
                     let key = value::first_column_to_generic(row);
                     let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                    bodies.insert(key, value::json_to_generic(document));
+                    bodies.insert(key, value::coerce_document(document, &schema.fields));
                 }
 
                 // Every requested id yields an outcome: a body present in the

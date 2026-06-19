@@ -61,10 +61,22 @@ pub(super) fn geo_value(geo: &Geo, alias: &str) -> String {
 fn scalar_literal(value: &GenericValue) -> Option<String> {
     let text = match value {
         GenericValue::Bool(b) => b.to_string(),
+        GenericValue::SmallInt(i) => i.to_string(),
         GenericValue::Int(i) => i.to_string(),
+        GenericValue::BigInt(i) => i.to_string(),
+        GenericValue::Float(f) => f.to_string(),
+        GenericValue::Double(f) => f.to_string(),
         GenericValue::Decimal(d) => d.to_string(),
         GenericValue::String(s) => s.clone(),
-        GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => return None,
+        GenericValue::Uuid(u) => u.to_string(),
+        GenericValue::Date(d) => d.to_string(),
+        GenericValue::Time(t) => t.to_string(),
+        GenericValue::Timestamp(ts) => ts.to_string(),
+        GenericValue::TimestampTz(ts) => ts.to_rfc3339(),
+        GenericValue::Bytes(_)
+        | GenericValue::Null
+        | GenericValue::Array(_)
+        | GenericValue::Map(_) => return None,
     };
     Some(sql_string(&text))
 }

@@ -345,14 +345,20 @@ impl Builder<'_> {
         Ok(expr)
     }
 
-    /// A bound operand cast to its column's SQL type — `$n::<type>` — so a
-    /// `numeric` column compares numerically, a `date` as a date, and so on,
-    /// rather than everything degrading to text. The type was resolved from the
-    /// catalog before query building (see
+    /// A bound value cast to its column's catalog SQL type — `$n::<type>`.
+    ///
+    /// Every value re-injected into a predicate — filter operands *and* the
+    /// keys/foreign keys that drive document lookup — goes through here, so a
+    /// non-`text` column compares against its own type (`uuid = uuid`,
+    /// `date = date`) instead of degrading to `text` and tripping
+    /// `operator does not exist: uuid = text`. The type is the catalog's
+    /// `format_type` name, resolved before query building (see
     /// [`PgDocumentBuilder::column_type`](crate::document::PgDocumentBuilder::column_type)).
-    fn typed_param(
+    /// A missing type is an internal error, not a silent bare bind: that is what
+    /// keeps the cast mandatory.
+    pub(super) fn typed_placeholder(
         &mut self,
-        value: &str,
+        value: GenericValue,
         table: &TableName,
         column: &ColumnName,
     ) -> Result<String> {
@@ -363,8 +369,19 @@ impl Builder<'_> {
                 SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
             })?
             .clone();
-        let placeholder = self.placeholder(GenericValue::String(value.to_owned()))?;
+        let placeholder = self.placeholder(value)?;
         Ok(format!("{placeholder}::{sql_type}"))
+    }
+
+    /// [`typed_placeholder`](Self::typed_placeholder) for a filter operand, whose
+    /// value is carried as a raw string.
+    fn typed_param(
+        &mut self,
+        value: &str,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        self.typed_placeholder(GenericValue::String(value.to_owned()), table, column)
     }
 
     fn typed_params(

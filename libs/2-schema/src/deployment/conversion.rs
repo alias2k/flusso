@@ -38,6 +38,7 @@ impl From<ConfigToml> for Config {
                 public_address: toml.server.public_address,
                 private_address: toml.server.private_address,
             },
+            prefix: toml.prefix,
         }
     }
 }

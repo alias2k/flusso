@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Client::index_prefix`: apply a runtime index prefix to every request, so one
+  consumer binary can read any prefixed deployment.
+
 ## [0.3.2](https://github.com/alias2k/flusso/compare/flusso-query-v0.3.1...flusso-query-v0.3.2) - 2026-06-19
 
 ### Added

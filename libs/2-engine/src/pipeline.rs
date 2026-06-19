@@ -417,9 +417,28 @@ fn document_id(id: &DocumentId) -> String {
 fn value_to_string(value: &GenericValue) -> String {
     match value {
         GenericValue::Bool(b) => b.to_string(),
+        GenericValue::SmallInt(i) => i.to_string(),
         GenericValue::Int(i) => i.to_string(),
+        GenericValue::BigInt(i) => i.to_string(),
+        GenericValue::Float(f) => f.to_string(),
+        GenericValue::Double(f) => f.to_string(),
         GenericValue::Decimal(d) => d.to_string(),
         GenericValue::String(s) => s.clone(),
+        GenericValue::Uuid(u) => u.to_string(),
+        GenericValue::Date(d) => d.to_string(),
+        GenericValue::Time(t) => t.to_string(),
+        GenericValue::Timestamp(ts) => ts.to_string(),
+        GenericValue::TimestampTz(ts) => ts.to_rfc3339(),
+        // `\x`-prefixed lowercase hex, matching Postgres's `bytea` text output,
+        // so a snapshot key and a WAL key for the same row agree.
+        GenericValue::Bytes(bytes) => {
+            let mut out = String::with_capacity(2 + bytes.len() * 2);
+            out.push_str("\\x");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out
+        }
         GenericValue::Null => "null".to_owned(),
         GenericValue::Array(_) | GenericValue::Map(_) => String::new(),
     }

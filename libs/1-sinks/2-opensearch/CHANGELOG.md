@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `with_index_prefix`: prepend a prefix to every index, alias, and the meta index.
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-sinks-opensearch-v0.3.0...flusso-sinks-opensearch-v0.3.1) - 2026-06-19
 
 ### Added

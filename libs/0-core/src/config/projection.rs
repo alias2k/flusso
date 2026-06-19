@@ -124,67 +124,29 @@ fn aggregate_type(aggregate: &Aggregate) -> (MappingType, bool, bool) {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
-
-    use crate::common::{FieldName, IndexName, TableName};
-    use crate::config::{
-        Aggregate, AggregateKey, AggregateOp, DatabaseSchema, Field, FieldSource, FlussoType,
-        IndexSchema, MappingType, Relation,
-    };
-
-    fn ids_schema(element_type: FlussoType) -> IndexSchema {
-        IndexSchema {
-            version: 1,
-            table: TableName::try_new("users").unwrap(),
-            db_schema: DatabaseSchema::default(),
-            primary_key: None,
-            doc_id: None,
-            soft_delete: None,
-            filters: None,
-            fields: vec![Field {
-                field: FieldName::try_new("orderIds").unwrap(),
-                options: Default::default(),
-                source: FieldSource::Relation(Relation::Aggregate(Aggregate {
-                    table: TableName::try_new("orders").unwrap(),
-                    op: AggregateOp::Ids { element_type },
-                    key: AggregateKey::Direct(
-                        crate::common::ColumnName::try_new("user_id").unwrap(),
-                    ),
-                    value_type: None,
-                    filters: None,
-                })),
-            }],
-        }
-    }
-
-    #[test]
-    fn ids_projects_to_a_non_null_element_typed_array() {
-        let mapping = ids_schema(FlussoType::Long).resolve(IndexName::try_new("users").unwrap());
-        let field = &mapping.fields[0];
-        assert_eq!(field.mapping.mapping_type, MappingType::Long);
-        assert!(field.array);
-        assert!(!field.nullable);
-
-        let mapping = ids_schema(FlussoType::Keyword).resolve(IndexName::try_new("users").unwrap());
-        let field = &mapping.fields[0];
-        assert_eq!(field.mapping.mapping_type, MappingType::Keyword);
-        assert!(field.array);
-        assert!(!field.nullable);
-    }
-}
+mod tests;
 
 /// The mapping type a constant value's shape implies.
 fn constant_mapping_type(value: &GenericValue) -> MappingType {
     match value {
         GenericValue::Bool(_) => MappingType::Boolean,
-        GenericValue::Int(_) => MappingType::Long,
-        GenericValue::Decimal(_) => MappingType::Double,
+        GenericValue::SmallInt(_) => MappingType::Short,
+        GenericValue::Int(_) => MappingType::Integer,
+        GenericValue::BigInt(_) => MappingType::Long,
+        GenericValue::Float(_) => MappingType::Float,
+        GenericValue::Double(_) | GenericValue::Decimal(_) => MappingType::Double,
+        GenericValue::Date(_)
+        | GenericValue::Time(_)
+        | GenericValue::Timestamp(_)
+        | GenericValue::TimestampTz(_) => MappingType::Date,
+        GenericValue::Bytes(_) => MappingType::Other("binary".to_owned()),
         GenericValue::Array(items) => items
             .first()
             .map(constant_mapping_type)
             .unwrap_or(MappingType::Keyword),
         GenericValue::Map(_) => MappingType::Object,
-        GenericValue::String(_) | GenericValue::Null => MappingType::Keyword,
+        GenericValue::String(_) | GenericValue::Uuid(_) | GenericValue::Null => {
+            MappingType::Keyword
+        }
     }
 }

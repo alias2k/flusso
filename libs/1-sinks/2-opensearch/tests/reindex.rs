@@ -88,6 +88,12 @@ fn sink(base_url: &str) -> OpensearchSink {
     OpensearchSink::from_config(&name, &config).unwrap()
 }
 
+/// A fresh sink that prepends `prefix` to every name it owns — the deployment
+/// index prefix, as a `flusso run --index-prefix` would.
+fn sink_with_prefix(base_url: &str, prefix: &str) -> OpensearchSink {
+    sink(base_url).with_index_prefix(prefix)
+}
+
 /// The explicit mapping the documents conform to. The hash is fixed, so the two
 /// runs share the same `{logical}_{hash}` alias — exactly the reindex case (same
 /// schema, new generation).
@@ -114,7 +120,7 @@ fn mapping() -> IndexMapping {
 
 fn document(i: usize) -> GenericValue {
     let mut map = BTreeMap::new();
-    map.insert("id".to_owned(), GenericValue::Int(i as i64));
+    map.insert("id".to_owned(), GenericValue::BigInt(i as i64));
     map.insert(
         "email".to_owned(),
         GenericValue::String(format!("user{i}@example.com")),
@@ -244,4 +250,120 @@ async fn reindex_swaps_generations_and_drops_the_old_one() {
         "rebuilding from empty dropped id 3, which the new generation never received",
     );
     assert!(run2.is_seeded(&index).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn index_prefix_isolates_two_deployments_and_scopes_reindex() {
+    // Two deployments (`dev_`, `staging_`) with the *same* schema (so the same
+    // hash, the colliding case) share one cluster. The prefix must keep their
+    // indexes, convenience aliases, meta state, and reindex blast radius fully
+    // independent.
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+
+    let names = |prefix: &str| {
+        let hash_alias = format!("{prefix}{LOGICAL}_{}", mapping.hash);
+        let gen1 = format!("{hash_alias}_1");
+        let gen2 = format!("{hash_alias}_2");
+        let convenience = format!("{prefix}{LOGICAL}");
+        let meta = format!("{prefix}flusso_meta");
+        (hash_alias, gen1, gen2, convenience, meta)
+    };
+    let (dev_alias, dev_gen1, dev_gen2, dev_conv, dev_meta) = names("dev_");
+    let (stg_alias, stg_gen1, _stg_gen2, stg_conv, stg_meta) = names("staging_");
+
+    // ── Seed dev_ (ids 1,2,3) and staging_ (ids 1,2) on the same cluster ─────
+    let dev = sink_with_prefix(&base, "dev_");
+    dev.ensure_index(&mapping).await.unwrap();
+    for i in [1, 2, 3] {
+        dev.upsert(&index, &i.to_string(), &document(i))
+            .await
+            .unwrap();
+    }
+    dev.flush(true).await.unwrap();
+    dev.mark_seeded(&index).await.unwrap();
+
+    let staging = sink_with_prefix(&base, "staging_");
+    staging.ensure_index(&mapping).await.unwrap();
+    for i in [1, 2] {
+        staging
+            .upsert(&index, &i.to_string(), &document(i))
+            .await
+            .unwrap();
+    }
+    staging.flush(true).await.unwrap();
+    staging.mark_seeded(&index).await.unwrap();
+
+    // ── Names are prefixed and the two deployments don't collide ─────────────
+    assert_eq!(
+        alias_targets(&client, &base, &dev_alias).await,
+        vec![dev_gen1.clone()],
+        "dev hash alias points at its own generation 1",
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &stg_alias).await,
+        vec![stg_gen1.clone()],
+        "staging hash alias points at its own generation 1",
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &dev_conv).await,
+        vec![dev_gen1.clone()],
+        "the convenience alias is prefixed too (dev_users -> dev_users_1_1)",
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &stg_conv).await,
+        vec![stg_gen1.clone()],
+    );
+    assert!(
+        index_exists(&client, &base, &dev_meta).await
+            && index_exists(&client, &base, &stg_meta).await,
+        "each deployment keeps its own prefixed meta index",
+    );
+
+    // Data isolation: id 3 lives in dev only; staging never received it.
+    assert!(doc_exists(&client, &base, &dev_alias, "3").await);
+    assert!(!doc_exists(&client, &base, &stg_alias, "3").await);
+
+    // A fresh dev sink (a restart) re-announces the index, then reads dev's
+    // prefixed meta and reports seeded — the slot/seed state round-trips through
+    // the prefixed `dev_flusso_meta`.
+    let dev_restart = sink_with_prefix(&base, "dev_");
+    dev_restart.ensure_index(&mapping).await.unwrap();
+    assert!(
+        dev_restart.is_seeded(&index).await.unwrap(),
+        "seed state is read back through the prefixed meta index",
+    );
+
+    // ── Reindex dev_ → generation 2; staging_ must be untouched ──────────────
+    sink_with_prefix(&base, "dev_")
+        .reindex(&mapping)
+        .await
+        .unwrap();
+    let dev2 = sink_with_prefix(&base, "dev_");
+    dev2.ensure_index(&mapping).await.unwrap();
+    for i in [1, 2] {
+        dev2.upsert(&index, &i.to_string(), &document(i))
+            .await
+            .unwrap();
+    }
+    dev2.flush(true).await.unwrap();
+    dev2.mark_seeded(&index).await.unwrap();
+
+    assert_eq!(
+        alias_targets(&client, &base, &dev_alias).await,
+        vec![dev_gen2.clone()],
+        "dev swapped onto its generation 2",
+    );
+    assert!(
+        !index_exists(&client, &base, &dev_gen1).await,
+        "dev's superseded generation 1 was dropped",
+    );
+    assert!(
+        index_exists(&client, &base, &stg_gen1).await
+            && alias_targets(&client, &base, &stg_alias).await == vec![stg_gen1.clone()],
+        "the dev reindex left staging's generation and alias entirely untouched",
+    );
 }

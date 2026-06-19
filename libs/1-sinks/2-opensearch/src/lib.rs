@@ -118,6 +118,11 @@ pub struct OpensearchSink {
     /// Settings that shape every index this sink creates: shard counts, the
     /// analysis backend, and whether `text`/`keyword` fields are auto-enriched.
     pub(crate) index_options: IndexOptions,
+    /// Literal prefix prepended to every name this sink owns — the hash alias,
+    /// its generations, the `{logical}` convenience alias, and the meta index —
+    /// so several deployments can share one cluster without colliding. Empty by
+    /// default (no prefix). Set with [`with_index_prefix`](OpensearchSink::with_index_prefix).
+    pub(crate) index_prefix: String,
     /// In-flight operations, shared across clones.
     pub(crate) buffer: Arc<Mutex<Vec<BulkAction>>>,
     /// Logical index name → physical name (logical + schema hash), learned from
@@ -179,9 +184,39 @@ impl OpensearchSink {
                 text_analysis: config.text_analysis,
                 auto_subfields: config.auto_subfields,
             },
+            index_prefix: String::new(),
             buffer: Arc::new(Mutex::new(Vec::new())),
             index_names: Arc::new(SyncMutex::new(HashMap::new())),
         })
+    }
+
+    /// Set the literal prefix prepended to every name this sink owns. Empty
+    /// (the default) means no prefix. The matching `flusso-query` client must
+    /// be given the same prefix to read the indexes back.
+    #[must_use]
+    pub fn with_index_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.index_prefix = prefix.into();
+        self
+    }
+
+    /// The stable hash alias `{prefix}{logical}_{hash}` an index is addressed
+    /// by — the load-bearing name the generations sit behind. Prefixing here is
+    /// the single chokepoint: generations (`hash_alias_*`) and the meta doc key
+    /// all derive from this.
+    pub(crate) fn hash_alias(&self, logical: &str, hash: &str) -> String {
+        format!("{}{logical}_{hash}", self.index_prefix)
+    }
+
+    /// The `{prefix}{logical}` convenience alias kept on the live generation.
+    pub(crate) fn convenience_alias(&self, logical: &str) -> String {
+        format!("{}{logical}", self.index_prefix)
+    }
+
+    /// The meta index name, `{prefix}flusso_meta` — prefixed too, so two
+    /// prefixed deployments on one cluster keep independent seed/generation
+    /// state.
+    pub(crate) fn meta_index(&self) -> String {
+        format!("{}{META_INDEX}", self.index_prefix)
     }
 
     /// Apply basic auth to a request builder if credentials are configured.

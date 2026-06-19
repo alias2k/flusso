@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--index-prefix` / `FLUSSO_INDEX_PREFIX` to namespace every index per deployment.
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-cli-v0.3.0...flusso-cli-v0.3.1) - 2026-06-19
 
 ### Added

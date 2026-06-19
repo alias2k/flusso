@@ -45,6 +45,15 @@ pub struct Config {
     /// see [`ServerConfig`].
     #[serde(default)]
     pub server: ServerConfig,
+    /// Literal prefix prepended to every index name flusso owns (indexes,
+    /// aliases, and the `flusso_meta` index), so several deployments can share
+    /// one OpenSearch cluster without colliding. Empty (the default) means no
+    /// prefix. The binary layers the `--index-prefix` flag / `FLUSSO_INDEX_PREFIX`
+    /// env var on top (which win); validated at resolution time with
+    /// [`validate_index_prefix`](schema_core::validate_index_prefix). The
+    /// `flusso-query` client must apply the same prefix at runtime to read back.
+    #[serde(default)]
+    pub prefix: String,
 }
 
 /// Bind addresses for the two operational HTTP surfaces, as configured in

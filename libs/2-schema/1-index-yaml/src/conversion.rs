@@ -511,7 +511,7 @@ pub(crate) fn yaml_to_generic(v: serde_yaml::Value) -> GenericValue {
         serde_yaml::Value::Bool(b) => GenericValue::Bool(b),
         serde_yaml::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                GenericValue::Int(i)
+                GenericValue::BigInt(i)
             } else {
                 let s = n.to_string();
                 match Decimal::from_str(&s) {

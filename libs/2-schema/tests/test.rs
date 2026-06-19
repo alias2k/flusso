@@ -114,6 +114,7 @@ fn compiled_artifact_keeps_env_secret_unresolved() {
         indexes: Default::default(),
         on_error: Default::default(),
         server: Default::default(),
+        prefix: String::new(),
     };
     let compiled = Compiled {
         format_version: FORMAT_VERSION,

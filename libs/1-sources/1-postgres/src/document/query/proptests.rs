@@ -91,7 +91,7 @@ fn safe_string() -> impl Strategy<Value = String> {
 
 fn scalar_value() -> impl Strategy<Value = GenericValue> {
     prop_oneof![
-        any::<i64>().prop_map(GenericValue::Int),
+        any::<i64>().prop_map(GenericValue::BigInt),
         any::<bool>().prop_map(GenericValue::Bool),
         safe_string().prop_map(GenericValue::String),
         Just(GenericValue::Null),
@@ -392,7 +392,7 @@ proptest! {
     ) {
         let key = [(key_column, GenericValue::Int(5))];
         let (sql, params) =
-            reverse_query(&db_schema(), &table, &select_column, &key).unwrap();
+            reverse_query(&db_schema(), &table, &select_column, &key, &col_type_map()).unwrap();
         assert_valid(sql.as_str(), params.len())?;
     }
 }

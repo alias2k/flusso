@@ -1,24 +1,67 @@
 use std::collections::BTreeMap;
-use std::fmt;
+use std::hash::{Hash, Hasher};
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
-use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+/// The canonical value vocabulary every layer trades in — the **middle type**
+/// between a source and a sink.
+///
+/// A source maps its native types *into* these variants; a sink maps them *out*
+/// to its own representation. The set is deliberately fine-grained — numerics are
+/// split by width, temporals are split into date/time/timestamp/timestamptz — so
+/// no semantic information is lost in transit: a `date` arrives at a sink as a
+/// [`Date`](Self::Date), not an opaque string a future sink would have to guess
+/// at. Text-family Postgres types (`text`/`varchar`/`citext`/enum) share the one
+/// [`String`](Self::String) shape because they don't differ *as values*; their
+/// indexing differs, and that lives in the field's `FlussoType`.
+///
+/// Serde is **derived and format-agnostic** on purpose. The derive is externally
+/// tagged (`{"Date":"2024-01-01"}`, `{"BigInt":5}`), so serialize → deserialize
+/// is a lossless identity — a `Date` round-trips back a `Date`, never collapsing
+/// to a string. That lets a queue persist or transport a value in whatever format
+/// it likes and hand it back unchanged: it goes in as a `GenericValue` and comes
+/// out as the same `GenericValue`. Core picks no format (no JSON here); the
+/// concrete encoding is the consumer's choice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GenericValue {
     Null,
     Bool(bool),
-    Int(i64),
+    /// `smallint` / `int2`.
+    SmallInt(i16),
+    /// `integer` / `int4`.
+    Int(i32),
+    /// `bigint` / `int8`.
+    BigInt(i64),
+    /// `real` / `float4`.
+    Float(f32),
+    /// `double precision` / `float8`.
+    Double(f64),
+    /// `numeric` / `decimal` — exact.
     Decimal(Decimal),
+    /// Any text-family value (`text`/`varchar`/`citext`/enum).
     String(String),
+    /// `uuid`.
+    Uuid(Uuid),
+    /// `date` — no time, no zone.
+    Date(NaiveDate),
+    /// `time` — no date, no zone.
+    Time(NaiveTime),
+    /// `timestamp` — date + time, no zone.
+    Timestamp(NaiveDateTime),
+    /// `timestamptz` — an instant, normalized to UTC.
+    TimestampTz(DateTime<Utc>),
+    /// `bytea`.
+    Bytes(Vec<u8>),
     Array(Vec<GenericValue>),
     Map(BTreeMap<String, GenericValue>),
 }
 
 impl GenericValue {
     /// Whether this value can stand as a single SQL parameter, key, or literal:
-    /// true for the scalar variants, false for `Null` and the composite
+    /// true for every scalar variant, false for `Null` and the composite
     /// `Array`/`Map`. The one home for that rule — the Postgres source applies
     /// it when binding params, building keys, and inlining literals. Written as
     /// an exhaustive match so a new variant cannot be added without classifying
@@ -26,109 +69,78 @@ impl GenericValue {
     pub fn is_bindable_scalar(&self) -> bool {
         match self {
             GenericValue::Bool(_)
+            | GenericValue::SmallInt(_)
             | GenericValue::Int(_)
+            | GenericValue::BigInt(_)
+            | GenericValue::Float(_)
+            | GenericValue::Double(_)
             | GenericValue::Decimal(_)
-            | GenericValue::String(_) => true,
+            | GenericValue::String(_)
+            | GenericValue::Uuid(_)
+            | GenericValue::Date(_)
+            | GenericValue::Time(_)
+            | GenericValue::Timestamp(_)
+            | GenericValue::TimestampTz(_)
+            | GenericValue::Bytes(_) => true,
             GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => false,
         }
     }
 }
 
-/// Serializes to the **natural** JSON shape — `5`, `"x"`, `true`, `null`,
-/// `[…]`, `{…}` — not serde's externally-tagged enum form (`{"Int": 5}`). This
-/// is what makes a serialized `Config` or `IndexMapping` read like the data it
-/// describes; a value's variant is evident from its JSON shape.
-impl Serialize for GenericValue {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            GenericValue::Null => serializer.serialize_none(),
-            GenericValue::Bool(value) => serializer.serialize_bool(*value),
-            GenericValue::Int(value) => serializer.serialize_i64(*value),
-            // `Decimal` has an inherent `serialize` (to bytes) that shadows the
-            // trait method, so call the trait method explicitly.
-            GenericValue::Decimal(value) => Serialize::serialize(value, serializer),
-            GenericValue::String(value) => serializer.serialize_str(value),
-            GenericValue::Array(items) => items.serialize(serializer),
-            GenericValue::Map(map) => map.serialize(serializer),
+// `f32`/`f64` are not `Eq`/`Hash`, so the derives won't do; compare and hash the
+// float variants by their bit pattern (a total equivalence — the rare float key
+// is pathological anyway, and this keeps `Eq`/`Hash` consistent). Every other
+// variant defers to its payload's own impls.
+impl PartialEq for GenericValue {
+    fn eq(&self, other: &Self) -> bool {
+        use GenericValue::*;
+        match (self, other) {
+            (Null, Null) => true,
+            (Bool(a), Bool(b)) => a == b,
+            (SmallInt(a), SmallInt(b)) => a == b,
+            (Int(a), Int(b)) => a == b,
+            (BigInt(a), BigInt(b)) => a == b,
+            (Float(a), Float(b)) => a.to_bits() == b.to_bits(),
+            (Double(a), Double(b)) => a.to_bits() == b.to_bits(),
+            (Decimal(a), Decimal(b)) => a == b,
+            (String(a), String(b)) => a == b,
+            (Uuid(a), Uuid(b)) => a == b,
+            (Date(a), Date(b)) => a == b,
+            (Time(a), Time(b)) => a == b,
+            (Timestamp(a), Timestamp(b)) => a == b,
+            (TimestampTz(a), TimestampTz(b)) => a == b,
+            (Bytes(a), Bytes(b)) => a == b,
+            (Array(a), Array(b)) => a == b,
+            (Map(a), Map(b)) => a == b,
+            _ => false,
         }
     }
 }
 
-/// Deserializes from the same **natural** shape it serializes to, by inspecting
-/// the value's form rather than expecting serde's tagged-enum encoding. This
-/// requires a self-describing format (JSON, MessagePack, …); it is what lets a
-/// compiled config round-trip. A `Decimal` is written as a string by its serde
-/// integration, so a decimal literal round-trips as a [`String`](GenericValue::String)
-/// — a documented edge for the rare decimal `constant` / `default`.
-impl<'de> Deserialize<'de> for GenericValue {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct GenericValueVisitor;
+impl Eq for GenericValue {}
 
-        impl<'de> Visitor<'de> for GenericValueVisitor {
-            type Value = GenericValue;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("any JSON-like value")
-            }
-
-            fn visit_bool<E>(self, v: bool) -> Result<GenericValue, E> {
-                Ok(GenericValue::Bool(v))
-            }
-
-            fn visit_i64<E>(self, v: i64) -> Result<GenericValue, E> {
-                Ok(GenericValue::Int(v))
-            }
-
-            fn visit_u64<E>(self, v: u64) -> Result<GenericValue, E> {
-                match i64::try_from(v) {
-                    Ok(i) => Ok(GenericValue::Int(i)),
-                    Err(_) => Ok(GenericValue::Decimal(Decimal::from(v))),
-                }
-            }
-
-            fn visit_f64<E: de::Error>(self, v: f64) -> Result<GenericValue, E> {
-                Decimal::try_from(v)
-                    .map(GenericValue::Decimal)
-                    .map_err(E::custom)
-            }
-
-            fn visit_str<E>(self, v: &str) -> Result<GenericValue, E> {
-                Ok(GenericValue::String(v.to_owned()))
-            }
-
-            fn visit_string<E>(self, v: String) -> Result<GenericValue, E> {
-                Ok(GenericValue::String(v))
-            }
-
-            fn visit_none<E>(self) -> Result<GenericValue, E> {
-                Ok(GenericValue::Null)
-            }
-
-            fn visit_unit<E>(self) -> Result<GenericValue, E> {
-                Ok(GenericValue::Null)
-            }
-
-            fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<GenericValue, D::Error> {
-                GenericValue::deserialize(d)
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<GenericValue, A::Error> {
-                let mut items = Vec::new();
-                while let Some(item) = seq.next_element()? {
-                    items.push(item);
-                }
-                Ok(GenericValue::Array(items))
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<GenericValue, A::Error> {
-                let mut out = BTreeMap::new();
-                while let Some((key, value)) = map.next_entry()? {
-                    out.insert(key, value);
-                }
-                Ok(GenericValue::Map(out))
-            }
+impl Hash for GenericValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        use GenericValue::*;
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Null => {}
+            Bool(v) => v.hash(state),
+            SmallInt(v) => v.hash(state),
+            Int(v) => v.hash(state),
+            BigInt(v) => v.hash(state),
+            Float(v) => v.to_bits().hash(state),
+            Double(v) => v.to_bits().hash(state),
+            Decimal(v) => v.hash(state),
+            String(v) => v.hash(state),
+            Uuid(v) => v.hash(state),
+            Date(v) => v.hash(state),
+            Time(v) => v.hash(state),
+            Timestamp(v) => v.hash(state),
+            TimestampTz(v) => v.hash(state),
+            Bytes(v) => v.hash(state),
+            Array(v) => v.hash(state),
+            Map(v) => v.hash(state),
         }
-
-        deserializer.deserialize_any(GenericValueVisitor)
     }
 }
