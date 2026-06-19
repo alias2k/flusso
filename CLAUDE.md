@@ -347,6 +347,21 @@ belongs in the linked docs.
   stay, an upstream-bug workaround, or a "must happen before X" constraint. If a comment could be
   deleted by renaming a variable or extracting a function, do that instead of commenting. When
   reviewing or editing, strip narration; keep only the genuine gotchas.
+  - **NEVER add useless comments when writing new code.** Useless means any of: a comment that
+    describes the change you just made ("added X", "now does Y") — that belongs in the commit, not
+    the code; a comment that restates code that already describes itself; a comment that
+    re-describes a function or type that already carries an explicit doc comment.
+  - **DO comment, briefly, in exactly these cases:** a public-API function gets a short `///`
+    saying what it does for the caller; an externally-exported struct used as public API gets a
+    `///`, and so do its fields. That is the bar for "when to comment" — public surface, said
+    once, concisely.
+  - **Module docs (`//!`) are the one place to be detailed.** Every module gets a `//!` header
+    that explains what the module does and how it fits in, and includes runnable examples
+    (```rust``` blocks — they're doctests, so keep them compiling). This is where depth belongs;
+    spend the words here instead of scattering them across inline comments.
+  - **Tone, everywhere — write for an ADHD reader.** Lead with the point, keep sentences short and
+    concrete, prefer scannable structure (a one-line summary first, then specifics) over dense
+    prose. Applies to `///`, `//!`, and the rare inline gotcha alike.
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
   `libs/0-core/src/common/`. `GenericValue` is the value enum that crosses layers.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
