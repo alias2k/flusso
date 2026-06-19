@@ -123,6 +123,74 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     Ok(())
 }
 
+// Issue #19 acceptance test: a realistic projection — weighted + fuzzy +
+// case-insensitive-wildcard free-text with `minimum_should_match: 1`, exact
+// filters on a `Uuid` and an enum keyword, exact/wildcard/full-text on the
+// right subfield, and `created_at desc` with `missing: _first` — written with
+// ZERO `Search::raw` / `Json::raw` and ZERO `#[flusso(skip)]` on the `Uuid`.
+
+/// A keyword enum field (`tier`), passed as a query value via its serde form.
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+#[serde(rename_all = "camelCase")]
+#[flusso(keyword)]
+enum CustomerTier {
+    Pro,
+    Free,
+}
+
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct Customer {
+    email: String,
+    #[flusso(rename = "fullName")]
+    full_name: Option<String>,
+    // A `Uuid` keyword field — no `#[flusso(skip)]`, no `Keyword::at("ownerId")`.
+    #[flusso(rename = "ownerId")]
+    owner_id: flusso_query::uuid::Uuid,
+    tier: CustomerTier,
+    #[flusso(rename = "createdAt")]
+    created_at: Option<String>,
+}
+
+#[test]
+fn acceptance_realistic_projection_needs_no_escape_hatch() -> Result {
+    let owner = flusso_query::uuid::Uuid::nil();
+    let body = Customer::query()
+        // Weighted + fuzzy + case-insensitive-wildcard free-text, a real
+        // constraint via `minimum_should_match: 1`.
+        .should(Customer::full_name().matches("acme").boost(2.0))
+        .should(
+            Customer::full_name()
+                .keyword()
+                .wildcard("*acme*")
+                .case_insensitive(),
+        )
+        .should(Customer::full_name().matches("acme").fuzziness("AUTO"))
+        .min_should_match(1)
+        // Exact filters on a Uuid and an enum keyword — typed, no string paths.
+        .filter(Customer::owner_id().eq(owner))
+        .filter(Customer::tier().eq(CustomerTier::Pro))
+        // Full-text against a keyword field's `.text` subfield.
+        .filter(Customer::email().text().matches("acme"))
+        // Null-aware sort, no string path.
+        .sort(Customer::created_at().desc().missing_first())
+        .body();
+
+    let json = body.to_string();
+    assert!(json.contains(r#""minimum_should_match":1"#), "{json}");
+    assert!(json.contains(r#""fullName.keyword""#), "{json}");
+    assert!(json.contains(r#""case_insensitive":true"#), "{json}");
+    assert!(json.contains(r#""ownerId""#), "{json}");
+    assert!(
+        json.contains("00000000-0000-0000-0000-000000000000"),
+        "{json}"
+    );
+    assert!(json.contains(r#""tier""#) && json.contains(r#""pro""#), "{json}");
+    assert!(json.contains(r#""email.text""#), "{json}");
+    assert!(json.contains(r#""missing":"_first""#), "{json}");
+    Ok(())
+}
+
 // `#[derive(FlussoMultiDocument)]` — the combined-search union over two
 // document types from two indexes. Purely syntactic: the generated impl
 // references each payload's derive-baked `INDEX`/`SCHEMA_HASH`.

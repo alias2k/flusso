@@ -10,6 +10,14 @@ fields:
   - text: fullName
     column: full_name
     required: false
+  - uuid: ownerId
+    column: owner_id
+    required: true
+  - enum: tier
+    required: true
+  - timestamp: createdAt
+    column: created_at
+    required: false
   - geo: location
     lat: latitude
     lon: longitude
