@@ -18,7 +18,7 @@ You write and own the struct (a **projection** — deserialize the subset you wa
 
 - `flusso-query` — the runtime: `Client`, field handles, `Query`/`Search`, `SearchResponse`. Re-exports the derive behind the **`derive`** feature, so you `use flusso_query::FlussoDocument;`.
 - `flusso-query-derive` (`apps/query-derive`) — the proc-macros: `FlussoDocument`, `FlussoMultiDocument`, `FlussoValue`.
-- Optional features: **`derive`** (the macros), **`decimal`** (`rust_decimal::Decimal`), **`chrono`** / **`time`** (date leaf types — pick one, or use `String` for raw ISO-8601).
+- Optional features: **`derive`** (the macros), **`decimal`** (`rust_decimal::Decimal`), **`chrono`** / **`time`** (date leaf types — pick one, or use `String` for raw ISO-8601), **`uuid`** (`uuid::Uuid` as a `keyword` value — see below).
 
 ## The shape of a consumer
 
@@ -99,8 +99,8 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 
 | Handle | Operators |
 | --- | --- |
-| `Keyword` | `eq` `in_` `prefix` `wildcard` `regexp` `fuzzy` `exists` |
-| `Text` | `matches` `match_phrase` `match_phrase_prefix` `matches_fuzzy` `exists` — **no exact `eq`** (analyzed) |
+| `Keyword` | `eq` `in_` `prefix` `wildcard` `regexp` `fuzzy` `exists`; subfields `text()` / `keyword_lowercase()` |
+| `Text` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy` `exists` — **no exact `eq`** (analyzed); subfields `keyword()` / `keyword_lowercase()` |
 | `Bool` | `eq` `exists` |
 | `Number<T>` | `eq` `in_` `lt` `lte` `gt` `gte` `between` `exists` |
 | `Date` | `eq` `lt` `lte` `gt` `gte` `between` `exists` |
@@ -110,7 +110,11 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 | `Binary` | `exists` (base64, not searchable) |
 | `Json` | `exists` `raw(serde_json::Value)` |
 
-`sort(…)` only accepts sortable handles (numbers, dates, keywords, bools) — `sort` on a `text` field is a compile error. Cross-field: `multi_match("ada", [User::full_name(), User::bio()])`. Anything outside the typed surface (`knn`, `function_score`, `script`, `geo_shape`) → the [`raw`](#escape-hatch) hatch.
+`sort(…)` only accepts sortable handles (numbers, dates, keywords, bools) — `sort` on a `text` field is a compile error (use `User::full_name().keyword().desc()` for exact, `.keyword_lowercase()` for case-insensitive). Cross-field: `multi_match("ada", [User::full_name(), User::bio()])` (weight one with `.boosted(3.0)`).
+
+**Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields (`auto_subfields`, on by default) with exact/sortable/searchable subfields, reachable with **no string path**: `User::full_name().keyword()` (exact/`wildcard`/`prefix`), `.keyword_lowercase()` (case-insensitive match/sort), `User::email().text()` (full-text over a keyword). A `wildcard` belongs on `.keyword()`, not the analyzed handle. Valid when `auto_subfields` is on and the field defines no custom `fields`.
+
+**Options & extra query types — the typed surface is broad** (see next section). What's still only reachable via the [`raw`](#escape-hatch) hatch: `knn`/vector, `geo_shape`, span, and parent/child queries — types with no flusso field.
 
 ## Composing — scope is in the type
 
@@ -144,6 +148,30 @@ let next = busy_users().from(20).send(&client).await?;
 **Terminals:** `.send(&client)` → `SearchResponse<T>`; `.count(&client)` → `u64` (no fetch/score); `.ids(&client)` → `Vec<String>` (matching ids, `_source: false`).
 
 **Optional filters:** `Option<Q>` is itself a `Query` — `None` adds nothing. So `.filter(params.email.map(|e| User::email().eq(e)))` just drops out when absent.
+
+## Query options, compound & extra query types
+
+Each leaf operator returns a small **builder** carrying that query's options plus the universal `boost(f32)` and `name(&str)` (`_name`, surfaced in `matched_queries`). With no option set it renders the DSL shorthand; set one and it expands. A builder *is* an `AsQuery`, so it drops straight into a clause — no `.build()`:
+
+```rust
+User::query()
+    .should(User::full_name().matches("acme").boost(2.0).fuzziness("AUTO"))
+    .should(User::code().keyword().wildcard("*acme*").case_insensitive())
+    .min_should_match(1)                         // make a should-group a real filter
+    .filter(User::owner_id().eq(owner_uuid))     // uuid keyword (feature) — no skip
+    .filter(User::tier().eq(Tier::Pro))          // enum keyword
+    .sort(User::created_at().desc().missing_first())
+    .send(&client).await?;
+```
+
+Per-type options (all optional): `case_insensitive` on `term`/`prefix`/`wildcard`/`regexp`; `rewrite` (prefix/wildcard); `flags`/`max_determinized_states` (regexp); `fuzziness`/`prefix_length`/`max_expansions`/`transpositions` (fuzzy); `fuzziness`/`operator`/`minimum_should_match`/`prefix_length`/`analyzer`/`zero_terms_query`/`lenient` (`matches`); `slop`/`analyzer` (phrase); `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` (`multi_match`); `format`/`time_zone`/`relation` (range); `distance_type`/`validation_method` (geo `within`); `score_mode`/`ignore_unmapped` (nested `any`).
+
+> `.or()` / `.and()` / `.not()` on a **builder** need `use flusso_query::AsQuery;` (provided trait methods; inherent `Query` methods are unaffected). Composing via the `Search` clauses needs no import.
+
+- **Bool / scoring:** `Search::min_should_match(n)` (or `Query::min_should_match` on an `or`-group, plus `Query::boost`) turns a top-level free-text `should` group into a real constraint. Free functions: `constant_score(filter)`, `dis_max([..]).tie_breaker(..)`, `boosting(pos, neg, negative_boost)`, `function_score(q).weight(..)/.weight_when(.., filter)/.boost_mode(..)`.
+- **Standalone queries** (free fns, each `AsQuery`): `ids([..])`, `query_string(..)`, `simple_query_string(..)`, `combined_fields(.., [fields])`, `script(..)`, `script_score(q, src)`, `distance_feature(..)`, `rank_feature(..)`, `more_like_this([fields], [like])`. (`match_bool_prefix` is a `Text` operator.)
+- **Sort builder:** `.asc()/.desc()` then chain `.missing_first()/.missing_last()/.missing(v)`, `.mode(SortMode::..)`, `.unmapped_type(..)/.numeric_type(..)/.format(..)`, `.nested(path)/.nested_filtered(path, q)`; plus `Sort::score()` and `Sort::script(type, src, order)`.
+- **Search-level:** `min_score`, `track_total_hits`, `track_scores`, `search_after([..])` (deep pagination), `collapse(field)`, `post_filter(q)`, `highlight(Highlight::new().field(..).pre_tags(..))`.
 
 ## Nested collections — filter *by* vs filter *of*
 
@@ -185,13 +213,16 @@ enum AccountTier { Free, Pro, Enterprise }
 
 Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Kind rules: keyword/text accept a unit enum **or** a newtype; number/date accept a **newtype only**. Query-value wiring is currently keyword-only (`eq`/`in_`); number/date custom types generalize the **doc side** only. A missing `FlussoValue` impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
 
+**Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
+
 ## flusso type → Rust type (what the derive expects)
 
 | flusso `type` | Rust | Handle |
 | --- | --- | --- |
 | `text` / `identifier` | `String` | `Text` |
-| `keyword` / `enum` | `String` | `Keyword` |
-| `uuid` | `String` (or `uuid::Uuid`, feature) | `Keyword` |
+| `keyword` | `String` (or a `FlussoValue` newtype) | `Keyword` |
+| `enum` | `String` or a `#[derive(FlussoValue)]` enum | `Keyword` |
+| `uuid` | `String`, or `uuid::Uuid` (`uuid` feature) | `Keyword` |
 | `boolean` | `bool` | `Bool` |
 | `short`/`integer`/`long` | `i16`/`i32`/`i64` | `Number<T>` |
 | `float`/`double` | `f32`/`f64` | `Number<T>` |
@@ -215,15 +246,17 @@ Escape hatches from validation: a `serde_json::Value` field skips type-checking;
 
 ## <a id="escape-hatch"></a>The raw escape hatch
 
+For the few types with no flusso field (`knn`/vector, `geo_shape`, span, parent/child) and percolators. Most of what once needed `raw` — `function_score`, `script`, `constant_score`, `query_string`, `search_after`, … — is now in the typed surface.
+
 ```rust
 User::query().raw(serde_json::json!({
-    "function_score": { "query": { "match_all": {} }, "random_score": {} }
+    "knn": { "embedding": { "vector": [/* … */], "k": 10 } }
 })).send(&client).await?;     // still deserializes into SearchResponse<User>
 ```
 
 ## Out of scope (v1)
 
-Search aggregations/facets (use `raw`), writes (flusso owns the index — query-only by construction), cross-index hit correlation, scroll/`search_after` deep pagination.
+Search aggregations/facets (use `raw`), writes (flusso owns the index — query-only by construction), cross-index hit correlation, and a scroll cursor (`from`/`size` and `search_after` ship).
 
 ## Working reference
 
