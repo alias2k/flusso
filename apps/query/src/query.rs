@@ -135,6 +135,17 @@ fn combine(a: Inner, b: Inner, clause: Clause) -> Inner {
     Inner::Bool(combined)
 }
 
+/// Combine two optional clauses under `clause`, treating an absent side as the
+/// identity (so `Some(a).or(None)` is just `a`). Both absent → `match_all`.
+/// Backs the [`AsQuery`] `and`/`or` combinators, which any builder inherits.
+fn combine_opt<S>(a: Option<Query<S>>, b: Option<Query<S>>, clause: Clause) -> Query<S> {
+    match (a, b) {
+        (Some(a), Some(b)) => Query::wrap(combine(a.inner, b.inner, clause)),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => Query::match_all(),
+    }
+}
+
 impl<S> Query<S> {
     /// Wrap a leaf clause value. Crate-internal: handles call this.
     pub(crate) fn leaf(value: Value) -> Self {
@@ -142,6 +153,11 @@ impl<S> Query<S> {
             inner: Inner::Leaf(value),
             _scope: PhantomData,
         }
+    }
+
+    /// A `match_all` clause — the identity when combining absent clauses.
+    pub(crate) fn match_all() -> Self {
+        Query::leaf(crate::handles::match_all_value())
     }
 
     fn wrap(inner: Inner) -> Self {
@@ -224,9 +240,57 @@ impl BoolBuilder {
 /// Anything that can become a query clause in scope `S`. A clause may be absent
 /// ([`into_query`](AsQuery::into_query) returns `None`) — that's what makes an
 /// `Option<Query<S>>` a first-class optional filter.
+///
+/// The leaf-query builders ([`TermQuery`](crate::TermQuery),
+/// [`WildcardQuery`](crate::WildcardQuery), [`MatchQuery`](crate::MatchQuery), …)
+/// implement this, so they drop straight into [`Search`](crate::Search) clauses
+/// and into `and`/`or`/`not` with no explicit `.build()`. The combinators here
+/// are *provided* methods; on a [`Query`] the inherent ones win, so a builder
+/// gains `and`/`or`/`not`/`to_value` for free while `Query`'s behavior is
+/// unchanged.
 pub trait AsQuery<S> {
     /// The clause this produces, or `None` to contribute nothing.
     fn into_query(self) -> Option<Query<S>>;
+
+    /// `self AND other`. An absent side is the identity.
+    #[must_use]
+    fn and(self, other: impl AsQuery<S>) -> Query<S>
+    where
+        Self: Sized,
+    {
+        combine_opt(self.into_query(), other.into_query(), Clause::Must)
+    }
+
+    /// `self OR other`. An absent side is the identity.
+    #[must_use]
+    fn or(self, other: impl AsQuery<S>) -> Query<S>
+    where
+        Self: Sized,
+    {
+        combine_opt(self.into_query(), other.into_query(), Clause::Should)
+    }
+
+    /// `NOT self` (negating an absent clause matches everything).
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    fn not(self) -> Query<S>
+    where
+        Self: Sized,
+    {
+        self.into_query().map_or_else(Query::match_all, Query::not)
+    }
+
+    /// Render this clause to the OpenSearch query DSL. An absent clause renders
+    /// as `match_all`. Handy for tests and debugging.
+    #[must_use]
+    fn to_value(&self) -> Value
+    where
+        Self: Sized + Clone,
+    {
+        self.clone()
+            .into_query()
+            .map_or_else(crate::handles::match_all_value, |q| q.to_value())
+    }
 }
 
 impl<S> AsQuery<S> for Query<S> {

@@ -96,8 +96,10 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
-    Binary, Bool, Date, FlussoValue, Geo, GeoPoint, Json, Keyword, Nested, NestedProjection,
-    Number, Object, Sort, SortOrder, Text, kind, multi_match,
+    Binary, Bool, Date, EqQuery, FlussoValue, FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint, Json,
+    Keyword, MatchQuery, MultiMatchQuery, Nested, NestedProjection, NestedQuery, Number, Object,
+    PrefixQuery, RangeQuery, RegexpQuery, Sort, SortMode, SortOrder, TermQuery, TermsQuery, Text,
+    WildcardQuery, kind, multi_match,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};

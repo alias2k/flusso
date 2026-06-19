@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Sort, exists_q, match_all_value};
+use super::{Common, Sort, common_opts, exists_q, match_all_value};
 use crate::query::{AsQuery, Query, Root};
 
 /// `{ "nested": { "path": "<path>", "query": <query> } }`.
@@ -46,12 +46,20 @@ impl<E, C> Nested<E, C> {
         }
     }
 
-    /// Parents with **at least one** element matching `query`.
-    pub fn any(&self, query: impl AsQuery<C>) -> Query<E> {
+    /// Parents with **at least one** element matching `query`. Returns a
+    /// [`NestedQuery`] builder for `score_mode` / `ignore_unmapped` plus
+    /// `boost` / `name`.
+    pub fn any(&self, query: impl AsQuery<C>) -> NestedQuery<E> {
         let inner = query
             .into_query()
             .map_or_else(match_all_value, |q| q.to_value());
-        Query::leaf(nested_value(&self.path, inner))
+        NestedQuery {
+            path: self.path.clone(),
+            query: inner,
+            opts: Map::new(),
+            common: Common::default(),
+            _marker: PhantomData,
+        }
     }
 
     /// Parents where **every** element matches `query` ("no element fails it").
@@ -90,6 +98,50 @@ impl<E, C> Nested<E, C> {
             size: None,
             from: None,
         }
+    }
+}
+
+/// A `nested` clause (parents with a matching element), with the `score_mode` /
+/// `ignore_unmapped` options plus `boost` / `name`. `E` is the enclosing scope.
+#[derive(Debug, Clone)]
+pub struct NestedQuery<E = Root> {
+    path: String,
+    query: Value,
+    opts: Map<String, Value>,
+    common: Common,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<E> NestedQuery<E> {
+    /// How matching elements' scores combine into the parent score:
+    /// `"avg"` (default) / `"sum"` / `"min"` / `"max"` / `"none"`.
+    #[must_use]
+    pub fn score_mode(mut self, score_mode: impl Into<String>) -> Self {
+        self.opts
+            .insert("score_mode".to_string(), Value::String(score_mode.into()));
+        self
+    }
+
+    /// Treat an unmapped `path` as matching nothing instead of erroring.
+    #[must_use]
+    pub fn ignore_unmapped(mut self, ignore_unmapped: bool) -> Self {
+        self.opts
+            .insert("ignore_unmapped".to_string(), Value::Bool(ignore_unmapped));
+        self
+    }
+
+    common_opts!(common);
+}
+
+impl<E> AsQuery<E> for NestedQuery<E> {
+    fn into_query(self) -> Option<Query<E>> {
+        let mut body = self.opts;
+        body.insert("path".to_string(), Value::String(self.path));
+        body.insert("query".to_string(), self.query);
+        self.common.write(&mut body);
+        let mut outer = Map::new();
+        outer.insert("nested".to_string(), Value::Object(body));
+        Some(Query::leaf(Value::Object(outer)))
     }
 }
 
