@@ -4,7 +4,7 @@
 //! Every operator returns a small per-query builder ([`TermQuery`],
 //! [`WildcardQuery`], [`MatchQuery`], …) carrying that query's options plus the
 //! universal `boost` / `name`. Builders render lazily through
-//! [`AsQuery`](crate::AsQuery), so they drop straight into a clause — with no
+//! [`AsQuery`], so they drop straight into a clause — with no
 //! options (the DSL shorthand) or with them (the expanded object form).
 
 use std::marker::PhantomData;

@@ -185,7 +185,10 @@ fn acceptance_realistic_projection_needs_no_escape_hatch() -> Result {
         json.contains("00000000-0000-0000-0000-000000000000"),
         "{json}"
     );
-    assert!(json.contains(r#""tier""#) && json.contains(r#""pro""#), "{json}");
+    assert!(
+        json.contains(r#""tier""#) && json.contains(r#""pro""#),
+        "{json}"
+    );
     assert!(json.contains(r#""email.text""#), "{json}");
     assert!(json.contains(r#""missing":"_first""#), "{json}");
     Ok(())

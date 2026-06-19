@@ -1,6 +1,6 @@
 //! Compound / scoring queries that wrap other clauses rather than a field:
 //! [`constant_score`], [`dis_max`], [`boosting`], and [`function_score`]. Each
-//! returns a builder implementing [`AsQuery`](crate::AsQuery), so it composes
+//! returns a builder implementing [`AsQuery`], so it composes
 //! exactly like a leaf query.
 
 use std::marker::PhantomData;

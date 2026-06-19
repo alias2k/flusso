@@ -4,7 +4,7 @@
 //! The value operators return small builders ([`EqQuery`], [`TermsQuery`],
 //! [`RangeQuery`]) that carry the universal `boost` / `name` modifiers (and, for
 //! ranges, `format` / `time_zone` / `relation`) and render lazily through
-//! [`AsQuery`](crate::AsQuery) — so they drop straight into a clause, with or
+//! [`AsQuery`] — so they drop straight into a clause, with or
 //! without options.
 
 use std::marker::PhantomData;

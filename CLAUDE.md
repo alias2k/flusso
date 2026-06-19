@@ -300,6 +300,23 @@ deep subsystem — the proc-macro internals (scope tagging, `FlussoValue<K>` kin
 nested/object handles) are documented in the `flusso-query-derive` memory note; read that
 before changing the derive.
 
+The query surface is **builder-based** (issue #19): each leaf operator returns a small
+per-query builder (`handles/string.rs`/`scalar.rs`/`geo.rs`/`nested.rs`) carrying that
+query's options plus the universal `boost`/`name` (the `Common` carrier + `common_opts!`
+macro in `handles/mod.rs`), implementing `AsQuery<S>` so it composes and renders the DSL
+shorthand when no option is set; `and`/`or`/`not`/`to_value` are **provided methods on
+`AsQuery`** (inherent `Query` methods shadow them, so existing behavior is unchanged — but
+`.or()` on a *builder* needs `use flusso_query::AsQuery`). Compound/scoring queries live in
+`handles/compound.rs` (`constant_score`/`dis_max`/`function_score`/`boosting`), standalone
+ones in `handles/extra.rs` (`ids`/`query_string`/`simple_query_string`/`combined_fields`/
+`script`/`script_score`/`distance_feature`/`rank_feature`/`more_like_this`); `Sort` is a
+builder (`sort.rs`); search-level controls + the `Highlight` builder live on `Search`
+(`search.rs`). The `uuid` feature makes `uuid::Uuid` a `keyword` value (no `#[flusso(skip)]`).
+`Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
+(runtime methods, not derive codegen — keeps the field method returning the shared handle
+type for `multi_match`/composition). Issue #19 acceptance test: `apps/query-derive/tests/
+derive.rs::acceptance_realistic_projection_needs_no_escape_hatch`.
+
 ## Keeping this file current
 
 This file is a living index — keep it accurate as part of normal work, no separate ask

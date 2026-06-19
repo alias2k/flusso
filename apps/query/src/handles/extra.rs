@@ -2,8 +2,7 @@
 //! lookup ([`ids`]), the user-facing full-text strings ([`query_string`],
 //! [`simple_query_string`], [`combined_fields`]), and the advanced-relevance
 //! queries ([`script`], [`script_score`], [`distance_feature`], [`rank_feature`],
-//! [`more_like_this`]). Each returns a builder implementing
-//! [`AsQuery`](crate::AsQuery).
+//! [`more_like_this`]). Each returns a builder implementing [`AsQuery`].
 
 use std::marker::PhantomData;
 

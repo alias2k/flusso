@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Acceptance test for the completed typed query surface (issue #19): a realistic
+  projection with a `Uuid` keyword field (no `#[flusso(skip)]`), an enum keyword
+  field, subfield targeting, `minimum_should_match`, and null-aware sort builds
+  with zero `Search::raw` / `Json::raw`. The derive needs no change — it already
+  defers a `FlussoValue<Keyword>` bound for `Uuid`, satisfied by `flusso-query`'s
+  `uuid` feature.
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.3.0...flusso-query-derive-v0.3.1) - 2026-06-19
 
 ### Added
