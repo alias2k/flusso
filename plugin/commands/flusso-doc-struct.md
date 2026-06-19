@@ -14,6 +14,8 @@ Generate a hand-written `#[derive(FlussoDocument)]` projection struct for the fl
 3. Emit a child struct with `#[flusso(index = "$1", path = "<dotted.path>")]` for every object/join, recursively.
 4. Remind the user this is a **projection** — they can omit fields they don't need; only declared fields are checked. It compiles against their `flusso.toml` (auto-discovered, or `FLUSSO_CONFIG`).
 
+**If an equivalent document struct already exists** (a migration — the project already has this type): edit that struct **in place** instead of scaffolding a new one. Add `FlussoDocument` to its derive list and `#[flusso(index = "$1")]`, and **preserve all its existing fields, including the `id` / primary key** — a migration reproduces the current document exactly, it does not trim it. Don't create a parallel `$2`-v2 type alongside the original.
+
 Skeleton:
 
 ```rust

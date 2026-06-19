@@ -48,12 +48,14 @@ enabled = true
 
 Define multiple `[sinks.<name>]` and flusso **fans out** — every document lands in each. No sinks at all → it falls back to a stdout sink. A `stdout` sink (`type = "stdout"`, optional `pretty = true`) alongside OpenSearch is the fastest way to *see* what documents look like while integrating.
 
+Once `flusso.toml` exists, **offer** to wire editor validation for it — a `.taplo.toml` rule pointing at the published config schema (see **flusso-schema**) — but only add it if the user agrees; don't create `.taplo.toml` unprompted.
+
 ### 2. The index schema
 
 One `*.schema.yml` per `[[index]]`. Use the **flusso-schema** skill for the field syntax. Minimal:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/alias2k/flusso/main/libs/2-schema/1-index-yaml/schemas/index.schema.yml
+# yaml-language-server: $schema=https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml
 version: 1
 table: users
 primary_key: id
@@ -98,10 +100,14 @@ The lock carries `{ env = … }` refs as references, so the same artifact runs i
 
 ## Migrating from a hand-rolled indexer
 
-1. Map each existing search document to **one** `*.schema.yml` (root table + the related tables it folds in via joins/aggregates).
-2. Let flusso **own the index**: drop your bespoke mapping; flusso derives a fully-typed one (`dynamic: strict`) with tuned analyzers + subfields. Read `SOURCES_AND_SINKS.md` "Index analysis & subfields" so you query the right subfield.
-3. `flusso check` to confirm the derived mapping matches your data, then run a backfill into a fresh cluster/index alongside the old one, and cut the read path over once seeded.
-4. Retire your CDC/cron glue — logical replication replaces it.
+**A migration reproduces the existing document, it does not redesign it.** The target shape is whatever the project already indexes/queries today — preserve it field-for-field.
+
+1. **Find the existing document definition first** (the mapping, the indexed struct, the serializer) and treat it as the spec. Map each existing search document to **one** `*.schema.yml`: root table + the related tables it folds in via joins/aggregates.
+2. **Carry every existing field across — including the `id` / primary key.** Do not drop, rename, or omit a field that the current implementation indexes; if the old document has `id`, the schema declares `- <type>: id` (and `primary_key: id`) and the struct keeps its `id` field. Dropping fields silently changes the document contract and breaks consumers. If a field genuinely can't be mapped, surface it and ask — don't quietly leave it out.
+3. **Edit the existing code in place; do not create a parallel new struct/module.** Convert the project's current document type to a `#[derive(FlussoDocument)]` projection (see flusso-query), keeping its name, fields, and `serde` renames. A second "v2" struct alongside the original is wrong unless the user explicitly asks for one.
+4. Let flusso **own the index**: drop your bespoke mapping; flusso derives a fully-typed one (`dynamic: strict`) with tuned analyzers + subfields. Read `SOURCES_AND_SINKS.md` "Index analysis & subfields" so you query the right subfield.
+5. `flusso check` to confirm the derived mapping matches your data, then run a backfill into a fresh cluster/index alongside the old one, and cut the read path over once seeded.
+6. Retire your CDC/cron glue — logical replication replaces it.
 
 ## Before you call it done
 

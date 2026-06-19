@@ -73,6 +73,15 @@ for hit in page.hits {                  // hit.id, hit.score from the envelope;
 
 See `examples/consumer.rs` for a fuller worked file.
 
+## Migrating an existing struct (don't redesign it)
+
+When the task is "migrate this to flusso" / "switch the existing implementation over," the existing document struct is the **spec**, not a starting suggestion:
+
+- **Edit it in place.** Add `FlussoDocument` to the derive list and `#[flusso(index = "…")]` on the *existing* struct — keep its name, module, and visibility. Do **not** scaffold a new parallel struct alongside it; that leaves two document types and breaks every existing consumer.
+- **Preserve every field — especially the `id` / primary key.** A migration must produce the **exact** field set the project already has. Don't drop the `id`, don't drop fields you think are "redundant," don't rename. Match each existing field to a schema field; if the leaf Rust type or `Option` shape disagrees with the schema, fix the *schema* or surface the mismatch — never delete the field to make it compile.
+- If the existing primary-key field isn't in the schema yet, add it to the schema (`- <type>: id` + `primary_key: id`) rather than removing it from the struct.
+- Keep existing `#[serde(rename = …)]` and field ordering; the derive validates by leaf identifier + `Option` shape, so a faithful copy compiles, and a `cargo check` failure tells you exactly which field drifted.
+
 ## How the derive binds to the schema (no DB, no codegen file)
 
 `#[flusso(index = "users")]` is the only input. At compile time the macro:

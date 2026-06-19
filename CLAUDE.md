@@ -367,12 +367,18 @@ belongs in the linked docs.
 - `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
   completion live **inside the parser crate that owns each** (so they ship in the published
   `.crate`): `schema_config_toml::CONFIG_SCHEMA`
-  (`libs/2-schema/1-config-toml/schemas/config.schema.json`) and `schema_index_yaml::INDEX_SCHEMA`
-  (`libs/2-schema/1-index-yaml/schemas/index.schema.yml`), each embedded via a crate-local
+  (`libs/2-schema/1-config-toml/config.schema.json`) and `schema_index_yaml::INDEX_SCHEMA`
+  (`libs/2-schema/1-index-yaml/index.schema.yml`), each embedded via a crate-local
   `include_str!`, both re-exported from `schema` and emitted by `flusso schema config|index`.
-  They sit in-crate (not repo root) because `cargo package` only bundles files under the crate
-  dir — an out-of-crate `include_str!` would break the published crate. Editor `# yaml-language-server:
-  $schema=…` modelines and registry refs point at these in-crate paths.
+  They sit in-crate (not bare at the repo root) because `cargo package` only bundles files under the
+  crate dir — an out-of-crate `include_str!` would break the published crate. On each release the
+  `.github/workflows/pages.yml` workflow publishes copies of these files to GitHub Pages under an
+  immutable per-version path
+  (`https://alias2k.github.io/flusso/schemas/v<version>/{index.schema.yml,config.schema.json}`, plus
+  `v<minor>` and `latest` aliases), triggered by the schema crates' release tags
+  (`flusso-schema-{index-yaml,config-toml}-v*`, which move together since all crates share a version);
+  editor `# yaml-language-server: $schema=…` modelines point at that versioned URL, while in-repo files
+  (`dev/*.schema.yml`, the parser test fixtures) use a relative path to the in-crate `schemas/`.
   `libs/2-schema/tests/schema_drift.rs` guards their enumerable sets — field type tags, field
   siblings, enum tokens, sink fields — against the parsers (reading the embedded consts), so
   adding a tag/sibling/variant fails CI until the schema matches. It does **not** check

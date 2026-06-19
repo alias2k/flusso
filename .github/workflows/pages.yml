@@ -1,0 +1,101 @@
+name: pages
+
+# Publish the editor-assist JSON Schemas to GitHub Pages, one immutable directory
+# per release version, so a `# yaml-language-server: $schema=…` modeline (and the
+# `.taplo.toml` rule) can pin to the schema matching the running flusso:
+#
+#   schemas/v0.3.0/index.schema.yml   exact version — immutable
+#   schemas/v0.3/index.schema.yml     newest 0.3.x patch — recommended pin
+#   schemas/latest/index.schema.yml   newest version overall
+#   (same three forms for config.schema.json)
+#
+# under https://alias2k.github.io/flusso/. Every crate shares one version, so the
+# two schema crates' tags move together; this fires on either and rebuilds the
+# whole versioned tree from EVERY release tag, so a new release never drops older
+# versions and each minor alias re-resolves to its highest patch. Versions whose
+# tag predates the in-crate schema layout are skipped (their files lived
+# elsewhere) — Pages effectively starts at the first release after that move.
+
+on:
+  push:
+    tags:
+      - 'flusso-schema-index-yaml-v[0-9]+.[0-9]+.[0-9]+'
+      - 'flusso-schema-config-toml-v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Both schema tags push together on a release; serialize the runs (the build is
+# idempotent — each rebuilds the full site from all tags).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assemble versioned schema site from release tags
+        run: |
+          set -euo pipefail
+          idx=libs/2-schema/1-index-yaml/index.schema.yml
+          cfg=libs/2-schema/1-config-toml/config.schema.json
+          mkdir -p site/schemas
+          latest=""
+          # Versions come from the index-yaml tags; the config-toml tag at the
+          # same version is its sibling (all crates share one version). Ascending
+          # order, so a minor alias ends on its highest patch and the final tag
+          # overall is `latest`.
+          for tag in $(git tag --list 'flusso-schema-index-yaml-v[0-9]*.[0-9]*.[0-9]*' --sort=version:refname); do
+            ver="${tag##*-v}"
+            cfg_tag="flusso-schema-config-toml-v${ver}"
+            # Skip versions predating the in-crate schema layout (files moved/renamed
+            # since, so `git show` at the current path would fail for old tags).
+            git cat-file -e "${tag}:${idx}" 2>/dev/null || continue
+            git cat-file -e "${cfg_tag}:${cfg}" 2>/dev/null || continue
+            for dest in "v${ver}" "v${ver%.*}"; do
+              mkdir -p "site/schemas/${dest}"
+              git show "${tag}:${idx}"     > "site/schemas/${dest}/index.schema.yml"
+              git show "${cfg_tag}:${cfg}" > "site/schemas/${dest}/config.schema.json"
+            done
+            latest="${ver}"
+          done
+          if [ -z "$latest" ]; then
+            echo "No release tags carry the in-crate schemas yet; nothing to publish." >&2
+            exit 1
+          fi
+          mkdir -p site/schemas/latest
+          git show "flusso-schema-index-yaml-v${latest}:${idx}"  > site/schemas/latest/index.schema.yml
+          git show "flusso-schema-config-toml-v${latest}:${cfg}" > site/schemas/latest/config.schema.json
+          {
+            echo "<!doctype html><meta charset=utf-8><title>flusso schemas</title>"
+            echo "<h1>flusso editor-assist schemas</h1>"
+            echo "<p>Pin a <code># yaml-language-server: \$schema=…</code> modeline (or a <code>.taplo.toml</code> rule) at"
+            echo "<code>schemas/&lt;ref&gt;/…</code> — <code>latest</code>, a minor like <code>v0.3</code>"
+            echo "(newest patch, recommended), or an exact <code>v0.3.0</code>.</p><ul>"
+            for d in $(ls -1 site/schemas | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -rV); do
+              echo "<li>${d}: <a href=\"schemas/${d}/index.schema.yml\">index</a> · <a href=\"schemas/${d}/config.schema.json\">config</a></li>"
+            done
+            echo "</ul>"
+          } > site/index.html
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
