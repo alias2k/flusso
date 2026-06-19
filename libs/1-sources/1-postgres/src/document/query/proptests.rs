@@ -392,7 +392,7 @@ proptest! {
     ) {
         let key = [(key_column, GenericValue::Int(5))];
         let (sql, params) =
-            reverse_query(&db_schema(), &table, &select_column, &key).unwrap();
+            reverse_query(&db_schema(), &table, &select_column, &key, &col_type_map()).unwrap();
         assert_valid(sql.as_str(), params.len())?;
     }
 }

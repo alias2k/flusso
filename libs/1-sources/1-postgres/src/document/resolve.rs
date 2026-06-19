@@ -1,7 +1,7 @@
 //! Reverse resolution: given a changed row, find the keys of the root documents
 //! it affects by walking relation paths back up to the root.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use schema_core::{
     ColumnName, DatabaseSchema, GenericValue, IndexSchema, Relation, RelationKey, TableName,
@@ -131,8 +131,10 @@ impl PgDocumentBuilder {
         target_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
         let value = local_target_value(relation, target_key)?.clone();
+        let key = [(column.clone(), value)];
+        let col_types = self.key_types(schema, parent_table, &key).await?;
         let (sql, params) =
-            query::reverse_query(schema, parent_table, parent_pk, &[(column.clone(), value)])?;
+            query::reverse_query(schema, parent_table, parent_pk, &key, &col_types)?;
         self.run_reverse(sql, params, parent_pk.as_ref()).await
     }
 
@@ -145,7 +147,9 @@ impl PgDocumentBuilder {
         foreign_key: &ColumnName,
         child_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
-        let (sql, params) = query::reverse_query(schema, child, foreign_key, &child_key.0)?;
+        let col_types = self.key_types(schema, child, &child_key.0).await?;
+        let (sql, params) =
+            query::reverse_query(schema, child, foreign_key, &child_key.0, &col_types)?;
         self.run_reverse(sql, params, foreign_key.as_ref()).await
     }
 
@@ -160,8 +164,9 @@ impl PgDocumentBuilder {
         far_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
         let far_pk = single_far_key(far_key)?.clone();
-        let (sql, params) =
-            query::reverse_query(schema, junction, left_key, &[(right_key.clone(), far_pk)])?;
+        let key = [(right_key.clone(), far_pk)];
+        let col_types = self.key_types(schema, junction, &key).await?;
+        let (sql, params) = query::reverse_query(schema, junction, left_key, &key, &col_types)?;
         self.run_reverse(sql, params, left_key.as_ref()).await
     }
 
@@ -178,8 +183,30 @@ impl PgDocumentBuilder {
         if let Some((_, value)) = junction_key.0.iter().find(|(column, _)| column == left_key) {
             return Ok(vec![value.clone()]);
         }
-        let (sql, params) = query::reverse_query(schema, junction, left_key, &junction_key.0)?;
+        let col_types = self.key_types(schema, junction, &junction_key.0).await?;
+        let (sql, params) =
+            query::reverse_query(schema, junction, left_key, &junction_key.0, &col_types)?;
         self.run_reverse(sql, params, left_key.as_ref()).await
+    }
+
+    /// The catalog SQL type of every key column on `table`, so a reverse query
+    /// can cast each operand to its column's type (`= $n::<type>`). Without it a
+    /// `uuid`/`date`/… foreign key would re-bind as `text` and fail to match.
+    async fn key_types(
+        &self,
+        db: &DatabaseSchema,
+        table: &TableName,
+        key: &[(ColumnName, GenericValue)],
+    ) -> Result<HashMap<(String, String), String>> {
+        let mut types = HashMap::new();
+        for (column, _) in key {
+            let entry = (table.to_string(), column.to_string());
+            if types.contains_key(&entry) {
+                continue;
+            }
+            types.insert(entry, self.column_type(db, table, column).await?);
+        }
+        Ok(types)
     }
 
     /// Run a reverse query and collect the distinct, non-null values of its

@@ -108,7 +108,7 @@ pub(super) fn document_query(
 
     let mut conditions = Vec::new();
     for (column, value) in key {
-        let placeholder = builder.placeholder(value.clone())?;
+        let placeholder = builder.typed_placeholder(value.clone(), &schema.table, column)?;
         conditions.push(format!("{} = {placeholder}", qcol(ROOT, column)));
     }
     if let Some(predicate) = builder.soft_delete_predicate(schema)? {
@@ -160,7 +160,7 @@ pub(super) fn documents_query(
 
     let mut placeholders = Vec::with_capacity(keys.len());
     for key in keys {
-        placeholders.push(builder.placeholder(key.clone())?);
+        placeholders.push(builder.typed_placeholder(key.clone(), &schema.table, pk_column)?);
     }
     let mut predicate = format!("{} IN ({})", qcol(ROOT, pk_column), placeholders.join(", "),);
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
@@ -181,11 +181,16 @@ pub(super) fn documents_query(
 }
 
 /// Build a reverse-resolution query: one column from a table, filtered by a key.
+///
+/// Each key column is matched with its operand cast to the column's catalog SQL
+/// type (`= $n::<type>`), so a `uuid`/`date`/… foreign key compares against its
+/// own type rather than `text`. `col_types` must carry every key column's type.
 pub(super) fn reverse_query(
     db: &DatabaseSchema,
     table: &TableName,
     select_column: &ColumnName,
     key: &[(ColumnName, GenericValue)],
+    col_types: &HashMap<(String, String), String>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut params = Vec::new();
     let mut conditions = Vec::new();
@@ -195,8 +200,17 @@ pub(super) fn reverse_query(
                 "cannot bind null, array, or map as a key".into(),
             ));
         }
+        let sql_type = col_types
+            .get(&(table.to_string(), column.to_string()))
+            .ok_or_else(|| {
+                SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
+            })?;
         params.push(value.clone());
-        conditions.push(format!("{} = ${}", qident(column.as_ref()), params.len()));
+        conditions.push(format!(
+            "{} = ${}::{sql_type}",
+            qident(column.as_ref()),
+            params.len()
+        ));
     }
     if conditions.is_empty() {
         conditions.push("true".to_owned());
