@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/alias2k/flusso/compare/flusso-sources-postgres-v0.3.2...flusso-sources-postgres-v0.4.0) - 2026-06-19
+
+### Added
+
+- *(postgres)* coerce the document body to typed values by schema
+
+### Fixed
+
+- *(postgres)* cast keyed-lookup operands to their catalog type
+
+### Other
+
+- *(postgres)* update config_coverage e2e for typed values
+- move inline unit tests into sibling tests.rs modules
+- *(core)* typed canonical value vocabulary between source and sink
+- *(postgres)* uuid-key e2e for build/build_many/resolve
+
 ### Fixed
 
 - Keyed document lookup now casts each key/foreign-key operand to its column's

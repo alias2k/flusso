@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/alias2k/flusso/compare/flusso-queue-channel-v0.3.2...flusso-queue-channel-v0.4.0) - 2026-06-19
+
+### Other
+
+- move inline unit tests into sibling tests.rs modules
+
 ## [0.3.1](https://github.com/alias2k/flusso/compare/flusso-queue-channel-v0.3.0...flusso-queue-channel-v0.3.1) - 2026-06-19
 
 ### Added
