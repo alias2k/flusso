@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.5.0...flusso-query-derive-v0.6.0) - 2026-06-22
+
+### Added
+
+- *(query)* [**breaking**] compile-time gating of subfield accessors
+- *(query)* [**breaking**] typed geo distance (Distance + DistanceUnit)
+- *(query)* [**breaking**] closed enum params over stringly-typed options
+
+### Other
+
+- *(query)* rustfmt the enum-param edits
+
 ## [0.5.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.4.0...flusso-query-derive-v0.5.0) - 2026-06-22
 
 ### Added
