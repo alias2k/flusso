@@ -12,8 +12,8 @@ use std::marker::PhantomData;
 use serde_json::{Map, Value};
 
 use super::{
-    Common, FlussoValue, Fuzziness, MultiMatchType, Operator, Sort, SortOrder, TermsQuery,
-    ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
+    Common, FlussoValue, Fuzziness, MinimumShouldMatch, MultiMatchType, Operator, Sort, SortOrder,
+    TermsQuery, ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
 };
 use crate::query::{AsQuery, Query, Root};
 
@@ -478,10 +478,11 @@ impl<S> MatchQuery<S> {
         self.set("operator", Value::String(operator.as_str().to_string()))
     }
 
-    /// How many of the analyzed terms must match (e.g. `"75%"`, `"2"`).
+    /// How many of the analyzed terms must match
+    /// (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(self, value: impl Into<String>) -> Self {
-        self.set("minimum_should_match", Value::String(value.into()))
+    pub fn minimum_should_match(self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.set("minimum_should_match", value.into().to_value())
     }
 
     /// Leading characters that must match exactly (fuzzy/prefix matching).
@@ -707,10 +708,11 @@ impl<S> MultiMatchQuery<S> {
         self.set("tie_breaker", Value::from(tie_breaker))
     }
 
-    /// How many of the analyzed terms must match (e.g. `"75%"`, `"2"`).
+    /// How many of the analyzed terms must match
+    /// (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(self, value: impl Into<String>) -> Self {
-        self.set("minimum_should_match", Value::String(value.into()))
+    pub fn minimum_should_match(self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.set("minimum_should_match", value.into().to_value())
     }
 
     common_opts!(common);

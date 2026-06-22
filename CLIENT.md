@@ -321,8 +321,10 @@ take `ScoreMode`/`BoostMode`; a nested `score_mode` takes `NestedScoreMode`
 (which, unlike `ScoreMode`, has `None` for a filter-only nested clause). Geo's
 `distance_type`/`validation_method` take `DistanceType`/`ValidationMethod`, and
 a sort's `numeric_type` / `Sort::script` type take `NumericType` /
-`ScriptSortType`. Genuinely open-ended params (`analyzer`, `format`,
-`time_zone`, `unmapped_type`, `minimum_should_match`, `flags`) stay `String`.
+`ScriptSortType`. `minimum_should_match` takes a `MinimumShouldMatch`
+(`2`/`.into()` for a count, `MinimumShouldMatch::percent(75)`, or `::raw("3<90%")`
+for the combining mini-language). Genuinely open-ended params (`analyzer`,
+`format`, `time_zone`, `unmapped_type`, `flags`) stay `String`.
 
 > **`.or()` / `.and()` on a builder** need `use flusso_query::AsQuery;` in scope
 > (the combinators are provided methods on that trait). Composing via the

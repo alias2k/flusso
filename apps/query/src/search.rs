@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::Client;
 use crate::error::Result;
-use crate::handles::{NestedProjection, Sort};
+use crate::handles::{MinimumShouldMatch, NestedProjection, Sort};
 use crate::query::{AsQuery, BoolBuilder, Root};
 
 /// A document type bound to a flusso-maintained index — the trait that
@@ -145,11 +145,12 @@ impl<T> Search<T> {
 
     /// Require at least this many `should` clauses to match. Beside `query` /
     /// `filter` clauses, `should` defaults to non-constraining (scoring only);
-    /// setting this makes a top-level `should`-group a real filter. Accepts an
-    /// integer (`1`) or an expression string (`"75%"`).
+    /// setting this makes a top-level `should`-group a real filter. Accepts a
+    /// count (`1`) or [`MinimumShouldMatch::percent`] / `raw`.
     #[must_use]
-    pub fn min_should_match(mut self, value: impl Into<Value>) -> Self {
-        self.bool_query.set_min_should_match(value.into());
+    pub fn min_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.bool_query
+            .set_min_should_match(value.into().to_value());
         self
     }
 

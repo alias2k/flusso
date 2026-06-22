@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Operator, Text, common_opts, wrap};
+use super::{Common, MinimumShouldMatch, Operator, Text, common_opts, wrap};
 use crate::query::{AsQuery, Query, Root};
 
 fn string_array(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<Value> {
@@ -192,13 +192,11 @@ impl<S> SimpleQueryStringQuery<S> {
         self
     }
 
-    /// How many terms must match (e.g. `"75%"`, `"2"`).
+    /// How many terms must match (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(mut self, value: impl Into<String>) -> Self {
-        self.opts.insert(
-            "minimum_should_match".to_string(),
-            Value::String(value.into()),
-        );
+    pub fn minimum_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.opts
+            .insert("minimum_should_match".to_string(), value.into().to_value());
         self
     }
 
@@ -250,13 +248,11 @@ impl<S> CombinedFieldsQuery<S> {
         self
     }
 
-    /// How many terms must match (e.g. `"75%"`, `"2"`).
+    /// How many terms must match (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(mut self, value: impl Into<String>) -> Self {
-        self.opts.insert(
-            "minimum_should_match".to_string(),
-            Value::String(value.into()),
-        );
+    pub fn minimum_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.opts
+            .insert("minimum_should_match".to_string(), value.into().to_value());
         self
     }
 
@@ -542,13 +538,11 @@ impl<S> MoreLikeThisQuery<S> {
         self
     }
 
-    /// How many selected terms must match (e.g. `"30%"`).
+    /// How many selected terms must match (e.g. `MinimumShouldMatch::percent(30)`).
     #[must_use]
-    pub fn minimum_should_match(mut self, value: impl Into<String>) -> Self {
-        self.opts.insert(
-            "minimum_should_match".to_string(),
-            Value::String(value.into()),
-        );
+    pub fn minimum_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.opts
+            .insert("minimum_should_match".to_string(), value.into().to_value());
         self
     }
 

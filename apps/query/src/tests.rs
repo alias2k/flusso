@@ -411,7 +411,7 @@ fn multi_match_carries_field_weights_and_options() {
     )
     .match_type(MultiMatchType::BestFields)
     .tie_breaker(0.5)
-    .minimum_should_match("1");
+    .minimum_should_match(crate::MinimumShouldMatch::percent(75));
     assert_eq!(
         query.to_value(),
         json!({ "multi_match": {
@@ -419,7 +419,7 @@ fn multi_match_carries_field_weights_and_options() {
             "fields": ["name^3", "code"],
             "type": "best_fields",
             "tie_breaker": 0.5,
-            "minimum_should_match": "1"
+            "minimum_should_match": "75%"
         } })
     );
 }
@@ -869,7 +869,23 @@ fn date_accepts_typed_chrono_values() {
 
 #[test]
 fn enum_params_render_their_tokens() {
-    use crate::{RangeRelation, ZeroTermsQuery};
+    use crate::{MinimumShouldMatch, RangeRelation, ZeroTermsQuery};
+
+    // minimum_should_match: a bare count is a number; raw passes through verbatim.
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("a b c")
+            .minimum_should_match(2)
+            .to_value(),
+        json!({ "match": { "bio": { "query": "a b c", "minimum_should_match": 2 } } })
+    );
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("a b c")
+            .minimum_should_match(MinimumShouldMatch::raw("3<90%"))
+            .to_value(),
+        json!({ "match": { "bio": { "query": "a b c", "minimum_should_match": "3<90%" } } })
+    );
 
     // Fuzziness: a fixed edit count renders as a number; bounded AUTO as a string.
     assert_eq!(

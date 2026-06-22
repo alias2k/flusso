@@ -37,7 +37,10 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Date, Keyword, Number, Text, common_opts, exists_q, wrap};
+use super::{
+    Common, Date, Fuzziness, Keyword, MinimumShouldMatch, Number, Operator, Text, common_opts,
+    exists_q, wrap,
+};
 use crate::query::{AsQuery, Query, Root};
 
 /// Define a concrete map handle over leaf kind `$Leaf`. Each carries a field
@@ -201,22 +204,24 @@ impl<S> MapSearch<S> {
         self
     }
 
-    /// Combine analyzed terms with `"AND"` or `"OR"` (default `"OR"`).
+    /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`]
+    /// (default `Or`).
     #[must_use]
-    pub fn operator(self, operator: impl Into<String>) -> Self {
-        self.set("operator", Value::String(operator.into()))
+    pub fn operator(self, operator: Operator) -> Self {
+        self.set("operator", Value::String(operator.as_str().to_string()))
     }
 
-    /// Edit distance for analyzed terms — `"AUTO"` or an integer-as-string.
+    /// Edit distance for analyzed terms ([`Fuzziness::Auto`] is the usual choice).
     #[must_use]
-    pub fn fuzziness(self, fuzziness: impl Into<String>) -> Self {
-        self.set("fuzziness", Value::String(fuzziness.into()))
+    pub fn fuzziness(self, fuzziness: Fuzziness) -> Self {
+        self.set("fuzziness", fuzziness.to_value())
     }
 
-    /// How many of the analyzed terms must match (e.g. `"75%"`, `"2"`).
+    /// How many of the analyzed terms must match
+    /// (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(self, value: impl Into<String>) -> Self {
-        self.set("minimum_should_match", Value::String(value.into()))
+    pub fn minimum_should_match(self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.set("minimum_should_match", value.into().to_value())
     }
 
     common_opts!(common);

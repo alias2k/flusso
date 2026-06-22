@@ -184,6 +184,53 @@ impl MultiMatchType {
     }
 }
 
+/// How many clauses/terms must match (`minimum_should_match`). Types the common
+/// cases — an absolute count and a percentage — while [`raw`](Self::raw) keeps
+/// the full mini-language (`"3<90%"`, `"2<-25% 9<-3"`) reachable.
+///
+/// `i32` converts via [`From`], so `.minimum_should_match(2)` works directly;
+/// use [`percent`](Self::percent) / [`raw`](Self::raw) for the rest.
+#[derive(Debug, Clone)]
+pub enum MinimumShouldMatch {
+    /// An absolute count (negative = all but this many).
+    Count(i32),
+    /// A percentage (negative = all but this percent).
+    Percent(i32),
+    /// The raw `minimum_should_match` expression, verbatim.
+    Raw(String),
+}
+
+impl MinimumShouldMatch {
+    /// At least `n` clauses (negative = all but `n`).
+    pub fn count(n: i32) -> Self {
+        Self::Count(n)
+    }
+
+    /// At least `p` percent of clauses (negative = all but `p` percent).
+    pub fn percent(p: i32) -> Self {
+        Self::Percent(p)
+    }
+
+    /// The raw expression — the escape hatch for the combining mini-language.
+    pub fn raw(expr: impl Into<String>) -> Self {
+        Self::Raw(expr.into())
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        match self {
+            MinimumShouldMatch::Count(n) => Value::from(*n),
+            MinimumShouldMatch::Percent(p) => Value::String(format!("{p}%")),
+            MinimumShouldMatch::Raw(expr) => Value::String(expr.clone()),
+        }
+    }
+}
+
+impl From<i32> for MinimumShouldMatch {
+    fn from(n: i32) -> Self {
+        MinimumShouldMatch::Count(n)
+    }
+}
+
 /// How `geo_distance` computes distance (`distance_type`).
 #[derive(Debug, Clone, Copy)]
 pub enum DistanceType {

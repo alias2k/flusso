@@ -11,6 +11,8 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
+use crate::handles::MinimumShouldMatch;
+
 /// The default query scope — the document root. Root fields and flattened
 /// object / to-one-join sub-fields share it.
 #[derive(Debug, Clone, Copy)]
@@ -225,18 +227,19 @@ impl<S> Query<S> {
     /// Set `minimum_should_match` on a `should`-group. Use this on an `or`
     /// chain (or `Search::min_should_match`) so the optional clauses become a
     /// real constraint — without it, `should` beside `must`/`filter` only
-    /// scores. Accepts an integer (`1`) or an expression string (`"75%"`). A
-    /// leaf clause is wrapped as a single `should`.
+    /// scores. Accepts a count (`1`) or [`MinimumShouldMatch::percent`] / `raw`.
+    /// A leaf clause is wrapped as a single `should`.
     #[must_use]
-    pub fn min_should_match(mut self, value: impl Into<Value>) -> Query<S> {
+    pub fn min_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Query<S> {
+        let value = value.into().to_value();
         self.inner = match self.inner {
             Inner::Bool(mut bool_inner) => {
-                bool_inner.minimum_should_match = Some(value.into());
+                bool_inner.minimum_should_match = Some(value);
                 Inner::Bool(bool_inner)
             }
             leaf => Inner::Bool(BoolInner {
                 should: vec![leaf],
-                minimum_should_match: Some(value.into()),
+                minimum_should_match: Some(value),
                 ..BoolInner::default()
             }),
         };
