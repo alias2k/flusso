@@ -51,8 +51,8 @@ pub use map::{DateMap, KeywordMap, MapSearch, NumberMap, TextMap};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
 pub use params::{
-    BoostMode, Fuzziness, MultiMatchType, NestedScoreMode, Operator, RangeRelation, ScoreMode,
-    ZeroTermsQuery,
+    BoostMode, DistanceType, Fuzziness, MultiMatchType, NestedScoreMode, NumericType, Operator,
+    RangeRelation, ScoreMode, ScriptSortType, ValidationMethod, ZeroTermsQuery,
 };
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
 pub use sort::{Sort, SortMode, SortOrder};

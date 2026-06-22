@@ -10,6 +10,7 @@
 
 use serde_json::{Map, Value};
 
+use super::{NumericType, ScriptSortType};
 use crate::query::AsQuery;
 
 /// Sort direction.
@@ -93,17 +94,21 @@ impl Sort {
     }
 
     /// Sort by a computed script value. `script_type` is the emitted value type
-    /// (`"number"` / `"string"`); `source` is the painless expression.
+    /// ([`ScriptSortType::Number`] / [`ScriptSortType::String`]); `source` is
+    /// the painless expression.
     #[must_use]
     pub fn script(
-        script_type: impl Into<String>,
+        script_type: ScriptSortType,
         source: impl Into<String>,
         order: SortOrder,
     ) -> Self {
         let mut script = Map::new();
         script.insert("source".to_string(), Value::String(source.into()));
         let mut body = Map::new();
-        body.insert("type".to_string(), Value::String(script_type.into()));
+        body.insert(
+            "type".to_string(),
+            Value::String(script_type.as_str().to_string()),
+        );
         body.insert("script".to_string(), Value::Object(script));
         body.insert(
             "order".to_string(),
@@ -178,13 +183,12 @@ impl Sort {
         self
     }
 
-    /// Numeric type to sort as (`"double"` / `"long"` / `"date"` /
-    /// `"date_nanos"`), for cross-index type coercion.
+    /// Numeric type to sort as ([`NumericType`]), for cross-index type coercion.
     #[must_use]
-    pub fn numeric_type(mut self, numeric_type: impl Into<String>) -> Self {
+    pub fn numeric_type(mut self, numeric_type: NumericType) -> Self {
         self.body.insert(
             "numeric_type".to_string(),
-            Value::String(numeric_type.into()),
+            Value::String(numeric_type.as_str().to_string()),
         );
         self
     }

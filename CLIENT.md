@@ -318,9 +318,11 @@ error, not a 400. `operator`/`default_operator` take `Operator { And, Or }`;
 `ZeroTermsQuery { None, All }`; a range `relation` takes `RangeRelation
 { Intersects, Contains, Within }`; `function_score`'s `score_mode`/`boost_mode`
 take `ScoreMode`/`BoostMode`; a nested `score_mode` takes `NestedScoreMode`
-(which, unlike `ScoreMode`, has `None` for a filter-only nested clause).
-Genuinely open-ended params (`analyzer`, `format`, `time_zone`,
-`minimum_should_match`, `flags`) stay `String`.
+(which, unlike `ScoreMode`, has `None` for a filter-only nested clause). Geo's
+`distance_type`/`validation_method` take `DistanceType`/`ValidationMethod`, and
+a sort's `numeric_type` / `Sort::script` type take `NumericType` /
+`ScriptSortType`. Genuinely open-ended params (`analyzer`, `format`,
+`time_zone`, `unmapped_type`, `minimum_should_match`, `flags`) stay `String`.
 
 > **`.or()` / `.and()` on a builder** need `use flusso_query::AsQuery;` in scope
 > (the combinators are provided methods on that trait). Composing via the

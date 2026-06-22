@@ -447,7 +447,7 @@ fn geo_distance_options_render() {
     assert_eq!(
         Geo::<Root>::at("location")
             .within("10km", here)
-            .distance_type("plane")
+            .distance_type(crate::DistanceType::Plane)
             .to_value(),
         json!({ "geo_distance": {
             "distance": "10km",
@@ -475,6 +475,43 @@ fn sort_builder_options_render() {
     assert_eq!(
         body.pointer("/sort/0").cloned().unwrap_or_default(),
         json!({ "orderCount": { "order": "desc", "missing": "_first", "mode": "max" } })
+    );
+}
+
+#[test]
+fn sort_and_geo_typed_options_render() {
+    use crate::{NumericType, ScriptSortType, ValidationMethod};
+
+    // Sort numeric_type coercion token.
+    let body = Search::<User>::new("users", "xxxxxx")
+        .sort(User::order_count().asc().numeric_type(NumericType::Long))
+        .body();
+    assert_eq!(
+        body.pointer("/sort/0").cloned().unwrap_or_default(),
+        json!({ "orderCount": { "order": "asc", "numeric_type": "long" } })
+    );
+
+    // Script sort emits its typed value kind.
+    assert_eq!(
+        crate::Sort::script(ScriptSortType::Number, "doc['n'].value", SortOrder::Desc).to_value(),
+        json!({ "_script": {
+            "type": "number",
+            "script": { "source": "doc['n'].value" },
+            "order": "desc"
+        } })
+    );
+
+    // Geo validation_method uppercase token.
+    assert_eq!(
+        Geo::<Root>::at("location")
+            .within("5km", GeoPoint::new(0.0, 0.0))
+            .validation_method(ValidationMethod::IgnoreMalformed)
+            .to_value(),
+        json!({ "geo_distance": {
+            "distance": "5km",
+            "location": { "lat": 0.0, "lon": 0.0 },
+            "validation_method": "IGNORE_MALFORMED"
+        } })
     );
 }
 

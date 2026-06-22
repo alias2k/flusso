@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Sort, SortOrder, common_opts, exists_q, wrap};
+use super::{Common, DistanceType, Sort, SortOrder, ValidationMethod, common_opts, exists_q, wrap};
 use crate::query::{AsQuery, Query, Root};
 
 /// A geographic point — latitude/longitude in degrees.
@@ -135,24 +135,23 @@ pub struct GeoDistanceQuery<S = Root> {
 }
 
 impl<S> GeoDistanceQuery<S> {
-    /// How distance is computed: `"arc"` (default) or `"plane"` (faster, less
-    /// accurate over long spans).
+    /// How distance is computed ([`DistanceType::Arc`] is the default).
     #[must_use]
-    pub fn distance_type(mut self, distance_type: impl Into<String>) -> Self {
+    pub fn distance_type(mut self, distance_type: DistanceType) -> Self {
         self.opts.insert(
             "distance_type".to_string(),
-            Value::String(distance_type.into()),
+            Value::String(distance_type.as_str().to_string()),
         );
         self
     }
 
-    /// How malformed coordinates are handled: `"STRICT"` (default),
-    /// `"COERCE"`, or `"IGNORE_MALFORMED"`.
+    /// How malformed coordinates are handled ([`ValidationMethod::Strict`] is
+    /// the default).
     #[must_use]
-    pub fn validation_method(mut self, validation_method: impl Into<String>) -> Self {
+    pub fn validation_method(mut self, validation_method: ValidationMethod) -> Self {
         self.opts.insert(
             "validation_method".to_string(),
-            Value::String(validation_method.into()),
+            Value::String(validation_method.as_str().to_string()),
         );
         self
     }
