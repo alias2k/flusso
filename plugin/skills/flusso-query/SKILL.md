@@ -99,22 +99,85 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 
 | Handle | Operators |
 | --- | --- |
-| `Keyword` | `eq` `in_` `prefix` `wildcard` `regexp` `fuzzy` `exists`; subfields `text()` / `keyword_lowercase()` |
-| `Text` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy` `exists` — **no exact `eq`** (analyzed); subfields `keyword()` / `keyword_lowercase()` |
-| `Bool` | `eq` `exists` |
-| `Number<T>` | `eq` `in_` `lt` `lte` `gt` `gte` `between` `exists` |
-| `Date` | `eq` `lt` `lte` `gt` `gte` `between` `exists` |
+| `Keyword` | `eq` `any_of` `prefix` `wildcard` `regexp` `fuzzy` `exists` `asc`/`desc`; subfields `text()` / `keyword_lowercase()` |
+| `Text` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy` `any_of` (exact, via `.keyword`) `exists` `asc`/`desc` (via `.keyword_lowercase`) — **no exact `eq`** (analyzed); subfields `keyword()` / `keyword_lowercase()` |
+| `Bool` | `eq` `exists` `asc`/`desc` |
+| `Number<T>` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
+| `Date` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
 | `Object<S>` | `exists` only (same-doc sub-object / to-one join). Query its sub-fields via the **child struct's** flattened handles (`Account::tier()`), not by chaining off this handle. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort/.size/.from`) to shape the returned array; `exists` |
-| `Geo` | `within(distance, center)` `in_bounding_box` `in_polygon` `exists`; `distance_sort(...)` |
+| `Geo` | `within(Distance::km(12.0), center)` `within_box` `within_polygon` `exists`; `distance_from(center)` / `distance_sort(center, order, DistanceUnit)` (radius is a typed `Distance`, not a string) |
 | `Binary` | `exists` (base64, not searchable) |
 | `Json` | `exists` `raw(serde_json::Value)` |
 
-`sort(…)` only accepts sortable handles (numbers, dates, keywords, bools) — `sort` on a `text` field is a compile error (use `User::full_name().keyword().desc()` for exact, `.keyword_lowercase()` for case-insensitive). Cross-field: `multi_match("ada", [User::full_name(), User::bio()])` (weight one with `.boosted(3.0)`).
+`sort(…)` accepts sortable handles (numbers, dates, keywords, bools, and now `text` — `Text::asc`/`desc` sort via the case-insensitive `.keyword_lowercase` subfield automatically; use `.keyword().desc()` for an exact-case sort). Geo sorts with `Geo::distance_from(center)` (nearest-first). Cross-field: `multi_match("ada", [User::full_name(), User::bio()])` (weight one with `.boosted(3.0)`).
 
-**Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields (`auto_subfields`, on by default) with exact/sortable/searchable subfields, reachable with **no string path**: `User::full_name().keyword()` (exact/`wildcard`/`prefix`), `.keyword_lowercase()` (case-insensitive match/sort), `User::email().text()` (full-text over a keyword). A `wildcard` belongs on `.keyword()`, not the analyzed handle. Valid when `auto_subfields` is on and the field defines no custom `fields`.
+**Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields (`auto_subfields`, on by default) with exact/sortable/searchable subfields, reachable with **no string path**: `User::full_name().keyword()` (exact/`wildcard`/`prefix`), `.keyword_lowercase()` (case-insensitive match/sort), `User::email().text()` (full-text over a keyword). A `wildcard` belongs on `.keyword()`, not the analyzed handle. **Compile-enforced:** the derive stamps a `text`/`keyword` handle with subfields only when every OpenSearch sink has `auto_subfields` on and the field has no custom `fields`; otherwise the handle is `…<NoSubfields>` and the accessors (and the `any_of`/`asc` sugar built on them) don't exist — calling one is a compile error, not a 400.
 
 **Options & extra query types — the typed surface is broad** (see next section). What's still only reachable via the [`raw`](#escape-hatch) hatch: `knn`/vector, `geo_shape`, span, and parent/child queries — types with no flusso field.
+
+## Filtering: which operator for which field
+
+Pick the operator from the field's **type**, not by habit. Get this wrong and you reach for an escape hatch you don't need.
+
+| Field | Want | Use |
+| --- | --- | --- |
+| `keyword` / `enum` / `uuid` | exact match | `Type::field().eq(v)` |
+| `keyword` / number / date | any of a set | `Type::field().any_of([a, b])` |
+| `keyword` | case-insensitive exact | `Type::field().keyword_lowercase().eq(v)` |
+| id / foreign key | filter by id | `Type::id().eq(uuid)` — **uuid feature, no wrapper struct, no `.to_string()`** |
+| `text` | full-text | `Type::field().matches(v)` |
+| `text` | phrase (terms in order) | `Type::field().match_phrase(v)` |
+| `text` | exact whole-value | `Type::field().keyword().eq(v)` — the `.keyword` subfield |
+| number / date | range | `.gte(v)` / `.lte(v)` / `.between(a, b)` |
+
+`matches` / `match_phrase` are for **analyzed `text` only**. On a `keyword` field a `match_phrase` is whole-value — behaviorally just `.eq()` — so use `.eq()`.
+
+## Anti-patterns — scan for these before you finish
+
+Each is something an LLM reaches for when it doesn't trust the typed surface. Each has a one-line fix — the typed form is shorter *and* compile-checked.
+
+1. **String-path handle** — `Keyword::<Root>::at("code")` / `Text::<Root>::at("code")` when a generated `Type::code()` exists. The string path **bypasses the compile-time mapping check** — the entire point of the derive. → Use `Type::code()`. (`::at` is only for hand-written handles where there is no derived struct at all.)
+2. **`matches` / `match_phrase` on a keyword field** — you put a `Text` op on a `keyword`. → Filter a keyword with `.eq()` / `.any_of()`. A legacy `match_phrase` on a keyword equals `.eq()` — port it to `.eq()`, don't reproduce the JSON.
+3. **Hand-rolled `Option` flattening** — `Vec<Option<Query>>` + `.flatten()` + a loop of `.filter(clause)`. **`Option<Q>` already *is* a `Query`** — `None` adds nothing. → One line per filter: `search.filter(params.x.map(|v| Type::x().eq(v)))`. No helper fn, no loop, no `.flatten()`.
+4. **Wrapper struct just to filter** — inventing `struct Key { id: Uuid }` to query by id. → `Type::id().eq(uuid)`. The document struct is a projection for *results*, never a filter-input type.
+5. **`raw(json!(…))` for something typed** — `eq`/range/`matches`/`function_score`/`script`/`query_string`/`sort`/`search_after` are all typed. → `raw` is only for `knn`/`geo_shape`/span/parent-child (no flusso field).
+6. **`#[flusso(skip)]` on a `Uuid` / enum keyword** → keep it typed: `Uuid` (uuid feature) or a `#[derive(FlussoValue)]` enum.
+
+**Porting a legacy query builder?** Map each clause to its *idiomatic* typed form and match **behavior, not byte-identical JSON**. A `term`-vs-`match_phrase` difference that selects the same documents is not worth an escape hatch plus an apologetic comment — use the idiomatic op, and if a real behavioral difference exists, state it in one line.
+
+**The compiler is the safety net** — write the typed form and run `cargo check`. A handle/operator that doesn't fit the mapping fails to compile; don't pre-empt that with a string path or `raw`.
+
+**Self-check before you finish** — these compile fine, so the compiler won't catch them; grep your own query diff and justify or fix each hit:
+
+| grep | smell | fix |
+| --- | --- | --- |
+| `::at("` | string-path handle | use the generated `Type::field()` |
+| `.raw(` | escape hatch | only `knn`/`geo_shape`/span/parent-child belong here |
+| `.flatten()` / `Vec<Option<` near filters | hand-rolled optionals | `.filter(opt.map(\|v\| …))` |
+| `match_phrase` / `matches` | check the field is **`text`**, not `keyword` | keyword → `.eq()`/`.any_of()` |
+| a `struct` used only to hold filter inputs | wrapper-to-filter | filter via handles (`Type::id().eq(uuid)`) |
+
+## Writing readable queries
+
+Readability is the goal — **compact *and* clear, both at once.** Aim to keep a query on one screen, but never buy density with confusion. The [worked example](examples/consumer.rs) is the reference shape.
+
+- **The builder chain is the canonical form** — one clause per line (`.filter(..)` / `.query(..)` / `.sort(..)`), read top-to-bottom like a spec.
+- **One clause, one line — when it fits (or almost).** `.filter(User::tier().eq(Tier::Pro))` stays inline; don't wrap what already fits on a line.
+- **Too dense to read at a glance? Bind it to a named `let` first**, then drop the name into the chain. A lifted nested query with several conditions, an `or`-group, a `function_score` — give it an intent-revealing name; the chain stays scannable and the name says *why*.
+  ```rust
+  // the clause is hard to read inline — name it:
+  let high_value_delivered = User::orders()
+      .any(Order::status().eq("delivered").and(Order::total().gte(100.0)));
+
+  let page = User::query()
+      .filter(high_value_delivered)
+      .filter(User::tier().any_of([Tier::Pro, Tier::Enterprise]))
+      .sort(User::order_count().desc())
+      .send(&client).await?;
+  ```
+- **Recurring query → a client-free helper** (`fn busy_users() -> Search<User>`), extended at the call site (`busy_users().from(20)`).
+- **Conditional filters are one line each** — `.filter(opt.map(|v| Type::x().eq(v)))` (Anti-pattern #3), not a multi-line block.
 
 ## Composing — scope is in the type
 
@@ -155,7 +218,7 @@ Each leaf operator returns a small **builder** carrying that query's options plu
 
 ```rust
 User::query()
-    .should(User::full_name().matches("acme").boost(2.0).fuzziness("AUTO"))
+    .should(User::full_name().matches("acme").boost(2.0).fuzziness(Fuzziness::Auto))
     .should(User::code().keyword().wildcard("*acme*").case_insensitive())
     .min_should_match(1)                         // make a should-group a real filter
     .filter(User::owner_id().eq(owner_uuid))     // uuid keyword (feature) — no skip
@@ -165,6 +228,8 @@ User::query()
 ```
 
 Per-type options (all optional): `case_insensitive` on `term`/`prefix`/`wildcard`/`regexp`; `rewrite` (prefix/wildcard); `flags`/`max_determinized_states` (regexp); `fuzziness`/`prefix_length`/`max_expansions`/`transpositions` (fuzzy); `fuzziness`/`operator`/`minimum_should_match`/`prefix_length`/`analyzer`/`zero_terms_query`/`lenient` (`matches`); `slop`/`analyzer` (phrase); `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` (`multi_match`); `format`/`time_zone`/`relation` (range); `distance_type`/`validation_method` (geo `within`); `score_mode`/`ignore_unmapped` (nested `any`).
+
+The enumerable params are **closed enums**, not strings (typo → compile error): `Operator { And, Or }` (`operator`/`default_operator`); `Fuzziness { Auto, AutoBounds(u32,u32), Edits(u32) }`; `MultiMatchType` (`multi_match` `type`); `ZeroTermsQuery { None, All }`; `RangeRelation { Intersects, Contains, Within }`; `ScoreMode`/`BoostMode` (function_score); `NestedScoreMode` (nested — has `None` for a filter-only clause); `DistanceType`/`ValidationMethod` (geo `within`); `NumericType`/`ScriptSortType` (sort); `MinimumShouldMatch` (`2`/`.into()` for a count, `::percent(75)`, `::raw("3<90%")`). Open-ended params (`analyzer`/`format`/`time_zone`/`unmapped_type`/`flags`) stay `String`.
 
 > `.or()` / `.and()` / `.not()` on a **builder** need `use flusso_query::AsQuery;` (provided trait methods; inherent `Query` methods are unaffected). Composing via the `Search` clauses needs no import.
 
@@ -211,7 +276,7 @@ Let a scalar field be your own enum/newtype instead of a bare leaf:
 enum AccountTier { Free, Pro, Enterprise }
 ```
 
-Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Kind rules: keyword/text accept a unit enum **or** a newtype; number/date accept a **newtype only**. Query-value wiring is currently keyword-only (`eq`/`in_`); number/date custom types generalize the **doc side** only. A missing `FlussoValue` impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
+Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Kind rules: keyword/text accept a unit enum **or** a newtype; number/date accept a **newtype only**. Query-value wiring is currently keyword-only (`eq`/`any_of`); number/date custom types generalize the **doc side** only. A missing `FlussoValue` impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
 
 **Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
 

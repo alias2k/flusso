@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Text, common_opts, wrap};
+use super::{Common, MinimumShouldMatch, Operator, Text, common_opts, wrap};
 use crate::query::{AsQuery, Query, Root};
 
 fn string_array(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<Value> {
@@ -18,7 +18,7 @@ fn string_array(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<Valu
         .collect()
 }
 
-fn field_specs<S>(fields: impl IntoIterator<Item = Text<S>>) -> Vec<Value> {
+fn field_specs<S, Sub>(fields: impl IntoIterator<Item = Text<S, Sub>>) -> Vec<Value> {
     fields
         .into_iter()
         .map(|f| Value::String(f.field_spec()))
@@ -87,18 +87,18 @@ impl<S> QueryStringQuery<S> {
 
     /// The fields searched (each may carry a `^weight` via [`Text::boosted`]).
     #[must_use]
-    pub fn fields(mut self, fields: impl IntoIterator<Item = Text<S>>) -> Self {
+    pub fn fields<Sub>(mut self, fields: impl IntoIterator<Item = Text<S, Sub>>) -> Self {
         self.opts
             .insert("fields".to_string(), Value::Array(field_specs(fields)));
         self
     }
 
-    /// Default boolean operator between terms (`"OR"` default / `"AND"`).
+    /// Default boolean operator between terms ([`Operator::Or`] default).
     #[must_use]
-    pub fn default_operator(mut self, operator: impl Into<String>) -> Self {
+    pub fn default_operator(mut self, operator: Operator) -> Self {
         self.opts.insert(
             "default_operator".to_string(),
-            Value::String(operator.into()),
+            Value::String(operator.as_str().to_string()),
         );
         self
     }
@@ -160,18 +160,18 @@ pub struct SimpleQueryStringQuery<S = Root> {
 impl<S> SimpleQueryStringQuery<S> {
     /// The fields searched (each may carry a `^weight` via [`Text::boosted`]).
     #[must_use]
-    pub fn fields(mut self, fields: impl IntoIterator<Item = Text<S>>) -> Self {
+    pub fn fields<Sub>(mut self, fields: impl IntoIterator<Item = Text<S, Sub>>) -> Self {
         self.opts
             .insert("fields".to_string(), Value::Array(field_specs(fields)));
         self
     }
 
-    /// Default boolean operator between terms (`"OR"` default / `"AND"`).
+    /// Default boolean operator between terms ([`Operator::Or`] default).
     #[must_use]
-    pub fn default_operator(mut self, operator: impl Into<String>) -> Self {
+    pub fn default_operator(mut self, operator: Operator) -> Self {
         self.opts.insert(
             "default_operator".to_string(),
-            Value::String(operator.into()),
+            Value::String(operator.as_str().to_string()),
         );
         self
     }
@@ -192,13 +192,11 @@ impl<S> SimpleQueryStringQuery<S> {
         self
     }
 
-    /// How many terms must match (e.g. `"75%"`, `"2"`).
+    /// How many terms must match (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(mut self, value: impl Into<String>) -> Self {
-        self.opts.insert(
-            "minimum_should_match".to_string(),
-            Value::String(value.into()),
-        );
+    pub fn minimum_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.opts
+            .insert("minimum_should_match".to_string(), value.into().to_value());
         self
     }
 
@@ -216,9 +214,9 @@ impl<S> AsQuery<S> for SimpleQueryStringQuery<S> {
 
 /// Term-centric full-text across several fields, treating them as one combined
 /// field (`combined_fields`).
-pub fn combined_fields<S>(
+pub fn combined_fields<S, Sub>(
     query: impl Into<String>,
-    fields: impl IntoIterator<Item = Text<S>>,
+    fields: impl IntoIterator<Item = Text<S, Sub>>,
 ) -> CombinedFieldsQuery<S> {
     CombinedFieldsQuery {
         query: query.into(),
@@ -240,21 +238,21 @@ pub struct CombinedFieldsQuery<S = Root> {
 }
 
 impl<S> CombinedFieldsQuery<S> {
-    /// Combine analyzed terms with `"AND"` or `"OR"`.
+    /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`].
     #[must_use]
-    pub fn operator(mut self, operator: impl Into<String>) -> Self {
-        self.opts
-            .insert("operator".to_string(), Value::String(operator.into()));
+    pub fn operator(mut self, operator: Operator) -> Self {
+        self.opts.insert(
+            "operator".to_string(),
+            Value::String(operator.as_str().to_string()),
+        );
         self
     }
 
-    /// How many terms must match (e.g. `"75%"`, `"2"`).
+    /// How many terms must match (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(mut self, value: impl Into<String>) -> Self {
-        self.opts.insert(
-            "minimum_should_match".to_string(),
-            Value::String(value.into()),
-        );
+    pub fn minimum_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.opts
+            .insert("minimum_should_match".to_string(), value.into().to_value());
         self
     }
 
@@ -500,8 +498,8 @@ impl<S> AsQuery<S> for RankFeatureQuery<S> {
 }
 
 /// Find documents similar to `like` text(s) across `fields` (`more_like_this`).
-pub fn more_like_this<S>(
-    fields: impl IntoIterator<Item = Text<S>>,
+pub fn more_like_this<S, Sub>(
+    fields: impl IntoIterator<Item = Text<S, Sub>>,
     like: impl IntoIterator<Item = impl Into<String>>,
 ) -> MoreLikeThisQuery<S> {
     MoreLikeThisQuery {
@@ -540,13 +538,11 @@ impl<S> MoreLikeThisQuery<S> {
         self
     }
 
-    /// How many selected terms must match (e.g. `"30%"`).
+    /// How many selected terms must match (e.g. `MinimumShouldMatch::percent(30)`).
     #[must_use]
-    pub fn minimum_should_match(mut self, value: impl Into<String>) -> Self {
-        self.opts.insert(
-            "minimum_should_match".to_string(),
-            Value::String(value.into()),
-        );
+    pub fn minimum_should_match(mut self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.opts
+            .insert("minimum_should_match".to_string(), value.into().to_value());
         self
     }
 

@@ -11,8 +11,22 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Sort, SortOrder, common_opts, exists_q, single, wrap};
+use super::{
+    Common, FlussoValue, RangeRelation, Sort, SortOrder, common_opts, exists_q, kind, single, wrap,
+};
 use crate::query::{AsQuery, Query, Root};
+
+/// The JSON value for a typed date input, taken from its serde serialization
+/// (`String`/`&str` pass straight through; `chrono` types serialize to their
+/// ISO-8601 string). Mirrors `keyword_term` — a non-string serialization falls
+/// back to its display form rather than failing.
+fn date_value(value: &(impl FlussoValue<kind::Date> + serde::Serialize)) -> Value {
+    match serde_json::to_value(value) {
+        Ok(Value::String(string)) => Value::String(string),
+        Ok(other) => Value::String(other.to_string()),
+        Err(_) => Value::String(String::new()),
+    }
+}
 
 /// An exact-match (`term`) clause for a non-string value (number, bool, date),
 /// carrying the universal `boost` / `name` modifiers.
@@ -51,7 +65,7 @@ impl<S> AsQuery<S> for EqQuery<S> {
 }
 
 /// A multi-value (`terms`) clause, carrying `boost` / `name`. Shared by the
-/// keyword and numeric `in_` operators.
+/// keyword and numeric `any_of` operators.
 #[derive(Debug, Clone)]
 pub struct TermsQuery<S = Root> {
     path: String,
@@ -122,11 +136,13 @@ impl<S> RangeQuery<S> {
     }
 
     /// How the range relates to range-typed field values
-    /// (`INTERSECTS` / `CONTAINS` / `WITHIN`).
+    /// ([`RangeRelation::Intersects`] / `Contains` / `Within`).
     #[must_use]
-    pub fn relation(mut self, relation: impl Into<String>) -> Self {
-        self.extra
-            .insert("relation".to_string(), Value::String(relation.into()));
+    pub fn relation(mut self, relation: RangeRelation) -> Self {
+        self.extra.insert(
+            "relation".to_string(),
+            Value::String(relation.as_str().to_string()),
+        );
         self
     }
 
@@ -168,6 +184,14 @@ impl<S> Bool<S> {
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
+
+    pub fn asc(&self) -> Sort {
+        Sort::new(&self.path, SortOrder::Asc)
+    }
+
+    pub fn desc(&self) -> Sort {
+        Sort::new(&self.path, SortOrder::Desc)
+    }
 }
 
 /// A numeric field. `T` is the Rust scalar; `S` is the scope (defaults to
@@ -195,7 +219,7 @@ where
     }
 
     /// Match any of the given values.
-    pub fn in_(&self, values: impl IntoIterator<Item = T>) -> TermsQuery<S> {
+    pub fn any_of(&self, values: impl IntoIterator<Item = T>) -> TermsQuery<S> {
         let array = values.into_iter().map(Into::into).collect();
         TermsQuery::new(&self.path, array)
     }
@@ -254,39 +278,50 @@ impl<S> Date<S> {
         }
     }
 
-    /// Exact match.
-    pub fn eq(&self, value: impl Into<String>) -> EqQuery<S> {
-        EqQuery::new(&self.path, Value::String(value.into()))
+    /// Exact match. Accepts a `String`/`&str`, or — with the `chrono` feature —
+    /// a `NaiveDate` / `NaiveDateTime` / `DateTime<Utc>`.
+    pub fn eq(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> EqQuery<S> {
+        EqQuery::new(&self.path, date_value(&value))
+    }
+
+    /// Match any of the given dates (`String`/`&str` or `chrono` date types).
+    pub fn any_of(
+        &self,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Date> + serde::Serialize>,
+    ) -> TermsQuery<S> {
+        let array = values.into_iter().map(|v| date_value(&v)).collect();
+        TermsQuery::new(&self.path, array)
     }
 
     /// Strictly before `value`.
-    pub fn lt(&self, value: impl Into<String>) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("lt", Value::String(value.into()))])
+    pub fn lt(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("lt", date_value(&value))])
     }
 
     /// At or before `value`.
-    pub fn lte(&self, value: impl Into<String>) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("lte", Value::String(value.into()))])
+    pub fn lte(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("lte", date_value(&value))])
     }
 
     /// Strictly after `value`.
-    pub fn gt(&self, value: impl Into<String>) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("gt", Value::String(value.into()))])
+    pub fn gt(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("gt", date_value(&value))])
     }
 
     /// At or after `value`.
-    pub fn gte(&self, value: impl Into<String>) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("gte", Value::String(value.into()))])
+    pub fn gte(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("gte", date_value(&value))])
     }
 
     /// Inclusive range `[low, high]`.
-    pub fn between(&self, low: impl Into<String>, high: impl Into<String>) -> RangeQuery<S> {
+    pub fn between(
+        &self,
+        low: impl FlussoValue<kind::Date> + serde::Serialize,
+        high: impl FlussoValue<kind::Date> + serde::Serialize,
+    ) -> RangeQuery<S> {
         RangeQuery::new(
             &self.path,
-            vec![
-                ("gte", Value::String(low.into())),
-                ("lte", Value::String(high.into())),
-            ],
+            vec![("gte", date_value(&low)), ("lte", date_value(&high))],
         )
     }
 

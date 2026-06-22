@@ -13,8 +13,9 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, Client, Date, FlussoDocument, FlussoMultiDocument, Geo, GeoPoint, Keyword,
-    MsearchBundle, Nested, Number, Query, Search, SearchResponse, SortOrder, Text, multi_match,
+    AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoMultiDocument, Fuzziness,
+    Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode, Number,
+    Operator, Query, Search, SearchResponse, SortOrder, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -248,7 +249,7 @@ fn combinators_build_bool_clauses() {
 fn operators_render_expected_clauses() {
     assert_eq!(
         Keyword::<Root>::at("status")
-            .in_(["paid", "shipped"])
+            .any_of(["paid", "shipped"])
             .to_value(),
         json!({ "terms": { "status": ["paid", "shipped"] } })
     );
@@ -342,7 +343,7 @@ fn universal_boost_and_name_expand_the_clause() {
     // `terms` carries boost beside the field, not inside it.
     assert_eq!(
         Keyword::<Root>::at("status")
-            .in_(["paid", "shipped"])
+            .any_of(["paid", "shipped"])
             .boost(1.5)
             .to_value(),
         json!({ "terms": { "status": ["paid", "shipped"], "boost": 1.5 } })
@@ -371,7 +372,7 @@ fn string_query_options_render() {
     assert_eq!(
         Keyword::<Root>::at("city")
             .fuzzy("bostn")
-            .fuzziness("AUTO")
+            .fuzziness(Fuzziness::Auto)
             .prefix_length(1)
             .to_value(),
         json!({ "fuzzy": { "city": {
@@ -382,8 +383,8 @@ fn string_query_options_render() {
     assert_eq!(
         Text::<Root>::at("bio")
             .matches("ada")
-            .fuzziness("AUTO")
-            .operator("AND")
+            .fuzziness(Fuzziness::Auto)
+            .operator(Operator::And)
             .to_value(),
         json!({ "match": { "bio": {
             "query": "ada", "fuzziness": "AUTO", "operator": "AND"
@@ -408,9 +409,9 @@ fn multi_match_carries_field_weights_and_options() {
             Text::<Root>::at("code"),
         ],
     )
-    .match_type("best_fields")
+    .match_type(MultiMatchType::BestFields)
     .tie_breaker(0.5)
-    .minimum_should_match("1");
+    .minimum_should_match(crate::MinimumShouldMatch::percent(75));
     assert_eq!(
         query.to_value(),
         json!({ "multi_match": {
@@ -418,7 +419,7 @@ fn multi_match_carries_field_weights_and_options() {
             "fields": ["name^3", "code"],
             "type": "best_fields",
             "tie_breaker": 0.5,
-            "minimum_should_match": "1"
+            "minimum_should_match": "75%"
         } })
     );
 }
@@ -427,7 +428,7 @@ fn multi_match_carries_field_weights_and_options() {
 fn nested_query_options_render() {
     let q = User::orders()
         .any(Order::status().eq("delivered"))
-        .score_mode("max")
+        .score_mode(NestedScoreMode::Max)
         .ignore_unmapped(true);
     assert_eq!(
         q.to_value(),
@@ -445,8 +446,8 @@ fn geo_distance_options_render() {
     let here = GeoPoint::new(52.37, 4.90);
     assert_eq!(
         Geo::<Root>::at("location")
-            .within("10km", here)
-            .distance_type("plane")
+            .within(Distance::km(10.0), here)
+            .distance_type(crate::DistanceType::Plane)
             .to_value(),
         json!({ "geo_distance": {
             "distance": "10km",
@@ -474,6 +475,72 @@ fn sort_builder_options_render() {
     assert_eq!(
         body.pointer("/sort/0").cloned().unwrap_or_default(),
         json!({ "orderCount": { "order": "desc", "missing": "_first", "mode": "max" } })
+    );
+}
+
+#[test]
+fn sort_and_geo_typed_options_render() {
+    use crate::{NumericType, ScriptSortType, ValidationMethod};
+
+    // Sort numeric_type coercion token.
+    let body = Search::<User>::new("users", "xxxxxx")
+        .sort(User::order_count().asc().numeric_type(NumericType::Long))
+        .body();
+    assert_eq!(
+        body.pointer("/sort/0").cloned().unwrap_or_default(),
+        json!({ "orderCount": { "order": "asc", "numeric_type": "long" } })
+    );
+
+    // Script sort emits its typed value kind.
+    assert_eq!(
+        crate::Sort::script(ScriptSortType::Number, "doc['n'].value", SortOrder::Desc).to_value(),
+        json!({ "_script": {
+            "type": "number",
+            "script": { "source": "doc['n'].value" },
+            "order": "desc"
+        } })
+    );
+
+    // Geo validation_method uppercase token.
+    assert_eq!(
+        Geo::<Root>::at("location")
+            .within(Distance::km(5.0), GeoPoint::new(0.0, 0.0))
+            .validation_method(ValidationMethod::IgnoreMalformed)
+            .to_value(),
+        json!({ "geo_distance": {
+            "distance": "5km",
+            "location": { "lat": 0.0, "lon": 0.0 },
+            "validation_method": "IGNORE_MALFORMED"
+        } })
+    );
+}
+
+#[test]
+fn sort_sugar_covers_text_bool_geo() {
+    // Text sorts via the case-insensitive subfield automatically.
+    assert_eq!(
+        Text::<Root>::at("title").asc().to_value(),
+        json!({ "title.keyword_lowercase": { "order": "asc" } })
+    );
+
+    // Bool sorts directly.
+    assert_eq!(
+        crate::Bool::<Root>::at("active").desc().to_value(),
+        json!({ "active": { "order": "desc" } })
+    );
+
+    // Geo distance-from: ascending (nearest first) by default; `.desc()` flips.
+    let here = GeoPoint::new(52.37, 4.90);
+    assert_eq!(
+        Geo::<Root>::at("location").distance_from(here).to_value(),
+        json!({ "_geo_distance": { "location": { "lat": 52.37, "lon": 4.90 }, "order": "asc" } })
+    );
+    assert_eq!(
+        Geo::<Root>::at("location")
+            .distance_from(here)
+            .desc()
+            .to_value(),
+        json!({ "_geo_distance": { "location": { "lat": 52.37, "lon": 4.90 }, "order": "desc" } })
     );
 }
 
@@ -574,7 +641,7 @@ fn compound_queries_render() {
     assert_eq!(
         crate::function_score(Text::<Root>::at("title").matches("ada"))
             .weight_when(2.0, Keyword::<Root>::at("status").eq("featured"))
-            .boost_mode("sum")
+            .boost_mode(BoostMode::Sum)
             .to_value(),
         json!({ "function_score": {
             "query": { "match": { "title": "ada" } },
@@ -594,7 +661,7 @@ fn ids_and_fulltext_queries_render() {
     assert_eq!(
         crate::query_string::<Root>("ada AND lovelace")
             .default_field("bio")
-            .default_operator("AND")
+            .default_operator(Operator::And)
             .to_value(),
         json!({ "query_string": {
             "query": "ada AND lovelace",
@@ -618,7 +685,7 @@ fn ids_and_fulltext_queries_render() {
 
     assert_eq!(
         crate::combined_fields("ada", [Text::<Root>::at("title"), Text::<Root>::at("body")])
-            .operator("AND")
+            .operator(Operator::And)
             .to_value(),
         json!({ "combined_fields": {
             "query": "ada",
@@ -731,9 +798,9 @@ fn uuid_is_a_keyword_value() {
         Keyword::<Root>::at("ownerId").eq(id).to_value(),
         json!({ "term": { "ownerId": "00000000-0000-0000-0000-000000000000" } })
     );
-    // `in_` over uuids works too.
+    // `any_of` over uuids works too.
     assert_eq!(
-        Keyword::<Root>::at("ownerId").in_([id]).to_value(),
+        Keyword::<Root>::at("ownerId").any_of([id]).to_value(),
         json!({ "terms": { "ownerId": ["00000000-0000-0000-0000-000000000000"] } })
     );
 }
@@ -770,6 +837,130 @@ fn subfield_accessors_target_the_right_subfield() {
 }
 
 #[test]
+fn date_accepts_bare_strings() {
+    assert_eq!(
+        Date::<Root>::at("created_at").gte("2024-01-01").to_value(),
+        json!({ "range": { "created_at": { "gte": "2024-01-01" } } })
+    );
+}
+
+#[cfg(feature = "chrono")]
+#[test]
+fn date_accepts_typed_chrono_values() {
+    use crate::chrono::{NaiveDate, NaiveDateTime};
+
+    let day = NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    assert_eq!(
+        Date::<Root>::at("created_at").gte(day).to_value(),
+        json!({ "range": { "created_at": { "gte": "2024-01-01" } } })
+    );
+
+    let stamp = day.and_hms_opt(9, 30, 0).expect("valid time");
+    let _: NaiveDateTime = stamp;
+    assert_eq!(
+        Date::<Root>::at("created_at")
+            .between(day, stamp)
+            .to_value(),
+        json!({ "range": { "created_at": {
+            "gte": "2024-01-01", "lte": "2024-01-01T09:30:00"
+        } } })
+    );
+}
+
+#[test]
+fn enum_params_render_their_tokens() {
+    use crate::{MinimumShouldMatch, RangeRelation, ZeroTermsQuery};
+
+    // minimum_should_match: a bare count is a number; raw passes through verbatim.
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("a b c")
+            .minimum_should_match(2)
+            .to_value(),
+        json!({ "match": { "bio": { "query": "a b c", "minimum_should_match": 2 } } })
+    );
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("a b c")
+            .minimum_should_match(MinimumShouldMatch::raw("3<90%"))
+            .to_value(),
+        json!({ "match": { "bio": { "query": "a b c", "minimum_should_match": "3<90%" } } })
+    );
+
+    // Fuzziness: a fixed edit count renders as a number; bounded AUTO as a string.
+    assert_eq!(
+        Keyword::<Root>::at("city")
+            .fuzzy("bostn")
+            .fuzziness(Fuzziness::Edits(2))
+            .to_value(),
+        json!({ "fuzzy": { "city": { "value": "bostn", "fuzziness": 2 } } })
+    );
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("ada")
+            .fuzziness(Fuzziness::AutoBounds(3, 6))
+            .to_value(),
+        json!({ "match": { "bio": { "query": "ada", "fuzziness": "AUTO:3:6" } } })
+    );
+
+    // zero_terms_query.
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("the")
+            .zero_terms_query(ZeroTermsQuery::All)
+            .to_value(),
+        json!({ "match": { "bio": { "query": "the", "zero_terms_query": "all" } } })
+    );
+
+    // range relation (uppercase tokens).
+    assert_eq!(
+        Number::<i64, Root>::at("n")
+            .between(1, 10)
+            .relation(RangeRelation::Within)
+            .to_value(),
+        json!({ "range": { "n": { "relation": "WITHIN", "gte": 1, "lte": 10 } } })
+    );
+
+    // nested score_mode keeps `none` (filter-only).
+    assert_eq!(
+        User::orders()
+            .any(Order::status().eq("delivered"))
+            .score_mode(NestedScoreMode::None)
+            .to_value(),
+        json!({ "nested": {
+            "path": "orders",
+            "query": { "term": { "orders.status": "delivered" } },
+            "score_mode": "none"
+        } })
+    );
+}
+
+#[test]
+fn any_of_covers_every_handle() {
+    // Number.
+    assert_eq!(
+        Number::<i64, Root>::at("n").any_of([1, 2, 3]).to_value(),
+        json!({ "terms": { "n": [1, 2, 3] } })
+    );
+
+    // Date.
+    assert_eq!(
+        Date::<Root>::at("created_at")
+            .any_of(["2024-01-01", "2024-02-01"])
+            .to_value(),
+        json!({ "terms": { "created_at": ["2024-01-01", "2024-02-01"] } })
+    );
+
+    // Text routes through the exact `.keyword` subfield.
+    assert_eq!(
+        Text::<Root>::at("title")
+            .any_of(["Rust", "OpenSearch"])
+            .to_value(),
+        json!({ "terms": { "title.keyword": ["Rust", "OpenSearch"] } })
+    );
+}
+
+#[test]
 fn multi_match_spans_text_fields() {
     let query = multi_match(
         "ada lovelace",
@@ -789,7 +980,9 @@ fn geo_queries_render_expected_clauses() {
     let here = GeoPoint::new(52.37, 4.90);
 
     assert_eq!(
-        Geo::<Root>::at("location").within("10km", here).to_value(),
+        Geo::<Root>::at("location")
+            .within(Distance::km(10.0), here)
+            .to_value(),
         json!({ "geo_distance": {
             "distance": "10km",
             "location": { "lat": 52.37, "lon": 4.90 }
@@ -798,7 +991,7 @@ fn geo_queries_render_expected_clauses() {
 
     assert_eq!(
         Geo::<Root>::at("location")
-            .in_bounding_box(GeoPoint::new(53.0, 4.0), GeoPoint::new(52.0, 5.0))
+            .within_box(GeoPoint::new(53.0, 4.0), GeoPoint::new(52.0, 5.0))
             .to_value(),
         json!({ "geo_bounding_box": { "location": {
             "top_left": { "lat": 53.0, "lon": 4.0 },
@@ -808,7 +1001,7 @@ fn geo_queries_render_expected_clauses() {
 
     assert_eq!(
         Geo::<Root>::at("location")
-            .in_polygon([
+            .within_polygon([
                 GeoPoint::new(0.0, 0.0),
                 GeoPoint::new(0.0, 1.0),
                 GeoPoint::new(1.0, 1.0),
@@ -828,7 +1021,7 @@ fn geo_distance_sort_in_search_body() -> Result {
         .sort(Geo::<Root>::at("location").distance_sort(
             GeoPoint::new(52.37, 4.90),
             SortOrder::Asc,
-            "km",
+            crate::DistanceUnit::Kilometers,
         ))
         .body();
 

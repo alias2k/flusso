@@ -31,6 +31,7 @@ mod geo;
 mod map;
 mod nested;
 mod object;
+mod params;
 mod scalar;
 mod sort;
 mod string;
@@ -45,15 +46,20 @@ pub use extra::{
     distance_feature, ids, more_like_this, query_string, rank_feature, script, script_score,
     simple_query_string,
 };
-pub use geo::{Geo, GeoDistanceQuery, GeoPoint};
+pub use geo::{Distance, DistanceUnit, Geo, GeoDistanceQuery, GeoPoint};
 pub use map::{DateMap, KeywordMap, MapSearch, NumberMap, TextMap};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
+pub use params::{
+    BoostMode, DistanceType, Fuzziness, MinimumShouldMatch, MultiMatchType, NestedScoreMode,
+    NumericType, Operator, RangeRelation, ScoreMode, ScriptSortType, ValidationMethod,
+    ZeroTermsQuery,
+};
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
 pub use sort::{Sort, SortMode, SortOrder};
 pub use string::{
-    FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, PrefixQuery, RegexpQuery, TermQuery, Text,
-    WildcardQuery, multi_match,
+    FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery, RegexpQuery,
+    TermQuery, Text, WildcardQuery, WithSubfields, multi_match,
 };
 
 /// `{ "<wrapper>": { "<path>": <value> } }`.
@@ -181,8 +187,10 @@ pub mod kind {
 }
 
 /// A Rust type usable where a field of kind `K` is expected: as the field type
-/// in a `#[derive(FlussoDocument)]` struct, and (for [`kind::Keyword`]) as a
-/// query value on [`Keyword::eq`]/[`Keyword::in_`].
+/// in a `#[derive(FlussoDocument)]` struct, and as a query value — for
+/// [`kind::Keyword`] on [`Keyword::eq`]/[`Keyword::any_of`], and for
+/// [`kind::Date`] on [`Date::eq`]/[`Date::gte`]/… (`String`/`&str`, or the
+/// `chrono` date types behind the `chrono` feature).
 ///
 /// Built-in leaf types are pre-implemented (`String`/`&str` for keyword, the
 /// numeric primitives for number, …). Custom enums and newtype wrappers opt in
@@ -217,6 +225,13 @@ impl FlussoValue<kind::Number> for f64 {}
 impl FlussoValue<kind::Number> for crate::Decimal {}
 
 impl FlussoValue<kind::Date> for String {}
+impl FlussoValue<kind::Date> for &str {}
+#[cfg(feature = "chrono")]
+impl FlussoValue<kind::Date> for chrono::NaiveDate {}
+#[cfg(feature = "chrono")]
+impl FlussoValue<kind::Date> for chrono::NaiveDateTime {}
+#[cfg(feature = "chrono")]
+impl FlussoValue<kind::Date> for chrono::DateTime<chrono::Utc> {}
 
 /// A Rust type usable as the **document type** of a `map` field of value kind
 /// `K`: a dynamic-key object whose values are all of kind `K`.

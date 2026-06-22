@@ -1,0 +1,8 @@
+error[E0599]: no method named `keyword` found for struct `flusso_query::Text<Root, NoSubfields>` in the current scope
+  --> tests/ui_no_subfields/subfields_gated.rs:17:31
+   |
+17 |     let _ = User::full_name().keyword();
+   |                               ^^^^^^^ method not found in `flusso_query::Text<Root, NoSubfields>`
+   |
+   = note: the method was found for
+           - `flusso_query::Text<S>`

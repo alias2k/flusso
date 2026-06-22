@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Sort, common_opts, exists_q, match_all_value};
+use super::{Common, NestedScoreMode, Sort, common_opts, exists_q, match_all_value};
 use crate::query::{AsQuery, Query, Root};
 
 /// `{ "nested": { "path": "<path>", "query": <query> } }`.
@@ -113,12 +113,15 @@ pub struct NestedQuery<E = Root> {
 }
 
 impl<E> NestedQuery<E> {
-    /// How matching elements' scores combine into the parent score:
-    /// `"avg"` (default) / `"sum"` / `"min"` / `"max"` / `"none"`.
+    /// How matching elements' scores combine into the parent score
+    /// ([`NestedScoreMode::Avg`] is the default; [`NestedScoreMode::None`]
+    /// makes the clause a pure filter).
     #[must_use]
-    pub fn score_mode(mut self, score_mode: impl Into<String>) -> Self {
-        self.opts
-            .insert("score_mode".to_string(), Value::String(score_mode.into()));
+    pub fn score_mode(mut self, score_mode: NestedScoreMode) -> Self {
+        self.opts.insert(
+            "score_mode".to_string(),
+            Value::String(score_mode.as_str().to_string()),
+        );
         self
     }
 

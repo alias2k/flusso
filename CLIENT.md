@@ -166,14 +166,14 @@ mistake is a compile error rather than a 400 from OpenSearch.
 
 | Handle          | Operators                                                                 |
 | --------------- | ------------------------------------------------------------------------- |
-| `Keyword`       | `eq`, `in_`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `exists`            |
-| `Text`          | `matches`, `match_phrase`, `match_phrase_prefix`, `matches_fuzzy`, `exists` — *no* exact `eq` (it's analyzed) |
-| `Bool`          | `eq`, `exists`                                                            |
-| `Number<T>`     | `eq`, `in_`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                |
-| `Date`          | `eq`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`                       |
+| `Keyword`       | `eq`, `any_of`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `exists`         |
+| `Text`          | `matches`, `match_phrase`, `match_phrase_prefix`, `matches_fuzzy`, `any_of` (exact, via `.keyword`), `exists` — *no* exact `eq` (it's analyzed) |
+| `Bool`          | `eq`, `exists`, `asc`/`desc`                                              |
+| `Number<T>`     | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
+| `Date`          | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
 | `Object<S>`     | `exists` (a same-document sub-object — group or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
-| `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
+| `Geo`           | `within(Distance::km(12.0), center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` (nearest-first sugar) or `distance_sort(center, order, DistanceUnit)` |
 | `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
 | `KeywordMap`    | `key(k)` → a `Keyword` leaf for one key; `has_key(k)`, `exists` — *no* `search` (exact-match, use `key(..).eq(..)`) |
 | `NumberMap<T>`  | `key(k)` → a `Number<T>` leaf for one key (`eq`/`lt`/`gte`/`between`/…); `has_key(k)`, `exists` |
@@ -182,8 +182,11 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
 
 Each operator's argument is typed too: `User::order_count().gte(_)` takes an
-`i64`, `.between(_, _)` takes two; `User::email().in_(_)` takes an
-`IntoIterator<Item = impl Into<String>>`.
+`i64`, `.between(_, _)` takes two; `User::email().any_of(_)` takes an
+`IntoIterator`. `Date` operators take a `String`/`&str` ISO-8601 literal or —
+with the `chrono` feature — a `NaiveDate` / `NaiveDateTime` / `DateTime<Utc>`,
+so `Order::created_at().gte(NaiveDate::from_ymd_opt(2024, 1, 1)?)` is a compile
+error if you pass a non-date type.
 
 **Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields
 (`auto_subfields`, on by default) with exact / sortable / searchable subfields,
@@ -197,13 +200,19 @@ User::email().text()                   // Text    → full-text over a keyword f
 ```
 
 (A `wildcard` belongs on `.keyword()`, not the analyzed handle, which matches
-tokens not the whole value.) These are valid when `auto_subfields` is on and the
-field defines no custom `fields`.
+tokens not the whole value.) These accessors exist only when the subfield is
+actually provisioned — and the derive **enforces it at compile time**: a
+`text`/`keyword` handle is stamped with subfields only when every OpenSearch
+sink has `auto_subfields` on and the field declares no custom `fields`.
+Otherwise the handle is `…<NoSubfields>` and `.keyword()` / `.text()` /
+`.keyword_lowercase()` (and the `Text::any_of` / `Text::asc` sugar built on
+them) simply don't exist — calling one is a compile error, not a runtime 400.
 
-Sorting is the same — `sort(…)` only accepts handles whose type is sortable
-(numbers, dates, keywords, booleans), so `sort(User::full_name().desc())` on a
-`text` field is a compile error (use `User::full_name().keyword().desc()` for an
-exact sort, or `.keyword_lowercase()` for a case-insensitive one).
+Sorting is similar — `sort(…)` accepts handles whose type is sortable (numbers,
+dates, keywords, booleans, and `text`). `Text::asc`/`desc` is sugar that sorts
+via the case-insensitive `.keyword_lowercase` subfield automatically; reach for
+`User::full_name().keyword().desc()` when you want an exact-case sort instead.
+A `geo_point` sorts by proximity with `User::location().distance_from(center)`.
 
 A few clauses span more than one field, so they're free functions:
 `multi_match("ada", [User::full_name(), User::bio()])` runs one analyzed query
@@ -288,7 +297,7 @@ it expands. A builder drops straight into a clause (it's an `AsQuery`), so no
 User::query()
     .should(User::full_name().matches("acme").boost(2.0))         // weighted text
     .should(User::full_name().keyword().wildcard("*acme*").case_insensitive())
-    .should(User::full_name().matches("acme").fuzziness("AUTO"))  // typo-tolerant
+    .should(User::full_name().matches("acme").fuzziness(Fuzziness::Auto))  // typo-tolerant
     .min_should_match(1)                                          // make should a real filter
     .filter(User::owner_id().eq(owner_uuid))                      // uuid keyword (feature)
     .filter(User::tier().eq(Tier::Pro))                           // enum keyword
@@ -306,6 +315,21 @@ matches; `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` on
 `multi_match`; `format`/`time_zone`/`relation` on a range; `distance_type`/
 `validation_method` on `within` (geo); `score_mode`/`ignore_unmapped` on a
 nested `any`.
+
+The enumerable options are **closed enums**, not strings — a typo is a compile
+error, not a 400. `operator`/`default_operator` take `Operator { And, Or }`;
+`fuzziness` takes `Fuzziness { Auto, AutoBounds(u32, u32), Edits(u32) }`;
+`multi_match`'s `type` takes `MultiMatchType`; `zero_terms_query` takes
+`ZeroTermsQuery { None, All }`; a range `relation` takes `RangeRelation
+{ Intersects, Contains, Within }`; `function_score`'s `score_mode`/`boost_mode`
+take `ScoreMode`/`BoostMode`; a nested `score_mode` takes `NestedScoreMode`
+(which, unlike `ScoreMode`, has `None` for a filter-only nested clause). Geo's
+`distance_type`/`validation_method` take `DistanceType`/`ValidationMethod`, and
+a sort's `numeric_type` / `Sort::script` type take `NumericType` /
+`ScriptSortType`. `minimum_should_match` takes a `MinimumShouldMatch`
+(`2`/`.into()` for a count, `MinimumShouldMatch::percent(75)`, or `::raw("3<90%")`
+for the combining mini-language). Genuinely open-ended params (`analyzer`,
+`format`, `time_zone`, `unmapped_type`, `flags`) stay `String`.
 
 > **`.or()` / `.and()` on a builder** need `use flusso_query::AsQuery;` in scope
 > (the combinators are provided methods on that trait). Composing via the
@@ -325,11 +349,15 @@ free functions: `constant_score(filter)`, `dis_max([..]).tie_breaker(..)`,
 `rank_feature(..)`, `more_like_this([fields], [like])`. `match_bool_prefix` is a
 `Text` operator (search-as-you-type).
 
-**Sort.** `.asc()`/`.desc()` on a sortable handle return a `Sort` builder:
-chain `.missing_first()`/`.missing_last()`/`.missing(v)`, `.mode(SortMode::..)`,
-`.unmapped_type(..)`/`.numeric_type(..)`/`.format(..)`, or
-`.nested(path)`/`.nested_filtered(path, q)`. Also `Sort::score()` (by `_score`)
-and `Sort::script(type, source, order)`.
+**Sort.** `.asc()`/`.desc()` on a sortable handle (number, date, keyword, bool,
+or `text` — the last routing through `.keyword_lowercase`) return a `Sort`
+builder: chain `.missing_first()`/`.missing_last()`/`.missing(v)`,
+`.mode(SortMode::..)`, `.unmapped_type(..)`/`.numeric_type(..)`/`.format(..)`, or
+`.nested(path)`/`.nested_filtered(path, q)`. Also `Sort::score()` (by `_score`),
+`Sort::script(ScriptSortType, source, order)`, and `Geo::distance_from(center)`
+/ `Geo::distance_sort(center, order, DistanceUnit)` for proximity sorting. A
+geo radius is a typed `Distance` (`Distance::km(12.0)` / `::miles(5.0)` /
+`::meters(800.0)` / …), so a malformed `"12 km"` can't reach the query.
 
 **Search-level** controls on the `Search` builder: `min_score`,
 `track_total_hits`, `track_scores`, `search_after([..])` (deep pagination),

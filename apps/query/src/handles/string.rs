@@ -12,8 +12,8 @@ use std::marker::PhantomData;
 use serde_json::{Map, Value};
 
 use super::{
-    Common, FlussoValue, Sort, SortOrder, TermsQuery, common_opts, exists_q, keyed_value_query,
-    kind, wrap,
+    Common, FlussoValue, Fuzziness, MinimumShouldMatch, MultiMatchType, Operator, Sort, SortOrder,
+    TermsQuery, ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
 };
 use crate::query::{AsQuery, Query, Root};
 
@@ -274,7 +274,7 @@ impl<S> AsQuery<S> for RegexpQuery<S> {
 pub struct FuzzyQuery<S = Root> {
     path: String,
     value: String,
-    fuzziness: Option<String>,
+    fuzziness: Option<Value>,
     prefix_length: Option<u32>,
     max_expansions: Option<u32>,
     transpositions: Option<bool>,
@@ -296,10 +296,10 @@ impl<S> FuzzyQuery<S> {
         }
     }
 
-    /// Maximum edit distance — `"AUTO"` (the default) or an integer-as-string.
+    /// Maximum edit distance ([`Fuzziness::Auto`] is the usual choice).
     #[must_use]
-    pub fn fuzziness(mut self, fuzziness: impl Into<String>) -> Self {
-        self.fuzziness = Some(fuzziness.into());
+    pub fn fuzziness(mut self, fuzziness: Fuzziness) -> Self {
+        self.fuzziness = Some(fuzziness.to_value());
         self
     }
 
@@ -331,7 +331,7 @@ impl<S> AsQuery<S> for FuzzyQuery<S> {
     fn into_query(self) -> Option<Query<S>> {
         let mut opts = Map::new();
         if let Some(fuzziness) = self.fuzziness {
-            opts.insert("fuzziness".to_string(), Value::String(fuzziness));
+            opts.insert("fuzziness".to_string(), fuzziness);
         }
         if let Some(prefix_length) = self.prefix_length {
             opts.insert("prefix_length".to_string(), Value::from(prefix_length));
@@ -353,18 +353,36 @@ impl<S> AsQuery<S> for FuzzyQuery<S> {
     }
 }
 
-/// An exact, aggregatable string field (`keyword`, `enum`, `uuid`).
+/// Type-state marker: this `text`/`keyword` handle's field carries flusso's
+/// auto subfields, so its subfield accessors (`.keyword()` / `.text()` /
+/// `.keyword_lowercase()`) — and the sugar built on them (`Text::any_of`,
+/// `Text::asc`) — are in scope. The default for a hand-written handle; the
+/// derive stamps it on a field only when every OpenSearch sink has
+/// `auto_subfields` on and the field declares no custom `fields`.
+#[derive(Debug)]
+pub enum WithSubfields {}
+
+/// Type-state marker: this handle's field has **no** auto subfields, so the
+/// subfield accessors don't exist — calling one is a compile error, not a 400.
+/// The derive stamps it when subfields aren't provisioned; subfield leaves
+/// (`.keyword()`) also carry it, since a subfield has no further subfields.
+#[derive(Debug)]
+pub enum NoSubfields {}
+
+/// An exact, aggregatable string field (`keyword`, `enum`, `uuid`). `Sub` is a
+/// [`WithSubfields`]/[`NoSubfields`] type-state marker gating the subfield
+/// accessors.
 #[derive(Debug, Clone)]
-pub struct Keyword<S = Root> {
+pub struct Keyword<S = Root, Sub = WithSubfields> {
     path: String,
-    _scope: PhantomData<fn() -> S>,
+    _marker: PhantomData<fn() -> (S, Sub)>,
 }
 
-impl<S> Keyword<S> {
-    pub fn at(path: impl Into<String>) -> Self {
+impl<S, Sub> Keyword<S, Sub> {
+    fn handle(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
-            _scope: PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -376,7 +394,7 @@ impl<S> Keyword<S> {
     }
 
     /// Match any of the given values (`String`/`&str` or keyword `FlussoValue` types).
-    pub fn in_(
+    pub fn any_of(
         &self,
         values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword> + serde::Serialize>,
     ) -> TermsQuery<S> {
@@ -404,21 +422,6 @@ impl<S> Keyword<S> {
         FuzzyQuery::new(&self.path, value.into())
     }
 
-    /// The full-text `.text` subfield flusso auto-creates on a `keyword` field
-    /// (analyzed with `flusso_code`), so a keyword is still searchable in a
-    /// search box. Available only when the sink's `auto_subfields` is on (the
-    /// default) and the field defines no custom `fields`.
-    pub fn text(&self) -> Text<S> {
-        Text::at(format!("{}.text", self.path))
-    }
-
-    /// The case/accent-insensitive `.keyword_lowercase` subfield flusso
-    /// auto-creates — for case-insensitive exact match and sort. Available only
-    /// when the sink's `auto_subfields` is on (the default).
-    pub fn keyword_lowercase(&self) -> Keyword<S> {
-        Keyword::at(format!("{}.keyword_lowercase", self.path))
-    }
-
     /// The field has a non-null value.
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
@@ -430,6 +433,34 @@ impl<S> Keyword<S> {
 
     pub fn desc(&self) -> Sort {
         Sort::new(&self.path, SortOrder::Desc)
+    }
+}
+
+impl<S> Keyword<S, WithSubfields> {
+    pub fn at(path: impl Into<String>) -> Self {
+        Self::handle(path)
+    }
+
+    /// The full-text `.text` subfield flusso auto-creates on a `keyword` field
+    /// (analyzed with `flusso_code`), so a keyword is still searchable in a
+    /// search box. Only in scope when the field carries auto subfields.
+    pub fn text(&self) -> Text<S, NoSubfields> {
+        Text::leaf(format!("{}.text", self.path))
+    }
+
+    /// The case/accent-insensitive `.keyword_lowercase` subfield flusso
+    /// auto-creates — for case-insensitive exact match and sort. Only in scope
+    /// when the field carries auto subfields.
+    pub fn keyword_lowercase(&self) -> Keyword<S, NoSubfields> {
+        Keyword::leaf(format!("{}.keyword_lowercase", self.path))
+    }
+}
+
+impl<S> Keyword<S, NoSubfields> {
+    /// Construct a handle for a field known to have no auto subfields (a
+    /// subfield leaf, or a field the derive resolved as un-subfielded).
+    pub fn leaf(path: impl Into<String>) -> Self {
+        Self::handle(path)
     }
 }
 
@@ -465,22 +496,24 @@ impl<S> MatchQuery<S> {
         self
     }
 
-    /// Edit distance for analyzed terms — `"AUTO"` or an integer-as-string.
+    /// Edit distance for analyzed terms ([`Fuzziness::Auto`] is the usual choice).
     #[must_use]
-    pub fn fuzziness(self, fuzziness: impl Into<String>) -> Self {
-        self.set("fuzziness", Value::String(fuzziness.into()))
+    pub fn fuzziness(self, fuzziness: Fuzziness) -> Self {
+        self.set("fuzziness", fuzziness.to_value())
     }
 
-    /// Combine analyzed terms with `"AND"` or `"OR"` (default `"OR"`).
+    /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`]
+    /// (default `Or`).
     #[must_use]
-    pub fn operator(self, operator: impl Into<String>) -> Self {
-        self.set("operator", Value::String(operator.into()))
+    pub fn operator(self, operator: Operator) -> Self {
+        self.set("operator", Value::String(operator.as_str().to_string()))
     }
 
-    /// How many of the analyzed terms must match (e.g. `"75%"`, `"2"`).
+    /// How many of the analyzed terms must match
+    /// (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(self, value: impl Into<String>) -> Self {
-        self.set("minimum_should_match", Value::String(value.into()))
+    pub fn minimum_should_match(self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.set("minimum_should_match", value.into().to_value())
     }
 
     /// Leading characters that must match exactly (fuzzy/prefix matching).
@@ -507,10 +540,14 @@ impl<S> MatchQuery<S> {
         self.set("slop", Value::from(slop))
     }
 
-    /// Behavior when analysis yields no terms (`"none"` or `"all"`).
+    /// Behavior when analysis yields no terms ([`ZeroTermsQuery::None`] or
+    /// [`ZeroTermsQuery::All`]).
     #[must_use]
-    pub fn zero_terms_query(self, value: impl Into<String>) -> Self {
-        self.set("zero_terms_query", Value::String(value.into()))
+    pub fn zero_terms_query(self, value: ZeroTermsQuery) -> Self {
+        self.set(
+            "zero_terms_query",
+            Value::String(value.as_str().to_string()),
+        )
     }
 
     /// Ignore format errors (e.g. analyzing text for a numeric subfield).
@@ -536,20 +573,22 @@ impl<S> AsQuery<S> for MatchQuery<S> {
     }
 }
 
-/// An analyzed full-text field (`text`, `identifier`). No exact `eq`.
+/// An analyzed full-text field (`text`, `identifier`). No exact `eq`. `Sub` is
+/// a [`WithSubfields`]/[`NoSubfields`] type-state marker gating the subfield
+/// accessors (and the `any_of` / `asc` sugar built on them).
 #[derive(Debug, Clone)]
-pub struct Text<S = Root> {
+pub struct Text<S = Root, Sub = WithSubfields> {
     path: String,
     boost: Option<f32>,
-    _scope: PhantomData<fn() -> S>,
+    _marker: PhantomData<fn() -> (S, Sub)>,
 }
 
-impl<S> Text<S> {
-    pub fn at(path: impl Into<String>) -> Self {
+impl<S, Sub> Text<S, Sub> {
+    fn handle(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             boost: None,
-            _scope: PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -592,25 +631,10 @@ impl<S> Text<S> {
         MatchQuery::new("match_bool_prefix", &self.path, value.into())
     }
 
-    /// Analyzed match tolerant of typos — sugar for `matches(v).fuzziness("AUTO")`.
+    /// Analyzed match tolerant of typos — sugar for
+    /// `matches(v).fuzziness(Fuzziness::Auto)`.
     pub fn matches_fuzzy(&self, value: impl Into<String>) -> MatchQuery<S> {
-        self.matches(value).fuzziness("AUTO")
-    }
-
-    /// The exact `.keyword` subfield flusso auto-creates on a `text` field —
-    /// for exact `eq` / `in_`, `wildcard`, `prefix`, and exact sort. (A wildcard
-    /// belongs here, not on the analyzed handle, which matches tokens not the
-    /// whole value.) Available only when the sink's `auto_subfields` is on (the
-    /// default) and the field defines no custom `fields`.
-    pub fn keyword(&self) -> Keyword<S> {
-        Keyword::at(format!("{}.keyword", self.path))
-    }
-
-    /// The case/accent-insensitive `.keyword_lowercase` subfield — for
-    /// case-insensitive exact match and sort. Available only when the sink's
-    /// `auto_subfields` is on (the default).
-    pub fn keyword_lowercase(&self) -> Keyword<S> {
-        Keyword::at(format!("{}.keyword_lowercase", self.path))
+        self.matches(value).fuzziness(Fuzziness::Auto)
     }
 
     /// The field has a non-null value.
@@ -619,12 +643,64 @@ impl<S> Text<S> {
     }
 }
 
+impl<S> Text<S, WithSubfields> {
+    pub fn at(path: impl Into<String>) -> Self {
+        Self::handle(path)
+    }
+
+    /// Exact match against **any** of the given values, on the auto `.keyword`
+    /// subfield. A `terms` query on the analyzed field would match raw tokens,
+    /// which is rarely intended; this targets the exact subfield instead. Only
+    /// in scope when the field carries auto subfields.
+    pub fn any_of(
+        &self,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword> + serde::Serialize>,
+    ) -> TermsQuery<S> {
+        self.keyword().any_of(values)
+    }
+
+    /// The exact `.keyword` subfield flusso auto-creates on a `text` field —
+    /// for exact `eq` / `any_of`, `wildcard`, `prefix`, and exact sort. (A
+    /// wildcard belongs here, not on the analyzed handle, which matches tokens
+    /// not the whole value.) Only in scope when the field carries auto subfields.
+    pub fn keyword(&self) -> Keyword<S, NoSubfields> {
+        Keyword::leaf(format!("{}.keyword", self.path))
+    }
+
+    /// The case/accent-insensitive `.keyword_lowercase` subfield — for
+    /// case-insensitive exact match and sort. Only in scope when the field
+    /// carries auto subfields.
+    pub fn keyword_lowercase(&self) -> Keyword<S, NoSubfields> {
+        Keyword::leaf(format!("{}.keyword_lowercase", self.path))
+    }
+
+    /// Sort ascending — on the case/accent-insensitive `.keyword_lowercase`
+    /// subfield, since the analyzed field itself isn't sortable. Only in scope
+    /// when the field carries auto subfields.
+    pub fn asc(&self) -> Sort {
+        self.keyword_lowercase().asc()
+    }
+
+    /// Sort descending (on `.keyword_lowercase` — see [`asc`](Self::asc)).
+    pub fn desc(&self) -> Sort {
+        self.keyword_lowercase().desc()
+    }
+}
+
+impl<S> Text<S, NoSubfields> {
+    /// Construct a handle for a field known to have no auto subfields (a
+    /// subfield leaf, or a field the derive resolved as un-subfielded).
+    pub fn leaf(path: impl Into<String>) -> Self {
+        Self::handle(path)
+    }
+}
+
 /// A cross-field full-text query over several [`Text`] fields in the same scope.
 /// Returns a [`MultiMatchQuery`] builder; weight individual fields with
 /// [`Text::boosted`].
-pub fn multi_match<S>(
+pub fn multi_match<S, Sub>(
     query: impl Into<String>,
-    fields: impl IntoIterator<Item = Text<S>>,
+    fields: impl IntoIterator<Item = Text<S, Sub>>,
 ) -> MultiMatchQuery<S> {
     MultiMatchQuery {
         query: query.into(),
@@ -653,23 +729,22 @@ impl<S> MultiMatchQuery<S> {
         self
     }
 
-    /// The scoring `type`: `"best_fields"` / `"most_fields"` / `"cross_fields"`
-    /// / `"phrase"` / `"phrase_prefix"` / `"bool_prefix"`.
+    /// The scoring [`MultiMatchType`] (default `BestFields`).
     #[must_use]
-    pub fn match_type(self, match_type: impl Into<String>) -> Self {
-        self.set("type", Value::String(match_type.into()))
+    pub fn match_type(self, match_type: MultiMatchType) -> Self {
+        self.set("type", Value::String(match_type.as_str().to_string()))
     }
 
-    /// Combine analyzed terms with `"AND"` or `"OR"`.
+    /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`].
     #[must_use]
-    pub fn operator(self, operator: impl Into<String>) -> Self {
-        self.set("operator", Value::String(operator.into()))
+    pub fn operator(self, operator: Operator) -> Self {
+        self.set("operator", Value::String(operator.as_str().to_string()))
     }
 
-    /// Edit distance — `"AUTO"` or an integer-as-string.
+    /// Edit distance ([`Fuzziness::Auto`] is the usual choice).
     #[must_use]
-    pub fn fuzziness(self, fuzziness: impl Into<String>) -> Self {
-        self.set("fuzziness", Value::String(fuzziness.into()))
+    pub fn fuzziness(self, fuzziness: Fuzziness) -> Self {
+        self.set("fuzziness", fuzziness.to_value())
     }
 
     /// `tie_breaker` for `best_fields` — how much non-winning fields contribute.
@@ -678,10 +753,11 @@ impl<S> MultiMatchQuery<S> {
         self.set("tie_breaker", Value::from(tie_breaker))
     }
 
-    /// How many of the analyzed terms must match (e.g. `"75%"`, `"2"`).
+    /// How many of the analyzed terms must match
+    /// (e.g. `2`, `MinimumShouldMatch::percent(75)`).
     #[must_use]
-    pub fn minimum_should_match(self, value: impl Into<String>) -> Self {
-        self.set("minimum_should_match", Value::String(value.into()))
+    pub fn minimum_should_match(self, value: impl Into<MinimumShouldMatch>) -> Self {
+        self.set("minimum_should_match", value.into().to_value())
     }
 
     common_opts!(common);

@@ -247,6 +247,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         level,
         &fields,
         &tracked,
+        resolved.auto_subfields,
     );
 
     let mut out = items;

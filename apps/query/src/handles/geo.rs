@@ -1,11 +1,12 @@
-//! Geographic field handles: a [`GeoPoint`] and the [`Geo`] field with distance,
-//! bounding-box, and polygon queries plus sort-by-distance.
+//! Geographic field handles: a [`GeoPoint`] and the [`Geo`] field with the
+//! `within` query family (`within` distance / `within_box` / `within_polygon`)
+//! plus sort-by-distance.
 
 use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Sort, SortOrder, common_opts, exists_q, wrap};
+use super::{Common, DistanceType, Sort, SortOrder, ValidationMethod, common_opts, exists_q, wrap};
 use crate::query::{AsQuery, Query, Root};
 
 /// A geographic point — latitude/longitude in degrees.
@@ -32,8 +33,105 @@ impl GeoPoint {
     }
 }
 
-/// A `geo_point` field — distance, bounding-box, and polygon queries, plus
-/// sort-by-distance.
+/// A distance unit OpenSearch accepts in a `geo_distance` query or
+/// `_geo_distance` sort.
+#[derive(Debug, Clone, Copy)]
+pub enum DistanceUnit {
+    /// Kilometers (`km`).
+    Kilometers,
+    /// Meters (`m`).
+    Meters,
+    /// Centimeters (`cm`).
+    Centimeters,
+    /// Millimeters (`mm`).
+    Millimeters,
+    /// Miles (`mi`).
+    Miles,
+    /// Yards (`yd`).
+    Yards,
+    /// Feet (`ft`).
+    Feet,
+    /// Nautical miles (`nmi`).
+    NauticalMiles,
+}
+
+impl DistanceUnit {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DistanceUnit::Kilometers => "km",
+            DistanceUnit::Meters => "m",
+            DistanceUnit::Centimeters => "cm",
+            DistanceUnit::Millimeters => "mm",
+            DistanceUnit::Miles => "mi",
+            DistanceUnit::Yards => "yd",
+            DistanceUnit::Feet => "ft",
+            DistanceUnit::NauticalMiles => "nmi",
+        }
+    }
+}
+
+/// A distance with an explicit unit — e.g. `Distance::km(12.0)`. Renders to the
+/// OpenSearch distance string (`"12km"`), so a malformed radius (`"12 km"`, a
+/// typo'd unit) can't reach the query.
+#[derive(Debug, Clone, Copy)]
+pub struct Distance {
+    value: f64,
+    unit: DistanceUnit,
+}
+
+impl Distance {
+    /// `value` in `unit`.
+    pub fn new(value: f64, unit: DistanceUnit) -> Self {
+        Self { value, unit }
+    }
+
+    /// Kilometers.
+    pub fn km(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Kilometers)
+    }
+
+    /// Meters.
+    pub fn meters(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Meters)
+    }
+
+    /// Centimeters.
+    pub fn centimeters(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Centimeters)
+    }
+
+    /// Millimeters.
+    pub fn millimeters(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Millimeters)
+    }
+
+    /// Miles.
+    pub fn miles(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Miles)
+    }
+
+    /// Yards.
+    pub fn yards(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Yards)
+    }
+
+    /// Feet.
+    pub fn feet(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Feet)
+    }
+
+    /// Nautical miles.
+    pub fn nautical_miles(value: f64) -> Self {
+        Self::new(value, DistanceUnit::NauticalMiles)
+    }
+
+    fn to_query_string(self) -> String {
+        format!("{}{}", self.value, self.unit.as_str())
+    }
+}
+
+/// A `geo_point` field — the `within` query family (distance / box / polygon),
+/// plus sort-by-distance.
 #[derive(Debug, Clone)]
 pub struct Geo<S = Root> {
     path: String,
@@ -48,13 +146,13 @@ impl<S> Geo<S> {
         }
     }
 
-    /// Points within `distance` (e.g. `"12km"`, `"5mi"`) of `center`. Returns a
-    /// [`GeoDistanceQuery`] builder for `distance_type` / `validation_method`
+    /// Points within `distance` (e.g. `Distance::km(12.0)`) of `center`. Returns
+    /// a [`GeoDistanceQuery`] builder for `distance_type` / `validation_method`
     /// plus `boost` / `name`.
-    pub fn within(&self, distance: impl Into<String>, center: GeoPoint) -> GeoDistanceQuery<S> {
+    pub fn within(&self, distance: Distance, center: GeoPoint) -> GeoDistanceQuery<S> {
         GeoDistanceQuery {
             path: self.path.clone(),
-            distance: distance.into(),
+            distance: distance.to_query_string(),
             center,
             opts: Map::new(),
             common: Common::default(),
@@ -63,7 +161,7 @@ impl<S> Geo<S> {
     }
 
     /// Points inside the axis-aligned box with the given corners.
-    pub fn in_bounding_box(&self, top_left: GeoPoint, bottom_right: GeoPoint) -> Query<S> {
+    pub fn within_box(&self, top_left: GeoPoint, bottom_right: GeoPoint) -> Query<S> {
         let mut corners = Map::new();
         corners.insert("top_left".to_string(), top_left.to_value());
         corners.insert("bottom_right".to_string(), bottom_right.to_value());
@@ -73,7 +171,7 @@ impl<S> Geo<S> {
     }
 
     /// Points inside the polygon described by `points` (three or more vertices).
-    pub fn in_polygon(&self, points: impl IntoIterator<Item = GeoPoint>) -> Query<S> {
+    pub fn within_polygon(&self, points: impl IntoIterator<Item = GeoPoint>) -> Query<S> {
         let vertices = points.into_iter().map(GeoPoint::to_value).collect();
         let mut inner = Map::new();
         inner.insert("points".to_string(), Value::Array(vertices));
@@ -87,20 +185,26 @@ impl<S> Geo<S> {
         exists_q(&self.path)
     }
 
-    /// Sort by distance from `center`, measured in `unit` (e.g. `"km"`).
-    pub fn distance_sort(
-        &self,
-        center: GeoPoint,
-        order: SortOrder,
-        unit: impl Into<String>,
-    ) -> Sort {
+    /// Sort by distance from `center`, nearest first. Sugar for the common
+    /// `_geo_distance` sort: ascending, OpenSearch's default unit (meters);
+    /// chain `.desc()` to flip it. For an explicit unit or order use
+    /// [`distance_sort`](Self::distance_sort).
+    pub fn distance_from(&self, center: GeoPoint) -> Sort {
+        let mut body = Map::new();
+        body.insert(self.path.clone(), center.to_value());
+        body.insert("order".to_string(), Value::String("asc".to_string()));
+        Sort::from_parts("_geo_distance".to_string(), body)
+    }
+
+    /// Sort by distance from `center`, measured in `unit`.
+    pub fn distance_sort(&self, center: GeoPoint, order: SortOrder, unit: DistanceUnit) -> Sort {
         let mut body = Map::new();
         body.insert(self.path.clone(), center.to_value());
         body.insert(
             "order".to_string(),
             Value::String(order.as_str().to_string()),
         );
-        body.insert("unit".to_string(), Value::String(unit.into()));
+        body.insert("unit".to_string(), Value::String(unit.as_str().to_string()));
         Sort::from_parts("_geo_distance".to_string(), body)
     }
 }
@@ -123,24 +227,23 @@ pub struct GeoDistanceQuery<S = Root> {
 }
 
 impl<S> GeoDistanceQuery<S> {
-    /// How distance is computed: `"arc"` (default) or `"plane"` (faster, less
-    /// accurate over long spans).
+    /// How distance is computed ([`DistanceType::Arc`] is the default).
     #[must_use]
-    pub fn distance_type(mut self, distance_type: impl Into<String>) -> Self {
+    pub fn distance_type(mut self, distance_type: DistanceType) -> Self {
         self.opts.insert(
             "distance_type".to_string(),
-            Value::String(distance_type.into()),
+            Value::String(distance_type.as_str().to_string()),
         );
         self
     }
 
-    /// How malformed coordinates are handled: `"STRICT"` (default),
-    /// `"COERCE"`, or `"IGNORE_MALFORMED"`.
+    /// How malformed coordinates are handled ([`ValidationMethod::Strict`] is
+    /// the default).
     #[must_use]
-    pub fn validation_method(mut self, validation_method: impl Into<String>) -> Self {
+    pub fn validation_method(mut self, validation_method: ValidationMethod) -> Self {
         self.opts.insert(
             "validation_method".to_string(),
-            Value::String(validation_method.into()),
+            Value::String(validation_method.as_str().to_string()),
         );
         self
     }

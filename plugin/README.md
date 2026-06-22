@@ -43,16 +43,21 @@ Each schema/query skill ships worked `examples/` you can copy from.
 
 `flusso-expert` — a subagent with the full mental model, for multi-file flusso tasks (designing a schema, planning a migration, query-side Rust, substrate debugging, codebase changes). Its knowledge base is the skills above, which it **reads** from `${CLAUDE_PLUGIN_ROOT}/skills/` (agents can't invoke skills), with the repo docs and the `flusso` binary as fallback/ground truth. `/flusso:expert` delegates to it when a task spans several files.
 
-### Hook — auto-validation
+### Hooks — auto-validation & query lint
 
-A `PostToolUse` hook (`hooks/flusso_validate.py`) runs **after any edit** to a `*.schema.yml` or `flusso.toml`: it finds the owning `flusso.toml` and runs `flusso check`, so a broken schema is caught and fed back in the same turn instead of at `flusso run` time.
+Two `PostToolUse` hooks run **after any edit** (`Edit`/`Write`/`MultiEdit`):
+
+**`hooks/flusso_validate.py`** — on a `*.schema.yml` or `flusso.toml` edit, finds the owning `flusso.toml` and runs `flusso check`, so a broken schema is caught and fed back in the same turn instead of at `flusso run` time.
 
 - **Online first, offline fallback.** It validates against the live database (catching type/nullability mismatches against real columns); if the DB isn't reachable it silently falls back to offline structural validation rather than nagging about connections.
 - **Silent on success**, speaks only when validation fails. Unrelated edits, files outside a flusso project, or a missing runner all exit quietly.
 - **Runner resolution:** `$FLUSSO_CHECK_CMD` (a full command prefix) → `flusso` on `PATH` → `cargo run --quiet --` from the nearest Cargo workspace (repo-dev mode).
-- Requires `python3` (used only to parse the hook's stdin JSON and bridge to `flusso check` — the validation itself is flusso's).
 
-> Plugin hooks run a shell command on your machine; review `hooks/flusso_validate.py` before installing, as you would any hook.
+**`hooks/flusso_query_lint.py`** — on a `.rs` edit, flags the one query anti-pattern a compiler can't: a `Keyword`/`Text` **string-path handle** (`Keyword::at("…")` / `Text::<Root>::at("…")`) in a file that also uses `#[derive(FlussoDocument)]`. There every schema field already has a generated `Type::field()` handle, so a string path bypasses the compile-time mapping check — the classic escape-hatch mistake. High precision: a file with no derive (hand-written handles) is never flagged; the typed fix is fed back for a same-turn correction. Style only — it never blocks editing.
+
+Both require `python3` (only to parse the hook's stdin JSON; the validation/lint logic is local) and are **silent on success**.
+
+> Plugin hooks run a shell command on your machine; review `hooks/flusso_validate.py` and `hooks/flusso_query_lint.py` before installing, as you would any hook.
 
 ## Design notes
 
