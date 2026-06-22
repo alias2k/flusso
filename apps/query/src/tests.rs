@@ -907,7 +907,7 @@ fn geo_queries_render_expected_clauses() {
 
     assert_eq!(
         Geo::<Root>::at("location")
-            .in_bounding_box(GeoPoint::new(53.0, 4.0), GeoPoint::new(52.0, 5.0))
+            .within_box(GeoPoint::new(53.0, 4.0), GeoPoint::new(52.0, 5.0))
             .to_value(),
         json!({ "geo_bounding_box": { "location": {
             "top_left": { "lat": 53.0, "lon": 4.0 },
@@ -917,7 +917,7 @@ fn geo_queries_render_expected_clauses() {
 
     assert_eq!(
         Geo::<Root>::at("location")
-            .in_polygon([
+            .within_polygon([
                 GeoPoint::new(0.0, 0.0),
                 GeoPoint::new(0.0, 1.0),
                 GeoPoint::new(1.0, 1.0),

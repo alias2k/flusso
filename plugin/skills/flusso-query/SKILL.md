@@ -106,7 +106,7 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 | `Date` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
 | `Object<S>` | `exists` only (same-doc sub-object / to-one join). Query its sub-fields via the **child struct's** flattened handles (`Account::tier()`), not by chaining off this handle. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort/.size/.from`) to shape the returned array; `exists` |
-| `Geo` | `within(distance, center)` `in_bounding_box` `in_polygon` `exists`; `distance_sort(...)` |
+| `Geo` | `within(distance, center)` `within_box` `within_polygon` `exists`; `distance_sort(...)` |
 | `Binary` | `exists` (base64, not searchable) |
 | `Json` | `exists` `raw(serde_json::Value)` |
 

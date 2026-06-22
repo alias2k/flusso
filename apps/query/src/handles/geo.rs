@@ -1,5 +1,6 @@
-//! Geographic field handles: a [`GeoPoint`] and the [`Geo`] field with distance,
-//! bounding-box, and polygon queries plus sort-by-distance.
+//! Geographic field handles: a [`GeoPoint`] and the [`Geo`] field with the
+//! `within` query family (`within` distance / `within_box` / `within_polygon`)
+//! plus sort-by-distance.
 
 use std::marker::PhantomData;
 
@@ -32,8 +33,8 @@ impl GeoPoint {
     }
 }
 
-/// A `geo_point` field — distance, bounding-box, and polygon queries, plus
-/// sort-by-distance.
+/// A `geo_point` field — the `within` query family (distance / box / polygon),
+/// plus sort-by-distance.
 #[derive(Debug, Clone)]
 pub struct Geo<S = Root> {
     path: String,
@@ -63,7 +64,7 @@ impl<S> Geo<S> {
     }
 
     /// Points inside the axis-aligned box with the given corners.
-    pub fn in_bounding_box(&self, top_left: GeoPoint, bottom_right: GeoPoint) -> Query<S> {
+    pub fn within_box(&self, top_left: GeoPoint, bottom_right: GeoPoint) -> Query<S> {
         let mut corners = Map::new();
         corners.insert("top_left".to_string(), top_left.to_value());
         corners.insert("bottom_right".to_string(), bottom_right.to_value());
@@ -73,7 +74,7 @@ impl<S> Geo<S> {
     }
 
     /// Points inside the polygon described by `points` (three or more vertices).
-    pub fn in_polygon(&self, points: impl IntoIterator<Item = GeoPoint>) -> Query<S> {
+    pub fn within_polygon(&self, points: impl IntoIterator<Item = GeoPoint>) -> Query<S> {
         let vertices = points.into_iter().map(GeoPoint::to_value).collect();
         let mut inner = Map::new();
         inner.insert("points".to_string(), Value::Array(vertices));
