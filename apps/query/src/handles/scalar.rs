@@ -184,6 +184,14 @@ impl<S> Bool<S> {
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
+
+    pub fn asc(&self) -> Sort {
+        Sort::new(&self.path, SortOrder::Asc)
+    }
+
+    pub fn desc(&self) -> Sort {
+        Sort::new(&self.path, SortOrder::Desc)
+    }
 }
 
 /// A numeric field. `T` is the Rust scalar; `S` is the scope (defaults to

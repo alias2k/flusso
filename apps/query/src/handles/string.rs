@@ -632,6 +632,18 @@ impl<S> Text<S> {
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
+
+    /// Sort ascending — on the case/accent-insensitive `.keyword_lowercase`
+    /// subfield, since the analyzed field itself isn't sortable. Available only
+    /// when the sink's `auto_subfields` is on (the default).
+    pub fn asc(&self) -> Sort {
+        self.keyword_lowercase().asc()
+    }
+
+    /// Sort descending (on `.keyword_lowercase` — see [`asc`](Self::asc)).
+    pub fn desc(&self) -> Sort {
+        self.keyword_lowercase().desc()
+    }
 }
 
 /// A cross-field full-text query over several [`Text`] fields in the same scope.

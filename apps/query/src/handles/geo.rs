@@ -88,6 +88,17 @@ impl<S> Geo<S> {
         exists_q(&self.path)
     }
 
+    /// Sort by distance from `center`, nearest first. Sugar for the common
+    /// `_geo_distance` sort: ascending, OpenSearch's default unit (meters);
+    /// chain `.desc()` to flip it. For an explicit unit or order use
+    /// [`distance_sort`](Self::distance_sort).
+    pub fn distance_from(&self, center: GeoPoint) -> Sort {
+        let mut body = Map::new();
+        body.insert(self.path.clone(), center.to_value());
+        body.insert("order".to_string(), Value::String("asc".to_string()));
+        Sort::from_parts("_geo_distance".to_string(), body)
+    }
+
     /// Sort by distance from `center`, measured in `unit` (e.g. `"km"`).
     pub fn distance_sort(
         &self,

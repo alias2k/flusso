@@ -106,11 +106,11 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 | `Date` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
 | `Object<S>` | `exists` only (same-doc sub-object / to-one join). Query its sub-fields via the **child struct's** flattened handles (`Account::tier()`), not by chaining off this handle. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort/.size/.from`) to shape the returned array; `exists` |
-| `Geo` | `within(distance, center)` `within_box` `within_polygon` `exists`; `distance_sort(...)` |
+| `Geo` | `within(distance, center)` `within_box` `within_polygon` `exists`; `distance_from(center)` / `distance_sort(...)` |
 | `Binary` | `exists` (base64, not searchable) |
 | `Json` | `exists` `raw(serde_json::Value)` |
 
-`sort(…)` only accepts sortable handles (numbers, dates, keywords, bools) — `sort` on a `text` field is a compile error (use `User::full_name().keyword().desc()` for exact, `.keyword_lowercase()` for case-insensitive). Cross-field: `multi_match("ada", [User::full_name(), User::bio()])` (weight one with `.boosted(3.0)`).
+`sort(…)` accepts sortable handles (numbers, dates, keywords, bools, and now `text` — `Text::asc`/`desc` sort via the case-insensitive `.keyword_lowercase` subfield automatically; use `.keyword().desc()` for an exact-case sort). Geo sorts with `Geo::distance_from(center)` (nearest-first). Cross-field: `multi_match("ada", [User::full_name(), User::bio()])` (weight one with `.boosted(3.0)`).
 
 **Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields (`auto_subfields`, on by default) with exact/sortable/searchable subfields, reachable with **no string path**: `User::full_name().keyword()` (exact/`wildcard`/`prefix`), `.keyword_lowercase()` (case-insensitive match/sort), `User::email().text()` (full-text over a keyword). A `wildcard` belongs on `.keyword()`, not the analyzed handle. Valid when `auto_subfields` is on and the field defines no custom `fields`.
 

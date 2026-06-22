@@ -479,6 +479,35 @@ fn sort_builder_options_render() {
 }
 
 #[test]
+fn sort_sugar_covers_text_bool_geo() {
+    // Text sorts via the case-insensitive subfield automatically.
+    assert_eq!(
+        Text::<Root>::at("title").asc().to_value(),
+        json!({ "title.keyword_lowercase": { "order": "asc" } })
+    );
+
+    // Bool sorts directly.
+    assert_eq!(
+        crate::Bool::<Root>::at("active").desc().to_value(),
+        json!({ "active": { "order": "desc" } })
+    );
+
+    // Geo distance-from: ascending (nearest first) by default; `.desc()` flips.
+    let here = GeoPoint::new(52.37, 4.90);
+    assert_eq!(
+        Geo::<Root>::at("location").distance_from(here).to_value(),
+        json!({ "_geo_distance": { "location": { "lat": 52.37, "lon": 4.90 }, "order": "asc" } })
+    );
+    assert_eq!(
+        Geo::<Root>::at("location")
+            .distance_from(here)
+            .desc()
+            .to_value(),
+        json!({ "_geo_distance": { "location": { "lat": 52.37, "lon": 4.90 }, "order": "desc" } })
+    );
+}
+
+#[test]
 fn builder_or_composes_into_a_should_bool() {
     // `.or()` on a builder lifts both sides into a should-bool.
     let q = Text::<Root>::at("name")

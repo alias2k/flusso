@@ -173,7 +173,7 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Date`          | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
 | `Object<S>`     | `exists` (a same-document sub-object — group or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
-| `Geo`           | `within(distance, center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
+| `Geo`           | `within(distance, center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` (nearest-first sugar) or `distance_sort(center, order, unit)` |
 | `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
 | `KeywordMap`    | `key(k)` → a `Keyword` leaf for one key; `has_key(k)`, `exists` — *no* `search` (exact-match, use `key(..).eq(..)`) |
 | `NumberMap<T>`  | `key(k)` → a `Number<T>` leaf for one key (`eq`/`lt`/`gte`/`between`/…); `has_key(k)`, `exists` |
@@ -203,10 +203,11 @@ User::email().text()                   // Text    → full-text over a keyword f
 tokens not the whole value.) These are valid when `auto_subfields` is on and the
 field defines no custom `fields`.
 
-Sorting is the same — `sort(…)` only accepts handles whose type is sortable
-(numbers, dates, keywords, booleans), so `sort(User::full_name().desc())` on a
-`text` field is a compile error (use `User::full_name().keyword().desc()` for an
-exact sort, or `.keyword_lowercase()` for a case-insensitive one).
+Sorting is similar — `sort(…)` accepts handles whose type is sortable (numbers,
+dates, keywords, booleans, and `text`). `Text::asc`/`desc` is sugar that sorts
+via the case-insensitive `.keyword_lowercase` subfield automatically; reach for
+`User::full_name().keyword().desc()` when you want an exact-case sort instead.
+A `geo_point` sorts by proximity with `User::location().distance_from(center)`.
 
 A few clauses span more than one field, so they're free functions:
 `multi_match("ada", [User::full_name(), User::bio()])` runs one analyzed query
@@ -339,11 +340,13 @@ free functions: `constant_score(filter)`, `dis_max([..]).tie_breaker(..)`,
 `rank_feature(..)`, `more_like_this([fields], [like])`. `match_bool_prefix` is a
 `Text` operator (search-as-you-type).
 
-**Sort.** `.asc()`/`.desc()` on a sortable handle return a `Sort` builder:
-chain `.missing_first()`/`.missing_last()`/`.missing(v)`, `.mode(SortMode::..)`,
-`.unmapped_type(..)`/`.numeric_type(..)`/`.format(..)`, or
-`.nested(path)`/`.nested_filtered(path, q)`. Also `Sort::score()` (by `_score`)
-and `Sort::script(type, source, order)`.
+**Sort.** `.asc()`/`.desc()` on a sortable handle (number, date, keyword, bool,
+or `text` — the last routing through `.keyword_lowercase`) return a `Sort`
+builder: chain `.missing_first()`/`.missing_last()`/`.missing(v)`,
+`.mode(SortMode::..)`, `.unmapped_type(..)`/`.numeric_type(..)`/`.format(..)`, or
+`.nested(path)`/`.nested_filtered(path, q)`. Also `Sort::score()` (by `_score`),
+`Sort::script(type, source, order)`, and `Geo::distance_from(center)` /
+`Geo::distance_sort(center, order, unit)` for proximity sorting.
 
 **Search-level** controls on the `Search` builder: `min_score`,
 `track_total_hits`, `track_scores`, `search_after([..])` (deep pagination),
