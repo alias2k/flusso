@@ -80,7 +80,10 @@ EXPOSE 9464
 ENTRYPOINT ["flusso"]
 CMD ["run", "--public-address", "0.0.0.0:9464"]
 
-# OCI metadata — CI stamps the dynamic values: --build-arg VERSION=… REVISION=… CREATED=…
+# OCI metadata. These LABELs are a fallback for a bare local `docker build`; in
+# CI the docker workflow's metadata-action applies its own labels (version,
+# revision, created, source, …) via `--label`, which override these. CI stamps
+# VERSION/REVISION as build-args; `created` is set by metadata-action, not here.
 ARG VERSION=0.0.0-dev
 ARG REVISION=unknown
 ARG CREATED=unknown
