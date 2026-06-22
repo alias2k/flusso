@@ -128,6 +128,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         Join {
             table: table("profiles"),
             primary_key: column("id"),
+            nullable: false,
             kind: JoinKind::HasOne {
                 foreign_key: column("user_id"),
             },
@@ -143,6 +144,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         Join {
             table: table("orders"),
             primary_key: column("id"),
+            nullable: false,
             kind: JoinKind::HasMany {
                 foreign_key: column("user_id"),
             },
@@ -160,6 +162,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                     Join {
                         table: table("order_items"),
                         primary_key: column("id"),
+                        nullable: false,
                         kind: JoinKind::HasMany {
                             foreign_key: column("order_id"),
                         },
@@ -181,6 +184,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
         Join {
             table: table("tags"),
             primary_key: column("id"),
+            nullable: false,
             kind: JoinKind::ManyToMany {
                 through: Through {
                     table: table("user_tags"),
@@ -679,6 +683,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             Join {
                 table: table("profiles"),
                 primary_key: column("id"),
+                nullable: false,
                 kind: JoinKind::HasOne {
                     foreign_key: column("user_id"),
                 },
@@ -693,6 +698,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             Join {
                 table: table("orders"),
                 primary_key: column("id"),
+                nullable: false,
                 kind: JoinKind::HasMany {
                     foreign_key: column("user_id"),
                 },
@@ -706,6 +712,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                         Join {
                             table: table("order_items"),
                             primary_key: column("id"),
+                            nullable: false,
                             kind: JoinKind::HasMany {
                                 foreign_key: column("order_id"),
                             },
@@ -723,6 +730,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
             Join {
                 table: table("tags"),
                 primary_key: column("id"),
+                nullable: false,
                 kind: JoinKind::ManyToMany {
                     through: Through {
                         table: table("user_tags"),
@@ -833,6 +841,7 @@ async fn belongs_to_assembles_and_reverse_resolves() {
                 Join {
                     table: table("users"),
                     primary_key: column("id"),
+                    nullable: false,
                     kind: JoinKind::BelongsTo {
                         column: column("user_id"),
                     },

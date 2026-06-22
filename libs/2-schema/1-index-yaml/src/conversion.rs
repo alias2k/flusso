@@ -173,6 +173,17 @@ fn convert_join_field(
     {
         return Err(sibling_not_allowed(verb, "limit"));
     }
+    // `required` only describes a to-one object's presence; a to-many join is
+    // inherently a (possibly empty) non-null array, so the knob is meaningless
+    // there and is rejected rather than silently ignored.
+    let nullable = if kind.is_to_many() {
+        if body.required.is_some() {
+            return Err(sibling_not_allowed(verb, "required"));
+        }
+        false
+    } else {
+        !body.required.unwrap_or(false)
+    };
     let fields = body
         .fields
         .into_iter()
@@ -182,6 +193,7 @@ fn convert_join_field(
         table: body.table,
         kind,
         primary_key: body.primary_key,
+        nullable,
         filters: convert_filters_opt(body.filters)?,
         order_by: body
             .order_by

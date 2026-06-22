@@ -13,6 +13,11 @@ pub struct Join {
     pub table: common::TableName,
     pub kind: JoinKind,
     pub primary_key: common::ColumnName,
+    /// Whether the folded-in object may be absent. Only meaningful for a to-one
+    /// join (`belongs_to`/`has_one`); a to-many join is always a non-null array.
+    /// A to-one join defaults to nullable unless the schema marks it `required`.
+    #[serde(default)]
+    pub nullable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<Vec<Filter>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

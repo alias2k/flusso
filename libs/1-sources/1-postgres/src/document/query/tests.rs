@@ -182,6 +182,7 @@ fn has_many_with_order_and_limit() {
                 foreign_key: c("user_id"),
             },
             primary_key: c("primary_key"),
+            nullable: false,
             filters: None,
             order_by: Some(vec![OrderBy {
                 column: c("created_at"),
@@ -218,6 +219,7 @@ fn belongs_to_correlates_on_the_parent_column() {
                 column: c("org_id"),
             },
             primary_key: c("id"),
+            nullable: false,
             filters: None,
             order_by: None,
             limit: None,

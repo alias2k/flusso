@@ -130,7 +130,11 @@ definitions:
       # column pointing at the related row, defaulting to the field name):
       required:
         type: boolean
-        description: Whether the field may be null. Mandatory on a scalar leaf.
+        description: >-
+          Whether the field may be null. Mandatory on a scalar leaf. Optional on
+          a to-one join (`belongs_to`/`has_one`): omitted means the object is
+          nullable, `true` maps it non-null. Not allowed on a to-many join
+          (`has_many`/`many_to_many`), which is always a non-null array.
       column:
         $ref: "#/definitions/pg_identifier"
       options:

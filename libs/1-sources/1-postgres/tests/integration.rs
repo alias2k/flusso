@@ -320,6 +320,7 @@ fn users_spec() -> SourceSpec {
         source: FieldSource::Relation(Relation::Join(Join {
             table: table("orders"),
             primary_key: column("id"),
+            nullable: false,
             kind: JoinKind::HasMany {
                 foreign_key: column("user_id"),
             },

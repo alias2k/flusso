@@ -236,7 +236,7 @@ that type:
 
 | Sibling | Applies to | Description |
 | --- | --- | --- |
-| `required` | scalar, `geo` | **Mandatory** on a scalar/geo leaf. `true` forces the field non-null; nullable otherwise. Joins and aggregates are structural — their nullability is fixed — so they take no `required`. |
+| `required` | scalar, `geo`, `map`, to-one join | **Mandatory** on a scalar/`geo`/`map` leaf. `true` forces the field non-null; nullable otherwise. **Optional** on a to-one join (`belongs_to`/`has_one`): omitted maps the object nullable, `true` maps it non-null. Not allowed on a to-many join (`has_many`/`many_to_many`) or an aggregate — those are structural (a non-null array / fixed nullability). |
 | `column` | scalar, `geo`, `belongs_to` | The source column — for a `belongs_to`, this table's column pointing at the related row. Defaults to the document key when omitted. |
 | `options` | types with a mapping | Extra OpenSearch mapping properties merged beside the derived type (e.g. `analyzer`, `format`, `scaling_factor`). |
 | `transforms` | scalar | Value transforms to apply. See [Transforms](#transforms). |
@@ -437,8 +437,8 @@ key.**
 
 | Type key | The key lives on… | Reads as | Renders as |
 | --- | --- | --- | --- |
-| `belongs_to` | **this** table (`column`) | "my `column` points at the related row" | object (nullable) |
-| `has_one` | the **related** table (`foreign_key`) | "one related row points back at me" | object (nullable) |
+| `belongs_to` | **this** table (`column`) | "my `column` points at the related row" | object (nullable; `required: true` → non-null) |
+| `has_one` | the **related** table (`foreign_key`) | "one related row points back at me" | object (nullable; `required: true` → non-null) |
 | `has_many` | the **related** table (`foreign_key`) | "many related rows point back at me" | nested array (never null) |
 | `many_to_many` | a junction table (`through`) | "we connect through a junction" | nested array (never null) |
 
@@ -483,6 +483,7 @@ is marked non-null automatically, like the root `primary_key`.
 | `column` | Postgres identifier | `belongs_to` only | **This** table's column pointing at the related row. Defaults to the field name (so `belongs_to: created_by` reads the `created_by` column). |
 | `foreign_key` | Postgres identifier | `has_one`/`has_many` | The **related** table's column pointing back at the parent. |
 | `through` | object | `many_to_many` | A junction table. |
+| `required` | bool | to-one only | `belongs_to`/`has_one` only. `true` maps the object non-null; omitted means nullable. Rejected on `has_many`/`many_to_many` (always a non-null array). |
 | `filters` | list | no | [Filters](#filters) narrowing which related rows are folded in. |
 | `order_by` | list | no | Ordering — a list of `{ column, direction }`, where `direction` is `asc` (default) or `desc`. Not allowed on `belongs_to` (its target is unique); on `has_one` it picks *which* row becomes the object. |
 | `limit` | int ≥ 1 | `has_many`/`many_to_many` only | Cap the number of related rows folded in (the to-one verbs imply their own `LIMIT 1`). |

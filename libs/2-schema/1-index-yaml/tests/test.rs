@@ -243,6 +243,44 @@ fn belongs_to_column_defaults_to_the_field_name() {
 }
 
 #[test]
+fn to_one_join_defaults_to_nullable() {
+    let schema = convert(
+        "version: 1\ntable: tickets\nfields:\n  - belongs_to: created_by\n    table: users\n    primary_key: id\n    fields:\n      - keyword: email\n        required: true",
+    )
+    .unwrap();
+    match &field(&schema, "created_by").source {
+        FieldSource::Relation(Relation::Join(j)) => assert!(j.nullable, "no `required` → nullable"),
+        other => panic!("expected a join, got {other:?}"),
+    }
+}
+
+#[test]
+fn to_one_join_required_is_non_null() {
+    let schema = convert(
+        "version: 1\ntable: tickets\nfields:\n  - belongs_to: created_by\n    table: users\n    primary_key: id\n    required: true\n    fields:\n      - keyword: email\n        required: true",
+    )
+    .unwrap();
+    match &field(&schema, "created_by").source {
+        FieldSource::Relation(Relation::Join(j)) => {
+            assert!(!j.nullable, "`required: true` → non-null")
+        }
+        other => panic!("expected a join, got {other:?}"),
+    }
+}
+
+#[test]
+fn required_on_a_to_many_join_is_rejected() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - has_many: orders\n    table: orders\n    primary_key: id\n    foreign_key: user_id\n    required: true\n    fields:\n      - keyword: status\n        required: true",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("required"),
+        "to-many `required` should be rejected, got: {err}"
+    );
+}
+
+#[test]
 fn aggregates_come_from_the_op_tag() {
     let schema = convert(include_str!("user.schema.yml")).unwrap();
     match &field(&schema, "orderCount").source {

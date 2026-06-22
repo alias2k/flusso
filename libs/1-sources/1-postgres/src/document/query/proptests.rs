@@ -263,6 +263,7 @@ fn field_source() -> impl Strategy<Value = FieldSource> {
                             table,
                             kind,
                             primary_key,
+                            nullable: false,
                             filters,
                             order_by,
                             limit,

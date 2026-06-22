@@ -540,6 +540,7 @@ fn spec() -> SourceSpec {
         Join {
             table: table("profiles"),
             primary_key: column("id"),
+            nullable: false,
             kind: JoinKind::HasOne {
                 foreign_key: column("user_id"),
             },
@@ -555,6 +556,7 @@ fn spec() -> SourceSpec {
         Join {
             table: table("orders"),
             primary_key: column("id"),
+            nullable: false,
             kind: JoinKind::HasMany {
                 foreign_key: column("user_id"),
             },
@@ -570,6 +572,7 @@ fn spec() -> SourceSpec {
                     Join {
                         table: table("order_items"),
                         primary_key: column("id"),
+                        nullable: false,
                         kind: JoinKind::HasMany {
                             foreign_key: column("order_id"),
                         },
@@ -588,6 +591,7 @@ fn spec() -> SourceSpec {
         Join {
             table: table("tags"),
             primary_key: column("id"),
+            nullable: false,
             kind: JoinKind::ManyToMany {
                 through: Through {
                     table: table("user_tags"),
