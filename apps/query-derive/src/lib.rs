@@ -10,8 +10,9 @@
 //! 3. generates the typed query surface (`Type::field()` handles, `get`/`query`,
 //!    `SCHEMA_HASH`) that targets the `flusso-query` runtime.
 //!
-//! Two companion derives ship alongside it: [`FlussoValue`](derive_flusso_value)
-//! (a Rust enum/newtype standing in for a leaf field) and
+//! Three companion derives ship alongside it: [`FlussoValue`](derive_flusso_value)
+//! (a Rust enum/newtype standing in for a leaf field), [`FlussoMap`](derive_flusso_map)
+//! (a newtype wrapper over a `map` field), and
 //! [`FlussoMultiDocument`](derive_flusso_multi_document) (the combined-search
 //! union over several document types).
 //!
@@ -24,6 +25,7 @@ use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, LitStr, parse_macro_input};
 
 mod doc;
+mod map;
 mod multi;
 mod resolve;
 mod value;
@@ -58,6 +60,23 @@ pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
 pub fn derive_flusso_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     value::expand(input).into()
+}
+
+/// Implement `flusso_query::FlussoMap<K>` for a newtype wrapper over a map, so
+/// it may stand in for a `map` field of value kind `K` in a `FlussoDocument`
+/// struct. `HashMap<String, V>` already implements the trait directly — this is
+/// only for wrapping it. The kind is chosen with `#[flusso(keyword)]` (the
+/// default), `#[flusso(text)]`, `#[flusso(number)]`, or `#[flusso(date)]`.
+///
+/// ```ignore
+/// #[derive(serde::Deserialize, FlussoMap)]
+/// #[flusso(text)]
+/// struct Translations(std::collections::HashMap<String, String>);
+/// ```
+#[proc_macro_derive(FlussoMap, attributes(flusso))]
+pub fn derive_flusso_map(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    map::expand(input).into()
 }
 
 /// Implement `flusso_query::FlussoMultiDocument` for an enum of document

@@ -80,8 +80,9 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     }
 }
 
-/// Read the kind from `#[flusso(keyword | number | date)]`; defaults to keyword.
-fn parse_kind(input: &DeriveInput) -> syn::Result<Kind> {
+/// Read the kind from `#[flusso(keyword | text | number | date)]`; defaults to
+/// keyword. Shared by the `FlussoValue` and `FlussoMap` derives.
+pub(crate) fn parse_kind(input: &DeriveInput) -> syn::Result<Kind> {
     let mut kind = Kind::Keyword;
     for attr in &input.attrs {
         if !attr.path().is_ident("flusso") {

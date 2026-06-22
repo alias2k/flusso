@@ -9,3 +9,11 @@ fields:
     required: true
   - text: name
     required: false
+  # A `map` field: dynamic-key translations, full-text searchable per key.
+  - map: title
+    values: text
+    required: true
+  # A keyword-valued map (exact per-key lookup, no `search`).
+  - map: codes
+    values: keyword
+    required: false

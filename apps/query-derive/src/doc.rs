@@ -197,8 +197,16 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             }
             Ok(None)
         }
-        MappingType::Object if resolved.children.is_empty() => Ok(None),
         MappingType::Object => {
+            // A `map` field (dynamic-key object) → check its value kind; an
+            // opaque `json` (no children) accepts anything; a group / to-one
+            // object wants a struct.
+            if let Some(values) = &resolved.mapping.map_values {
+                return check_map_type(field, inner, values);
+            }
+            if resolved.children.is_empty() {
+                return Ok(None);
+            }
             if vec_inner(inner).is_some() || is_primitive(leaf_ident(inner).as_deref()) {
                 return Err(shape_error(field, os, "a struct (a sub-object)"));
             }
@@ -268,6 +276,88 @@ fn value_assert(ty: &Type, kind: TokenStream) -> TokenStream {
             __assert_field_value::<#ty>();
         };
     }
+}
+
+/// Validate a `map` field's Rust type against its declared value kind `values`.
+/// The type is either `HashMap<String, V>` — peel to `V` and check it exactly
+/// as a scalar value (a known primitive must match the kind; an unknown type
+/// defers to `FlussoValue<kind>`) — or a whole-map newtype wrapper, which defers
+/// a `FlussoMap<kind>` bound satisfied by `#[derive(FlussoMap)]`.
+fn check_map_type(
+    field: &DocField,
+    inner: &Type,
+    values: &MappingType,
+) -> syn::Result<Option<TokenStream>> {
+    let os = values.name();
+    let kind = value_kind(values);
+    match hashmap_value(inner) {
+        Some(value_ty) => {
+            let expected = expected_leaves(values);
+            let found = leaf_ident(value_ty);
+            if found.as_deref().is_some_and(|f| expected.contains(&f)) {
+                return Ok(None);
+            }
+            if let Some(kind) = kind
+                && found.as_deref().is_some_and(|f| !is_primitive(Some(f)))
+            {
+                return Ok(Some(value_assert(value_ty, kind.marker())));
+            }
+            Err(map_value_error(field, os, &expected, found.as_deref()))
+        }
+        None => match kind {
+            Some(kind) => Ok(Some(map_assert(inner, kind.marker()))),
+            None => Ok(None),
+        },
+    }
+}
+
+/// The value type `V` of a `HashMap<String, V>` (the last path segment must be
+/// `HashMap`), else `None`. Peels a map field to its value type for checking.
+fn hashmap_value(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "HashMap" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    let mut types = args.args.iter().filter_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    });
+    let _key = types.next()?;
+    types.next()
+}
+
+/// A zero-cost assertion that `ty` implements `FlussoMap<kind>` (a whole-map
+/// wrapper), reported at the field's type span if it doesn't.
+fn map_assert(ty: &Type, kind: TokenStream) -> TokenStream {
+    quote::quote_spanned! {ty.span()=>
+        const _: fn() = || {
+            fn __assert_field_map<__T: ::flusso_query::FlussoMap<#kind>>() {}
+            __assert_field_map::<#ty>();
+        };
+    }
+}
+
+fn map_value_error(
+    field: &DocField,
+    os: &str,
+    expected: &[&str],
+    found: Option<&str>,
+) -> syn::Error {
+    let found = found.unwrap_or("a non-scalar type");
+    syn::Error::new(
+        field.ty.span(),
+        format!(
+            "field `{}` is a `{os}` map in the schema — its values must be `{}`, found `{found}`",
+            field.doc_key,
+            expected.join("` or `"),
+        ),
+    )
 }
 
 fn shape_error(field: &DocField, os: &str, expected: &str) -> syn::Error {
@@ -442,14 +532,25 @@ fn handle_fn(
         MappingType::Date => simple("Date"),
         MappingType::Other(name) if name == "geo_point" => simple("Geo"),
         MappingType::Other(name) if name == "binary" => simple("Binary"),
-        MappingType::Object if resolved.children.is_empty() => simple("Json"),
-        // A group / to-one-join object → an `Object<S>` handle (for `.exists()`;
-        // sub-fields are queried via their own dotted-path child handles). `S` is
-        // the enclosing scope, same as the leaf handles at this level.
-        MappingType::Object => Some((
-            quote! { ::flusso_query::Object<#scope> },
-            quote! { ::flusso_query::Object::<#scope>::at(#path) },
-        )),
+        // An `object` mapping is one of three things, told apart by `map_values`
+        // and children: a `map` (dynamic-key object → a kind-typed map handle),
+        // an opaque `json` (no children), or a group / to-one-join sub-object.
+        MappingType::Object => match &resolved.mapping.map_values {
+            Some(MappingType::Text) => simple("TextMap"),
+            Some(MappingType::Keyword) => simple("KeywordMap"),
+            // Number/date map values: typed map handles (`NumberMap`/`DateMap`)
+            // are a later phase; fall back to the opaque object handle so the
+            // field is still addressable in the meantime.
+            Some(_) => simple("Json"),
+            // A group / to-one-join object → an `Object<S>` handle (for
+            // `.exists()`; sub-fields are queried via their own dotted-path child
+            // handles). `S` is the enclosing scope, same as the leaf handles here.
+            None if resolved.children.is_empty() => simple("Json"),
+            None => Some((
+                quote! { ::flusso_query::Object<#scope> },
+                quote! { ::flusso_query::Object::<#scope>::at(#path) },
+            )),
+        },
         // A `nested` array → `Nested<EnclosingScope, ChildScope>`: queries lift
         // from the element scope up to this level. The child scope is the
         // projected element struct (which derives its own `SelfTagged` handles),

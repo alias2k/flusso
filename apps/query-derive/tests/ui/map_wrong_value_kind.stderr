@@ -1,0 +1,5 @@
+error: field `title` is a `text` map in the schema — its values must be `String`, found `i32`
+  --> tests/ui/map_wrong_value_kind.rs:10:12
+   |
+10 |     title: HashMap<String, i32>,
+   |            ^^^^^^^
