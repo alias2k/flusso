@@ -512,7 +512,10 @@ impl<S> MatchQuery<S> {
     /// [`ZeroTermsQuery::All`]).
     #[must_use]
     pub fn zero_terms_query(self, value: ZeroTermsQuery) -> Self {
-        self.set("zero_terms_query", Value::String(value.as_str().to_string()))
+        self.set(
+            "zero_terms_query",
+            Value::String(value.as_str().to_string()),
+        )
     }
 
     /// Ignore format errors (e.g. analyzing text for a numeric subfield).

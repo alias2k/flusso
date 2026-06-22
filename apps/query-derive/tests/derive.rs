@@ -167,7 +167,11 @@ fn acceptance_realistic_projection_needs_no_escape_hatch() -> Result {
                 .wildcard("*acme*")
                 .case_insensitive(),
         )
-        .should(Customer::full_name().matches("acme").fuzziness(Fuzziness::Auto))
+        .should(
+            Customer::full_name()
+                .matches("acme")
+                .fuzziness(Fuzziness::Auto),
+        )
         .min_should_match(1)
         // Exact filters on a Uuid and an enum keyword — typed, no string paths.
         .filter(Customer::owner_id().eq(owner))
