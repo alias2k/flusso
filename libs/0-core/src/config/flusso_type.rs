@@ -52,6 +52,12 @@ pub enum FlussoType {
     Binary,
     /// PG `json` / `jsonb` → OS `object`.
     Json,
+    /// A dynamic-key object: a `json`/`jsonb` column whose keys are
+    /// runtime-determined but whose values all share one leaf type (e.g.
+    /// translations `{"en": …, "it": …}`). Maps to OS `object` with
+    /// `dynamic: true`, so unmapped keys stay full-text searchable without
+    /// enumerating them in the schema. `values` is the leaf type of every value.
+    Map { values: Box<FlussoType> },
     /// A geographic point → OS `geo_point`.
     ///
     /// The document is assembled server-side as JSON, so the source column must
@@ -84,7 +90,7 @@ impl FlussoType {
             FlussoType::Double | FlussoType::Decimal => MappingType::Double,
             FlussoType::Date | FlussoType::Timestamp => MappingType::Date,
             FlussoType::Binary => MappingType::Other("binary".to_owned()),
-            FlussoType::Json => MappingType::Object,
+            FlussoType::Json | FlussoType::Map { .. } => MappingType::Object,
             FlussoType::GeoPoint => MappingType::Other("geo_point".to_owned()),
             FlussoType::Custom { opensearch, .. } => MappingType::from_name(opensearch),
         }
@@ -131,7 +137,9 @@ impl FlussoType {
                     | "timetz"
             ),
             FlussoType::Binary => base == "bytea",
-            FlussoType::Json => matches!(base.as_str(), "json" | "jsonb"),
+            FlussoType::Json | FlussoType::Map { .. } => {
+                matches!(base.as_str(), "json" | "jsonb")
+            }
             // Geo data must reach OpenSearch as JSON `{lat,lon}` / `[lon,lat]` or
             // a `"lat,lon"` string — i.e. it lives in a json/jsonb or text-like
             // column. PostGIS `geometry` / PG `point` are intentionally rejected.

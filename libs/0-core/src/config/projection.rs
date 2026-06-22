@@ -2,7 +2,7 @@
 //! database.
 //!
 //! Every gap a thin config once left to the source is now stated in the schema:
-//! a column field carries its [`FlussoType`](super::FlussoType) and nullability,
+//! a column field carries its [`FlussoType`] and nullability,
 //! an aggregate its result type. So the mapping follows from the schema alone.
 //! The structural rules are unchanged from when the source derived them — a
 //! group is an `object`, a to-many join is a `nested` array, a `count` is a
@@ -12,8 +12,8 @@
 use crate::common::{ColumnName, GenericValue, IndexName};
 
 use super::{
-    Aggregate, AggregateOp, Column, ContentHash, Field, FieldSource, IndexMapping, IndexSchema,
-    Mapping, MappingType, Relation, ResolvedField,
+    Aggregate, AggregateOp, Column, ContentHash, Field, FieldSource, FlussoType, IndexMapping,
+    IndexSchema, Mapping, MappingType, Relation, ResolvedField,
 };
 
 impl IndexSchema {
@@ -55,6 +55,7 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
     let mapping = Mapping {
         mapping_type,
         extra: field.options.clone(),
+        map_values: map_value_type(field),
     };
 
     ResolvedField {
@@ -63,6 +64,19 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
         nullable,
         array,
         children,
+    }
+}
+
+/// The value mapping type of a `map` field — `Some(values.opensearch())` for a
+/// column declared [`FlussoType::Map`], `None` for everything else. This is the
+/// only thing distinguishing a `map`'s `object` mapping from a plain one.
+fn map_value_type(field: &Field) -> Option<MappingType> {
+    match &field.source {
+        FieldSource::Column(Column {
+            ty: FlussoType::Map { values },
+            ..
+        }) => Some(values.opensearch()),
+        _ => None,
     }
 }
 
