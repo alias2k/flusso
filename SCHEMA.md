@@ -142,7 +142,7 @@ from, the fields it contains, and how related tables fold in.
 | `table` | Postgres identifier | **yes** | — | The root table the document is built from. |
 | `schema` | Postgres identifier | no | `public` | The database schema the root table lives in. |
 | `primary_key` | Postgres identifier | no | — | The root table's primary-key column. Used to derive the document id and to resolve which documents a related-row change affects. Relations and reverse-resolution require it. |
-| `doc_id` | string | no | — | Column whose value becomes the document id. Parsed and validated by the schema layer; the current Postgres source derives the id from `primary_key`. |
+| `doc_id` | string | no | — | **Not supported yet — setting it is a hard error.** The document `_id` is always derived from `primary_key`. (A non-pk `_id` needs the id value at delete time, which the pk-keyed tombstone path can't supply; tracked as a follow-up.) |
 | `soft_delete` | object | no | — | Treat rows as deleted based on a column/field rather than a physical `DELETE`. See [below](#soft_delete). |
 | `filters` | list | no | — | Root filters: only root rows matching every filter become documents. See [below](#root-filters). |
 | `fields` | list | **yes** | — | The document's fields. See [Fields](#fields). |

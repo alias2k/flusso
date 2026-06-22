@@ -44,6 +44,18 @@ fn convert_fixture() {
 }
 
 #[test]
+fn doc_id_is_rejected_until_supported() {
+    let err = convert(
+        "version: 1\ntable: users\ndoc_id: slug\nfields:\n  - keyword: slug\n    required: true",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ConversionError::DocIdUnsupported),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn minimal_schema() {
     let schema =
         convert("version: 1\ntable: users\nfields:\n  - integer: id\n    required: false").unwrap();

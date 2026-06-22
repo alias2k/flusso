@@ -105,6 +105,11 @@ pub enum ConversionError {
          map value types"
     )]
     InvalidMapValueType { got: &'static str },
+    #[error(
+        "`doc_id` is not supported yet — the document `_id` is always derived from `primary_key`. \
+         Remove `doc_id` from the schema."
+    )]
+    DocIdUnsupported,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +143,12 @@ impl TryFrom<SchemaYaml> for schema_core::IndexSchema {
             None => schema_core::DatabaseSchema::default(),
         };
         let primary_key = yaml.primary_key.map(ColumnName::try_new).transpose()?;
+        // `doc_id` parses (so existing schemas still deserialize) but is rejected
+        // here: honoring a non-pk `_id` needs the value at delete time, which the
+        // pk-keyed tombstone path can't supply. Tracked as a follow-up feature.
+        if yaml.doc_id.is_some() {
+            return Err(ConversionError::DocIdUnsupported);
+        }
         let doc_id = yaml.doc_id.map(ColumnName::try_new).transpose()?;
         let soft_delete = yaml
             .soft_delete

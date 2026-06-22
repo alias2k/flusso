@@ -59,6 +59,9 @@ pub struct IndexSchema {
     pub db_schema: DatabaseSchema,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_key: Option<common::ColumnName>,
+    /// Reserved: the column whose value would become the document `_id`.
+    /// Not honored yet — the schema layer rejects a set `doc_id`, so this is
+    /// always `None`; the `_id` is derived from [`primary_key`](Self::primary_key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc_id: Option<common::ColumnName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
