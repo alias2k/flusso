@@ -110,6 +110,11 @@ pub enum ConversionError {
          Remove `doc_id` from the schema."
     )]
     DocIdUnsupported,
+    #[error(
+        "a `default` must be a scalar value (string, number, bool, or date) — a `{got}` default \
+         is not supported"
+    )]
+    NonScalarDefault { got: &'static str },
 }
 
 #[derive(Debug, Clone, Deserialize)]

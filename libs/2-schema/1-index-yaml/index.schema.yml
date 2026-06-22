@@ -147,7 +147,10 @@ definitions:
           (e.g. analyzer, format, scaling_factor).
       transforms:
         $ref: "#/definitions/transforms"
-      default: {}
+      # Coalesce value for a null column. Must be a scalar (string/number/bool/
+      # date); an array/object/binary default is rejected at conversion.
+      default:
+        type: [string, number, boolean, "null"]
       # custom:
       postgres:
         type: array

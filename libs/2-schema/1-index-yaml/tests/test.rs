@@ -86,6 +86,40 @@ fn scalar_carries_type_and_nullability() {
 }
 
 #[test]
+fn scalar_default_is_kept() {
+    let schema = convert(
+        "version: 1\ntable: t\nfields:\n  - integer: n\n    required: false\n    default: 0",
+    )
+    .unwrap();
+    match &field(&schema, "n").source {
+        FieldSource::Column(Column { default, .. }) => {
+            assert!(default.is_some(), "a scalar default is preserved");
+        }
+        other => panic!("expected a column, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_scalar_default_is_rejected() {
+    for (kind, yaml) in [
+        (
+            "array",
+            "version: 1\ntable: t\nfields:\n  - json: data\n    required: false\n    default: [1, 2]",
+        ),
+        (
+            "object",
+            "version: 1\ntable: t\nfields:\n  - json: data\n    required: false\n    default: { a: 1 }",
+        ),
+    ] {
+        let err = convert(yaml).unwrap_err();
+        assert!(
+            matches!(err, ConversionError::NonScalarDefault { got } if got == kind),
+            "{kind} default should be rejected, got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn column_defaults_to_field_name_else_explicit() {
     let schema = convert(include_str!("user.schema.yml")).unwrap();
     // `text: fullName` with `column: full_name`.
