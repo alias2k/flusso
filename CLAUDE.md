@@ -305,17 +305,18 @@ deep subsystem — the proc-macro internals (scope tagging, `FlussoValue<K>` kin
 nested/object handles) are documented in the `flusso-query-derive` memory note; read that
 before changing the derive.
 
-Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits
-`TextMap`/`KeywordMap` (per value kind), where `.key(runtime_str)` returns a fully-typed
-leaf handle (`Text`/`Keyword`) of the declared kind — runtime keys, compile-time value
-type. `TextMap::search(q)` builds a `MapSearch` (a `best_fields` `multi_match` over
-`prefer`'d keys plus a `path.*` fallback) for cross-key search with per-key preference;
-`has_key`/`exists` are presence checks. The doc-side type is `HashMap<String, V>` (a blanket
-`FlussoMap<K>` impl for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` newtype
-wrapper; the derive's `check_type` map arm hard-checks a `HashMap` value type and defers a
-`FlussoMap<kind>` bound otherwise. `handle_fn` dispatches on `Mapping.map_values`
-(`Text`→`TextMap`, `Keyword`→`KeywordMap`; number/date map handles are a later phase and
-fall back to `Json`). Phase 2 (`dynamic_templates` per-key analyzers) is deferred.
+Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
+handle per value kind — `TextMap`/`KeywordMap`/`NumberMap<T>`/`DateMap` — where
+`.key(runtime_str)` returns a fully-typed leaf handle (`Text`/`Keyword`/`Number<T>`/`Date`)
+of the declared kind: runtime keys, compile-time value type. `TextMap::search(q)` builds a
+`MapSearch` (a `best_fields` `multi_match` over `prefer`'d keys plus a `path.*` fallback) for
+cross-key search with per-key preference; `has_key`/`exists` are presence checks. The
+doc-side type is `HashMap<String, V>` (a blanket `FlussoMap<K>` impl for any
+`V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` newtype wrapper; the derive's `check_type`
+map arm hard-checks a `HashMap` value type and defers a `FlussoMap<kind>` bound otherwise.
+`handle_fn` dispatches on `Mapping.map_values` (`Text`→`TextMap`, `Keyword`→`KeywordMap`,
+`Date`→`DateMap`, the numerics→`NumberMap<T>`). Phase 2 (`dynamic_templates` per-key
+analyzers for per-language stemming) is deferred.
 
 The query surface is **builder-based** (issue #19): each leaf operator returns a small
 per-query builder (`handles/string.rs`/`scalar.rs`/`geo.rs`/`nested.rs`) carrying that

@@ -176,6 +176,8 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
 | `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
 | `KeywordMap`    | `key(k)` → a `Keyword` leaf for one key; `has_key(k)`, `exists` — *no* `search` (exact-match, use `key(..).eq(..)`) |
+| `NumberMap<T>`  | `key(k)` → a `Number<T>` leaf for one key (`eq`/`lt`/`gte`/`between`/…); `has_key(k)`, `exists` |
+| `DateMap`       | `key(k)` → a `Date` leaf for one key (`eq`/`gte`/`between`/…); `has_key(k)`, `exists` |
 | `Binary`        | `exists` — base64-encoded, not searchable                                 |
 | `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
 
