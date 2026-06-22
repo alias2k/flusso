@@ -148,6 +148,16 @@ Each is something an LLM reaches for when it doesn't trust the typed surface. Ea
 
 **The compiler is the safety net** — write the typed form and run `cargo check`. A handle/operator that doesn't fit the mapping fails to compile; don't pre-empt that with a string path or `raw`.
 
+**Self-check before you finish** — these compile fine, so the compiler won't catch them; grep your own query diff and justify or fix each hit:
+
+| grep | smell | fix |
+| --- | --- | --- |
+| `::at("` | string-path handle | use the generated `Type::field()` |
+| `.raw(` | escape hatch | only `knn`/`geo_shape`/span/parent-child belong here |
+| `.flatten()` / `Vec<Option<` near filters | hand-rolled optionals | `.filter(opt.map(\|v\| …))` |
+| `match_phrase` / `matches` | check the field is **`text`**, not `keyword` | keyword → `.eq()`/`.any_of()` |
+| a `struct` used only to hold filter inputs | wrapper-to-filter | filter via handles (`Type::id().eq(uuid)`) |
+
 ## Writing readable queries
 
 Readability is the goal — **compact *and* clear, both at once.** Aim to keep a query on one screen, but never buy density with confusion. The [worked example](examples/consumer.rs) is the reference shape.
