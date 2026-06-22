@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/alias2k/flusso/compare/flusso-sources-postgres-v0.4.0...flusso-sources-postgres-v0.5.0) - 2026-06-22
+
+### Added
+
+- *(sources-postgres)* decode map columns as passthrough JSON
+
+### Fixed
+
+- add chunking to postgres
+
 ## [0.4.0](https://github.com/alias2k/flusso/compare/flusso-sources-postgres-v0.3.2...flusso-sources-postgres-v0.4.0) - 2026-06-19
 
 ### Added
