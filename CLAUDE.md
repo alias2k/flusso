@@ -284,7 +284,12 @@ split by relationship verb, which names where the key lives: `belongs_to` (this 
 (the related table's `foreign_key`), `many_to_many` (`through` a junction). Aggregates
 split by op (`count`/`sum`/`avg`/`min`/`max`, plus `ids` — a flat scalar array of the
 related table's primary keys, typed by an explicit `element_type`; `ResolvedField.array`
-flags it). Parsing lives in
+flags it). A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
+`json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
+injected into options (so runtime keys stay searchable); the resolved `Mapping.map_values`
+carries the value kind, which is the only thing distinguishing a `map` from a plain
+`object`/`json`. `values` must be a leaf kind (text/keyword/number/date); the conversion
+rejects others. Parsing lives in
 `libs/2-schema/1-index-yaml/src/entities/field.rs`; the core model is `schema_core::FieldSource`
 (`Join.kind: JoinKind`, with reverse resolution per kind in
 `libs/1-sources/1-postgres/src/document/resolve.rs`).
@@ -299,6 +304,18 @@ and generates a typed query surface. `dev/search-api` is a working axum consumer
 deep subsystem — the proc-macro internals (scope tagging, `FlussoValue<K>` kind markers,
 nested/object handles) are documented in the `flusso-query-derive` memory note; read that
 before changing the derive.
+
+Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits
+`TextMap`/`KeywordMap` (per value kind), where `.key(runtime_str)` returns a fully-typed
+leaf handle (`Text`/`Keyword`) of the declared kind — runtime keys, compile-time value
+type. `TextMap::search(q)` builds a `MapSearch` (a `best_fields` `multi_match` over
+`prefer`'d keys plus a `path.*` fallback) for cross-key search with per-key preference;
+`has_key`/`exists` are presence checks. The doc-side type is `HashMap<String, V>` (a blanket
+`FlussoMap<K>` impl for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` newtype
+wrapper; the derive's `check_type` map arm hard-checks a `HashMap` value type and defers a
+`FlussoMap<kind>` bound otherwise. `handle_fn` dispatches on `Mapping.map_values`
+(`Text`→`TextMap`, `Keyword`→`KeywordMap`; number/date map handles are a later phase and
+fall back to `Json`). Phase 2 (`dynamic_templates` per-key analyzers) is deferred.
 
 The query surface is **builder-based** (issue #19): each leaf operator returns a small
 per-query builder (`handles/string.rs`/`scalar.rs`/`geo.rs`/`nested.rs`) carrying that

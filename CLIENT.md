@@ -174,6 +174,8 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Object<S>`     | `exists` (a same-document sub-object — group or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
 | `Geo`           | `within(distance, center)`, `in_bounding_box`, `in_polygon`, `exists`; sort with `distance_sort(center, order, unit)` |
+| `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
+| `KeywordMap`    | `key(k)` → a `Keyword` leaf for one key; `has_key(k)`, `exists` — *no* `search` (exact-match, use `key(..).eq(..)`) |
 | `Binary`        | `exists` — base64-encoded, not searchable                                 |
 | `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
 
