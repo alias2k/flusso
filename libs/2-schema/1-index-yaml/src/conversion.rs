@@ -59,9 +59,28 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             ty,
             nullable: !body.required,
             transforms,
-            default: body.default.map(yaml_to_generic),
+            default: convert_default(body.default)?,
         }),
     })
+}
+
+/// Convert a scalar field's `default`, rejecting non-scalar values. A `default`
+/// is coalesced into a single column value at read time, so only a scalar (or
+/// null) is meaningful; an array/object/binary default would be silently dropped
+/// at SQL-build time, so it's an error here instead.
+fn convert_default(
+    value: Option<serde_yaml::Value>,
+) -> Result<Option<GenericValue>, ConversionError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let got = match yaml_to_generic(value) {
+        GenericValue::Array(_) => "array",
+        GenericValue::Map(_) => "object",
+        GenericValue::Bytes(_) => "binary",
+        scalar => return Ok(Some(scalar)),
+    };
+    Err(ConversionError::NonScalarDefault { got })
 }
 
 /// A dynamic-key object: a `json`/`jsonb` column read through verbatim, mapped

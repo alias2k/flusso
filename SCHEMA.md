@@ -240,7 +240,7 @@ that type:
 | `column` | scalar, `geo`, `belongs_to` | The source column — for a `belongs_to`, this table's column pointing at the related row. Defaults to the document key when omitted. |
 | `options` | types with a mapping | Extra OpenSearch mapping properties merged beside the derived type (e.g. `analyzer`, `format`, `scaling_factor`). |
 | `transforms` | scalar | Value transforms to apply. See [Transforms](#transforms). |
-| `default` | scalar | Value to coalesce a `null` column to. |
+| `default` | scalar | Value to coalesce a `null` column to. Must be a scalar (string, number, bool, or date) — an array/object/binary default is a hard error. |
 | `postgres` / `opensearch` | `custom` | The Postgres types accepted and the OpenSearch type emitted. |
 | `lat` / `lon` | `geo` | The two coordinate columns (two-column form). |
 | `values` | `map` | **Mandatory** — the leaf type shared by every value (a leaf kind: text/keyword/number/date). See [Maps](#maps). |
