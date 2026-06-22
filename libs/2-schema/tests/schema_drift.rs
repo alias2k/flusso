@@ -189,6 +189,7 @@ fn scalar_type_tokens() -> BTreeSet<String> {
             Text | Identifier | Keyword | Enum | Uuid | Boolean | Short | Integer | Long
             | Float | Double | Decimal | Date | Timestamp | Binary | Json => {}
             GeoPoint => {}
+            Map { .. } => {}
             Custom { .. } => {}
         }
     }
@@ -207,6 +208,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
         c: schema_index_yaml::CustomBody,
         g: schema_index_yaml::GeoBody,
         o: schema_index_yaml::ObjectBody,
+        m: schema_index_yaml::MapBody,
         j: schema_index_yaml::JoinBody,
         a: schema_index_yaml::AggregateBody,
         k: schema_index_yaml::ConstantBody,
@@ -242,6 +244,13 @@ fn body_sibling_keys() -> BTreeSet<String> {
             options: _,
             fields: _,
         } = o;
+        let schema_index_yaml::MapBody {
+            field: _,
+            values: _,
+            column: _,
+            required: _,
+            options: _,
+        } = m;
         let schema_index_yaml::JoinBody {
             field: _,
             table: _,
@@ -288,6 +297,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "limit",        // join
         "value_type",   // aggregate (sum/min/max)
         "element_type", // aggregate (ids)
+        "values",       // map (value leaf type)
         "value",        // constant
     ])
 }
@@ -327,8 +337,9 @@ fn index_field_type_tags_match_parser() {
     rust_tags.extend(tokens(&all_join_verbs()));
     rust_tags.extend(tokens(&all_aggregate_ops()));
     // Parser keywords with no 1:1 serializable enum: `geo`→GeoPoint, `object`→
-    // Group, `custom`→Custom, `constant`→Constant (see `field::classify`).
-    rust_tags.extend(strs(&["geo", "object", "custom", "constant"]));
+    // Group, `map`→Map, `custom`→Custom, `constant`→Constant (see
+    // `field::classify`).
+    rust_tags.extend(strs(&["geo", "object", "map", "custom", "constant"]));
 
     assert_eq!(
         schema_tags, rust_tags,

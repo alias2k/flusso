@@ -105,10 +105,11 @@ definitions:
       timestamp: { $ref: "#/definitions/field_name" }
       binary: { $ref: "#/definitions/field_name" }
       json: { $ref: "#/definitions/field_name" }
-      # ── custom scalar, geo, object ────────────────────────────────────────
+      # ── custom scalar, geo, object, map ───────────────────────────────────
       custom: { $ref: "#/definitions/field_name" }
       geo: { $ref: "#/definitions/field_name" }
       object: { $ref: "#/definitions/field_name" }
+      map: { $ref: "#/definitions/field_name" }
       # ── joins (the relationship verb is the key) ──────────────────────────
       belongs_to: { $ref: "#/definitions/field_name" }
       has_one: { $ref: "#/definitions/field_name" }
@@ -180,6 +181,10 @@ definitions:
         $ref: "#/definitions/flusso_type"
       # aggregate (ids element type — the scalar type of each collected key):
       element_type:
+        $ref: "#/definitions/flusso_type"
+      # map (the shared leaf type of every dynamic-key value — must be a leaf
+      # kind: text/keyword or a number/date type, enforced at conversion):
+      values:
         $ref: "#/definitions/flusso_type"
       # constant:
       value: {}
