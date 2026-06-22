@@ -518,6 +518,13 @@ fn handle_fn(
             quote! { ::flusso_query::Number::<#inner, #scope>::at(#path) },
         ))
     };
+    let number_map = |inner: &str| {
+        let inner = Ident::new(inner, Span::call_site());
+        Some((
+            quote! { ::flusso_query::NumberMap<#inner, #scope> },
+            quote! { ::flusso_query::NumberMap::<#inner, #scope>::at(#path) },
+        ))
+    };
 
     let (ret, ctor) = match &resolved.mapping.mapping_type {
         MappingType::Keyword => simple("Keyword"),
@@ -538,9 +545,16 @@ fn handle_fn(
         MappingType::Object => match &resolved.mapping.map_values {
             Some(MappingType::Text) => simple("TextMap"),
             Some(MappingType::Keyword) => simple("KeywordMap"),
-            // Number/date map values: typed map handles (`NumberMap`/`DateMap`)
-            // are a later phase; fall back to the opaque object handle so the
-            // field is still addressable in the meantime.
+            Some(MappingType::Date) => simple("DateMap"),
+            Some(MappingType::Byte) => number_map("i8"),
+            Some(MappingType::Short) => number_map("i16"),
+            Some(MappingType::Integer) => number_map("i32"),
+            Some(MappingType::Long) => number_map("i64"),
+            Some(MappingType::Float | MappingType::HalfFloat) => number_map("f32"),
+            Some(MappingType::Double | MappingType::ScaledFloat) => number_map("f64"),
+            // Any other value kind has no typed map handle (the conversion
+            // rejects non-leaf map values, so this is defensive) — fall back to
+            // the opaque object handle so the field is still addressable.
             Some(_) => simple("Json"),
             // A group / to-one-join object → an `Object<S>` handle (for
             // `.exists()`; sub-fields are queried via their own dotted-path child

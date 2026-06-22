@@ -17,3 +17,11 @@ fields:
   - map: codes
     values: keyword
     required: false
+  # A number-valued map: per-currency prices, range-queryable per key.
+  - map: prices
+    values: double
+    required: false
+  # A date-valued map: per-region release dates.
+  - map: releaseDates
+    values: date
+    required: false

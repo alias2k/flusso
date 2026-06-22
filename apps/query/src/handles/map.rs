@@ -3,8 +3,9 @@
 //! A `map` field (e.g. translations `{"en": …, "it": …}`) has runtime-determined
 //! keys but a compile-time-known value kind. That split is the whole point:
 //! `.key(runtime_str)` returns a **fully-typed** leaf handle of the declared kind
-//! ([`Text`] for a [`TextMap`], [`Keyword`] for a [`KeywordMap`]), so a specific
-//! key is queried with full type safety while keys stay open-ended.
+//! — [`Text`] for a [`TextMap`], [`Keyword`] for a [`KeywordMap`], [`Number<T>`]
+//! for a [`NumberMap`], [`Date`] for a [`DateMap`] — so a specific key is queried
+//! with full type safety while keys stay open-ended.
 //!
 //! Three operators are shared by every map handle:
 //!
@@ -36,7 +37,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Keyword, Text, common_opts, exists_q, wrap};
+use super::{Common, Date, Keyword, Number, Text, common_opts, exists_q, wrap};
 use crate::query::{AsQuery, Query, Root};
 
 /// Define a concrete map handle over leaf kind `$Leaf`. Each carries a field
@@ -91,6 +92,54 @@ map_handle!(
     /// `key(..).eq(..)` / `has_key(..)`, consistent with the leaf split.
     KeywordMap => Keyword, "keyword"
 );
+map_handle!(
+    /// A dynamic-key object whose values are dates (`map` with a
+    /// `date`/`timestamp` value kind). [`key`](Self::key) yields a [`Date`]
+    /// leaf for range/exact operators (`gte`/`between`/`eq`/…).
+    DateMap => Date, "date"
+);
+
+/// A dynamic-key object whose values are numbers (`map` with a numeric value
+/// kind — `short`…`double`, `decimal`). [`key`](Self::key) yields a
+/// [`Number<T>`] leaf for range/exact operators (`gt`/`between`/`eq`/…); `T` is
+/// the numeric type the schema's value kind implies (e.g. `i64` for `long`,
+/// `f64` for `double`). `has_key`/`exists` are presence checks. No `search` —
+/// numbers aren't full text.
+#[derive(Debug, Clone)]
+pub struct NumberMap<T, S = Root> {
+    path: String,
+    _marker: PhantomData<fn() -> (T, S)>,
+}
+
+impl<T, S> NumberMap<T, S> {
+    pub fn at(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// The map holds the given key with a non-null value.
+    pub fn has_key(&self, key: impl AsRef<str>) -> Query<S> {
+        exists_q(&format!("{}.{}", self.path, key.as_ref()))
+    }
+
+    /// The map field itself is present (has at least one key).
+    pub fn exists(&self) -> Query<S> {
+        exists_q(&self.path)
+    }
+}
+
+impl<T, S> NumberMap<T, S>
+where
+    T: Into<serde_json::Value> + Copy,
+{
+    /// A specific runtime key → a fully-typed [`Number<T>`] leaf handle,
+    /// queried like any other numeric field.
+    pub fn key(&self, key: impl AsRef<str>) -> Number<T, S> {
+        Number::at(format!("{}.{}", self.path, key.as_ref()))
+    }
+}
 
 impl<S> TextMap<S> {
     /// Full-text search across *every* key at once, with optional per-key

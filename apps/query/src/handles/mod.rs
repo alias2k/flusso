@@ -46,7 +46,7 @@ pub use extra::{
     simple_query_string,
 };
 pub use geo::{Geo, GeoDistanceQuery, GeoPoint};
-pub use map::{KeywordMap, MapSearch, TextMap};
+pub use map::{DateMap, KeywordMap, MapSearch, NumberMap, TextMap};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};

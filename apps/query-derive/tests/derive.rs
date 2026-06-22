@@ -249,6 +249,9 @@ struct MappedProduct {
     sku: String,
     title: HashMap<String, String>,
     codes: Option<HashMap<String, String>>,
+    prices: Option<HashMap<String, f64>>,
+    #[flusso(rename = "releaseDates")]
+    release_dates: Option<HashMap<String, String>>,
 }
 
 #[derive(serde::Deserialize, FlussoDocument)]
@@ -263,6 +266,23 @@ struct CustomValueProduct {
 struct WrappedProduct {
     sku: String,
     title: Translations,
+}
+
+#[test]
+fn number_and_date_maps_generate_typed_leaves() -> Result {
+    // `prices` is a `double` map → `NumberMap<f64>`; `.key()` is a `Number<f64>`
+    // leaf with range ops (`.matches(..)` would not compile here).
+    let body = Product::query()
+        .filter(Product::prices().key("usd").gt(9.99))
+        .filter(Product::prices().has_key("eur"))
+        // `releaseDates` is a `date` map → `DateMap`; `.key()` is a `Date` leaf.
+        .filter(Product::release_dates().key("eu").gte("2020-01-01"))
+        .body();
+    let json = body.to_string();
+    assert!(json.contains(r#""prices.usd""#), "{json}");
+    assert!(json.contains(r#""prices.eur""#), "{json}");
+    assert!(json.contains(r#""releaseDates.eu""#), "{json}");
+    Ok(())
 }
 
 #[test]
