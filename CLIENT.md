@@ -326,6 +326,13 @@ a sort's `numeric_type` / `Sort::script` type take `NumericType` /
 for the combining mini-language). Genuinely open-ended params (`analyzer`,
 `format`, `time_zone`, `unmapped_type`, `flags`) stay `String`.
 
+> **One-glob import.** `use flusso_query::prelude::*;` brings the traits
+> (`AsQuery`, `FlussoDocument`), `Client`/`Search`, every handle, the typed
+> query/sort params, the standalone query free functions, and the derive macros
+> into scope at once — so the note below about importing `AsQuery` is handled for
+> you. The per-query builder structs (`MatchQuery`, …) stay out; name them from
+> the crate root if you need them.
+
 > **`.or()` / `.and()` on a builder** need `use flusso_query::AsQuery;` in scope
 > (the combinators are provided methods on that trait). Composing via the
 > `Search` clauses (`.should()`/`.filter()`/…) needs no import.
