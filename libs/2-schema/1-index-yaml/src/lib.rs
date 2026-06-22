@@ -99,6 +99,12 @@ pub enum ConversionError {
          holding a combined value — not a mix"
     )]
     InvalidGeoSource,
+    #[error(
+        "a `map` field's `values` must be a leaf type — `text`/`keyword` or a number/date kind \
+         (`{got}` is not one); `boolean`, `binary`, `json`, `geo`, and `custom` are not valid \
+         map value types"
+    )]
+    InvalidMapValueType { got: &'static str },
 }
 
 #[derive(Debug, Clone, Deserialize)]

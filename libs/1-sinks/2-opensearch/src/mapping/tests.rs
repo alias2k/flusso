@@ -10,6 +10,7 @@ fn field(name: &str, mapping_type: MappingType, children: Vec<ResolvedField>) ->
         mapping: Mapping {
             mapping_type,
             extra: BTreeMap::new(),
+            map_values: None,
         },
         nullable: true,
         array: false,
@@ -149,6 +150,7 @@ fn explicit_extra_overrides_the_auto_shape() {
         mapping: Mapping {
             mapping_type: MappingType::Text,
             extra,
+            map_values: None,
         },
         nullable: true,
         array: false,
@@ -189,6 +191,7 @@ fn extra_mapping_settings_pass_through() {
         mapping: Mapping {
             mapping_type: MappingType::ScaledFloat,
             extra,
+            map_values: None,
         },
         nullable: true,
         array: false,
@@ -198,6 +201,32 @@ fn extra_mapping_settings_pass_through() {
     let amount = &body["mappings"]["properties"]["amount"];
     assert_eq!(amount["type"], "scaled_float");
     assert_eq!(amount["scaling_factor"], 100);
+}
+
+#[test]
+fn map_field_renders_a_dynamic_object() {
+    // A `map` field resolves to an `object` with `dynamic: true` in `extra` and
+    // no children, so the dynamic keys stay searchable rather than being
+    // rejected by the index's root `dynamic: strict`.
+    let mut extra = BTreeMap::new();
+    extra.insert("dynamic".to_owned(), GenericValue::Bool(true));
+    let title = ResolvedField {
+        name: FieldName::try_new("title").unwrap(),
+        mapping: Mapping {
+            mapping_type: MappingType::Object,
+            extra,
+            map_values: Some(MappingType::Text),
+        },
+        nullable: false,
+        array: false,
+        children: vec![],
+    };
+    let body = build_index_body(&[title], &opts());
+    let title = &body["mappings"]["properties"]["title"];
+    assert_eq!(title["type"], "object");
+    assert_eq!(title["dynamic"], true);
+    // No fixed sub-properties — the keys are dynamic.
+    assert!(title.get("properties").is_none());
 }
 
 #[test]

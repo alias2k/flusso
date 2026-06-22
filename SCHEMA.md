@@ -224,6 +224,7 @@ The type key is one of:
   Postgres/OpenSearch pair);
 - `geo` — a geographic point (see [Geo points](#geo-points));
 - `object` — a same-row sub-object (see [Objects](#objects));
+- `map` — a dynamic-key object (see [Maps](#maps));
 - `belongs_to` / `has_one` / `has_many` / `many_to_many` — a related table
   folded in (see [Joins](#joins));
 - `count` / `sum` / `avg` / `min` / `max` — a rollup over a related table (see
@@ -242,6 +243,7 @@ that type:
 | `default` | scalar | Value to coalesce a `null` column to. |
 | `postgres` / `opensearch` | `custom` | The Postgres types accepted and the OpenSearch type emitted. |
 | `lat` / `lon` | `geo` | The two coordinate columns (two-column form). |
+| `values` | `map` | **Mandatory** — the leaf type shared by every value (a leaf kind: text/keyword/number/date). See [Maps](#maps). |
 | `fields` | `object`, joins | The nested projection. |
 | `table`, `primary_key`, `column`/`foreign_key`/`through`, `order_by`, `filters`, `limit` | joins | Which key sibling applies depends on the verb. See [Joins](#joins). |
 | `table`, `column`, `value_type`, `element_type`, `foreign_key`, `through`, `filters` | aggregates | See [Aggregates](#aggregates). |
@@ -282,6 +284,30 @@ null; its members declare their own types.
 An `object` differs from a to-one [join](#joins) (`belongs_to`/`has_one`): the
 join reads a *related table* by key, an object stays put on the current row.
 Optional `options` pass extra properties to the `object` mapping.
+
+### Maps
+
+A `map` is a **dynamic-key object** over a `json`/`jsonb` column: the keys are
+runtime-determined, but every value shares one leaf type. The motivating case is
+translations — `{"en": "…", "it": "…"}` with an open-ended language set, where
+declaring each language as its own field would defeat the purpose.
+
+```yaml
+- map: title
+  values: text          # the leaf type of every value (required)
+  required: true
+```
+
+`values` must be a **leaf kind** — `text`/`identifier` (text), `keyword`/`enum`/
+`uuid` (keyword), a numeric, or `date`/`timestamp`. `boolean`, `binary`, `json`,
+`geo`, and `custom` are rejected. The field maps to an OpenSearch `object` with
+`dynamic: true` (injected automatically — an explicit `dynamic` in `options`
+wins), so unmapped keys are accepted and stay searchable rather than rejected by
+the index's `dynamic: strict`. `column` defaults to the document key.
+
+On the query side a `map` gets a typed handle (`flusso-query`): `.key("it")`
+returns a fully-typed leaf of the declared kind, and a text map also offers a
+cross-key `.search(..)` with per-key preference. See [CLIENT.md](CLIENT.md).
 
 ### Types
 

@@ -37,6 +37,12 @@ INSERT INTO products (id, sku, name, description, price, currency, in_stock, cat
     (4, 'EL-1002', 'Noise-Cancelling Headphones',     'Over-ear, 30h battery.',                           249.00, 'USD', false, 2, '2023-02-15 00:00+00'),
     (5, 'HM-2001', 'Standing Desk',                   'Electric height-adjustable, oak top.',             499.00, 'USD', true,  3, '2023-03-01 00:00+00');
 
+-- Localized titles for the first few products — the open-ended set of language
+-- keys the `map: title` field keeps searchable per key.
+UPDATE products SET title = '{"en": "Mechanical Keyboard", "it": "Tastiera Meccanica", "es": "Teclado Mecánico"}'::jsonb WHERE id = 3;
+UPDATE products SET title = '{"en": "Noise-Cancelling Headphones", "it": "Cuffie con Cancellazione del Rumore"}'::jsonb WHERE id = 4;
+UPDATE products SET title = '{"en": "Standing Desk", "de": "Stehpult"}'::jsonb WHERE id = 5;
+
 INSERT INTO tags (id, label) VALUES
     (1, 'bestseller'),
     (2, 'sale'),

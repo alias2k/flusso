@@ -1,0 +1,18 @@
+error[E0277]: `std::string::String` is not a valid map for a `flusso_query::kind::Text` field
+ --> tests/ui/map_wrong_container.rs:9:12
+  |
+9 |     title: String,
+  |            ^^^^^^ unsupported map type
+  |
+  = help: the trait `FlussoMap<flusso_query::kind::Text>` is not implemented for `std::string::String`
+  = note: use `HashMap<String, V>` with a `flusso_query::kind::Text` value type, or add `#[derive(FlussoMap)]` (with the matching kind) to `std::string::String`
+help: the trait `FlussoMap<K>` is implemented for `HashMap<std::string::String, V>`
+ --> $WORKSPACE/apps/query/src/handles/mod.rs
+  |
+  | impl<K, V: FlussoValue<K>> FlussoMap<K> for std::collections::HashMap<String, V> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `__assert_field_map`
+ --> tests/ui/map_wrong_container.rs:9:12
+  |
+9 |     title: String,
+  |            ^^^^^^ required by this bound in `__assert_field_map`

@@ -273,6 +273,7 @@ fn coerce_scalar(json: serde_json::Value, ty: &FlussoType) -> GenericValue {
         | FlussoType::Enum
         | FlussoType::Binary
         | FlussoType::Json
+        | FlussoType::Map { .. }
         | FlussoType::GeoPoint
         | FlussoType::Custom { .. } => json_to_generic(json),
     }

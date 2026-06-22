@@ -2,7 +2,9 @@
 //! `flusso.toml` fixture → a generated query surface that builds real requests.
 #![allow(dead_code, unused_crate_dependencies)]
 
-use flusso_query::{FlussoDocument, FlussoValue, GeoPoint};
+use std::collections::HashMap;
+
+use flusso_query::{AsQuery, FlussoDocument, FlussoMap, FlussoValue, GeoPoint};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -191,6 +193,106 @@ fn acceptance_realistic_projection_needs_no_escape_hatch() -> Result {
     );
     assert!(json.contains(r#""email.text""#), "{json}");
     assert!(json.contains(r#""missing":"_first""#), "{json}");
+    Ok(())
+}
+
+// Issue #28: first-class `map` type. The `products` schema declares `title`
+// (a `text` map) and `codes` (a `keyword` map). The query surface generates
+// from the schema, so `Product` (which projects neither) still gets typed
+// `title()`/`codes()` handles.
+
+#[test]
+fn map_field_generates_typed_query_surface() -> Result {
+    // Specific key — a fully-typed `Text` leaf (zero `.raw()`, zero string path).
+    let q = Product::title().key("it").matches("ciao").to_value();
+    assert_eq!(q["match"]["title.it"], serde_json::json!("ciao"));
+
+    // Cross-key search with per-key preference + presence checks.
+    let body = Product::query()
+        .query(
+            Product::title()
+                .search("ciao")
+                .prefer("it", 3.0)
+                .prefer("en", 2.0),
+        )
+        .filter(Product::title().exists())
+        .filter(Product::title().has_key("it"))
+        // A keyword map: exact per-key lookup, no `search`.
+        .filter(Product::codes().key("ean").eq("0049"))
+        .body();
+
+    let json = body.to_string();
+    assert!(json.contains(r#""title.it^3""#), "{json}");
+    assert!(json.contains(r#""title.en^2""#), "{json}");
+    assert!(json.contains(r#""title.*""#), "{json}");
+    assert!(json.contains(r#""best_fields""#), "{json}");
+    assert!(json.contains(r#""codes.ean""#), "{json}");
+    Ok(())
+}
+
+/// A custom keyword/text value type usable as a map's values (`FlussoValue<Text>`).
+#[derive(serde::Deserialize, FlussoValue)]
+#[flusso(text)]
+struct Locale(String);
+
+/// A whole-map newtype wrapper over the `text` map (`FlussoMap<Text>`).
+#[derive(serde::Deserialize, FlussoMap)]
+#[flusso(text)]
+struct Translations(HashMap<String, String>);
+
+// Each of these compiling proves a `check_type` map arm: a bare `HashMap`
+// (hard-checked value kind), a `HashMap` of a custom `FlussoValue`, and a
+// whole-map `FlussoMap` wrapper. `codes` is nullable → `Option`.
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct MappedProduct {
+    sku: String,
+    title: HashMap<String, String>,
+    codes: Option<HashMap<String, String>>,
+    prices: Option<HashMap<String, f64>>,
+    #[flusso(rename = "releaseDates")]
+    release_dates: Option<HashMap<String, String>>,
+}
+
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct CustomValueProduct {
+    sku: String,
+    title: HashMap<String, Locale>,
+}
+
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct WrappedProduct {
+    sku: String,
+    title: Translations,
+}
+
+#[test]
+fn number_and_date_maps_generate_typed_leaves() -> Result {
+    // `prices` is a `double` map → `NumberMap<f64>`; `.key()` is a `Number<f64>`
+    // leaf with range ops (`.matches(..)` would not compile here).
+    let body = Product::query()
+        .filter(Product::prices().key("usd").gt(9.99))
+        .filter(Product::prices().has_key("eur"))
+        // `releaseDates` is a `date` map → `DateMap`; `.key()` is a `Date` leaf.
+        .filter(Product::release_dates().key("eu").gte("2020-01-01"))
+        .body();
+    let json = body.to_string();
+    assert!(json.contains(r#""prices.usd""#), "{json}");
+    assert!(json.contains(r#""prices.eur""#), "{json}");
+    assert!(json.contains(r#""releaseDates.eu""#), "{json}");
+    Ok(())
+}
+
+#[test]
+fn map_doc_types_accept_hashmap_custom_value_and_wrapper() -> Result {
+    // The three structs above compiled → every deferred map bound held. The
+    // generated handles still follow the schema regardless of the doc type.
+    let body = MappedProduct::query()
+        .query(MappedProduct::title().key("it").matches("ciao"))
+        .body();
+    assert!(body.to_string().contains(r#""title.it""#));
     Ok(())
 }
 

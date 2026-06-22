@@ -96,15 +96,15 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
-    Binary, Bool, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DisMaxQuery,
-    DistanceFeatureQuery, EqQuery, FlussoValue, FunctionScoreQuery, FuzzyQuery, Geo,
-    GeoDistanceQuery, GeoPoint, IdsQuery, Json, Keyword, MatchQuery, MoreLikeThisQuery,
-    MultiMatchQuery, Nested, NestedProjection, NestedQuery, Number, Object, PrefixQuery,
-    QueryStringQuery, RangeQuery, RankFeatureQuery, RegexpQuery, ScriptQuery, ScriptScoreQuery,
-    SimpleQueryStringQuery, Sort, SortMode, SortOrder, TermQuery, TermsQuery, Text, WildcardQuery,
-    boosting, combined_fields, constant_score, dis_max, distance_feature, function_score, ids,
-    kind, more_like_this, multi_match, query_string, rank_feature, script, script_score,
-    simple_query_string,
+    Binary, Bool, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
+    DisMaxQuery, DistanceFeatureQuery, EqQuery, FlussoMap, FlussoValue, FunctionScoreQuery,
+    FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint, IdsQuery, Json, Keyword, KeywordMap, MapSearch,
+    MatchQuery, MoreLikeThisQuery, MultiMatchQuery, Nested, NestedProjection, NestedQuery, Number,
+    NumberMap, Object, PrefixQuery, QueryStringQuery, RangeQuery, RankFeatureQuery, RegexpQuery,
+    ScriptQuery, ScriptScoreQuery, SimpleQueryStringQuery, Sort, SortMode, SortOrder, TermQuery,
+    TermsQuery, Text, TextMap, WildcardQuery, boosting, combined_fields, constant_score, dis_max,
+    distance_feature, function_score, ids, kind, more_like_this, multi_match, query_string,
+    rank_feature, script, script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};
@@ -125,6 +125,14 @@ pub use flusso_query_derive::FlussoDocument;
 /// in a [`FlussoDocument`] struct. Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoValue;
+
+/// `#[derive(FlussoMap)]` — implements [`trait@FlussoMap`] for a newtype wrapper
+/// over a `map` field, so it may stand in for a `map` of the chosen value kind
+/// (`#[flusso(keyword)]` — the default — `#[flusso(text)]`, `#[flusso(number)]`,
+/// or `#[flusso(date)]`) in a [`FlussoDocument`] struct. A bare
+/// `HashMap<String, V>` needs no derive. Enabled by the `derive` feature.
+#[cfg(feature = "derive")]
+pub use flusso_query_derive::FlussoMap;
 
 /// `#[derive(FlussoMultiDocument)]` — implements [`trait@FlussoMultiDocument`]
 /// for an enum with one single-field variant per document type (the

@@ -144,6 +144,67 @@ fn object_becomes_a_group() {
 }
 
 #[test]
+fn map_is_a_dynamic_object_column() {
+    let schema = convert(
+        "version: 1\ntable: products\nfields:\n  - map: title\n    values: text\n    required: true",
+    )
+    .unwrap();
+    match &field(&schema, "title").source {
+        FieldSource::Column(Column {
+            column,
+            ty,
+            nullable,
+            ..
+        }) => {
+            assert_eq!(column.as_ref(), "title", "defaults to the field name");
+            assert_eq!(
+                *ty,
+                FlussoType::Map {
+                    values: Box::new(FlussoType::Text)
+                }
+            );
+            assert!(!nullable, "required → non-null");
+        }
+        other => panic!("expected a map column, got {other:?}"),
+    }
+    // `dynamic: true` is injected so the dynamic keys stay searchable.
+    assert_eq!(
+        field(&schema, "title").options.get("dynamic"),
+        Some(&schema_core::GenericValue::Bool(true)),
+    );
+}
+
+#[test]
+fn map_resolves_value_kind_onto_the_mapping() {
+    use schema_core::{IndexName, MappingType};
+    let schema = convert(
+        "version: 1\ntable: products\nfields:\n  - map: codes\n    values: keyword\n    required: false",
+    )
+    .unwrap();
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let codes = mapping
+        .fields
+        .iter()
+        .find(|f| f.name.as_ref() == "codes")
+        .unwrap();
+    assert_eq!(codes.mapping.mapping_type, MappingType::Object);
+    assert_eq!(codes.mapping.map_values, Some(MappingType::Keyword));
+    assert!(codes.nullable, "not required → nullable");
+}
+
+#[test]
+fn map_rejects_a_non_leaf_value_type() {
+    let err = convert(
+        "version: 1\ntable: products\nfields:\n  - map: blob\n    values: json\n    required: true",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ConversionError::InvalidMapValueType { got: "json" }),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn join_verb_comes_from_the_tag() {
     let schema = convert(include_str!("user.schema.yml")).unwrap();
     assert!(matches!(

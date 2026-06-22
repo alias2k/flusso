@@ -30,6 +30,9 @@ pub enum Field {
     Geo(GeoBody),
     /// A same-row sub-object (`object:`).
     Object(ObjectBody),
+    /// A dynamic-key object (`map:`) over a `json`/`jsonb` column, with the
+    /// leaf type its values share.
+    Map(MapBody),
     /// A related table folded in, with its relationship verb.
     Join(JoinVerb, Box<JoinBody>),
     /// A rollup over a related table, with its operation.
@@ -81,6 +84,22 @@ pub struct GeoBody {
     pub lat: Option<common::ColumnName>,
     #[serde(default)]
     pub lon: Option<common::ColumnName>,
+    #[serde(default)]
+    pub column: Option<common::ColumnName>,
+    pub required: bool,
+    #[serde(default)]
+    pub options: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// A dynamic-key object: a `json`/`jsonb` column whose keys are
+/// runtime-determined but whose values all share one leaf type (`values`).
+/// `column` defaults to the field name; `required` is mandatory.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapBody {
+    pub field: common::FieldName,
+    /// The leaf type of every value (`text`, `keyword`, `integer`, `date`, …).
+    pub values: FlussoType,
     #[serde(default)]
     pub column: Option<common::ColumnName>,
     pub required: bool,
@@ -163,6 +182,7 @@ enum TagKind {
     Custom,
     Geo,
     Object,
+    Map,
     Join(JoinVerb),
     Aggregate(AggregateOp),
     Constant,
@@ -177,6 +197,7 @@ fn classify(key: &str) -> Option<TagKind> {
         "custom" => TagKind::Custom,
         "geo" => TagKind::Geo,
         "object" => TagKind::Object,
+        "map" => TagKind::Map,
         "belongs_to" => TagKind::Join(JoinVerb::BelongsTo),
         "has_one" => TagKind::Join(JoinVerb::HasOne),
         "has_many" => TagKind::Join(JoinVerb::HasMany),
@@ -242,7 +263,7 @@ fn find_tag<E: de::Error>(map: &serde_yaml::Mapping) -> Result<(String, TagKind)
         };
         E::custom(format!(
             "field is missing a type tag{here}; expected one of: a scalar type like \
-             `keyword`/`text`/`integer`, or `custom`, `geo`, `object`, \
+             `keyword`/`text`/`integer`, or `custom`, `geo`, `object`, `map`, \
              `belongs_to`/`has_one`/`has_many`/`many_to_many`, \
              `count`/`sum`/`avg`/`min`/`max`/`ids`, `constant`"
         ))
@@ -317,6 +338,7 @@ impl<'de> Deserialize<'de> for Field {
             }
             TagKind::Geo => Field::Geo(body_from(body, tag, &name_str)?),
             TagKind::Object => Field::Object(body_from(body, tag, &name_str)?),
+            TagKind::Map => Field::Map(body_from(body, tag, &name_str)?),
             TagKind::Join(join_type) => {
                 Field::Join(join_type, Box::new(body_from(body, tag, &name_str)?))
             }

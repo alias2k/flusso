@@ -108,6 +108,7 @@ fn mapping() -> IndexMapping {
         mapping: Mapping {
             mapping_type: ty,
             extra: BTreeMap::new(),
+            map_values: None,
         },
         nullable: true,
         array: false,

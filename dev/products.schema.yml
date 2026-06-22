@@ -16,6 +16,14 @@ fields:
     required: true
   - text: description # natural-language full text
     required: false
+
+  # A first-class `map`: localized titles keyed by language code. Keys are
+  # runtime-determined; every value is analyzed `text`, so each language stays
+  # full-text searchable (`Product::title().key("it").matches(..)` /
+  # `Product::title().search(..).prefer("it", 3.0)`).
+  - map: title
+    values: text
+    required: true
   - boolean: inStock
     column: in_stock
     required: true

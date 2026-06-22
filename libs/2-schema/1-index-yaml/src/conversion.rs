@@ -28,6 +28,7 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
                 source: FieldSource::Group(fields),
             })
         }
+        entities::Field::Map(body) => convert_map(body),
         entities::Field::Join(verb, body) => convert_join_field(verb, *body),
         entities::Field::Aggregate(op, body) => convert_aggregate_field(op, *body),
         entities::Field::Constant(body) => Ok(Field {
@@ -61,6 +62,64 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             default: body.default.map(yaml_to_generic),
         }),
     })
+}
+
+/// A dynamic-key object: a `json`/`jsonb` column read through verbatim, mapped
+/// as an OpenSearch `object` with `dynamic: true` so its runtime keys stay
+/// searchable without enumeration. `values` declares the shared leaf type and
+/// must be a leaf kind (text/keyword/number/date); `dynamic: true` is injected
+/// into the field's mapping options (an explicit `dynamic` option wins).
+fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
+    let values = require_map_value_type(body.values)?;
+    let column = match body.column {
+        Some(column) => column,
+        None => default_column(&body.field)?,
+    };
+    let mut options = convert_options(body.options);
+    options
+        .entry("dynamic".to_owned())
+        .or_insert(GenericValue::Bool(true));
+    Ok(Field {
+        field: body.field,
+        options,
+        source: FieldSource::Column(Column {
+            column,
+            ty: FlussoType::Map {
+                values: Box::new(values),
+            },
+            nullable: !body.required,
+            transforms: Vec::new(),
+            default: None,
+        }),
+    })
+}
+
+/// A `map`'s `values` must be a leaf kind that has a typed query surface —
+/// text/keyword (string), a numeric, or a date. `boolean`, `binary`, `json`,
+/// `geo_point`, and `custom` are rejected (no value-kind handle, and a nested
+/// `map`/`json` defeats the dynamic-object purpose).
+fn require_map_value_type(ty: FlussoType) -> Result<FlussoType, ConversionError> {
+    match ty {
+        FlussoType::Text
+        | FlussoType::Identifier
+        | FlussoType::Keyword
+        | FlussoType::Enum
+        | FlussoType::Uuid
+        | FlussoType::Short
+        | FlussoType::Integer
+        | FlussoType::Long
+        | FlussoType::Float
+        | FlussoType::Double
+        | FlussoType::Decimal
+        | FlussoType::Date
+        | FlussoType::Timestamp => Ok(ty),
+        FlussoType::Boolean => Err(ConversionError::InvalidMapValueType { got: "boolean" }),
+        FlussoType::Binary => Err(ConversionError::InvalidMapValueType { got: "binary" }),
+        FlussoType::Json => Err(ConversionError::InvalidMapValueType { got: "json" }),
+        FlussoType::Map { .. } => Err(ConversionError::InvalidMapValueType { got: "map" }),
+        FlussoType::GeoPoint => Err(ConversionError::InvalidMapValueType { got: "geo" }),
+        FlussoType::Custom { .. } => Err(ConversionError::InvalidMapValueType { got: "custom" }),
+    }
 }
 
 /// A geo point: either two coordinate columns (`lat`/`lon`) assembled into a

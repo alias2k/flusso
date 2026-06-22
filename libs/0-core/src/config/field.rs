@@ -175,6 +175,13 @@ impl Relation {
 pub struct Mapping {
     pub mapping_type: MappingType,
     pub extra: BTreeMap<String, common::GenericValue>,
+    /// For a `map` field (a dynamic-key object), the mapping type of every
+    /// value; `None` for every other field. Internal metadata only — it is
+    /// **not** serialized into the index body (a map carries just
+    /// `{"type":"object","dynamic":true}`, the latter via `extra`). It exists so
+    /// a consumer turning the mapping into typed bindings can tell a `map` from a
+    /// plain `object` and offer a value-kind-typed handle.
+    pub map_values: Option<MappingType>,
 }
 
 /// Serializes the way OpenSearch expects a field mapping — `{ "type": …, …extra }`

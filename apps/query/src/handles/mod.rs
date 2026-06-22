@@ -12,6 +12,7 @@
 //!
 //! - `string` — [`Keyword`], [`Text`], and the cross-field [`multi_match`].
 //! - `scalar` — [`Bool`], [`Number`], [`Date`] (exact/range value fields).
+//! - `map` — [`TextMap`]/[`KeywordMap`] dynamic-key objects and [`MapSearch`].
 //! - `nested` — [`Nested`] arrays and their [`NestedProjection`].
 //! - `object` — [`Object`] sub-documents and the opaque [`Binary`]/[`Json`] fields.
 //! - `geo` — [`Geo`] points and [`GeoPoint`].
@@ -27,6 +28,7 @@ use crate::query::Query;
 mod compound;
 mod extra;
 mod geo;
+mod map;
 mod nested;
 mod object;
 mod scalar;
@@ -44,6 +46,7 @@ pub use extra::{
     simple_query_string,
 };
 pub use geo::{Geo, GeoDistanceQuery, GeoPoint};
+pub use map::{DateMap, KeywordMap, MapSearch, NumberMap, TextMap};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
@@ -214,3 +217,22 @@ impl FlussoValue<kind::Number> for f64 {}
 impl FlussoValue<kind::Number> for crate::Decimal {}
 
 impl FlussoValue<kind::Date> for String {}
+
+/// A Rust type usable as the **document type** of a `map` field of value kind
+/// `K`: a dynamic-key object whose values are all of kind `K`.
+///
+/// The canonical map type — `HashMap<String, V>` where `V` is a `K` value — is
+/// pre-implemented via a blanket impl, so `HashMap<String, String>` is a valid
+/// `text`/`keyword` map and `HashMap<String, i64>` a valid `long` map with no
+/// extra code. A whole-map newtype wrapper (`struct Translations(HashMap<…>)`)
+/// opts in with `#[derive(FlussoMap)]`. `FlussoDocument` emits a deferred bound
+/// on this trait for a `map` field, so the document only compiles when its type
+/// genuinely fits the declared value kind.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid map for a `{K}` field",
+    label = "unsupported map type",
+    note = "use `HashMap<String, V>` with a `{K}` value type, or add `#[derive(FlussoMap)]` (with the matching kind) to `{Self}`"
+)]
+pub trait FlussoMap<K> {}
+
+impl<K, V: FlussoValue<K>> FlussoMap<K> for std::collections::HashMap<String, V> {}
