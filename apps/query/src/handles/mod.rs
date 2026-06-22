@@ -58,8 +58,8 @@ pub use params::{
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
 pub use sort::{Sort, SortMode, SortOrder};
 pub use string::{
-    FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, PrefixQuery, RegexpQuery, TermQuery, Text,
-    WildcardQuery, multi_match,
+    FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery, RegexpQuery,
+    TermQuery, Text, WildcardQuery, WithSubfields, multi_match,
 };
 
 /// `{ "<wrapper>": { "<path>": <value> } }`.

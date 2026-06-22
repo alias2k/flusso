@@ -453,10 +453,11 @@ pub(crate) fn codegen(
     level: &[ResolvedField],
     fields: &[DocField],
     tracked: &[String],
+    auto_subfields: bool,
 ) -> TokenStream {
     let handles = level
         .iter()
-        .filter_map(|resolved| handle_fn(resolved, prefix, scope, fields));
+        .filter_map(|resolved| handle_fn(resolved, prefix, scope, fields, auto_subfields));
 
     // The root binding implements `FlussoDocument`: it supplies the physical
     // index name = logical name + schema hash (exactly what the OpenSearch sink
@@ -496,6 +497,7 @@ fn handle_fn(
     prefix: &str,
     scope: &TokenStream,
     fields: &[DocField],
+    auto_subfields: bool,
 ) -> Option<TokenStream> {
     let path = if prefix.is_empty() {
         resolved.name.to_string()
@@ -510,6 +512,28 @@ fn handle_fn(
             quote! { ::flusso_query::#ty<#scope> },
             quote! { ::flusso_query::#ty::<#scope>::at(#path) },
         ))
+    };
+    // A `text`/`keyword` handle carries flusso's auto subfields (`.keyword()` /
+    // `.text()` / `.keyword_lowercase()`) only when the sink provisions them:
+    // `auto_subfields` on, a scalar field (no children), and no custom `fields`
+    // override (which replaces the defaults). Otherwise stamp `NoSubfields` so
+    // the accessors are a compile error rather than a runtime 400.
+    let subfielded = auto_subfields
+        && resolved.children.is_empty()
+        && !resolved.mapping.extra.contains_key("fields");
+    let string_handle = |ty: &str| {
+        let ty = Ident::new(ty, Span::call_site());
+        Some(if subfielded {
+            (
+                quote! { ::flusso_query::#ty<#scope, ::flusso_query::WithSubfields> },
+                quote! { ::flusso_query::#ty::<#scope>::at(#path) },
+            )
+        } else {
+            (
+                quote! { ::flusso_query::#ty<#scope, ::flusso_query::NoSubfields> },
+                quote! { ::flusso_query::#ty::<#scope, ::flusso_query::NoSubfields>::leaf(#path) },
+            )
+        })
     };
     let number = |inner: &str| {
         let inner = Ident::new(inner, Span::call_site());
@@ -527,8 +551,8 @@ fn handle_fn(
     };
 
     let (ret, ctor) = match &resolved.mapping.mapping_type {
-        MappingType::Keyword => simple("Keyword"),
-        MappingType::Text => simple("Text"),
+        MappingType::Keyword => string_handle("Keyword"),
+        MappingType::Text => string_handle("Text"),
         MappingType::Boolean => simple("Bool"),
         MappingType::Byte => number("i8"),
         MappingType::Short => number("i16"),

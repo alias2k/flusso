@@ -1,0 +1,18 @@
+# Fixture for the subfield-gating UI test: an OpenSearch sink with
+# `auto_subfields = false`, so the derive stamps `text`/`keyword` handles
+# `NoSubfields` and their `.keyword()`/`.text()`/`.keyword_lowercase()`
+# accessors don't exist. No database is touched.
+
+[source]
+type = "postgres"
+connection_url = "postgres://app@localhost/test"
+
+[sinks.primary]
+type = "opensearch"
+url = "http://127.0.0.1:9200"
+auto_subfields = false
+
+[[index]]
+name = "users"
+schema = "users.schema.yml"
+enabled = true

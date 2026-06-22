@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use schema::{IndexMapping, IndexName, MappingType, ResolvedField};
+use schema::{IndexMapping, IndexName, MappingType, ResolvedField, Sink};
 
 /// The query **scope** a struct's handles live in (see `query::Root`).
 ///
@@ -22,6 +22,12 @@ pub(crate) enum Scope {
 /// A resolved index plus the files whose changes should retrigger a rebuild.
 pub(crate) struct Resolved {
     pub(crate) mapping: IndexMapping,
+    /// Whether every OpenSearch sink has `auto_subfields` on — so the auto
+    /// `.keyword`/`.text`/`.keyword_lowercase` subfields are guaranteed present
+    /// in whichever cluster the query client reads. Conservative across a
+    /// multi-sink fan-out: false if *any* OpenSearch sink has it off. Gates the
+    /// subfield accessors on generated `text`/`keyword` handles.
+    pub(crate) auto_subfields: bool,
     /// Absolute paths to fold in via `include_bytes!` so edits rebuild.
     pub(crate) tracked: Vec<PathBuf>,
 }
@@ -128,7 +134,24 @@ pub(crate) fn resolve(index: &str, config_override: Option<&str>) -> Result<Reso
     let mapping = index_entry.schema.resolve(key);
     let tracked = tracked_files(&config_path);
 
-    Ok(Resolved { mapping, tracked })
+    // Indexes fan out to every configured sink (there's no per-index sink
+    // selection), so the subfields are guaranteed only if every OpenSearch sink
+    // provisions them. Stdout sinks don't create indexes — ignore them. No
+    // OpenSearch sink (nothing to query) → leave the permissive default.
+    let auto_subfields = config
+        .sinks
+        .values()
+        .filter_map(|sink| match sink {
+            Sink::Opensearch(os) => Some(os.auto_subfields),
+            Sink::Stdout(_) => None,
+        })
+        .all(|on| on);
+
+    Ok(Resolved {
+        mapping,
+        auto_subfields,
+        tracked,
+    })
 }
 
 /// Walk up from `start` to find `flusso.toml`, honoring an explicit override

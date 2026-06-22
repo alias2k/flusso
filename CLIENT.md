@@ -200,8 +200,13 @@ User::email().text()                   // Text    → full-text over a keyword f
 ```
 
 (A `wildcard` belongs on `.keyword()`, not the analyzed handle, which matches
-tokens not the whole value.) These are valid when `auto_subfields` is on and the
-field defines no custom `fields`.
+tokens not the whole value.) These accessors exist only when the subfield is
+actually provisioned — and the derive **enforces it at compile time**: a
+`text`/`keyword` handle is stamped with subfields only when every OpenSearch
+sink has `auto_subfields` on and the field declares no custom `fields`.
+Otherwise the handle is `…<NoSubfields>` and `.keyword()` / `.text()` /
+`.keyword_lowercase()` (and the `Text::any_of` / `Text::asc` sugar built on
+them) simply don't exist — calling one is a compile error, not a runtime 400.
 
 Sorting is similar — `sort(…)` accepts handles whose type is sortable (numbers,
 dates, keywords, booleans, and `text`). `Text::asc`/`desc` is sugar that sorts

@@ -18,7 +18,7 @@ fn string_array(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<Valu
         .collect()
 }
 
-fn field_specs<S>(fields: impl IntoIterator<Item = Text<S>>) -> Vec<Value> {
+fn field_specs<S, Sub>(fields: impl IntoIterator<Item = Text<S, Sub>>) -> Vec<Value> {
     fields
         .into_iter()
         .map(|f| Value::String(f.field_spec()))
@@ -87,7 +87,7 @@ impl<S> QueryStringQuery<S> {
 
     /// The fields searched (each may carry a `^weight` via [`Text::boosted`]).
     #[must_use]
-    pub fn fields(mut self, fields: impl IntoIterator<Item = Text<S>>) -> Self {
+    pub fn fields<Sub>(mut self, fields: impl IntoIterator<Item = Text<S, Sub>>) -> Self {
         self.opts
             .insert("fields".to_string(), Value::Array(field_specs(fields)));
         self
@@ -160,7 +160,7 @@ pub struct SimpleQueryStringQuery<S = Root> {
 impl<S> SimpleQueryStringQuery<S> {
     /// The fields searched (each may carry a `^weight` via [`Text::boosted`]).
     #[must_use]
-    pub fn fields(mut self, fields: impl IntoIterator<Item = Text<S>>) -> Self {
+    pub fn fields<Sub>(mut self, fields: impl IntoIterator<Item = Text<S, Sub>>) -> Self {
         self.opts
             .insert("fields".to_string(), Value::Array(field_specs(fields)));
         self
@@ -214,9 +214,9 @@ impl<S> AsQuery<S> for SimpleQueryStringQuery<S> {
 
 /// Term-centric full-text across several fields, treating them as one combined
 /// field (`combined_fields`).
-pub fn combined_fields<S>(
+pub fn combined_fields<S, Sub>(
     query: impl Into<String>,
-    fields: impl IntoIterator<Item = Text<S>>,
+    fields: impl IntoIterator<Item = Text<S, Sub>>,
 ) -> CombinedFieldsQuery<S> {
     CombinedFieldsQuery {
         query: query.into(),
@@ -498,8 +498,8 @@ impl<S> AsQuery<S> for RankFeatureQuery<S> {
 }
 
 /// Find documents similar to `like` text(s) across `fields` (`more_like_this`).
-pub fn more_like_this<S>(
-    fields: impl IntoIterator<Item = Text<S>>,
+pub fn more_like_this<S, Sub>(
+    fields: impl IntoIterator<Item = Text<S, Sub>>,
     like: impl IntoIterator<Item = impl Into<String>>,
 ) -> MoreLikeThisQuery<S> {
     MoreLikeThisQuery {

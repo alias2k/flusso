@@ -101,13 +101,13 @@ pub use handles::{
     FlussoValue, FunctionScoreQuery, Fuzziness, FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint,
     IdsQuery, Json, Keyword, KeywordMap, MapSearch, MatchQuery, MinimumShouldMatch,
     MoreLikeThisQuery, MultiMatchQuery, MultiMatchType, Nested, NestedProjection, NestedQuery,
-    NestedScoreMode, Number, NumberMap, NumericType, Object, Operator, PrefixQuery,
+    NestedScoreMode, NoSubfields, Number, NumberMap, NumericType, Object, Operator, PrefixQuery,
     QueryStringQuery, RangeQuery, RangeRelation, RankFeatureQuery, RegexpQuery, ScoreMode,
     ScriptQuery, ScriptScoreQuery, ScriptSortType, SimpleQueryStringQuery, Sort, SortMode,
     SortOrder, TermQuery, TermsQuery, Text, TextMap, ValidationMethod, WildcardQuery,
-    ZeroTermsQuery, boosting, combined_fields, constant_score, dis_max, distance_feature,
-    function_score, ids, kind, more_like_this, multi_match, query_string, rank_feature, script,
-    script_score, simple_query_string,
+    WithSubfields, ZeroTermsQuery, boosting, combined_fields, constant_score, dis_max,
+    distance_feature, function_score, ids, kind, more_like_this, multi_match, query_string,
+    rank_feature, script, script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};
@@ -196,11 +196,11 @@ pub mod prelude {
         AsQuery, Binary, Bool, BoostMode, Client, Date, DateMap, Distance, DistanceType,
         DistanceUnit, FlussoDocument, FlussoMap, FlussoMultiDocument, FlussoValue, Fuzziness, Geo,
         GeoPoint, Highlight, Hit, Json, Keyword, KeywordMap, MapSearch, MinimumShouldMatch,
-        MultiMatchType, MultiSearch, Nested, NestedScoreMode, Number, NumberMap, NumericType,
-        Object, Operator, Query, RangeRelation, Root, ScoreMode, ScriptSortType, Search,
-        SearchResponse, Sort, SortMode, SortOrder, Text, TextMap, ValidationMethod, ZeroTermsQuery,
-        boosting, combined_fields, constant_score, dis_max, distance_feature, function_score, ids,
-        kind, more_like_this, multi_match, query_string, rank_feature, script, script_score,
-        simple_query_string,
+        MultiMatchType, MultiSearch, Nested, NestedScoreMode, NoSubfields, Number, NumberMap,
+        NumericType, Object, Operator, Query, RangeRelation, Root, ScoreMode, ScriptSortType,
+        Search, SearchResponse, Sort, SortMode, SortOrder, Text, TextMap, ValidationMethod,
+        WithSubfields, ZeroTermsQuery, boosting, combined_fields, constant_score, dis_max,
+        distance_feature, function_score, ids, kind, more_like_this, multi_match, query_string,
+        rank_feature, script, script_score, simple_query_string,
     };
 }
