@@ -183,7 +183,10 @@ mistake is a compile error rather than a 400 from OpenSearch.
 
 Each operator's argument is typed too: `User::order_count().gte(_)` takes an
 `i64`, `.between(_, _)` takes two; `User::email().any_of(_)` takes an
-`IntoIterator<Item = impl Into<String>>`.
+`IntoIterator`. `Date` operators take a `String`/`&str` ISO-8601 literal or —
+with the `chrono` feature — a `NaiveDate` / `NaiveDateTime` / `DateTime<Utc>`,
+so `Order::created_at().gte(NaiveDate::from_ymd_opt(2024, 1, 1)?)` is a compile
+error if you pass a non-date type.
 
 **Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields
 (`auto_subfields`, on by default) with exact / sortable / searchable subfields,

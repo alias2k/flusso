@@ -770,6 +770,37 @@ fn subfield_accessors_target_the_right_subfield() {
 }
 
 #[test]
+fn date_accepts_bare_strings() {
+    assert_eq!(
+        Date::<Root>::at("created_at").gte("2024-01-01").to_value(),
+        json!({ "range": { "created_at": { "gte": "2024-01-01" } } })
+    );
+}
+
+#[cfg(feature = "chrono")]
+#[test]
+fn date_accepts_typed_chrono_values() {
+    use crate::chrono::{NaiveDate, NaiveDateTime};
+
+    let day = NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    assert_eq!(
+        Date::<Root>::at("created_at").gte(day).to_value(),
+        json!({ "range": { "created_at": { "gte": "2024-01-01" } } })
+    );
+
+    let stamp = day.and_hms_opt(9, 30, 0).expect("valid time");
+    let _: NaiveDateTime = stamp;
+    assert_eq!(
+        Date::<Root>::at("created_at")
+            .between(day, stamp)
+            .to_value(),
+        json!({ "range": { "created_at": {
+            "gte": "2024-01-01", "lte": "2024-01-01T09:30:00"
+        } } })
+    );
+}
+
+#[test]
 fn any_of_covers_every_handle() {
     // Number.
     assert_eq!(

@@ -181,8 +181,10 @@ pub mod kind {
 }
 
 /// A Rust type usable where a field of kind `K` is expected: as the field type
-/// in a `#[derive(FlussoDocument)]` struct, and (for [`kind::Keyword`]) as a
-/// query value on [`Keyword::eq`]/[`Keyword::any_of`].
+/// in a `#[derive(FlussoDocument)]` struct, and as a query value — for
+/// [`kind::Keyword`] on [`Keyword::eq`]/[`Keyword::any_of`], and for
+/// [`kind::Date`] on [`Date::eq`]/[`Date::gte`]/… (`String`/`&str`, or the
+/// `chrono` date types behind the `chrono` feature).
 ///
 /// Built-in leaf types are pre-implemented (`String`/`&str` for keyword, the
 /// numeric primitives for number, …). Custom enums and newtype wrappers opt in
@@ -217,6 +219,13 @@ impl FlussoValue<kind::Number> for f64 {}
 impl FlussoValue<kind::Number> for crate::Decimal {}
 
 impl FlussoValue<kind::Date> for String {}
+impl FlussoValue<kind::Date> for &str {}
+#[cfg(feature = "chrono")]
+impl FlussoValue<kind::Date> for chrono::NaiveDate {}
+#[cfg(feature = "chrono")]
+impl FlussoValue<kind::Date> for chrono::NaiveDateTime {}
+#[cfg(feature = "chrono")]
+impl FlussoValue<kind::Date> for chrono::DateTime<chrono::Utc> {}
 
 /// A Rust type usable as the **document type** of a `map` field of value kind
 /// `K`: a dynamic-key object whose values are all of kind `K`.
