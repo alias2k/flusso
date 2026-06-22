@@ -306,8 +306,8 @@ nested/object handles) are documented in the `flusso-query-derive` memory note; 
 before changing the derive.
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
-handle per value kind — `TextMap`/`KeywordMap`/`NumberMap<T>`/`DateMap` — where
-`.key(runtime_str)` returns a fully-typed leaf handle (`Text`/`Keyword`/`Number<T>`/`Date`)
+handle per value kind — `TextMap`/`KeywordMap`/`NumberMap`/`DateMap` — where
+`.key(runtime_str)` returns a fully-typed leaf handle (`Text`/`Keyword`/`Number`/`Date`)
 of the declared kind: runtime keys, compile-time value type. `TextMap::search(q)` builds a
 `MapSearch` (a `best_fields` `multi_match` over `prefer`'d keys plus a `path.*` fallback) for
 cross-key search with per-key preference; `has_key`/`exists` are presence checks. The
@@ -315,7 +315,7 @@ doc-side type is `HashMap<String, V>` (a blanket `FlussoMap<K>` impl for any
 `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` newtype wrapper; the derive's `check_type`
 map arm hard-checks a `HashMap` value type and defers a `FlussoMap<kind>` bound otherwise.
 `handle_fn` dispatches on `Mapping.map_values` (`Text`→`TextMap`, `Keyword`→`KeywordMap`,
-`Date`→`DateMap`, the numerics→`NumberMap<T>`). Phase 2 (`dynamic_templates` per-key
+`Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (`dynamic_templates` per-key
 analyzers for per-language stemming) is deferred.
 
 The query surface is **builder-based** (issue #19): each leaf operator returns a small
@@ -330,6 +330,15 @@ ones in `handles/extra.rs` (`ids`/`query_string`/`simple_query_string`/`combined
 `script`/`script_score`/`distance_feature`/`rank_feature`/`more_like_this`); `Sort` is a
 builder (`sort.rs`); search-level controls + the `Highlight` builder live on `Search`
 (`search.rs`). The `uuid` feature makes `uuid::Uuid` a `keyword` value (no `#[flusso(skip)]`).
+Every scalar handle is typed by **kind**, not by one fixed Rust type: value ops take `impl
+FlussoValue<kind::…>`. Numerics are **split per type** — `Number<kind::Byte|Short|Integer|Long|
+Float|Double|Decimal, S>` — and `FlussoValue` is impl'd by **lossless widening**, so `eq(5)` works
+on `long`/`double`/`decimal` but a float on an integer field (or `i64` on a `short`) is a compile
+error. `decimal` vs `double` is carried by `Mapping.decimal` (0-core), since both map to OS
+`double`. `Bool` is kind-based too (`kind::Bool`). `FlussoValue<K>` has a `serde::Serialize`
+supertrait. A `#[derive(FlussoValue)]` **newtype inherits its inner type's kinds** (blanket
+forward impl) — `struct Money(Decimal)` is a decimal value with no tag; only enums need an
+explicit `#[flusso(keyword|text)]` (numeric/date tags don't exist).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `apps/query-derive/tests/

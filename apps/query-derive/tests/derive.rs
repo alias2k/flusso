@@ -39,7 +39,7 @@ struct Order {
 fn generated_surface_builds_queries() -> Result {
     let body = User::query()
         .filter(User::email().eq("ada@example.com")) // keyword handle
-        .filter(User::order_count().gte(5)) // count → Number<i64>
+        .filter(User::order_count().gte(5)) // count → Number
         .query(User::full_name().matches("ada")) // text (renamed fullName)
         .filter(User::orders().any(Order::status().eq("paid"))) // nested + child handle
         .filter(User::location().within(Distance::km(10.0), GeoPoint::new(52.37, 4.90))) // geo, not projected
@@ -66,11 +66,12 @@ fn generated_surface_builds_queries() -> Result {
 // plus a `number` newtype on the orders' decimal `total`.
 
 /// A newtype wrapper over the `email` keyword (kind defaults to `keyword`).
-#[derive(serde::Deserialize, FlussoValue)]
+/// `FlussoValue` requires `Serialize` (so the type can be a query value).
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 struct Email(String);
 
 /// A newtype over the analyzed `fullName` text field — the `text` kind.
-#[derive(serde::Deserialize, FlussoValue)]
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[flusso(text)]
 struct Headline(String);
 
@@ -85,10 +86,11 @@ enum OrderStatus {
     Cancelled,
 }
 
-/// A numeric newtype over the orders' decimal `total` — the `number` kind.
-#[derive(serde::Deserialize, FlussoValue)]
-#[flusso(number)]
-struct Money(f64);
+/// A numeric newtype over the orders' decimal `total`. No kind tag — it inherits
+/// `Decimal`'s kinds, so it's a `decimal` value both as a document field and as a
+/// query value (`total().eq(Money(..))`).
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, FlussoValue)]
+struct Money(flusso_query::Decimal);
 
 #[derive(serde::Deserialize, FlussoDocument)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
@@ -124,6 +126,29 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     assert!(json.contains(r#""orders.status""#), "{json}");
     // The enum serialized to its `rename_all = "camelCase"` form, not "Paid".
     assert!(json.contains(r#""paid""#), "{json}");
+    Ok(())
+}
+
+// A `decimal` field's handle (`Number<kind::Decimal>`) accepts any value of that
+// kind — a `Decimal`, a losslessly-widening integer, or a `Decimal`-wrapping
+// newtype — with no cast. A float would be a compile error (lossy), which is the
+// whole point of the per-type split.
+#[test]
+fn number_handle_accepts_any_decimal_value_no_conversion() -> Result {
+    use flusso_query::Decimal;
+
+    let body = TypedUser::query()
+        // `rust_decimal::Decimal` — the headline case, no `as f64`.
+        .filter(TypedUser::orders().any(TypedOrder::total().eq(Decimal::new(105_050, 2))))
+        // a bare integer literal widens losslessly into `decimal`.
+        .filter(TypedUser::orders().any(TypedOrder::total().gte(100)))
+        // and a custom newtype over `Decimal`, as a query value.
+        .filter(TypedUser::orders().any(TypedOrder::total().lt(Money(Decimal::new(500_000, 2)))))
+        .body();
+
+    let json = body.to_string();
+    assert!(json.contains(r#""orders.total""#), "{json}");
+    assert!(json.contains("1050.5"), "{json}");
     Ok(())
 }
 
@@ -237,7 +262,7 @@ fn map_field_generates_typed_query_surface() -> Result {
 }
 
 /// A custom keyword/text value type usable as a map's values (`FlussoValue<Text>`).
-#[derive(serde::Deserialize, FlussoValue)]
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[flusso(text)]
 struct Locale(String);
 
@@ -276,7 +301,7 @@ struct WrappedProduct {
 
 #[test]
 fn number_and_date_maps_generate_typed_leaves() -> Result {
-    // `prices` is a `double` map → `NumberMap<f64>`; `.key()` is a `Number<f64>`
+    // `prices` is a `double` map → `NumberMap`; `.key()` is a `Number`
     // leaf with range ops (`.matches(..)` would not compile here).
     let body = Product::query()
         .filter(Product::prices().key("usd").gt(9.99))

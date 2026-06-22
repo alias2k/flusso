@@ -70,6 +70,45 @@ fn to_one_join_nullability_flows_into_the_mapping() {
     assert!(!field.nullable, "required to-one join → non-null object");
 }
 
+fn column_schema(name: &str, ty: FlussoType) -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: TableName::try_new("accounts").unwrap(),
+        db_schema: DatabaseSchema::default(),
+        primary_key: None,
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![Field {
+            field: FieldName::try_new(name).unwrap(),
+            options: Default::default(),
+            source: FieldSource::Column(crate::config::Column {
+                column: ColumnName::try_new(name).unwrap(),
+                ty,
+                nullable: false,
+                transforms: vec![],
+                default: None,
+            }),
+        }],
+    }
+}
+
+#[test]
+fn decimal_maps_to_double_but_flags_decimal() {
+    let m = column_schema("creditLimit", FlussoType::Decimal)
+        .resolve(IndexName::try_new("accounts").unwrap());
+    let field = &m.fields[0];
+    assert_eq!(field.mapping.mapping_type, MappingType::Double);
+    assert!(field.mapping.decimal, "a `decimal` column flags `decimal`");
+
+    // A true `double` is the same OS type but must NOT be flagged.
+    let m =
+        column_schema("ratio", FlussoType::Double).resolve(IndexName::try_new("accounts").unwrap());
+    let field = &m.fields[0];
+    assert_eq!(field.mapping.mapping_type, MappingType::Double);
+    assert!(!field.mapping.decimal, "a `double` column is not a decimal");
+}
+
 #[test]
 fn ids_projects_to_a_non_null_element_typed_array() {
     let mapping = ids_schema(FlussoType::Long).resolve(IndexName::try_new("users").unwrap());

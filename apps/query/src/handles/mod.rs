@@ -178,9 +178,30 @@ pub mod kind {
     /// A `text` field — an analyzed string.
     #[derive(Debug)]
     pub enum Text {}
-    /// A numeric field (`byte`…`double`, `scaled_float`).
+    /// A `boolean` field.
     #[derive(Debug)]
-    pub enum Number {}
+    pub enum Bool {}
+    /// A `byte` field (`i8`).
+    #[derive(Debug)]
+    pub enum Byte {}
+    /// A `short` field (`i16`).
+    #[derive(Debug)]
+    pub enum Short {}
+    /// An `integer` field (`i32`).
+    #[derive(Debug)]
+    pub enum Integer {}
+    /// A `long` field (`i64`).
+    #[derive(Debug)]
+    pub enum Long {}
+    /// A `float` / `half_float` field (`f32`).
+    #[derive(Debug)]
+    pub enum Float {}
+    /// A `double` field (`f64`).
+    #[derive(Debug)]
+    pub enum Double {}
+    /// A `decimal` / `scaled_float` field (`rust_decimal::Decimal`).
+    #[derive(Debug)]
+    pub enum Decimal {}
     /// A `date`/`timestamp` field — an ISO-8601 string.
     #[derive(Debug)]
     pub enum Date {}
@@ -203,7 +224,7 @@ pub mod kind {
     label = "unsupported field type",
     note = "use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `{Self}`"
 )]
-pub trait FlussoValue<K> {}
+pub trait FlussoValue<K>: serde::Serialize {}
 
 impl FlussoValue<kind::Keyword> for String {}
 impl FlussoValue<kind::Keyword> for &str {}
@@ -215,14 +236,25 @@ impl FlussoValue<kind::Keyword> for &uuid::Uuid {}
 impl FlussoValue<kind::Text> for String {}
 impl FlussoValue<kind::Text> for &str {}
 
-impl FlussoValue<kind::Number> for i8 {}
-impl FlussoValue<kind::Number> for i16 {}
-impl FlussoValue<kind::Number> for i32 {}
-impl FlussoValue<kind::Number> for i64 {}
-impl FlussoValue<kind::Number> for f32 {}
-impl FlussoValue<kind::Number> for f64 {}
+impl FlussoValue<kind::Bool> for bool {}
+
+// A numeric type is a valid value for a numeric kind iff it widens into that
+// kind's Rust leaf **without loss** — so `Order::age().eq(5)` works on an `i64`
+// field, an `f64` field rejects an `i64` (precision), and an integer field
+// rejects a float. (`i32`→`f64` and any int→`Decimal` are lossless, so bare
+// literals work on `double`/`decimal`; `byte`/`short` need a typed literal.)
+macro_rules! number_values {
+    ($kind:path: $($ty:ty),+ $(,)?) => { $(impl FlussoValue<$kind> for $ty {})+ };
+}
+number_values!(kind::Byte: i8);
+number_values!(kind::Short: i8, i16);
+number_values!(kind::Integer: i8, i16, i32);
+number_values!(kind::Long: i8, i16, i32, i64);
+number_values!(kind::Float: i8, i16, f32);
+number_values!(kind::Double: i8, i16, i32, f32, f64);
+number_values!(kind::Decimal: i8, i16, i32, i64);
 #[cfg(feature = "decimal")]
-impl FlussoValue<kind::Number> for crate::Decimal {}
+impl FlussoValue<kind::Decimal> for crate::Decimal {}
 
 impl FlussoValue<kind::Date> for String {}
 impl FlussoValue<kind::Date> for &str {}

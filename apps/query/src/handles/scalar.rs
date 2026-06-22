@@ -20,12 +20,33 @@ use crate::query::{AsQuery, Query, Root};
 /// (`String`/`&str` pass straight through; `chrono` types serialize to their
 /// ISO-8601 string). Mirrors `keyword_term` — a non-string serialization falls
 /// back to its display form rather than failing.
-fn date_value(value: &(impl FlussoValue<kind::Date> + serde::Serialize)) -> Value {
+fn date_value(value: &impl FlussoValue<kind::Date>) -> Value {
     match serde_json::to_value(value) {
         Ok(Value::String(string)) => Value::String(string),
         Ok(other) => Value::String(other.to_string()),
         Err(_) => Value::String(String::new()),
     }
+}
+
+/// The JSON value for a numeric input, from its serde serialization. The
+/// primitives serialize straight to a JSON number; `rust_decimal::Decimal`
+/// serializes to a string (the workspace's `serde-with-str`), so parse it back
+/// to a number — the field is numeric, so a clean number is what it queries.
+/// Generic over the numeric kind `K` (`Byte`…`Decimal`).
+fn number_value<K>(value: &impl FlussoValue<K>) -> Value {
+    match serde_json::to_value(value) {
+        Ok(Value::String(string)) => string
+            .parse::<serde_json::Number>()
+            .map_or(Value::String(string), Value::Number),
+        Ok(other) => other,
+        Err(_) => Value::Null,
+    }
+}
+
+/// The JSON value for a boolean input, from its serde serialization (`bool` →
+/// `Value::Bool`; a bool newtype serializes through to the same).
+fn bool_value(value: &impl FlussoValue<kind::Bool>) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
 /// An exact-match (`term`) clause for a non-string value (number, bool, date),
@@ -175,9 +196,9 @@ impl<S> Bool<S> {
         }
     }
 
-    /// Exact match.
-    pub fn eq(&self, value: bool) -> EqQuery<S> {
-        EqQuery::new(&self.path, Value::Bool(value))
+    /// Exact match. Accepts a `bool`, or a `#[derive(FlussoValue)]` bool newtype.
+    pub fn eq(&self, value: impl FlussoValue<kind::Bool>) -> EqQuery<S> {
+        EqQuery::new(&self.path, bool_value(&value))
     }
 
     /// The field has a non-null value.
@@ -194,18 +215,20 @@ impl<S> Bool<S> {
     }
 }
 
-/// A numeric field. `T` is the Rust scalar; `S` is the scope (defaults to
-/// [`Root`], so `Number<i64>` is a root-scope handle).
+/// A numeric field. `K` is the numeric kind ([`kind::Byte`]…[`kind::Decimal`]),
+/// `S` the scope. Value operators accept any value of that kind — the matching
+/// primitive, a losslessly-widening one (`i32` on a `Long`/`Double`/`Decimal`
+/// field), `rust_decimal::Decimal` (`decimal` feature, on a `Decimal` field), or
+/// a `#[derive(FlussoValue)]` numeric newtype — so a custom money/quantity type
+/// queries with no cast. A lossy value is a compile error (a float on an integer
+/// field, an `i64` on a `Short`).
 #[derive(Debug, Clone)]
-pub struct Number<T, S = Root> {
+pub struct Number<K, S = Root> {
     path: String,
-    _marker: PhantomData<fn() -> (T, S)>,
+    _marker: PhantomData<fn() -> (K, S)>,
 }
 
-impl<T, S> Number<T, S>
-where
-    T: Into<Value> + Copy,
-{
+impl<K, S> Number<K, S> {
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -214,39 +237,42 @@ where
     }
 
     /// Exact match.
-    pub fn eq(&self, value: T) -> EqQuery<S> {
-        EqQuery::new(&self.path, value.into())
+    pub fn eq(&self, value: impl FlussoValue<K>) -> EqQuery<S> {
+        EqQuery::new(&self.path, number_value(&value))
     }
 
     /// Match any of the given values.
-    pub fn any_of(&self, values: impl IntoIterator<Item = T>) -> TermsQuery<S> {
-        let array = values.into_iter().map(Into::into).collect();
+    pub fn any_of(&self, values: impl IntoIterator<Item = impl FlussoValue<K>>) -> TermsQuery<S> {
+        let array = values.into_iter().map(|v| number_value(&v)).collect();
         TermsQuery::new(&self.path, array)
     }
 
     /// Strictly less than `value`.
-    pub fn lt(&self, value: T) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("lt", value.into())])
+    pub fn lt(&self, value: impl FlussoValue<K>) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("lt", number_value(&value))])
     }
 
     /// Less than or equal to `value`.
-    pub fn lte(&self, value: T) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("lte", value.into())])
+    pub fn lte(&self, value: impl FlussoValue<K>) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("lte", number_value(&value))])
     }
 
     /// Strictly greater than `value`.
-    pub fn gt(&self, value: T) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("gt", value.into())])
+    pub fn gt(&self, value: impl FlussoValue<K>) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("gt", number_value(&value))])
     }
 
     /// Greater than or equal to `value`.
-    pub fn gte(&self, value: T) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("gte", value.into())])
+    pub fn gte(&self, value: impl FlussoValue<K>) -> RangeQuery<S> {
+        RangeQuery::new(&self.path, vec![("gte", number_value(&value))])
     }
 
     /// Inclusive range `[low, high]`.
-    pub fn between(&self, low: T, high: T) -> RangeQuery<S> {
-        RangeQuery::new(&self.path, vec![("gte", low.into()), ("lte", high.into())])
+    pub fn between(&self, low: impl FlussoValue<K>, high: impl FlussoValue<K>) -> RangeQuery<S> {
+        RangeQuery::new(
+            &self.path,
+            vec![("gte", number_value(&low)), ("lte", number_value(&high))],
+        )
     }
 
     /// The field has a non-null value.
@@ -280,44 +306,44 @@ impl<S> Date<S> {
 
     /// Exact match. Accepts a `String`/`&str`, or — with the `chrono` feature —
     /// a `NaiveDate` / `NaiveDateTime` / `DateTime<Utc>`.
-    pub fn eq(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> EqQuery<S> {
+    pub fn eq(&self, value: impl FlussoValue<kind::Date>) -> EqQuery<S> {
         EqQuery::new(&self.path, date_value(&value))
     }
 
     /// Match any of the given dates (`String`/`&str` or `chrono` date types).
     pub fn any_of(
         &self,
-        values: impl IntoIterator<Item = impl FlussoValue<kind::Date> + serde::Serialize>,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Date>>,
     ) -> TermsQuery<S> {
         let array = values.into_iter().map(|v| date_value(&v)).collect();
         TermsQuery::new(&self.path, array)
     }
 
     /// Strictly before `value`.
-    pub fn lt(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+    pub fn lt(&self, value: impl FlussoValue<kind::Date>) -> RangeQuery<S> {
         RangeQuery::new(&self.path, vec![("lt", date_value(&value))])
     }
 
     /// At or before `value`.
-    pub fn lte(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+    pub fn lte(&self, value: impl FlussoValue<kind::Date>) -> RangeQuery<S> {
         RangeQuery::new(&self.path, vec![("lte", date_value(&value))])
     }
 
     /// Strictly after `value`.
-    pub fn gt(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+    pub fn gt(&self, value: impl FlussoValue<kind::Date>) -> RangeQuery<S> {
         RangeQuery::new(&self.path, vec![("gt", date_value(&value))])
     }
 
     /// At or after `value`.
-    pub fn gte(&self, value: impl FlussoValue<kind::Date> + serde::Serialize) -> RangeQuery<S> {
+    pub fn gte(&self, value: impl FlussoValue<kind::Date>) -> RangeQuery<S> {
         RangeQuery::new(&self.path, vec![("gte", date_value(&value))])
     }
 
     /// Inclusive range `[low, high]`.
     pub fn between(
         &self,
-        low: impl FlussoValue<kind::Date> + serde::Serialize,
-        high: impl FlussoValue<kind::Date> + serde::Serialize,
+        low: impl FlussoValue<kind::Date>,
+        high: impl FlussoValue<kind::Date>,
     ) -> RangeQuery<S> {
         RangeQuery::new(
             &self.path,

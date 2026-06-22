@@ -182,6 +182,15 @@ pub struct Mapping {
     /// a consumer turning the mapping into typed bindings can tell a `map` from a
     /// plain `object` and offer a value-kind-typed handle.
     pub map_values: Option<MappingType>,
+    /// Whether this numeric field came from a [`FlussoType::Decimal`] — a PG
+    /// `numeric`/`decimal`. It maps to OpenSearch `double` like a true `double`,
+    /// so [`mapping_type`](Self::mapping_type) alone can't tell them apart.
+    /// Internal metadata only — **not** serialized into the index body. It lets a
+    /// consumer turning the mapping into typed bindings offer a `Decimal`-kind
+    /// handle (exact) instead of an `f64`-kind one.
+    ///
+    /// [`FlussoType::Decimal`]: super::FlussoType::Decimal
+    pub decimal: bool,
 }
 
 /// Serializes the way OpenSearch expects a field mapping — `{ "type": …, …extra }`

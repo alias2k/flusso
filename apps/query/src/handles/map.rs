@@ -3,7 +3,7 @@
 //! A `map` field (e.g. translations `{"en": …, "it": …}`) has runtime-determined
 //! keys but a compile-time-known value kind. That split is the whole point:
 //! `.key(runtime_str)` returns a **fully-typed** leaf handle of the declared kind
-//! — [`Text`] for a [`TextMap`], [`Keyword`] for a [`KeywordMap`], [`Number<T>`]
+//! — [`Text`] for a [`TextMap`], [`Keyword`] for a [`KeywordMap`], [`Number`]
 //! for a [`NumberMap`], [`Date`] for a [`DateMap`] — so a specific key is queried
 //! with full type safety while keys stay open-ended.
 //!
@@ -103,23 +103,27 @@ map_handle!(
 );
 
 /// A dynamic-key object whose values are numbers (`map` with a numeric value
-/// kind — `short`…`double`, `decimal`). [`key`](Self::key) yields a
-/// [`Number<T>`] leaf for range/exact operators (`gt`/`between`/`eq`/…); `T` is
-/// the numeric type the schema's value kind implies (e.g. `i64` for `long`,
-/// `f64` for `double`). `has_key`/`exists` are presence checks. No `search` —
-/// numbers aren't full text.
+/// kind — `short`…`double`, `decimal`). [`key`](Self::key) yields a [`Number`]
+/// leaf for range/exact operators (`gt`/`between`/`eq`/…). `has_key`/`exists`
+/// are presence checks. No `search` — numbers aren't full text.
 #[derive(Debug, Clone)]
-pub struct NumberMap<T, S = Root> {
+pub struct NumberMap<K, S = Root> {
     path: String,
-    _marker: PhantomData<fn() -> (T, S)>,
+    _marker: PhantomData<fn() -> (K, S)>,
 }
 
-impl<T, S> NumberMap<T, S> {
+impl<K, S> NumberMap<K, S> {
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             _marker: PhantomData,
         }
+    }
+
+    /// A specific runtime key → a [`Number`] leaf handle of value kind `K`,
+    /// queried like any other numeric field.
+    pub fn key(&self, key: impl AsRef<str>) -> Number<K, S> {
+        Number::at(format!("{}.{}", self.path, key.as_ref()))
     }
 
     /// The map holds the given key with a non-null value.
@@ -130,17 +134,6 @@ impl<T, S> NumberMap<T, S> {
     /// The map field itself is present (has at least one key).
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
-    }
-}
-
-impl<T, S> NumberMap<T, S>
-where
-    T: Into<serde_json::Value> + Copy,
-{
-    /// A specific runtime key → a fully-typed [`Number<T>`] leaf handle,
-    /// queried like any other numeric field.
-    pub fn key(&self, key: impl AsRef<str>) -> Number<T, S> {
-        Number::at(format!("{}.{}", self.path, key.as_ref()))
     }
 }
 

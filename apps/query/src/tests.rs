@@ -29,7 +29,7 @@ impl User {
     fn full_name() -> Text {
         Text::at("fullName")
     }
-    fn order_count() -> Number<i64> {
+    fn order_count() -> Number<crate::kind::Long> {
         Number::at("orderCount")
     }
     fn orders() -> Nested<Root, Order> {
@@ -260,7 +260,9 @@ fn operators_render_expected_clauses() {
     );
 
     assert_eq!(
-        Number::<i64, Root>::at("n").between(1, 10).to_value(),
+        Number::<crate::kind::Long, Root>::at("n")
+            .between(1, 10)
+            .to_value(),
         json!({ "range": { "n": { "gte": 1, "lte": 10 } } })
     );
 
@@ -322,7 +324,7 @@ fn builders_render_shorthand_without_options() {
         json!({ "term": { "status": "paid" } })
     );
     assert_eq!(
-        Number::<i64, Root>::at("n").gte(5).to_value(),
+        Number::<crate::kind::Long, Root>::at("n").gte(5).to_value(),
         json!({ "range": { "n": { "gte": 5 } } })
     );
 }
@@ -351,7 +353,10 @@ fn universal_boost_and_name_expand_the_clause() {
 
     // `range` merges options into the bounds object.
     assert_eq!(
-        Number::<i64, Root>::at("n").gte(5).boost(2.0).to_value(),
+        Number::<crate::kind::Long, Root>::at("n")
+            .gte(5)
+            .boost(2.0)
+            .to_value(),
         json!({ "range": { "n": { "gte": 5, "boost": 2.0 } } })
     );
 }
@@ -914,7 +919,7 @@ fn enum_params_render_their_tokens() {
 
     // range relation (uppercase tokens).
     assert_eq!(
-        Number::<i64, Root>::at("n")
+        Number::<crate::kind::Long, Root>::at("n")
             .between(1, 10)
             .relation(RangeRelation::Within)
             .to_value(),
@@ -939,7 +944,9 @@ fn enum_params_render_their_tokens() {
 fn any_of_covers_every_handle() {
     // Number.
     assert_eq!(
-        Number::<i64, Root>::at("n").any_of([1, 2, 3]).to_value(),
+        Number::<crate::kind::Long, Root>::at("n")
+            .any_of([1, 2, 3])
+            .to_value(),
         json!({ "terms": { "n": [1, 2, 3] } })
     );
 

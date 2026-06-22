@@ -1,0 +1,52 @@
+error[E0277]: `{float}` is not a valid value for a `flusso_query::kind::Long` field
+  --> tests/ui/value_numeric_kind_mismatch.rs:15:36
+   |
+15 |     let _ = User::order_count().eq(1.5);
+   |                                 -- ^^^ unsupported field type
+   |                                 |
+   |                                 required by a bound introduced by this call
+   |
+   = help: the trait `FlussoValue<flusso_query::kind::Long>` is not implemented for `{float}`
+   = note: use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `{float}`
+   = help: the following other types implement trait `FlussoValue<K>`:
+             `f32` implements `FlussoValue<flusso_query::kind::Double>`
+             `f32` implements `FlussoValue<flusso_query::kind::Float>`
+             `f64` implements `FlussoValue<flusso_query::kind::Double>`
+             `i16` implements `FlussoValue<Integer>`
+             `i16` implements `FlussoValue<flusso_query::kind::Decimal>`
+             `i16` implements `FlussoValue<flusso_query::kind::Double>`
+             `i16` implements `FlussoValue<flusso_query::kind::Float>`
+             `i16` implements `FlussoValue<flusso_query::kind::Long>`
+           and $N others
+note: required by a bound in `flusso_query::Number::<K, S>::eq`
+  --> $WORKSPACE/apps/query/src/handles/scalar.rs
+   |
+   |     pub fn eq(&self, value: impl FlussoValue<K>) -> EqQuery<S> {
+   |                                  ^^^^^^^^^^^^^^ required by this bound in `Number::<K, S>::eq`
+
+error[E0277]: `&str` is not a valid value for a `flusso_query::kind::Long` field
+  --> tests/ui/value_numeric_kind_mismatch.rs:17:36
+   |
+17 |     let _ = User::order_count().eq("nope");
+   |                                 -- ^^^^^^ unsupported field type
+   |                                 |
+   |                                 required by a bound introduced by this call
+   |
+   = help: the trait `FlussoValue<flusso_query::kind::Long>` is not implemented for `&str`
+   = note: use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `&str`
+help: the following other types implement trait `FlussoValue<K>`
+  --> $WORKSPACE/apps/query/src/handles/mod.rs
+   |
+   | impl FlussoValue<kind::Keyword> for &str {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `FlussoValue<flusso_query::kind::Keyword>`
+...
+   | impl FlussoValue<kind::Text> for &str {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `FlussoValue<flusso_query::kind::Text>`
+...
+   | impl FlussoValue<kind::Date> for &str {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `FlussoValue<flusso_query::kind::Date>`
+note: required by a bound in `flusso_query::Number::<K, S>::eq`
+  --> $WORKSPACE/apps/query/src/handles/scalar.rs
+   |
+   |     pub fn eq(&self, value: impl FlussoValue<K>) -> EqQuery<S> {
+   |                                  ^^^^^^^^^^^^^^ required by this bound in `Number::<K, S>::eq`

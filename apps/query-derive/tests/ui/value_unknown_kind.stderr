@@ -1,0 +1,5 @@
+error: unknown `flusso` kind (expected `keyword` or `text`; numeric/date newtypes inherit their inner type's kinds, so need no tag)
+ --> tests/ui/value_unknown_kind.rs:6:10
+  |
+6 | #[flusso(number)]
+  |          ^^^^^^

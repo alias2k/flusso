@@ -236,7 +236,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             // bound — satisfied by `#[derive(FlussoValue)]`. Primitives (a real
             // mismatch like `i32` in a keyword) and non-path types still
             // hard-error here with the precise, schema-aware message.
-            if let Some(kind) = value_kind(scalar)
+            if let Some(kind) = kind_of(scalar, resolved.mapping.decimal)
                 && found.as_deref().is_some_and(|f| !is_primitive(Some(f)))
             {
                 return Ok(Some(value_assert(inner, kind.marker())));
@@ -246,25 +246,27 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
     }
 }
 
-/// The [`Kind`] a scalar mapping accepts custom values for, or `None` for kinds
-/// without a `FlussoValue` escape hatch (`bool`, geo, binary — a custom type
-/// there is almost always a mistake). The marker tokens themselves live on
-/// [`Kind::marker`]; this only classifies the mapping type.
-fn value_kind(mapping_type: &MappingType) -> Option<Kind> {
-    match mapping_type {
-        MappingType::Keyword => Some(Kind::Keyword),
-        MappingType::Text => Some(Kind::Text),
-        MappingType::Byte
-        | MappingType::Short
-        | MappingType::Integer
-        | MappingType::Long
-        | MappingType::Float
-        | MappingType::HalfFloat
-        | MappingType::Double
-        | MappingType::ScaledFloat => Some(Kind::Number),
-        MappingType::Date => Some(Kind::Date),
-        _ => None,
-    }
+/// The [`Kind`] a scalar mapping accepts values for, or `None` for kinds without
+/// a `FlussoValue` escape hatch (geo, binary — a custom type there is almost
+/// always a mistake). Numerics split per type so values can't cross losslessly;
+/// `decimal` carries the `double`-vs-`decimal` distinction the mapping type
+/// erases. The marker tokens live on [`Kind::marker`]; this only classifies.
+fn kind_of(mapping_type: &MappingType, decimal: bool) -> Option<Kind> {
+    Some(match mapping_type {
+        MappingType::Keyword => Kind::Keyword,
+        MappingType::Text => Kind::Text,
+        MappingType::Boolean => Kind::Bool,
+        MappingType::Byte => Kind::Byte,
+        MappingType::Short => Kind::Short,
+        MappingType::Integer => Kind::Integer,
+        MappingType::Long => Kind::Long,
+        MappingType::Float | MappingType::HalfFloat => Kind::Float,
+        MappingType::Double if decimal => Kind::Decimal,
+        MappingType::Double => Kind::Double,
+        MappingType::ScaledFloat => Kind::Decimal,
+        MappingType::Date => Kind::Date,
+        _ => return None,
+    })
 }
 
 /// A zero-cost assertion that `ty` implements `FlussoValue<kind>`, reported at
@@ -289,7 +291,9 @@ fn check_map_type(
     values: &MappingType,
 ) -> syn::Result<Option<TokenStream>> {
     let os = values.name();
-    let kind = value_kind(values);
+    // Map value kinds carry no decimal flag (`map_values` is just a mapping
+    // type), so a `double`-valued map keys to the `Double` kind.
+    let kind = kind_of(values, false);
     match hashmap_value(inner) {
         Some(value_ty) => {
             let expected = expected_leaves(values);
@@ -394,8 +398,12 @@ fn expected_leaves(mapping_type: &MappingType) -> Vec<&'static str> {
         MappingType::Integer => vec!["i32"],
         MappingType::Long => vec!["i64"],
         MappingType::Float | MappingType::HalfFloat => vec!["f32"],
-        MappingType::Double => vec!["f64"],
-        MappingType::ScaledFloat => vec!["f64", "Decimal"],
+        // `f64` is the primitive leaf for `double` and `scaled_float` (and a
+        // `decimal` column, which also maps to `double`). A `Decimal` document
+        // field isn't name-matched here — it's not a primitive, so it routes
+        // through the deferred `FlussoValue<kind::Decimal>` bound (real type
+        // checking, not an ident match).
+        MappingType::Double | MappingType::ScaledFloat => vec!["f64"],
         MappingType::Date => vec![
             "String",
             "NaiveDate",
@@ -433,7 +441,6 @@ fn is_primitive(ident: Option<&str>) -> bool {
                 | "usize"
                 | "f32"
                 | "f64"
-                | "Decimal"
         )
     )
 }
@@ -513,6 +520,22 @@ fn handle_fn(
             quote! { ::flusso_query::#ty::<#scope>::at(#path) },
         ))
     };
+    // A numeric handle carries its value kind: `Number<kind::Long, S>` etc., so a
+    // value of the wrong numeric type is a compile error.
+    let number = |kind: Kind| {
+        let marker = kind.marker();
+        Some((
+            quote! { ::flusso_query::Number<#marker, #scope> },
+            quote! { ::flusso_query::Number::<#marker, #scope>::at(#path) },
+        ))
+    };
+    let number_map = |kind: Kind| {
+        let marker = kind.marker();
+        Some((
+            quote! { ::flusso_query::NumberMap<#marker, #scope> },
+            quote! { ::flusso_query::NumberMap::<#marker, #scope>::at(#path) },
+        ))
+    };
     // A `text`/`keyword` handle carries flusso's auto subfields (`.keyword()` /
     // `.text()` / `.keyword_lowercase()`) only when the sink provisions them:
     // `auto_subfields` on, a scalar field (no children), and no custom `fields`
@@ -535,31 +558,24 @@ fn handle_fn(
             )
         })
     };
-    let number = |inner: &str| {
-        let inner = Ident::new(inner, Span::call_site());
-        Some((
-            quote! { ::flusso_query::Number<#inner, #scope> },
-            quote! { ::flusso_query::Number::<#inner, #scope>::at(#path) },
-        ))
-    };
-    let number_map = |inner: &str| {
-        let inner = Ident::new(inner, Span::call_site());
-        Some((
-            quote! { ::flusso_query::NumberMap<#inner, #scope> },
-            quote! { ::flusso_query::NumberMap::<#inner, #scope>::at(#path) },
-        ))
-    };
 
     let (ret, ctor) = match &resolved.mapping.mapping_type {
         MappingType::Keyword => string_handle("Keyword"),
         MappingType::Text => string_handle("Text"),
         MappingType::Boolean => simple("Bool"),
-        MappingType::Byte => number("i8"),
-        MappingType::Short => number("i16"),
-        MappingType::Integer => number("i32"),
-        MappingType::Long => number("i64"),
-        MappingType::Float | MappingType::HalfFloat => number("f32"),
-        MappingType::Double | MappingType::ScaledFloat => number("f64"),
+        // Each numeric mapping → a `Number` handle of its kind (`decimal` carries
+        // the double-vs-decimal split), so values are type-checked per kind.
+        MappingType::Byte
+        | MappingType::Short
+        | MappingType::Integer
+        | MappingType::Long
+        | MappingType::Float
+        | MappingType::HalfFloat
+        | MappingType::Double
+        | MappingType::ScaledFloat => number(kind_of(
+            &resolved.mapping.mapping_type,
+            resolved.mapping.decimal,
+        )?),
         MappingType::Date => simple("Date"),
         MappingType::Other(name) if name == "geo_point" => simple("Geo"),
         MappingType::Other(name) if name == "binary" => simple("Binary"),
@@ -570,12 +586,16 @@ fn handle_fn(
             Some(MappingType::Text) => simple("TextMap"),
             Some(MappingType::Keyword) => simple("KeywordMap"),
             Some(MappingType::Date) => simple("DateMap"),
-            Some(MappingType::Byte) => number_map("i8"),
-            Some(MappingType::Short) => number_map("i16"),
-            Some(MappingType::Integer) => number_map("i32"),
-            Some(MappingType::Long) => number_map("i64"),
-            Some(MappingType::Float | MappingType::HalfFloat) => number_map("f32"),
-            Some(MappingType::Double | MappingType::ScaledFloat) => number_map("f64"),
+            Some(
+                value @ (MappingType::Byte
+                | MappingType::Short
+                | MappingType::Integer
+                | MappingType::Long
+                | MappingType::Float
+                | MappingType::HalfFloat
+                | MappingType::Double
+                | MappingType::ScaledFloat),
+            ) => number_map(kind_of(value, false)?),
             // Any other value kind has no typed map handle (the conversion
             // rejects non-leaf map values, so this is defensive) — fall back to
             // the opaque object handle so the field is still addressable.
