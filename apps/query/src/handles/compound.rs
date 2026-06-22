@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, common_opts, wrap};
+use super::{BoostMode, Common, ScoreMode, common_opts, wrap};
 use crate::query::{AsQuery, Query, Root};
 
 fn clause_value<S>(query: impl AsQuery<S>) -> Value {
@@ -185,21 +185,24 @@ impl<S> FunctionScoreQuery<S> {
         self
     }
 
-    /// How the functions combine (`"multiply"` default / `"sum"` / `"avg"` /
-    /// `"first"` / `"max"` / `"min"`).
+    /// How the functions combine ([`ScoreMode::Multiply`] is the default).
     #[must_use]
-    pub fn score_mode(mut self, score_mode: impl Into<String>) -> Self {
-        self.opts
-            .insert("score_mode".to_string(), Value::String(score_mode.into()));
+    pub fn score_mode(mut self, score_mode: ScoreMode) -> Self {
+        self.opts.insert(
+            "score_mode".to_string(),
+            Value::String(score_mode.as_str().to_string()),
+        );
         self
     }
 
-    /// How the function score combines with the query score (`"multiply"`
-    /// default / `"replace"` / `"sum"` / `"avg"` / `"max"` / `"min"`).
+    /// How the function score combines with the query score
+    /// ([`BoostMode::Multiply`] is the default).
     #[must_use]
-    pub fn boost_mode(mut self, boost_mode: impl Into<String>) -> Self {
-        self.opts
-            .insert("boost_mode".to_string(), Value::String(boost_mode.into()));
+    pub fn boost_mode(mut self, boost_mode: BoostMode) -> Self {
+        self.opts.insert(
+            "boost_mode".to_string(),
+            Value::String(boost_mode.as_str().to_string()),
+        );
         self
     }
 

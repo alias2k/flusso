@@ -155,7 +155,7 @@ Each leaf operator returns a small **builder** carrying that query's options plu
 
 ```rust
 User::query()
-    .should(User::full_name().matches("acme").boost(2.0).fuzziness("AUTO"))
+    .should(User::full_name().matches("acme").boost(2.0).fuzziness(Fuzziness::Auto))
     .should(User::code().keyword().wildcard("*acme*").case_insensitive())
     .min_should_match(1)                         // make a should-group a real filter
     .filter(User::owner_id().eq(owner_uuid))     // uuid keyword (feature) — no skip
@@ -165,6 +165,8 @@ User::query()
 ```
 
 Per-type options (all optional): `case_insensitive` on `term`/`prefix`/`wildcard`/`regexp`; `rewrite` (prefix/wildcard); `flags`/`max_determinized_states` (regexp); `fuzziness`/`prefix_length`/`max_expansions`/`transpositions` (fuzzy); `fuzziness`/`operator`/`minimum_should_match`/`prefix_length`/`analyzer`/`zero_terms_query`/`lenient` (`matches`); `slop`/`analyzer` (phrase); `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` (`multi_match`); `format`/`time_zone`/`relation` (range); `distance_type`/`validation_method` (geo `within`); `score_mode`/`ignore_unmapped` (nested `any`).
+
+The enumerable params are **closed enums**, not strings (typo → compile error): `Operator { And, Or }` (`operator`/`default_operator`); `Fuzziness { Auto, AutoBounds(u32,u32), Edits(u32) }`; `MultiMatchType` (`multi_match` `type`); `ZeroTermsQuery { None, All }`; `RangeRelation { Intersects, Contains, Within }`; `ScoreMode`/`BoostMode` (function_score); `NestedScoreMode` (nested — has `None` for a filter-only clause). Open-ended params (`analyzer`/`format`/`time_zone`/`minimum_should_match`/`flags`) stay `String`.
 
 > `.or()` / `.and()` / `.not()` on a **builder** need `use flusso_query::AsQuery;` (provided trait methods; inherent `Query` methods are unaffected). Composing via the `Search` clauses needs no import.
 

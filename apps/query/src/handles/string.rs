@@ -12,8 +12,8 @@ use std::marker::PhantomData;
 use serde_json::{Map, Value};
 
 use super::{
-    Common, FlussoValue, Sort, SortOrder, TermsQuery, common_opts, exists_q, keyed_value_query,
-    kind, wrap,
+    Common, FlussoValue, Fuzziness, MultiMatchType, Operator, Sort, SortOrder, TermsQuery,
+    ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
 };
 use crate::query::{AsQuery, Query, Root};
 
@@ -274,7 +274,7 @@ impl<S> AsQuery<S> for RegexpQuery<S> {
 pub struct FuzzyQuery<S = Root> {
     path: String,
     value: String,
-    fuzziness: Option<String>,
+    fuzziness: Option<Value>,
     prefix_length: Option<u32>,
     max_expansions: Option<u32>,
     transpositions: Option<bool>,
@@ -296,10 +296,10 @@ impl<S> FuzzyQuery<S> {
         }
     }
 
-    /// Maximum edit distance — `"AUTO"` (the default) or an integer-as-string.
+    /// Maximum edit distance ([`Fuzziness::Auto`] is the usual choice).
     #[must_use]
-    pub fn fuzziness(mut self, fuzziness: impl Into<String>) -> Self {
-        self.fuzziness = Some(fuzziness.into());
+    pub fn fuzziness(mut self, fuzziness: Fuzziness) -> Self {
+        self.fuzziness = Some(fuzziness.to_value());
         self
     }
 
@@ -331,7 +331,7 @@ impl<S> AsQuery<S> for FuzzyQuery<S> {
     fn into_query(self) -> Option<Query<S>> {
         let mut opts = Map::new();
         if let Some(fuzziness) = self.fuzziness {
-            opts.insert("fuzziness".to_string(), Value::String(fuzziness));
+            opts.insert("fuzziness".to_string(), fuzziness);
         }
         if let Some(prefix_length) = self.prefix_length {
             opts.insert("prefix_length".to_string(), Value::from(prefix_length));
@@ -465,16 +465,17 @@ impl<S> MatchQuery<S> {
         self
     }
 
-    /// Edit distance for analyzed terms — `"AUTO"` or an integer-as-string.
+    /// Edit distance for analyzed terms ([`Fuzziness::Auto`] is the usual choice).
     #[must_use]
-    pub fn fuzziness(self, fuzziness: impl Into<String>) -> Self {
-        self.set("fuzziness", Value::String(fuzziness.into()))
+    pub fn fuzziness(self, fuzziness: Fuzziness) -> Self {
+        self.set("fuzziness", fuzziness.to_value())
     }
 
-    /// Combine analyzed terms with `"AND"` or `"OR"` (default `"OR"`).
+    /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`]
+    /// (default `Or`).
     #[must_use]
-    pub fn operator(self, operator: impl Into<String>) -> Self {
-        self.set("operator", Value::String(operator.into()))
+    pub fn operator(self, operator: Operator) -> Self {
+        self.set("operator", Value::String(operator.as_str().to_string()))
     }
 
     /// How many of the analyzed terms must match (e.g. `"75%"`, `"2"`).
@@ -507,10 +508,11 @@ impl<S> MatchQuery<S> {
         self.set("slop", Value::from(slop))
     }
 
-    /// Behavior when analysis yields no terms (`"none"` or `"all"`).
+    /// Behavior when analysis yields no terms ([`ZeroTermsQuery::None`] or
+    /// [`ZeroTermsQuery::All`]).
     #[must_use]
-    pub fn zero_terms_query(self, value: impl Into<String>) -> Self {
-        self.set("zero_terms_query", Value::String(value.into()))
+    pub fn zero_terms_query(self, value: ZeroTermsQuery) -> Self {
+        self.set("zero_terms_query", Value::String(value.as_str().to_string()))
     }
 
     /// Ignore format errors (e.g. analyzing text for a numeric subfield).
@@ -592,9 +594,10 @@ impl<S> Text<S> {
         MatchQuery::new("match_bool_prefix", &self.path, value.into())
     }
 
-    /// Analyzed match tolerant of typos — sugar for `matches(v).fuzziness("AUTO")`.
+    /// Analyzed match tolerant of typos — sugar for
+    /// `matches(v).fuzziness(Fuzziness::Auto)`.
     pub fn matches_fuzzy(&self, value: impl Into<String>) -> MatchQuery<S> {
-        self.matches(value).fuzziness("AUTO")
+        self.matches(value).fuzziness(Fuzziness::Auto)
     }
 
     /// Exact match against **any** of the given values, on the auto `.keyword`
@@ -665,23 +668,22 @@ impl<S> MultiMatchQuery<S> {
         self
     }
 
-    /// The scoring `type`: `"best_fields"` / `"most_fields"` / `"cross_fields"`
-    /// / `"phrase"` / `"phrase_prefix"` / `"bool_prefix"`.
+    /// The scoring [`MultiMatchType`] (default `BestFields`).
     #[must_use]
-    pub fn match_type(self, match_type: impl Into<String>) -> Self {
-        self.set("type", Value::String(match_type.into()))
+    pub fn match_type(self, match_type: MultiMatchType) -> Self {
+        self.set("type", Value::String(match_type.as_str().to_string()))
     }
 
-    /// Combine analyzed terms with `"AND"` or `"OR"`.
+    /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`].
     #[must_use]
-    pub fn operator(self, operator: impl Into<String>) -> Self {
-        self.set("operator", Value::String(operator.into()))
+    pub fn operator(self, operator: Operator) -> Self {
+        self.set("operator", Value::String(operator.as_str().to_string()))
     }
 
-    /// Edit distance — `"AUTO"` or an integer-as-string.
+    /// Edit distance ([`Fuzziness::Auto`] is the usual choice).
     #[must_use]
-    pub fn fuzziness(self, fuzziness: impl Into<String>) -> Self {
-        self.set("fuzziness", Value::String(fuzziness.into()))
+    pub fn fuzziness(self, fuzziness: Fuzziness) -> Self {
+        self.set("fuzziness", fuzziness.to_value())
     }
 
     /// `tie_breaker` for `best_fields` — how much non-winning fields contribute.

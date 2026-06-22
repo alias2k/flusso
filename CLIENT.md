@@ -291,7 +291,7 @@ it expands. A builder drops straight into a clause (it's an `AsQuery`), so no
 User::query()
     .should(User::full_name().matches("acme").boost(2.0))         // weighted text
     .should(User::full_name().keyword().wildcard("*acme*").case_insensitive())
-    .should(User::full_name().matches("acme").fuzziness("AUTO"))  // typo-tolerant
+    .should(User::full_name().matches("acme").fuzziness(Fuzziness::Auto))  // typo-tolerant
     .min_should_match(1)                                          // make should a real filter
     .filter(User::owner_id().eq(owner_uuid))                      // uuid keyword (feature)
     .filter(User::tier().eq(Tier::Pro))                           // enum keyword
@@ -309,6 +309,17 @@ matches; `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` on
 `multi_match`; `format`/`time_zone`/`relation` on a range; `distance_type`/
 `validation_method` on `within` (geo); `score_mode`/`ignore_unmapped` on a
 nested `any`.
+
+The enumerable options are **closed enums**, not strings — a typo is a compile
+error, not a 400. `operator`/`default_operator` take `Operator { And, Or }`;
+`fuzziness` takes `Fuzziness { Auto, AutoBounds(u32, u32), Edits(u32) }`;
+`multi_match`'s `type` takes `MultiMatchType`; `zero_terms_query` takes
+`ZeroTermsQuery { None, All }`; a range `relation` takes `RangeRelation
+{ Intersects, Contains, Within }`; `function_score`'s `score_mode`/`boost_mode`
+take `ScoreMode`/`BoostMode`; a nested `score_mode` takes `NestedScoreMode`
+(which, unlike `ScoreMode`, has `None` for a filter-only nested clause).
+Genuinely open-ended params (`analyzer`, `format`, `time_zone`,
+`minimum_should_match`, `flags`) stay `String`.
 
 > **`.or()` / `.and()` on a builder** need `use flusso_query::AsQuery;` in scope
 > (the combinators are provided methods on that trait). Composing via the

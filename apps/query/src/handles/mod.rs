@@ -31,6 +31,7 @@ mod geo;
 mod map;
 mod nested;
 mod object;
+mod params;
 mod scalar;
 mod sort;
 mod string;
@@ -49,6 +50,10 @@ pub use geo::{Geo, GeoDistanceQuery, GeoPoint};
 pub use map::{DateMap, KeywordMap, MapSearch, NumberMap, TextMap};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
+pub use params::{
+    BoostMode, Fuzziness, MultiMatchType, NestedScoreMode, Operator, RangeRelation, ScoreMode,
+    ZeroTermsQuery,
+};
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
 pub use sort::{Sort, SortMode, SortOrder};
 pub use string::{

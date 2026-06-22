@@ -13,8 +13,9 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, Client, Date, FlussoDocument, FlussoMultiDocument, Geo, GeoPoint, Keyword,
-    MsearchBundle, Nested, Number, Query, Search, SearchResponse, SortOrder, Text, multi_match,
+    AsQuery, BoostMode, Client, Date, FlussoDocument, FlussoMultiDocument, Fuzziness, Geo,
+    GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode, Number, Operator,
+    Query, Search, SearchResponse, SortOrder, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -371,7 +372,7 @@ fn string_query_options_render() {
     assert_eq!(
         Keyword::<Root>::at("city")
             .fuzzy("bostn")
-            .fuzziness("AUTO")
+            .fuzziness(Fuzziness::Auto)
             .prefix_length(1)
             .to_value(),
         json!({ "fuzzy": { "city": {
@@ -382,8 +383,8 @@ fn string_query_options_render() {
     assert_eq!(
         Text::<Root>::at("bio")
             .matches("ada")
-            .fuzziness("AUTO")
-            .operator("AND")
+            .fuzziness(Fuzziness::Auto)
+            .operator(Operator::And)
             .to_value(),
         json!({ "match": { "bio": {
             "query": "ada", "fuzziness": "AUTO", "operator": "AND"
@@ -408,7 +409,7 @@ fn multi_match_carries_field_weights_and_options() {
             Text::<Root>::at("code"),
         ],
     )
-    .match_type("best_fields")
+    .match_type(MultiMatchType::BestFields)
     .tie_breaker(0.5)
     .minimum_should_match("1");
     assert_eq!(
@@ -427,7 +428,7 @@ fn multi_match_carries_field_weights_and_options() {
 fn nested_query_options_render() {
     let q = User::orders()
         .any(Order::status().eq("delivered"))
-        .score_mode("max")
+        .score_mode(NestedScoreMode::Max)
         .ignore_unmapped(true);
     assert_eq!(
         q.to_value(),
@@ -574,7 +575,7 @@ fn compound_queries_render() {
     assert_eq!(
         crate::function_score(Text::<Root>::at("title").matches("ada"))
             .weight_when(2.0, Keyword::<Root>::at("status").eq("featured"))
-            .boost_mode("sum")
+            .boost_mode(BoostMode::Sum)
             .to_value(),
         json!({ "function_score": {
             "query": { "match": { "title": "ada" } },
@@ -594,7 +595,7 @@ fn ids_and_fulltext_queries_render() {
     assert_eq!(
         crate::query_string::<Root>("ada AND lovelace")
             .default_field("bio")
-            .default_operator("AND")
+            .default_operator(Operator::And)
             .to_value(),
         json!({ "query_string": {
             "query": "ada AND lovelace",
@@ -618,7 +619,7 @@ fn ids_and_fulltext_queries_render() {
 
     assert_eq!(
         crate::combined_fields("ada", [Text::<Root>::at("title"), Text::<Root>::at("body")])
-            .operator("AND")
+            .operator(Operator::And)
             .to_value(),
         json!({ "combined_fields": {
             "query": "ada",
@@ -797,6 +798,58 @@ fn date_accepts_typed_chrono_values() {
         json!({ "range": { "created_at": {
             "gte": "2024-01-01", "lte": "2024-01-01T09:30:00"
         } } })
+    );
+}
+
+#[test]
+fn enum_params_render_their_tokens() {
+    use crate::{RangeRelation, ZeroTermsQuery};
+
+    // Fuzziness: a fixed edit count renders as a number; bounded AUTO as a string.
+    assert_eq!(
+        Keyword::<Root>::at("city")
+            .fuzzy("bostn")
+            .fuzziness(Fuzziness::Edits(2))
+            .to_value(),
+        json!({ "fuzzy": { "city": { "value": "bostn", "fuzziness": 2 } } })
+    );
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("ada")
+            .fuzziness(Fuzziness::AutoBounds(3, 6))
+            .to_value(),
+        json!({ "match": { "bio": { "query": "ada", "fuzziness": "AUTO:3:6" } } })
+    );
+
+    // zero_terms_query.
+    assert_eq!(
+        Text::<Root>::at("bio")
+            .matches("the")
+            .zero_terms_query(ZeroTermsQuery::All)
+            .to_value(),
+        json!({ "match": { "bio": { "query": "the", "zero_terms_query": "all" } } })
+    );
+
+    // range relation (uppercase tokens).
+    assert_eq!(
+        Number::<i64, Root>::at("n")
+            .between(1, 10)
+            .relation(RangeRelation::Within)
+            .to_value(),
+        json!({ "range": { "n": { "relation": "WITHIN", "gte": 1, "lte": 10 } } })
+    );
+
+    // nested score_mode keeps `none` (filter-only).
+    assert_eq!(
+        User::orders()
+            .any(Order::status().eq("delivered"))
+            .score_mode(NestedScoreMode::None)
+            .to_value(),
+        json!({ "nested": {
+            "path": "orders",
+            "query": { "term": { "orders.status": "delivered" } },
+            "score_mode": "none"
+        } })
     );
 }
 

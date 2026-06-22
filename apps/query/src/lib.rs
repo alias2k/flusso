@@ -96,15 +96,16 @@ mod tests;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
-    Binary, Bool, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
+    Binary, Bool, BoostMode, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
     DisMaxQuery, DistanceFeatureQuery, EqQuery, FlussoMap, FlussoValue, FunctionScoreQuery,
-    FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint, IdsQuery, Json, Keyword, KeywordMap, MapSearch,
-    MatchQuery, MoreLikeThisQuery, MultiMatchQuery, Nested, NestedProjection, NestedQuery, Number,
-    NumberMap, Object, PrefixQuery, QueryStringQuery, RangeQuery, RankFeatureQuery, RegexpQuery,
-    ScriptQuery, ScriptScoreQuery, SimpleQueryStringQuery, Sort, SortMode, SortOrder, TermQuery,
-    TermsQuery, Text, TextMap, WildcardQuery, boosting, combined_fields, constant_score, dis_max,
-    distance_feature, function_score, ids, kind, more_like_this, multi_match, query_string,
-    rank_feature, script, script_score, simple_query_string,
+    Fuzziness, FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint, IdsQuery, Json, Keyword, KeywordMap,
+    MapSearch, MatchQuery, MoreLikeThisQuery, MultiMatchQuery, MultiMatchType, Nested,
+    NestedProjection, NestedQuery, NestedScoreMode, Number, NumberMap, Object, Operator,
+    PrefixQuery, QueryStringQuery, RangeQuery, RangeRelation, RankFeatureQuery, RegexpQuery,
+    ScoreMode, ScriptQuery, ScriptScoreQuery, SimpleQueryStringQuery, Sort, SortMode, SortOrder,
+    TermQuery, TermsQuery, Text, TextMap, WildcardQuery, ZeroTermsQuery, boosting, combined_fields,
+    constant_score, dis_max, distance_feature, function_score, ids, kind, more_like_this,
+    multi_match, query_string, rank_feature, script, script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};

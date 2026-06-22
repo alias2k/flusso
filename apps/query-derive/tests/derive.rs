@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use flusso_query::{AsQuery, FlussoDocument, FlussoMap, FlussoValue, GeoPoint};
+use flusso_query::{AsQuery, FlussoDocument, FlussoMap, FlussoValue, Fuzziness, GeoPoint};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -167,7 +167,7 @@ fn acceptance_realistic_projection_needs_no_escape_hatch() -> Result {
                 .wildcard("*acme*")
                 .case_insensitive(),
         )
-        .should(Customer::full_name().matches("acme").fuzziness("AUTO"))
+        .should(Customer::full_name().matches("acme").fuzziness(Fuzziness::Auto))
         .min_should_match(1)
         // Exact filters on a Uuid and an enum keyword — typed, no string paths.
         .filter(Customer::owner_id().eq(owner))

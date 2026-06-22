@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, Text, common_opts, wrap};
+use super::{Common, Operator, Text, common_opts, wrap};
 use crate::query::{AsQuery, Query, Root};
 
 fn string_array(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<Value> {
@@ -93,12 +93,12 @@ impl<S> QueryStringQuery<S> {
         self
     }
 
-    /// Default boolean operator between terms (`"OR"` default / `"AND"`).
+    /// Default boolean operator between terms ([`Operator::Or`] default).
     #[must_use]
-    pub fn default_operator(mut self, operator: impl Into<String>) -> Self {
+    pub fn default_operator(mut self, operator: Operator) -> Self {
         self.opts.insert(
             "default_operator".to_string(),
-            Value::String(operator.into()),
+            Value::String(operator.as_str().to_string()),
         );
         self
     }
@@ -166,12 +166,12 @@ impl<S> SimpleQueryStringQuery<S> {
         self
     }
 
-    /// Default boolean operator between terms (`"OR"` default / `"AND"`).
+    /// Default boolean operator between terms ([`Operator::Or`] default).
     #[must_use]
-    pub fn default_operator(mut self, operator: impl Into<String>) -> Self {
+    pub fn default_operator(mut self, operator: Operator) -> Self {
         self.opts.insert(
             "default_operator".to_string(),
-            Value::String(operator.into()),
+            Value::String(operator.as_str().to_string()),
         );
         self
     }
@@ -240,11 +240,13 @@ pub struct CombinedFieldsQuery<S = Root> {
 }
 
 impl<S> CombinedFieldsQuery<S> {
-    /// Combine analyzed terms with `"AND"` or `"OR"`.
+    /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`].
     #[must_use]
-    pub fn operator(mut self, operator: impl Into<String>) -> Self {
-        self.opts
-            .insert("operator".to_string(), Value::String(operator.into()));
+    pub fn operator(mut self, operator: Operator) -> Self {
+        self.opts.insert(
+            "operator".to_string(),
+            Value::String(operator.as_str().to_string()),
+        );
         self
     }
 

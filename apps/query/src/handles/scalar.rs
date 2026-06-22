@@ -11,7 +11,9 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Common, FlussoValue, Sort, SortOrder, common_opts, exists_q, kind, single, wrap};
+use super::{
+    Common, FlussoValue, RangeRelation, Sort, SortOrder, common_opts, exists_q, kind, single, wrap,
+};
 use crate::query::{AsQuery, Query, Root};
 
 /// The JSON value for a typed date input, taken from its serde serialization
@@ -134,11 +136,13 @@ impl<S> RangeQuery<S> {
     }
 
     /// How the range relates to range-typed field values
-    /// (`INTERSECTS` / `CONTAINS` / `WITHIN`).
+    /// ([`RangeRelation::Intersects`] / `Contains` / `Within`).
     #[must_use]
-    pub fn relation(mut self, relation: impl Into<String>) -> Self {
-        self.extra
-            .insert("relation".to_string(), Value::String(relation.into()));
+    pub fn relation(mut self, relation: RangeRelation) -> Self {
+        self.extra.insert(
+            "relation".to_string(),
+            Value::String(relation.as_str().to_string()),
+        );
         self
     }
 
