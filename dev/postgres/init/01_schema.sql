@@ -51,6 +51,9 @@ CREATE TABLE products (
     sku         text          NOT NULL,
     name        text          NOT NULL,
     description text,
+    -- Localized titles keyed by language code: a dynamic-key object the schema
+    -- maps as a first-class `map` (see dev/products.schema.yml).
+    title       jsonb         NOT NULL DEFAULT '{}'::jsonb,
     price       numeric(10, 2) NOT NULL,
     currency    char(3)       NOT NULL DEFAULT 'USD',
     in_stock    boolean       NOT NULL DEFAULT true,

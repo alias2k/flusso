@@ -1,5 +1,7 @@
 //! The `products` index document and a filterable endpoint.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -18,6 +20,9 @@ pub(crate) struct Product {
     sku: String,
     name: String,
     description: Option<String>,
+    // A `map` field: localized titles keyed by language code, deserialized as a
+    // `HashMap` (no derive needed — `HashMap<String, String>` is a `text` map).
+    title: HashMap<String, String>,
     in_stock: bool,
     review_count: i64,
     avg_rating: Option<f64>,
@@ -30,6 +35,10 @@ struct ProductFilter {
     q: Option<String>,
     sku: Option<String>,
     name: Option<String>,
+    // Full-text search across every localized `title`, optionally preferring
+    // the caller's `locale` (e.g. `?title=tastiera&locale=it`).
+    title: Option<String>,
+    locale: Option<String>,
     in_stock: Option<bool>,
     min_reviews: Option<i64>,
     min_rating: Option<f64>,
@@ -70,6 +79,14 @@ async fn list(
         )
         .filter(filter.sku.map(|v| Product::sku().eq(v)))
         .query(filter.name.map(|v| Product::name().matches(v)))
+        // Cross-language title search; prefer the caller's locale when given.
+        .query(filter.title.map(|v| {
+            let search = Product::title().search(v);
+            match filter.locale {
+                Some(locale) => search.prefer(locale, 3.0),
+                None => search,
+            }
+        }))
         .filter(filter.in_stock.map(|v| Product::in_stock().eq(v)))
         .filter(filter.min_reviews.map(|v| Product::review_count().gte(v)))
         .filter(filter.min_rating.map(|v| Product::avg_rating().gte(v)))
