@@ -45,7 +45,7 @@ The `flusso` **binary** is ground truth for syntax and validity — prefer `flus
 
 **If the task spans several files or needs the full mental model** (designing a non-trivial schema, planning a migration, multi-file codebase changes), **delegate to the `flusso-expert` subagent** so it doesn't consume this conversation's context, then relay its result.
 
-**Prefer structured forms** (structured filters over `raw:` SQL, declared types over guesses — `flusso check` can reason about them) and **end build work by validating** (schema/config → `flusso check`; codebase → match CI order under the strict workspace lints).
+**Prefer structured forms** (structured filters over `raw:` SQL, declared types over guesses — `flusso check` can reason about them) and **end build work by validating** (schema/config → `flusso check`; codebase → match CI order under the strict workspace lints). **Writing queries:** go through the generated `Type::field()` handles, never `Keyword::at("…")`/`raw` when a typed form exists; pick the operator by field type (keyword → `eq`/`any_of`, text → `matches`); `Option<Q>` is a `Query` so conditional filters are `.filter(opt.map(..))`; keep the chain readable — one clause per line, a clause on one line when it fits. See the **flusso-query** skill's "Anti-patterns" / "Writing readable queries".
 
 ---
 

@@ -63,11 +63,23 @@ fn busy_users() -> Search<User> {
     User::query().filter(User::order_count().gte(5))
 }
 
-// Optional inputs: `Option<Query>` is itself a Query — None contributes nothing.
-fn search_users(name: Option<String>, tier: Option<Tier>) -> Search<User> {
+// Many optional filters, the right way. `Option<Q>` is itself a `Query`, so a
+// conditional filter is ONE `.filter(opt.map(..))` per field — `None` drops
+// out. No `Vec<Option<_>>` + `.flatten()` loop, no helper, no wrapper struct.
+// Pick the operator by the field's TYPE — keyword → `eq`/`any_of`, text →
+// `matches`/`match_phrase`, number → range. (Filtering a keyword with
+// `match_phrase` is the classic mistake — use `eq`.)
+fn search_users(
+    name: Option<String>,
+    tiers: Option<Vec<Tier>>,
+    min_orders: Option<i64>,
+) -> Search<User> {
     User::query()
-        .query(name.map(|n| User::full_name().matches(n)))
-        .filter(tier.map(|t| Account::tier().eq(t))) // object sub-field via child handle
+        .query(name.map(|n| User::full_name().matches(n))) // text → analyzed
+        .filter(tiers.map(|ts| User::tier().any_of(ts))) // keyword enum → any-of-a-set
+        .filter(min_orders.map(|n| User::order_count().gte(n))) // long → range
+    // exact keyword: `User::email().eq(v)`; by id (uuid feature):
+    // `User::owner_id().eq(uuid)` — never a wrapper struct just to hold the id.
 }
 
 #[tokio::main]
@@ -117,7 +129,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _n: u64 = busy_users().count(&client).await?;
 
     // Reuse the helper.
-    let _ = search_users(Some("ada".into()), Some(Tier::Pro)).send(&client).await?;
+    let _ = search_users(Some("ada".into()), Some(vec![Tier::Pro]), Some(5))
+        .send(&client)
+        .await?;
 
     Ok(())
 }
