@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.4.0...flusso-query-v0.5.0) - 2026-06-22
+
+### Added
+
+- *(query)* complete the map matrix with NumberMap and DateMap
+- *(query)* typed map handles and the FlussoMap marker trait
+
 ## [0.4.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.3.2...flusso-query-v0.4.0) - 2026-06-19
 
 ### Added
