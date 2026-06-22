@@ -109,11 +109,12 @@ fn type_and_nullability(
             false,
         ),
         FieldSource::Relation(Relation::Join(join)) => {
-            if join.kind.is_to_many() {
-                (MappingType::Nested, false, false)
+            let mapping_type = if join.kind.is_to_many() {
+                MappingType::Nested
             } else {
-                (MappingType::Object, true, false)
-            }
+                MappingType::Object
+            };
+            (mapping_type, join.nullable, false)
         }
         FieldSource::Relation(Relation::Aggregate(aggregate)) => aggregate_type(aggregate),
     }

@@ -127,6 +127,11 @@ pub struct JoinBody {
     pub field: common::FieldName,
     pub table: common::TableName,
     pub primary_key: common::ColumnName,
+    /// Marks a to-one join (`belongs_to`/`has_one`) as guaranteed present, so it
+    /// maps non-nullable. Absent means nullable. Not allowed on a to-many verb
+    /// (those are always a non-null array).
+    #[serde(default)]
+    pub required: Option<bool>,
     #[serde(default)]
     pub column: Option<common::ColumnName>,
     #[serde(default)]

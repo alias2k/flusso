@@ -255,6 +255,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             field: _,
             table: _,
             primary_key: _,
+            required: _,
             column: _,
             foreign_key: _,
             through: _,
