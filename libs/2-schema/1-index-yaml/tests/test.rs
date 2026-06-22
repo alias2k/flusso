@@ -261,7 +261,9 @@ fn to_one_join_required_is_non_null() {
     )
     .unwrap();
     match &field(&schema, "created_by").source {
-        FieldSource::Relation(Relation::Join(j)) => assert!(!j.nullable, "`required: true` → non-null"),
+        FieldSource::Relation(Relation::Join(j)) => {
+            assert!(!j.nullable, "`required: true` → non-null")
+        }
         other => panic!("expected a join, got {other:?}"),
     }
 }
