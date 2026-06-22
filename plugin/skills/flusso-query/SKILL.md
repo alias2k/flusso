@@ -99,11 +99,11 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 
 | Handle | Operators |
 | --- | --- |
-| `Keyword` | `eq` `in_` `prefix` `wildcard` `regexp` `fuzzy` `exists`; subfields `text()` / `keyword_lowercase()` |
-| `Text` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy` `exists` — **no exact `eq`** (analyzed); subfields `keyword()` / `keyword_lowercase()` |
-| `Bool` | `eq` `exists` |
-| `Number<T>` | `eq` `in_` `lt` `lte` `gt` `gte` `between` `exists` |
-| `Date` | `eq` `lt` `lte` `gt` `gte` `between` `exists` |
+| `Keyword` | `eq` `any_of` `prefix` `wildcard` `regexp` `fuzzy` `exists` `asc`/`desc`; subfields `text()` / `keyword_lowercase()` |
+| `Text` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy` `any_of` (exact, via `.keyword`) `exists` `asc`/`desc` (via `.keyword_lowercase`) — **no exact `eq`** (analyzed); subfields `keyword()` / `keyword_lowercase()` |
+| `Bool` | `eq` `exists` `asc`/`desc` |
+| `Number<T>` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
+| `Date` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
 | `Object<S>` | `exists` only (same-doc sub-object / to-one join). Query its sub-fields via the **child struct's** flattened handles (`Account::tier()`), not by chaining off this handle. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort/.size/.from`) to shape the returned array; `exists` |
 | `Geo` | `within(distance, center)` `in_bounding_box` `in_polygon` `exists`; `distance_sort(...)` |
@@ -211,7 +211,7 @@ Let a scalar field be your own enum/newtype instead of a bare leaf:
 enum AccountTier { Free, Pro, Enterprise }
 ```
 
-Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Kind rules: keyword/text accept a unit enum **or** a newtype; number/date accept a **newtype only**. Query-value wiring is currently keyword-only (`eq`/`in_`); number/date custom types generalize the **doc side** only. A missing `FlussoValue` impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
+Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Kind rules: keyword/text accept a unit enum **or** a newtype; number/date accept a **newtype only**. Query-value wiring is currently keyword-only (`eq`/`any_of`); number/date custom types generalize the **doc side** only. A missing `FlussoValue` impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
 
 **Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
 

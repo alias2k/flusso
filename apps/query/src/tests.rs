@@ -248,7 +248,7 @@ fn combinators_build_bool_clauses() {
 fn operators_render_expected_clauses() {
     assert_eq!(
         Keyword::<Root>::at("status")
-            .in_(["paid", "shipped"])
+            .any_of(["paid", "shipped"])
             .to_value(),
         json!({ "terms": { "status": ["paid", "shipped"] } })
     );
@@ -342,7 +342,7 @@ fn universal_boost_and_name_expand_the_clause() {
     // `terms` carries boost beside the field, not inside it.
     assert_eq!(
         Keyword::<Root>::at("status")
-            .in_(["paid", "shipped"])
+            .any_of(["paid", "shipped"])
             .boost(1.5)
             .to_value(),
         json!({ "terms": { "status": ["paid", "shipped"], "boost": 1.5 } })
@@ -731,9 +731,9 @@ fn uuid_is_a_keyword_value() {
         Keyword::<Root>::at("ownerId").eq(id).to_value(),
         json!({ "term": { "ownerId": "00000000-0000-0000-0000-000000000000" } })
     );
-    // `in_` over uuids works too.
+    // `any_of` over uuids works too.
     assert_eq!(
-        Keyword::<Root>::at("ownerId").in_([id]).to_value(),
+        Keyword::<Root>::at("ownerId").any_of([id]).to_value(),
         json!({ "terms": { "ownerId": ["00000000-0000-0000-0000-000000000000"] } })
     );
 }
@@ -766,6 +766,31 @@ fn subfield_accessors_target_the_right_subfield() {
     assert_eq!(
         User::email().text().matches("ada").to_value(),
         json!({ "match": { "email.text": "ada" } })
+    );
+}
+
+#[test]
+fn any_of_covers_every_handle() {
+    // Number.
+    assert_eq!(
+        Number::<i64, Root>::at("n").any_of([1, 2, 3]).to_value(),
+        json!({ "terms": { "n": [1, 2, 3] } })
+    );
+
+    // Date.
+    assert_eq!(
+        Date::<Root>::at("created_at")
+            .any_of(["2024-01-01", "2024-02-01"])
+            .to_value(),
+        json!({ "terms": { "created_at": ["2024-01-01", "2024-02-01"] } })
+    );
+
+    // Text routes through the exact `.keyword` subfield.
+    assert_eq!(
+        Text::<Root>::at("title")
+            .any_of(["Rust", "OpenSearch"])
+            .to_value(),
+        json!({ "terms": { "title.keyword": ["Rust", "OpenSearch"] } })
     );
 }
 

@@ -182,7 +182,7 @@ pub mod kind {
 
 /// A Rust type usable where a field of kind `K` is expected: as the field type
 /// in a `#[derive(FlussoDocument)]` struct, and (for [`kind::Keyword`]) as a
-/// query value on [`Keyword::eq`]/[`Keyword::in_`].
+/// query value on [`Keyword::eq`]/[`Keyword::any_of`].
 ///
 /// Built-in leaf types are pre-implemented (`String`/`&str` for keyword, the
 /// numeric primitives for number, …). Custom enums and newtype wrappers opt in

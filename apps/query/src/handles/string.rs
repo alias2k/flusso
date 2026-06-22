@@ -376,7 +376,7 @@ impl<S> Keyword<S> {
     }
 
     /// Match any of the given values (`String`/`&str` or keyword `FlussoValue` types).
-    pub fn in_(
+    pub fn any_of(
         &self,
         values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword> + serde::Serialize>,
     ) -> TermsQuery<S> {
@@ -597,8 +597,20 @@ impl<S> Text<S> {
         self.matches(value).fuzziness("AUTO")
     }
 
+    /// Exact match against **any** of the given values, on the auto `.keyword`
+    /// subfield. A `terms` query on the analyzed field would match raw tokens,
+    /// which is rarely intended; this targets the exact subfield instead.
+    /// Available only when the sink's `auto_subfields` is on (the default) and
+    /// the field defines no custom `fields`.
+    pub fn any_of(
+        &self,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword> + serde::Serialize>,
+    ) -> TermsQuery<S> {
+        self.keyword().any_of(values)
+    }
+
     /// The exact `.keyword` subfield flusso auto-creates on a `text` field —
-    /// for exact `eq` / `in_`, `wildcard`, `prefix`, and exact sort. (A wildcard
+    /// for exact `eq` / `any_of`, `wildcard`, `prefix`, and exact sort. (A wildcard
     /// belongs here, not on the analyzed handle, which matches tokens not the
     /// whole value.) Available only when the sink's `auto_subfields` is on (the
     /// default) and the field defines no custom `fields`.

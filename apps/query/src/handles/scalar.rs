@@ -51,7 +51,7 @@ impl<S> AsQuery<S> for EqQuery<S> {
 }
 
 /// A multi-value (`terms`) clause, carrying `boost` / `name`. Shared by the
-/// keyword and numeric `in_` operators.
+/// keyword and numeric `any_of` operators.
 #[derive(Debug, Clone)]
 pub struct TermsQuery<S = Root> {
     path: String,
@@ -195,7 +195,7 @@ where
     }
 
     /// Match any of the given values.
-    pub fn in_(&self, values: impl IntoIterator<Item = T>) -> TermsQuery<S> {
+    pub fn any_of(&self, values: impl IntoIterator<Item = T>) -> TermsQuery<S> {
         let array = values.into_iter().map(Into::into).collect();
         TermsQuery::new(&self.path, array)
     }
@@ -257,6 +257,15 @@ impl<S> Date<S> {
     /// Exact match.
     pub fn eq(&self, value: impl Into<String>) -> EqQuery<S> {
         EqQuery::new(&self.path, Value::String(value.into()))
+    }
+
+    /// Match any of the given dates.
+    pub fn any_of(&self, values: impl IntoIterator<Item = impl Into<String>>) -> TermsQuery<S> {
+        let array = values
+            .into_iter()
+            .map(|v| Value::String(v.into()))
+            .collect();
+        TermsQuery::new(&self.path, array)
     }
 
     /// Strictly before `value`.
