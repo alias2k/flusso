@@ -13,9 +13,9 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, BoostMode, Client, Date, FlussoDocument, FlussoMultiDocument, Fuzziness, Geo,
-    GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode, Number, Operator,
-    Query, Search, SearchResponse, SortOrder, Text, multi_match,
+    AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoMultiDocument, Fuzziness,
+    Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode, Number,
+    Operator, Query, Search, SearchResponse, SortOrder, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -446,7 +446,7 @@ fn geo_distance_options_render() {
     let here = GeoPoint::new(52.37, 4.90);
     assert_eq!(
         Geo::<Root>::at("location")
-            .within("10km", here)
+            .within(Distance::km(10.0), here)
             .distance_type(crate::DistanceType::Plane)
             .to_value(),
         json!({ "geo_distance": {
@@ -504,7 +504,7 @@ fn sort_and_geo_typed_options_render() {
     // Geo validation_method uppercase token.
     assert_eq!(
         Geo::<Root>::at("location")
-            .within("5km", GeoPoint::new(0.0, 0.0))
+            .within(Distance::km(5.0), GeoPoint::new(0.0, 0.0))
             .validation_method(ValidationMethod::IgnoreMalformed)
             .to_value(),
         json!({ "geo_distance": {
@@ -964,7 +964,9 @@ fn geo_queries_render_expected_clauses() {
     let here = GeoPoint::new(52.37, 4.90);
 
     assert_eq!(
-        Geo::<Root>::at("location").within("10km", here).to_value(),
+        Geo::<Root>::at("location")
+            .within(Distance::km(10.0), here)
+            .to_value(),
         json!({ "geo_distance": {
             "distance": "10km",
             "location": { "lat": 52.37, "lon": 4.90 }
@@ -1003,7 +1005,7 @@ fn geo_distance_sort_in_search_body() -> Result {
         .sort(Geo::<Root>::at("location").distance_sort(
             GeoPoint::new(52.37, 4.90),
             SortOrder::Asc,
-            "km",
+            crate::DistanceUnit::Kilometers,
         ))
         .body();
 

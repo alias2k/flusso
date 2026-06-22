@@ -46,7 +46,7 @@ pub use extra::{
     distance_feature, ids, more_like_this, query_string, rank_feature, script, script_score,
     simple_query_string,
 };
-pub use geo::{Geo, GeoDistanceQuery, GeoPoint};
+pub use geo::{Distance, DistanceUnit, Geo, GeoDistanceQuery, GeoPoint};
 pub use map::{DateMap, KeywordMap, MapSearch, NumberMap, TextMap};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};

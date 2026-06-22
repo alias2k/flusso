@@ -33,6 +33,103 @@ impl GeoPoint {
     }
 }
 
+/// A distance unit OpenSearch accepts in a `geo_distance` query or
+/// `_geo_distance` sort.
+#[derive(Debug, Clone, Copy)]
+pub enum DistanceUnit {
+    /// Kilometers (`km`).
+    Kilometers,
+    /// Meters (`m`).
+    Meters,
+    /// Centimeters (`cm`).
+    Centimeters,
+    /// Millimeters (`mm`).
+    Millimeters,
+    /// Miles (`mi`).
+    Miles,
+    /// Yards (`yd`).
+    Yards,
+    /// Feet (`ft`).
+    Feet,
+    /// Nautical miles (`nmi`).
+    NauticalMiles,
+}
+
+impl DistanceUnit {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DistanceUnit::Kilometers => "km",
+            DistanceUnit::Meters => "m",
+            DistanceUnit::Centimeters => "cm",
+            DistanceUnit::Millimeters => "mm",
+            DistanceUnit::Miles => "mi",
+            DistanceUnit::Yards => "yd",
+            DistanceUnit::Feet => "ft",
+            DistanceUnit::NauticalMiles => "nmi",
+        }
+    }
+}
+
+/// A distance with an explicit unit — e.g. `Distance::km(12.0)`. Renders to the
+/// OpenSearch distance string (`"12km"`), so a malformed radius (`"12 km"`, a
+/// typo'd unit) can't reach the query.
+#[derive(Debug, Clone, Copy)]
+pub struct Distance {
+    value: f64,
+    unit: DistanceUnit,
+}
+
+impl Distance {
+    /// `value` in `unit`.
+    pub fn new(value: f64, unit: DistanceUnit) -> Self {
+        Self { value, unit }
+    }
+
+    /// Kilometers.
+    pub fn km(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Kilometers)
+    }
+
+    /// Meters.
+    pub fn meters(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Meters)
+    }
+
+    /// Centimeters.
+    pub fn centimeters(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Centimeters)
+    }
+
+    /// Millimeters.
+    pub fn millimeters(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Millimeters)
+    }
+
+    /// Miles.
+    pub fn miles(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Miles)
+    }
+
+    /// Yards.
+    pub fn yards(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Yards)
+    }
+
+    /// Feet.
+    pub fn feet(value: f64) -> Self {
+        Self::new(value, DistanceUnit::Feet)
+    }
+
+    /// Nautical miles.
+    pub fn nautical_miles(value: f64) -> Self {
+        Self::new(value, DistanceUnit::NauticalMiles)
+    }
+
+    fn to_query_string(self) -> String {
+        format!("{}{}", self.value, self.unit.as_str())
+    }
+}
+
 /// A `geo_point` field — the `within` query family (distance / box / polygon),
 /// plus sort-by-distance.
 #[derive(Debug, Clone)]
@@ -49,13 +146,13 @@ impl<S> Geo<S> {
         }
     }
 
-    /// Points within `distance` (e.g. `"12km"`, `"5mi"`) of `center`. Returns a
-    /// [`GeoDistanceQuery`] builder for `distance_type` / `validation_method`
+    /// Points within `distance` (e.g. `Distance::km(12.0)`) of `center`. Returns
+    /// a [`GeoDistanceQuery`] builder for `distance_type` / `validation_method`
     /// plus `boost` / `name`.
-    pub fn within(&self, distance: impl Into<String>, center: GeoPoint) -> GeoDistanceQuery<S> {
+    pub fn within(&self, distance: Distance, center: GeoPoint) -> GeoDistanceQuery<S> {
         GeoDistanceQuery {
             path: self.path.clone(),
-            distance: distance.into(),
+            distance: distance.to_query_string(),
             center,
             opts: Map::new(),
             common: Common::default(),
@@ -99,20 +196,15 @@ impl<S> Geo<S> {
         Sort::from_parts("_geo_distance".to_string(), body)
     }
 
-    /// Sort by distance from `center`, measured in `unit` (e.g. `"km"`).
-    pub fn distance_sort(
-        &self,
-        center: GeoPoint,
-        order: SortOrder,
-        unit: impl Into<String>,
-    ) -> Sort {
+    /// Sort by distance from `center`, measured in `unit`.
+    pub fn distance_sort(&self, center: GeoPoint, order: SortOrder, unit: DistanceUnit) -> Sort {
         let mut body = Map::new();
         body.insert(self.path.clone(), center.to_value());
         body.insert(
             "order".to_string(),
             Value::String(order.as_str().to_string()),
         );
-        body.insert("unit".to_string(), Value::String(unit.into()));
+        body.insert("unit".to_string(), Value::String(unit.as_str().to_string()));
         Sort::from_parts("_geo_distance".to_string(), body)
     }
 }

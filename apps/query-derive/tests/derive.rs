@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
-use flusso_query::{AsQuery, FlussoDocument, FlussoMap, FlussoValue, Fuzziness, GeoPoint};
+use flusso_query::{
+    AsQuery, Distance, FlussoDocument, FlussoMap, FlussoValue, Fuzziness, GeoPoint,
+};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -40,7 +42,7 @@ fn generated_surface_builds_queries() -> Result {
         .filter(User::order_count().gte(5)) // count → Number<i64>
         .query(User::full_name().matches("ada")) // text (renamed fullName)
         .filter(User::orders().any(Order::status().eq("paid"))) // nested + child handle
-        .filter(User::location().within("10km", GeoPoint::new(52.37, 4.90))) // geo, not projected
+        .filter(User::location().within(Distance::km(10.0), GeoPoint::new(52.37, 4.90))) // geo, not projected
         .body();
 
     assert!(body.is_object());

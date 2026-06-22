@@ -173,7 +173,7 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Date`          | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
 | `Object<S>`     | `exists` (a same-document sub-object — group or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
-| `Geo`           | `within(distance, center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` (nearest-first sugar) or `distance_sort(center, order, unit)` |
+| `Geo`           | `within(Distance::km(12.0), center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` (nearest-first sugar) or `distance_sort(center, order, DistanceUnit)` |
 | `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
 | `KeywordMap`    | `key(k)` → a `Keyword` leaf for one key; `has_key(k)`, `exists` — *no* `search` (exact-match, use `key(..).eq(..)`) |
 | `NumberMap<T>`  | `key(k)` → a `Number<T>` leaf for one key (`eq`/`lt`/`gte`/`between`/…); `has_key(k)`, `exists` |
@@ -347,8 +347,10 @@ or `text` — the last routing through `.keyword_lowercase`) return a `Sort`
 builder: chain `.missing_first()`/`.missing_last()`/`.missing(v)`,
 `.mode(SortMode::..)`, `.unmapped_type(..)`/`.numeric_type(..)`/`.format(..)`, or
 `.nested(path)`/`.nested_filtered(path, q)`. Also `Sort::score()` (by `_score`),
-`Sort::script(type, source, order)`, and `Geo::distance_from(center)` /
-`Geo::distance_sort(center, order, unit)` for proximity sorting.
+`Sort::script(ScriptSortType, source, order)`, and `Geo::distance_from(center)`
+/ `Geo::distance_sort(center, order, DistanceUnit)` for proximity sorting. A
+geo radius is a typed `Distance` (`Distance::km(12.0)` / `::miles(5.0)` /
+`::meters(800.0)` / …), so a malformed `"12 km"` can't reach the query.
 
 **Search-level** controls on the `Search` builder: `min_score`,
 `track_total_hits`, `track_scores`, `search_after([..])` (deep pagination),
