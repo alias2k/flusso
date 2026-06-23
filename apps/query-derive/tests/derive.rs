@@ -5,7 +5,8 @@
 use std::collections::HashMap;
 
 use flusso_query::{
-    AsQuery, Distance, FlussoDocument, FlussoMap, FlussoValue, Fuzziness, GeoPoint,
+    AsQuery, Distance, FlussoDocument, FlussoIndex, FlussoMap, FlussoValue, Fuzziness, GeoPoint,
+    Sortable,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;

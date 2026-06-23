@@ -56,7 +56,7 @@ pub use params::{
     ZeroTermsQuery,
 };
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
-pub use sort::{Sort, SortMode, SortOrder};
+pub use sort::{MaybeOrderBy, Missing, OrderBy, Sort, SortBuilder, SortMode, SortOrder, Sortable};
 pub use string::{
     FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery, RegexpQuery,
     TermQuery, Text, WildcardQuery, WithSubfields, multi_match,

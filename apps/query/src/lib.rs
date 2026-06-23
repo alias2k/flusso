@@ -87,6 +87,7 @@ mod error;
 mod handles;
 mod msearch;
 mod multi;
+mod path;
 mod query;
 mod search;
 
@@ -99,20 +100,21 @@ pub use handles::{
     Binary, Bool, BoostMode, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
     DisMaxQuery, Distance, DistanceFeatureQuery, DistanceType, DistanceUnit, EqQuery, FlussoMap,
     FlussoValue, FunctionScoreQuery, Fuzziness, FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint,
-    IdsQuery, Json, Keyword, KeywordMap, MapSearch, MatchQuery, MinimumShouldMatch,
-    MoreLikeThisQuery, MultiMatchQuery, MultiMatchType, Nested, NestedProjection, NestedQuery,
-    NestedScoreMode, NoSubfields, Number, NumberMap, NumericType, Object, Operator, PrefixQuery,
-    QueryStringQuery, RangeQuery, RangeRelation, RankFeatureQuery, RegexpQuery, ScoreMode,
-    ScriptQuery, ScriptScoreQuery, ScriptSortType, SimpleQueryStringQuery, Sort, SortMode,
-    SortOrder, TermQuery, TermsQuery, Text, TextMap, ValidationMethod, WildcardQuery,
-    WithSubfields, ZeroTermsQuery, boosting, combined_fields, constant_score, dis_max,
-    distance_feature, function_score, ids, kind, more_like_this, multi_match, query_string,
-    rank_feature, script, script_score, simple_query_string,
+    IdsQuery, Json, Keyword, KeywordMap, MapSearch, MatchQuery, MaybeOrderBy, MinimumShouldMatch,
+    Missing, MoreLikeThisQuery, MultiMatchQuery, MultiMatchType, Nested, NestedProjection,
+    NestedQuery, NestedScoreMode, NoSubfields, Number, NumberMap, NumericType, Object, Operator,
+    OrderBy, PrefixQuery, QueryStringQuery, RangeQuery, RangeRelation, RankFeatureQuery,
+    RegexpQuery, ScoreMode, ScriptQuery, ScriptScoreQuery, ScriptSortType, SimpleQueryStringQuery,
+    Sort, SortBuilder, SortMode, SortOrder, Sortable, TermQuery, TermsQuery, Text, TextMap,
+    ValidationMethod, WildcardQuery, WithSubfields, ZeroTermsQuery, boosting, combined_fields,
+    constant_score, dis_max, distance_feature, function_score, ids, kind, more_like_this,
+    multi_match, query_string, rank_feature, script, script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};
+pub use path::{Segment, SegmentKind, nested_boundaries};
 pub use query::{AsQuery, Query, Root};
-pub use search::{FlussoDocument, Highlight, Hit, Search, SearchResponse};
+pub use search::{FlussoDocument, FlussoIndex, Highlight, Hit, Search, SearchResponse};
 
 /// `#[derive(FlussoDocument)]` — generates the typed query surface for a
 /// hand-written document struct (its field handles) and implements the

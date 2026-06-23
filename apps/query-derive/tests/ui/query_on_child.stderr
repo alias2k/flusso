@@ -1,0 +1,13 @@
+error[E0599]: no function or associated item named `query` found for struct `UserOrder` in the current scope
+  --> tests/ui/query_on_child.rs:12:24
+   |
+ 7 | struct UserOrder {
+   | ---------------- function or associated item `query` not found for this struct
+...
+12 |     let _ = UserOrder::query();
+   |                        ^^^^^ function or associated item not found in `UserOrder`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `query`, perhaps you need to implement one of them:
+           candidate #1: `FlussoIndex`
+           candidate #2: `FlussoMultiDocument`

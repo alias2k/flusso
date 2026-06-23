@@ -15,8 +15,17 @@ use crate::handles::MinimumShouldMatch;
 
 /// The default query scope — the document root. Root fields and flattened
 /// object / to-one-join sub-fields share it.
+///
+/// It is a [`FlussoDocument`](crate::FlussoDocument) with an empty `PATH`: a
+/// root/flattened-object field sits under no `nested` boundary, so it sorts
+/// plainly. (A `nested` array's element struct is its own scope, with a
+/// non-empty `PATH`.)
 #[derive(Debug, Clone, Copy)]
 pub struct Root;
+
+impl crate::FlussoDocument for Root {
+    const PATH: &'static [crate::Segment] = &[];
+}
 
 /// A composable query clause in scope `S`.
 ///

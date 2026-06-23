@@ -4,7 +4,9 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, FlussoDocument, FlussoValue, multi_match};
+use flusso_query::{
+    Client, FlussoDocument, FlussoIndex, FlussoValue, OrderBy, SortBuilder, Sortable, multi_match,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -97,6 +99,27 @@ struct OrderLine {
     unit_price: f64,
 }
 
+/// A sort direction from the request (`?sort_orders=desc`). The endpoint maps
+/// this once, into an [`OrderBy`], and `SortBuilder` does the rest.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OrderDirection {
+    Asc,
+    Desc,
+}
+
+// The single place this app states its missing-value policy: ascending keeps
+// rows with no value last, descending pushes them first — so "no value" never
+// masquerades as the largest. Every `.by(handle, dir)` inherits it.
+impl From<OrderDirection> for OrderBy {
+    fn from(direction: OrderDirection) -> Self {
+        match direction {
+            OrderDirection::Asc => OrderBy::asc().missing_last(),
+            OrderDirection::Desc => OrderBy::desc().missing_first(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct UserFilter {
@@ -113,6 +136,15 @@ struct UserFilter {
     min_orders: Option<i64>,
     // Filter OF nested: trim each returned user's `orders` to the N most recent.
     recent_orders: Option<u64>,
+    // Sorting: one optional direction per sortable column. An absent column is
+    // skipped by `SortBuilder::by`, so the request shapes the `sort` array with
+    // no per-field branching here.
+    sort_name: Option<OrderDirection>,
+    sort_orders: Option<OrderDirection>,
+    sort_spend: Option<OrderDirection>,
+    sort_joined: Option<OrderDirection>,
+    // A field inside the `orders` nested array — sorted by the same `.by` call.
+    sort_recent_order: Option<OrderDirection>,
     limit: Option<u64>,
 }
 
@@ -140,6 +172,25 @@ async fn list(
     State(client): State<Client>,
     Query(filter): Query<UserFilter>,
 ) -> Result<Json<Page<User>>, ApiError> {
+    // One fluent chain replaces the hand-rolled field→handle→direction dispatch:
+    // each `.by` skips an absent column, the nested field needs no special case,
+    // relevance leads only when there's a query, and a fallback covers the rest.
+    let sorts = SortBuilder::new()
+        .score_if(filter.q.is_some())
+        .by(User::full_name(), filter.sort_name)
+        .by(User::order_count(), filter.sort_orders)
+        .by(User::lifetime_value(), filter.sort_spend)
+        .by(Account::created_at(), filter.sort_joined)
+        // A field inside the `orders` nested array — the *same* one-line `.by`.
+        // The nested clause (`mode: max` → the user's most recent order) is
+        // derived from the handle's scope; no hand-written `nested` wrapper.
+        .by(UserOrder::placed_at(), filter.sort_recent_order)
+        // Stable final key so rows with equal leading values page deterministically.
+        .tiebreak(User::id())
+        // Used only when the request named no sort: busiest customers first.
+        .or_default(User::order_count().desc())
+        .build();
+
     let mut search = User::query()
         // Free-text `q`: one scoring `multi_match` across the analyzed `text`
         // fields, root and flattened one-to-one alike (`fullName`, `profile.bio`).
@@ -178,7 +229,7 @@ async fn list(
                 .map(|v| User::orders().any(UserOrder::status().eq(v))),
         )
         .filter(filter.min_orders.map(|v| User::order_count().gte(v)))
-        .sort(User::order_count().desc())
+        .sorts(sorts)
         .size(filter.limit.unwrap_or(20));
 
     // Filter OF nested: shape the returned `orders` array (newest first, capped)

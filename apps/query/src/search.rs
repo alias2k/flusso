@@ -10,16 +10,33 @@ use serde_json::{Map, Value};
 use crate::Client;
 use crate::error::Result;
 use crate::handles::{MinimumShouldMatch, NestedProjection, Sort};
+use crate::path::Segment;
 use crate::query::{AsQuery, BoolBuilder, Root};
 
-/// A document type bound to a flusso-maintained index — the trait that
-/// `#[derive(FlussoDocument)]` implements.
+/// A view onto a flusso-maintained index — the root document **or** any of its
+/// `nested` element projections. Every struct `#[derive(FlussoDocument)]`
+/// generates carries a [`PATH`](Self::PATH): the chain of container levels from
+/// the index root down to this view, which a nesting-aware sort reads to render
+/// the right `nested` clause. The root's `PATH` is empty.
+///
+/// The index-pointing operations (`query`/`get`, the index name + hash) live on
+/// the [`FlussoIndex`] supertrait, emitted **only** for the root — so a child
+/// projection cannot start a search.
+pub trait FlussoDocument {
+    /// This view's position from the index root, outermost first. Empty for the
+    /// root and for any flattened-object scope (no `nested` boundary above it).
+    const PATH: &'static [Segment];
+}
+
+/// The **root** document bound to a flusso-maintained index — the entry point for
+/// queries. `#[derive(FlussoDocument)]` implements this only for the struct with
+/// no `path` (the index root).
 ///
 /// The derive supplies [`INDEX`](Self::INDEX) and [`SCHEMA_HASH`](Self::SCHEMA_HASH)
 /// (the physical index is `{INDEX}_{SCHEMA_HASH}`, exactly what the OpenSearch
 /// sink writes); [`query`](Self::query) and [`get`](Self::get) are provided.
 /// `DeserializeOwned` is required so search hits and fetched documents decode.
-pub trait FlussoDocument: DeserializeOwned {
+pub trait FlussoIndex: FlussoDocument + DeserializeOwned {
     /// The logical index name this binding queries.
     const INDEX: &'static str;
 
@@ -54,7 +71,7 @@ pub trait FlussoDocument: DeserializeOwned {
 
 /// A typed query against one index — a plain, client-free value.
 ///
-/// Built from [`FlussoDocument::query`] (or `Search::new(index, hash)` by
+/// Built from [`FlussoIndex::query`] (or `Search::new(index, hash)` by
 /// hand). Clauses accumulate into a bool query: `query`/`should` score,
 /// `filter`/`must_not` don't. Because no client (and no lifetime) is
 /// involved, a `Search` can be named, stored, cloned, and reused; a [`Client`]
@@ -157,6 +174,14 @@ impl<T> Search<T> {
     #[must_use]
     pub fn sort(mut self, sort: Sort) -> Self {
         self.sort.push(sort);
+        self
+    }
+
+    /// Append several sort keys at once — e.g. straight from a
+    /// [`SortBuilder`](crate::SortBuilder). Equivalent to repeated [`sort`](Self::sort).
+    #[must_use]
+    pub fn sorts(mut self, sorts: impl IntoIterator<Item = Sort>) -> Self {
+        self.sort.extend(sorts);
         self
     }
 

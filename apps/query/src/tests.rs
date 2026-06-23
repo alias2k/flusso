@@ -13,9 +13,10 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoMultiDocument, Fuzziness,
-    Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode, Number,
-    Operator, Query, Search, SearchResponse, SortOrder, Text, multi_match,
+    AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoIndex, FlussoMultiDocument,
+    Fuzziness, Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode,
+    Number, Operator, OrderBy, Query, Search, SearchResponse, Segment, SegmentKind, Sort,
+    SortBuilder, SortOrder, Sortable, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -50,6 +51,40 @@ impl Order {
     fn placed_at() -> Date<Order> {
         Date::at("orders.placedAt")
     }
+}
+
+impl FlussoDocument for Order {
+    const PATH: &'static [Segment] = &[Segment {
+        name: "orders",
+        kind: SegmentKind::Nested,
+    }];
+}
+
+/// A doubly-nested scope: `orders` (nested) → `shipping` (object) → `packages`
+/// (nested). Its fields sort through the recursive `nested` chain.
+struct Package;
+
+impl Package {
+    fn weight() -> Number<crate::kind::Double, Package> {
+        Number::at("orders.shipping.packages.weight")
+    }
+}
+
+impl FlussoDocument for Package {
+    const PATH: &'static [Segment] = &[
+        Segment {
+            name: "orders",
+            kind: SegmentKind::Nested,
+        },
+        Segment {
+            name: "shipping",
+            kind: SegmentKind::Object,
+        },
+        Segment {
+            name: "packages",
+            kind: SegmentKind::Nested,
+        },
+    ];
 }
 
 #[test]
@@ -1212,11 +1247,17 @@ fn msearch_decodes_each_slot_with_its_own_type() -> Result {
 }
 
 impl FlussoDocument for DecodedUser {
+    const PATH: &'static [Segment] = &[];
+}
+impl FlussoIndex for DecodedUser {
     const INDEX: &'static str = "users";
     const SCHEMA_HASH: &'static str = "xxxxxx";
 }
 
 impl FlussoDocument for DecodedOrder {
+    const PATH: &'static [Segment] = &[];
+}
+impl FlussoIndex for DecodedOrder {
     const INDEX: &'static str = "orders";
     const SCHEMA_HASH: &'static str = "yyyyyy";
 }
@@ -1414,4 +1455,183 @@ fn decodes_an_empty_page() -> Result {
     assert_eq!(page.max_score, None);
     assert!(page.hits.is_empty());
     Ok(())
+}
+
+// --- Nesting-aware sort + SortBuilder (issue #49) --------------------------
+
+#[test]
+fn root_field_sorts_plainly() {
+    // A root / flattened-object field (scope `Root`, empty PATH) sorts with no
+    // `nested` wrapper and no auto `mode`.
+    assert_eq!(
+        Keyword::<crate::Root>::at("account.createdAt")
+            .asc()
+            .to_value(),
+        json!({ "account.createdAt": { "order": "asc" } })
+    );
+}
+
+#[test]
+fn one_level_nested_field_wraps_in_its_nested_clause() {
+    // `orders.placedAt` lives in the `orders` nested array: the sort wraps in
+    // that boundary and defaults `mode` from the direction (`desc → max`).
+    assert_eq!(
+        Order::placed_at().desc().to_value(),
+        json!({ "orders.placedAt": {
+            "order": "desc",
+            "mode": "max",
+            "nested": { "path": "orders" }
+        } })
+    );
+}
+
+#[test]
+fn doubly_nested_field_renders_the_recursive_chain() {
+    // The object hop (`shipping`) extends the path but isn't a boundary, so the
+    // chain is orders → orders.shipping.packages (issue #49 worked example).
+    assert_eq!(
+        Package::weight().desc().to_value(),
+        json!({ "orders.shipping.packages.weight": {
+            "order": "desc",
+            "mode": "max",
+            "nested": { "path": "orders", "nested": { "path": "orders.shipping.packages" } }
+        } })
+    );
+}
+
+#[test]
+fn ascending_nested_sort_defaults_mode_to_min() {
+    let value = Order::placed_at().asc().to_value();
+    assert_eq!(value["orders.placedAt"]["mode"], json!("min"));
+}
+
+#[test]
+fn sort_builder_takes_order_orderby_and_options() {
+    let sorts = SortBuilder::new()
+        .by(User::order_count(), SortOrder::Desc)
+        .by(Order::placed_at(), OrderBy::asc().missing_last())
+        .by(User::email(), Some(SortOrder::Asc))
+        .by(User::full_name(), None::<OrderBy>) // None skips the field
+        .build();
+
+    let rendered: Vec<_> = sorts.iter().map(Sort::to_value).collect();
+    assert_eq!(
+        rendered,
+        vec![
+            json!({ "orderCount": { "order": "desc" } }),
+            json!({ "orders.placedAt": {
+                "order": "asc", "mode": "min", "missing": "_last",
+                "nested": { "path": "orders" }
+            } }),
+            json!({ "email": { "order": "asc" } }),
+        ]
+    );
+}
+
+#[test]
+fn sort_builder_umbrella_accepts_a_consumer_request_enum() {
+    enum Dir {
+        Asc,
+        Desc,
+    }
+    impl From<Dir> for OrderBy {
+        fn from(dir: Dir) -> Self {
+            match dir {
+                Dir::Asc => OrderBy::asc(),
+                Dir::Desc => OrderBy::desc().missing_first(),
+            }
+        }
+    }
+
+    // `Option<Dir>` flows straight in: `Some` orders, `None` skips.
+    let sorts = SortBuilder::new()
+        .by(User::order_count(), Some(Dir::Desc))
+        .by(User::email(), Some(Dir::Asc))
+        .by(User::full_name(), None::<Dir>)
+        .build();
+
+    let rendered: Vec<_> = sorts.iter().map(Sort::to_value).collect();
+    assert_eq!(
+        rendered,
+        vec![
+            json!({ "orderCount": { "order": "desc", "missing": "_first" } }),
+            json!({ "email": { "order": "asc" } }),
+        ]
+    );
+}
+
+#[test]
+fn sort_builder_score_if_and_dedup_and_fallback() {
+    // score_if(false) adds nothing; a repeated key is deduped (first wins); the
+    // fallback only lands when the builder is otherwise empty.
+    let sorts = SortBuilder::new()
+        .score_if(false)
+        .by(User::order_count(), SortOrder::Desc)
+        .by(User::order_count(), SortOrder::Asc) // same key → dropped
+        .or_default(User::email().asc())
+        .build();
+    let rendered: Vec<_> = sorts.iter().map(Sort::to_value).collect();
+    assert_eq!(rendered, vec![json!({ "orderCount": { "order": "desc" } })]);
+
+    let empty = SortBuilder::new()
+        .by(User::full_name(), None::<OrderBy>)
+        .or_default(User::email().asc())
+        .build();
+    assert_eq!(
+        empty.iter().map(Sort::to_value).collect::<Vec<_>>(),
+        vec![json!({ "email": { "order": "asc" } })]
+    );
+}
+
+#[test]
+fn sort_builder_score_if_true_and_tiebreak() {
+    let sorts = SortBuilder::new()
+        .score_if(true)
+        .by(User::order_count(), SortOrder::Desc)
+        .tiebreak(User::email())
+        .build();
+    let rendered: Vec<_> = sorts.iter().map(Sort::to_value).collect();
+    assert_eq!(
+        rendered,
+        vec![
+            json!({ "_score": { "order": "desc" } }),
+            json!({ "orderCount": { "order": "desc" } }),
+            json!({ "email": { "order": "asc" } }),
+        ]
+    );
+}
+
+#[test]
+fn sort_builder_near_skips_none_and_raw_is_exempt_from_dedup() {
+    let here = GeoPoint::new(40.0, -74.0);
+    let location = || Geo::<crate::Root>::at("location");
+    let none_sorts = SortBuilder::new().near(location(), None).build();
+    assert!(none_sorts.is_empty());
+
+    let sorts = SortBuilder::new()
+        .near(location(), here)
+        .raw(location().distance_from(here)) // same key, but raw isn't deduped
+        .raw(None::<Sort>) // None adds nothing
+        .build();
+    assert_eq!(sorts.len(), 2);
+    assert!(
+        sorts
+            .iter()
+            .all(|s| s.to_value().get("_geo_distance").is_some())
+    );
+}
+
+#[test]
+fn sorts_plural_matches_repeated_sort() {
+    let built = SortBuilder::new()
+        .by(User::order_count(), SortOrder::Desc)
+        .tiebreak(User::email())
+        .build();
+
+    let plural = User::query().sorts(built.clone()).body();
+    let singular = User::query()
+        .sort(built[0].clone())
+        .sort(built[1].clone())
+        .body();
+    assert_eq!(plural, singular);
 }

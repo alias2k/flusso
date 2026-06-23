@@ -41,15 +41,17 @@ use crate::search::{Hit, RawCount, SearchResponse};
 /// derive, the impl is written by hand — exactly what the derive generates:
 ///
 /// ```no_run
-/// use flusso_query::{FlussoDocument, FlussoMultiDocument, Error, Result};
+/// use flusso_query::{FlussoDocument, FlussoIndex, FlussoMultiDocument, Error, Result, Segment};
 /// use serde_json::Value;
 /// # #[derive(serde::Deserialize)] struct User { email: String }
-/// # impl FlussoDocument for User {
+/// # impl FlussoDocument for User { const PATH: &'static [Segment] = &[]; }
+/// # impl FlussoIndex for User {
 /// #     const INDEX: &'static str = "users";
 /// #     const SCHEMA_HASH: &'static str = "xxxxxx";
 /// # }
 /// # #[derive(serde::Deserialize)] struct Order { status: String }
-/// # impl FlussoDocument for Order {
+/// # impl FlussoDocument for Order { const PATH: &'static [Segment] = &[]; }
+/// # impl FlussoIndex for Order {
 /// #     const INDEX: &'static str = "orders";
 /// #     const SCHEMA_HASH: &'static str = "yyyyyy";
 /// # }
@@ -81,8 +83,8 @@ use crate::search::{Hit, RawCount, SearchResponse};
 pub trait FlussoMultiDocument: Sized {
     /// The `(logical index, schema hash)` pair of every document type in the
     /// union, in variant order — each is that type's
-    /// [`INDEX`](crate::FlussoDocument::INDEX) /
-    /// [`SCHEMA_HASH`](crate::FlussoDocument::SCHEMA_HASH).
+    /// [`INDEX`](crate::FlussoIndex::INDEX) /
+    /// [`SCHEMA_HASH`](crate::FlussoIndex::SCHEMA_HASH).
     const TARGETS: &'static [(&'static str, &'static str)];
 
     /// Decode one hit's `_source` into the right variant, dispatching on the
@@ -91,7 +93,7 @@ pub trait FlussoMultiDocument: Sized {
     fn decode(physical_index: &str, source: Value) -> Result<Self>;
 
     /// Start a typed query across all of this union's indexes. Like
-    /// [`FlussoDocument::query`](crate::FlussoDocument::query), the returned
+    /// [`FlussoIndex::query`](crate::FlussoIndex::query), the returned
     /// builder is a plain client-free value.
     fn query() -> MultiSearch<Self> {
         MultiSearch::new()
@@ -185,6 +187,14 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
     #[must_use]
     pub fn sort(mut self, sort: Sort) -> Self {
         self.sort.push(sort);
+        self
+    }
+
+    /// Append several sort keys at once — e.g. from a
+    /// [`SortBuilder`](crate::SortBuilder). Equivalent to repeated [`sort`](Self::sort).
+    #[must_use]
+    pub fn sorts(mut self, sorts: impl IntoIterator<Item = Sort>) -> Self {
+        self.sort.extend(sorts);
         self
     }
 
