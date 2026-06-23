@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.8.0...flusso-query-derive-v0.9.0) - 2026-06-23
+
+### Added
+
+- *(query)* SortBuilder + nesting-aware Sortable sort surface
+- *(query)* path metadata + FlussoDocument/FlussoIndex trait split
+
+### Other
+
+- *(query)* rustfmt + fix intra-doc links after trait split
+- *(query)* cover nesting-aware sort + SortBuilder (refs #49)
+
 ## [0.8.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.7.0...flusso-query-derive-v0.8.0) - 2026-06-23
 
 ### Fixed
