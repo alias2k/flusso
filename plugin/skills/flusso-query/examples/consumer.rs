@@ -14,7 +14,7 @@ use flusso_query::{Client, FlussoDocument, FlussoMultiDocument, FlussoValue, Sea
 // ── Custom value type: a closed enum stored as a keyword ────────────────────
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, FlussoValue)]
 #[serde(rename_all = "lowercase")]
-#[flusso(keyword)] // kind: keyword (default) | text | number | date
+#[flusso(keyword)] // enum kind: keyword (default) | text
 pub enum Tier {
     Free,
     Pro,
