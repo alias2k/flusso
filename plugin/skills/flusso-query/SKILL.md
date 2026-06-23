@@ -272,7 +272,7 @@ Let a scalar field be your own enum/newtype instead of a bare leaf:
 
 ```rust
 #[derive(serde::Deserialize, serde::Serialize, FlussoValue)]
-#[flusso(keyword)]                       // kind: keyword (default) | text | number | date
+#[flusso(keyword)]                       // enum kind: keyword (default) | text
 enum AccountTier { Free, Pro, Enterprise }
 ```
 
