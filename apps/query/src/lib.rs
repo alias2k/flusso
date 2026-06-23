@@ -87,6 +87,7 @@ mod error;
 mod handles;
 mod msearch;
 mod multi;
+mod path;
 mod query;
 mod search;
 
@@ -111,8 +112,9 @@ pub use handles::{
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};
+pub use path::{Segment, SegmentKind, nested_boundaries};
 pub use query::{AsQuery, Query, Root};
-pub use search::{FlussoDocument, Highlight, Hit, Search, SearchResponse};
+pub use search::{FlussoDocument, FlussoIndex, Highlight, Hit, Search, SearchResponse};
 
 /// `#[derive(FlussoDocument)]` — generates the typed query surface for a
 /// hand-written document struct (its field handles) and implements the

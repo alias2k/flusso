@@ -227,6 +227,10 @@ fn expand(input: DeriveInput) -> TokenStream2 {
     };
     let prefix = attrs.path.as_deref().unwrap_or("");
     let is_root = attrs.path.is_none();
+    let segments = match resolved.path_segments(attrs.path.as_deref()) {
+        Ok(segments) => segments,
+        Err(message) => return syn::Error::new(attrs.path_span, message).to_compile_error(),
+    };
     let hash = resolved.mapping.hash.to_string();
     let tracked: Vec<String> = resolved
         .tracked
@@ -244,6 +248,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         prefix,
         is_root,
         &scope_tag,
+        &segments,
         level,
         &fields,
         &tracked,

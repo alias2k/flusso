@@ -13,9 +13,10 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoMultiDocument, Fuzziness,
-    Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode, Number,
-    Operator, Query, Search, SearchResponse, SortOrder, Text, multi_match,
+    AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoIndex, FlussoMultiDocument,
+    Fuzziness, Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode,
+    Number, Operator, Query, Search, SearchResponse, Segment, SegmentKind, SortOrder, Text,
+    multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -50,6 +51,13 @@ impl Order {
     fn placed_at() -> Date<Order> {
         Date::at("orders.placedAt")
     }
+}
+
+impl FlussoDocument for Order {
+    const PATH: &'static [Segment] = &[Segment {
+        name: "orders",
+        kind: SegmentKind::Nested,
+    }];
 }
 
 #[test]
@@ -1212,11 +1220,17 @@ fn msearch_decodes_each_slot_with_its_own_type() -> Result {
 }
 
 impl FlussoDocument for DecodedUser {
+    const PATH: &'static [Segment] = &[];
+}
+impl FlussoIndex for DecodedUser {
     const INDEX: &'static str = "users";
     const SCHEMA_HASH: &'static str = "xxxxxx";
 }
 
 impl FlussoDocument for DecodedOrder {
+    const PATH: &'static [Segment] = &[];
+}
+impl FlussoIndex for DecodedOrder {
     const INDEX: &'static str = "orders";
     const SCHEMA_HASH: &'static str = "yyyyyy";
 }

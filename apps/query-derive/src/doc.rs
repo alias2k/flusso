@@ -446,9 +446,10 @@ fn is_primitive(ident: Option<&str>) -> bool {
 }
 
 /// Generate the field-handle `impl` (a handle per schema field at this level),
-/// plus — at the root — the `FlussoDocument` trait impl (`INDEX`/`SCHEMA_HASH`,
-/// inheriting `search`/`get`), plus rebuild tracking. `prefix` is the dotted
-/// path of this level (empty at the root).
+/// plus the `FlussoDocument` trait impl (the `PATH` metadata — for every struct),
+/// plus — at the root only — the `FlussoIndex` impl (`INDEX`/`SCHEMA_HASH`,
+/// inheriting `query`/`get`), plus rebuild tracking. `prefix` is the dotted path
+/// of this level (empty at the root); `segments` is that path's container chain.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn codegen(
     ident: &Ident,
@@ -457,6 +458,7 @@ pub(crate) fn codegen(
     prefix: &str,
     is_root: bool,
     scope: &TokenStream,
+    segments: &[crate::resolve::PathSegment],
     level: &[ResolvedField],
     fields: &[DocField],
     tracked: &[String],
@@ -466,14 +468,35 @@ pub(crate) fn codegen(
         .iter()
         .filter_map(|resolved| handle_fn(resolved, prefix, scope, fields, auto_subfields));
 
-    // The root binding implements `FlussoDocument`: it supplies the physical
+    // Every struct implements `FlussoDocument` carrying its path-from-root, so a
+    // nesting-aware sort can read the `nested` boundaries above any field. The
+    // root's `PATH` is empty; an object level adds to the path but isn't a
+    // boundary.
+    let path_segments = segments.iter().map(|segment| {
+        let name = LitStr::new(&segment.name, Span::call_site());
+        let kind = Ident::new(if segment.nested { "Nested" } else { "Object" }, Span::call_site());
+        quote! {
+            ::flusso_query::Segment {
+                name: #name,
+                kind: ::flusso_query::SegmentKind::#kind,
+            }
+        }
+    });
+    let doc_impl = quote! {
+        impl ::flusso_query::FlussoDocument for #ident {
+            const PATH: &'static [::flusso_query::Segment] = &[ #(#path_segments),* ];
+        }
+    };
+
+    // Only the root binding implements `FlussoIndex`: it supplies the physical
     // index name = logical name + schema hash (exactly what the OpenSearch sink
     // writes), and inherits `query`/`get`. The derive bakes the hash in (a
     // structural schema change rotates it *and* forces a recompile), so it stays
-    // hidden from callers — `Type::query()` just works.
-    let entry = if is_root {
+    // hidden from callers — `Type::query()` just works. A child projection has no
+    // `FlussoIndex`, so it cannot start a search.
+    let index_impl = if is_root {
         quote! {
-            impl ::flusso_query::FlussoDocument for #ident {
+            impl ::flusso_query::FlussoIndex for #ident {
                 const INDEX: &'static str = #index;
                 const SCHEMA_HASH: &'static str = #hash;
             }
@@ -481,6 +504,7 @@ pub(crate) fn codegen(
     } else {
         quote! {}
     };
+    let entry = quote! { #doc_impl #index_impl };
 
     let tracked = tracked.iter().map(|path| {
         let lit = LitStr::new(path, Span::call_site());

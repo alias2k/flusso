@@ -19,6 +19,14 @@ pub(crate) enum Scope {
     SelfTagged,
 }
 
+/// One path level for codegen: the field name plus whether it's a `nested`
+/// boundary (vs a flattened object). Mirrors `flusso_query::Segment`.
+#[derive(Debug, Clone)]
+pub(crate) struct PathSegment {
+    pub(crate) name: String,
+    pub(crate) nested: bool,
+}
+
 /// A resolved index plus the files whose changes should retrigger a rebuild.
 pub(crate) struct Resolved {
     pub(crate) mapping: IndexMapping,
@@ -69,6 +77,30 @@ impl Resolved {
             }
         }
         Ok(fields)
+    }
+
+    /// The container levels from the index root down to the struct bound at
+    /// `path`, each tagged `nested` or not — the data behind
+    /// `FlussoDocument::PATH`. Empty for the root. Assumes `path` already
+    /// validated via [`Resolved::fields_at`].
+    pub(crate) fn path_segments(&self, path: Option<&str>) -> Result<Vec<PathSegment>, String> {
+        let Some(path) = path else {
+            return Ok(Vec::new());
+        };
+        let mut fields = self.mapping.fields.as_slice();
+        let mut out = Vec::new();
+        for segment in path.split('.') {
+            let field = fields
+                .iter()
+                .find(|f| f.name.as_ref() == segment)
+                .ok_or_else(|| format!("`path = \"{path}\"`: no field `{segment}`"))?;
+            out.push(PathSegment {
+                name: segment.to_owned(),
+                nested: matches!(field.mapping.mapping_type, MappingType::Nested),
+            });
+            fields = &field.children;
+        }
+        Ok(out)
     }
 
     /// The query scope for the struct bound at `path` (see [`Scope`]).

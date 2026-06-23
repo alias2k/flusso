@@ -1,5 +1,5 @@
-error[E0277]: the trait bound `std::string::String: FlussoDocument` is not satisfied
+error[E0277]: the trait bound `std::string::String: FlussoIndex` is not satisfied
  --> tests/ui/multi_not_document.rs:7:10
   |
 7 |     Text(String),
-  |          ^^^^^^ the trait `FlussoDocument` is not implemented for `std::string::String`
+  |          ^^^^^^ the trait `FlussoIndex` is not implemented for `std::string::String`

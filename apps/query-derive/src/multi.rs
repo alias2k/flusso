@@ -3,14 +3,14 @@
 //!
 //! Unlike `FlussoDocument`, this derive is **purely syntactic**: no
 //! `flusso.toml` discovery, no schema resolution. Each variant's payload type
-//! must itself implement `FlussoDocument` (usually via its own derive), and
-//! the generated code only references that type's `INDEX` / `SCHEMA_HASH`
-//! consts. The emitted impl supplies the trait's two members:
+//! must itself be a root [`FlussoIndex`] (usually via its own `FlussoDocument`
+//! derive), and the generated code only references that type's `INDEX` /
+//! `SCHEMA_HASH` consts. The emitted impl supplies the trait's two members:
 //!
 //! - `TARGETS` — one `(INDEX, SCHEMA_HASH)` pair per variant, in declaration
 //!   order;
 //! - `decode` — dispatch on the hit's physical index name via
-//!   `FlussoDocument::physical_index()`, deserializing the source into the
+//!   `FlussoIndex::physical_index()`, deserializing the source into the
 //!   matching variant; a hit from an index no variant claims is
 //!   `Error::UnexpectedIndex`.
 
@@ -102,20 +102,20 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
 
     let ident = &input.ident;
 
-    // `quote_spanned` pins the `FlussoDocument` bound to the variant's payload
+    // `quote_spanned` pins the `FlussoIndex` bound to the variant's payload
     // type, so "trait not satisfied" points at the offending variant.
     let targets = variants.iter().map(|(_, ty)| {
         quote_spanned! { ty.span() =>
             (
-                <#ty as ::flusso_query::FlussoDocument>::INDEX,
-                <#ty as ::flusso_query::FlussoDocument>::SCHEMA_HASH,
+                <#ty as ::flusso_query::FlussoIndex>::INDEX,
+                <#ty as ::flusso_query::FlussoIndex>::SCHEMA_HASH,
             )
         }
     });
 
     let arms = variants.iter().map(|(variant, ty)| {
         quote_spanned! { ty.span() =>
-            if physical_index == <#ty as ::flusso_query::FlussoDocument>::physical_index() {
+            if physical_index == <#ty as ::flusso_query::FlussoIndex>::physical_index() {
                 return ::flusso_query::__serde_json::from_value::<#ty>(source)
                     .map(Self::#variant)
                     .map_err(::flusso_query::Error::from);
