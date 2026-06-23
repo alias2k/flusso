@@ -9,7 +9,10 @@
 //!   tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 //!   time = "0.3"
 
-use flusso_query::{Client, FlussoDocument, FlussoMultiDocument, FlussoValue, Search};
+use flusso_query::{
+    Client, FlussoDocument, FlussoIndex, FlussoMultiDocument, FlussoValue, Search, SortBuilder,
+    Sortable, SortOrder,
+};
 
 // ── Custom value type: a closed enum stored as a keyword ────────────────────
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, FlussoValue)]
@@ -108,7 +111,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sort(Order::placed_at().desc())
                 .size(5),
         ) // OF
-        .sort(User::order_count().desc())
+        // SortBuilder maps a request to the `sort` array: each `.by` skips a
+        // `None`, `tiebreak` adds a stable final key, `or_default` is the
+        // fallback. `Order::placed_at()` (a nested field) auto-wraps in its
+        // `nested` clause — same one-line `.by`.
+        .sorts(
+            SortBuilder::new()
+                .by(User::order_count(), SortOrder::Desc)
+                .by(Order::placed_at(), None::<SortOrder>) // skipped here
+                .tiebreak(User::id())
+                .or_default(User::order_count().desc())
+                .build(),
+        )
         .from(0)
         .size(20)
         .send(&client)
