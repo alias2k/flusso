@@ -16,7 +16,7 @@ workspace = true
 
 [dependencies]
 # The typed query client + the derive, resolved against ../flusso.toml.
-flusso-query = { path = "../../apps/query", features = ["derive"] }
+flusso-query = { path = "../../apps/query", features = ["derive", "decimal"] }
 axum = "0.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
 serde = { workspace = true }

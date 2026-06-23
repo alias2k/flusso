@@ -56,6 +56,7 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
         mapping_type,
         extra: field.options.clone(),
         map_values: map_value_type(field),
+        decimal: is_decimal(field),
     };
 
     ResolvedField {
@@ -77,6 +78,26 @@ fn map_value_type(field: &Field) -> Option<MappingType> {
             ..
         }) => Some(values.opensearch()),
         _ => None,
+    }
+}
+
+/// Whether this field's leaf type is [`FlussoType::Decimal`] — a PG
+/// `numeric`/`decimal` (or a decimal-typed `sum`/`min`/`max`/`ids` aggregate, or
+/// a decimal constant). It maps to OpenSearch `double` either way; this is what
+/// lets a typed binding offer a `Decimal` handle instead of `f64`.
+fn is_decimal(field: &Field) -> bool {
+    let ty_is_decimal = |ty: &FlussoType| matches!(ty, FlussoType::Decimal);
+    match &field.source {
+        FieldSource::Column(Column { ty, .. }) => ty_is_decimal(ty),
+        FieldSource::Constant(GenericValue::Decimal(_)) => true,
+        FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
+            AggregateOp::Sum(_) | AggregateOp::Min(_) | AggregateOp::Max(_) => {
+                aggregate.value_type.as_ref().is_some_and(ty_is_decimal)
+            }
+            AggregateOp::Ids { element_type } => ty_is_decimal(element_type),
+            AggregateOp::Count | AggregateOp::Avg(_) => false,
+        },
+        _ => false,
     }
 }
 

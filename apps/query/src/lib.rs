@@ -50,7 +50,7 @@
 //! # Example (hand-written until the derive lands)
 //!
 //! ```no_run
-//! use flusso_query::{Client, Keyword, Number, Nested};
+//! use flusso_query::{Client, Keyword, Number, Nested, kind};
 //!
 //! #[derive(serde::Deserialize)]
 //! struct User {
@@ -61,7 +61,7 @@
 //!
 //! impl User {
 //!     fn email() -> Keyword { Keyword::at("email") }
-//!     fn order_count() -> Number<i64> { Number::at("orderCount") }
+//!     fn order_count() -> Number<kind::Long> { Number::at("orderCount") }
 //!     fn query() -> flusso_query::Search<User> {
 //!         flusso_query::Search::new("users", "xxxxxx")
 //!     }

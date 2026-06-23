@@ -6,7 +6,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, FlussoDocument};
+use flusso_query::{Client, Decimal, FlussoDocument};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -20,7 +20,9 @@ pub(crate) struct Order {
     id: i32,
     user_id: i32,
     status: String,
-    total: f64,
+    // A `decimal` column → a `Decimal` handle, queried with `Decimal` (no `f64`
+    // cast). Needs the `decimal` feature on `flusso-query`.
+    total: Decimal,
     item_count: i64,
     units_sold: Option<i32>,
 }
@@ -30,7 +32,7 @@ pub(crate) struct Order {
 struct OrderFilter {
     user_id: Option<i32>,
     status: Option<String>,
-    min_total: Option<f64>,
+    min_total: Option<Decimal>,
     min_items: Option<i64>,
     limit: Option<u64>,
 }

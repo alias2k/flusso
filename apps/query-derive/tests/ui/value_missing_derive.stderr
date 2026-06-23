@@ -16,9 +16,9 @@ help: the trait `FlussoValue<flusso_query::kind::Keyword>` is not implemented fo
              `&str` implements `FlussoValue<flusso_query::kind::Keyword>`
              `&str` implements `FlussoValue<flusso_query::kind::Text>`
              `Uuid` implements `FlussoValue<flusso_query::kind::Keyword>`
-             `f32` implements `FlussoValue<flusso_query::kind::Number>`
-             `f64` implements `FlussoValue<flusso_query::kind::Number>`
-             `i16` implements `FlussoValue<flusso_query::kind::Number>`
+             `bool` implements `FlussoValue<flusso_query::kind::Bool>`
+             `f32` implements `FlussoValue<flusso_query::kind::Double>`
+             `f32` implements `FlussoValue<flusso_query::kind::Float>`
            and $N others
 note: required by a bound in `__assert_field_value`
   --> tests/ui/value_missing_derive.rs:16:12

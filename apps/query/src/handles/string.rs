@@ -389,14 +389,14 @@ impl<S, Sub> Keyword<S, Sub> {
     /// Exact match. Accepts a `String`/`&str`, or any `#[derive(FlussoValue)]`
     /// keyword enum/newtype — matched against its serde string form
     /// (`Account::tier().eq(AccountTier::Pro)`).
-    pub fn eq(&self, value: impl FlussoValue<kind::Keyword> + serde::Serialize) -> TermQuery<S> {
+    pub fn eq(&self, value: impl FlussoValue<kind::Keyword>) -> TermQuery<S> {
         TermQuery::new(&self.path, keyword_term(&value))
     }
 
     /// Match any of the given values (`String`/`&str` or keyword `FlussoValue` types).
     pub fn any_of(
         &self,
-        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword> + serde::Serialize>,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword>>,
     ) -> TermsQuery<S> {
         let array = values.into_iter().map(|v| keyword_term(&v)).collect();
         TermsQuery::new(&self.path, array)
@@ -654,7 +654,7 @@ impl<S> Text<S, WithSubfields> {
     /// in scope when the field carries auto subfields.
     pub fn any_of(
         &self,
-        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword> + serde::Serialize>,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword>>,
     ) -> TermsQuery<S> {
         self.keyword().any_of(values)
     }

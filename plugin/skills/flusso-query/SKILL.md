@@ -47,7 +47,7 @@ pub struct User {
 #[flusso(index = "users", path = "orders")]
 pub struct Order {
     pub status: String,                 // enum → keyword
-    pub total: f64,                     // decimal → double (lossy; see type table)
+    pub total: Decimal,                 // decimal (or f64); query with Decimal/f64/newtype
 }
 ```
 
@@ -102,7 +102,7 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 | `Keyword` | `eq` `any_of` `prefix` `wildcard` `regexp` `fuzzy` `exists` `asc`/`desc`; subfields `text()` / `keyword_lowercase()` |
 | `Text` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy` `any_of` (exact, via `.keyword`) `exists` `asc`/`desc` (via `.keyword_lowercase`) — **no exact `eq`** (analyzed); subfields `keyword()` / `keyword_lowercase()` |
 | `Bool` | `eq` `exists` `asc`/`desc` |
-| `Number<T>` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
+| `Number<K>` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` (`K` per type — `Byte`…`Decimal`; values widen losslessly, so `eq(5)` works on `long`/`double`/`decimal`, a float on an int field is a compile error) |
 | `Date` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
 | `Object<S>` | `exists` only (same-doc sub-object / to-one join). Query its sub-fields via the **child struct's** flattened handles (`Account::tier()`), not by chaining off this handle. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort/.size/.from`) to shape the returned array; `exists` |
@@ -276,7 +276,7 @@ Let a scalar field be your own enum/newtype instead of a bare leaf:
 enum AccountTier { Free, Pro, Enterprise }
 ```
 
-Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Kind rules: keyword/text accept a unit enum **or** a newtype; number/date accept a **newtype only**. Query-value wiring is currently keyword-only (`eq`/`any_of`); number/date custom types generalize the **doc side** only. A missing `FlussoValue` impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
+A **newtype inherits its inner type's kinds** automatically — `struct Money(Decimal)` is a `decimal` value, `struct Sku(String)` a keyword + text value — *no kind tag*, queryable and rejected exactly where the inner type would be (`Order::total().eq(Money(d))`, no cast). An **enum** has no inner type, so it needs an explicit string kind: `#[flusso(keyword)]` (default) or `#[flusso(text)]` — numeric/date tags don't exist (use a newtype). `FlussoValue<K>` has a `serde::Serialize` **supertrait**, so any `#[derive(FlussoValue)]` type derives `Serialize` too (even a doc-field-only one). A missing impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
 
 **Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
 
@@ -289,9 +289,9 @@ Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Ki
 | `enum` | `String` or a `#[derive(FlussoValue)]` enum | `Keyword` |
 | `uuid` | `String`, or `uuid::Uuid` (`uuid` feature) | `Keyword` |
 | `boolean` | `bool` | `Bool` |
-| `short`/`integer`/`long` | `i16`/`i32`/`i64` | `Number<T>` |
-| `float`/`double` | `f32`/`f64` | `Number<T>` |
-| `decimal` | `f64` *(lossy)* | `Number<f64>` |
+| `short`/`integer`/`long` | `i16`/`i32`/`i64` | `Number` |
+| `float`/`double` | `f32`/`f64` | `Number` |
+| `decimal` | `Decimal` (`decimal` feature) or `f64` *(lossy storage)* | `Number` |
 | `date` | `time::Date` / `chrono` (feature) | `Date` |
 | `timestamp` | `time::OffsetDateTime` / `chrono` | `Date` |
 | `binary` | `String` (base64) | `Binary` |
@@ -299,7 +299,7 @@ Then `Account::tier().eq(AccountTier::Pro)` works (`String`/`&str` still do). Ki
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `object` / `belongs_to` / `has_one` | struct / `Option<struct>` | `Object` |
 | `has_many` / `many_to_many` | `Vec<struct>` | `Nested<S,T>` |
-| `ids` aggregate | `Vec<i64>` / `Vec<String>` (per `element_type`) | `Number<T>` / `Keyword` (scalar handle — term queries match arrays) |
+| `ids` aggregate | `Vec<i64>` / `Vec<String>` (per `element_type`) | `Number` / `Keyword` (scalar handle — term queries match arrays) |
 
 Matching is by **leaf identifier + `Option` shape** — the macro compares the final type segment, not aliases. Exact money: declare a `custom` `scaled_float` in the schema and the derive accepts `rust_decimal::Decimal` (with the `decimal` feature).
 

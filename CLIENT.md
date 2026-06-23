@@ -73,7 +73,7 @@ pub struct Account {
 #[flusso(index = "users", path = "orders")]
 pub struct Order {
     pub status: String,                         // enum, required
-    pub total: f64,                             // decimal → double (lossy; see the type table)
+    pub total: Decimal,                         // decimal column (`decimal` feature); or `f64`
     #[serde(rename = "placedAt")]
     pub placed_at: time::OffsetDateTime,        // timestamp, required
     pub items: Vec<Item>,                       // a deeper has_many → nested
@@ -86,7 +86,7 @@ pub struct Item {
     pub product_id: i32,
     pub quantity: i32,
     #[serde(rename = "unitPrice")]
-    pub unit_price: f64,
+    pub unit_price: Decimal,
 }
 ```
 
@@ -169,24 +169,39 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Keyword`       | `eq`, `any_of`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `exists`         |
 | `Text`          | `matches`, `match_phrase`, `match_phrase_prefix`, `matches_fuzzy`, `any_of` (exact, via `.keyword`), `exists` — *no* exact `eq` (it's analyzed) |
 | `Bool`          | `eq`, `exists`, `asc`/`desc`                                              |
-| `Number<T>`     | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
+| `Number`        | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
 | `Date`          | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
 | `Object<S>`     | `exists` (a same-document sub-object — group or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
 | `Geo`           | `within(Distance::km(12.0), center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` (nearest-first sugar) or `distance_sort(center, order, DistanceUnit)` |
 | `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
 | `KeywordMap`    | `key(k)` → a `Keyword` leaf for one key; `has_key(k)`, `exists` — *no* `search` (exact-match, use `key(..).eq(..)`) |
-| `NumberMap<T>`  | `key(k)` → a `Number<T>` leaf for one key (`eq`/`lt`/`gte`/`between`/…); `has_key(k)`, `exists` |
+| `NumberMap`     | `key(k)` → a `Number` leaf for one key (`eq`/`lt`/`gte`/`between`/…); `has_key(k)`, `exists` |
 | `DateMap`       | `key(k)` → a `Date` leaf for one key (`eq`/`gte`/`between`/…); `has_key(k)`, `exists` |
 | `Binary`        | `exists` — base64-encoded, not searchable                                 |
 | `Json`          | `exists`, `raw(serde_json::Value)` — the untyped fallback                 |
 
-Each operator's argument is typed too: `User::order_count().gte(_)` takes an
-`i64`, `.between(_, _)` takes two; `User::email().any_of(_)` takes an
-`IntoIterator`. `Date` operators take a `String`/`&str` ISO-8601 literal or —
-with the `chrono` feature — a `NaiveDate` / `NaiveDateTime` / `DateTime<Utc>`,
-so `Order::created_at().gte(NaiveDate::from_ymd_opt(2024, 1, 1)?)` is a compile
-error if you pass a non-date type.
+Each operator's argument is typed by **kind**, not by one fixed Rust type — a
+handle accepts any value implementing `FlussoValue<kind::…>` (which requires
+`serde::Serialize`):
+
+- **Numerics are split per type** (`kind::Byte`/`Short`/`Integer`/`Long`/`Float`/
+  `Double`/`Decimal`), and a value is accepted only if it widens into that kind
+  **without loss**. So a `Long` field takes any integer, a `Double` takes `f32`/
+  `f64` or a small int, a `Decimal` takes `Decimal` (`decimal` feature) or an
+  integer — but a float on an integer field, or an `i64` on a `Short`, is a
+  *compile error*. Bare literals work where lossless: `eq(5)` on `long`/`integer`/
+  `double`/`decimal`, `eq(5.0)` on `float`/`double`. A `byte`/`short` field needs
+  a typed literal (`eq(5i16)`), since `5` defaults to `i32` (which would narrow).
+- `Keyword` takes a `String`/`&str` or a `#[derive(FlussoValue)]` keyword
+  enum/newtype (matched against its serde string form).
+- `Bool` takes a `bool` or a bool `#[derive(FlussoValue)]` newtype.
+- `Date` takes a `String`/`&str` ISO-8601 literal or — with the `chrono` feature
+  — a `NaiveDate` / `NaiveDateTime` / `DateTime<Utc>`.
+
+A custom money/quantity type queries with no cast — `Order::total().eq(Money(d))`
+— as long as it's a `FlussoValue` of the field's kind (see below). A value of the
+wrong kind is a compile error (`Order::created_at().gte(5)`, `Order::age().eq(1.5)`).
 
 **Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields
 (`auto_subfields`, on by default) with exact / sortable / searchable subfields,
@@ -671,15 +686,15 @@ impl User {
     // Field handles — one per *schema* field, carrying its type. These are what
     // the query builder consumes. They exist for every field in the mapping,
     // whether or not `User` projects it.
-    pub fn id() -> Number<i32> { /* … */ }
+    pub fn id() -> Number<kind::Integer> { /* … */ }
     pub fn email() -> Keyword { /* … */ }
     pub fn full_name() -> Text { /* … */ }
     pub fn account() -> Object { /* … */ }                  // object/to-one join → `Object<Root>` (scope-only; `.exists()`)
     pub fn addresses() -> Nested<Root, AddressFields> { /* … */ } // not projected — generated namespace
     pub fn orders() -> Nested<Root, Order> { /* … */ }      // projected — `Nested<enclosing scope, your struct>`
-    pub fn order_count() -> Number<i64> { /* … */ }
-    pub fn lifetime_value() -> Number<f64> { /* … */ }
-    pub fn avg_order_value() -> Number<f64> { /* … */ }       // not projected by `User`
+    pub fn order_count() -> Number<kind::Long> { /* … */ }
+    pub fn lifetime_value() -> Number<kind::Double> { /* … */ }
+    pub fn avg_order_value() -> Number<kind::Double> { /* … */ } // not projected by `User`
     pub fn last_order_at() -> Date { /* … */ }                // not projected by `User`
     // …one per schema field.
 
@@ -697,7 +712,7 @@ impl User {
 // flattened objects stay `<Root>`); they must be lifted before joining a root query.
 impl Order {
     pub fn status() -> Keyword<Order> { /* … */ }
-    pub fn total() -> Number<f64, Order> { /* … */ }
+    pub fn total() -> Number<kind::Decimal, Order> { /* … */ }
     pub fn placed_at() -> Date<Order> { /* … */ }
     pub fn items() -> Nested<Order, Item> { /* … */ }   // deeper nested: enclosing scope `Order`, child `Item`
     // …one per field at the `orders` path.
@@ -756,12 +771,12 @@ else and it won't compile (modulo the leaf-identifier rule above).
 | `enum`            | `keyword`  | `String` or a `#[derive(FlussoValue)]` enum | `Keyword` |
 | `uuid`            | `keyword`  | `String`, or `uuid::Uuid` (`uuid` feature) | `Keyword` |
 | `boolean`         | `boolean`  | `bool`                           | `Bool`          |
-| `short`           | `short`    | `i16`                            | `Number<i16>`   |
-| `integer`         | `integer`  | `i32`                            | `Number<i32>`   |
-| `long`            | `long`     | `i64`                            | `Number<i64>`   |
-| `float`           | `float`    | `f32`                            | `Number<f32>`   |
-| `double`          | `double`   | `f64`                            | `Number<f64>`   |
-| `decimal`         | `double`   | `f64` *(lossy — see note)*       | `Number<f64>`   |
+| `short`           | `short`    | `i16`                            | `Number<kind::Short>`   |
+| `integer`         | `integer`  | `i32`                            | `Number<kind::Integer>` |
+| `long`            | `long`     | `i64`                            | `Number<kind::Long>`    |
+| `float`           | `float`    | `f32`                            | `Number<kind::Float>`   |
+| `double`          | `double`   | `f64`                            | `Number<kind::Double>`  |
+| `decimal`         | `double`   | `Decimal` (`decimal` feature) or `f64` | `Number<kind::Decimal>` |
 | `date`            | `date`     | `time::Date` (feature)           | `Date`          |
 | `timestamp`       | `date`     | `time::OffsetDateTime` (feature) | `Date`          |
 | `binary`          | `binary`   | `String` (base64)                | `Binary`        |
@@ -772,32 +787,48 @@ else and it won't compile (modulo the leaf-identifier rule above).
 | join `belongs_to` / `has_one` | `object`   | `Option<` a struct `>`           | `Object`        |
 | join `has_many` / `many_to_many` | `nested` | `Vec<` a struct `>`  | `Nested<S, T>`  |
 
-**Decimals are lossy by default.** `type: decimal` maps to OpenSearch `double`, so
-a money field round-trips as `f64`. When exactness matters, declare a `custom`
-`scaled_float` in the schema (`type: { custom: { postgres: [numeric], opensearch:
-scaled_float } }`, `options: { scaling_factor: 100 }`); the derive then accepts
-`rust_decimal::Decimal` for that field.
+**Decimals query without a cast.** `type: decimal` maps to OpenSearch `double`
+(lossy in storage) but gets a `Number<kind::Decimal>` handle, distinct from a
+true `double`'s `Number<kind::Double>` — so it accepts a `Decimal` or a
+losslessly-widening integer (`eq(5)`), but *not* an `f64` (that's lossy, a
+compile error). To pass a `rust_decimal::Decimal`, **enable the `decimal`
+feature** on `flusso-query` (it re-exports `Decimal` and implements
+`FlussoValue<kind::Decimal>` for it); the document field can be `Decimal` or
+`f64` (both deserialize from the stored double). Query precision is `f64`-bound
+(serde_json has no arbitrary precision) — fine for a `double`-stored column; if
+you need exact querying, declare a `custom` `scaled_float` (also `kind::Decimal`)
+and note this limit.
 
 **Dates** are behind a feature so a caller picks `time` or `chrono` (or `String`
 for raw ISO-8601); the derive accepts whichever leaf type the chosen feature settles
 on.
 
-**Enum keyword fields stay typed — never `#[flusso(skip)]`.** A status/type
-field is a Rust enum that derives `FlussoValue`; the derive accepts it for the
-field, and (with `Serialize`) it passes as a query value matched against its
-serde string form:
+**Custom value types — `#[derive(FlussoValue)]`.** A newtype **inherits its inner
+type's kinds** automatically, so `struct Money(Decimal)` is a `decimal` value and
+`struct Sku(String)` a keyword + text value — *no kind tag needed*, and each is
+queryable and rejected exactly where the inner type would be. `FlussoValue`
+requires `serde::Serialize` (a supertrait), so derive it too. An **enum** has no
+inner type, so it needs an explicit string kind — `#[flusso(keyword)]` (default)
+or `#[flusso(text)]`; numeric/date tags don't exist (use a newtype, which
+inherits). Enum keyword fields stay typed — never `#[flusso(skip)]` them.
 
 ```rust
+// Newtype: inherits Decimal's kinds — a `decimal`/`scaled_float` value.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, FlussoValue)]
+struct Money(Decimal);
+
+// Enum: string-valued, so a kind tag is required (keyword default).
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[serde(rename_all = "camelCase")]
-#[flusso(keyword)]                 // the default kind; also text/number/date
+#[flusso(keyword)]
 enum Tier { Pro, Enterprise, Free }
 
 #[derive(serde::Deserialize, FlussoDocument)]
 #[flusso(index = "customers")]
-struct Customer { tier: Tier /* … */ }
+struct Customer { tier: Tier, balance: Money /* … */ }
 
-Customer::tier().eq(Tier::Pro);    // term against "pro"
+Customer::tier().eq(Tier::Pro);              // term against "pro"
+Customer::balance().gte(Money(Decimal::ONE)); // a decimal value, no cast
 ```
 
 **`uuid::Uuid` is a keyword value behind the `uuid` feature** — id / foreign-key

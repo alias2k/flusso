@@ -109,6 +109,7 @@ fn mapping() -> IndexMapping {
             mapping_type: ty,
             extra: BTreeMap::new(),
             map_values: None,
+            decimal: false,
         },
         nullable: true,
         array: false,
