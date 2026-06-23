@@ -20,7 +20,7 @@ retries = 0
 # The container-backed e2e tests. Capping the thread count bounds how many
 # Postgres containers come up at once instead of one per core.
 [test-groups.docker]
-max-threads = 4
+max-threads = 8
 
 # The Postgres e2e tests live in these integration-test binaries and are
 # `#[ignore]`d by default (run with `--run-ignored all`). Put them in the
