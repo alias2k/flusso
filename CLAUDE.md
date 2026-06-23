@@ -344,6 +344,22 @@ explicit `#[flusso(keyword|text)]` (numeric/date tags don't exist).
 type for `multi_match`/composition). Issue #19 acceptance test: `apps/query-derive/tests/
 derive.rs::acceptance_realistic_projection_needs_no_escape_hatch`.
 
+**Sorting + nesting-aware path metadata (issue #49).** `FlussoDocument` now carries only
+`const PATH: &[Segment]` (the container chain from the index root, in `apps/query/src/path.rs`);
+the index identity + `query`/`get` moved to a root-only `FlussoIndex: FlussoDocument` supertrait,
+so a child projection physically can't `.query()`. The derive emits `FlussoDocument` for **every**
+struct (root + each nested element) and `FlussoIndex` only for the root; the `Root` scope marker
+stays (the shared root/flattened-object scope, so combined search and object handles keep
+composing) and impls `FlussoDocument` with `PATH = &[]`. Sorting goes through a `Sortable` trait
+(`asc`/`desc`, impl'd for `Keyword`/`Text`/`Number`/`Date`/`Bool`, **not** `Geo`/`Object`/map) whose
+sorts are nesting-aware: `Sort::field::<S>` reads `nested_boundaries(S::PATH)` and renders the
+recursive `nested:{path, nested:{…}}` chain (mode defaulted from direction), so a bare
+`Order::placed_at().desc()` is correct at top level; `NestedProjection` (inner_hits) strips that
+wrapper. `SortBuilder` (`by`/`near`/`score`/`score_if`/`raw`/`tiebreak`/`or_default`/`build`,
+deduping by key) collapses request→`sort` mapping; `OrderBy`/`MaybeOrderBy` carry a direction +
+optionality (a request's `Option<dir>` self-skips). `Search`/`MultiSearch`/`NestedProjection` take
+plural `.sorts(..)`.
+
 **Index prefix (issue #24).** A deployment-wide `prefix` (top-level `Config` field;
 `--index-prefix`/`FLUSSO_INDEX_PREFIX` override it, flag > env > config) is prepended to
 **every** name the OpenSearch sink owns — the hash alias `{prefix}{logical}_{hash}`, its
