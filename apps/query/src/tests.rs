@@ -15,8 +15,8 @@ use crate::query::Root;
 use crate::{
     AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoIndex, FlussoMultiDocument,
     Fuzziness, Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode,
-    Number, Operator, Query, Search, SearchResponse, Segment, SegmentKind, SortOrder, Text,
-    multi_match,
+    Number, Operator, Query, Search, SearchResponse, Segment, SegmentKind, Sortable, SortOrder,
+    Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;

@@ -190,6 +190,14 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
         self
     }
 
+    /// Append several sort keys at once — e.g. from a
+    /// [`SortBuilder`](crate::SortBuilder). Equivalent to repeated [`sort`](Self::sort).
+    #[must_use]
+    pub fn sorts(mut self, sorts: impl IntoIterator<Item = Sort>) -> Self {
+        self.sort.extend(sorts);
+        self
+    }
+
     /// Offset of the first hit to return, in the blended list.
     #[must_use]
     pub fn from(mut self, from: u64) -> Self {

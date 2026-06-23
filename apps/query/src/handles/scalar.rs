@@ -12,8 +12,10 @@ use std::marker::PhantomData;
 use serde_json::{Map, Value};
 
 use super::{
-    Common, FlussoValue, RangeRelation, Sort, SortOrder, common_opts, exists_q, kind, single, wrap,
+    Common, FlussoValue, RangeRelation, Sort, SortOrder, Sortable, common_opts, exists_q, kind,
+    single, wrap,
 };
+use crate::FlussoDocument;
 use crate::query::{AsQuery, Query, Root};
 
 /// The JSON value for a typed date input, taken from its serde serialization
@@ -206,12 +208,14 @@ impl<S> Bool<S> {
         exists_q(&self.path)
     }
 
-    pub fn asc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Asc)
-    }
+}
 
-    pub fn desc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Desc)
+impl<S: FlussoDocument> Sortable for Bool<S> {
+    fn asc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Asc)
+    }
+    fn desc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Desc)
     }
 }
 
@@ -280,12 +284,14 @@ impl<K, S> Number<K, S> {
         exists_q(&self.path)
     }
 
-    pub fn asc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Asc)
-    }
+}
 
-    pub fn desc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Desc)
+impl<K, S: FlussoDocument> Sortable for Number<K, S> {
+    fn asc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Asc)
+    }
+    fn desc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Desc)
     }
 }
 
@@ -356,11 +362,13 @@ impl<S> Date<S> {
         exists_q(&self.path)
     }
 
-    pub fn asc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Asc)
-    }
+}
 
-    pub fn desc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Desc)
+impl<S: FlussoDocument> Sortable for Date<S> {
+    fn asc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Asc)
+    }
+    fn desc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Desc)
     }
 }

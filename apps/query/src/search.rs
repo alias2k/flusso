@@ -177,6 +177,14 @@ impl<T> Search<T> {
         self
     }
 
+    /// Append several sort keys at once — e.g. straight from a
+    /// [`SortBuilder`](crate::SortBuilder). Equivalent to repeated [`sort`](Self::sort).
+    #[must_use]
+    pub fn sorts(mut self, sorts: impl IntoIterator<Item = Sort>) -> Self {
+        self.sort.extend(sorts);
+        self
+    }
+
     /// Drop hits scoring below `min_score`.
     #[must_use]
     pub fn min_score(mut self, min_score: f32) -> Self {

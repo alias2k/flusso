@@ -9,7 +9,7 @@
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, FlussoIndex, FlussoMultiDocument, multi_match};
+use flusso_query::{Client, FlussoIndex, FlussoMultiDocument, Sortable, multi_match};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;

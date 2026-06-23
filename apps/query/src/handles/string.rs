@@ -13,8 +13,9 @@ use serde_json::{Map, Value};
 
 use super::{
     Common, FlussoValue, Fuzziness, MinimumShouldMatch, MultiMatchType, Operator, Sort, SortOrder,
-    TermsQuery, ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
+    Sortable, TermsQuery, ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
 };
+use crate::FlussoDocument;
 use crate::query::{AsQuery, Query, Root};
 
 /// The keyword term for a value, taken from its serde serialization — so a
@@ -426,13 +427,14 @@ impl<S, Sub> Keyword<S, Sub> {
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
+}
 
-    pub fn asc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Asc)
+impl<S: FlussoDocument, Sub> Sortable for Keyword<S, Sub> {
+    fn asc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Asc)
     }
-
-    pub fn desc(&self) -> Sort {
-        Sort::new(&self.path, SortOrder::Desc)
+    fn desc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Desc)
     }
 }
 
@@ -674,15 +676,16 @@ impl<S> Text<S, WithSubfields> {
         Keyword::leaf(format!("{}.keyword_lowercase", self.path))
     }
 
-    /// Sort ascending — on the case/accent-insensitive `.keyword_lowercase`
-    /// subfield, since the analyzed field itself isn't sortable. Only in scope
-    /// when the field carries auto subfields.
-    pub fn asc(&self) -> Sort {
+}
+
+/// Sorting a `text` field goes through its case/accent-insensitive
+/// `.keyword_lowercase` subfield (the analyzed field itself isn't sortable), so
+/// it's [`Sortable`] only when the field carries auto subfields.
+impl<S: FlussoDocument> Sortable for Text<S, WithSubfields> {
+    fn asc(&self) -> Sort {
         self.keyword_lowercase().asc()
     }
-
-    /// Sort descending (on `.keyword_lowercase` — see [`asc`](Self::asc)).
-    pub fn desc(&self) -> Sort {
+    fn desc(&self) -> Sort {
         self.keyword_lowercase().desc()
     }
 }

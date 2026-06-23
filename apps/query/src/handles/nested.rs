@@ -159,10 +159,21 @@ pub struct NestedProjection {
 }
 
 impl NestedProjection {
-    /// Order the returned elements.
+    /// Order the returned elements. A field sort keeps just its key + order:
+    /// inside `inner_hits` the sort already runs within the nested document, so
+    /// any `nested` wrapper from a [`Sortable`] handle is dropped here.
     #[must_use]
     pub fn sort(mut self, sort: Sort) -> Self {
-        self.sort.push(sort);
+        self.sort.push(sort.without_nested_context());
+        self
+    }
+
+    /// Order the returned elements by several keys at once — e.g. from a
+    /// [`SortBuilder`](crate::SortBuilder). Equivalent to repeated [`sort`](Self::sort).
+    #[must_use]
+    pub fn sorts(mut self, sorts: impl IntoIterator<Item = Sort>) -> Self {
+        self.sort
+            .extend(sorts.into_iter().map(Sort::without_nested_context));
         self
     }
 
