@@ -474,7 +474,10 @@ pub(crate) fn codegen(
     // boundary.
     let path_segments = segments.iter().map(|segment| {
         let name = LitStr::new(&segment.name, Span::call_site());
-        let kind = Ident::new(if segment.nested { "Nested" } else { "Object" }, Span::call_site());
+        let kind = Ident::new(
+            if segment.nested { "Nested" } else { "Object" },
+            Span::call_site(),
+        );
         quote! {
             ::flusso_query::Segment {
                 name: #name,

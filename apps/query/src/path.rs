@@ -83,13 +83,19 @@ mod tests {
 
     #[test]
     fn a_flattened_object_adds_no_boundary() {
-        let path = &[Segment { name: "account", kind: OBJECT }];
+        let path = &[Segment {
+            name: "account",
+            kind: OBJECT,
+        }];
         assert!(nested_boundaries(path).is_empty());
     }
 
     #[test]
     fn one_nested_level_yields_its_path() {
-        let path = &[Segment { name: "orders", kind: NESTED }];
+        let path = &[Segment {
+            name: "orders",
+            kind: NESTED,
+        }];
         assert_eq!(nested_boundaries(path), ["orders"]);
     }
 
@@ -97,9 +103,18 @@ mod tests {
     fn an_object_hop_extends_the_path_without_a_boundary() {
         // orders (nested) → shipping (object) → packages (nested)
         let path = &[
-            Segment { name: "orders", kind: NESTED },
-            Segment { name: "shipping", kind: OBJECT },
-            Segment { name: "packages", kind: NESTED },
+            Segment {
+                name: "orders",
+                kind: NESTED,
+            },
+            Segment {
+                name: "shipping",
+                kind: OBJECT,
+            },
+            Segment {
+                name: "packages",
+                kind: NESTED,
+            },
         ];
         assert_eq!(
             nested_boundaries(path),

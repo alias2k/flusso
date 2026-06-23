@@ -496,7 +496,11 @@ impl SortBuilder {
 
     /// Push `sort` unless its key is already present (first wins).
     fn push_unique(&mut self, sort: Sort) {
-        if !self.sorts.iter().any(|existing| existing.key() == sort.key()) {
+        if !self
+            .sorts
+            .iter()
+            .any(|existing| existing.key() == sort.key())
+        {
             self.sorts.push(sort);
         }
     }

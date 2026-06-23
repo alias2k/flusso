@@ -107,9 +107,8 @@ pub use handles::{
     RegexpQuery, ScoreMode, ScriptQuery, ScriptScoreQuery, ScriptSortType, SimpleQueryStringQuery,
     Sort, SortBuilder, SortMode, SortOrder, Sortable, TermQuery, TermsQuery, Text, TextMap,
     ValidationMethod, WildcardQuery, WithSubfields, ZeroTermsQuery, boosting, combined_fields,
-    constant_score, dis_max,
-    distance_feature, function_score, ids, kind, more_like_this, multi_match, query_string,
-    rank_feature, script, script_score, simple_query_string,
+    constant_score, dis_max, distance_feature, function_score, ids, kind, more_like_this,
+    multi_match, query_string, rank_feature, script, script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};

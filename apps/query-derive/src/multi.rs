@@ -3,7 +3,7 @@
 //!
 //! Unlike `FlussoDocument`, this derive is **purely syntactic**: no
 //! `flusso.toml` discovery, no schema resolution. Each variant's payload type
-//! must itself be a root [`FlussoIndex`] (usually via its own `FlussoDocument`
+//! must itself be a root `FlussoIndex` (usually via its own `FlussoDocument`
 //! derive), and the generated code only references that type's `INDEX` /
 //! `SCHEMA_HASH` consts. The emitted impl supplies the trait's two members:
 //!

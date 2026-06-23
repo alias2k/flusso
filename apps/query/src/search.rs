@@ -71,7 +71,7 @@ pub trait FlussoIndex: FlussoDocument + DeserializeOwned {
 
 /// A typed query against one index — a plain, client-free value.
 ///
-/// Built from [`FlussoDocument::query`] (or `Search::new(index, hash)` by
+/// Built from [`FlussoIndex::query`] (or `Search::new(index, hash)` by
 /// hand). Clauses accumulate into a bool query: `query`/`should` score,
 /// `filter`/`must_not` don't. Because no client (and no lifetime) is
 /// involved, a `Search` can be named, stored, cloned, and reused; a [`Client`]

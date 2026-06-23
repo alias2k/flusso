@@ -16,7 +16,7 @@ use crate::{
     AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoIndex, FlussoMultiDocument,
     Fuzziness, Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode,
     Number, Operator, OrderBy, Query, Search, SearchResponse, Segment, SegmentKind, Sort,
-    SortBuilder, Sortable, SortOrder, Text, multi_match,
+    SortBuilder, SortOrder, Sortable, Text, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -72,9 +72,18 @@ impl Package {
 
 impl FlussoDocument for Package {
     const PATH: &'static [Segment] = &[
-        Segment { name: "orders", kind: SegmentKind::Nested },
-        Segment { name: "shipping", kind: SegmentKind::Object },
-        Segment { name: "packages", kind: SegmentKind::Nested },
+        Segment {
+            name: "orders",
+            kind: SegmentKind::Nested,
+        },
+        Segment {
+            name: "shipping",
+            kind: SegmentKind::Object,
+        },
+        Segment {
+            name: "packages",
+            kind: SegmentKind::Nested,
+        },
     ];
 }
 
@@ -1455,7 +1464,9 @@ fn root_field_sorts_plainly() {
     // A root / flattened-object field (scope `Root`, empty PATH) sorts with no
     // `nested` wrapper and no auto `mode`.
     assert_eq!(
-        Keyword::<crate::Root>::at("account.createdAt").asc().to_value(),
+        Keyword::<crate::Root>::at("account.createdAt")
+            .asc()
+            .to_value(),
         json!({ "account.createdAt": { "order": "asc" } })
     );
 }
@@ -1603,7 +1614,11 @@ fn sort_builder_near_skips_none_and_raw_is_exempt_from_dedup() {
         .raw(None::<Sort>) // None adds nothing
         .build();
     assert_eq!(sorts.len(), 2);
-    assert!(sorts.iter().all(|s| s.to_value().get("_geo_distance").is_some()));
+    assert!(
+        sorts
+            .iter()
+            .all(|s| s.to_value().get("_geo_distance").is_some())
+    );
 }
 
 #[test]

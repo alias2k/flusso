@@ -207,7 +207,6 @@ impl<S> Bool<S> {
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
-
 }
 
 impl<S: FlussoDocument> Sortable for Bool<S> {
@@ -283,7 +282,6 @@ impl<K, S> Number<K, S> {
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
-
 }
 
 impl<K, S: FlussoDocument> Sortable for Number<K, S> {
@@ -361,7 +359,6 @@ impl<S> Date<S> {
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
     }
-
 }
 
 impl<S: FlussoDocument> Sortable for Date<S> {

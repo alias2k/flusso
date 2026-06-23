@@ -675,7 +675,6 @@ impl<S> Text<S, WithSubfields> {
     pub fn keyword_lowercase(&self) -> Keyword<S, NoSubfields> {
         Keyword::leaf(format!("{}.keyword_lowercase", self.path))
     }
-
 }
 
 /// Sorting a `text` field goes through its case/accent-insensitive
