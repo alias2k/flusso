@@ -68,3 +68,42 @@ pub fn nested_boundaries(path: &[Segment]) -> Vec<String> {
     }
     boundaries
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Segment, SegmentKind, nested_boundaries};
+
+    const OBJECT: SegmentKind = SegmentKind::Object;
+    const NESTED: SegmentKind = SegmentKind::Nested;
+
+    #[test]
+    fn root_has_no_boundaries() {
+        assert!(nested_boundaries(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_flattened_object_adds_no_boundary() {
+        let path = &[Segment { name: "account", kind: OBJECT }];
+        assert!(nested_boundaries(path).is_empty());
+    }
+
+    #[test]
+    fn one_nested_level_yields_its_path() {
+        let path = &[Segment { name: "orders", kind: NESTED }];
+        assert_eq!(nested_boundaries(path), ["orders"]);
+    }
+
+    #[test]
+    fn an_object_hop_extends_the_path_without_a_boundary() {
+        // orders (nested) → shipping (object) → packages (nested)
+        let path = &[
+            Segment { name: "orders", kind: NESTED },
+            Segment { name: "shipping", kind: OBJECT },
+            Segment { name: "packages", kind: NESTED },
+        ];
+        assert_eq!(
+            nested_boundaries(path),
+            ["orders", "orders.shipping.packages"]
+        );
+    }
+}
