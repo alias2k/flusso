@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.7.0...flusso-query-v0.8.0) - 2026-06-23
+
+### Fixed
+
+- *(query)* per-type numeric kinds + kind-based values for every kind ([#45](https://github.com/alias2k/flusso/pull/45))
+
 ## [0.6.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.5.0...flusso-query-v0.6.0) - 2026-06-22
 
 ### Added
