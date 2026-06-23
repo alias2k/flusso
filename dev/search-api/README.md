@@ -40,7 +40,7 @@ field, so it has no `q`.)
 
 | Endpoint | Filters |
 | -------- | ------- |
-| `GET /users` | `q` (full-text over `fullName` + `profile.bio`), `email`, `email_prefix`, `name` (full-text on `fullName`), `tier` (`account.tier`), `bio` (full-text on `profile.bio`), `has_profile` (one-to-one exists), `city` (matches an address), `order_status` (matches an order), `min_orders`, `recent_orders=N` (trim each user's returned `orders` to the N newest), `limit` |
+| `GET /users` | `q` (full-text over `fullName` + `profile.bio`), `email`, `email_prefix`, `name` (full-text on `fullName`), `tier` (`account.tier`), `bio` (full-text on `profile.bio`), `has_profile` (one-to-one exists), `city` (matches an address), `order_status` (matches an order), `min_orders`, `recent_orders=N` (trim each user's returned `orders` to the N newest), **sorting** (`SortBuilder`): `sort_name`, `sort_orders`, `sort_spend`, `sort_joined`, `sort_recent_order` (a nested `orders.placedAt` field) — each `asc`/`desc`, composable; `limit` |
 | `GET /users/{id}` | — (fetch one) |
 | `GET /products` | `q` (full-text over `name` + `description`), `sku`, `name` (full-text), `in_stock`, `min_reviews`, `min_rating`, `limit` |
 | `GET /products/{id}` | — (fetch one) |
@@ -52,6 +52,10 @@ field, so it has no `q`.)
 # Free-text, then narrow: users matching "ada" with ≥5 orders, in London, pro tier,
 # returning only their 3 newest orders:
 curl 'localhost:8080/users?q=ada&min_orders=5&tier=pro&city=London&recent_orders=3'
+
+# Composable sorting: biggest spenders first, then most recent order (a nested
+# orders.placedAt field — sorted with the same one-line call):
+curl 'localhost:8080/users?sort_spend=desc&sort_recent_order=desc'
 curl 'localhost:8080/products?q=keyboard&in_stock=true&min_rating=4'
 curl 'localhost:8080/orders?status=delivered&min_total=100'
 
