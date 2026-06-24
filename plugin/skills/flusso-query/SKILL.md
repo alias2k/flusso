@@ -107,10 +107,11 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 | `Object<S>` | `exists` only (same-doc sub-object / to-one join). Query its sub-fields via the **child struct's** flattened handles (`Account::tier()`), not by chaining off this handle. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort/.size/.from`) to shape the returned array; `exists` |
 | `Geo` | `within(Distance::km(12.0), center)` `within_box` `within_polygon` `exists`; `distance_from(center)` / `distance_sort(center, order, DistanceUnit)` (radius is a typed `Distance`, not a string) |
+| `TextMap`/`KeywordMap`/`NumberMap<K>`/`DateMap` | dynamic-key `map`. `key("it")` → a typed leaf for that key (query it like any field of the value kind); `has_key("it")` `exists`; `TextMap::search(q).prefer("it", w)` (cross-key full-text). **Sort by key with fallback:** `sort_key("it").or("en")` (see Sorting). `key(..)` itself is **not** sortable. |
 | `Binary` | `exists` (base64, not searchable) |
 | `Json` | `exists` `raw(serde_json::Value)` |
 
-`sort(…)` accepts sortable handles (`handle.asc()`/`.desc()` — the `Sortable` trait, so `use flusso_query::Sortable`): numbers, dates, keywords, bools, and `text` (`Text::asc`/`desc` sort via the case-insensitive `.keyword_lowercase` subfield automatically; use `.keyword().desc()` for an exact-case sort). `Geo`/`Object`/map handles are **not** `Sortable` — geo sorts with `Geo::distance_from(center)` (nearest-first). `Search::sorts(iter)` takes several at once. Sorting a field **inside a `nested` array is automatic**: `Order::placed_at().desc()` renders the right `nested` clause (any depth) from the handle's scope — no hand-written wrapper. Prefer **`SortBuilder`** to map a request to the `sort` array (see below). Cross-field: `multi_match("ada", [User::full_name(), User::bio()])` (weight one with `.boosted(3.0)`).
+`sort(…)` accepts sortable handles (`handle.asc()`/`.desc()` — the `Sortable` trait, so `use flusso_query::Sortable`): numbers, dates, keywords, bools, and `text` (`Text::asc`/`desc` sort via the case-insensitive `.keyword_lowercase` subfield automatically; use `.keyword().desc()` for an exact-case sort). `Geo`/`Object` handles and a bare **map** handle are **not** `Sortable` — geo sorts with `Geo::distance_from(center)` (nearest-first); a **map sorts by key with fallback** via `Type::field().sort_key("it").or("en")` (see Sorting below — a bare `.key("it")` is deliberately not sortable). `Search::sorts(iter)` takes several at once. Sorting a field **inside a `nested` array is automatic**: `Order::placed_at().desc()` renders the right `nested` clause (any depth) from the handle's scope — no hand-written wrapper. Prefer **`SortBuilder`** to map a request to the `sort` array (see below). Cross-field: `multi_match("ada", [User::full_name(), User::bio()])` (weight one with `.boosted(3.0)`).
 
 **Subfield accessors.** flusso's sink auto-enriches `text`/`keyword` fields (`auto_subfields`, on by default) with exact/sortable/searchable subfields, reachable with **no string path**: `User::full_name().keyword()` (exact/`wildcard`/`prefix`), `.keyword_lowercase()` (case-insensitive match/sort), `User::email().text()` (full-text over a keyword). A `wildcard` belongs on `.keyword()`, not the analyzed handle. **Compile-enforced:** the derive stamps a `text`/`keyword` handle with subfields only when every OpenSearch sink has `auto_subfields` on and the field has no custom `fields`; otherwise the handle is `…<NoSubfields>` and the accessors (and the `any_of`/`asc` sugar built on them) don't exist — calling one is a compile error, not a 400.
 
@@ -236,6 +237,7 @@ The enumerable params are **closed enums**, not strings (typo → compile error)
 - **Bool / scoring:** `Search::min_should_match(n)` (or `Query::min_should_match` on an `or`-group, plus `Query::boost`) turns a top-level free-text `should` group into a real constraint. Free functions: `constant_score(filter)`, `dis_max([..]).tie_breaker(..)`, `boosting(pos, neg, negative_boost)`, `function_score(q).weight(..)/.weight_when(.., filter)/.boost_mode(..)`.
 - **Standalone queries** (free fns, each `AsQuery`): `ids([..])`, `query_string(..)`, `simple_query_string(..)`, `combined_fields(.., [fields])`, `script(..)`, `script_score(q, src)`, `distance_feature(..)`, `rank_feature(..)`, `more_like_this([fields], [like])`. (`match_bool_prefix` is a `Text` operator.)
 - **One sort key:** `handle.asc()/.desc()` (the `Sortable` trait), then chain `.missing_first()/.missing_last()/.missing(v)`, `.mode(SortMode::..)`, `.unmapped_type(..)/.numeric_type(..)/.format(..)`. A field in a `nested` array auto-wraps in the right `nested` chain (mode defaults from direction — `asc→min`, `desc→max`); no manual `.nested(path)`. Plus `Sort::score()` and `Sort::script(type, src, order)` (use `SortBuilder::raw(..)` for those in a builder).
+- **Sort a `map` by key, with fallback:** `Type::field().sort_key("it").or("en")` — sort by `it`, else `en` (true language fallback, not lexicographic tiers: a row with only `en` still orders by `en`). It's `Sortable`, so it flows through the normal `.by(handle, dir)` / `.sort(..)`; single key is just `sort_key("it")` with no `.or`. String maps sort case-insensitively on the key's `.keyword`; numeric/date on the bare key. `missing_first/last/missing(v)` resolve to a **direction-correct** fallback value (not the `missing` field, which a `_script` sort ignores); `numeric_type/unmapped_type/format` don't apply (dropped). Several map sorts coexist (dedup by field path, not the shared `_script` key). A bare `field().key("it").asc()` won't compile — it would target a nonexistent subfield; always sort a map through `sort_key`.
 - **`SortBuilder`** — map a request to the `sort` array, one verb per concern, each absorbing its own optionality: `.by(handle, dir)` where `dir` is a `SortOrder`, an `OrderBy`, or an `Option` of either (a `None` skips the field — so a request's `Option<dir>` flows straight in); `.near(geo, center)` (geo, skips on `None`); `.score()/.score_if(cond)`; `.tiebreak(handle)` (stable final key); `.or_default(sort)` (fallback when otherwise empty); `.raw(sort)` (escape hatch, exempt from dedup); `.build()` / `IntoIterator`. `by`/`near`/`tiebreak`/`or_default` dedup by sort key (first wins). Convert your own direction enum once: `impl From<MyDir> for OrderBy`. `OrderBy::asc()/desc()` carry the same field-sort modifiers (`missing_*`/`mode`/`numeric_type`/`unmapped_type`/`format`). Feed it in with `Search::sorts(builder)` (also `MultiSearch`/`NestedProjection`).
 - **Search-level:** `min_score`, `track_total_hits`, `track_scores`, `search_after([..])` (deep pagination), `collapse(field)`, `post_filter(q)`, `highlight(Highlight::new().field(..).pre_tags(..))`.
 
@@ -261,6 +263,32 @@ for hit in &page.hits {
 ```
 
 By default `filter_nested` **replaces** `hit.source.<path>` with the matched subset (read it straight off the struct). A parent with no matches still returns, with `[]`. (`keep_source()` + the typed `hit.nested(handle)` side-accessor are deferred in v1.)
+
+## Map fields — dynamic-key objects
+
+A `map` is a `jsonb`-backed object whose **keys are runtime** but whose values all share **one leaf kind** — translations (`name: {"it": "ciao", "en": "hi"}`), per-currency prices, per-region dates. Schema: `- map: name` + a required `values:` leaf type (`text`/`keyword`/number/`date`). The derive gives it one handle per value kind: `TextMap`, `KeywordMap`, `NumberMap<K>`, `DateMap`.
+
+**Doc side** — the field type is `HashMap<String, V>` where `V` is a value of the declared kind (blanket impl, no derive): `HashMap<String, String>` for a text/keyword map, `HashMap<String, f64>` for a `double` map. A whole-map newtype opts in with `#[derive(FlussoMap)]` (`#[flusso(text)]`, etc.). Nullable map → `Option<HashMap<…>>`.
+
+```rust
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "products")]
+struct Product {
+    sku: String,
+    title: HashMap<String, String>,          // map<text>   → TextMap
+    codes: Option<HashMap<String, String>>,  // map<keyword>→ KeywordMap (nullable)
+    prices: Option<HashMap<String, f64>>,    // map<double> → NumberMap
+}
+```
+
+**Query side** — the split is the point: runtime keys, compile-time value type.
+
+- **One key** → a fully-typed leaf of the value kind, queried like any field: `Product::title().key("it").matches("ciao")` (text), `Product::codes().key("ean").eq("0049")` (keyword exact), `Product::prices().key("usd").gte(9.99)` (number range). `.key(..)` is **not** sortable (see below).
+- **Presence** — `Product::title().has_key("it")` (one key non-null) / `Product::title().exists()` (any key).
+- **Cross-key full-text** (`TextMap` only) — `Product::title().search("ciao").prefer("it", 3.0).prefer("en", 2.0)`: one `multi_match best_fields` over the preferred keys (each `key^weight`) plus a `title.*` fallback, so the best-scoring key wins. `.only_preferred()` drops the fallback; `operator`/`fuzziness`/`minimum_should_match` as on `matches`. (Exact-match maps have no `search` — use `key(..).eq(..)`.)
+- **Sort by key, with fallback** — `Product::title().sort_key("it").or("en")` (see [Sorting](#query-options-compound--extra-query-types)): sort by `it`, else `en`, through the normal `.by()`/`.sort(..)`.
+
+> `prefer(key, weight)` is **search scoring** (blend across keys, weighted). `sort_key("it").or("en")` is **ordered fallback** (pick the first present key). Different jobs — don't reach for weights when you mean fallback.
 
 ## Multi-index
 
@@ -300,6 +328,7 @@ A **newtype inherits its inner type's kinds** automatically — `struct Money(De
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `object` / `belongs_to` / `has_one` | struct / `Option<struct>` | `Object` |
 | `has_many` / `many_to_many` | `Vec<struct>` | `Nested<S,T>` |
+| `map` (dynamic-key object, shared value kind) | `HashMap<String, V>` (or a `#[derive(FlussoMap)]` newtype) | `TextMap`/`KeywordMap`/`NumberMap`/`DateMap` |
 | `ids` aggregate | `Vec<i64>` / `Vec<String>` (per `element_type`) | `Number` / `Keyword` (scalar handle — term queries match arrays) |
 
 Matching is by **leaf identifier + `Option` shape** — the macro compares the final type segment, not aliases. Exact money: declare a `custom` `scaled_float` in the schema and the derive accepts `rust_decimal::Decimal` (with the `decimal` feature).
