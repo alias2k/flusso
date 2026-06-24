@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2](https://github.com/alias2k/flusso/compare/flusso-query-v0.9.1...flusso-query-v0.9.2) - 2026-06-24
+
+### Added
+
+- *(query)* typed map-key sort with language fallback
+
+### Fixed
+
+- *(query)* drop field-only sort modifiers on a map-key script sort
+
+### Other
+
+- *(query)* chainable map-key sort through the normal .by()
+- record map-key fallback sort (issue #58)
+
 ## [0.9.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.8.0...flusso-query-v0.9.0) - 2026-06-23
 
 ### Added

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.9.1...flusso-query-derive-v0.9.2) - 2026-06-24
+
+### Other
+
+- *(query)* chainable map-key sort through the normal .by()
+- *(query)* cover map-key sort + reroute (issue #58)
+
 ## [0.9.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.8.0...flusso-query-derive-v0.9.0) - 2026-06-23
 
 ### Added
