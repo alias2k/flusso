@@ -358,7 +358,7 @@ impl Pipeline {
     /// artifact, not what these tests probe. Each index writes one `flusso_meta`
     /// doc when marked seeded.
     async fn await_seeded(&self, want: usize) {
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let _ = self
                 .http
@@ -401,7 +401,7 @@ impl Pipeline {
         id: &str,
         expected: Option<&str>,
     ) -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let observed = match self.fetch_name(index, id).await {
                 Some(name) => name,
