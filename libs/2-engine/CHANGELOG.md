@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/alias2k/flusso/compare/flusso-engine-v0.9.0...flusso-engine-v0.9.1) - 2026-06-24
+
+### Fixed
+
+- *(sources-postgres)* decode WAL keys to match the read-back variant
+
+### Other
+
+- *(engine)* serialize OpenSearch-backed e2e so CI doesn't starve
+
 ## [0.7.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.6.0...flusso-engine-v0.7.0) - 2026-06-22
 
 ### Fixed
