@@ -263,31 +263,40 @@ impl Sort {
     }
 
     /// Type to assume when the field is unmapped on some shard (instead of
-    /// failing the search), e.g. `"long"`.
+    /// failing the search), e.g. `"long"`. A no-op on a map-key `_script` sort —
+    /// it's a field-sort option with no meaning there.
     #[must_use]
     pub fn unmapped_type(mut self, unmapped_type: impl Into<String>) -> Self {
-        self.body.insert(
-            "unmapped_type".to_string(),
-            Value::String(unmapped_type.into()),
-        );
+        if self.script_kind.is_none() {
+            self.body.insert(
+                "unmapped_type".to_string(),
+                Value::String(unmapped_type.into()),
+            );
+        }
         self
     }
 
     /// Numeric type to sort as ([`NumericType`]), for cross-index type coercion.
+    /// A no-op on a map-key `_script` sort — a field-sort-only option.
     #[must_use]
     pub fn numeric_type(mut self, numeric_type: NumericType) -> Self {
-        self.body.insert(
-            "numeric_type".to_string(),
-            Value::String(numeric_type.as_str().to_string()),
-        );
+        if self.script_kind.is_none() {
+            self.body.insert(
+                "numeric_type".to_string(),
+                Value::String(numeric_type.as_str().to_string()),
+            );
+        }
         self
     }
 
-    /// Date `format` for a `date` field sort.
+    /// Date `format` for a `date` field sort. A no-op on a map-key `_script`
+    /// sort — a field-sort-only option.
     #[must_use]
     pub fn format(mut self, format: impl Into<String>) -> Self {
-        self.body
-            .insert("format".to_string(), Value::String(format.into()));
+        if self.script_kind.is_none() {
+            self.body
+                .insert("format".to_string(), Value::String(format.into()));
+        }
         self
     }
 
@@ -752,7 +761,8 @@ impl SortBuilder {
     /// Map-key sorts render a `_script` sort but dedup on the field path, so
     /// several still coexist; an [`OrderBy`]'s `missing_first`/`missing_last`
     /// resolves to a direction-correct fallback value (a `_script` sort can't use
-    /// the `missing` field), while `mode` / `numeric_type` / … don't apply.
+    /// the `missing` field). `numeric_type`/`unmapped_type`/`format` are dropped
+    /// (field-sort-only); `mode` is kept (it's valid on a `_script` sort).
     #[must_use]
     pub fn by<H: Sortable>(mut self, handle: H, dir: impl Into<MaybeOrderBy>) -> Self {
         if let Some(order) = dir.into().0 {

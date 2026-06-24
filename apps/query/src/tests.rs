@@ -1650,6 +1650,31 @@ fn map_sort_missing_resolves_to_a_direction_correct_sentinel() {
 }
 
 #[test]
+fn map_sort_drops_field_only_modifiers() {
+    // `numeric_type`/`unmapped_type`/`format` are field-sort-only and would be
+    // dead (or rejected) keys on a `_script` sort, so they're dropped — an
+    // `OrderBy` carrying them onto a map sort can't produce a bad request.
+    let value = SortBuilder::new()
+        .by(
+            NumberMap::<crate::kind::Long, Root>::at("prices").sort_key("usd"),
+            OrderBy::asc()
+                .numeric_type(crate::NumericType::Long)
+                .unmapped_type("long")
+                .format("epoch_millis"),
+        )
+        .build()
+        .first()
+        .map(Sort::to_value)
+        .unwrap_or_default();
+    let body = &value["_script"];
+    assert_eq!(body.get("numeric_type"), None);
+    assert_eq!(body.get("unmapped_type"), None);
+    assert_eq!(body.get("format"), None);
+    // Direction still applies.
+    assert_eq!(body["order"], json!("asc"));
+}
+
+#[test]
 fn map_sorts_dedup_by_field_path_not_by_script() {
     // Two *different* map fields both render `_script` yet must coexist; the
     // same field added twice dedups (first wins), like any other `by`.
