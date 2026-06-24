@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `flusso_query::Text<Root, MapKey>: Sortable` is not satisfied
+  --> tests/ui/map_key_not_sortable.rs:17:13
+   |
+17 |         .by(Product::title().key("it"), SortOrder::Asc)
+   |          -- ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Sortable` is not implemented for `flusso_query::Text<Root, MapKey>`
+   |          |
+   |          required by a bound introduced by this call
+   |
+help: the trait `Sortable` is implemented for `flusso_query::Text<S>`
+  --> $WORKSPACE/apps/query/src/handles/string.rs
+   |
+   | impl<S: FlussoDocument> Sortable for Text<S, WithSubfields> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `SortBuilder::by`
+  --> $WORKSPACE/apps/query/src/handles/sort.rs
+   |
+   |     pub fn by<H: Sortable>(mut self, handle: H, dir: impl Into<MaybeOrderBy>) -> Self {
+   |                  ^^^^^^^^ required by this bound in `SortBuilder::by`
