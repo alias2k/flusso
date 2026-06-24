@@ -56,10 +56,12 @@ pub use params::{
     ZeroTermsQuery,
 };
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
-pub use sort::{MaybeOrderBy, Missing, OrderBy, Sort, SortBuilder, SortMode, SortOrder, Sortable};
+pub use sort::{
+    MapKeySort, MaybeOrderBy, Missing, OrderBy, Sort, SortBuilder, SortMode, SortOrder, Sortable,
+};
 pub use string::{
-    FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery, RegexpQuery,
-    TermQuery, Text, WildcardQuery, WithSubfields, multi_match,
+    FuzzyQuery, Keyword, MapKey, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery,
+    RegexpQuery, TermQuery, Text, WildcardQuery, WithSubfields, multi_match,
 };
 
 /// `{ "<wrapper>": { "<path>": <value> } }`.

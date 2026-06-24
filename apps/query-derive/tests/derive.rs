@@ -318,6 +318,33 @@ fn number_and_date_maps_generate_typed_leaves() -> Result {
 }
 
 #[test]
+fn map_fields_sort_by_key_with_language_fallback() -> Result {
+    use flusso_query::{SortBuilder, SortOrder};
+
+    // Sort by Italian title, falling back to English — a `_script` sort over the
+    // dynamic `.keyword` subfields (not the broken single-key field sort), plus
+    // a numeric map sort on bare keys, driven from request directions.
+    let body = Product::query()
+        .sorts(
+            SortBuilder::new()
+                .by(Product::title().sort_key("it").or("en"), SortOrder::Desc)
+                .by(Product::prices().sort_key("usd"), SortOrder::Asc),
+        )
+        .body();
+
+    let json = body.to_string();
+    assert!(json.contains(r#""type":"string""#), "{json}");
+    assert!(
+        json.contains(r#"["title.it.keyword","title.en.keyword"]"#),
+        "{json}"
+    );
+    assert!(json.contains("toLowerCase"), "{json}");
+    assert!(json.contains(r#""type":"number""#), "{json}");
+    assert!(json.contains(r#"["prices.usd"]"#), "{json}");
+    Ok(())
+}
+
+#[test]
 fn map_doc_types_accept_hashmap_custom_value_and_wrapper() -> Result {
     // The three structs above compiled → every deferred map bound held. The
     // generated handles still follow the schema regardless of the doc type.

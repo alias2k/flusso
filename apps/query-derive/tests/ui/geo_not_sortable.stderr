@@ -7,9 +7,11 @@ error[E0277]: the trait bound `Geo: Sortable` is not satisfied
    |          required by a bound introduced by this call
    |
    = help: the following other types implement trait `Sortable`:
+             MapKeySort<S>
              flusso_query::Bool<S>
              flusso_query::Date<S>
-             flusso_query::Keyword<S, Sub>
+             flusso_query::Keyword<S, NoSubfields>
+             flusso_query::Keyword<S>
              flusso_query::Number<K, S>
              flusso_query::Text<S>
 note: required by a bound in `SortBuilder::by`
