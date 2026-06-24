@@ -39,11 +39,20 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   decoder must never panic on arbitrary bytes — an `Err` is the correct outcome. Run from the
   crate dir; a crash lands in `fuzz/artifacts/`.
 - The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration` and
-  `config_coverage` binaries plus `engine`'s `wal` binary (the full source→engine→sink
-  e2e lives in `engine` — a leaf source crate must not dev-depend on the engine, or it
-  can't be published before the engine and the layering is violated); `testcontainers`
-  spins up Postgres. `.config/nextest.toml` caps their concurrency and retries them —
-  they're legitimately slow/flaky.
+  `config_coverage` binaries plus `engine`'s `wal` and `pipeline` binaries (the full
+  source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
+  the engine, or it can't be published before the engine and the layering is violated);
+  `testcontainers` spins up Postgres (and, for `pipeline`, OpenSearch). `engine`'s `wal`
+  drives a *recording* sink (asserts which op the engine emits); `engine`'s `pipeline`
+  drives a **real OpenSearch sink** and reads the index back over HTTP, asserting the
+  actual document after each change: live insert/update/delete across
+  `uuid`/`int`/`bigint`/`text` keys, soft-delete tombstoning (boolean + timestamp markers,
+  set→removed, cleared→restored), and backfill (active rows seeded, soft-deleted skipped).
+  It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
+  written as a tombstone because the WAL key decoder and the read-back decoder disagree on
+  the `GenericValue` variant; see `cdc/pgoutput.rs::typed_value` vs
+  `document/value.rs::decode_column`). `.config/nextest.toml` caps their concurrency and
+  retries them — they're legitimately slow/flaky.
 - **The `schema` crate's config env-var tests must run single-threaded**: the
   `flusso.toml` parse/convert tests (`libs/2-schema/tests/config_toml.rs`) mutate process-wide
   env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its own process so it's
