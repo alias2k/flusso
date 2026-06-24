@@ -1615,8 +1615,12 @@ fn by_map_key_sorts_are_not_deduped() {
 fn nested_map_sort_wraps_in_its_nested_clause() {
     // A map inside the `orders` nested array renders the matching `nested`
     // wrapper and defaults `mode` from the direction, like a field sort.
-    let value =
-        Sort::from(TextMap::<Order>::at("orders.translations").sort_by(["it"]).desc()).to_value();
+    let value = Sort::from(
+        TextMap::<Order>::at("orders.translations")
+            .sort_by(["it"])
+            .desc(),
+    )
+    .to_value();
     assert_eq!(value["_script"]["nested"], json!({ "path": "orders" }));
     assert_eq!(value["_script"]["mode"], json!("max"));
 }

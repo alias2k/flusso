@@ -327,6 +327,21 @@ map arm hard-checks a `HashMap` value type and defers a `FlussoMap<kind>` bound 
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (`dynamic_templates` per-key
 analyzers for per-language stemming) is deferred.
 
+**Sorting a `map` by key, with language fallback (issue #58).** `*Map::sort_by([keys])`
+returns a `MapKeySort` (`handles/sort.rs`); `SortBuilder::by_map_key(handle, keys, dir)`
+drives it from a request direction (same `Into<MaybeOrderBy>` optionality as `by`). It renders
+a `_script` sort whose painless source walks the **ordered preferred keys** and sorts by the
+first one a doc has — true fallback (sort by `it`, else `en`), not lexicographic tiers. String
+maps sort case-insensitively (`toLowerCase`) on the dynamic `.keyword` subfield; numeric/date
+maps on the bare key (epoch millis for dates); a doc with none of the keys takes `.missing(..)`
+(default `""`/`0`). Nesting-aware via the scope path, like a field sort. Map-key sorts aren't
+deduped (every `_script` shares the key `_script`), so several coexist — like `raw`. **The
+single-key footgun is closed:** `TextMap::key`/`KeywordMap::key` now return `MapKey`-marked
+leaves (`string.rs`) that are **not** `Sortable` — a plain `.asc()` used to compile and 400 on
+the nonexistent `name.it.keyword_lowercase`. Number/date map keys stay directly sortable (their
+bare path is doc-valued and runtime-correct). Guarded by the `*_map_sort_by_*`/`by_map_key_*`
+tests and the `map_key_not_sortable` UI test.
+
 The query surface is **builder-based** (issue #19): each leaf operator returns a small
 per-query builder (`handles/string.rs`/`scalar.rs`/`geo.rs`/`nested.rs`) carrying that
 query's options plus the universal `boost`/`name` (the `Common` carrier + `common_opts!`
