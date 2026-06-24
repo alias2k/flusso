@@ -376,9 +376,9 @@ pub enum NoSubfields {}
 /// real OpenSearch field is created by default dynamic mapping, which has no
 /// `keyword_lowercase` subfield, so a plain `.asc()` would target a path that
 /// doesn't exist and 400 at query time. Sort a map by key through
-/// [`TextMap::sort_by`](crate::TextMap::sort_by) /
-/// [`SortBuilder::by_map_key`](crate::SortBuilder::by_map_key) instead, which
-/// emit a correct (fallback-capable) sort.
+/// [`TextMap::sort_key`](crate::TextMap::sort_key) (then
+/// [`SortBuilder::by`](crate::SortBuilder::by)) instead, which emits a correct
+/// (fallback-capable) sort.
 #[derive(Debug)]
 pub enum MapKey {}
 
@@ -444,7 +444,7 @@ impl<S, Sub> Keyword<S, Sub> {
 /// A `keyword` field sorts directly on its own path. Implemented for the
 /// scalar markers ([`WithSubfields`]/[`NoSubfields`]) only — **not** [`MapKey`],
 /// whose dynamically-mapped field isn't sortable on its bare path (sort a map by
-/// key through [`TextMap::sort_by`](crate::TextMap::sort_by) instead).
+/// key through [`KeywordMap::sort_key`](crate::KeywordMap::sort_key) instead).
 macro_rules! keyword_sortable {
     ($sub:ty) => {
         impl<S: FlussoDocument> Sortable for Keyword<S, $sub> {

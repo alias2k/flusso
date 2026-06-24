@@ -327,8 +327,8 @@ fn map_fields_sort_by_key_with_language_fallback() -> Result {
     let body = Product::query()
         .sorts(
             SortBuilder::new()
-                .by_map_key(Product::title(), ["it", "en"], SortOrder::Desc)
-                .by_map_key(Product::prices(), ["usd"], SortOrder::Asc),
+                .by(Product::title().sort_key("it").or("en"), SortOrder::Desc)
+                .by(Product::prices().sort_key("usd"), SortOrder::Asc),
         )
         .body();
 

@@ -39,22 +39,14 @@ use serde_json::{Map, Value};
 
 use super::sort::MapSortValueKind;
 use super::{
-    Common, Date, Fuzziness, Keyword, MapKey, MapKeySort, MapSortKey, MinimumShouldMatch, Number,
-    Operator, Text, common_opts, exists_q, wrap,
+    Common, Date, Fuzziness, Keyword, MapKey, MapKeySort, MinimumShouldMatch, Number, Operator,
+    Text, common_opts, exists_q, wrap,
 };
-use crate::FlussoDocument;
 use crate::query::{AsQuery, Query, Root};
-
-/// Collect preferred-key strings for a `sort_by` call.
-fn sort_keys(keys: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
-    keys.into_iter()
-        .map(|key| key.as_ref().to_string())
-        .collect()
-}
 
 /// Define a concrete map handle. Each carries a field path and scope `S` and
 /// exposes the key-agnostic `has_key`/`exists`; per-handle `key` (a fully-typed
-/// leaf) and `sort_by` (a key-fallback [`MapKeySort`]) are defined alongside.
+/// leaf) and `sort_key` (a key-fallback [`MapKeySort`]) are defined alongside.
 macro_rules! map_handle {
     ($(#[$meta:meta])* $Name:ident) => {
         $(#[$meta])*
@@ -89,7 +81,7 @@ map_handle!(
     /// A dynamic-key object whose values are analyzed full text (`map` with a
     /// `text`/`identifier` value kind). [`key`](Self::key) yields a [`Text`]
     /// leaf; [`search`](Self::search) runs full text across every key;
-    /// [`sort_by`](Self::sort_by) orders by a key with fallback.
+    /// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
     TextMap
 );
 map_handle!(
@@ -97,14 +89,14 @@ map_handle!(
     /// `keyword`/`enum`/`uuid` value kind). [`key`](Self::key) yields a
     /// [`Keyword`] leaf for exact match. No `search` — exact-match maps use
     /// `key(..).eq(..)` / `has_key(..)`, consistent with the leaf split.
-    /// [`sort_by`](Self::sort_by) orders by a key with fallback.
+    /// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
     KeywordMap
 );
 map_handle!(
     /// A dynamic-key object whose values are dates (`map` with a
     /// `date`/`timestamp` value kind). [`key`](Self::key) yields a [`Date`]
     /// leaf for range/exact operators (`gte`/`between`/`eq`/…).
-    /// [`sort_by`](Self::sort_by) orders by a key with fallback.
+    /// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
     DateMap
 );
 
@@ -112,67 +104,47 @@ impl<S> TextMap<S> {
     /// A specific runtime key → a fully-typed [`Text`] leaf, queried like any
     /// other text field. It carries the [`MapKey`] marker, so it is **not**
     /// directly sortable — order a text map by key with
-    /// [`sort_by`](Self::sort_by), which is correct at query time and supports
+    /// [`sort_key`](Self::sort_key), which is correct at query time and supports
     /// key fallback.
     pub fn key(&self, key: impl AsRef<str>) -> Text<S, MapKey> {
         Text::map_key(format!("{}.{}", self.path, key.as_ref()))
     }
 
-    /// Sort by an ordered list of preferred keys (language fallback: by `it`,
-    /// else `en`, …). Returns a [`MapKeySort`]; see it for the rendered shape.
-    pub fn sort_by(&self, keys: impl IntoIterator<Item = impl AsRef<str>>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), sort_keys(keys), MapSortValueKind::String)
-    }
-}
-
-impl<S: FlussoDocument> MapSortKey for TextMap<S> {
-    type Scope = S;
-    fn map_key_sort(&self, keys: Vec<String>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), keys, MapSortValueKind::String)
+    /// Sort by this key, with optional fallback — `sort_key("it").or("en")`
+    /// orders by `it`, else `en` (language fallback). Returns a [`MapKeySort`];
+    /// pass it to [`SortBuilder::by`](crate::SortBuilder::by) or `.asc()`/`.desc()`.
+    pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
+        MapKeySort::new(self.path.clone(), key, MapSortValueKind::String)
     }
 }
 
 impl<S> KeywordMap<S> {
     /// A specific runtime key → a fully-typed [`Keyword`] leaf for exact match.
     /// It carries the [`MapKey`] marker, so it is **not** directly sortable —
-    /// order a keyword map by key with [`sort_by`](Self::sort_by).
+    /// order a keyword map by key with [`sort_key`](Self::sort_key).
     pub fn key(&self, key: impl AsRef<str>) -> Keyword<S, MapKey> {
         Keyword::map_key(format!("{}.{}", self.path, key.as_ref()))
     }
 
-    /// Sort by an ordered list of preferred keys (fallback). Returns a
-    /// [`MapKeySort`]; see it for the rendered shape.
-    pub fn sort_by(&self, keys: impl IntoIterator<Item = impl AsRef<str>>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), sort_keys(keys), MapSortValueKind::String)
-    }
-}
-
-impl<S: FlussoDocument> MapSortKey for KeywordMap<S> {
-    type Scope = S;
-    fn map_key_sort(&self, keys: Vec<String>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), keys, MapSortValueKind::String)
+    /// Sort by this key, with optional fallback (`sort_key("a").or("b")`).
+    /// Returns a [`MapKeySort`]; see it for the rendered shape.
+    pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
+        MapKeySort::new(self.path.clone(), key, MapSortValueKind::String)
     }
 }
 
 impl<S> DateMap<S> {
     /// A specific runtime key → a fully-typed [`Date`] leaf for range/exact
     /// operators. A `date` map key is doc-valued on its bare path, so the leaf
-    /// sorts directly; [`sort_by`](Self::sort_by) adds ordered key fallback.
+    /// sorts directly; [`sort_key`](Self::sort_key) adds ordered key fallback.
     pub fn key(&self, key: impl AsRef<str>) -> Date<S> {
         Date::at(format!("{}.{}", self.path, key.as_ref()))
     }
 
-    /// Sort by an ordered list of preferred keys (fallback), by epoch millis.
-    /// Returns a [`MapKeySort`]; see it for the rendered shape.
-    pub fn sort_by(&self, keys: impl IntoIterator<Item = impl AsRef<str>>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), sort_keys(keys), MapSortValueKind::Date)
-    }
-}
-
-impl<S: FlussoDocument> MapSortKey for DateMap<S> {
-    type Scope = S;
-    fn map_key_sort(&self, keys: Vec<String>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), keys, MapSortValueKind::Date)
+    /// Sort by this key, with optional fallback (`sort_key("eu").or("us")`), by
+    /// epoch millis. Returns a [`MapKeySort`]; see it for the rendered shape.
+    pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
+        MapKeySort::new(self.path.clone(), key, MapSortValueKind::Date)
     }
 }
 
@@ -196,16 +168,16 @@ impl<K, S> NumberMap<K, S> {
 
     /// A specific runtime key → a [`Number`] leaf handle of value kind `K`,
     /// queried like any other numeric field. A numeric map key is doc-valued on
-    /// its bare path, so the leaf sorts directly; [`sort_by`](Self::sort_by)
+    /// its bare path, so the leaf sorts directly; [`sort_key`](Self::sort_key)
     /// adds ordered key fallback.
     pub fn key(&self, key: impl AsRef<str>) -> Number<K, S> {
         Number::at(format!("{}.{}", self.path, key.as_ref()))
     }
 
-    /// Sort by an ordered list of preferred keys (fallback). Returns a
-    /// [`MapKeySort`]; see it for the rendered shape.
-    pub fn sort_by(&self, keys: impl IntoIterator<Item = impl AsRef<str>>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), sort_keys(keys), MapSortValueKind::Number)
+    /// Sort by this key, with optional fallback (`sort_key("usd").or("eur")`).
+    /// Returns a [`MapKeySort`]; see it for the rendered shape.
+    pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
+        MapKeySort::new(self.path.clone(), key, MapSortValueKind::Number)
     }
 
     /// The map holds the given key with a non-null value.
@@ -216,13 +188,6 @@ impl<K, S> NumberMap<K, S> {
     /// The map field itself is present (has at least one key).
     pub fn exists(&self) -> Query<S> {
         exists_q(&self.path)
-    }
-}
-
-impl<K, S: FlussoDocument> MapSortKey for NumberMap<K, S> {
-    type Scope = S;
-    fn map_key_sort(&self, keys: Vec<String>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), keys, MapSortValueKind::Number)
     }
 }
 
