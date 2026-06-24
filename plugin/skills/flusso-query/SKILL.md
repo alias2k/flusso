@@ -264,6 +264,32 @@ for hit in &page.hits {
 
 By default `filter_nested` **replaces** `hit.source.<path>` with the matched subset (read it straight off the struct). A parent with no matches still returns, with `[]`. (`keep_source()` + the typed `hit.nested(handle)` side-accessor are deferred in v1.)
 
+## Map fields — dynamic-key objects
+
+A `map` is a `jsonb`-backed object whose **keys are runtime** but whose values all share **one leaf kind** — translations (`name: {"it": "ciao", "en": "hi"}`), per-currency prices, per-region dates. Schema: `- map: name` + a required `values:` leaf type (`text`/`keyword`/number/`date`). The derive gives it one handle per value kind: `TextMap`, `KeywordMap`, `NumberMap<K>`, `DateMap`.
+
+**Doc side** — the field type is `HashMap<String, V>` where `V` is a value of the declared kind (blanket impl, no derive): `HashMap<String, String>` for a text/keyword map, `HashMap<String, f64>` for a `double` map. A whole-map newtype opts in with `#[derive(FlussoMap)]` (`#[flusso(text)]`, etc.). Nullable map → `Option<HashMap<…>>`.
+
+```rust
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "products")]
+struct Product {
+    sku: String,
+    title: HashMap<String, String>,          // map<text>   → TextMap
+    codes: Option<HashMap<String, String>>,  // map<keyword>→ KeywordMap (nullable)
+    prices: Option<HashMap<String, f64>>,    // map<double> → NumberMap
+}
+```
+
+**Query side** — the split is the point: runtime keys, compile-time value type.
+
+- **One key** → a fully-typed leaf of the value kind, queried like any field: `Product::title().key("it").matches("ciao")` (text), `Product::codes().key("ean").eq("0049")` (keyword exact), `Product::prices().key("usd").gte(9.99)` (number range). `.key(..)` is **not** sortable (see below).
+- **Presence** — `Product::title().has_key("it")` (one key non-null) / `Product::title().exists()` (any key).
+- **Cross-key full-text** (`TextMap` only) — `Product::title().search("ciao").prefer("it", 3.0).prefer("en", 2.0)`: one `multi_match best_fields` over the preferred keys (each `key^weight`) plus a `title.*` fallback, so the best-scoring key wins. `.only_preferred()` drops the fallback; `operator`/`fuzziness`/`minimum_should_match` as on `matches`. (Exact-match maps have no `search` — use `key(..).eq(..)`.)
+- **Sort by key, with fallback** — `Product::title().sort_key("it").or("en")` (see [Sorting](#query-options-compound--extra-query-types)): sort by `it`, else `en`, through the normal `.by()`/`.sort(..)`.
+
+> `prefer(key, weight)` is **search scoring** (blend across keys, weighted). `sort_key("it").or("en")` is **ordered fallback** (pick the first present key). Different jobs — don't reach for weights when you mean fallback.
+
 ## Multi-index
 
 - **One blended list** — `#[derive(FlussoMultiDocument)]` on an enum with one single-field tuple variant per document type. `StoreItem::query()…send(&client)` ranks hits together; dispatch by `hit.source` match. Purely syntactic (no schema resolution); validates enum shape + no duplicate payload types. A *sort* on a field not in every index needs `unmapped_type` — sort by relevance or shared fields.
