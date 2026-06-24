@@ -13,10 +13,11 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, BoostMode, Client, Date, Distance, FlussoDocument, FlussoIndex, FlussoMultiDocument,
-    Fuzziness, Geo, GeoPoint, Keyword, MsearchBundle, MultiMatchType, Nested, NestedScoreMode,
-    Number, Operator, OrderBy, Query, Search, SearchResponse, Segment, SegmentKind, Sort,
-    SortBuilder, SortOrder, Sortable, Text, multi_match,
+    AsQuery, BoostMode, Client, Date, DateMap, Distance, FlussoDocument, FlussoIndex,
+    FlussoMultiDocument, Fuzziness, Geo, GeoPoint, Keyword, KeywordMap, MsearchBundle,
+    MultiMatchType, Nested, NestedScoreMode, Number, NumberMap, Operator, OrderBy, Query, Search,
+    SearchResponse, Segment, SegmentKind, Sort, SortBuilder, SortOrder, Sortable, Text, TextMap,
+    multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -1503,6 +1504,121 @@ fn doubly_nested_field_renders_the_recursive_chain() {
 fn ascending_nested_sort_defaults_mode_to_min() {
     let value = Order::placed_at().asc().to_value();
     assert_eq!(value["orders.placedAt"]["mode"], json!("min"));
+}
+
+// --- Map-key sort with language fallback (issue #58) -----------------------
+
+#[test]
+fn text_map_sort_by_renders_a_lowercasing_string_script_over_keyword_subfields() {
+    // A string map sorts on the dynamic `.keyword` subfield of each preferred
+    // key, lowercased (parity with scalar text sort), walking the keys in order
+    // so a row with only `en` still orders by `en` — true fallback.
+    let sort = Sort::from(TextMap::<Root>::at("name").sort_by(["it", "en"]).desc());
+    assert_eq!(
+        sort.to_value(),
+        json!({ "_script": {
+            "type": "string",
+            "order": "desc",
+            "script": {
+                "source": "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;",
+                "params": {
+                    "fields": ["name.it.keyword", "name.en.keyword"],
+                    "missing": "",
+                }
+            }
+        } })
+    );
+}
+
+#[test]
+fn keyword_map_sort_by_uses_the_same_string_script() {
+    let value = Sort::from(KeywordMap::<Root>::at("codes").sort_by(["ean"]).asc()).to_value();
+    assert_eq!(value["_script"]["type"], json!("string"));
+    assert_eq!(
+        value["_script"]["script"]["params"]["fields"],
+        json!(["codes.ean.keyword"])
+    );
+}
+
+#[test]
+fn number_map_sort_by_renders_a_number_script_over_bare_keys() {
+    // Numeric values are doc-valued on the bare key path (no `.keyword`).
+    let value =
+        Sort::from(NumberMap::<crate::kind::Double, Root>::at("prices").sort_by(["usd", "eur"]))
+            .to_value();
+    assert_eq!(value["_script"]["type"], json!("number"));
+    assert_eq!(value["_script"]["order"], json!("asc"));
+    assert_eq!(
+        value["_script"]["script"]["params"]["fields"],
+        json!(["prices.usd", "prices.eur"])
+    );
+    assert_eq!(value["_script"]["script"]["params"]["missing"], json!(0));
+}
+
+#[test]
+fn date_map_sort_by_sorts_by_epoch_millis() {
+    let value = Sort::from(DateMap::<Root>::at("releaseDates").sort_by(["eu"])).to_value();
+    assert_eq!(value["_script"]["type"], json!("number"));
+    assert!(
+        value["_script"]["script"]["source"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("toEpochMilli")
+    );
+    assert_eq!(
+        value["_script"]["script"]["params"]["fields"],
+        json!(["releaseDates.eu"])
+    );
+}
+
+#[test]
+fn by_map_key_drives_direction_and_missing_from_a_request_and_skips_none() {
+    let sorts = SortBuilder::new()
+        .by_map_key(
+            TextMap::<Root>::at("name"),
+            ["it", "en"],
+            OrderBy::desc().missing("\u{10ffff}"),
+        )
+        // A `None` direction self-skips, exactly like `by`.
+        .by_map_key(TextMap::<Root>::at("label"), ["fr"], None::<OrderBy>)
+        .build();
+
+    let rendered: Vec<_> = sorts.iter().map(Sort::to_value).collect();
+    assert_eq!(
+        rendered,
+        vec![json!({ "_script": {
+            "type": "string",
+            "order": "desc",
+            "script": {
+                "source": "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;",
+                "params": {
+                    "fields": ["name.it.keyword", "name.en.keyword"],
+                    "missing": "\u{10ffff}",
+                }
+            }
+        } })]
+    );
+}
+
+#[test]
+fn by_map_key_sorts_are_not_deduped() {
+    // Every `_script` sort shares the key `_script`; map-key sorts must still
+    // coexist (like `raw`), not collapse to one.
+    let sorts = SortBuilder::new()
+        .by_map_key(TextMap::<Root>::at("name"), ["it"], SortOrder::Asc)
+        .by_map_key(TextMap::<Root>::at("label"), ["en"], SortOrder::Asc)
+        .build();
+    assert_eq!(sorts.len(), 2);
+}
+
+#[test]
+fn nested_map_sort_wraps_in_its_nested_clause() {
+    // A map inside the `orders` nested array renders the matching `nested`
+    // wrapper and defaults `mode` from the direction, like a field sort.
+    let value =
+        Sort::from(TextMap::<Order>::at("orders.translations").sort_by(["it"]).desc()).to_value();
+    assert_eq!(value["_script"]["nested"], json!({ "path": "orders" }));
+    assert_eq!(value["_script"]["mode"], json!("max"));
 }
 
 #[test]

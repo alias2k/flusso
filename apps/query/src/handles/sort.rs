@@ -8,10 +8,12 @@
 //! renders to one entry in the `sort` array. The typed handle is always the
 //! entry point — there is no public string-path sort.
 
+use std::marker::PhantomData;
+
 use serde_json::{Map, Value};
 
 use super::{Geo, GeoPoint, NumericType, ScriptSortType};
-use crate::query::AsQuery;
+use crate::query::{AsQuery, Root};
 use crate::{FlussoDocument, nested_boundaries};
 
 /// Sort direction.
@@ -310,6 +312,172 @@ pub enum Missing {
     Value(Value),
 }
 
+/// The doc-values shape of a `map`'s values, which decides how
+/// [`MapKeySort`] reads a key: the exact `.keyword` subfield + lowercasing for a
+/// string map, the bare numeric/date field otherwise.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MapSortValueKind {
+    /// `text`/`keyword` values — sort on the dynamic `.keyword` subfield,
+    /// lowercased for case-insensitive order (parity with scalar string sort).
+    String,
+    /// Numeric values — sort on the bare key field.
+    Number,
+    /// Date values — sort on the bare key field, by epoch millis.
+    Date,
+}
+
+/// `for (def f : params.fields) { if present → return … }` then the `missing`
+/// fallback. Walking `params.fields` in order is the whole point: it's the
+/// **key fallback** (sort by the first preferred key a document actually has).
+const STRING_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;";
+const NUMBER_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;";
+const DATE_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toInstant().toEpochMilli(); } } return params.missing;";
+
+/// A sort over a dynamic-key `map` field by an **ordered list of preferred
+/// keys** — language fallback (sort by `it`, else `en`, …). Produced by
+/// `TextMap::sort_by` / `KeywordMap::sort_by` / `NumberMap::sort_by` /
+/// `DateMap::sort_by`, or driven from a request via
+/// [`SortBuilder::by_map_key`].
+///
+/// It renders a `_script` sort whose painless source walks the preferred keys
+/// and sorts by the value of the first one the document has, so a row with only
+/// `en` still orders by `en` (true fallback, not lexicographic tiers). String
+/// maps sort case-insensitively on the dynamic `.keyword` subfield; numeric/date
+/// maps sort on the bare key. A document with **none** of the keys takes
+/// [`missing`](Self::missing) (default: empty string / `0`).
+///
+/// Nesting-aware: a map inside one or more `nested` arrays renders the matching
+/// `nested` chain from its scope `S`, exactly like a field sort.
+///
+/// ```
+/// use flusso_query::{Root, SortBuilder, TextMap};
+///
+/// // Sort by Italian, falling back to English; feed it through `raw`, or use
+/// // `SortBuilder::by_map_key` to drive it from a request direction.
+/// let sorts = SortBuilder::new()
+///     .raw(TextMap::<Root>::at("name").sort_by(["it", "en"]).desc())
+///     .build();
+/// assert_eq!(sorts.len(), 1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct MapKeySort<S = Root> {
+    path: String,
+    keys: Vec<String>,
+    kind: MapSortValueKind,
+    order: SortOrder,
+    missing: Option<Value>,
+    _scope: PhantomData<fn() -> S>,
+}
+
+impl<S> MapKeySort<S> {
+    pub(crate) fn new(path: String, keys: Vec<String>, kind: MapSortValueKind) -> Self {
+        Self {
+            path,
+            keys,
+            kind,
+            order: SortOrder::Asc,
+            missing: None,
+            _scope: PhantomData,
+        }
+    }
+
+    /// Sort ascending.
+    #[must_use]
+    pub fn asc(mut self) -> Self {
+        self.order = SortOrder::Asc;
+        self
+    }
+
+    /// Sort descending.
+    #[must_use]
+    pub fn desc(mut self) -> Self {
+        self.order = SortOrder::Desc;
+        self
+    }
+
+    /// The sort value for a document that has **none** of the preferred keys.
+    /// Defaults to an empty string (string maps) or `0` (numeric/date maps). A
+    /// `_script` sort has no `missing` modifier, so this literal is how missing
+    /// rows are placed — pass a high sentinel (e.g. `"\u{10ffff}"`) to force
+    /// them last under ascending order.
+    #[must_use]
+    pub fn missing(mut self, value: impl Into<Value>) -> Self {
+        self.missing = Some(value.into());
+        self
+    }
+
+    fn leaf_field(&self, key: &str) -> String {
+        match self.kind {
+            MapSortValueKind::String => format!("{}.{key}.keyword", self.path),
+            MapSortValueKind::Number | MapSortValueKind::Date => format!("{}.{key}", self.path),
+        }
+    }
+}
+
+impl<S: FlussoDocument> From<MapKeySort<S>> for Sort {
+    fn from(map_sort: MapKeySort<S>) -> Self {
+        let fields: Vec<Value> = map_sort
+            .keys
+            .iter()
+            .map(|key| Value::String(map_sort.leaf_field(key)))
+            .collect();
+
+        let (sort_type, source, default_missing) = match map_sort.kind {
+            MapSortValueKind::String => ("string", STRING_SOURCE, Value::String(String::new())),
+            MapSortValueKind::Number => ("number", NUMBER_SOURCE, Value::from(0)),
+            MapSortValueKind::Date => ("number", DATE_SOURCE, Value::from(0)),
+        };
+        let missing = map_sort.missing.unwrap_or(default_missing);
+
+        let mut params = Map::new();
+        params.insert("fields".to_string(), Value::Array(fields));
+        params.insert("missing".to_string(), missing);
+
+        let mut script = Map::new();
+        script.insert("source".to_string(), Value::String(source.to_string()));
+        script.insert("params".to_string(), Value::Object(params));
+
+        let mut body = Map::new();
+        body.insert("type".to_string(), Value::String(sort_type.to_string()));
+        body.insert("script".to_string(), Value::Object(script));
+        body.insert(
+            "order".to_string(),
+            Value::String(map_sort.order.as_str().to_string()),
+        );
+
+        let boundaries = nested_boundaries(S::PATH);
+        if let Some(nested) = nested_clause(&boundaries) {
+            body.insert("nested".to_string(), nested);
+            body.insert(
+                "mode".to_string(),
+                Value::String(default_mode(map_sort.order).to_string()),
+            );
+        }
+
+        Sort::from_parts("_script".to_string(), body)
+    }
+}
+
+impl<S: FlussoDocument> From<MapKeySort<S>> for Option<Sort> {
+    fn from(map_sort: MapKeySort<S>) -> Self {
+        Some(map_sort.into())
+    }
+}
+
+/// A map handle that can drive a [`SortBuilder::by_map_key`] / `sort_by`. Sealed
+/// — implemented by the four map handles (`TextMap`/`KeywordMap`/`NumberMap`/
+/// `DateMap`); the value kind it reports picks the doc-values shape.
+pub trait MapSortKey {
+    /// The scope the map field lives in (its containing document), so the sort
+    /// is nesting-aware.
+    type Scope: FlussoDocument;
+
+    /// Build a [`MapKeySort`] over `keys` for this handle. Plumbing for
+    /// [`SortBuilder::by_map_key`] and the handles' own `sort_by`.
+    #[doc(hidden)]
+    fn map_key_sort(&self, keys: Vec<String>) -> MapKeySort<Self::Scope>;
+}
+
 /// A field sort minus the field — a direction plus the field-sort modifiers,
 /// ready to attach to whatever handle [`SortBuilder::by`] is given.
 ///
@@ -513,6 +681,41 @@ impl SortBuilder {
     pub fn by<H: Sortable>(mut self, handle: H, dir: impl Into<MaybeOrderBy>) -> Self {
         if let Some(order) = dir.into().0 {
             self.push_unique(order.into_sort(&handle));
+        }
+        self
+    }
+
+    /// Sort a dynamic-key `map` field by an ordered list of preferred `keys`
+    /// (language fallback: by `it`, else `en`, …). `dir` is the same
+    /// [`SortOrder`] / [`OrderBy`] / `Option`-of-either as [`by`](Self::by), so a
+    /// request's `Option<dir>` flows straight in and a `None` skips it.
+    ///
+    /// Renders a `_script` sort (see [`MapKeySort`]). Like [`raw`](Self::raw) it
+    /// is **not** deduped — every `_script` sort shares the key `_script`, so
+    /// several map-key sorts (and a hand-written script sort) coexist. Only the
+    /// direction and a literal `missing` from `dir` apply; `mode` / `_first` /
+    /// `_last` and the other field-sort modifiers don't carry to a script sort.
+    #[must_use]
+    pub fn by_map_key<H: MapSortKey>(
+        mut self,
+        handle: H,
+        keys: impl IntoIterator<Item = impl AsRef<str>>,
+        dir: impl Into<MaybeOrderBy>,
+    ) -> Self {
+        if let Some(order) = dir.into().0 {
+            let keys = keys
+                .into_iter()
+                .map(|key| key.as_ref().to_string())
+                .collect();
+            let mut map_sort = handle.map_key_sort(keys);
+            map_sort = match order.order {
+                SortOrder::Asc => map_sort.asc(),
+                SortOrder::Desc => map_sort.desc(),
+            };
+            if let Some(Missing::Value(value)) = order.missing {
+                map_sort = map_sort.missing(value);
+            }
+            self.sorts.push(map_sort.into());
         }
         self
     }

@@ -370,6 +370,18 @@ pub enum WithSubfields {}
 #[derive(Debug)]
 pub enum NoSubfields {}
 
+/// Type-state marker: this leaf is one **key of a dynamic-key `map`** (from
+/// `TextMap::key` / `KeywordMap::key`). The key's value ops work as usual, but
+/// it carries no flusso subfields **and is not directly [`Sortable`]** — its
+/// real OpenSearch field is created by default dynamic mapping, which has no
+/// `keyword_lowercase` subfield, so a plain `.asc()` would target a path that
+/// doesn't exist and 400 at query time. Sort a map by key through
+/// [`TextMap::sort_by`](crate::TextMap::sort_by) /
+/// [`SortBuilder::by_map_key`](crate::SortBuilder::by_map_key) instead, which
+/// emit a correct (fallback-capable) sort.
+#[derive(Debug)]
+pub enum MapKey {}
+
 /// An exact, aggregatable string field (`keyword`, `enum`, `uuid`). `Sub` is a
 /// [`WithSubfields`]/[`NoSubfields`] type-state marker gating the subfield
 /// accessors.
@@ -429,12 +441,30 @@ impl<S, Sub> Keyword<S, Sub> {
     }
 }
 
-impl<S: FlussoDocument, Sub> Sortable for Keyword<S, Sub> {
-    fn asc(&self) -> Sort {
-        Sort::field::<S>(&self.path, SortOrder::Asc)
-    }
-    fn desc(&self) -> Sort {
-        Sort::field::<S>(&self.path, SortOrder::Desc)
+/// A `keyword` field sorts directly on its own path. Implemented for the
+/// scalar markers ([`WithSubfields`]/[`NoSubfields`]) only — **not** [`MapKey`],
+/// whose dynamically-mapped field isn't sortable on its bare path (sort a map by
+/// key through [`TextMap::sort_by`](crate::TextMap::sort_by) instead).
+macro_rules! keyword_sortable {
+    ($sub:ty) => {
+        impl<S: FlussoDocument> Sortable for Keyword<S, $sub> {
+            fn asc(&self) -> Sort {
+                Sort::field::<S>(&self.path, SortOrder::Asc)
+            }
+            fn desc(&self) -> Sort {
+                Sort::field::<S>(&self.path, SortOrder::Desc)
+            }
+        }
+    };
+}
+keyword_sortable!(WithSubfields);
+keyword_sortable!(NoSubfields);
+
+impl<S> Keyword<S, MapKey> {
+    /// A handle for one key of a dynamic-key `map` (see [`MapKey`]). The value
+    /// ops apply; the subfield accessors and direct sort do not.
+    pub(crate) fn map_key(path: impl Into<String>) -> Self {
+        Self::handle(path)
     }
 }
 
@@ -693,6 +723,14 @@ impl<S> Text<S, NoSubfields> {
     /// Construct a handle for a field known to have no auto subfields (a
     /// subfield leaf, or a field the derive resolved as un-subfielded).
     pub fn leaf(path: impl Into<String>) -> Self {
+        Self::handle(path)
+    }
+}
+
+impl<S> Text<S, MapKey> {
+    /// A handle for one key of a dynamic-key `map` (see [`MapKey`]). The
+    /// match/`exists` ops apply; the subfield accessors and direct sort do not.
+    pub(crate) fn map_key(path: impl Into<String>) -> Self {
         Self::handle(path)
     }
 }
