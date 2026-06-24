@@ -23,6 +23,8 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{Aggregation, PeriodicReader, SdkMeterProvider, Stream};
 use prometheus::Registry;
 
+use crate::telemetry::{OtlpProtocol, OtlpSignal, otlp_protocol};
+
 const OTLP_PUSH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Histogram buckets for `flusso.flush.duration`, in **seconds** — OTel's
@@ -131,13 +133,16 @@ pub(crate) fn otlp_configured() -> bool {
         || std::env::var_os("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_some()
 }
 
-/// A periodic OTLP push reader over OTLP/HTTP, reading its endpoint/headers from
-/// the standard env vars (as the trace exporter does).
+/// A periodic OTLP push reader, reading its endpoint/headers from the standard
+/// env vars (as the trace exporter does). The transport follows
+/// `OTEL_EXPORTER_OTLP_PROTOCOL` (HTTP/protobuf by default, gRPC when `grpc`).
 fn otlp_reader() -> anyhow::Result<PeriodicReader<opentelemetry_otlp::MetricExporter>> {
-    let exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_http()
-        .build()
-        .context("building the OTLP metric exporter")?;
+    let builder = opentelemetry_otlp::MetricExporter::builder();
+    let exporter = match otlp_protocol(OtlpSignal::Metrics) {
+        OtlpProtocol::HttpProtobuf => builder.with_http().build(),
+        OtlpProtocol::Grpc => builder.with_tonic().build(),
+    }
+    .context("building the OTLP metric exporter")?;
     Ok(PeriodicReader::builder(exporter)
         .with_interval(OTLP_PUSH_INTERVAL)
         .build())

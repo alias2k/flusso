@@ -72,10 +72,105 @@ pub(crate) fn init_tracing() -> Option<SdkTracerProvider> {
     provider
 }
 
+/// Which OTLP transport an exporter uses, selected by the standard
+/// `OTEL_EXPORTER_OTLP_PROTOCOL` env vars. The endpoint/port is the user's
+/// responsibility per protocol (4317 for gRPC, 4318 for HTTP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OtlpProtocol {
+    /// OTLP over HTTP with protobuf payloads — the default (conventionally `:4318`).
+    HttpProtobuf,
+    /// OTLP over gRPC (conventionally `:4317`).
+    Grpc,
+}
+
+/// The OTLP signal whose protocol is being resolved — picks which per-signal env
+/// var overrides the general one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OtlpSignal {
+    Traces,
+    Metrics,
+}
+
+impl OtlpSignal {
+    fn per_signal_var(self) -> &'static str {
+        match self {
+            OtlpSignal::Traces => "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+            OtlpSignal::Metrics => "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+        }
+    }
+}
+
+/// Resolve the OTLP transport for `signal` from the standard env vars: the
+/// per-signal `OTEL_EXPORTER_OTLP_{TRACES,METRICS}_PROTOCOL` wins over the
+/// general `OTEL_EXPORTER_OTLP_PROTOCOL`; unset defaults to `http/protobuf`; an
+/// unrecognized value warns and falls back to `http/protobuf`.
+pub(crate) fn otlp_protocol(signal: OtlpSignal) -> OtlpProtocol {
+    let per_signal = std::env::var(signal.per_signal_var()).ok();
+    let general = std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").ok();
+    resolve_protocol(per_signal.as_deref(), general.as_deref())
+}
+
+/// Pure resolution: per-signal wins over general; unset → http/protobuf;
+/// unrecognized warns and falls back. Split out so it's testable without
+/// mutating process-wide env.
+fn resolve_protocol(per_signal: Option<&str>, general: Option<&str>) -> OtlpProtocol {
+    match per_signal.or(general).map(str::trim) {
+        None | Some("http/protobuf") => OtlpProtocol::HttpProtobuf,
+        Some("grpc") => OtlpProtocol::Grpc,
+        Some(other) => {
+            tracing::warn!(
+                protocol = other,
+                "unrecognized OTEL_EXPORTER_OTLP_PROTOCOL; falling back to http/protobuf"
+            );
+            OtlpProtocol::HttpProtobuf
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OtlpProtocol, resolve_protocol};
+
+    #[test]
+    fn unset_defaults_to_http_protobuf() {
+        assert_eq!(resolve_protocol(None, None), OtlpProtocol::HttpProtobuf);
+    }
+
+    #[test]
+    fn general_protocol_is_honored() {
+        assert_eq!(resolve_protocol(None, Some("grpc")), OtlpProtocol::Grpc);
+        assert_eq!(
+            resolve_protocol(None, Some(" http/protobuf ")),
+            OtlpProtocol::HttpProtobuf
+        );
+    }
+
+    #[test]
+    fn per_signal_overrides_general() {
+        assert_eq!(
+            resolve_protocol(Some("grpc"), Some("http/protobuf")),
+            OtlpProtocol::Grpc
+        );
+        assert_eq!(
+            resolve_protocol(Some("http/protobuf"), Some("grpc")),
+            OtlpProtocol::HttpProtobuf
+        );
+    }
+
+    #[test]
+    fn unrecognized_falls_back_to_http_protobuf() {
+        assert_eq!(
+            resolve_protocol(Some("thrift"), None),
+            OtlpProtocol::HttpProtobuf
+        );
+    }
+}
+
 /// Build an OTLP tracer provider when an OTLP endpoint is configured via the
 /// standard env vars; otherwise `Ok(None)`. The exporter reads its endpoint,
-/// headers, and timeout from those same env vars and ships spans over
-/// OTLP/HTTP (protobuf) on a background batch processor.
+/// headers, and timeout from those same env vars and ships spans on a background
+/// batch processor over the transport selected by `OTEL_EXPORTER_OTLP_PROTOCOL`
+/// (HTTP/protobuf by default, gRPC when set to `grpc`).
 fn otlp_provider() -> anyhow::Result<Option<SdkTracerProvider>> {
     let configured = std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
         || std::env::var_os("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_some();
@@ -83,10 +178,12 @@ fn otlp_provider() -> anyhow::Result<Option<SdkTracerProvider>> {
         return Ok(None);
     }
 
-    let exporter = SpanExporter::builder()
-        .with_http()
-        .build()
-        .context("building OTLP span exporter")?;
+    let builder = SpanExporter::builder();
+    let exporter = match otlp_protocol(OtlpSignal::Traces) {
+        OtlpProtocol::HttpProtobuf => builder.with_http().build(),
+        OtlpProtocol::Grpc => builder.with_tonic().build(),
+    }
+    .context("building OTLP span exporter")?;
 
     let resource = Resource::builder()
         .with_service_name(env!("CARGO_PKG_NAME"))
