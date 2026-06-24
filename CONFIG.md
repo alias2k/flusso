@@ -144,11 +144,22 @@ collision: set `dev_`, `staging_`, `nightly_`, and each gets its own
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base OTLP endpoint. Its presence *turns on* trace + metric export. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Traces-only endpoint (enables trace export on its own). |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Metrics-only endpoint (enables metric export on its own). |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | OTLP transport for both signals: `http/protobuf` or `grpc`. Unrecognized values warn and fall back to `http/protobuf`. |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | (general) | Per-signal transport override for traces. |
+| `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | (general) | Per-signal transport override for metrics. |
 
 With no OTLP endpoint set, the exporters aren't installed and cost nothing —
 telemetry is opt-in. When an endpoint *is* configured, the rest of the standard
-`OTEL_*` variables (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`,
-`OTEL_EXPORTER_OTLP_PROTOCOL`, …) are honored by the OpenTelemetry SDK.
+`OTEL_*` variables (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, …) are
+honored by the OpenTelemetry SDK.
+
+**Transport and port go together.** flusso defaults to OTLP over HTTP/protobuf
+(conventionally port `:4318`). Set `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` to switch to
+OTLP/gRPC (conventionally `:4317` — the OpenTelemetry Collector's and Jaeger's
+default receiver). flusso does **not** infer the protocol from the port, so the
+endpoint must match the protocol you choose: pointing the default HTTP exporter at a
+gRPC `:4317` port just loops `HTTP export failed: network error`. The per-signal
+`*_TRACES_PROTOCOL` / `*_METRICS_PROTOCOL` override the general one.
 
 > Prometheus metrics are a separate, pull-based path: served at `/metrics` on the
 > public surface (default `127.0.0.1:9464`), no env var required.
