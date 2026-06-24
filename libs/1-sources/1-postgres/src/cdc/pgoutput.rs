@@ -101,29 +101,51 @@ pub(crate) fn row_key(rel: &Relation, tuple: &Tuple) -> Result<RowKey, SourceErr
     Ok(RowKey(pairs))
 }
 
-/// Interpret a pgoutput text value by its Postgres type OID. Unknown or
-/// unparseable types fall back to the text itself.
+/// Interpret a pgoutput text value by its Postgres type OID.
+///
+/// A WAL key must decode into the **same** [`GenericValue`] variant the document
+/// builder reads the column back as (`value::decode_column`): the engine matches
+/// a live change's key against the rebuilt row's key by variant-exact equality.
+/// A width or type drift — a WAL `BigInt` against a read-back `Int(i32)`, or a
+/// WAL `String` against a read-back `Uuid` — makes the match miss, so every live
+/// insert/update on that table looks like a tombstone and the document is
+/// silently deleted. So mirror the integer widths and decode `uuid` here.
+///
+/// Unknown or unparseable types fall back to the text itself. Temporal and bytea
+/// keys are *not* mirrored (pathological as keys); a drift there surfaces as a
+/// loud bind error, not silent loss.
 fn typed_value(text: &str, type_oid: u32) -> GenericValue {
+    let as_text = || GenericValue::String(text.to_owned());
     match type_oid {
         // bool
         16 => match text {
             "t" => GenericValue::Bool(true),
             "f" => GenericValue::Bool(false),
-            _ => GenericValue::String(text.to_owned()),
+            _ => as_text(),
         },
-        // int2 / int4 / int8 / oid — a WAL value is a lookup key (re-bound, then
-        // cast to its column type), so a single wide integer is enough here.
-        21 | 23 | 20 | 26 => text.parse::<i64>().map_or_else(
-            |_| GenericValue::String(text.to_owned()),
-            GenericValue::BigInt,
-        ),
-        // float4 / float8 / numeric
-        700 | 701 | 1700 => rust_decimal::Decimal::from_str_exact(text).map_or_else(
-            |_| GenericValue::String(text.to_owned()),
-            GenericValue::Decimal,
-        ),
-        // everything else (text, varchar, uuid, timestamps, …) stays text
-        _ => GenericValue::String(text.to_owned()),
+        // int2 / int4 / int8 (+ oid) — width-exact, matching `decode_column`.
+        21 => text
+            .parse::<i16>()
+            .map_or_else(|_| as_text(), GenericValue::SmallInt),
+        23 => text
+            .parse::<i32>()
+            .map_or_else(|_| as_text(), GenericValue::Int),
+        20 | 26 => text
+            .parse::<i64>()
+            .map_or_else(|_| as_text(), GenericValue::BigInt),
+        // float4 / float8 / numeric — split, matching `decode_column`.
+        700 => text
+            .parse::<f32>()
+            .map_or_else(|_| as_text(), GenericValue::Float),
+        701 => text
+            .parse::<f64>()
+            .map_or_else(|_| as_text(), GenericValue::Double),
+        1700 => rust_decimal::Decimal::from_str_exact(text)
+            .map_or_else(|_| as_text(), GenericValue::Decimal),
+        // uuid — decode, so a uuid key matches the read-back `Uuid`.
+        2950 => uuid::Uuid::parse_str(text).map_or_else(|_| as_text(), GenericValue::Uuid),
+        // everything else (text, varchar, timestamps, bytea, …) stays text
+        _ => as_text(),
     }
 }
 

@@ -39,6 +39,10 @@ sqlx.workspace = true
 rust_decimal.workspace = true
 testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
 criterion.workspace = true
+# The full-pipeline e2e (`tests/pipeline.rs`) reads the real OpenSearch index
+# back to assert what actually landed.
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+serde_json.workspace = true
 
 # Full pipeline benchmark: real Postgres -> the engine -> real OpenSearch.
 # The backfill scenario drives the real `Engine::run()`. Spins up both

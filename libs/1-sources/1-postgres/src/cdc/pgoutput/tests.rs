@@ -61,7 +61,7 @@ fn insert_yields_only_key_columns() {
     let key = row_key(&rel, &new).unwrap();
     assert_eq!(key.0.len(), 1);
     assert_eq!(key.0[0].0.as_ref(), "id");
-    assert_eq!(key.0[0].1, GenericValue::BigInt(42)); // id is int4 (oid 23)
+    assert_eq!(key.0[0].1, GenericValue::Int(42)); // id is int4 (oid 23)
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn delete_uses_old_key_tuple() {
         panic!("expected Delete");
     };
     let key = row_key(&rel, &old).unwrap();
-    assert_eq!(key.0[0].1, GenericValue::BigInt(42)); // id is int4 (oid 23)
+    assert_eq!(key.0[0].1, GenericValue::Int(42)); // id is int4 (oid 23)
 }
 
 #[test]
