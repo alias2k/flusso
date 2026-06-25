@@ -97,7 +97,7 @@ impl Client {
     )]
     pub(crate) async fn search_at(&self, path: &str, body: &Value) -> Result<Value> {
         let endpoint = format!("{}/{}/_search", self.base, self.prefixed(path));
-        tracing::debug!(%endpoint, "POST _search");
+        tracing::debug!(%endpoint, query = %body, "POST _search");
         self.post_json(&endpoint, body).await
     }
 
@@ -113,7 +113,7 @@ impl Client {
     )]
     pub(crate) async fn count_at(&self, path: &str, body: &Value) -> Result<Value> {
         let endpoint = format!("{}/{}/_count", self.base, self.prefixed(path));
-        tracing::debug!(%endpoint, "POST _count");
+        tracing::debug!(%endpoint, query = %body, "POST _count");
         self.post_json(&endpoint, body).await
     }
 
@@ -129,7 +129,7 @@ impl Client {
     )]
     pub(crate) async fn msearch_raw(&self, ndjson: String) -> Result<Value> {
         let endpoint = format!("{}/_msearch", self.base);
-        tracing::debug!(%endpoint, "POST _msearch");
+        tracing::debug!(%endpoint, query = %ndjson, "POST _msearch");
         let builder = self
             .http
             .post(&endpoint)
@@ -190,6 +190,7 @@ impl Client {
         let status = response.status();
         tracing::Span::current().record("status", status.as_u16());
         if status == StatusCode::NOT_FOUND {
+            tracing::debug!(found = false, "GET _doc resolved");
             return Ok(None);
         }
         if !status.is_success() {
@@ -200,8 +201,14 @@ impl Client {
         }
         let doc: GetResponse<T> = response.json().await?;
         match (doc.found, doc.source) {
-            (true, Some(source)) => Ok(Some(source)),
-            _ => Ok(None),
+            (true, Some(source)) => {
+                tracing::debug!(found = true, "GET _doc resolved");
+                Ok(Some(source))
+            }
+            _ => {
+                tracing::debug!(found = false, "GET _doc resolved");
+                Ok(None)
+            }
         }
     }
 }

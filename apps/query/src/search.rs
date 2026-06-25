@@ -465,6 +465,15 @@ where
         let span = tracing::Span::current();
         span.record("total", page.total);
         span.record("took_ms", page.took.as_millis() as u64);
+        if page.is_partial() {
+            tracing::warn!(
+                index = %self.index,
+                timed_out = page.timed_out,
+                shards_failed = page.shards.failed,
+                shards_total = page.shards.total,
+                "search returned partial results"
+            );
+        }
         tracing::debug!(
             total = page.total,
             hits = page.hits.len(),
@@ -604,6 +613,40 @@ pub struct SearchResponse<T> {
     pub hits: Vec<Hit<T>>,
     /// How long OpenSearch reported the query took.
     pub took: Duration,
+    /// `true` when OpenSearch hit its time budget and **returned partial
+    /// results** — the hits are whatever completed in time, not the full match
+    /// set. The HTTP status is still 200.
+    pub timed_out: bool,
+    /// Per-shard execution tally. A non-zero [`ShardStats::failed`] means some
+    /// shards errored and their matches are **missing from `hits`** — again
+    /// with a 200 status.
+    pub shards: ShardStats,
+}
+
+impl<T> SearchResponse<T> {
+    /// `true` when this page is **incomplete** — it timed out or some shards
+    /// failed — so `hits`/`total` under-report the real match set. A healthy
+    /// full response is `false`.
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        self.timed_out || self.shards.failed > 0
+    }
+}
+
+/// Per-shard execution tally from a `_search`/`_count` response's `_shards`.
+///
+/// When `failed` is non-zero the result is **partial**: matches on the failed
+/// shards are silently absent. OpenSearch still answers 200.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShardStats {
+    /// Shards the query was sent to.
+    pub total: u64,
+    /// Shards that answered successfully.
+    pub successful: u64,
+    /// Shards skipped (e.g. by the can-match pre-filter).
+    pub skipped: u64,
+    /// Shards that errored — their matches are missing from the result.
+    pub failed: u64,
 }
 
 impl<T> SearchResponse<T>
@@ -628,6 +671,8 @@ where
             max_score: raw.hits.max_score,
             hits,
             took: Duration::from_millis(raw.took),
+            timed_out: raw.timed_out,
+            shards: raw.shards.into(),
         })
     }
 }
@@ -647,7 +692,35 @@ pub struct Hit<T> {
 struct RawResponse<T> {
     #[serde(default)]
     took: u64,
+    #[serde(default)]
+    timed_out: bool,
+    #[serde(rename = "_shards", default)]
+    shards: RawShards,
     hits: RawHits<T>,
+}
+
+/// The `_shards` block of a `_search`/`_count` response.
+#[derive(Deserialize, Default)]
+pub(crate) struct RawShards {
+    #[serde(default)]
+    total: u64,
+    #[serde(default)]
+    successful: u64,
+    #[serde(default)]
+    skipped: u64,
+    #[serde(default)]
+    failed: u64,
+}
+
+impl From<RawShards> for ShardStats {
+    fn from(raw: RawShards) -> Self {
+        Self {
+            total: raw.total,
+            successful: raw.successful,
+            skipped: raw.skipped,
+            failed: raw.failed,
+        }
+    }
 }
 
 #[derive(Deserialize)]

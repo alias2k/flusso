@@ -131,6 +131,12 @@ where
             .and_then(Value::as_u64)
             .and_then(|status| u16::try_from(status).ok())
             .unwrap_or(0);
+        tracing::warn!(
+            slot,
+            index = %search.physical_index(),
+            status,
+            "msearch slot failed"
+        );
         return Err(Error::Msearch {
             slot,
             status,
@@ -141,7 +147,23 @@ where
     if !paths.is_empty() {
         merge_inner_hits(&mut entry, &paths);
     }
-    SearchResponse::from_value(entry)
+    let page = SearchResponse::from_value(entry)?;
+    if page.is_partial() {
+        tracing::warn!(
+            slot,
+            index = %search.physical_index(),
+            timed_out = page.timed_out,
+            shards_failed = page.shards.failed,
+            "msearch slot returned partial results"
+        );
+    }
+    tracing::debug!(
+        slot,
+        total = page.total,
+        hits = page.hits.len(),
+        "msearch slot decoded"
+    );
+    Ok(page)
 }
 
 /// The `_msearch` response envelope.
