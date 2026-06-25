@@ -97,7 +97,7 @@ impl Client {
     )]
     pub(crate) async fn search_at(&self, path: &str, body: &Value) -> Result<Value> {
         let endpoint = format!("{}/{}/_search", self.base, self.prefixed(path));
-        tracing::debug!(%endpoint, "POST _search");
+        tracing::debug!(%endpoint, query = %body, "POST _search");
         self.post_json(&endpoint, body).await
     }
 
@@ -113,7 +113,7 @@ impl Client {
     )]
     pub(crate) async fn count_at(&self, path: &str, body: &Value) -> Result<Value> {
         let endpoint = format!("{}/{}/_count", self.base, self.prefixed(path));
-        tracing::debug!(%endpoint, "POST _count");
+        tracing::debug!(%endpoint, query = %body, "POST _count");
         self.post_json(&endpoint, body).await
     }
 
@@ -129,7 +129,7 @@ impl Client {
     )]
     pub(crate) async fn msearch_raw(&self, ndjson: String) -> Result<Value> {
         let endpoint = format!("{}/_msearch", self.base);
-        tracing::debug!(%endpoint, "POST _msearch");
+        tracing::debug!(%endpoint, query = %ndjson, "POST _msearch");
         let builder = self
             .http
             .post(&endpoint)
