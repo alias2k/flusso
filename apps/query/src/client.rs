@@ -190,6 +190,7 @@ impl Client {
         let status = response.status();
         tracing::Span::current().record("status", status.as_u16());
         if status == StatusCode::NOT_FOUND {
+            tracing::debug!(found = false, "GET _doc resolved");
             return Ok(None);
         }
         if !status.is_success() {
@@ -200,8 +201,14 @@ impl Client {
         }
         let doc: GetResponse<T> = response.json().await?;
         match (doc.found, doc.source) {
-            (true, Some(source)) => Ok(Some(source)),
-            _ => Ok(None),
+            (true, Some(source)) => {
+                tracing::debug!(found = true, "GET _doc resolved");
+                Ok(Some(source))
+            }
+            _ => {
+                tracing::debug!(found = false, "GET _doc resolved");
+                Ok(None)
+            }
         }
     }
 }
