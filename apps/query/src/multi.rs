@@ -286,6 +286,15 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
         let span = tracing::Span::current();
         span.record("total", page.total);
         span.record("took_ms", page.took.as_millis() as u64);
+        if page.is_partial() {
+            tracing::warn!(
+                path = %self.path,
+                timed_out = page.timed_out,
+                shards_failed = page.shards.failed,
+                shards_total = page.shards.total,
+                "combined search returned partial results"
+            );
+        }
         tracing::debug!(
             total = page.total,
             hits = page.hits.len(),
@@ -346,6 +355,8 @@ pub(crate) fn decode_response<U: FlussoMultiDocument>(
         max_score: raw.hits.max_score,
         hits,
         took: Duration::from_millis(raw.took),
+        timed_out: raw.timed_out,
+        shards: raw.shards.into(),
     })
 }
 
@@ -353,6 +364,10 @@ pub(crate) fn decode_response<U: FlussoMultiDocument>(
 struct RawMultiResponse {
     #[serde(default)]
     took: u64,
+    #[serde(default)]
+    timed_out: bool,
+    #[serde(rename = "_shards", default)]
+    shards: crate::search::RawShards,
     hits: RawMultiHits,
 }
 

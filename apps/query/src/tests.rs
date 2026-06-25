@@ -1404,6 +1404,7 @@ fn decodes_a_search_response() -> Result {
     let raw = json!({
         "took": 7,
         "timed_out": false,
+        "_shards": { "total": 5, "successful": 5, "skipped": 0, "failed": 0 },
         "hits": {
             "total": { "value": 42, "relation": "eq" },
             "max_score": 1.5,
@@ -1430,6 +1431,9 @@ fn decodes_a_search_response() -> Result {
     assert_eq!(page.max_score, Some(1.5));
     assert_eq!(page.took, Duration::from_millis(7));
     assert_eq!(page.hits.len(), 2);
+    assert!(!page.is_partial());
+    assert_eq!(page.shards.total, 5);
+    assert_eq!(page.shards.failed, 0);
 
     let first = page.hits.first().ok_or("expected a hit")?;
     assert_eq!(first.id, "1");
@@ -1437,6 +1441,46 @@ fn decodes_a_search_response() -> Result {
     assert_eq!(first.source.email, "ada@example.com");
     assert_eq!(first.source.order_count, 9);
 
+    Ok(())
+}
+
+#[test]
+fn flags_a_partial_response_when_shards_fail() -> Result {
+    let raw = json!({
+        "took": 12,
+        "timed_out": false,
+        "_shards": { "total": 5, "successful": 4, "skipped": 0, "failed": 1 },
+        "hits": {
+            "total": { "value": 8, "relation": "eq" },
+            "max_score": null,
+            "hits": []
+        }
+    });
+
+    let page: SearchResponse<DecodedUser> = SearchResponse::from_value(raw)?;
+    assert!(page.is_partial());
+    assert_eq!(page.shards.failed, 1);
+    assert!(!page.timed_out);
+    Ok(())
+}
+
+#[test]
+fn flags_a_partial_response_when_timed_out() -> Result {
+    let raw = json!({
+        "took": 30,
+        "timed_out": true,
+        "_shards": { "total": 5, "successful": 5, "skipped": 0, "failed": 0 },
+        "hits": {
+            "total": { "value": 3, "relation": "gte" },
+            "max_score": null,
+            "hits": []
+        }
+    });
+
+    let page: SearchResponse<DecodedUser> = SearchResponse::from_value(raw)?;
+    assert!(page.is_partial());
+    assert!(page.timed_out);
+    assert_eq!(page.shards.failed, 0);
     Ok(())
 }
 
