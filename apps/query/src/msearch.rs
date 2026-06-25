@@ -157,7 +157,12 @@ where
             "msearch slot returned partial results"
         );
     }
-    tracing::debug!(slot, total = page.total, hits = page.hits.len(), "msearch slot decoded");
+    tracing::debug!(
+        slot,
+        total = page.total,
+        hits = page.hits.len(),
+        "msearch slot decoded"
+    );
     Ok(page)
 }
 
