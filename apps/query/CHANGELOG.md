@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.9.2...flusso-query-v0.10.0) - 2026-06-25
+
+### Added
+
+- *(query)* log get_one found/not-found outcome
+- *(query)* log per-slot msearch outcomes and failures
+- *(query)* surface shard failures and timeouts as partial results
+- *(query)* log the OpenSearch query body in request traces
+
+### Fixed
+
+- *(query)* export ShardStats from the crate root
+
+### Other
+
+- chore(fmt)
+
 ## [0.9.2](https://github.com/alias2k/flusso/compare/flusso-query-v0.9.1...flusso-query-v0.9.2) - 2026-06-24
 
 ### Added
