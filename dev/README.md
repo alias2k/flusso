@@ -113,7 +113,8 @@ Once it's up:
 In demo mode flusso reads its baked-in `flusso.lock`, and its connection + sink
 URLs are pointed at the in-cluster services via `DATABASE_URL` /
 `PRIMARY_OPENSEARCH_URL` set in the override (the full env-var story lives in
-[`../CONFIG.md`](../CONFIG.md)). It's the same Compose project as the base stack,
+[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html)).
+It's the same Compose project as the base stack,
 so it shares the same network and volumes — which is exactly why you must **not**
 *also* run a host `cargo run -- run` at the same time: two flussos fighting over
 one replication slot ends about as well as it sounds. Tear it down with:
@@ -148,8 +149,10 @@ dev/
     03_replication.sql      publication `flusso` over every table
 ```
 
-The schema keys themselves are documented in [`../SCHEMA.md`](../SCHEMA.md), and
-the source/sink options in [`../SOURCES_AND_SINKS.md`](../SOURCES_AND_SINKS.md).
+The schema keys themselves are documented in
+[Authoring schemas](https://alias2k.github.io/flusso/guides/schema-authoring.html), and
+the source/sink options in
+[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
 
 ## Notes
 
@@ -205,7 +208,8 @@ The stack ships Prometheus and Grafana, both wired to flusso's metrics.
 - The same metrics export over **OTLP** when an endpoint is configured, e.g.
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run -- run …` — the
   same env vars that already drive trace export. See
-  [`../CONFIG.md`](../CONFIG.md#logging--telemetry) for the full telemetry story.
+  [Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html#logging--telemetry)
+  for the full telemetry story.
 - Peek at the raw numbers without Grafana:
 
   ```sh

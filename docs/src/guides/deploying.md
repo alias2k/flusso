@@ -2,8 +2,8 @@
 
 How to ship flusso as the smallest possible image, without compiling the binary
 yourself and without dragging your whole repo into the build context. For the
-image's internals (targets, base, non-root user) see the [`Dockerfile`](Dockerfile);
-for Kubernetes see the [Helm chart](deploy/helm/flusso/README.md).
+image's internals (targets, base, non-root user) see the [`Dockerfile`](https://github.com/alias2k/flusso/blob/main/Dockerfile);
+for Kubernetes see the [Helm chart](https://github.com/alias2k/flusso/blob/main/deploy/helm/flusso/README.md).
 
 ## Contents
 

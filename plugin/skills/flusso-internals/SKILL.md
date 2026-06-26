@@ -9,6 +9,8 @@ flusso keeps OpenSearch in sync with Postgres from declarative config. This skil
 
 Before a non-trivial change, read the repo's `CLAUDE.md` — it's the living architecture index and the source of truth. This skill is the orientation; `CLAUDE.md` has the detail and stays current.
 
+**Docs layout.** `libs/README.md` maps the crate layering for humans (the contributor companion to `CLAUDE.md`'s index). Every library crate has its own `README.md` wired as the crate-root doc via `#![doc = include_str!("../README.md")]` — so a crate's README *is* its `//!`; edit them as one file, and any ```rust block in it is a doctest that must compile. (`apps/query` is the exception: its README is the full query manual, kept separate from a curated `//!`.) The user-facing manual is an mdBook under `docs/` published to GitHub Pages — the canonical user docs are `docs/src/guides/{schema-authoring,configuration,deploying}.md` and `apps/query/README.md`. Touch a crate's behavior → update its README/`//!` in the same change, just like `CLAUDE.md`.
+
 ## Crate layering — the numeric prefix is the dependency layer
 
 Crates under `libs/` and `apps/`. A crate depends **only on lower-numbered layers**. Keep it acyclic.

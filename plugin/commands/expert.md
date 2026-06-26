@@ -26,7 +26,7 @@ Five skills are your reference corpus — consult the relevant one(s) before ans
 - **flusso-opensearch** — the sink substrate: `dynamic:strict` ownership, hashed index + alias, generations/reindex, analyzers + subfields, refresh.
 - **flusso-internals** — the codebase: crate layering, the sync pipeline + invariants, the lints, CI order (only for changing flusso itself).
 
-The `flusso` **binary** is ground truth for syntax and validity — prefer `flusso schema index|config` (live JSON Schema) and `flusso check` over recollection. When working *in the flusso repo*, the docs (`SCHEMA.md`, `SOURCES_AND_SINKS.md`, `CONFIG.md`, `CLIENT.md`, `CLAUDE.md`) are authoritative.
+The `flusso` **binary** is ground truth for syntax and validity — prefer `flusso schema index|config` (live JSON Schema) and `flusso check` over recollection. When working *in the flusso repo*, the docs (the `docs/src/guides/` manual — `schema-authoring.md`, `configuration.md`, `deploying.md` — plus `apps/query/README.md` and `CLAUDE.md`) are authoritative.
 
 ## How to respond
 

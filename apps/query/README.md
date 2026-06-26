@@ -1,7 +1,7 @@
 # flusso-query — the typed query client
 
 flusso keeps an OpenSearch index in sync with Postgres from a declarative schema
-(the write side; see [`README.md`](README.md)). That schema is a contract: it
+(the write side; see [`README.md`](https://github.com/alias2k/flusso/blob/main/README.md)). That schema is a contract: it
 fixes the shape of every document — which fields exist, their types, which are
 nested arrays, which are scalars. flusso enforces that contract on the **write**
 side; `flusso-query` enforces it on the **read** side.
@@ -29,7 +29,7 @@ compiling at `cargo build`.
 
 ## A query, from the caller's seat
 
-A service that searches the `users` index from [`SCHEMA.md`](SCHEMA.md). You write
+A service that searches the `users` index from the [schema guide](https://alias2k.github.io/flusso/guides/schema-authoring.html). You write
 the structs; `#[derive(FlussoDocument)]` validates them and generates the query
 surface. The only input is the **index name** — it finds `flusso.toml` itself (see
 [Binding to the schema](#binding-to-the-schema)).
@@ -153,8 +153,8 @@ have, is a **compile error from the derive**. The schema has been lifted into th
 type system, so the compiler checks both your queries and your struct against it.
 
 > `OS_PASSWORD` is just a variable name picked for the example. The full env-var
-> story (secrets, the reserved deployment overrides, `FLUSSO_CONFIG`) lives in
-> [`CONFIG.md`](CONFIG.md).
+> story (secrets, the reserved deployment overrides, `FLUSSO_CONFIG`) lives in the
+> [configuration guide](https://alias2k.github.io/flusso/guides/configuration.html).
 
 ---
 
@@ -611,16 +611,17 @@ struct you wrote. There is no `serde_json::Value` in the common path.
 ## Binding to the schema
 
 The macro validates against the **resolved mapping** — flusso's
-[`IndexMapping`](libs/0-core/src/config/index_mapping.rs): every field with a
+[`IndexMapping`](https://github.com/alias2k/flusso/blob/main/libs/0-core/src/config/index_mapping.rs): every field with a
 concrete type, whether it is **nullable**, its nested `children`, and the schema
 `hash`.
 
 flusso's schemas are **self-describing**: every leaf declares its `type` and
 whether it's `required`, and joins/groups/aggregates have structural types — so the
 mapping resolves with **no database**, exactly as `flusso build` does when it writes
-`flusso.lock`. The client reuses that resolution. (See [`SCHEMA.md`](SCHEMA.md) for
-the schema format and [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md) for how the
-index is written.)
+`flusso.lock`. The client reuses that resolution. (See the
+[schema guide](https://alias2k.github.io/flusso/guides/schema-authoring.html) for the
+schema format and the [configuration guide](https://alias2k.github.io/flusso/guides/configuration.html)
+for how the index is written.)
 
 ### The one input: the index name
 
@@ -637,8 +638,8 @@ At compile time the macro:
 
 1. **Locates `flusso.toml`** by walking up from the consuming crate's
    `CARGO_MANIFEST_DIR`. (Override with `#[flusso(index = "users", config = "…")]`
-   or the `FLUSSO_CONFIG` env var — see
-   [`CONFIG.md`](CONFIG.md#the-derive-compile-time).)
+   or the `FLUSSO_CONFIG` env var — see the
+   [configuration guide](https://alias2k.github.io/flusso/guides/configuration.html).)
 2. **Selects the `[[index]]`** whose `name` matches `"users"` — the reason an index
    name is required, since one `flusso.toml` defines several.
 3. **Loads that index's `schema:` file** (resolved relative to `flusso.toml`) and
@@ -737,9 +738,9 @@ agree — then checks three things:
 
 | Check                | Pass                                              | Compile error                                                        |
 | -------------------- | ------------------------------------------------- | -------------------------------------------------------------------- |
-| **field exists**     | the doc key is in the schema                       | `no field `totl` in index `users`` (span on the field)              |
-| **type matches**     | leaf Rust type matches the field's `type`          | `email is `keyword` → expected `String`, found `i32``               |
-| **nullability matches** | `Option<_>` iff the field is nullable           | `email is required → expected `String`, found `Option<String>``     |
+| **field exists**     | the doc key is in the schema                       | `` no field `totl` in index `users` `` (span on the field)          |
+| **type matches**     | leaf Rust type matches the field's `type`          | `` email is `keyword` → expected `String`, found `i32` ``           |
+| **nullability matches** | `Option<_>` iff the field is nullable           | `` email is required → expected `String`, found `Option<String>` `` |
 
 The rules that make this **full control rather than a straitjacket**:
 
@@ -759,8 +760,8 @@ The rules that make this **full control rather than a straitjacket**:
 
 ### flusso types → Rust types
 
-The type the derive **expects** for each schema `type` (the same bridge
-[`SCHEMA.md`](SCHEMA.md#types) defines, with the Rust side added). Declare something
+The type the derive **expects** for each schema `type` (the same bridge the
+[schema guide](https://alias2k.github.io/flusso/guides/schema-authoring.html) defines, with the Rust side added). Declare something
 else and it won't compile (modulo the leaf-identifier rule above).
 
 | flusso `type`     | OpenSearch | Rust type                        | Field handle    |
@@ -905,7 +906,7 @@ admin, or a hand-built `Search`.)
 
 ### Reading a prefixed deployment
 
-If flusso runs with an [index prefix](CONFIG.md#index-prefix) (`FLUSSO_INDEX_PREFIX`,
+If flusso runs with an [index prefix](https://alias2k.github.io/flusso/guides/configuration.html) (`FLUSSO_INDEX_PREFIX`,
 e.g. `dev_` so it writes `dev_users_<hash>`), tell the client the same prefix:
 
 ```rust
@@ -942,7 +943,7 @@ writer's prefix exactly, or queries hit an empty (or wrong) index.
 | Crate            | Role                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------- |
 | `flusso-query` | Runtime: the `Client` transport, the field-handle/`Query`/`Search` builder, `SearchResponse`. Generic over the developer's document types. Targets OpenSearch / Elasticsearch (shared DSL). Re-exports the derive behind a `derive` feature, so callers `use flusso_query::FlussoDocument`. |
-| `flusso-query-derive`  | The `#[derive(FlussoDocument)]` proc-macro crate. At compile time it discovers `flusso.toml`, resolves the named index's [`IndexMapping`](libs/0-core/src/config/index_mapping.rs) from the self-describing schema (no database), validates the annotated struct, and emits the field handles, entry points, and schema hash. Reuses `schema-config-toml`, `schema-index-yaml`, and `schema-core`. |
+| `flusso-query-derive`  | The `#[derive(FlussoDocument)]` proc-macro crate. At compile time it discovers `flusso.toml`, resolves the named index's [`IndexMapping`](https://github.com/alias2k/flusso/blob/main/libs/0-core/src/config/index_mapping.rs) from the self-describing schema (no database), validates the annotated struct, and emits the field handles, entry points, and schema hash. Reuses `schema-config-toml`, `schema-index-yaml`, and `schema-core`. |
 
 Both crates sit above `schema-core` and depend only downward — no dependency on the
 engine, the sources, or the sinks. They share only the domain model, the one thing

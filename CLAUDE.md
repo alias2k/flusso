@@ -7,11 +7,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 flusso keeps OpenSearch in sync with Postgres from declarative config. You describe a
 search document in YAML (`*.schema.yml`); flusso derives the index mapping, seeds it,
 then follows Postgres logical replication so the index stays current. Read `README.md`
-for the full picture, `SCHEMA.md` for every config/schema key, `SOURCES_AND_SINKS.md`
-for source/sink options, `CONFIG.md` for every environment variable (secrets, the
-`FLUSSO_*` flag overrides, logging/telemetry — centralized there, not in the other docs),
-`CLIENT.md` for the query-side `flusso-query` crate, and `DEPLOY.md` for the Docker
-shipping recipes (bake/compile a `flusso.lock`, scoped per-Dockerfile `.dockerignore`).
+for the full picture. The user manual is an mdBook under `docs/` (published to GitHub
+Pages); its chapters are the canonical docs: `docs/src/guides/schema-authoring.md` for
+every `*.schema.yml` key, `docs/src/guides/configuration.md` for every `flusso.toml` key,
+source/sink option, and environment variable (secrets, the `FLUSSO_*` flag overrides,
+logging/telemetry — all centralized there), and `docs/src/guides/deploying.md` for the
+Docker shipping recipes (bake/compile a `flusso.lock`, scoped per-Dockerfile
+`.dockerignore`). The query side is `apps/query/README.md` (the `flusso-query` crate;
+`docs/src/guides/querying.md` `{{#include}}`s it). Every crate has its own `README.md`
+— its crates.io/docs.rs landing, wired via `#![doc = include_str!("../README.md")]`
+(except the `apps/query` README, kept separate from its `//!` because it's the full query
+manual) — and `libs/README.md` maps the crate layering. When you change a doc's content,
+update the chapter/README that owns it, not a now-deleted root `.md`.
 
 ## Commands
 
@@ -433,7 +440,7 @@ belongs in the linked docs.
 | Query client (`flusso-query`) | `apps/query/src/` |
 | `#[derive(FlussoDocument)]` proc-macro | `apps/query-derive/src/` (+ the `flusso-query-derive` memory note) |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
-| Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `DEPLOY.md` |
+| Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/guides/deploying.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 
 ## Conventions

@@ -27,7 +27,7 @@ Resolve the path **once**, up front: `root="$CLAUDE_PLUGIN_ROOT"` (Bash), then `
 - **flusso-opensearch** — the sink substrate: `dynamic:strict` ownership, hashed physical index + alias, generations/reindex, the `flusso_*` analyzers + auto subfields (which subfield to query), refresh.
 - **flusso-internals** — the codebase: crate layering, the sync pipeline + invariants, the strict lints, CI order.
 
-**If `$CLAUDE_PLUGIN_ROOT` is empty, do NOT scan the filesystem** (no `find /`, no broad globs). Fall back in order: (1) in the flusso repo, read the named docs (`SCHEMA.md`, `SOURCES_AND_SINKS.md`, `CONFIG.md`, `CLIENT.md`, `CLAUDE.md`); (2) otherwise answer from your own knowledge and use the `flusso` binary for syntax. Treat the binary as ground truth — but query it **targeted** (`flusso schema index | head -40`, `flusso check`), never dump full output speculatively. Don't read a doc/schema you don't need for the task at hand.
+**If `$CLAUDE_PLUGIN_ROOT` is empty, do NOT scan the filesystem** (no `find /`, no broad globs). Fall back in order: (1) in the flusso repo, read the named docs (the `docs/src/guides/` manual — `schema-authoring.md`, `configuration.md`, `deploying.md` — plus `apps/query/README.md` and `CLAUDE.md`); (2) otherwise answer from your own knowledge and use the `flusso` binary for syntax. Treat the binary as ground truth — but query it **targeted** (`flusso schema index | head -40`, `flusso check`), never dump full output speculatively. Don't read a doc/schema you don't need for the task at hand.
 
 ## Operating rules
 

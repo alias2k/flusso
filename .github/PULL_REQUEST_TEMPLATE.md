@@ -26,7 +26,7 @@ I ran the same gate CI runs (`just ci`, plus the extra CI-only steps):
 
 - [ ] Updated [`CLAUDE.md`](../CLAUDE.md) if this added/moved a crate, changed a command or test workflow, altered the config/schema format, or introduced an engine invariant
 - [ ] Added or updated tests for the change (and kept the named engine-invariant tests green if the sync loop was touched)
-- [ ] Updated the relevant docs (`README.md`, `SCHEMA.md`, `SOURCES_AND_SINKS.md`, `CONFIG.md`, `CLIENT.md`) if behavior or config changed
+- [ ] Updated the relevant docs (`README.md`, the `docs/` manual, `apps/query/README.md`) if behavior or config changed
 
 ## Notes for reviewers
 

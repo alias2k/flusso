@@ -4,7 +4,7 @@
 //!
 //! The `User`/`Order` handles here are written by hand — exactly the surface the
 //! future `#[derive(FlussoDocument)]` will generate, so they double as a worked
-//! example of the endgame API from CLIENT.md.
+//! example of the endgame API from the querying guide.
 
 use std::time::Duration;
 

@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 // Integration/e2e tests (in `tests/`) pull dev-dependencies the unit-test build
 // doesn't touch; allow that only under `cfg(test)` — the normal build still
 // enforces unused dependencies.
