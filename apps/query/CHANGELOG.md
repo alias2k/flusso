@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/alias2k/flusso/compare/flusso-query-v0.10.0...flusso-query-v0.10.1) - 2026-06-26
+
+### Fixed
+
+- *(query)* dispatch combined-search hits by generation-suffixed _index
+
+### Other
+
+- *(query)* allow unused dev-deps in the lib test target
+- *(query)* correct combined-search dispatch — hits carry the generation index
+- *(query)* add live combined-search e2e against a real OpenSearch sink
+- *(query)* cover generation-suffixed _index dispatch in combined search
+- lead README with the tagline, move AI disclosure below it
+- readability pass — front-load lookups, de-densify
+- consistency pass — fix factual errors and terminology drift
+- rewrite all docs to the prose style guide
+- clarify pre-commit hook formats the whole workspace
+- add dev workflow tooling
+- split into an mdBook manual + per-crate READMEs
+
 ## [0.10.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.9.2...flusso-query-v0.10.0) - 2026-06-25
 
 ### Added
