@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Pre-commit: format staged Rust files so nothing lands unformatted (matches CI's
+# `cargo fmt --all --check`). Runs only when .rs files are staged.
+#
+# Caveat: a file staged with only *some* of its hunks gets its unstaged hunks pulled
+# in too, because we re-`git add` the whole file after formatting. Stage whole files
+# when you can.
+set -euo pipefail
+
+# Staged, still-present (Added/Copied/Modified) Rust files, NUL-delimited for odd
+# names. A while-read loop (not `mapfile`) keeps this working on macOS's bash 3.2.
+staged_rs=()
+while IFS= read -r -d '' f; do
+  staged_rs+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACM -z -- '*.rs')
+
+if [ ${#staged_rs[@]} -eq 0 ]; then
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not found; skipping rustfmt." >&2
+  exit 0
+fi
+
+echo "pre-commit: cargo fmt --all"
+cargo fmt --all
+
+# Re-stage the files we were asked to commit, in case formatting changed them.
+git add -- "${staged_rs[@]}"

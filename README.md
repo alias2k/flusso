@@ -197,6 +197,7 @@ full menu; the greatest hits:
 
 | Recipe | Does |
 | --- | --- |
+| `just setup` | One-time after cloning: enable the repo's git hooks (`core.hooksPath`) |
 | `just up` / `just down` / `just reset` | Start / stop / wipe-and-restart the dev stack |
 | `just check` / `just check-offline` | Validate config + schemas (with / without a DB) |
 | `just run` / `just run-live` | Backfill + follow / resume live only |
@@ -319,6 +320,12 @@ apply the rules the format can't express). Secrets are *not* resolved here, so a
 compiled config never carries a secret it wasn't literally given.
 
 ## Testing & development
+
+After cloning, run `just setup` once. It points git at the version-controlled hooks
+in [`.githooks/`](.githooks/) (via `core.hooksPath`, which a clone doesn't carry on
+its own). The `pre-commit` hook runs `cargo fmt --all` on staged Rust files and
+re-stages them, so nothing lands unformatted — it's the same formatting CI enforces
+with `cargo fmt --all --check`.
 
 Tests run with [`cargo-nextest`](https://nexte.st)
 (`cargo install cargo-nextest --locked`):

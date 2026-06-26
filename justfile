@@ -18,6 +18,11 @@ prom      := "127.0.0.1:9090"
 default:
     @just --list
 
+# Point git at the version-controlled hooks (run once after cloning).
+setup:
+    git config core.hooksPath .githooks
+    @echo "core.hooksPath set to .githooks"
+
 # ── dev stack (Docker) ───────────────────────────────────────────────────────
 
 # Bring up Postgres + OpenSearch + Dashboards + Prometheus + Grafana (waits for healthy).
