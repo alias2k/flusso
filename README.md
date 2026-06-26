@@ -1,12 +1,5 @@
 # flusso
 
-> [!IMPORTANT]
-> ## 🤖 Generative AI disclosure
->
-> **Generative AI was used in this project to produce boilerplate and
-> documentation.** Every single line of code has been manually reviewed and
-> revised by a human software developer who can be blamed accordingly.
-
 **Keep OpenSearch in sync with Postgres, driven by declarative config.**
 
 A schema describes what a search document should look like. flusso builds the
@@ -14,6 +7,13 @@ index, seeds it from existing rows, then tails Postgres' logical replication
 stream so the index stays current — no cron job, no nightly reindex, no
 hand-rolled `for row in rows: es.index(...)` script. You describe the *what*;
 flusso handles the *keep-it-in-sync*.
+
+> [!IMPORTANT]
+> ## 🤖 Generative AI disclosure
+>
+> **Generative AI was used in this project to produce boilerplate and
+> documentation.** Every single line of code has been manually reviewed and
+> revised by a human software developer who can be blamed accordingly.
 
 ## Contents
 
