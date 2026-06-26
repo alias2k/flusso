@@ -28,8 +28,16 @@ Two different "compilations" — conflating them is what makes Docker feel heavy
 > ℹ️ **Info** — The image is published to two registries with identical tags.
 > Use **Docker Hub** as the primary: [`alias2k/flusso`](https://hub.docker.com/r/alias2k/flusso)
 > (`docker.io/alias2k/flusso`). The **`ghcr.io/alias2k/flusso`** mirror is an
-> equivalent drop-in if you prefer GitHub Container Registry. Replace `VERSION`
-> with a published release tag (e.g. the latest release), or `latest`.
+> equivalent drop-in if you prefer GitHub Container Registry.
+>
+> Replace `VERSION` with whichever tag suits you:
+>
+> - **`X.Y.Z`** (e.g. `0.10.0`) — an exact, immutable release. Most reproducible;
+>   recommended for production.
+> - **`X.Y`** (e.g. `0.10`) — a rolling tag that follows the latest **patch** on
+>   that minor (`0.10.1`, `0.10.2`, …) but never a breaking minor bump.
+> - **`latest`** — newest stable release. Convenient, not pinned.
+> - **`sha-<short>`** — the immutable per-commit tag, for tracing or rollback.
 
 So however your schemas are laid out — even scattered across a monorepo next to
 the services they describe — that layout only has to exist *where you run

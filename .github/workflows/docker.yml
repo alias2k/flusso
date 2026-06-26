@@ -26,15 +26,29 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      minor: ${{ steps.ver.outputs.minor }}
+      latest: ${{ steps.ver.outputs.latest }}
     steps:
-      # Strip the `flusso-cli-v` tag prefix to get a clean semver (e.g. 0.1.0).
-      # On manual dispatch (no tag) fall back to a `dev` tag.
+      # Strip the `flusso-cli-v` tag prefix to get a clean semver (e.g. 0.10.0).
+      # A stable release also yields a rolling minor tag (0.10.0 → 0.10) and moves
+      # `latest`; a prerelease (0.11.0-rc1) gets only its exact tag. On manual
+      # dispatch (no tag) fall back to a `dev` tag. The custom `flusso-cli-v`
+      # prefix is why we derive these here instead of metadata-action's
+      # `type=semver`, which only parses a bare `vX.Y.Z` git ref.
       - name: Derive version
         id: ver
         run: |
           ref="${GITHUB_REF_NAME}"
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${ref#flusso-cli-v}" >> "$GITHUB_OUTPUT"
+            v="${ref#flusso-cli-v}"
+            echo "version=${v}" >> "$GITHUB_OUTPUT"
+            case "$v" in
+              *-*) ;;
+              *)
+                echo "minor=${v%.*}" >> "$GITHUB_OUTPUT"
+                echo "latest=true" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
           else
             echo "version=dev" >> "$GITHUB_OUTPUT"
           fi
@@ -168,7 +182,9 @@ jobs:
             ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=${{ needs.prepare.outputs.minor }},enable=${{ needs.prepare.outputs.minor != '' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.latest == 'true' }}
+            type=sha,format=short
 
       # A manifest list is registry-local, so assemble one per registry from the
       # per-platform digests pushed by the build job. Tags are filtered per
