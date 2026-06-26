@@ -1,16 +1,4 @@
-//! Parse `flusso.toml` into neutral [`ConfigToml`] entities.
-//!
-//! A config file declares the Postgres source, the sinks documents are written
-//! to, and the indexes to build. This crate handles only the **parse** stage:
-//! [`ConfigToml`] deserializes the file verbatim, rejecting unknown fields, into
-//! entity types that mirror the file 1:1 and reference only the `schema-core`
-//! vocabulary. Lifting these entities into the assembled `Config` is a
-//! composition step that lives in the `schema` crate (`From<ConfigToml>`), so
-//! this parser sits at the bottom layer and never depends on `Config`.
-//!
-//! Secrets are **not** resolved here. Any string value may be given literally or
-//! as `{ env = "VAR" }`; the entities carry that choice through unchanged so the
-//! value can be read in the environment that runs the pipeline.
+#![doc = include_str!("../README.md")]
 
 pub mod entities;
 mod env_value;
@@ -45,7 +33,9 @@ pub struct ConfigToml {
     /// Literal prefix prepended to every index name flusso owns, so several
     /// deployments can share one OpenSearch cluster without colliding. The
     /// `--index-prefix` flag / `FLUSSO_INDEX_PREFIX` env var override it at
-    /// runtime (which win); see `CONFIG.md`. Empty (the default) means no prefix.
+    /// runtime (which win); see the [configuration
+    /// guide](https://alias2k.github.io/flusso/guides/configuration.html). Empty
+    /// (the default) means no prefix.
     #[serde(default)]
     pub prefix: String,
     /// Global item-level rejection policy; per-index overrides live on each
@@ -53,7 +43,8 @@ pub struct ConfigToml {
     #[serde(default)]
     pub on_error: schema_core::FailurePolicy,
     /// Bind addresses for the operational HTTP surfaces. The binary layers
-    /// `FLUSSO_*` env vars and CLI flags on top (which win); see `CONFIG.md`.
+    /// `FLUSSO_*` env vars and CLI flags on top (which win); see the
+    /// [configuration guide](https://alias2k.github.io/flusso/guides/configuration.html).
     #[serde(default)]
     pub server: Server,
 }

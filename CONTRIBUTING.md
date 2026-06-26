@@ -3,8 +3,9 @@
 Thanks for your interest in improving flusso. This guide covers the practical
 bits — how to get a dev environment running, the quality gate your change has to
 clear, and how to submit it. The architecture tour and the deeper house rules
-live in [`CLAUDE.md`](CLAUDE.md); the docs it links (`README.md`, `SCHEMA.md`,
-`SOURCES_AND_SINKS.md`, `CONFIG.md`, `CLIENT.md`) cover everything else.
+live in [`CLAUDE.md`](CLAUDE.md); the user manual under
+[`docs/`](docs/) (schema authoring, configuration, deploying) plus
+[`apps/query/README.md`](apps/query/README.md) for the query side cover everything else.
 
 ## Code of conduct
 

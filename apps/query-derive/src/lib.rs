@@ -1,22 +1,4 @@
-//! `#[derive(FlussoDocument)]` — the proc-macro behind `flusso-query`.
-//!
-//! It does **not** generate the document struct. The developer writes the struct;
-//! this derive, at compile time:
-//!
-//! 1. discovers `flusso.toml` (up from `CARGO_MANIFEST_DIR`, or `config = "…"` /
-//!    `FLUSSO_CONFIG`) and resolves the named index's mapping — no database;
-//! 2. validates each declared field against that mapping (exists / type /
-//!    nullability), reporting every problem at once with precise spans;
-//! 3. generates the typed query surface (`Type::field()` handles, `get`/`query`,
-//!    `SCHEMA_HASH`) that targets the `flusso-query` runtime.
-//!
-//! Three companion derives ship alongside it: [`FlussoValue`](derive_flusso_value)
-//! (a Rust enum/newtype standing in for a leaf field), [`FlussoMap`](derive_flusso_map)
-//! (a newtype wrapper over a `map` field), and
-//! [`FlussoMultiDocument`](derive_flusso_multi_document) (the combined-search
-//! union over several document types).
-//!
-//! Use them through `flusso-query`'s `derive` feature: `use flusso_query::FlussoDocument`.
+#![doc = include_str!("../README.md")]
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};

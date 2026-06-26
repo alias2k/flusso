@@ -1,131 +1,15 @@
-# flusso configuration reference
+# Authoring schemas
 
-flusso is driven entirely by declarative files. A deployment is described by two
-kinds:
-
-| File | Count | Format | Describes |
-| --- | --- | --- | --- |
-| [`flusso.toml`](#flussotoml) | one per deployment | TOML | the source database, the sink destinations, and which indexes to build |
-| [`*.schema.yml`](#schemayml) | one per index | YAML | a single search document — its root table, fields, and how related tables fold in |
-
-`schema::load("flusso.toml")` is the front door: it reads the config and every
-schema it references, validates both layers, and returns one fully-validated
-`Config`. Schema paths in `flusso.toml` resolve **relative to the config file's
-directory**.
-
-This file covers the config *structure* and the index document *format*. Source
-and sink **types** live in [Sources and sinks](SOURCES_AND_SINKS.md); environment
-variables (secrets, overrides, CLI-flag twins) in [`CONFIG.md`](CONFIG.md); the
-query side in [`CLIENT.md`](CLIENT.md).
+Each search document flusso builds is described by one `*.schema.yml` file — its root
+table, its fields, and how related tables fold in. This guide covers that file format in
+full. For the deployment side (`flusso.toml` — the source database, the sink destinations,
+and which indexes to build), see [Configuration](configuration.md).
 
 > Two JSON Schemas ship alongside this reference and are the machine-readable
 > source of truth for the file formats:
-> [`config.schema.json`](libs/2-schema/1-config-toml/config.schema.json) and
-> [`index.schema.yml`](libs/2-schema/1-index-yaml/index.schema.yml). Point
+> [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json) and
+> [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml). Point
 > your editor at them for completion and inline validation.
-
----
-
-## `flusso.toml`
-
-Top-level table. Only `[source]` is required.
-
-| Key | Required | Description |
-| --- | --- | --- |
-| `[source]` | **yes** | The database to read from. |
-| `[sinks.<name>]` | no | Named destinations. Zero or more; each key is a sink name (a Postgres identifier). |
-| `[[index]]` | no | The indexes to build. Zero or more array entries. |
-| `on_error` | no | What to do when a sink rejects a document at the item level: `"stop"` (default) or `"skip"`. See [`on_error`](#on_error). |
-| `prefix` | no | Literal string prepended to every index name flusso owns (indexes, aliases, `flusso_meta`), so deployments can share one cluster — e.g. `prefix = "dev_"` → `dev_users`. Overridable at runtime by `--index-prefix` / `FLUSSO_INDEX_PREFIX`. See [CONFIG.md](CONFIG.md#index-prefix). |
-
-### `on_error`
-
-When a sink accepts a flush but rejects a *specific* document — a mapping
-conflict, a value the destination can't index — `on_error` decides what happens.
-It governs only these **item-level rejections**; a flush-wide failure (the
-destination unreachable, the whole request refused) always stops the run.
-
-| Value | Behavior |
-| --- | --- |
-| `"stop"` (default) | Stop the run. The batch is left unconfirmed and redelivered on restart, so a persistently-bad document halts sync until the data is fixed or the policy changes. Dropping data is opt-in. |
-| `"skip"` | Quarantine the document (logged, counted in `flusso.documents.quarantined` and the `/status` `documents_quarantined`) and continue. The rest of the batch is applied and acked; the document never lands until its source row changes again. |
-
-A global `on_error` is the default for every index; override it per index with
-`on_error` inside an `[[index]]` entry. The policy is operational, not part of the
-document shape, so changing it never triggers a reindex.
-
-```toml
-on_error = "stop"   # global default
-
-[[index]]
-name = "analytics"
-schema = "analytics.schema.yml"
-enabled = true
-on_error = "skip"   # this index tolerates bad rows
-```
-
-### `[source]`
-
-The database documents are read from — one per deployment. `type` selects the
-kind:
-
-| `type` | Reference |
-| --- | --- |
-| `postgres` | [Postgres source](SOURCES_AND_SINKS.md#postgres) |
-
-```toml
-[source]
-type = "postgres"
-connection_url = "postgresql://user:pass@localhost:5432/mydb"
-```
-
-Connection options (full-URL and individual-parts forms, the `DATABASE_URL`
-override) and capture behavior live in
-[Sources and sinks](SOURCES_AND_SINKS.md#sources) and [`CONFIG.md`](CONFIG.md).
-
-### `[sinks.<name>]`
-
-Named destinations; each key is a sink name (a Postgres identifier) and `type`
-selects the kind. Define more than one and flusso **fans out** — every document
-is written to all of them. If no sinks are defined, the CLI falls back to a stdout
-sink.
-
-| `type` | Reference |
-| --- | --- |
-| `opensearch` | [OpenSearch sink](SOURCES_AND_SINKS.md#opensearch) |
-| `stdout` | [Stdout sink](SOURCES_AND_SINKS.md#stdout) |
-
-```toml
-[sinks.primary]
-type = "opensearch"
-url = "https://localhost:9200"
-password = { env = "OS_PASSWORD" }
-
-[sinks.audit]
-type = "stdout"
-pretty = true
-```
-
-Each type's full option set and behavior is documented in
-[Sources and sinks](SOURCES_AND_SINKS.md#sinks).
-
-### `[[index]]`
-
-One array entry per index to build.
-
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | Postgres identifier | yes | The logical index name — the pipeline's stable identity. |
-| `schema` | path | yes | Path to the index's `*.schema.yml`, relative to the config file. Must end in `.yml`/`.yaml`. |
-| `enabled` | bool | yes | Whether this index is built on this run. |
-| `on_error` | `"stop"` \| `"skip"` | no | Override the global [`on_error`](#on_error) for this index. Omitted inherits the global default. |
-
-```toml
-[[index]]
-name = "users"
-schema = "users.schema.yml"
-enabled = true
-```
 
 ---
 
@@ -307,7 +191,7 @@ the index's `dynamic: strict`. `column` defaults to the document key.
 
 On the query side a `map` gets a typed handle (`flusso-query`): `.key("it")`
 returns a fully-typed leaf of the declared kind, and a text map also offers a
-cross-key `.search(..)` with per-key preference. See [CLIENT.md](CLIENT.md).
+cross-key `.search(..)` with per-key preference. See [Querying](querying.md).
 
 ### Types
 
@@ -357,7 +241,7 @@ their own type keys rather than a scalar type; their shape is structural.
 > `text`/`keyword` fields bare. By default it attaches a strong analyzer and a set
 > of subfields (`keyword`, `keyword_lowercase`, `text`) so search, exact
 > filtering, and case-insensitive sort all work out of the box — see
-> [Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
+> [Index analysis & subfields](configuration.md#index-analysis--subfields).
 > Anything in `options` overrides the default for that field.
 
 #### `text` vs `identifier`
@@ -383,7 +267,7 @@ fields:
 search.) Both apply only to scalar column fields, and an explicit `analyzer` in
 `options` always wins over the type's default. The analyzers themselves are
 documented in
-[Index analysis & subfields](SOURCES_AND_SINKS.md#index-analysis--subfields).
+[Index analysis & subfields](configuration.md#index-analysis--subfields).
 
 ### Geo points
 
@@ -630,22 +514,6 @@ The split is deliberate: the value comes from a Postgres column (lowercase
 identifier) but lands under a document key you choose (which may be camelCase to
 suit the search index).
 
-### env_or_value
-
-Anywhere a secret or connection string is expected in `flusso.toml`, give either a
-literal string or a reference to an environment variable:
-
-```toml
-password = "literal-secret"          # literal
-password = { env = "OS_PASSWORD" }   # read from $OS_PASSWORD at run time
-```
-
-Either form is accepted wherever this doc says a value is an `env_or_value`.
-Resolution is **deferred to run time** — which lets a [compiled
-artifact](#compiling) travel without baking in its secrets. The full story
-(resolution timing, the reserved deployment-override variables, the precedence
-rules) lives in [`CONFIG.md`](CONFIG.md#secret--connection-values).
-
 ---
 
 ## Validation, in one place
@@ -675,45 +543,7 @@ and reports any disagreement.
 
 ---
 
-## Compiling
-
-`flusso build --config config.toml -o flusso.lock` runs everything above and
-writes the whole validated configuration — every schema inlined — to a single
-binary artifact (MessagePack). Because schemas are self-describing and secrets are
-[deferred](#env_or_value), compiling needs no database and bakes in no secret:
-`{ env = … }` references travel as references, not values.
-
-`flusso run` with no `--config` loads that artifact and resolves the connection
-and credentials in its own environment; `flusso run --config flusso.toml` compiles
-from source and runs that. So a deployment ships one file — no YAML tree, no source
-checkout — and the same artifact runs anywhere its environment provides the
-secrets.
-
----
-
 ## A complete example
-
-`flusso.toml`:
-
-```toml
-[source]
-type = "postgres"
-connection_url = { env = "DATABASE_URL" }
-
-[sinks.primary]
-type = "opensearch"
-url = "https://localhost:9200"
-password = { env = "OS_PASSWORD" }
-
-[sinks.audit]
-type = "stdout"
-pretty = true
-
-[[index]]
-name = "users"
-schema = "users.schema.yml"
-enabled = true
-```
 
 `users.schema.yml`:
 

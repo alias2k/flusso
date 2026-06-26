@@ -66,7 +66,7 @@ Indexes are created with auto-refresh **disabled** (`refresh_interval: -1`) for 
 | `text_analysis` | `builtin` | or `icu` (needs `analysis-icu` on every node) |
 | `auto_subfields` | `true` | `false` emits fields bare (explicit `mapping` always wins) |
 
-Define multiple `[sinks.<name>]` and flusso **fans out** — every document lands in each. No sinks → it falls back to a `stdout` sink (handy to *see* documents while integrating). Full reference: the repo's `SOURCES_AND_SINKS.md`.
+Define multiple `[sinks.<name>]` and flusso **fans out** — every document lands in each. No sinks → it falls back to a `stdout` sink (handy to *see* documents while integrating). Full reference: `docs/src/guides/configuration.md` (the Sinks section).
 
 ## Querying — don't hand-roll it
 

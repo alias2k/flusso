@@ -1,23 +1,30 @@
 name: pages
 
-# Publish the editor-assist JSON Schemas to GitHub Pages, one immutable directory
-# per release version, so a `# yaml-language-server: $schema=…` modeline (and the
-# `.taplo.toml` rule) can pin to the schema matching the running flusso:
+# Publish the GitHub Pages site at https://alias2k.github.io/flusso/. It has two parts:
+#
+#   /            the mdBook user manual (built from docs/), single `latest`, tracks main
+#   /schemas/    the editor-assist JSON Schemas, one immutable directory per release
+#
+# The manual is rebuilt on every push to `main` (and on schema-release tags) so it
+# tracks the current code; the schema tree is rebuilt from EVERY release tag on every
+# run (idempotent), so a new release never drops older versions.
+#
+# Schema pinning — a `# yaml-language-server: $schema=…` modeline (and the `.taplo.toml`
+# rule) can target the schema matching the running flusso:
 #
 #   schemas/v0.3.0/index.schema.yml   exact version — immutable
 #   schemas/v0.3/index.schema.yml     newest 0.3.x patch — recommended pin
 #   schemas/latest/index.schema.yml   newest version overall
 #   (same three forms for config.schema.json)
 #
-# under https://alias2k.github.io/flusso/. Every crate shares one version, so the
-# two schema crates' tags move together; this fires on either and rebuilds the
-# whole versioned tree from EVERY release tag, so a new release never drops older
-# versions and each minor alias re-resolves to its highest patch. Versions whose
-# tag predates the in-crate schema layout are skipped (their files lived
-# elsewhere) — Pages effectively starts at the first release after that move.
+# Every crate shares one version, so the two schema crates' tags move together. Versions
+# whose tag predates the in-crate schema layout are skipped (their files lived elsewhere)
+# — the schema tree effectively starts at the first release after that move.
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'flusso-schema-index-yaml-v[0-9]+.[0-9]+.[0-9]+'
       - 'flusso-schema-config-toml-v[0-9]+.[0-9]+.[0-9]+'
@@ -44,6 +51,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+
+      - name: Build the mdBook manual
+        run: |
+          set -euo pipefail
+          mdbook build docs
+          mkdir -p site
+          cp -r docs/book site/docs
 
       - name: Assemble versioned schema site from release tags
         run: |
@@ -78,8 +96,13 @@ jobs:
           git show "flusso-schema-index-yaml-v${latest}:${idx}"  > site/schemas/latest/index.schema.yml
           git show "flusso-schema-config-toml-v${latest}:${cfg}" > site/schemas/latest/config.schema.json
           {
-            echo "<!doctype html><meta charset=utf-8><title>flusso schemas</title>"
-            echo "<h1>flusso editor-assist schemas</h1>"
+            echo "<!doctype html><meta charset=utf-8><title>flusso</title>"
+            echo "<h1>flusso</h1>"
+            echo "<p>Keep OpenSearch in sync with Postgres, driven by declarative config.</p>"
+            echo "<h2><a href=\"docs/\">📖 Documentation</a></h2>"
+            echo "<p>The full manual — getting started, authoring schemas, configuring a"
+            echo "deployment, querying, and deploying.</p>"
+            echo "<h2>Editor-assist schemas</h2>"
             echo "<p>Pin a <code># yaml-language-server: \$schema=…</code> modeline (or a <code>.taplo.toml</code> rule) at"
             echo "<code>schemas/&lt;ref&gt;/…</code> — <code>latest</code>, a minor like <code>v0.3</code>"
             echo "(newest patch, recommended), or an exact <code>v0.3.0</code>.</p><ul>"

@@ -4,7 +4,8 @@
 //! this crate emits; any future backend divergence is handled on the [`Client`],
 //! not by separate crates.
 //!
-//! This is the **runtime** layer described in [`CLIENT.md`](../../../CLIENT.md):
+//! This is the **runtime** layer described in the
+//! [querying guide](https://alias2k.github.io/flusso/guides/querying.html):
 //! the transport, the field-handle / [`Query`] / [`Search`] builder, and the
 //! typed [`SearchResponse`]. It is generic over the caller's document type `T`.
 //!
@@ -38,7 +39,7 @@
 //! query must be lifted through [`Nested::any`]/[`Nested::all`] before it can join a
 //! root query; the compiler enforces it.
 //!
-//! # Not yet built (see CLIENT.md for the endgame)
+//! # Not yet built
 //!
 //! - The `#[derive(FlussoDocument)]` and `#[derive(FlussoMultiDocument)]`
 //!   proc-macros live in `flusso-query-derive` (the `derive` feature). Without
@@ -120,8 +121,9 @@ pub use search::{FlussoDocument, FlussoIndex, Highlight, Hit, Search, SearchResp
 /// `#[derive(FlussoDocument)]` — generates the typed query surface for a
 /// hand-written document struct (its field handles) and implements the
 /// [`FlussoDocument`](trait@FlussoDocument) trait (`INDEX`/`SCHEMA_HASH` +
-/// `search`/`get`). See [`CLIENT.md`](../../../CLIENT.md). Enabled by the
-/// `derive` feature.
+/// `search`/`get`). See the
+/// [querying guide](https://alias2k.github.io/flusso/guides/querying.html).
+/// Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoDocument;
 

@@ -115,7 +115,8 @@ fields:
     foreign_key: user_id
 ```
 
-Every field declares its **type** from a fixed set ([`SCHEMA.md`](SCHEMA.md) lists
+Every field declares its **type** from a fixed set (the
+[schema guide](https://alias2k.github.io/flusso/guides/schema-authoring.html) lists
 them all) that bridges a Postgres column and an OpenSearch mapping. So a schema is
 self-describing: flusso derives the full index mapping — and validates your config
 — without ever touching a database.
@@ -186,7 +187,8 @@ flusso run    --skip-backfill                       # resume live capture only
 Logging honors `RUST_LOG` (default `info`); `FLUSSO_LOG_FORMAT=json` for structured
 logs. Set the standard `OTEL_EXPORTER_OTLP_ENDPOINT` and traces export there too.
 Every environment variable flusso reads — secrets, the `FLUSSO_*` flags, telemetry
-— is collected in one place: [`CONFIG.md`](CONFIG.md).
+— is collected in one place:
+[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
 
 ## `just` commands
 
@@ -195,6 +197,7 @@ full menu; the greatest hits:
 
 | Recipe | Does |
 | --- | --- |
+| `just setup` | One-time after cloning: enable the repo's git hooks (`core.hooksPath`) |
 | `just up` / `just down` / `just reset` | Start / stop / wipe-and-restart the dev stack |
 | `just check` / `just check-offline` | Validate config + schemas (with / without a DB) |
 | `just run` / `just run-live` | Backfill + follow / resume live only |
@@ -210,7 +213,8 @@ full menu; the greatest hits:
 flusso doesn't own Postgres or OpenSearch — it's a guest in both. A few things
 have to be true *before* it can run. The [`dev/`](dev/) stack sets all of this up
 for you; here's what you'd replicate against your own infrastructure. Full
-per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md).
+per-source/per-sink options are in
+[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
 
 **Postgres (the source):**
 
@@ -245,7 +249,7 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
 **OpenSearch (the sink):**
 
 - **OpenSearch 2.x** (also speaks Elasticsearch 7.x on the query side via
-  [`flusso-query`](CLIENT.md)).
+  [`flusso-query`](apps/query/README.md)).
 - **A reachable HTTP(S) endpoint** as the sink `url`. Optional HTTP basic auth
   (`username` / `password`); `tls_verify` defaults to `true` — flip it off only
   for self-signed dev clusters.
@@ -262,9 +266,9 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
 - **Container image** — the [`Dockerfile`](Dockerfile) builds a registry-ready,
   config-less image (you mount a config or bake your own `flusso.lock`). It also
   has a `demo` target with the dev config baked in, which is what `just demo`
-  runs. [`DEPLOY.md`](DEPLOY.md) has the recipes for shipping the smallest
-  possible image — bake your own lock, or compile one in-Docker even when your
-  schemas are scattered across a monorepo.
+  runs. The [deployment recipes](https://alias2k.github.io/flusso/guides/deploying.html)
+  cover shipping the smallest possible image — bake your own lock, or compile one
+  in-Docker even when your schemas are scattered across a monorepo.
 - **Kubernetes** — the [Helm chart](deploy/helm/flusso/) deploys flusso as a
   single instance (it consumes one replication slot, so it's *firmly* a party of
   one) with config via ConfigMap, secrets via env, a Service, and an optional
@@ -272,21 +276,26 @@ per-source/per-sink options are in [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md
 
 ## Docs
 
+The full user manual lives at **[alias2k.github.io/flusso](https://alias2k.github.io/flusso/)**
+(built from [`docs/`](docs/) with mdBook):
+
 | Doc | What's in it |
 | --- | --- |
-| [`SCHEMA.md`](SCHEMA.md) | Every config + schema key: field types, joins, aggregates, filters, validation rules |
-| [`SOURCES_AND_SINKS.md`](SOURCES_AND_SINKS.md) | Every source and sink option — batch sizes, retries, analysis modes |
-| [`CONFIG.md`](CONFIG.md) | Every environment variable in one place — secrets, `FLUSSO_*` flags, logging & telemetry |
-| [`CLIENT.md`](CLIENT.md) | `flusso-query`, the typed query-side client and its `#[derive(FlussoDocument)]` |
-| [`DEPLOY.md`](DEPLOY.md) | Docker recipes — smallest image, baking/compiling a `flusso.lock`, scoped `.dockerignore` |
+| [Authoring schemas](https://alias2k.github.io/flusso/guides/schema-authoring.html) | Every `*.schema.yml` key: field types, joins, aggregates, filters, validation rules |
+| [Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html) | Every `flusso.toml` key + source/sink option + environment variable — secrets, `FLUSSO_*` flags, index prefix, logging & telemetry |
+| [Querying](https://alias2k.github.io/flusso/guides/querying.html) | `flusso-query`, the typed query-side client and its `#[derive(FlussoDocument)]` (source: [`apps/query`](apps/query/README.md)) |
+| [Deploying](https://alias2k.github.io/flusso/guides/deploying.html) | Docker recipes — smallest image, baking/compiling a `flusso.lock`, scoped `.dockerignore` |
 | [`dev/README.md`](dev/README.md) | The dev stack walk-through |
 | [`deploy/helm/flusso/README.md`](deploy/helm/flusso/README.md) | The Helm chart |
+| [`libs/README.md`](libs/README.md) | The library crates and how the layering works (for contributors) |
 | [`CLAUDE.md`](CLAUDE.md) | Architecture + contributor notes (also where the AI takes its instructions) |
 
 ## Project layout
 
 Crates live under `libs/` and `apps/`. The **numeric prefix is the dependency
-layer** — a crate only depends on lower-numbered ones.
+layer** — a crate only depends on lower-numbered ones. Each crate has its own
+README (its crates.io / docs.rs landing page);
+[`libs/README.md`](libs/README.md) explains the layering and links them all.
 
 | Crate | Path | Role |
 | --- | --- | --- |
@@ -311,6 +320,14 @@ apply the rules the format can't express). Secrets are *not* resolved here, so a
 compiled config never carries a secret it wasn't literally given.
 
 ## Testing & development
+
+After cloning, run `just setup` once. It points git at the version-controlled hooks
+in [`.githooks/`](.githooks/) (via `core.hooksPath`, which a clone doesn't carry on
+its own). When a commit has staged Rust files, the `pre-commit` hook runs
+`cargo fmt --all` (formatting the whole workspace) and re-stages the files you were
+committing, so nothing lands unformatted — it's the same formatting CI enforces with
+`cargo fmt --all --check`. Workspace files you weren't committing stay as unstaged
+changes rather than being swept in.
 
 Tests run with [`cargo-nextest`](https://nexte.st)
 (`cargo install cargo-nextest --locked`):

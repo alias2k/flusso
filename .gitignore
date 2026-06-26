@@ -1,2 +1,5 @@
 /target
 **/*.tmp
+
+# mdBook build output (the docs site is built fresh in CI)
+/docs/book
