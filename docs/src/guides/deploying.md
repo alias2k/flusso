@@ -20,10 +20,24 @@ Two different "compilations" — conflating them is what makes Docker feel heavy
 
 1. **The `flusso` binary** — a full Rust build. *Our* job, published once per
    release as a registry image. **You never compile it.** Pull
-   `ghcr.io/OWNER/flusso:VERSION` and build *from* it.
+   `alias2k/flusso:VERSION` and build *from* it.
 2. **A `flusso.lock`** — `flusso build` inlines your `flusso.toml` + every
    referenced `*.schema.yml` into one portable, self-contained file. No DB, no
    toolchain, no secrets baked in.
+
+> ℹ️ **Info** — The image is published to two registries with identical tags.
+> Use **Docker Hub** as the primary: [`alias2k/flusso`](https://hub.docker.com/r/alias2k/flusso)
+> (`docker.io/alias2k/flusso`). The **`ghcr.io/alias2k/flusso`** mirror is an
+> equivalent drop-in if you prefer GitHub Container Registry.
+>
+> Replace `VERSION` with whichever tag suits you:
+>
+> - **`X.Y.Z`** (e.g. `0.10.0`) — an exact, immutable release. Most reproducible;
+>   recommended for production.
+> - **`X.Y`** (e.g. `0.10`) — a rolling tag that follows the latest **patch** on
+>   that minor (`0.10.1`, `0.10.2`, …) but never a breaking minor bump.
+> - **`latest`** — newest stable release. Convenient, not pinned.
+> - **`sha-<short>`** — the immutable per-commit tag, for tracing or rollback.
 
 So however your schemas are laid out — even scattered across a monorepo next to
 the services they describe — that layout only has to exist *where you run
@@ -42,7 +56,7 @@ file in:
 
 ```dockerfile
 # syntax=docker/dockerfile:1
-FROM ghcr.io/OWNER/flusso:0.1.0
+FROM alias2k/flusso:VERSION
 COPY flusso.lock /app/flusso.lock
 # ENTRYPOINT/CMD are inherited: `flusso run --public-address 0.0.0.0:9464`
 # loads /app/flusso.lock by default.
@@ -61,7 +75,7 @@ Don't want to rebuild an image at all? Mount the lock instead:
 ```sh
 docker run --rm -e DATABASE_URL=… -e PRIMARY_OPENSEARCH_URL=… \
   -v "$PWD/flusso.lock:/app/flusso.lock" -p 9464:9464 \
-  ghcr.io/OWNER/flusso:0.1.0
+  alias2k/flusso:VERSION
 ```
 
 ## Recipe B: build the lock inside Docker
@@ -76,13 +90,13 @@ context tiny without enumerating folders is an allowlist ignore file (see
 
 ```dockerfile
 # syntax=docker/dockerfile:1
-FROM ghcr.io/OWNER/flusso:0.1.0 AS lock
+FROM alias2k/flusso:VERSION AS lock
 WORKDIR /src
 COPY . .                                   # context is already pruned to toml + *.schema.yml,
                                            # with their real paths preserved → flusso.toml resolves
 RUN flusso build --config flusso.toml --out /app/flusso.lock
 
-FROM ghcr.io/OWNER/flusso:0.1.0
+FROM alias2k/flusso:VERSION
 COPY --from=lock /app/flusso.lock /app/flusso.lock
 ```
 
@@ -118,7 +132,7 @@ Commit `flusso.lock`, or publish it as a CI artifact, and the image build never
 sees a schema file — there's no pattern to match, no context to prune, no tree to
 preserve. Just one file. (`flusso build` needs the `flusso` binary; in CI, run it
 from the published image: `docker run --rm -v "$PWD:/src" -w /src
-ghcr.io/OWNER/flusso:0.1.0 build --config flusso.toml --out flusso.lock`.)
+alias2k/flusso:VERSION build --config flusso.toml --out flusso.lock`.)
 
 ## Scoping the `.dockerignore`
 

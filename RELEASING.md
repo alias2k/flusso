@@ -59,6 +59,18 @@ The image namespace is hardcoded as `DOCKERHUB_IMAGE: docker.io/alias2k/flusso` 
 `env`, so the username secret is used only for auth. After the first push, set the repo's
 visibility to public on Docker Hub for anonymous `docker pull`.
 
+### Image tags
+Each release tag (`flusso-cli-vX.Y.Z`) pushes the same set to **both** registries:
+- **`X.Y.Z`** — the exact, immutable release.
+- **`X.Y`** — rolling, follows the latest patch on that minor.
+- **`latest`** — newest **stable** release (a prerelease like `0.11.0-rc1` gets only its exact tag).
+- **`sha-<short>`** — the immutable per-commit tag.
+
+A bare-major `X` tag is intentionally **not** published while on `0.x` (per semver, `0.x` minors are
+breaking). A manual `workflow_dispatch` run pushes `dev` + `sha-<short>`. Tags are derived in the
+`prepare` job (the `flusso-cli-v` prefix means metadata-action's `type=semver` can't parse the git
+ref directly).
+
 ### dist (prebuilt binaries) — generates its own workflow
 `dist`'s release workflow is **machine-generated**; don't hand-edit it.
 
