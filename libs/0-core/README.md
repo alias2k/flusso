@@ -1,23 +1,19 @@
 # flusso-schema-core
 
-The cross-cutting vocabulary for `flusso`.
+The cross-cutting vocabulary for `flusso` — the validated types every other layer trades in.
 
-Every other crate produces or consumes these types. They are the canonical,
-already-validated shape of a search document and its building blocks,
-carrying no trace of the file format they were parsed from. The *assembled*
-deployment config (`Config`/`Index`/`Source`/the `Sink` enum) is a
-composition concern and lives a layer up in the `schema` crate, not here, so
-the backends can depend on this vocabulary without reaching the top-level
-config.
+## Quick reference
 
-- [`common`] holds the validated primitives — newtypes such as [`TableName`]
-  and [`ColumnName`] that enforce Postgres identifier rules at construction.
-- [`config`] holds the structures built from them: [`IndexSchema`],
-  [`Field`], [`Join`], [`Aggregate`], [`Filter`], [`IndexMapping`], and the rest.
-- [`traits`] defines the conversion the format crates implement —
-  [`ParseFrom`] (text into entities).
+| Item | Role |
+| --- | --- |
+| [`common`] | Validated primitives — [`TableName`], [`ColumnName`], and the other identifier newtypes |
+| [`config`] | The structures built from them — [`IndexSchema`], [`Field`], [`Join`], [`Aggregate`], [`Filter`], [`IndexMapping`] |
+| [`traits`] | The conversion the format crates implement — [`ParseFrom`] (text into entities) |
 
-Identifier types are built with [`nutype`]: they can only be constructed
-through `try_new`, so an invalid name never reaches the model.
+This is layer 0: every other crate produces or consumes these types. They're the canonical, already-validated shape of a search document and its building blocks, carrying no trace of the file format they were parsed from.
+
+> ℹ️ **Info** — the *assembled* deployment config (`Config`/`Index`/`Source`/the `Sink` enum) is a composition concern and lives a layer up in the `schema` crate. Keeping it out of here lets the backends depend on the vocabulary without reaching the top-level config.
+
+Identifier types are built with [`nutype`]: they're constructed only through `try_new`, so an invalid name never reaches the model.
 
 [`nutype`]: https://docs.rs/nutype

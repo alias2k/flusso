@@ -1,5 +1,13 @@
 # flusso
 
+**Keep OpenSearch in sync with Postgres, driven by declarative config.**
+
+A schema describes what a search document should look like. flusso builds the
+index, seeds it from existing rows, then tails Postgres' logical replication
+stream so the index stays current — no cron job, no nightly reindex, no
+hand-rolled `for row in rows: es.index(...)` script. You describe the *what*;
+flusso handles the *keep-it-in-sync*.
+
 > [!IMPORTANT]
 > ## 🤖 Generative AI disclosure
 >
@@ -7,23 +15,13 @@
 > documentation.** Every single line of code has been manually reviewed and
 > revised by a human software developer who can be blamed accordingly.
 
-**Keep OpenSearch in sync with Postgres, driven by declarative config.**
-
-You write a bit of YAML describing what a search document should look like.
-flusso builds the index, seeds it from your existing rows, then tails Postgres'
-logical replication stream so the index stays current — no cron job, no nightly
-reindex, no hand-rolled `for row in rows: es.index(...)` script you'll regret at
-2am.
-
-In short: you describe the *what*, flusso handles the *keep-it-in-sync*.
-
 ## Contents
 
-- [Quickstart](#quickstart) — running in about five commands
+- [Quickstart](#quickstart) — running in three commands
 - [What it does](#what-it-does) — the two files you write
 - [How the pipeline works](#how-the-pipeline-works) — the bit that does the work
 - [The CLI](#the-cli) — `build`, `check`, `run`
-- [`just` commands](#just-commands) — the shortcuts you'll actually use
+- [`just` commands](#just-commands) — the common workflow shortcuts
 - [Requirements](#requirements) — what Postgres and OpenSearch need first
 - [Deploying it](#deploying-it) — Docker image + Helm chart
 - [Docs](#docs) — everything else, linked
@@ -121,10 +119,10 @@ them all) that bridges a Postgres column and an OpenSearch mapping. So a schema 
 self-describing: flusso derives the full index mapping — and validates your config
 — without ever touching a database.
 
-The neat part: change a user *or one of their orders* and flusso rebuilds the
-whole `users` document and re-emits it. It figures out which documents a changed
-row affects, reassembles each, and writes it by a deterministic id. You don't tell
-it what to update; it works it out.
+Change a user *or one of their orders*, and flusso rebuilds the whole `users`
+document and re-emits it. It works out which documents a changed row affects,
+reassembles each, and writes it by a deterministic id — no instructions about
+*what* to update.
 
 ## How the pipeline works
 
@@ -140,11 +138,10 @@ works out which document ids they touch, builds each document, and writes it.
 Writes are **batched** — N changes, or whatever shows up in a short window, flush
 together as one bulk round-trip.
 
-Delivery is **at-least-once** — not exactly-once, because exactly-once is mostly a
-story distributed systems tell at conferences. A change's ack is confirmed only
+Delivery is **at-least-once**, not exactly-once. A change's ack is confirmed only
 *after* the flush that made its document durable, so the replication slot advances
-exactly when the data has landed. Crash before the flush? The batch is redelivered
-on restart and re-applied idempotently — same id, same result, no duplicates.
+exactly when the data has landed. A crash before the flush redelivers the batch on
+restart; it's re-applied idempotently — same id, same result, no duplicates.
 
 Before going live, the engine runs an optional **backfill**: it asks each sink
 whether an index is already seeded and snapshots the tables for the ones that
@@ -172,7 +169,7 @@ wins when both are set) — handy for containers.
   here, in the running environment.
 - **`flusso check`** — validate the config and print the fully-typed mapping, with
   no database. Drop `--offline` and it also confirms the declared types match the
-  live database and grumbles about any that don't.
+  live database and reports any that don't.
 
 ```sh
 flusso --help
@@ -193,7 +190,7 @@ Every environment variable flusso reads — secrets, the `FLUSSO_*` flags, telem
 ## `just` commands
 
 Common workflows are wrapped in the [`justfile`](justfile). Run `just` for the
-full menu; the greatest hits:
+full menu; the ones reached for most:
 
 | Recipe | Does |
 | --- | --- |
@@ -230,13 +227,12 @@ per-source/per-sink options are in
   superuser), a stronger grant than the read-only role below. If the role can't,
   flusso doesn't fail: it logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION
   … ADD TABLE` to run, and `flusso check` prints the same. Set `[source]
-  manage_publication = false` (or `--no` via `FLUSSO_MANAGE_PUBLICATION=false`) to
-  turn management off and manage the publication yourself.
+  manage_publication = false` (or `--manage-publication false` /
+  `FLUSSO_MANAGE_PUBLICATION=false`) to manage the publication yourself.
 - **A replication slot** — this one flusso always creates on first connect (it
-  needs only the `REPLICATION` attribute). Heads-up: Postgres hoards WAL until
-  flusso confirms it, so a flusso that's down for a long time means WAL piling up
-  on the server. Drop the slot when you retire a deployment, unless you're a fan
-  of disk-full pages.
+  needs only the `REPLICATION` attribute). Postgres retains WAL until flusso
+  confirms it, so a flusso that's down for a long time means WAL piling up on the
+  server. Drop the slot when you retire a deployment.
 - **Row identity on every replicated table** — a primary key (usual case) or an
   explicit `REPLICA IDENTITY`. Keyless tables can't be addressed, so flusso skips
   them in backfill and errors on a live change it can't key.
@@ -270,8 +266,8 @@ per-source/per-sink options are in
   cover shipping the smallest possible image — bake your own lock, or compile one
   in-Docker even when your schemas are scattered across a monorepo.
 - **Kubernetes** — the [Helm chart](deploy/helm/flusso/) deploys flusso as a
-  single instance (it consumes one replication slot, so it's *firmly* a party of
-  one) with config via ConfigMap, secrets via env, a Service, and an optional
+  single instance (it consumes one replication slot, so `replicas: 1` is enforced)
+  with config via ConfigMap, secrets via env, a Service, and an optional
   Prometheus `ServiceMonitor`. See [its README](deploy/helm/flusso/README.md).
 
 ## Docs

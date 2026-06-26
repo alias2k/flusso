@@ -1,15 +1,38 @@
 # Authoring schemas
 
-Each search document flusso builds is described by one `*.schema.yml` file — its root
-table, its fields, and how related tables fold in. This guide covers that file format in
-full. For the deployment side (`flusso.toml` — the source database, the sink destinations,
-and which indexes to build), see [Configuration](configuration.md).
+One `*.schema.yml` file describes one search document — its root table, its fields, and how related tables fold in. This guide is the full reference for that format. For the deployment side (`flusso.toml`), see [Configuration](configuration.md).
 
-> Two JSON Schemas ship alongside this reference and are the machine-readable
-> source of truth for the file formats:
-> [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json) and
-> [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml). Point
-> your editor at them for completion and inline validation.
+## Quick reference
+
+Fields are written **type-first**: `- <type>: <name>`, with siblings the type allows.
+
+```yaml
+fields:
+  - keyword: email          # scalar; document key `email`
+    required: true
+  - has_many: orders        # join; folds a related table in
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    fields: [ { double: total } ]
+  - count: orderCount       # aggregate; rolls a related table up
+    table: orders
+    foreign_key: user_id
+```
+
+| Need | Type keys | Jump to |
+| --- | --- | --- |
+| A scalar column | `text` `identifier` `keyword` `enum` `uuid` `boolean` `short` `integer` `long` `float` `double` `decimal` `date` `timestamp` `binary` `json` `custom` | [Types](#types) |
+| Same-row sub-object | `object` | [Objects](#objects) |
+| Dynamic-key object (translations, …) | `map` | [Maps](#maps) |
+| A geographic point | `geo` | [Geo points](#geo-points) |
+| Fold in a related table | `belongs_to` `has_one` `has_many` `many_to_many` | [Joins](#joins) |
+| Roll a related table up | `count` `sum` `avg` `min` `max` `ids` | [Aggregates](#aggregates) |
+| A fixed value | `constant` | [Fields](#fields) |
+| Treat rows as deleted | top-level `soft_delete` | [soft_delete](#soft_delete) |
+| Index only a subset of rows | top-level `filters` | [Root filters](#root-filters) |
+
+> ℹ️ **Info** — Two JSON Schemas are the machine-readable source of truth for the file formats: [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json) and [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml). Point an editor at them for completion and inline validation.
 
 ---
 
@@ -120,7 +143,7 @@ that type:
 
 | Sibling | Applies to | Description |
 | --- | --- | --- |
-| `required` | scalar, `geo`, `map`, to-one join | **Mandatory** on a scalar/`geo`/`map` leaf. `true` forces the field non-null; nullable otherwise. **Optional** on a to-one join (`belongs_to`/`has_one`): omitted maps the object nullable, `true` maps it non-null. Not allowed on a to-many join (`has_many`/`many_to_many`) or an aggregate — those are structural (a non-null array / fixed nullability). |
+| `required` | scalar, `geo`, `map`, to-one join | `true` forces a scalar/`geo`/`map` leaf non-null (nullable otherwise); on a to-one join (`belongs_to`/`has_one`) it maps the object non-null — see [Joins](#joins). Rejected on to-many joins and aggregates (their nullability is structural). |
 | `column` | scalar, `geo`, `belongs_to` | The source column — for a `belongs_to`, this table's column pointing at the related row. Defaults to the document key when omitted. |
 | `options` | types with a mapping | Extra OpenSearch mapping properties merged beside the derived type (e.g. `analyzer`, `format`, `scaling_factor`). |
 | `transforms` | scalar | Value transforms to apply. See [Transforms](#transforms). |
@@ -300,7 +323,7 @@ flusso assembles the point in the document query.
 
 ### Transforms
 
-A list applied in order to a column value before it lands in the document:
+A list applied in sequence to a column value before it lands in the document:
 
 | Transform | Effect |
 | --- | --- |

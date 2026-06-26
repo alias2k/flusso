@@ -1,53 +1,38 @@
 # Deploying flusso with Docker
 
-How to ship flusso as the smallest possible image, without compiling the binary
-yourself and without dragging your whole repo into the build context. For the
-image's internals (targets, base, non-root user) see the [`Dockerfile`](https://github.com/alias2k/flusso/blob/main/Dockerfile);
-for Kubernetes see the [Helm chart](https://github.com/alias2k/flusso/blob/main/deploy/helm/flusso/README.md).
+Ship flusso as the smallest possible image — without compiling the binary yourself, and without dragging your whole repo into the build context. For the image's internals (targets, base, non-root user) see the [`Dockerfile`](https://github.com/alias2k/flusso/blob/main/Dockerfile); for Kubernetes see the [Helm chart](https://github.com/alias2k/flusso/blob/main/deploy/helm/flusso/README.md).
 
-## Contents
+## Pick a recipe
 
-- [The one idea](#the-one-idea) — don't compile the binary; the lock *is* the bundle
-- [Recipe A: bake your own lock (smallest, simplest)](#recipe-a-bake-your-own-lock-smallest-simplest)
-- [Recipe B: build the lock inside Docker](#recipe-b-build-the-lock-inside-docker) — scattered schemas, tiny context
-- [Recipe C: build the lock in CI, ship one file](#recipe-c-build-the-lock-in-ci-ship-one-file)
-- [Scoping the `.dockerignore`](#scoping-the-dockerignore) — a custom one just for flusso
-- [Why `COPY` alone can't do it](#why-copy-alone-cant-do-it)
+The key idea: **you never compile the binary, only a `flusso.lock`** — see [The one idea](#the-one-idea). Then pick by where the lock gets built:
+
+| Situation | Recipe |
+| --- | --- |
+| Already have a `flusso.lock`, or a flat config | [A — bake your own lock](#recipe-a-bake-your-own-lock-smallest-simplest) (smallest, simplest) |
+| Schemas scattered across a monorepo; want a hermetic in-Docker build | [B — build the lock inside Docker](#recipe-b-build-the-lock-inside-docker) |
+| Want CI to build the lock and ship one file | [C — build the lock in CI](#recipe-c-build-the-lock-in-ci-ship-one-file) |
+| Keep a flusso-only ignore file off everyone else's builds | [Scoping the `.dockerignore`](#scoping-the-dockerignore) |
+| Wondering why `COPY *.schema.yml` won't do | [Why `COPY` alone can't do it](#why-copy-alone-cant-do-it) |
 
 ## The one idea
 
-There are two different "compilations", and conflating them is what makes Docker
-feel heavy:
+Two different "compilations" — conflating them is what makes Docker feel heavy:
 
-1. **The `flusso` binary** — a full Rust build. This is *our* job, done once per
-   release and published as a registry image. **You never compile it.** Pull
+1. **The `flusso` binary** — a full Rust build. *Our* job, published once per
+   release as a registry image. **You never compile it.** Pull
    `ghcr.io/OWNER/flusso:VERSION` and build *from* it.
-2. **A `flusso.lock`** — `flusso build` compiles your `flusso.toml` + every
-   referenced `*.schema.yml` into one portable file. No DB, no toolchain, no
-   secrets baked in. It's fast, and the input is just your config text.
+2. **A `flusso.lock`** — `flusso build` inlines your `flusso.toml` + every
+   referenced `*.schema.yml` into one portable, self-contained file. No DB, no
+   toolchain, no secrets baked in.
 
-The lock is the key: **`flusso build` inlines every schema into a single
-self-contained file.** So however your schemas are laid out on disk — even
-scattered across a monorepo next to the services they describe — that layout only
-has to exist *where you run `flusso build`*, never inside the image. Get a lock,
-ship the lock, run the lock.
+So however your schemas are laid out — even scattered across a monorepo next to
+the services they describe — that layout only has to exist *where you run
+`flusso build`*, never inside the image. Get a lock, ship the lock, run the lock.
 
-Schema paths in `flusso.toml` are resolved **relative to the config file's
-directory**, and there's no globbing — each `[[index]]` names its `schema = "…"`
-explicitly:
-
-```toml
-[[index]]
-name   = "users"
-schema = "services/users/search/users.schema.yml"
-
-[[index]]
-name   = "orders"
-schema = "services/orders/search/orders.schema.yml"
-```
-
-That relative-path rule is the only thing the recipes below have to respect: when
-you compile the lock, the referenced files must be present at those paths.
+> ℹ️ **Info** — Schema paths in `flusso.toml` resolve **relative to the config
+> file's directory**, with no globbing; each `[[index]]` names its `schema = "…"`
+> explicitly. That's the only rule the recipes below respect — when you compile the
+> lock, the referenced files must exist at those paths.
 
 ## Recipe A: bake your own lock (smallest, simplest)
 

@@ -1,13 +1,17 @@
 # flusso-sinks-core
 
-The sink abstraction for `flusso`.
+The sink abstraction for `flusso` — where assembled documents land.
 
-A *sink* is where assembled documents go. It consumes neutral values — an
-[`IndexName`](schema_core::IndexName), a string id, and a document
-[`GenericValue`](schema_core::GenericValue) — so it depends on neither the
-source nor the engine; the engine is what feeds it.
+## Quick reference
 
-- [`Sink`] is the trait every destination implements.
-- [`to_json`] renders a [`GenericValue`](schema_core::GenericValue) as
-  natural JSON (numbers as numbers, maps as objects), which most sinks need.
-- [`SinkError`] / [`Result`] are the shared error type.
+| Item | Role |
+| --- | --- |
+| [`Sink`] | The trait every destination implements |
+| [`FanOutSink`] | A [`Sink`] that broadcasts each write to several sinks |
+| [`to_json`] | Renders a [`GenericValue`](schema_core::GenericValue) as natural JSON (numbers as numbers, maps as objects) |
+| [`FlushReport`] / [`RejectedDocument`] | A flush's outcome, including any documents the destination applied-but-rejected |
+| [`SinkError`] / [`Result`] | The shared error type |
+
+A sink consumes neutral values — an [`IndexName`](schema_core::IndexName), a string id, and a document [`GenericValue`](schema_core::GenericValue) — so it depends on neither the source nor the engine. The engine is what feeds it.
+
+[`to_json`] is the OpenSearch-flavored translation most sinks need at their boundary; a sink converts the canonical [`GenericValue`](schema_core::GenericValue) into its own representation there.

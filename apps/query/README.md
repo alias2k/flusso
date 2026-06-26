@@ -25,6 +25,22 @@ filter or sort on a field even if your struct doesn't deserialize it. When the
 schema changes and the index is rebuilt, anything that no longer fits stops
 compiling at `cargo build`.
 
+## Quick reference
+
+| Looking for… | Jump to |
+| --- | --- |
+| A full worked example (structs + query) | [A query, from the caller's seat](#a-query-from-the-callers-seat) |
+| Which operators each field type exposes | [What the field type buys you](#what-the-field-type-buys-you) |
+| `and`/`or`/`not`, clause vs combinator style, `count`/`ids` | [Composing queries](#composing-queries) |
+| Per-query options, compound/scoring, standalone, sort, search-level | [Query options and extra query types](#query-options-and-extra-query-types) |
+| Nested arrays — filter *by* vs filter *of* (`any`/`all`, `filter_nested`) | [Filtering nested collections](#filtering-nested-collections) |
+| Several searches, one round-trip | [`_msearch`](#several-searches-one-round-trip-_msearch) |
+| One blended result list across indexes | [Combined search](#one-blended-result-list-combined-search) |
+| How the macro finds the schema; `path` for nested structs | [Binding to the schema](#binding-to-the-schema) |
+| flusso `type` → Rust type → handle | [flusso types → Rust types](#flusso-types--rust-types) |
+| Anything the typed builder can't express | [The escape hatch](#the-escape-hatch) |
+| Reading a prefixed deployment | [Resolving the index name](#resolving-the-index-name) |
+
 ---
 
 ## A query, from the caller's seat
@@ -50,7 +66,7 @@ pub struct User {
     pub email: String,                          // keyword, required → never null
     #[serde(rename = "fullName")]
     pub full_name: Option<String>,              // text, not required → nullable
-    pub account: Account,                       // a group (object) — always assembled
+    pub account: Account,                       // an object — always assembled
     pub orders: Vec<Order>,                     // has_many join → nested, never null
     #[serde(rename = "orderCount")]
     pub order_count: i64,                        // count aggregate → long, never null
@@ -58,7 +74,7 @@ pub struct User {
     pub lifetime_value: Option<f64>,            // sum aggregate → nullable
 }
 
-/// The `account` group — a same-row sub-object. A nested/group struct validates
+/// The `account` object — a same-row sub-object. A nested/object struct validates
 /// against its `path` in the same index; it has no entry points of its own.
 #[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
 #[flusso(index = "users", path = "account")]
@@ -111,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     let page = User::query()
         .filter(User::email().eq("ada@example.com"))      // keyword → exact
         .filter(User::order_count().gte(5))               // long → range
-        .filter(User::account().tier().eq("gold"))        // into the group's handles
+        .filter(User::account().tier().eq("gold"))        // into the object's handles
         .query(User::full_name().matches("ada lovelace")) // text → analyzed match
         .filter(User::orders().any(Order::status().eq("delivered")))   // nested, via your Order struct
         .filter(User::addresses().any(AddressFields::city().eq("Boston"))) // not projected — generated namespace
@@ -171,7 +187,7 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Bool`          | `eq`, `exists`, `asc`/`desc`                                              |
 | `Number`        | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
 | `Date`          | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
-| `Object<S>`     | `exists` (a same-document sub-object — group or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
+| `Object<S>`     | `exists` (a same-document sub-object — an `object` field or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
 | `Geo`           | `within(Distance::km(12.0), center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` (nearest-first sugar) or `distance_sort(center, order, DistanceUnit)` |
 | `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
@@ -271,7 +287,14 @@ User::query()
 ```
 
 `query`/`filter`/`must_not`/`should` accept anything that is a `Query<Root>`, so
-the two styles mix freely.
+the two styles mix freely. Which clause to reach for:
+
+| Clause | Scores? | Bool slot | Use for |
+| --- | --- | --- | --- |
+| `query` | yes | `must` | full-text relevance you want ranked |
+| `filter` | no (cached) | `filter` | exact constraints — terms, ranges, nested `any` |
+| `must_not` | no | `must_not` | exclusions |
+| `should` | yes | `should` | optional boosts; a real constraint with `min_should_match` |
 
 A built search can finish as a **count** instead of a page: `.count()` sends the
 same query to `_count` and returns the number of matching documents (`u64`) —
@@ -320,16 +343,20 @@ User::query()
     .send(&client).await?;
 ```
 
-The options per query type (all optional): `case_insensitive` on
-`term`/`prefix`/`wildcard`/`regexp`; `rewrite` on `prefix`/`wildcard`;
-`flags`/`max_determinized_states` on `regexp`;
-`fuzziness`/`prefix_length`/`max_expansions`/`transpositions` on `fuzzy`;
-`fuzziness`/`operator`/`minimum_should_match`/`prefix_length`/`analyzer`/
-`zero_terms_query`/`lenient` on `matches`; `slop`/`analyzer` on the phrase
-matches; `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` on
-`multi_match`; `format`/`time_zone`/`relation` on a range; `distance_type`/
-`validation_method` on `within` (geo); `score_mode`/`ignore_unmapped` on a
-nested `any`.
+The options per query type (all optional; plus the universal `boost`/`name` on every builder):
+
+| Query | Options |
+| --- | --- |
+| `term` / `prefix` / `wildcard` / `regexp` | `case_insensitive` |
+| `prefix` / `wildcard` | `rewrite` |
+| `regexp` | `flags`, `max_determinized_states` |
+| `fuzzy` | `fuzziness`, `prefix_length`, `max_expansions`, `transpositions` |
+| `matches` | `fuzziness`, `operator`, `minimum_should_match`, `prefix_length`, `analyzer`, `zero_terms_query`, `lenient` |
+| phrase matches | `slop`, `analyzer` |
+| `multi_match` | `type`, `operator`, `fuzziness`, `tie_breaker`, `minimum_should_match` |
+| range | `format`, `time_zone`, `relation` |
+| `within` (geo) | `distance_type`, `validation_method` |
+| nested `any` | `score_mode`, `ignore_unmapped` |
 
 The enumerable options are **closed enums**, not strings — a typo is a compile
 error, not a 400. `operator`/`default_operator` take `Operator { And, Or }`;
@@ -444,7 +471,7 @@ for hit in page.hits {
 
 Root-scope queries compose across document types (`Query<Root>` carries no
 document type), and every hit names its physical index — exactly
-`{INDEX}_{HASH}` — so decoding into the right variant is precise, no read alias
+`{INDEX}_{HASH}` — so decoding into the right variant is precise, no convenience alias
 involved. A hit from an index no variant claims is an error, not a skip.
 `count(&client)` works on the union too.
 
@@ -616,7 +643,7 @@ concrete type, whether it is **nullable**, its nested `children`, and the schema
 `hash`.
 
 flusso's schemas are **self-describing**: every leaf declares its `type` and
-whether it's `required`, and joins/groups/aggregates have structural types — so the
+whether it's `required`, and joins/objects/aggregates have structural types — so the
 mapping resolves with **no database**, exactly as `flusso build` does when it writes
 `flusso.lock`. The client reuses that resolution. (See the
 [schema guide](https://alias2k.github.io/flusso/guides/schema-authoring.html) for the
@@ -656,9 +683,9 @@ physical index name, so binding and index are provably the same schema version.
 There is no `build.rs`, no generated `.rs` file to `include!`, and no committed
 mapping artifact to keep in sync — the struct is the only file you maintain.
 
-### A nested or group struct names its path
+### A nested or object struct names its path
 
-A `group`, an `object` join, or a `nested` join is its own struct, validated
+A same-row `object`, a to-one join, or a `nested` join is its own struct, validated
 against a dotted **`path`** into the same index — `account`, `orders`,
 `orders.items`. It declares the same `index` so the macro resolves the same config,
 then walks to that path's `children`:
@@ -750,7 +777,7 @@ The rules that make this **full control rather than a straitjacket**:
 - **Type matching is by leaf identifier + `Option` shape.** The macro can't resolve
   arbitrary type aliases, so it compares the final path segment (`String`, `i32`,
   `f64`, `OffsetDateTime`, …) and the `Option<_>` wrapper against the [type
-  table](#flusso-types--rust-types). For a group/`object` field it expects a struct,
+  table](#flusso-types--rust-types). For an `object` field it expects a struct,
   for a `nested` field a `Vec<_>`, and defers the inner field checks to *that*
   struct's own `FlussoDocument` derive.
 - **Escape hatches.** A field typed `serde_json::Value` opts out of type checking.
@@ -784,7 +811,7 @@ else and it won't compile (modulo the leaf-identifier rule above).
 | `json`            | `object`   | `serde_json::Value`              | `Json`          |
 | `geo_point`       | `geo_point`| `GeoPoint` (`{ lat, lon }`)      | `Geo`           |
 | `custom { opensearch }` | (given) | matching scalar, else `serde_json::Value` | by OS type |
-| `group`           | `object`   | a struct                         | `Object`        |
+| `object`          | `object`   | a struct                         | `Object`        |
 | join `belongs_to` / `has_one` | `object`   | `Option<` a struct `>`           | `Object`        |
 | join `has_many` / `many_to_many` | `nested` | `Vec<` a struct `>`  | `Nested<S, T>`  |
 
@@ -841,7 +868,7 @@ fields stay in the struct as `Uuid` (no `#[flusso(skip)]`, no
 
 A field is `T` or `Option<T>`, and the derive **checks** it against the resolved
 mapping. Nullability comes straight from the schema with no database round-trip: a
-leaf states it with `required`, and joins, groups, and aggregates carry it
+leaf states it with `required`, and joins, objects, and aggregates carry it
 structurally. `ResolvedField` records the resulting `nullable: bool`; the derive
 requires `nullable: false → T`, `nullable: true → Option<T>`.
 
@@ -851,7 +878,7 @@ requires `nullable: false → T`, `nullable: true → Option<T>`.
 | join `primary_key` field              | `false`    | forced non-null, just like the root key              |
 | leaf column, `required: true`         | `false`    | declared non-null                                    |
 | leaf column, `required: false`        | `true`     | nullable by default                                  |
-| `group` (`object`)                    | `false`    | always assembled from the same row                   |
+| `object`                              | `false`    | always assembled from the same row                   |
 | join `belongs_to` / `has_one` (`object`)          | `true`     | there may be no related row                          |
 | join `has_many` / `many_to_many`     | `false`    | a `Vec`, empty when there are none, never null       |
 | aggregate `count`                     | `false`    | a non-null `long` — zero rows is `0`, not null       |
@@ -893,16 +920,17 @@ the OpenSearch sink writes — and rotates on a structural schema change.
 Because the binding is **generated from the schema at compile time**, the derive
 knows that hash and emits it as a `const`: `User::INDEX` is the physical name, and
 `get`/`query` use it. So `User::query()` addresses the right index directly, with
-the hash hidden from the caller — no read alias required.
+the hash hidden from the caller — no convenience alias required.
 
 This is self-correcting: a structural schema change rotates the hash *and* changes
 the resolved mapping, so the next `cargo build` regenerates the binding against the
 new physical index. (`User::INDEX` and `User::SCHEMA_HASH` are exposed for logging,
 admin, or a hand-built `Search`.)
 
-> A read alias (`users` → current physical) is still worthwhile for clients that
-> *don't* recompile against the schema — dynamic/scripting use, dashboards. For a
-> derived binding it's unnecessary: the compile-time hash is the stable name.
+> The convenience alias (`users` → current generation) is still worthwhile for
+> clients that *don't* recompile against the schema — dynamic/scripting use,
+> dashboards. For a derived binding it's unnecessary: the compile-time hash is the
+> stable name.
 
 ### Reading a prefixed deployment
 

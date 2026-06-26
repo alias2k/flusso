@@ -1,34 +1,53 @@
 # Configuring a deployment
 
-A flusso deployment is described by one `flusso.toml` file — the source database, the
-sink destinations, and which indexes to build — plus the environment that feeds it
-secrets, connection strings, and runtime flags. This guide is the single reference for
-that file and that environment.
+One `flusso.toml` file describes a deployment — the source database, the sink destinations, and which indexes to build — plus the environment that feeds it secrets and runtime flags. This guide is the single reference for that file and that environment. (Each index's own `*.schema.yml` is covered in [schema authoring](schema-authoring.md).)
 
-Each index also has its own `*.schema.yml` describing the search document it produces;
-authoring those files is covered in [schema authoring](schema-authoring.md). Here we
-cover only the `flusso.toml` half: how to point flusso at a source and sinks, how
-secrets resolve, and every environment variable flusso reads.
+## Quick reference
 
-`schema::load("flusso.toml")` is the front door: it reads the config and every schema it
-references, validates both layers, and returns one fully-validated `Config`. Schema paths
-in `flusso.toml` resolve **relative to the config file's directory**.
+| Looking for… | Jump to |
+| --- | --- |
+| Every `flusso.toml` top-level key | [The `flusso.toml` format](#the-flussotoml-format) |
+| Postgres source options | [Postgres](#postgres) |
+| OpenSearch sink options + defaults | [OpenSearch](#opensearch) |
+| Which subfield to query (exact / full-text / sort) | [Index analysis & subfields](#index-analysis--subfields) |
+| Stdout sink envelope | [Stdout](#stdout) |
+| Secrets, `{ env = "VAR" }`, the reserved overrides + precedence | [Secrets & connection values](#secrets--connection-values) |
+| The `FLUSSO_*` flag env vars | [CLI flags as env vars](#cli-flags-as-env-vars) |
+| Status / metrics / control ports + auth | [HTTP surfaces](#http-surfaces) |
+| Sharing one cluster across deployments | [Index prefix](#index-prefix) |
+| `RUST_LOG`, OTLP, Prometheus | [Logging & telemetry](#logging--telemetry) |
+| A copy-paste env block | [Cheat sheet](#cheat-sheet) |
 
-> Two JSON Schemas ship alongside flusso and are the machine-readable source of truth for
-> the file formats:
-> [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json)
-> and
-> [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml).
-> Point your editor at them for completion and inline validation.
+flusso reads env vars for three jobs: **filling in config values** (the [secrets story](#secrets--connection-values)), **setting CLI flags** (every flag has a `FLUSSO_*` twin — [CLI flags as env vars](#cli-flags-as-env-vars)), and **logging & telemetry** ([below](#logging--telemetry)).
 
-flusso reads env vars for three jobs:
+### Every key + default
 
-1. **Filling in config values** — connection strings and credentials kept out of
-   `flusso.toml`. This is the [secrets story](#secrets--connection-values).
-2. **Setting CLI flags** — every flag has a `FLUSSO_*` twin. See
-   [CLI flags as env vars](#cli-flags-as-env-vars).
-3. **Logging & telemetry** — `RUST_LOG` / OpenTelemetry. See
-   [Logging & telemetry](#logging--telemetry).
+| Key | Where | Default | Purpose |
+| --- | --- | --- | --- |
+| `on_error` | top-level / `[[index]]` | `"stop"` | item-rejection policy — `stop` or `skip` ([on_error](#on_error)) |
+| `prefix` | top-level | — | prepend to every owned index name ([index prefix](#index-prefix)) |
+| `type` | `[source]` | — | `postgres` |
+| `connection_url` | `[source]` | — | full URL or parts; `DATABASE_URL` overrides |
+| `manage_publication` | `[source]` | `true` | auto-create/extend the publication |
+| `type` | `[sinks.<name>]` | — | `opensearch` or `stdout` |
+| `url` | opensearch sink | — | cluster URL; `<NAME>_OPENSEARCH_URL` overrides |
+| `username` / `password` | opensearch sink | — | HTTP Basic auth |
+| `tls_verify` | opensearch sink | `true` | verify TLS certs |
+| `batch_size` | opensearch sink | `1000` | docs per bulk chunk |
+| `max_bytes` | opensearch sink | 10 MiB | bytes per bulk chunk |
+| `timeout_secs` | opensearch sink | `30` | HTTP request timeout |
+| `max_retries` | opensearch sink | `3` | transient-failure retries |
+| `pipeline` | opensearch sink | — | ingest pipeline applied on index |
+| `number_of_shards` | opensearch sink | `1` | primary shards per index |
+| `number_of_replicas` | opensearch sink | `1` | replica shards per index |
+| `refresh_interval` | opensearch sink | `"10s"` | steady-state refresh ceiling (`"-1"` disables) |
+| `text_analysis` | opensearch sink | `builtin` | analyzer toolkit — `builtin` or `icu` |
+| `auto_subfields` | opensearch sink | `true` | auto subfields on `text`/`keyword` |
+| `pretty` | stdout sink | `false` | pretty JSON instead of NDJSON |
+| `name` / `schema` / `enabled` | `[[index]]` | — | logical name / schema path / build on this run |
+| `public_address` / `private_address` | `[server]` | `127.0.0.1:9464` / `:9465` | HTTP bind addresses ([HTTP surfaces](#http-surfaces)) |
+
+> ℹ️ **Info** — `schema::load("flusso.toml")` is the front door: it reads the config and every schema it references, validates both layers, and returns one fully-validated `Config`. Schema paths resolve **relative to the config file's directory**. Two JSON Schemas are the machine-readable source of truth — [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json) and [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml); point an editor at them for completion.
 
 ---
 
@@ -141,12 +160,7 @@ rules for sharing one OpenSearch cluster across deployments.
 
 ## The model
 
-**One source, many sinks.** A deployment reads from a single source and writes every
-document to *all* configured sinks (fan-out). Define none and the CLI falls back to a
-single [stdout](#stdout) sink. Today: Postgres in, OpenSearch (or stdout) out.
-
-Source, sink, and the in-process queue are all trait objects, so the backends below swap
-without touching the engine. Only what ships today is documented here.
+**One source, many sinks.** Source, sink, and the in-process queue are all trait objects, so backends swap without touching the engine. Today that's Postgres in, OpenSearch (or stdout) out — the only backends documented here.
 
 ---
 
@@ -275,7 +289,7 @@ overridden per sink via reserved deployment-override variables — naming and pr
 | `number_of_replicas` | int ≥ 0 | `1` | Replica shards for each created index. |
 | `refresh_interval` | string | `"10s"` | OpenSearch `refresh_interval` applied to each index after seeding — the steady-state visibility ceiling (e.g. `"10s"`, `"1s"`, or `"-1"` to disable auto-refresh). flusso forces an immediate refresh whenever the pipeline catches up, so this only bounds staleness while a backlog drains (see below). |
 | `text_analysis` | `builtin` \| `icu` | `builtin` | Analysis backend for the `flusso_*` analyzers (see [below](#index-analysis--subfields)). `icu` requires the `analysis-icu` plugin on every node. |
-| `auto_subfields` | bool | `true` | Auto-enrich `text`/`keyword` fields with a good analyzer and subfields. A field's explicit `mapping` always wins; set `false` to emit fields bare. |
+| `auto_subfields` | bool | `true` | Auto-enrich `text`/`keyword` fields with a good analyzer and subfields. A field's explicit `options` always win; set `false` to emit fields bare. |
 
 **How it owns its indexes:**
 
@@ -283,16 +297,18 @@ overridden per sink via reserved deployment-override variables — naming and pr
   schema mapping, `dynamic: strict` — field types come from the schema, not OpenSearch's
   dynamic guesses, and only configured fields are accepted. An index that already exists is
   left untouched.
-- **Hashed physical name.** The actual index is named `{logical}_{hash}`, where the hash
-  derives from the parsed index schema. A structural schema change changes the hash, so the
-  sink writes to a *fresh* index (re-seeded from scratch) rather than into the old, now-
-  mismatched shape. The logical name remains the pipeline's identity.
-- **Convenience alias.** The logical name is also kept as an alias on the *current* physical
-  index, repointed atomically when the schema hash moves — so `GET /users/_search` always
-  hits the latest index without you knowing the hash. It exists purely for humans and ad-hoc
-  tooling: flusso itself (the sink and the `flusso-query` client) always addresses the
-  physical name. Alias upkeep is best-effort — if it fails (e.g. the cluster already has a
-  real index named like the alias), flusso logs a warning and carries on.
+- **Hashed name over generations.** The addressable name is `{logical}_{hash}` (the hash
+  derives from the parsed index schema) — itself a **hash alias** over a concrete generation
+  index `{logical}_{hash}_{gen}` that holds the data. A structural schema change moves the
+  hash, so the sink writes a fresh alias + generation (re-seeded from scratch) rather than
+  into the old, mismatched shape. An on-demand reindex builds the *next* generation behind
+  the same hash alias and repoints atomically when it's seeded. flusso and the `flusso-query`
+  client address `{logical}_{hash}`; the generation detail is documented in the
+  [`flusso-sinks-opensearch` crate](https://github.com/alias2k/flusso/tree/main/libs/1-sinks/2-opensearch).
+- **Convenience alias.** The bare logical name (`users`) is *also* kept as an alias on the
+  current generation, so a human or ad-hoc tool can `GET /users/_search` without knowing the
+  hash. Best-effort: if it fails (e.g. the cluster already has a real index named like the
+  alias), flusso logs a warning and carries on — correctness never depends on it.
 - **Refresh adapts to the backlog.** Created with auto-refresh disabled (`refresh_interval:
   -1`) for fast bulk seeding; on seeding completion the index is handed the configured
   `refresh_interval` (default `"10s"`) — the steady-state visibility ceiling. A `flush` also
@@ -331,12 +347,12 @@ fails; `builtin` (the default) needs no plugins.
 
 | Field type | Shape | Query each subfield for… |
 | --- | --- | --- |
-| `text` | `analyzer: flusso_code` + `.keyword` + `.keyword_lowercase` | the field itself → full-text search; `.keyword` → exact filter / aggregation / exact sort; `.keyword_lowercase` → case-insensitive sort & exact lookup. |
+| `text` | `analyzer: flusso_text` + `.keyword` + `.keyword_lowercase` | the field itself → full-text search; `.keyword` → exact filter / aggregation / exact sort; `.keyword_lowercase` → case-insensitive sort & exact lookup. |
 | `keyword` | `.text` (`flusso_code`) + `.keyword_lowercase` | the field itself → exact term / aggregation; `.text` → full-text search; `.keyword_lowercase` → case-insensitive sort. |
 
 `keyword` subfields cap at `ignore_above: 256`. Other types (`long`, `date`, `boolean`, …)
 and the `object`/`nested` containers are emitted as-is. Any key you set in a field's
-`mapping` overrides the auto default for that field — e.g. your own `analyzer` replaces
+`options` overrides the auto default for that field — e.g. your own `analyzer` replaces
 `flusso_code`, and your own `fields` replaces the auto subfields wholesale.
 
 Example query against a `text` field `name`, precise (all terms must match) and
@@ -470,14 +486,24 @@ are set** — env is the fallback.
 
 `flusso <cmd> --help` shows the matching `[env: FLUSSO_…]` next to each flag.
 
-The two operational HTTP surfaces have an extra fallback for their bind addresses: a
-`[server]` table in `flusso.toml`. So precedence for `--public-address` /
-`--private-address` is **flag > `FLUSSO_*` env > `[server]` config > built-in default**
-(`127.0.0.1:9464` public read-only, `127.0.0.1:9465` private control). The Basic-auth
-credentials (`--admin-user` / `--admin-password`, default **`admin` / `flusso`** — change
-them before exposing the private port) are flag/env only, never the config file, because
-they're secrets. The `indexes` / `reindex` client subcommands reuse those credentials and
-take `--server` / `FLUSSO_SERVER` to address a running server's private surface.
+The two HTTP surfaces' bind addresses also fall back to a `[server]` table in
+`flusso.toml` — see [HTTP surfaces](#http-surfaces).
+
+---
+
+## HTTP surfaces
+
+flusso serves two HTTP surfaces; both read the daemon's live status.
+
+| Surface | Default bind | Auth | Endpoints |
+| --- | --- | --- | --- |
+| **Public** (read-only) | `127.0.0.1:9464` | none | `/healthz` `/readyz` `/status` `/metrics` |
+| **Private** (control) | `127.0.0.1:9465` | HTTP Basic | `/indexes`, `/reindex` |
+
+- **Bind address** — `--public-address` / `--private-address`, the `FLUSSO_PUBLIC_ADDRESS` / `FLUSSO_PRIVATE_ADDRESS` env vars, or a `[server]` table in `flusso.toml`. Precedence: **flag > env > `[server]` config > default**.
+- **Basic-auth credentials** — `--admin-user` / `--admin-password` (default `admin` / `flusso`). Flag/env only, never the config file — they're secrets. The `indexes` / `reindex` client subcommands reuse them and take `--server` / `FLUSSO_SERVER` to address a running server's private surface.
+
+> ⚠️ **Warning** — The default control-surface credentials are `admin` / `flusso`. Change them before binding the private surface anywhere but localhost.
 
 ---
 
