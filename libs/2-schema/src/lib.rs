@@ -1,5 +1,4 @@
 #![doc = include_str!("../README.md")]
-
 // `serde_json` / `serde_yaml` are dev-dependencies used only by the
 // `schema_drift` integration test; allow them to look unused in the lib's own
 // test build (see `tests/schema_drift.rs`).

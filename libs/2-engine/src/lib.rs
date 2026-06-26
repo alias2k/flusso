@@ -1,5 +1,4 @@
 #![doc = include_str!("../README.md")]
-
 // The pipeline benchmark (in `benches/`) pulls a concrete source and sink as
 // dev-dependencies the unit-test build doesn't touch; allow that only under
 // `cfg(test)` — the normal build still enforces unused dependencies.
