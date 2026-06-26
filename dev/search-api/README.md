@@ -1,14 +1,13 @@
 # flusso-dev-search-api
 
-A small HTTP API over the dev indexes, built with `flusso-query` +
-`#[derive(FlussoDocument)]`. It's the read side of the dev stack: the engine
-keeps OpenSearch in sync from Postgres, and this serves typed, filterable
-queries over the result.
+A small axum HTTP API over the dev indexes — the read side of the dev stack, built with
+`flusso-query` + `#[derive(FlussoDocument)]`. The engine keeps OpenSearch in sync from
+Postgres; this serves typed, filterable queries over the result.
 
 The document structs here are **projections** of the schemas in
-[`../flusso.toml`](../flusso.toml) — the derive discovers that config at compile
-time (walking up from this crate) and checks each struct against it, so a schema
-change that breaks a field fails `cargo build`.
+[`../flusso.toml`](../flusso.toml) — the derive discovers that config at compile time
+(walking up from this crate) and checks each struct against it, so a schema change that
+breaks a field fails `cargo build`.
 
 ## Run it
 
@@ -28,15 +27,13 @@ cargo run -p flusso-dev-search-api
 
 ## Endpoints
 
-Each index has a **list** endpoint (filterable via query params; absent params
-are simply not applied — the `Option<Query>` optional-filter primitive) and a
-**fetch-by-id** endpoint (`GET /<index>/{id}`, backed by `Type::get`, returning
-`404` when the document doesn't exist).
+Each index has a **list** endpoint (filterable via query params; absent params go
+unapplied — the `Option<Query>` optional-filter primitive) and a **fetch-by-id**
+endpoint (`GET /<index>/{id}`, backed by `Type::get`, `404` when the document is absent).
 
-`users` and `products` also accept a free-text **`q`** — a single scoring
-`multi_match` across that document's analyzed `text` fields, so it drives
-relevance ranking while the other params only narrow. (`orders` has no `text`
-field, so it has no `q`.)
+`users` and `products` also take a free-text **`q`** — one scoring `multi_match` across
+that document's analyzed `text` fields, driving relevance ranking while the other params
+only narrow. (`orders` has no `text` field, so no `q`.)
 
 | Endpoint | Filters |
 | -------- | ------- |

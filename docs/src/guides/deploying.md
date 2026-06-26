@@ -1,18 +1,18 @@
 # Deploying flusso with Docker
 
-How to ship flusso as the smallest possible image, without compiling the binary
-yourself and without dragging your whole repo into the build context. For the
-image's internals (targets, base, non-root user) see the [`Dockerfile`](https://github.com/alias2k/flusso/blob/main/Dockerfile);
-for Kubernetes see the [Helm chart](https://github.com/alias2k/flusso/blob/main/deploy/helm/flusso/README.md).
+Ship flusso as the smallest possible image — without compiling the binary yourself, and without dragging your whole repo into the build context. For the image's internals (targets, base, non-root user) see the [`Dockerfile`](https://github.com/alias2k/flusso/blob/main/Dockerfile); for Kubernetes see the [Helm chart](https://github.com/alias2k/flusso/blob/main/deploy/helm/flusso/README.md).
 
-## Contents
+## Pick a recipe
 
-- [The one idea](#the-one-idea) — don't compile the binary; the lock *is* the bundle
-- [Recipe A: bake your own lock (smallest, simplest)](#recipe-a-bake-your-own-lock-smallest-simplest)
-- [Recipe B: build the lock inside Docker](#recipe-b-build-the-lock-inside-docker) — scattered schemas, tiny context
-- [Recipe C: build the lock in CI, ship one file](#recipe-c-build-the-lock-in-ci-ship-one-file)
-- [Scoping the `.dockerignore`](#scoping-the-dockerignore) — a custom one just for flusso
-- [Why `COPY` alone can't do it](#why-copy-alone-cant-do-it)
+The key idea: **you never compile the binary, only a `flusso.lock`** — see [The one idea](#the-one-idea). Then pick by where the lock gets built:
+
+| Situation | Recipe |
+| --- | --- |
+| Already have a `flusso.lock`, or a flat config | [A — bake your own lock](#recipe-a-bake-your-own-lock-smallest-simplest) (smallest, simplest) |
+| Schemas scattered across a monorepo; want a hermetic in-Docker build | [B — build the lock inside Docker](#recipe-b-build-the-lock-inside-docker) |
+| Want CI to build the lock and ship one file | [C — build the lock in CI](#recipe-c-build-the-lock-in-ci-ship-one-file) |
+| Keep a flusso-only ignore file off everyone else's builds | [Scoping the `.dockerignore`](#scoping-the-dockerignore) |
+| Wondering why `COPY *.schema.yml` won't do | [Why `COPY` alone can't do it](#why-copy-alone-cant-do-it) |
 
 ## The one idea
 

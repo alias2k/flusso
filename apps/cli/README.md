@@ -1,7 +1,7 @@
 # flusso-cli — the `flusso` binary
 
-The command-line entry point to flusso: compile a deployment, validate it, run the
-sync engine, and drive a running server's control surface. Install it with:
+The `flusso` binary: compile a deployment, validate it, run the sync engine, drive a
+running server's control surface.
 
 ```sh
 cargo install flusso-cli
@@ -13,7 +13,7 @@ story — the two config files, the pipeline, deploying — see the
 
 ## Subcommands
 
-The first four are local/offline; the last two are thin HTTP clients to a *running*
+The first four run locally/offline; the last two are HTTP clients to a *running*
 server's private control surface.
 
 | Command | What it does |
@@ -27,11 +27,28 @@ server's private control surface.
 
 ### `flusso run` compiles first, like `cargo run`
 
-When a `flusso.toml` is present (the default path, or `--config`), `run` recompiles it
-and **rewrites `flusso.lock`**, then runs that — so the committed lock stays current for
-free. With no config it loads the existing `flusso.lock`; `--locked` runs the lock as-is
-without recompiling. Connection and credentials are resolved here, in the running
-environment. The replication slot is created automatically if it doesn't exist.
+When a `flusso.toml` is present (the default path, or `--config`), `run` recompiles it and
+**rewrites `flusso.lock`**, then runs that — the committed lock stays current for free.
+With no config it loads the existing `flusso.lock`; `--locked` runs the lock as-is, no
+recompile. Connection and credentials resolve here, in the running environment. The
+replication slot is created automatically if it's missing.
+
+Common `run` flags:
+
+| Flag | Env | Default | Effect |
+| --- | --- | --- | --- |
+| `--config` / `-c` | `FLUSSO_CONFIG` | `flusso.toml` | Source config; presence triggers a recompile. |
+| `--lock` | `FLUSSO_LOCK` | `flusso.lock` | Compiled artifact path (rewritten each start). |
+| `--locked` | `FLUSSO_LOCKED` | off | Run the lock as-is, skip recompile. |
+| `--slot` | `FLUSSO_SLOT` | `flusso` | Replication slot name. |
+| `--publication` | `FLUSSO_PUBLICATION` | `flusso` | Publication name. |
+| `--skip-backfill` | `FLUSSO_SKIP_BACKFILL` | off | Resume live capture only. |
+| `--public-address` | `FLUSSO_PUBLIC_ADDRESS` | — | Bind the public HTTP surface. |
+| `--private-address` | `FLUSSO_PRIVATE_ADDRESS` | — | Bind the private control surface. |
+| `--index-prefix` | `FLUSSO_INDEX_PREFIX` | — | Prefix every owned index name. |
+
+The full flag set lives in
+[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
 
 ```sh
 flusso --help
@@ -46,11 +63,10 @@ flusso run    --skip-backfill                       # resume live capture only
 ## Flags read from the environment too
 
 **Every flag also reads a `FLUSSO_*` env var** (clap's `env` feature; the flag wins when
-both are set) — so the binary configures cleanly from a container or Helm chart. For
-example `--config`/`FLUSSO_CONFIG`, `--slot`/`FLUSSO_SLOT`,
-`--public-address`/`FLUSSO_PUBLIC_ADDRESS`. The full table of flags, their env twins, and
-the reserved connection/secret variables (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`, …) is
-in the manual: [Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
+both are set) — so the binary configures cleanly from a container or Helm chart. This is
+separate from the config's reserved connection/secret variables (`DATABASE_URL`,
+`<SINK>_OPENSEARCH_URL`, …), all centralized in
+[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
 
 ## HTTP surfaces
 

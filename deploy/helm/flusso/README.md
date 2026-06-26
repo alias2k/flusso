@@ -1,13 +1,32 @@
 # flusso Helm chart
 
-Deploys [flusso](../../../README.md) — which keeps OpenSearch in sync with
-Postgres from declarative config — as a single Kubernetes Deployment.
+Deploys [flusso](../../../README.md) — OpenSearch kept in sync with Postgres from
+declarative config — as a single Kubernetes Deployment. Postgres and OpenSearch are
+external; point flusso at your existing clusters.
 
-> **One instance only.** flusso consumes a single Postgres logical replication
-> slot, so the chart pins `replicas: 1` (and **fails** if you set `replicaCount`
-> higher) and uses the `Recreate` rollout strategy so a new pod never overlaps
-> the old one on the slot. Postgres and OpenSearch are **not** deployed by this
-> chart — point flusso at your existing clusters.
+> ⚠️ **Warning** — One instance only. flusso consumes a single Postgres logical
+> replication slot, so the chart pins `replicas: 1` (and **fails** if you raise
+> `replicaCount`) and uses the `Recreate` strategy so a new pod never overlaps the old
+> one on the slot.
+
+## Key values
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `image.repository` / `image.tag` | `ghcr.io/OWNER/flusso` / chart appVersion | Image to run. |
+| `config.create` / `config.flussoToml` / `config.schemas` | `true` / sample / `{}` | Render config into a ConfigMap. |
+| `config.existingConfigMap` | `""` | Use an existing config ConfigMap instead. |
+| `secrets.create` / `secrets.data` | `false` / `{}` | Manage a Secret of env vars. |
+| `secrets.existingSecret` | `""` | Use an existing Secret instead. |
+| `run.slot` / `run.publication` | `flusso` / `flusso` | Replication slot / publication. |
+| `run.skipBackfill` | `false` | Resume live capture only. |
+| `run.queueCapacity` / `run.lagPollSecs` | `1024` / `15` | Queue size / lag poll interval. |
+| `run.extraArgs` | `[]` | Raw args appended verbatim, e.g. `["--pretty"]`. |
+| `http.port` / `http.privatePort` | `9464` / `9465` | Public surface (Service-exposed) / private control surface (localhost only). |
+| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor. |
+| `resources` / `nodeSelector` / `tolerations` / `affinity` | `{}` | Standard scheduling knobs. |
+
+See [`values.yaml`](values.yaml) for the full list.
 
 ## Install
 
@@ -65,31 +84,13 @@ config:
 
 ## Configuration is also available via env vars
 
-Every `flusso` CLI flag also reads a `FLUSSO_*` environment variable (the flag
-wins when both are set). The chart sets flags explicitly under `run.*`, but you
-can equally drive them through `env`/`secrets` — e.g. `FLUSSO_SLOT`,
-`FLUSSO_PUBLICATION`, `FLUSSO_HTTP_ADDR`, `FLUSSO_SKIP_BACKFILL`.
+Every `flusso` CLI flag also reads a `FLUSSO_*` environment variable (the flag wins when
+both are set). The chart sets flags explicitly under `run.*`, but you can equally drive
+them through `env`/`secrets` — e.g. `FLUSSO_SLOT`, `FLUSSO_PUBLICATION`,
+`FLUSSO_PUBLIC_ADDRESS`, `FLUSSO_SKIP_BACKFILL`.
 
 ## Metrics
 
-The pod serves Prometheus metrics at `:{{ http.port }}/metrics`. With the
-Prometheus Operator installed, set `metrics.serviceMonitor.enabled=true` to
-scrape it. For plain Prometheus, scrape the Service directly.
-
-## Key values
-
-| Key | Default | Description |
-| --- | --- | --- |
-| `image.repository` / `image.tag` | `ghcr.io/OWNER/flusso` / chart appVersion | Image to run. |
-| `config.create` / `config.flussoToml` / `config.schemas` | `true` / sample / `{}` | Render config into a ConfigMap. |
-| `config.existingConfigMap` | `""` | Use an existing config ConfigMap instead. |
-| `secrets.create` / `secrets.data` | `false` / `{}` | Manage a Secret of env vars. |
-| `secrets.existingSecret` | `""` | Use an existing Secret instead. |
-| `run.slot` / `run.publication` | `flusso` / `flusso` | Replication slot / publication. |
-| `run.skipBackfill` | `false` | Resume live capture only. |
-| `run.queueCapacity` / `run.lagPollSecs` | `1024` / `15` | Queue size / lag poll interval. |
-| `http.port` | `9464` | Operational HTTP surface port. |
-| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor. |
-| `resources` / `nodeSelector` / `tolerations` / `affinity` | `{}` / … | Standard scheduling knobs. |
-
-See [`values.yaml`](values.yaml) for the full list.
+The pod serves Prometheus metrics on the public surface at `:9464/metrics`. With the
+Prometheus Operator installed, set `metrics.serviceMonitor.enabled=true` to scrape it.
+For plain Prometheus, scrape the Service directly.

@@ -1,30 +1,12 @@
 # `libs/` — the flusso library crates
 
-This is the contributor's map of flusso's internals. If you're *using* flusso, you want
-the [manual](https://alias2k.github.io/flusso/) instead; if you're hacking on the code,
-start here, then read [`CLAUDE.md`](https://github.com/alias2k/flusso/blob/main/CLAUDE.md)
-for the architecture tour and house rules.
+The contributor's map of flusso's internals: every library crate, its layer, and what it holds.
 
-## The numeric prefix is the dependency layer
-
-Every crate sits in a numbered layer, and **a crate may only depend on lower-numbered
-layers**. The dependency graph is kept strictly acyclic — that's the whole point of the
-numbering, and it's what lets the workspace publish bottom-up to crates.io.
+The numeric prefix on each directory **is** the dependency layer — a crate depends only on lower-numbered layers, and the graph stays acyclic.
 
 ```text
 0-core  →  1-{queue,sources,sinks}  →  2-{engine,schema}  →  3-daemon  →  apps/
 ```
-
-Within a layer, **`0-core` is the abstraction/domain** and higher numbers are concrete
-backends. So `libs/1-sinks/0-core` is the `Sink` trait; `libs/1-sinks/2-opensearch` is an
-implementation of it. A backend depends on its layer's `0-core`, never the reverse, and
-never on a sibling backend.
-
-Layer 0 is a single crate, `schema-core` — the cross-cutting vocabulary (`GenericValue`,
-the newtypes, `IndexMapping`, `Field`/`Filter`, the per-sink configs) that every other
-layer trades in. Keeping it alone at the bottom is deliberate: the layer-1 backends depend
-only on this vocabulary and *cannot* see the assembled `Config` or the file parsers, which
-live a layer up in the `2-schema` group.
 
 ## The crates
 
@@ -46,6 +28,25 @@ live a layer up in the `2-schema` group.
 
 The `flusso` binary and the query-side crates live one level up, under
 [`apps/`](https://github.com/alias2k/flusso/tree/main/apps).
+
+> ℹ️ **Info** — *using* flusso rather than hacking on it? The
+> [manual](https://alias2k.github.io/flusso/) is the place to start. Working on the code,
+> read [`CLAUDE.md`](https://github.com/alias2k/flusso/blob/main/CLAUDE.md) next for the
+> architecture tour and house rules.
+
+## How the layering works
+
+Within a layer, **`0-core` is the abstraction/domain**; higher numbers are concrete
+backends. `libs/1-sinks/0-core` is the `Sink` trait; `libs/1-sinks/2-opensearch`
+implements it. A backend depends on its layer's `0-core`, never the reverse, and never on
+a sibling backend.
+
+Layer 0 is one crate, `schema-core` — the cross-cutting vocabulary (`GenericValue`, the
+newtypes, `IndexMapping`, `Field`/`Filter`, the per-sink configs) every other layer trades
+in. Keeping it alone at the bottom is the load-bearing part: layer-1 backends see only this
+vocabulary, never the assembled `Config` or the file parsers (those live a layer up, in the
+`2-schema` group). The acyclic graph is also what lets the workspace publish bottom-up to
+crates.io.
 
 ## Package name vs extern name
 

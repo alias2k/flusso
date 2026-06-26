@@ -1,34 +1,25 @@
 # Configuring a deployment
 
-A flusso deployment is described by one `flusso.toml` file — the source database, the
-sink destinations, and which indexes to build — plus the environment that feeds it
-secrets, connection strings, and runtime flags. This guide is the single reference for
-that file and that environment.
+One `flusso.toml` file describes a deployment — the source database, the sink destinations, and which indexes to build — plus the environment that feeds it secrets and runtime flags. This guide is the single reference for that file and that environment. (Each index's own `*.schema.yml` is covered in [schema authoring](schema-authoring.md).)
 
-Each index also has its own `*.schema.yml` describing the search document it produces;
-authoring those files is covered in [schema authoring](schema-authoring.md). Here we
-cover only the `flusso.toml` half: how to point flusso at a source and sinks, how
-secrets resolve, and every environment variable flusso reads.
+## Quick reference
 
-`schema::load("flusso.toml")` is the front door: it reads the config and every schema it
-references, validates both layers, and returns one fully-validated `Config`. Schema paths
-in `flusso.toml` resolve **relative to the config file's directory**.
+| Looking for… | Jump to |
+| --- | --- |
+| Every `flusso.toml` top-level key | [The `flusso.toml` format](#the-flussotoml-format) |
+| Postgres source options | [Postgres](#postgres) |
+| OpenSearch sink options + defaults | [OpenSearch](#opensearch) |
+| Which subfield to query (exact / full-text / sort) | [Index analysis & subfields](#index-analysis--subfields) |
+| Stdout sink envelope | [Stdout](#stdout) |
+| Secrets, `{ env = "VAR" }`, the reserved overrides + precedence | [Secrets & connection values](#secrets--connection-values) |
+| The `FLUSSO_*` flag env vars | [CLI flags as env vars](#cli-flags-as-env-vars) |
+| Sharing one cluster across deployments | [Index prefix](#index-prefix) |
+| `RUST_LOG`, OTLP, Prometheus | [Logging & telemetry](#logging--telemetry) |
+| A copy-paste env block | [Cheat sheet](#cheat-sheet) |
 
-> Two JSON Schemas ship alongside flusso and are the machine-readable source of truth for
-> the file formats:
-> [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json)
-> and
-> [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml).
-> Point your editor at them for completion and inline validation.
+flusso reads env vars for three jobs: **filling in config values** (the [secrets story](#secrets--connection-values)), **setting CLI flags** (every flag has a `FLUSSO_*` twin — [CLI flags as env vars](#cli-flags-as-env-vars)), and **logging & telemetry** ([below](#logging--telemetry)).
 
-flusso reads env vars for three jobs:
-
-1. **Filling in config values** — connection strings and credentials kept out of
-   `flusso.toml`. This is the [secrets story](#secrets--connection-values).
-2. **Setting CLI flags** — every flag has a `FLUSSO_*` twin. See
-   [CLI flags as env vars](#cli-flags-as-env-vars).
-3. **Logging & telemetry** — `RUST_LOG` / OpenTelemetry. See
-   [Logging & telemetry](#logging--telemetry).
+> ℹ️ **Info** — `schema::load("flusso.toml")` is the front door: it reads the config and every schema it references, validates both layers, and returns one fully-validated `Config`. Schema paths resolve **relative to the config file's directory**. Two JSON Schemas are the machine-readable source of truth — [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json) and [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml); point an editor at them for completion.
 
 ---
 

@@ -25,6 +25,22 @@ filter or sort on a field even if your struct doesn't deserialize it. When the
 schema changes and the index is rebuilt, anything that no longer fits stops
 compiling at `cargo build`.
 
+## Quick reference
+
+| Looking for… | Jump to |
+| --- | --- |
+| A full worked example (structs + query) | [A query, from the caller's seat](#a-query-from-the-callers-seat) |
+| Which operators each field type exposes | [What the field type buys you](#what-the-field-type-buys-you) |
+| `and`/`or`/`not`, clause vs combinator style, `count`/`ids` | [Composing queries](#composing-queries) |
+| Per-query options, compound/scoring, standalone, sort, search-level | [Query options and extra query types](#query-options-and-extra-query-types) |
+| Nested arrays — filter *by* vs filter *of* (`any`/`all`, `filter_nested`) | [Filtering nested collections](#filtering-nested-collections) |
+| Several searches, one round-trip | [`_msearch`](#several-searches-one-round-trip-_msearch) |
+| One blended result list across indexes | [Combined search](#one-blended-result-list-combined-search) |
+| How the macro finds the schema; `path` for nested structs | [Binding to the schema](#binding-to-the-schema) |
+| flusso `type` → Rust type → handle | [flusso types → Rust types](#flusso-types--rust-types) |
+| Anything the typed builder can't express | [The escape hatch](#the-escape-hatch) |
+| Reading a prefixed deployment | [Resolving the index name](#resolving-the-index-name) |
+
 ---
 
 ## A query, from the caller's seat
