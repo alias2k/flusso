@@ -470,6 +470,10 @@ belongs in the linked docs.
   - **Tone, everywhere — write for an ADHD reader.** Lead with the point, keep sentences short and
     concrete, prefer scannable structure (a one-line summary first, then specifics) over dense
     prose. Applies to `///`, `//!`, and the rare inline gotcha alike.
+  - **Prose docs have their own tone guide.** The above governs code comments. The mdBook
+    chapters (`docs/src/`) and per-crate READMEs follow `docs/STYLE.md` — impersonal/conversational
+    voice, expert body with newcomer callouts, terse + scannable, `flusso` always lowercase. Read it
+    before writing or editing a doc page.
 - Domain newtypes (validated identifiers, URLs) use the `nutype` crate (`try_new`) — see
   `libs/0-core/src/common/`. `GenericValue` is the **typed canonical value vocabulary** that
   crosses layers — the middle type a source maps *into* and a sink maps *out of*. It's

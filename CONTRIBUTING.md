@@ -6,6 +6,7 @@ clear, and how to submit it. The architecture tour and the deeper house rules
 live in [`CLAUDE.md`](CLAUDE.md); the user manual under
 [`docs/`](docs/) (schema authoring, configuration, deploying) plus
 [`apps/query/README.md`](apps/query/README.md) for the query side cover everything else.
+Writing or editing docs? Follow the prose tone guide in [`docs/STYLE.md`](docs/STYLE.md).
 
 ## Code of conduct
 
