@@ -16,38 +16,23 @@ The key idea: **you never compile the binary, only a `flusso.lock`** — see [Th
 
 ## The one idea
 
-There are two different "compilations", and conflating them is what makes Docker
-feel heavy:
+Two different "compilations" — conflating them is what makes Docker feel heavy:
 
-1. **The `flusso` binary** — a full Rust build. This is *our* job, done once per
-   release and published as a registry image. **You never compile it.** Pull
+1. **The `flusso` binary** — a full Rust build. *Our* job, published once per
+   release as a registry image. **You never compile it.** Pull
    `ghcr.io/OWNER/flusso:VERSION` and build *from* it.
-2. **A `flusso.lock`** — `flusso build` compiles your `flusso.toml` + every
-   referenced `*.schema.yml` into one portable file. No DB, no toolchain, no
-   secrets baked in. It's fast, and the input is just your config text.
+2. **A `flusso.lock`** — `flusso build` inlines your `flusso.toml` + every
+   referenced `*.schema.yml` into one portable, self-contained file. No DB, no
+   toolchain, no secrets baked in.
 
-The lock is the key: **`flusso build` inlines every schema into a single
-self-contained file.** So however your schemas are laid out on disk — even
-scattered across a monorepo next to the services they describe — that layout only
-has to exist *where you run `flusso build`*, never inside the image. Get a lock,
-ship the lock, run the lock.
+So however your schemas are laid out — even scattered across a monorepo next to
+the services they describe — that layout only has to exist *where you run
+`flusso build`*, never inside the image. Get a lock, ship the lock, run the lock.
 
-Schema paths in `flusso.toml` are resolved **relative to the config file's
-directory**, and there's no globbing — each `[[index]]` names its `schema = "…"`
-explicitly:
-
-```toml
-[[index]]
-name   = "users"
-schema = "services/users/search/users.schema.yml"
-
-[[index]]
-name   = "orders"
-schema = "services/orders/search/orders.schema.yml"
-```
-
-That relative-path rule is the only thing the recipes below have to respect: when
-you compile the lock, the referenced files must be present at those paths.
+> ℹ️ **Info** — Schema paths in `flusso.toml` resolve **relative to the config
+> file's directory**, with no globbing; each `[[index]]` names its `schema = "…"`
+> explicitly. That's the only rule the recipes below respect — when you compile the
+> lock, the referenced files must exist at those paths.
 
 ## Recipe A: bake your own lock (smallest, simplest)
 

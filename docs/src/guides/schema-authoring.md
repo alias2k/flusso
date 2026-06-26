@@ -143,7 +143,7 @@ that type:
 
 | Sibling | Applies to | Description |
 | --- | --- | --- |
-| `required` | scalar, `geo`, `map`, to-one join | **Mandatory** on a scalar/`geo`/`map` leaf. `true` forces the field non-null; nullable otherwise. **Optional** on a to-one join (`belongs_to`/`has_one`): omitted maps the object nullable, `true` maps it non-null. Not allowed on a to-many join (`has_many`/`many_to_many`) or an aggregate — those are structural (a non-null array / fixed nullability). |
+| `required` | scalar, `geo`, `map`, to-one join | `true` forces a scalar/`geo`/`map` leaf non-null (nullable otherwise); on a to-one join (`belongs_to`/`has_one`) it maps the object non-null — see [Joins](#joins). Rejected on to-many joins and aggregates (their nullability is structural). |
 | `column` | scalar, `geo`, `belongs_to` | The source column — for a `belongs_to`, this table's column pointing at the related row. Defaults to the document key when omitted. |
 | `options` | types with a mapping | Extra OpenSearch mapping properties merged beside the derived type (e.g. `analyzer`, `format`, `scaling_factor`). |
 | `transforms` | scalar | Value transforms to apply. See [Transforms](#transforms). |

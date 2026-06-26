@@ -287,7 +287,14 @@ User::query()
 ```
 
 `query`/`filter`/`must_not`/`should` accept anything that is a `Query<Root>`, so
-the two styles mix freely.
+the two styles mix freely. Which clause to reach for:
+
+| Clause | Scores? | Bool slot | Use for |
+| --- | --- | --- | --- |
+| `query` | yes | `must` | full-text relevance you want ranked |
+| `filter` | no (cached) | `filter` | exact constraints — terms, ranges, nested `any` |
+| `must_not` | no | `must_not` | exclusions |
+| `should` | yes | `should` | optional boosts; a real constraint with `min_should_match` |
 
 A built search can finish as a **count** instead of a page: `.count()` sends the
 same query to `_count` and returns the number of matching documents (`u64`) —
@@ -336,16 +343,20 @@ User::query()
     .send(&client).await?;
 ```
 
-The options per query type (all optional): `case_insensitive` on
-`term`/`prefix`/`wildcard`/`regexp`; `rewrite` on `prefix`/`wildcard`;
-`flags`/`max_determinized_states` on `regexp`;
-`fuzziness`/`prefix_length`/`max_expansions`/`transpositions` on `fuzzy`;
-`fuzziness`/`operator`/`minimum_should_match`/`prefix_length`/`analyzer`/
-`zero_terms_query`/`lenient` on `matches`; `slop`/`analyzer` on the phrase
-matches; `type`/`operator`/`fuzziness`/`tie_breaker`/`minimum_should_match` on
-`multi_match`; `format`/`time_zone`/`relation` on a range; `distance_type`/
-`validation_method` on `within` (geo); `score_mode`/`ignore_unmapped` on a
-nested `any`.
+The options per query type (all optional; plus the universal `boost`/`name` on every builder):
+
+| Query | Options |
+| --- | --- |
+| `term` / `prefix` / `wildcard` / `regexp` | `case_insensitive` |
+| `prefix` / `wildcard` | `rewrite` |
+| `regexp` | `flags`, `max_determinized_states` |
+| `fuzzy` | `fuzziness`, `prefix_length`, `max_expansions`, `transpositions` |
+| `matches` | `fuzziness`, `operator`, `minimum_should_match`, `prefix_length`, `analyzer`, `zero_terms_query`, `lenient` |
+| phrase matches | `slop`, `analyzer` |
+| `multi_match` | `type`, `operator`, `fuzziness`, `tie_breaker`, `minimum_should_match` |
+| range | `format`, `time_zone`, `relation` |
+| `within` (geo) | `distance_type`, `validation_method` |
+| nested `any` | `score_mode`, `ignore_unmapped` |
 
 The enumerable options are **closed enums**, not strings — a typo is a compile
 error, not a 400. `operator`/`default_operator` take `Operator { And, Or }`;

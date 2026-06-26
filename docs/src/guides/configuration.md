@@ -13,11 +13,39 @@ One `flusso.toml` file describes a deployment — the source database, the sink 
 | Stdout sink envelope | [Stdout](#stdout) |
 | Secrets, `{ env = "VAR" }`, the reserved overrides + precedence | [Secrets & connection values](#secrets--connection-values) |
 | The `FLUSSO_*` flag env vars | [CLI flags as env vars](#cli-flags-as-env-vars) |
+| Status / metrics / control ports + auth | [HTTP surfaces](#http-surfaces) |
 | Sharing one cluster across deployments | [Index prefix](#index-prefix) |
 | `RUST_LOG`, OTLP, Prometheus | [Logging & telemetry](#logging--telemetry) |
 | A copy-paste env block | [Cheat sheet](#cheat-sheet) |
 
 flusso reads env vars for three jobs: **filling in config values** (the [secrets story](#secrets--connection-values)), **setting CLI flags** (every flag has a `FLUSSO_*` twin — [CLI flags as env vars](#cli-flags-as-env-vars)), and **logging & telemetry** ([below](#logging--telemetry)).
+
+### Every key + default
+
+| Key | Where | Default | Purpose |
+| --- | --- | --- | --- |
+| `on_error` | top-level / `[[index]]` | `"stop"` | item-rejection policy — `stop` or `skip` ([on_error](#on_error)) |
+| `prefix` | top-level | — | prepend to every owned index name ([index prefix](#index-prefix)) |
+| `type` | `[source]` | — | `postgres` |
+| `connection_url` | `[source]` | — | full URL or parts; `DATABASE_URL` overrides |
+| `manage_publication` | `[source]` | `true` | auto-create/extend the publication |
+| `type` | `[sinks.<name>]` | — | `opensearch` or `stdout` |
+| `url` | opensearch sink | — | cluster URL; `<NAME>_OPENSEARCH_URL` overrides |
+| `username` / `password` | opensearch sink | — | HTTP Basic auth |
+| `tls_verify` | opensearch sink | `true` | verify TLS certs |
+| `batch_size` | opensearch sink | `1000` | docs per bulk chunk |
+| `max_bytes` | opensearch sink | 10 MiB | bytes per bulk chunk |
+| `timeout_secs` | opensearch sink | `30` | HTTP request timeout |
+| `max_retries` | opensearch sink | `3` | transient-failure retries |
+| `pipeline` | opensearch sink | — | ingest pipeline applied on index |
+| `number_of_shards` | opensearch sink | `1` | primary shards per index |
+| `number_of_replicas` | opensearch sink | `1` | replica shards per index |
+| `refresh_interval` | opensearch sink | `"10s"` | steady-state refresh ceiling (`"-1"` disables) |
+| `text_analysis` | opensearch sink | `builtin` | analyzer toolkit — `builtin` or `icu` |
+| `auto_subfields` | opensearch sink | `true` | auto subfields on `text`/`keyword` |
+| `pretty` | stdout sink | `false` | pretty JSON instead of NDJSON |
+| `name` / `schema` / `enabled` | `[[index]]` | — | logical name / schema path / build on this run |
+| `public_address` / `private_address` | `[server]` | `127.0.0.1:9464` / `:9465` | HTTP bind addresses ([HTTP surfaces](#http-surfaces)) |
 
 > ℹ️ **Info** — `schema::load("flusso.toml")` is the front door: it reads the config and every schema it references, validates both layers, and returns one fully-validated `Config`. Schema paths resolve **relative to the config file's directory**. Two JSON Schemas are the machine-readable source of truth — [`config.schema.json`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-config-toml/config.schema.json) and [`index.schema.yml`](https://github.com/alias2k/flusso/blob/main/libs/2-schema/1-index-yaml/index.schema.yml); point an editor at them for completion.
 
@@ -132,12 +160,7 @@ rules for sharing one OpenSearch cluster across deployments.
 
 ## The model
 
-**One source, many sinks.** A deployment reads from a single source and writes every
-document to *all* configured sinks (fan-out). Define none and the CLI falls back to a
-single [stdout](#stdout) sink. Today: Postgres in, OpenSearch (or stdout) out.
-
-Source, sink, and the in-process queue are all trait objects, so the backends below swap
-without touching the engine. Only what ships today is documented here.
+**One source, many sinks.** Source, sink, and the in-process queue are all trait objects, so backends swap without touching the engine. Today that's Postgres in, OpenSearch (or stdout) out — the only backends documented here.
 
 ---
 
@@ -463,14 +486,24 @@ are set** — env is the fallback.
 
 `flusso <cmd> --help` shows the matching `[env: FLUSSO_…]` next to each flag.
 
-The two operational HTTP surfaces have an extra fallback for their bind addresses: a
-`[server]` table in `flusso.toml`. So precedence for `--public-address` /
-`--private-address` is **flag > `FLUSSO_*` env > `[server]` config > built-in default**
-(`127.0.0.1:9464` public read-only, `127.0.0.1:9465` private control). The Basic-auth
-credentials (`--admin-user` / `--admin-password`, default **`admin` / `flusso`** — change
-them before exposing the private port) are flag/env only, never the config file, because
-they're secrets. The `indexes` / `reindex` client subcommands reuse those credentials and
-take `--server` / `FLUSSO_SERVER` to address a running server's private surface.
+The two HTTP surfaces' bind addresses also fall back to a `[server]` table in
+`flusso.toml` — see [HTTP surfaces](#http-surfaces).
+
+---
+
+## HTTP surfaces
+
+flusso serves two HTTP surfaces; both read the daemon's live status.
+
+| Surface | Default bind | Auth | Endpoints |
+| --- | --- | --- | --- |
+| **Public** (read-only) | `127.0.0.1:9464` | none | `/healthz` `/readyz` `/status` `/metrics` |
+| **Private** (control) | `127.0.0.1:9465` | HTTP Basic | `/indexes`, `/reindex` |
+
+- **Bind address** — `--public-address` / `--private-address`, the `FLUSSO_PUBLIC_ADDRESS` / `FLUSSO_PRIVATE_ADDRESS` env vars, or a `[server]` table in `flusso.toml`. Precedence: **flag > env > `[server]` config > default**.
+- **Basic-auth credentials** — `--admin-user` / `--admin-password` (default `admin` / `flusso`). Flag/env only, never the config file — they're secrets. The `indexes` / `reindex` client subcommands reuse them and take `--server` / `FLUSSO_SERVER` to address a running server's private surface.
+
+> ⚠️ **Warning** — The default control-surface credentials are `admin` / `flusso`. Change them before binding the private surface anywhere but localhost.
 
 ---
 
