@@ -5,6 +5,10 @@
 .git/
 .github/
 **/*.md
+# …but 14 crates embed their README at compile time via
+# `#![doc = include_str!("../README.md")]`, so the build needs them present.
+# This negation MUST stay after the broad `**/*.md` ignore to win.
+!**/README.md
 dev/grafana/
 dev/prometheus/
 docker-compose*.yml
