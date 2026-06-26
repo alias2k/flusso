@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Pre-commit: format staged Rust files so nothing lands unformatted (matches CI's
-# `cargo fmt --all --check`). Runs only when .rs files are staged.
+# Pre-commit: when Rust files are staged, run `cargo fmt --all` (whole workspace)
+# so nothing lands unformatted (matches CI's `cargo fmt --all --check`), then
+# re-stage only the files being committed. Skips when no .rs files are staged.
 #
 # Caveat: a file staged with only *some* of its hunks gets its unstaged hunks pulled
 # in too, because we re-`git add` the whole file after formatting. Stage whole files

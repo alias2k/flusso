@@ -323,9 +323,11 @@ compiled config never carries a secret it wasn't literally given.
 
 After cloning, run `just setup` once. It points git at the version-controlled hooks
 in [`.githooks/`](.githooks/) (via `core.hooksPath`, which a clone doesn't carry on
-its own). The `pre-commit` hook runs `cargo fmt --all` on staged Rust files and
-re-stages them, so nothing lands unformatted — it's the same formatting CI enforces
-with `cargo fmt --all --check`.
+its own). When a commit has staged Rust files, the `pre-commit` hook runs
+`cargo fmt --all` (formatting the whole workspace) and re-stages the files you were
+committing, so nothing lands unformatted — it's the same formatting CI enforces with
+`cargo fmt --all --check`. Workspace files you weren't committing stay as unstaged
+changes rather than being swept in.
 
 Tests run with [`cargo-nextest`](https://nexte.st)
 (`cargo install cargo-nextest --locked`):
