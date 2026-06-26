@@ -470,9 +470,11 @@ for hit in page.hits {
 ```
 
 Root-scope queries compose across document types (`Query<Root>` carries no
-document type), and every hit names its physical index — exactly
-`{INDEX}_{HASH}` — so decoding into the right variant is precise, no convenience alias
-involved. A hit from an index no variant claims is an error, not a skip.
+document type), and each hit is decoded into the variant that owns its index.
+The query goes through the stable `{INDEX}_{HASH}` alias, but OpenSearch reports
+the concrete index behind it (`{INDEX}_{HASH}_{generation}`) in each hit — so the
+crate normalizes that generation suffix before dispatch; you just match on
+`hit.source`. A hit from an index no variant claims is an error, not a skip.
 `count(&client)` works on the union too.
 
 Two semantics to know:

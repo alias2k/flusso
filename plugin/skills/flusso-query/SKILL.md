@@ -91,7 +91,7 @@ When the task is "migrate this to flusso" / "switch the existing implementation 
 3. Loads that index's `schema:` file and resolves the `IndexMapping` in-process — the **same** resolution `flusso build` performs. Self-describing schemas make this hermetic.
 4. Tracks `flusso.toml` + every schema file as build inputs, so editing config/schema retriggers compilation and a drifted struct fails the next build.
 
-The resolved schema's content hash is `User::SCHEMA_HASH`, and `User::INDEX` is the physical name `users_<hash>` — the exact index the sink writes. So `get`/`query` address the right index directly; **no read alias needed**, and a structural schema change rotates the hash and forces a recompile.
+The resolved schema's content hash is `User::SCHEMA_HASH` and `User::INDEX` is the logical name, so `User::physical_index()` is `users_<hash>` — the stable **hash alias** the sink maintains over the active generation (the concrete index is `users_<hash>_<n>`). So `get`/`query` address the right index directly through that alias; **no separate read alias to manage**, and a structural schema change rotates the hash and forces a recompile. (Combined search over a `FlussoMultiDocument` union sees the concrete generation name in each hit's `_index` and normalizes the `_<n>` suffix before dispatch — handled for you.)
 
 ## What each field type lets you write (the type safety that matters)
 

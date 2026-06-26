@@ -4,8 +4,14 @@
 //! searches in one round-trip (separate result lists), a [`MultiSearch`] runs
 //! **one** query across every index a [`FlussoMultiDocument`] union spans and
 //! returns a single, blended, relevance-ranked result list. Each hit decodes
-//! into the union variant matching its physical `_index` — the sink writes
-//! exactly `{INDEX}_{SCHEMA_HASH}`, so dispatch is precise, no alias involved.
+//! into the union variant matching its physical `_index`.
+//!
+//! A subtlety: the sink addresses each index by the stable alias
+//! `{INDEX}_{SCHEMA_HASH}`, but the alias points at a generation-suffixed
+//! concrete index (`{INDEX}_{SCHEMA_HASH}_{n}`), and OpenSearch always reports
+//! that *concrete* name in a hit's `_index` — never the alias the query went
+//! through. So before dispatching, the suffix is normalized back to the
+//! `{INDEX}_{SCHEMA_HASH}` a variant claims (see [`decode_response`]).
 //!
 //! The union enum is yours: one single-field variant per document type, named
 //! after the search surface it serves. `#[derive(FlussoMultiDocument)]` (the
@@ -20,6 +26,7 @@
 //!
 //! [`Query<Root>`]: crate::Query
 
+use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -328,10 +335,24 @@ impl<U: FlussoMultiDocument> Default for MultiSearch<U> {
 }
 
 /// Decode a combined `_search` response: the usual envelope, but each hit's
-/// `_source` is dispatched by the hit's `_index` into the union. `prefix` (the
-/// client's index prefix) is stripped from each hit's `_index` first, so
-/// dispatch matches the union's unprefixed `physical_index()` — empty for an
-/// unprefixed deployment.
+/// `_source` is dispatched by the hit's `_index` into the union.
+///
+/// Each `_index` is normalized to a variant's `physical_index()` in two steps
+/// before dispatch:
+///
+/// 1. **Prefix.** `prefix` (the client's index prefix) is stripped — empty for
+///    an unprefixed deployment.
+/// 2. **Generation suffix.** A hit's `_index` is the *concrete* index behind the
+///    hash alias (`{INDEX}_{SCHEMA_HASH}_{n}`), so the trailing `_{n}` is
+///    normalized away. This is anchored on the union's known targets rather than
+///    blindly trimming a trailing `_{digits}`: a name maps to a target when it
+///    equals that target's `{INDEX}_{SCHEMA_HASH}` or is `{that}_{digits}`. The
+///    anchor matters because the eight-hex `SCHEMA_HASH` can itself be all digits
+///    — so a bare `{INDEX}_{numeric-hash}` (a legacy un-suffixed index) must not
+///    be mistaken for a generation of `{INDEX}`.
+///
+/// A name matching no target is passed through unchanged, so the variant's
+/// `decode` reports it as [`Error::UnexpectedIndex`](crate::Error::UnexpectedIndex).
 pub(crate) fn decode_response<U: FlussoMultiDocument>(
     value: Value,
     prefix: &str,
@@ -342,11 +363,12 @@ pub(crate) fn decode_response<U: FlussoMultiDocument>(
         .hits
         .into_iter()
         .map(|hit| {
-            let index = hit.index.strip_prefix(prefix).unwrap_or(&hit.index);
+            let stripped = hit.index.strip_prefix(prefix).unwrap_or(&hit.index);
+            let index = dispatch_index::<U>(stripped);
             Ok(Hit {
                 id: hit.id,
                 score: hit.score.unwrap_or(0.0),
-                source: U::decode(index, hit.source)?,
+                source: U::decode(index.as_ref(), hit.source)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -358,6 +380,32 @@ pub(crate) fn decode_response<U: FlussoMultiDocument>(
         timed_out: raw.timed_out,
         shards: raw.shards.into(),
     })
+}
+
+/// Normalize a (prefix-stripped) hit `_index` to the `physical_index()` of the
+/// union target it belongs to, collapsing the generation suffix the sink's hash
+/// alias hides. Returns the canonical `{INDEX}_{SCHEMA_HASH}` when the name is
+/// that target or a `{target}_{digits}` generation of it; otherwise the name
+/// unchanged (so dispatch misses and surfaces `UnexpectedIndex`).
+fn dispatch_index<U: FlussoMultiDocument>(stripped: &str) -> Cow<'_, str> {
+    for (index, hash) in U::TARGETS {
+        let physical = format!("{index}_{hash}");
+        if stripped == physical || is_generation_of(stripped, &physical) {
+            return Cow::Owned(physical);
+        }
+    }
+    Cow::Borrowed(stripped)
+}
+
+/// Whether `name` is `{physical}_{digits}` — a concrete generation of the hash
+/// alias `physical`. The remainder after `physical_` must be a non-empty run of
+/// ASCII digits (the sink's generation counter).
+fn is_generation_of(name: &str, physical: &str) -> bool {
+    name.strip_prefix(physical)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .is_some_and(|generation| {
+            !generation.is_empty() && generation.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 #[derive(Deserialize)]

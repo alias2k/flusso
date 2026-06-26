@@ -1188,13 +1188,14 @@ fn client_prefixes_single_and_comma_joined_paths() -> Result {
 }
 
 #[test]
-fn multi_decode_strips_the_prefix_before_dispatch() -> Result {
-    // A prefixed deployment returns prefixed `_index` values; decode strips the
-    // client prefix so dispatch matches the union's unprefixed physical_index().
+fn multi_decode_strips_the_prefix_then_the_generation_suffix() -> Result {
+    // A prefixed deployment returns prefixed, generation-suffixed `_index`
+    // values (`dev_orders_yyyyyy_3`); decode strips the client prefix *and*
+    // normalizes the generation suffix so dispatch matches physical_index().
     let response = json!({
         "took": 1,
         "hits": { "total": { "value": 1 }, "hits": [
-            { "_index": "dev_orders_yyyyyy", "_id": "9", "_score": 2.0,
+            { "_index": "dev_orders_yyyyyy_3", "_id": "9", "_score": 2.0,
               "_source": { "status": "open" } }
         ] }
     });
@@ -1290,6 +1291,39 @@ impl FlussoMultiDocument for StoreItem {
     }
 }
 
+/// A document whose schema hash is purely numeric — the eight-hex `SCHEMA_HASH`
+/// can be all digits, the edge the suffix normalization must not trip on.
+#[derive(Debug, serde::Deserialize)]
+struct NumericDoc {
+    n: i64,
+}
+impl FlussoDocument for NumericDoc {
+    const PATH: &'static [Segment] = &[];
+}
+impl FlussoIndex for NumericDoc {
+    const INDEX: &'static str = "numbers";
+    const SCHEMA_HASH: &'static str = "12345678";
+}
+
+#[derive(Debug)]
+enum NumericItem {
+    Numbers(NumericDoc),
+}
+
+impl FlussoMultiDocument for NumericItem {
+    const TARGETS: &'static [(&'static str, &'static str)] =
+        &[(NumericDoc::INDEX, NumericDoc::SCHEMA_HASH)];
+
+    fn decode(physical_index: &str, source: serde_json::Value) -> crate::Result<Self> {
+        if physical_index == NumericDoc::physical_index() {
+            return Ok(Self::Numbers(serde_json::from_value(source)?));
+        }
+        Err(crate::Error::UnexpectedIndex {
+            index: physical_index.to_owned(),
+        })
+    }
+}
+
 #[test]
 fn multi_search_addresses_every_target_index() {
     let search = StoreItem::query()
@@ -1316,18 +1350,20 @@ fn multi_search_addresses_every_target_index() {
 
 #[test]
 fn multi_decode_dispatches_hits_by_physical_index() -> Result {
-    // A blended, interleaved page: order, user, order — ranked together.
+    // A blended, interleaved page: order, user, order — ranked together. Each
+    // `_index` is the concrete generation index behind the hash alias
+    // (`orders_yyyyyy_1`), which is what a real cluster returns.
     let response = json!({
         "took": 4,
         "hits": {
             "total": { "value": 3 },
             "max_score": 2.0,
             "hits": [
-                { "_index": "orders_yyyyyy", "_id": "9", "_score": 2.0,
+                { "_index": "orders_yyyyyy_1", "_id": "9", "_score": 2.0,
                   "_source": { "status": "open" } },
-                { "_index": "users_xxxxxx", "_id": "1", "_score": 1.5,
+                { "_index": "users_xxxxxx_1", "_id": "1", "_score": 1.5,
                   "_source": { "email": "ada@example.com", "orderCount": 2 } },
-                { "_index": "orders_yyyyyy", "_id": "7", "_score": 1.0,
+                { "_index": "orders_yyyyyy_1", "_id": "7", "_score": 1.0,
                   "_source": { "status": "shipped" } }
             ]
         }
@@ -1364,19 +1400,77 @@ fn multi_decode_dispatches_hits_by_physical_index() -> Result {
 
 #[test]
 fn multi_decode_rejects_a_hit_from_an_unclaimed_index() {
+    // A generation-suffixed index no variant claims still errors, reporting the
+    // name as received (the normalization only collapses suffixes onto a *known*
+    // target).
     let response = json!({
         "took": 1,
         "hits": { "total": { "value": 1 }, "hits": [
-            { "_index": "ghosts_zzzzzz", "_id": "1", "_score": 1.0, "_source": {} }
+            { "_index": "ghosts_zzzzzz_4", "_id": "1", "_score": 1.0, "_source": {} }
         ] }
     });
 
     match crate::multi::decode_response::<StoreItem>(response, "") {
         Err(crate::Error::UnexpectedIndex { index }) => {
-            assert_eq!(index, "ghosts_zzzzzz");
+            assert_eq!(index, "ghosts_zzzzzz_4");
         }
         other => panic!("expected an unexpected-index error, got {other:?}"),
     }
+}
+
+#[test]
+fn multi_decode_accepts_both_a_generation_and_a_legacy_index_for_a_target() -> Result {
+    // A legacy un-suffixed `{logical}_{hash}` (a pre-generations index) and a
+    // generation `{logical}_{hash}_{n}` both dispatch to the same variant.
+    let response = json!({
+        "took": 1,
+        "hits": { "total": { "value": 2 }, "hits": [
+            { "_index": "orders_yyyyyy", "_id": "1", "_score": 1.0,
+              "_source": { "status": "legacy" } },
+            { "_index": "orders_yyyyyy_7", "_id": "2", "_score": 1.0,
+              "_source": { "status": "current" } }
+        ] }
+    });
+
+    let page: SearchResponse<StoreItem> = crate::multi::decode_response(response, "")?;
+    let statuses: Vec<&str> = page
+        .hits
+        .iter()
+        .map(|hit| match &hit.source {
+            StoreItem::Order(order) => order.status.as_str(),
+            StoreItem::User(_) => "user",
+        })
+        .collect();
+    assert_eq!(statuses, ["legacy", "current"]);
+    Ok(())
+}
+
+#[test]
+fn multi_decode_does_not_mistake_a_numeric_hash_for_a_generation() -> Result {
+    // The eight-hex schema hash can be all digits. A legacy un-suffixed
+    // `numbers_12345678` must dispatch to its target, not be read as generation
+    // `8` of a `numbers_1234567` that doesn't exist — the dispatch is anchored on
+    // the union's known `{logical}_{hash}`, not a blind trailing-`_{digits}` trim.
+    let response = json!({
+        "took": 1,
+        "hits": { "total": { "value": 2 }, "hits": [
+            { "_index": "numbers_12345678", "_id": "1", "_score": 1.0,
+              "_source": { "n": 1 } },
+            { "_index": "numbers_12345678_2", "_id": "2", "_score": 1.0,
+              "_source": { "n": 2 } }
+        ] }
+    });
+
+    let page: SearchResponse<NumericItem> = crate::multi::decode_response(response, "")?;
+    let ns: Vec<i64> = page
+        .hits
+        .iter()
+        .map(|hit| match &hit.source {
+            NumericItem::Numbers(doc) => doc.n,
+        })
+        .collect();
+    assert_eq!(ns, [1, 2]);
+    Ok(())
 }
 
 #[test]

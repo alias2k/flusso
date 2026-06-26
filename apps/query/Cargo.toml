@@ -38,3 +38,14 @@ flusso-query-derive = { path = "../query-derive", version = "0.10.0", optional =
 rust_decimal = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+serde = { workspace = true, features = ["derive"] }
+# The combined-search e2e (`tests/combined_search.rs`) drives the real
+# OpenSearch sink to build generation-named indexes + their hash aliases, then
+# queries through this crate — guarding the sink↔query naming contract.
+schema-core.workspace = true
+sinks-core.workspace = true
+sinks-opensearch.workspace = true
+testcontainers-modules = { workspace = true, features = ["http_wait"] }

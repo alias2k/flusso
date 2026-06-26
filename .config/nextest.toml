@@ -40,7 +40,7 @@ slow-timeout = { period = "90s", terminate-after = 4 }
 
 # OpenSearch-backed e2e: serialized via the `opensearch` group, generous startup.
 [[profile.default.overrides]]
-filter = 'package(flusso-sinks-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline)'
+filter = 'package(flusso-sinks-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline) | package(flusso-query) & binary(combined_search)'
 test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
@@ -60,7 +60,7 @@ retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 [[profile.ci.overrides]]
-filter = 'package(flusso-sinks-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline)'
+filter = 'package(flusso-sinks-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline) | package(flusso-query) & binary(combined_search)'
 test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "150s", terminate-after = 5 }

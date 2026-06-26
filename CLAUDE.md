@@ -408,6 +408,15 @@ it from `_index` in combined-search decode), so one compiled consumer serves eve
 generation naming functions (`generations.rs`) are prefix-agnostic — they operate on whatever
 hash-alias string they're handed.
 
+Combined-search decode (`apps/query/src/multi.rs`, `decode_response`) also **normalizes the
+generation suffix**: a hit's `_index` is the concrete `{logical}_{hash}_{n}` behind the hash
+alias (OpenSearch reports the backing index, never the alias the query used), so the `_{n}` is
+collapsed back to a union variant's `{logical}_{hash}` before dispatch — anchored on the
+union's known targets, not a blind trailing-`_{digits}` trim, because the eight-hex hash can
+itself be all digits. Without this, every hit from a real deployment missed dispatch (issue
+#67). Single-index search and `_msearch` don't dispatch by `_index`, so they were unaffected.
+Guarded by the `multi_decode_*` unit tests and the `combined_search` live e2e (`apps/query/tests/`).
+
 ## Keeping this file current
 
 This file is a living index — keep it accurate as part of normal work, no separate ask
