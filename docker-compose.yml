@@ -6,7 +6,7 @@
 # consumer — it creates neither).
 #
 #   docker compose up -d
-#   cargo run -- --config dev/flusso.toml
+#   cargo run -- run --config dev/flusso.toml
 #   psql "postgres://postgres:postgres@127.0.0.1:5432/flusso" -f dev/changes.sql
 #
 # See dev/README.md for the full walk-through.
@@ -84,7 +84,7 @@ services:
         condition: service_healthy
 
   # Scrapes flusso's `/metrics` via host.docker.internal:9464 — which reaches a
-  # flusso run on the *host* (`cargo run -- run … --http-addr 127.0.0.1:9464`,
+  # flusso run on the *host* (`cargo run -- run … --public-address 127.0.0.1:9464`,
   # the default workflow) *or*, when the demo override is layered on, the
   # published port of the containerized flusso. So this one scrape config serves
   # both. `extra_hosts` makes the name resolve on Linux too (Docker Desktop
