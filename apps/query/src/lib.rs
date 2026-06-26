@@ -83,6 +83,11 @@
 //! # }
 //! ```
 
+// The combined-search e2e (`tests/combined_search.rs`) pulls dev-deps the unit
+// tests don't touch (the OpenSearch sink, testcontainers, tokio); they look
+// unused to the `--test`-compiled lib.
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
 mod client;
 mod error;
 mod handles;
