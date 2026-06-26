@@ -6,9 +6,9 @@ type: application
 version: 0.1.0
 # The flusso version this chart deploys by default (the image tag).
 appVersion: "0.1.0"
-home: https://github.com/OWNER/flusso
+home: https://github.com/alias2k/flusso
 sources:
-  - https://github.com/OWNER/flusso
+  - https://github.com/alias2k/flusso
 keywords:
   - opensearch
   - elasticsearch

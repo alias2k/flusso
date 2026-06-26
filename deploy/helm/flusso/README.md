@@ -13,7 +13,7 @@ external; point flusso at your existing clusters.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `image.repository` / `image.tag` | `ghcr.io/OWNER/flusso` / chart appVersion | Image to run. |
+| `image.repository` / `image.tag` | `alias2k/flusso` / chart appVersion | Image to run (Docker Hub; `ghcr.io/alias2k/flusso` is an equivalent mirror). |
 | `config.create` / `config.flussoToml` / `config.schemas` | `true` / sample / `{}` | Render config into a ConfigMap. |
 | `config.existingConfigMap` | `""` | Use an existing config ConfigMap instead. |
 | `secrets.create` / `secrets.data` | `false` / `{}` | Manage a Secret of env vars. |
@@ -33,7 +33,7 @@ See [`values.yaml`](values.yaml) for the full list.
 ```sh
 helm install flusso ./deploy/helm/flusso \
   --namespace flusso --create-namespace \
-  --set image.repository=ghcr.io/OWNER/flusso \
+  --set image.repository=alias2k/flusso \
   --set secrets.create=true \
   --set-string secrets.data.DATABASE_URL='postgres://user:pass@pg:5432/app' \
   --set-string secrets.data.PRIMARY_OPENSEARCH_URL='https://opensearch:9200' \

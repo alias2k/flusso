@@ -1,7 +1,8 @@
 # Default values for the flusso chart.
 
 image:
-  repository: ghcr.io/OWNER/flusso
+  # Docker Hub is the primary registry; ghcr.io/alias2k/flusso is an equivalent mirror.
+  repository: alias2k/flusso
   # Defaults to the chart's appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent

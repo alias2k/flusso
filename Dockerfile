@@ -9,7 +9,7 @@
 # and connection/sink URLs come from the environment via `{ env = "VAR" }`
 # secret references resolved where the pipeline runs.
 #
-#   docker build -t ghcr.io/OWNER/flusso:VERSION .
+#   docker build -t alias2k/flusso:VERSION .
 #
 # The `demo` target extends the same runtime with the repo's dev config compiled
 # into `/app/flusso.lock`; it is what docker-compose.demo.yml builds to run
@@ -89,7 +89,7 @@ ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.title="flusso" \
       org.opencontainers.image.description="Keep OpenSearch in sync with Postgres from declarative config." \
-      org.opencontainers.image.source="https://github.com/OWNER/flusso" \
+      org.opencontainers.image.source="https://github.com/alias2k/flusso" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
