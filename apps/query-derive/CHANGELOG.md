@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.10.0...flusso-query-derive-v0.10.1) - 2026-06-26
+
+### Other
+
+- lead README with the tagline, move AI disclosure below it
+- consistency pass — fix factual errors and terminology drift
+- rewrite all docs to the prose style guide
+- clarify pre-commit hook formats the whole workspace
+- add dev workflow tooling
+- split into an mdBook manual + per-crate READMEs
+
 ## [0.9.2](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.9.1...flusso-query-derive-v0.9.2) - 2026-06-24
 
 ### Other
