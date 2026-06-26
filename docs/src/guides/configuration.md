@@ -266,7 +266,7 @@ overridden per sink via reserved deployment-override variables — naming and pr
 | `number_of_replicas` | int ≥ 0 | `1` | Replica shards for each created index. |
 | `refresh_interval` | string | `"10s"` | OpenSearch `refresh_interval` applied to each index after seeding — the steady-state visibility ceiling (e.g. `"10s"`, `"1s"`, or `"-1"` to disable auto-refresh). flusso forces an immediate refresh whenever the pipeline catches up, so this only bounds staleness while a backlog drains (see below). |
 | `text_analysis` | `builtin` \| `icu` | `builtin` | Analysis backend for the `flusso_*` analyzers (see [below](#index-analysis--subfields)). `icu` requires the `analysis-icu` plugin on every node. |
-| `auto_subfields` | bool | `true` | Auto-enrich `text`/`keyword` fields with a good analyzer and subfields. A field's explicit `mapping` always wins; set `false` to emit fields bare. |
+| `auto_subfields` | bool | `true` | Auto-enrich `text`/`keyword` fields with a good analyzer and subfields. A field's explicit `options` always win; set `false` to emit fields bare. |
 
 **How it owns its indexes:**
 
@@ -274,16 +274,18 @@ overridden per sink via reserved deployment-override variables — naming and pr
   schema mapping, `dynamic: strict` — field types come from the schema, not OpenSearch's
   dynamic guesses, and only configured fields are accepted. An index that already exists is
   left untouched.
-- **Hashed physical name.** The actual index is named `{logical}_{hash}`, where the hash
-  derives from the parsed index schema. A structural schema change changes the hash, so the
-  sink writes to a *fresh* index (re-seeded from scratch) rather than into the old, now-
-  mismatched shape. The logical name remains the pipeline's identity.
-- **Convenience alias.** The logical name is also kept as an alias on the *current* physical
-  index, repointed atomically when the schema hash moves — so `GET /users/_search` always
-  hits the latest index without you knowing the hash. It exists purely for humans and ad-hoc
-  tooling: flusso itself (the sink and the `flusso-query` client) always addresses the
-  physical name. Alias upkeep is best-effort — if it fails (e.g. the cluster already has a
-  real index named like the alias), flusso logs a warning and carries on.
+- **Hashed name over generations.** The addressable name is `{logical}_{hash}` (the hash
+  derives from the parsed index schema) — itself a **hash alias** over a concrete generation
+  index `{logical}_{hash}_{gen}` that holds the data. A structural schema change moves the
+  hash, so the sink writes a fresh alias + generation (re-seeded from scratch) rather than
+  into the old, mismatched shape. An on-demand reindex builds the *next* generation behind
+  the same hash alias and repoints atomically when it's seeded. flusso and the `flusso-query`
+  client address `{logical}_{hash}`; the generation detail is documented in the
+  [`flusso-sinks-opensearch` crate](https://github.com/alias2k/flusso/tree/main/libs/1-sinks/2-opensearch).
+- **Convenience alias.** The bare logical name (`users`) is *also* kept as an alias on the
+  current generation, so a human or ad-hoc tool can `GET /users/_search` without knowing the
+  hash. Best-effort: if it fails (e.g. the cluster already has a real index named like the
+  alias), flusso logs a warning and carries on — correctness never depends on it.
 - **Refresh adapts to the backlog.** Created with auto-refresh disabled (`refresh_interval:
   -1`) for fast bulk seeding; on seeding completion the index is handed the configured
   `refresh_interval` (default `"10s"`) — the steady-state visibility ceiling. A `flush` also
@@ -322,12 +324,12 @@ fails; `builtin` (the default) needs no plugins.
 
 | Field type | Shape | Query each subfield for… |
 | --- | --- | --- |
-| `text` | `analyzer: flusso_code` + `.keyword` + `.keyword_lowercase` | the field itself → full-text search; `.keyword` → exact filter / aggregation / exact sort; `.keyword_lowercase` → case-insensitive sort & exact lookup. |
+| `text` | `analyzer: flusso_text` + `.keyword` + `.keyword_lowercase` | the field itself → full-text search; `.keyword` → exact filter / aggregation / exact sort; `.keyword_lowercase` → case-insensitive sort & exact lookup. |
 | `keyword` | `.text` (`flusso_code`) + `.keyword_lowercase` | the field itself → exact term / aggregation; `.text` → full-text search; `.keyword_lowercase` → case-insensitive sort. |
 
 `keyword` subfields cap at `ignore_above: 256`. Other types (`long`, `date`, `boolean`, …)
 and the `object`/`nested` containers are emitted as-is. Any key you set in a field's
-`mapping` overrides the auto default for that field — e.g. your own `analyzer` replaces
+`options` overrides the auto default for that field — e.g. your own `analyzer` replaces
 `flusso_code`, and your own `fields` replaces the auto subfields wholesale.
 
 Example query against a `text` field `name`, precise (all terms must match) and

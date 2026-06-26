@@ -43,7 +43,23 @@ to pin down the solution. This is the most important step — be relentless, not
 - Keep `CLAUDE.md` current in the *same* change if you alter crate layout, commands, engine
   invariants, lint policy, or config/schema format (per its "Keeping this file current" rule).
 
-## 5. Update the documentation — code + every README, fully
+## 5. Align the editor LSP schemas (if the format changed)
+
+If the change touched `flusso.toml` or `*.schema.yml` format — a new key, field type tag, field
+sibling, enum token, sink field, default, or description — update the hand-curated JSON Schemas
+that drive editor completion, which live **inside** the parser crates so they ship in the
+published crate:
+
+- `libs/2-schema/1-config-toml/config.schema.json` (`schema_config_toml::CONFIG_SCHEMA`)
+- `libs/2-schema/1-index-yaml/index.schema.yml` (`schema_index_yaml::INDEX_SCHEMA`)
+
+Keep them in lockstep with the parser entities. `libs/2-schema/tests/schema_drift.rs` enforces the
+**enumerable** sets (type tags, field siblings, enum tokens, sink fields) and runs in verify — but
+it does **not** check descriptions, defaults, the permissive `field` union, or identifier
+`pattern`s, so align those by hand. Don't forget the matching docs in `guides/configuration.md` /
+`guides/schema-authoring.md` (next step).
+
+## 6. Update the documentation — code + every README, fully
 
 Bring **all** docs up to date so nothing lags the change. Do this **before** the plugin — docs are
 the source of truth the plugin's skills teach from.
@@ -61,7 +77,7 @@ the source of truth the plugin's skills teach from.
 - Don't forget `CLAUDE.md` itself (its "Keeping this file current" rule) if layout/commands/
   invariants/format changed.
 
-## 6. Update the flusso Claude plugin
+## 7. Update the flusso Claude plugin
 
 With the docs settled, bring the repo's own Claude plugin under `plugin/` in lockstep:
 
@@ -73,7 +89,7 @@ With the docs settled, bring the repo's own Claude plugin under `plugin/` in loc
   anything a skill teaches, update the affected skill/agent/example so the plugin can't teach
   something now wrong. New capability worth surfacing → add/extend a skill.
 
-## 7. Verify — full CI parity before opening the PR
+## 8. Verify — full CI parity before opening the PR
 
 Run, in order, and fix anything that fails before proceeding:
 
@@ -89,7 +105,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-it
 If Docker isn't available for the `--run-ignored all` step, say so explicitly rather than
 silently skipping it.
 
-## 8. Open the PR
+## 9. Open the PR
 
 - Push the branch: `git push -u origin <branch>`.
 - Open the PR directly (no confirmation step needed):

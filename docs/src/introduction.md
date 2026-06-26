@@ -17,7 +17,7 @@ Change a user *or one of their orders*, and flusso rebuilds the whole `users` do
 
 ## This manual
 
-- **[Getting started](getting-started.md)** — run flusso in about five commands, and what Postgres and OpenSearch need first.
+- **[Getting started](getting-started.md)** — run flusso in three commands, and what Postgres and OpenSearch need first.
 - **[Authoring schemas](guides/schema-authoring.md)** — the `*.schema.yml` format: field types, objects, maps, joins, aggregates, geo, filters, soft-delete, validation.
 - **[Configuring a deployment](guides/configuration.md)** — the `flusso.toml` format, every source and sink option, secrets and `{ env = "VAR" }` references, the `FLUSSO_*` flag overrides, the index prefix, and logging/telemetry.
 - **[Querying](guides/querying.md)** — the typed query-side client, `flusso-query`, and its `#[derive(FlussoDocument)]`.

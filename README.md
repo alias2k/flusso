@@ -17,7 +17,7 @@ flusso handles the *keep-it-in-sync*.
 
 ## Contents
 
-- [Quickstart](#quickstart) — running in about five commands
+- [Quickstart](#quickstart) — running in three commands
 - [What it does](#what-it-does) — the two files you write
 - [How the pipeline works](#how-the-pipeline-works) — the bit that does the work
 - [The CLI](#the-cli) — `build`, `check`, `run`
@@ -227,8 +227,8 @@ per-source/per-sink options are in
   superuser), a stronger grant than the read-only role below. If the role can't,
   flusso doesn't fail: it logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION
   … ADD TABLE` to run, and `flusso check` prints the same. Set `[source]
-  manage_publication = false` (or `--no` via `FLUSSO_MANAGE_PUBLICATION=false`) to
-  turn management off and manage the publication yourself.
+  manage_publication = false` (or `--manage-publication false` /
+  `FLUSSO_MANAGE_PUBLICATION=false`) to manage the publication yourself.
 - **A replication slot** — this one flusso always creates on first connect (it
   needs only the `REPLICATION` attribute). Postgres retains WAL until flusso
   confirms it, so a flusso that's down for a long time means WAL piling up on the

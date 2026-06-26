@@ -94,16 +94,15 @@ Note on the complex fields:
   parent handle: `User::addresses().any(Address::city().eq(…))` — the `city` /
   `order_status` filters.
 
-The only thing not generated for object/one-to-one fields is a parent entry
-handle (`User::account()` / `User::profile()`) — useful mainly for an existence
-check on the object itself; for now `Keyword::at("profile").exists()` covers it.
+The object/one-to-one fields also get a parent handle of their own —
+`User::account()` / `User::profile()` return an `Object` handle whose `.exists()`
+is a presence check on the object itself.
 
 ## A note on index names
 
-The engine writes to a **physical** index named `<logical>_<hash>` (e.g.
-`users_3f2a1b9c`) and there's no read alias yet. You don't deal with that here:
-the derive bakes the physical name into `T::search`/`T::get` (it knows the hash
-at compile time, the same one the sink appends), so handlers just call
-`User::search(&client)` — the hash stays hidden. A structural schema change
-rotates the hash *and* forces this crate to recompile, so the binding always
-targets the right index. (`T::SCHEMA_HASH` is still exposed if you need it.)
+The derive bakes the hash-suffixed index name (`<logical>_<hash>`, e.g.
+`users_3f2a1b9c`) into `T::INDEX` and uses it for `T::query()` / `T::get()`, so
+handlers just call `User::query()` — the hash stays hidden. A structural schema
+change rotates the hash *and* forces this crate to recompile, so the binding always
+targets the right index. (`T::SCHEMA_HASH` is exposed too.) flusso also keeps a
+convenience alias on the bare logical name (`users`) for ad-hoc queries.

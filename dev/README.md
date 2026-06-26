@@ -142,7 +142,7 @@ docker compose -f docker-compose.yml -f docker-compose.demo.yml down -v
 
 A small e-commerce store (users, profiles, addresses, categories, products, tags,
 orders, items, reviews) feeding **three** indexes that, between them, exercise
-every feature: all scalar types (incl. a `custom` → `scaled_float`), groups,
+every feature: all scalar types (incl. a `custom` → `scaled_float`), objects,
 one-to-one / one-to-many / many-to-many joins, three levels of nesting, every
 aggregate, filters, and soft-delete. If a feature exists, something in here pokes
 it.
@@ -151,11 +151,11 @@ it.
 docker-compose.yml          Postgres + OpenSearch
 dev/
   flusso.toml               source + sinks (opensearch + stdout) + 3 indexes
-  users.schema.yml          user + account group + profile + addresses +
+  users.schema.yml          user + account object + profile + addresses +
                             orders→items + order rollups
-  products.schema.yml       product + pricing group (custom scaled_float) +
+  products.schema.yml       product + pricing object (custom scaled_float) +
                             tags (m:n) + reviews + rating rollups
-  orders.schema.yml         order + timeline group + line items + rollups
+  orders.schema.yml         order + timeline object + line items + rollups
   changes.sql               sample INSERT/UPDATE/DELETE to watch live
   load.sql                  simulate_production() — continuous read→modify→write load
   postgres/init/

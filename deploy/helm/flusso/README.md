@@ -59,7 +59,9 @@ config:
     schema = "users.schema.yml"
   schemas:
     users.schema.yml: |
-      root: public.users
+      version: 1
+      table: users
+      primary_key: id
       fields:
         - keyword: email
 ```
