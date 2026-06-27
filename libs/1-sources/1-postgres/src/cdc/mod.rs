@@ -22,6 +22,7 @@
 mod ack;
 mod backfill;
 mod capture;
+mod introspection;
 mod pgoutput;
 mod publication;
 mod stream;
