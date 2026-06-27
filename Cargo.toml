@@ -140,6 +140,11 @@ criterion = { version = "0.8.*", features = ["async_tokio"] }
 proptest = { version = "1.*" }
 axum = { version = "0.8.*" }
 base64 = "0.22"
+# Embeds the schema designer's built SPA (`apps/design/dist/`) into the binary.
+# `debug-embed` embeds in debug builds too, so the served assets don't depend on
+# the working directory and tests are reproducible.
+rust-embed = { version = "8.*", features = ["debug-embed"] }
+mime_guess = "2.*"
 # OpenTelemetry stack, shared by the CLI (traces) and the daemon (metrics).
 # Per-crate feature sets differ and are added at the use site; Cargo unifies
 # them. Keep these versions in lockstep — the otel crates release together.
@@ -157,6 +162,7 @@ schema-index-yaml = { path = "libs/2-schema/1-index-yaml", version = "0.10.1", p
 
 engine = { path = "libs/2-engine", version = "0.10.1", package = "flusso-engine" }
 daemon = { path = "libs/3-daemon", version = "0.10.1", package = "flusso-daemon" }
+design = { path = "apps/design", version = "0.10.1", package = "flusso-design" }
 
 sources-core = { path = "libs/1-sources/0-core", version = "0.10.1", package = "flusso-sources-core" }
 sources-postgres = { path = "libs/1-sources/1-postgres", version = "0.10.1", package = "flusso-sources-postgres" }
