@@ -148,3 +148,68 @@ jobs:
             git --no-pager diff --stat -- apps/design/dist
             exit 1
           fi
+
+  designer-e2e:
+    name: designer e2e (UI + save→check)
+    runs-on: ubuntu-latest
+    # A Postgres the dev `flusso.toml` points at (127.0.0.1:5432/flusso), seeded
+    # with the dev schema so the designer can introspect it.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: flusso
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Builds the real binary that the e2e drives (it embeds the committed SPA).
+      - name: Build flusso
+        run: cargo build -p flusso-cli
+
+      - name: Seed Postgres (schema + data)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql "postgres://postgres@127.0.0.1:5432/flusso" -f dev/postgres/init/01_schema.sql
+          psql "postgres://postgres@127.0.0.1:5432/flusso" -f dev/postgres/init/02_seed.sql
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/design/frontend/package-lock.json
+
+      - name: Install frontend deps + Chromium
+        working-directory: apps/design/frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      # Drives the binary's served UI (load, add relation, edit, delete, collapse)
+      # and runs `flusso check` against what the UI saved.
+      - name: Designer e2e
+        working-directory: apps/design/frontend
+        env:
+          CI: "true"
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/design/frontend/playwright-report/
+          if-no-files-found: ignore
