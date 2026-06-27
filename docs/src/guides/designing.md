@@ -17,6 +17,8 @@ flusso design --config flusso.toml
 # flusso designer running at http://127.0.0.1:7700
 ```
 
+It opens the UI in the default browser on start; `--no-open` (or
+`FLUSSO_DESIGN_NO_OPEN`) prints the URL instead — handy on a headless box or over SSH.
 `--address` (or `FLUSSO_DESIGN_ADDRESS`) moves the bind address; `--config` (or
 `FLUSSO_CONFIG`) picks the deployment to edit. The UI binds to localhost only.
 

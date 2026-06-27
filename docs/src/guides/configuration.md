@@ -483,6 +483,7 @@ are set** — env is the fallback.
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
 | `FLUSSO_FORMAT` | `--format` | `check` |
 | `FLUSSO_DESIGN_ADDRESS` | `--address` | `design` |
+| `FLUSSO_DESIGN_NO_OPEN` | `--no-open` | `design` |
 | `FLUSSO_SCHEMA` | the schema-kind argument | `schema` |
 
 `flusso <cmd> --help` shows the matching `[env: FLUSSO_…]` next to each flag.

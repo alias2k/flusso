@@ -145,6 +145,8 @@ base64 = "0.22"
 # the working directory and tests are reproducible.
 rust-embed = { version = "8.*", features = ["debug-embed"] }
 mime_guess = "2.*"
+# Opens the designer URL in the user's browser on `flusso design` (best-effort).
+open = "5.*"
 # OpenTelemetry stack, shared by the CLI (traces) and the daemon (metrics).
 # Per-crate feature sets differ and are added at the use site; Cargo unifies
 # them. Keep these versions in lockstep — the otel crates release together.

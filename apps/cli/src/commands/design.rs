@@ -26,12 +26,17 @@ pub(crate) struct DesignArgs {
     /// Local address to bind the designer's UI + API to.
     #[arg(long, env = "FLUSSO_DESIGN_ADDRESS", default_value = "127.0.0.1:7700")]
     address: SocketAddr,
+
+    /// Don't open the designer in a browser on start (it opens by default).
+    #[arg(long, env = "FLUSSO_DESIGN_NO_OPEN")]
+    no_open: bool,
 }
 
 pub(crate) async fn execute(args: DesignArgs) -> anyhow::Result<()> {
     design::serve(DesignOptions {
         config_path: args.config,
         address: args.address,
+        open_browser: !args.no_open,
     })
     .await
     .context("running the designer")

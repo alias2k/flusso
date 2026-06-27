@@ -38,6 +38,7 @@ axum.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 rust-embed.workspace = true
 mime_guess.workspace = true
+open.workspace = true
 
 [dev-dependencies]
 schema-core.workspace = true

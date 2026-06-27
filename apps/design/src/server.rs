@@ -28,6 +28,8 @@ pub struct DesignOptions {
     pub config_path: PathBuf,
     /// Local address to bind the UI + API to.
     pub address: SocketAddr,
+    /// Open the designer URL in the default browser once the listener is bound.
+    pub open_browser: bool,
 }
 
 #[derive(Clone)]
@@ -44,7 +46,17 @@ pub async fn serve(options: DesignOptions) -> Result<()> {
 
     let listener = TcpListener::bind(options.address).await?;
     let local = listener.local_addr()?;
-    tracing::info!(address = %local, url = %format!("http://{local}"), "flusso designer listening");
+    let url = format!("http://{local}");
+    tracing::info!(address = %local, url = %url, "flusso designer listening");
+
+    // Best-effort: the socket is already bound (connections queue until `serve`
+    // accepts), so the browser can open immediately. A failure to launch one
+    // (headless box, no handler) is logged, never fatal.
+    if options.open_browser
+        && let Err(e) = open::that_detached(&url)
+    {
+        tracing::warn!(error = %e, %url, "could not open a browser; open the URL manually");
+    }
 
     axum::serve(listener, app).await?;
     Ok(())
