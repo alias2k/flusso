@@ -1,11 +1,12 @@
 import type { DiagnosticDto, DocumentNode, PreviewResponse } from "../api";
+import { typeClass } from "../theme";
 
 function Node({ node, depth }: { node: DocumentNode; depth: number }) {
   return (
     <div>
       <div className="doc-node" style={{ paddingLeft: depth * 16 }}>
         <span className="doc-name">{node.name}</span>
-        <span className="doc-type">
+        <span className={`doc-type ${typeClass(node.type)}`}>
           {node.type}
           {node.array ? "[]" : ""}
           {node.nullable ? "?" : ""}

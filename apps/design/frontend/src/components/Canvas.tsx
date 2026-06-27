@@ -16,7 +16,9 @@ import { autoLayout, loadOverrides, saveOverride } from "../model/layout";
 import { suggestRelations } from "../model/relations";
 import { type DocNode, projectGraph } from "../model/tree";
 import { useDesign } from "../state";
+import { edgeColor } from "../theme";
 import { DocNodeView } from "./DocNodeView";
+import { Icon } from "./Icon";
 
 const nodeTypes = { doc: DocNodeView };
 
@@ -60,7 +62,16 @@ export function Canvas() {
         data: { node: n },
       }));
     });
-    setEdges(graph.edges.map((e) => ({ id: e.id, source: e.source, target: e.target, label: e.label })));
+    setEdges(
+      graph.edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        label: e.label,
+        animated: true, // flusso = flow: the current runs source → document
+        style: { stroke: edgeColor(e.label), strokeWidth: 1.5 },
+      })),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema, indexName, setNodes, setEdges]);
 
@@ -109,7 +120,7 @@ export function Canvas() {
           title={showMap ? "Hide minimap" : "Show minimap"}
           onClick={() => setShowMap((m) => !m)}
         >
-          🗺
+          <Icon name="map" />
         </button>
       </Panel>
     </ReactFlow>

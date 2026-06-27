@@ -4,6 +4,8 @@ import * as edit from "../model/edit";
 import { suggestRelations } from "../model/relations";
 import { nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useDesign } from "../state";
+import { typeClass } from "../theme";
+import { Icon } from "./Icon";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant"] as const;
 const AGG_KINDS = ["count", "sum", "avg", "min", "max", "ids"] as const;
@@ -55,7 +57,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
               select(null);
             }}
           >
-            ✕
+            <Icon name="close" size={13} />
           </button>
         )}
         <div className="node-sub">
@@ -84,7 +86,10 @@ export function DocNodeView({ data, selected }: NodeProps) {
                 {inc ? inc.name : c.name}
                 {renamed ? <span className="col-from"> ← {c.name}</span> : null}
               </span>
-              <span className="col-type">{inc ? (inc.ty as string) : typeLabel(c.suggested_type)}</span>
+              {(() => {
+                const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
+                return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
+              })()}
             </div>
           );
         })}
@@ -104,7 +109,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                 apply((s) => edit.removeAt(s, node.path, l.index));
               }}
             >
-              ✕
+              <Icon name="close" size={13} />
             </button>
           </div>
         ))}

@@ -12,6 +12,7 @@ import { Canvas } from "./components/Canvas";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
+import { Icon } from "./components/Icon";
 import { Select, Text } from "./components/widgets";
 import { DesignProvider, type Selection } from "./state";
 
@@ -126,9 +127,14 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <button className="icon" title={leftOpen ? "Hide sidebar" : "Show sidebar"} onClick={() => setLeftOpen((o) => !o)}>
-          ☰
+          <Icon name="menu" />
         </button>
-        <span className="brand">flusso designer</span>
+        <span className="brand">
+          <span className="brand-mark">
+            <Icon name="flow" size={18} />
+          </span>
+          flusso
+        </span>
         <span className="path">{project.config_path}</span>
         <span className="spacer" />
         {status && <span className="status">{status}</span>}
@@ -179,7 +185,7 @@ export default function App() {
             {inspectorOpen && (
               <aside className="inspector-pane">
                 <button className="icon collapse" title="Close" onClick={() => setSelection(null)}>
-                  ✕
+                  <Icon name="close" />
                 </button>
                 <Inspector />
               </aside>

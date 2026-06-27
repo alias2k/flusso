@@ -1,17 +1,43 @@
 :root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel-2: #1e222b;
-  --border: #2a2f3a;
-  --text: #d7dbe2;
-  --muted: #8b93a1;
-  --accent: #5b9dff;
-  --accent-2: #2f6fd6;
-  --error: #ff6b6b;
+  --bg: #0a0d12;
+  --panel: #12161d;
+  --panel-2: #1a1f29;
+  --panel-3: #232a36;
+  --border: #262d3a;
+  --text: #e4e8ef;
+  --muted: #8a93a3;
+  --accent: #10b981; /* emerald */
+  --accent-2: #06b6d4; /* cyan — the "flow" partner */
+  --accent-soft: rgba(16, 185, 129, 0.14);
+  --error: #f87171;
   --warn: #e0b341;
-  --ok: #4caf7d;
+  --ok: #34d399;
+
+  /* relation-kind hues (match theme.ts edgeColor) */
+  --k-root: #10b981;
+  --k-object: #a78bfa;
+  --k-toone: #38bdf8;
+  --k-tomany: #34d399;
+
+  /* field-type hues */
+  --t-string: #e2b15e;
+  --t-number: #60a5fa;
+  --t-temporal: #c084fc;
+  --t-bool: #2dd4bf;
+  --t-uuid: #f472b6;
+  --t-geo: #fb7185;
+  --t-other: #8a93a3;
+
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
+
+.t-string { color: var(--t-string); }
+.t-number { color: var(--t-number); }
+.t-temporal { color: var(--t-temporal); }
+.t-bool { color: var(--t-bool); }
+.t-uuid { color: var(--t-uuid); }
+.t-geo { color: var(--t-geo); }
+.t-other { color: var(--t-other); }
 
 * {
   box-sizing: border-box;
@@ -44,7 +70,19 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.brand-mark {
+  display: inline-flex;
   color: var(--accent);
 }
 .path {
@@ -71,9 +109,13 @@ button:hover {
   border-color: var(--accent);
 }
 button.primary {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
-  color: #fff;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  border: none;
+  color: #04140e;
+  font-weight: 600;
+}
+button.primary:hover {
+  filter: brightness(1.08);
 }
 button.link {
   background: none;
@@ -199,6 +241,13 @@ input:focus,
 select:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
 }
 .check {
   display: inline-flex;
@@ -297,7 +346,6 @@ summary {
   color: var(--text);
 }
 .doc-type {
-  color: var(--accent);
   font-family: ui-monospace, monospace;
   font-size: 12px;
 }
@@ -375,16 +423,18 @@ pre.yaml {
 }
 .badge {
   font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  padding: 1px 6px;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
   border-radius: 999px;
-  background: var(--panel-2);
+  background: var(--panel-3);
   color: var(--muted);
 }
-.badge.root { background: var(--accent-2); color: #fff; }
-.badge.has_many, .badge.many_to_many { background: #3a5; color: #fff; }
-.badge.belongs_to, .badge.has_one { background: #46c; color: #fff; }
-.badge.object { background: #756; color: #fff; }
+.badge.root { background: var(--k-root); color: #04140e; }
+.badge.has_many, .badge.many_to_many { background: var(--k-tomany); color: #04140e; }
+.badge.belongs_to, .badge.has_one { background: var(--k-toone); color: #04140e; }
+.badge.object { background: var(--k-object); color: #1a0f2e; }
 
 .node-cols {
   padding: 6px 8px;
@@ -407,7 +457,7 @@ pre.yaml {
   white-space: nowrap;
 }
 .col-row.on .col-name { color: var(--text); }
-.col-row .col-type { color: var(--accent); font-family: ui-monospace, monospace; font-size: 10px; flex: 0 0 auto; }
+.col-row .col-type { font-family: ui-monospace, monospace; font-size: 10px; letter-spacing: 0.3px; flex: 0 0 auto; }
 /* The rename input must be allowed to shrink (min-width:0) so the type chip
    beside it never pushes past the node edge — `.node-cols`'s overflow-y:auto
    forces overflow-x:auto, which would otherwise clip the chip. */
@@ -541,3 +591,52 @@ button.icon:hover {
   opacity: 1;
   border-color: var(--accent);
 }
+
+/* ── flow polish ─────────────────────────────────────────────────────────── */
+/* Each node carries its kind colour (--kc): an inset left stripe + a tinted
+   header gradient, so root / object / to-one / to-many read at a glance. */
+.flow-node {
+  --kc: var(--muted);
+  border-radius: 12px;
+  box-shadow: inset 3px 0 0 var(--kc), 0 10px 30px rgba(0, 0, 0, 0.42);
+  transition: box-shadow 0.15s ease;
+}
+.flow-node.kind-root { --kc: var(--k-root); }
+.flow-node.kind-object { --kc: var(--k-object); }
+.flow-node.kind-belongs_to,
+.flow-node.kind-has_one { --kc: var(--k-toone); }
+.flow-node.kind-has_many,
+.flow-node.kind-many_to_many { --kc: var(--k-tomany); }
+.flow-node.selected {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--kc), 0 0 0 2px var(--accent), 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.flow-node header {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--kc) 16%, transparent), transparent);
+}
+
+/* FK suggestions as accent pills */
+.node-add .suggest {
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid transparent;
+  color: var(--accent);
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.node-add .suggest:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* connection points as small kind-coloured dots */
+.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--kc, var(--accent));
+  border: 2px solid var(--panel);
+}
+
+/* edge label as a subtle pill on the panel colour */
+.react-flow__edge-text { fill: var(--text); font-weight: 600; }
+.react-flow__edge-textbg { fill: var(--panel-2); }
