@@ -4,12 +4,13 @@ import {
   type Edge,
   MiniMap,
   type Node,
+  Panel,
   ReactFlow,
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SCALAR_TYPES } from "../api";
 import { autoLayout, loadOverrides, saveOverride } from "../model/layout";
 import { suggestRelations } from "../model/relations";
@@ -23,6 +24,7 @@ export function Canvas() {
   const { schema, indexName, select, catalog } = useDesign();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [showMap, setShowMap] = useState(false);
 
   // Estimate a node's rendered height so the auto-layout reserves the right
   // vertical band (header + column rows, capped by the scroll area, + footer
@@ -100,7 +102,16 @@ export function Canvas() {
     >
       <Background />
       <Controls />
-      <MiniMap pannable zoomable />
+      {showMap && <MiniMap pannable zoomable style={{ marginBottom: 40 }} />}
+      <Panel position="bottom-right">
+        <button
+          className="icon map-toggle"
+          title={showMap ? "Hide minimap" : "Show minimap"}
+          onClick={() => setShowMap((m) => !m)}
+        >
+          🗺
+        </button>
+      </Panel>
     </ReactFlow>
   );
 }

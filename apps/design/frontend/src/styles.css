@@ -527,3 +527,17 @@ button.icon:hover {
 .col-row.sel { background: var(--accent-2); }
 .col-row.sel .col-name, .col-row.sel .col-type, .col-row.sel .leaf-kind { color: #fff; }
 .col-from { color: var(--muted); font-size: 10px; margin-left: 4px; }
+
+/* minimap toggle (the minimap is hidden by default) */
+.react-flow__panel .map-toggle {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  padding: 3px 7px;
+  opacity: 0.65;
+}
+.react-flow__panel .map-toggle:hover {
+  opacity: 1;
+  border-color: var(--accent);
+}
