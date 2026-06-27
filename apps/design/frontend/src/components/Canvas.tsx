@@ -9,7 +9,7 @@ import {
   useNodesState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { SCALAR_TYPES } from "../api";
 import { autoLayout, loadOverrides, saveOverride } from "../model/layout";
 import { suggestRelations } from "../model/relations";
@@ -34,10 +34,10 @@ export function Canvas() {
       (l) => !((SCALAR_TYPES as string[]).includes(l.kind) && l.column && catalogNames.has(l.column)),
     ).length;
     const rows = (tableCols.length || n.leaves.length) + special;
-    const colsH = Math.min(rows * 24 + 12, 272);
+    const colsH = Math.min(rows * 36 + 12, 280);
     const suggestions = catalog ? suggestRelations(catalog, n.table).length : 0;
-    const footerH = 52 + suggestions * 28;
-    return 56 + colsH + footerH;
+    const footerH = 76 + suggestions * 34;
+    return 64 + colsH + footerH;
   };
 
   // Re-project the tree to nodes/edges on every schema change. Persisted drag
@@ -67,6 +67,25 @@ export function Canvas() {
     // depends on it; it arrives asynchronously after the first render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema, indexName, catalog, setNodes, setEdges]);
+
+  // Estimates can't know real heights, so once React Flow has *measured* every
+  // node, re-run the tidy layout with those true heights — but only when the
+  // node *set* changes (add/remove/switch index), not on every field edit, so
+  // editing never reshuffles the canvas. Manual drags (overrides) still win.
+  const laidOut = useRef("");
+  useEffect(() => {
+    const sig = `${indexName}::${nodes.map((n) => n.id).sort().join(",")}`;
+    if (sig === laidOut.current) return;
+    if (!nodes.length || nodes.some((n) => !n.measured?.height)) return; // wait for measurement
+    laidOut.current = sig;
+    const docNodes = nodes.map((n) => (n.data as { node: DocNode }).node);
+    const heights = new Map(nodes.map((n) => [n.id, n.measured?.height ?? 0]));
+    const auto = autoLayout(docNodes, (dn) => heights.get(dn.id) ?? 300);
+    const overrides = loadOverrides(indexName);
+    setNodes((current) =>
+      current.map((n) => ({ ...n, position: overrides[n.id] ?? auto[n.id] ?? n.position })),
+    );
+  }, [nodes, indexName, setNodes]);
 
   return (
     <ReactFlow

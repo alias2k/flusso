@@ -108,7 +108,15 @@ button.add {
   display: grid;
   grid-template-columns: 200px 1fr 420px;
   min-height: 0;
+  transition: grid-template-columns 0.15s ease;
 }
+/* Pin each pane to its track explicitly: collapsing the nav removes it from the
+   DOM, and without this the canvas would fall into the now-zero-width first
+   column and render invisibly. */
+.layout > .sidebar { grid-column: 1; }
+.layout > .editor,
+.layout > .canvas-wrap { grid-column: 2; }
+.layout > .inspector-pane { grid-column: 3; }
 
 .sidebar {
   background: var(--panel);
@@ -492,9 +500,6 @@ pre.yaml {
 .react-flow__controls-button:hover svg { fill: var(--accent); }
 
 /* ── collapsible sidebars ───────────────────────────────────────────────── */
-.layout {
-  transition: grid-template-columns 0.15s ease;
-}
 button.icon {
   background: none;
   border: none;
