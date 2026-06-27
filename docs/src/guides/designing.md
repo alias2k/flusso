@@ -8,8 +8,8 @@ files in place.
 ## What it is
 
 The designer is a view over the canonical files, not a separate model. It reads the
-`flusso.toml` and the `*.schema.yml` files it references, lets them be edited through
-forms, and writes them back as clean, deterministic YAML/TOML. The files stay the source
+`flusso.toml` and the `*.schema.yml` files it references, lets them be edited on a visual
+canvas, and writes them back as clean, deterministic YAML/TOML. The files stay the source
 of truth — committing them is committing the design.
 
 ```sh
@@ -21,6 +21,21 @@ It opens the UI in the default browser on start; `--no-open` (or
 `FLUSSO_DESIGN_NO_OPEN`) prints the URL instead — handy on a headless box or over SSH.
 `--address` (or `FLUSSO_DESIGN_ADDRESS`) moves the bind address; `--config` (or
 `FLUSSO_CONFIG`) picks the deployment to edit. The UI binds to localhost only.
+
+## On the canvas
+
+Each index is a **node graph**. A node is a place in the document — the root, an `object`
+group, or a join — and shows the table it draws from plus a checklist of that table's
+columns (check to include, rename inline, set the type). Pull in a related table by
+clicking one of the node's FK suggestions: the verb (`belongs_to` / `has_one` / `has_many`,
+or `many_to_many` through a detected junction) is inferred from the foreign-key direction,
+and a new child node appears. Aggregates (`count`/`sum`/`ids`/…), `geo`, `map`, `custom`,
+and `constant` are added from the node's **+ field** menu as leaf fields, not child nodes.
+
+Selecting a node or field opens the **inspector** for the details a node can't show
+cleanly — join keys and verb, `order_by`, `limit`, filters, `value_type`/`element_type`,
+transforms, soft-delete, nullability. Node positions are remembered in your browser; they
+aren't written to the files (the files only hold the document tree).
 
 ## What it gives you
 

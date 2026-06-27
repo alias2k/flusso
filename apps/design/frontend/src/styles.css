@@ -320,3 +320,147 @@ pre.yaml {
   font-family: ui-monospace, monospace;
   color: var(--muted);
 }
+
+/* ── canvas + nodes ─────────────────────────────────────────────────────── */
+.canvas-wrap {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+}
+.canvas-wrap .react-flow {
+  height: 100%;
+}
+.inspector-pane {
+  overflow-y: auto;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 14px;
+  min-height: 0;
+}
+
+.flow-node {
+  width: 250px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+.flow-node.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.flow-node header {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  position: relative;
+}
+.flow-node .node-title {
+  font-weight: 700;
+  margin-left: 6px;
+}
+.flow-node .node-sub {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.badge.root { background: var(--accent-2); color: #fff; }
+.badge.has_many, .badge.many_to_many { background: #3a5; color: #fff; }
+.badge.belongs_to, .badge.has_one { background: #46c; color: #fff; }
+.badge.object { background: #756; color: #fff; }
+
+.node-cols {
+  padding: 6px 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.col-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+.col-row .col-name { color: var(--muted); flex: 1; }
+.col-row.on .col-name { color: var(--text); }
+.col-row .col-type { color: var(--accent); font-family: ui-monospace, monospace; font-size: 10px; }
+.col-row .rename { flex: 1; padding: 2px 4px; font-size: 12px; }
+.col-row select { padding: 1px 2px; font-size: 11px; }
+.col-row.special { cursor: pointer; }
+.col-row .leaf-kind {
+  font-size: 10px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--warn);
+}
+.manual-col { width: 100%; font-size: 12px; }
+
+.node-add {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.node-add .suggest {
+  text-align: left;
+  background: none;
+  border: 1px dashed var(--border);
+  color: var(--accent);
+  padding: 3px 6px;
+  font-size: 11px;
+}
+.add-menus { display: flex; gap: 6px; }
+.add-menu { flex: 1; font-size: 11px; }
+.flow-node .x {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: var(--error);
+  padding: 0 4px;
+}
+.col-row .x { position: static; margin-left: auto; }
+
+.drawer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 45%;
+  overflow-y: auto;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 12px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.inspector h3 { margin-top: 0; }
+.inspector.empty { color: var(--muted); }
+.key-editor, .through, .order-by, .soft-delete { margin: 6px 0; }
+
+.new-index {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.nav.new { color: var(--accent); border: 1px dashed var(--border); margin-top: 6px; }
+
+/* React Flow uses light defaults; nudge them toward the dark theme. */
+.react-flow__edge-text { fill: var(--muted); font-size: 10px; }
+.react-flow__controls button { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+.react-flow__minimap { background: var(--panel) !important; }

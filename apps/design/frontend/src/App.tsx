@@ -1,31 +1,40 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   CatalogResponse,
+  ColumnShape,
   DiagnosticDto,
   IndexSchema,
   PreviewResponse,
   Project,
-  SoftDelete,
 } from "./api";
 import { api } from "./api";
-import { CatalogCtx, NestedFields } from "./components/FieldEditor";
-import { Filters } from "./components/Filters";
+import { Canvas } from "./components/Canvas";
 import { ConfigPanel } from "./components/ConfigPanel";
+import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
-import { Field, Select, Text } from "./components/widgets";
+import { Select, Text } from "./components/widgets";
+import { DesignProvider, type Selection } from "./state";
 
-const EMPTY_SCHEMA = (): IndexSchema => ({ version: 1, table: "", db_schema: "public", fields: [] });
+const emptySchema = (table: string, pk?: string): IndexSchema => ({
+  version: 1,
+  table,
+  db_schema: "public",
+  primary_key: pk,
+  fields: [],
+});
 
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
-  const [schemas, setSchemas] = useState<Record<string, IndexSchema>>({});
   const [config, setConfig] = useState<Project["config"] | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [schemas, setSchemas] = useState<Record<string, IndexSchema>>({});
+  const [active, setActive] = useState<string>("config"); // "config" or an index name
+  const [selection, setSelection] = useState<Selection>(null);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[] | null>(null);
-  const [status, setStatus] = useState<string>("");
-  const [error, setError] = useState<string>("");
+  const [drawer, setDrawer] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
 
   useEffect(() => {
     api
@@ -36,41 +45,44 @@ export default function App() {
         const map: Record<string, IndexSchema> = {};
         for (const idx of p.indexes) if (idx.schema) map[idx.name] = idx.schema;
         setSchemas(map);
-        setSelected(p.indexes[0]?.name ?? "config");
+        setActive(p.indexes[0]?.name ?? "config");
       })
       .catch((e) => setError(String(e)));
     api.catalog().then(setCatalog).catch((e) => setError(String(e)));
   }, []);
 
-  const ctx: CatalogCtx = useMemo(() => {
+  const columnsFor = useMemo(() => {
     const tables = catalog?.catalog.tables ?? [];
-    return {
-      tables,
-      columnsFor: (t: string) => tables.find((x) => x.name === t)?.columns.map((c) => c.name) ?? [],
-    };
+    return (table: string): ColumnShape[] => tables.find((t) => t.name === table)?.columns ?? [];
   }, [catalog]);
 
-  const schema = selected && selected !== "config" ? schemas[selected] ?? EMPTY_SCHEMA() : null;
+  const schema = active !== "config" ? schemas[active] : undefined;
 
-  // Debounced live preview of the selected schema.
+  // Debounced live preview of the active index.
   useEffect(() => {
-    if (!selected || selected === "config" || !schema) {
+    if (!schema || active === "config") {
       setPreview(null);
       return;
     }
     const handle = setTimeout(() => {
-      api.preview(selected, schema).then(setPreview).catch((e) => setError(String(e)));
+      api.preview(active, schema).then(setPreview).catch((e) => setError(String(e)));
     }, 250);
     return () => clearTimeout(handle);
-  }, [selected, schema]);
+  }, [active, schema]);
 
-  const updateSchema = (next: IndexSchema) => {
-    if (!selected || selected === "config") return;
-    setSchemas((s) => ({ ...s, [selected]: next }));
+  const apply = (fn: (s: IndexSchema) => IndexSchema) => {
+    if (active === "config") return;
+    setSchemas((all) => ({ ...all, [active]: fn(all[active] ?? emptySchema("")) }));
+  };
+
+  const openIndex = (name: string) => {
+    setActive(name);
+    setSelection({ kind: "root" });
+    setDiagnostics(null);
   };
 
   const save = async () => {
-    if (!project || !config) return;
+    if (!config) return;
     try {
       const indexes = (config.index ?? [])
         .filter((e) => schemas[e.name])
@@ -93,12 +105,18 @@ export default function App() {
     } else {
       setDiagnostics(res.diagnostics);
       setStatus(res.diagnostics.length ? `${res.diagnostics.length} issue(s) found.` : "Schemas match the database.");
+      setDrawer(true);
     }
   };
 
-  if (!project || !config) {
-    return <div className="loading">{error || "Loading project…"}</div>;
-  }
+  const createIndex = (name: string, table: string) => {
+    const pk = catalog?.catalog.tables.find((t) => t.name === table)?.primary_key[0];
+    setConfig((c) => (c ? { ...c, index: [...(c.index ?? []), { name, schema: `${name}.schema.yml`, enabled: true }] } : c));
+    setSchemas((all) => ({ ...all, [name]: emptySchema(table, pk) }));
+    openIndex(name);
+  };
+
+  if (!project || !config) return <div className="loading">{error || "Loading project…"}</div>;
 
   return (
     <div className="app">
@@ -107,122 +125,88 @@ export default function App() {
         <span className="path">{project.config_path}</span>
         <span className="spacer" />
         {status && <span className="status">{status}</span>}
-        <button onClick={validate}>Validate against DB</button>
+        <button onClick={() => setDrawer((d) => !d)}>{drawer ? "Hide" : "YAML"}</button>
+        <button onClick={validate}>Validate</button>
         <button className="primary" onClick={save}>
           Save
         </button>
       </header>
 
       {error && <div className="banner error">{error}</div>}
-      {catalog?.error && (
-        <div className="banner warn">Database not reachable — offline authoring only. ({catalog.error})</div>
-      )}
+      {catalog?.error && <div className="banner warn">Database not reachable — offline authoring only.</div>}
 
       <div className="layout">
         <nav className="sidebar">
-          <button className={selected === "config" ? "nav active" : "nav"} onClick={() => setSelected("config")}>
+          <button className={active === "config" ? "nav active" : "nav"} onClick={() => setActive("config")}>
             ⚙ Deployment
           </button>
           <div className="nav-heading">Indexes</div>
           {(config.index ?? []).map((e) => (
-            <button key={e.name} className={selected === e.name ? "nav active" : "nav"} onClick={() => setSelected(e.name)}>
+            <button key={e.name} className={active === e.name ? "nav active" : "nav"} onClick={() => openIndex(e.name)}>
               {e.name}
-              {!e.enabled && <span className="muted"> (disabled)</span>}
+              {!e.enabled && <span className="muted"> (off)</span>}
             </button>
           ))}
+          <NewIndex tables={catalog?.catalog.tables.map((t) => t.name) ?? []} onCreate={createIndex} />
         </nav>
 
-        <main className="editor">
-          {selected === "config" ? (
+        {active === "config" ? (
+          <main className="editor">
             <ConfigPanel config={config} onChange={setConfig} />
-          ) : schema ? (
-            <IndexEditor schema={schema} onChange={updateSchema} ctx={ctx} name={selected!} />
-          ) : null}
-        </main>
-
-        <aside className="preview-pane">
-          {selected === "config" ? (
-            <div className="preview empty">Pick an index to preview its document.</div>
-          ) : (
-            <Preview preview={preview} diagnostics={diagnostics} />
-          )}
-        </aside>
+          </main>
+        ) : schema ? (
+          <DesignProvider value={{ catalog, schema, indexName: active, apply, selection, select: setSelection, columnsFor }}>
+            <main className="canvas-wrap">
+              <Canvas />
+              {drawer && (
+                <div className="drawer">
+                  <Preview preview={preview} diagnostics={diagnostics} />
+                </div>
+              )}
+            </main>
+            <aside className="inspector-pane">
+              <Inspector />
+            </aside>
+          </DesignProvider>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function IndexEditor({
-  schema,
-  onChange,
-  ctx,
-  name,
-}: {
-  schema: IndexSchema;
-  onChange: (s: IndexSchema) => void;
-  ctx: CatalogCtx;
-  name: string;
-}) {
-  const tableNames = ctx.tables.map((t) => t.name);
-  const cols = ctx.columnsFor(schema.table);
-
+function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: string, table: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [table, setTable] = useState(tables[0] ?? "");
+  if (!open) {
+    return (
+      <button className="nav new" onClick={() => setOpen(true)}>
+        + New index
+      </button>
+    );
+  }
   return (
-    <div className="index-editor">
-      <h2>{name}</h2>
+    <div className="new-index">
+      <Text value={name} onChange={setName} placeholder="index name" />
+      {tables.length ? (
+        <Select value={table} options={tables} onChange={setTable} />
+      ) : (
+        <Text value={table} onChange={setTable} placeholder="root table" />
+      )}
       <div className="row">
-        <Field label="root table">
-          <Text value={schema.table} onChange={(table) => onChange({ ...schema, table })} list={tableNames} />
-        </Field>
-        <Field label="schema">
-          <Text value={schema.db_schema} onChange={(db_schema) => onChange({ ...schema, db_schema })} placeholder="public" />
-        </Field>
-        <Field label="primary_key">
-          <Text value={schema.primary_key ?? ""} onChange={(pk) => onChange({ ...schema, primary_key: pk || undefined })} list={cols} />
-        </Field>
-      </div>
-
-      <SoftDeleteEditor value={schema.soft_delete} onChange={(soft_delete) => onChange({ ...schema, soft_delete })} cols={cols} />
-
-      <details>
-        <summary>root filters</summary>
-        <Filters value={schema.filters ?? []} onChange={(filters) => onChange({ ...schema, filters })} columns={cols} />
-      </details>
-
-      <h3>Fields</h3>
-      <NestedFields fields={schema.fields} onChange={(fields) => onChange({ ...schema, fields })} ctx={ctx} table={schema.table} />
-    </div>
-  );
-}
-
-function SoftDeleteEditor({
-  value,
-  onChange,
-  cols,
-}: {
-  value: SoftDelete | undefined;
-  onChange: (v: SoftDelete | undefined) => void;
-  cols: string[];
-}) {
-  const kind = value === undefined ? "none" : "field" in value ? "field" : "column";
-  return (
-    <div className="soft-delete">
-      <Field label="soft delete">
-        <Select
-          value={kind}
-          onChange={(k) => {
-            if (k === "none") onChange(undefined);
-            else if (k === "field") onChange({ field: "" });
-            else onChange({ column: "" });
+        <button
+          className="primary"
+          disabled={!name || !table}
+          onClick={() => {
+            onCreate(name, table);
+            setOpen(false);
+            setName("");
           }}
-          options={["none", "field", "column"]}
-        />
-      </Field>
-      {value && "field" in value && (
-        <Text value={value.field} onChange={(field) => onChange({ ...value, field })} placeholder="document field" />
-      )}
-      {value && "column" in value && (
-        <Text value={value.column} onChange={(column) => onChange({ ...value, column })} list={cols} placeholder="column" />
-      )}
+        >
+          Create
+        </button>
+        <button onClick={() => setOpen(false)}>Cancel</button>
+      </div>
     </div>
   );
 }

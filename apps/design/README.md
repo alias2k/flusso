@@ -30,8 +30,11 @@ truth — the UI is a round-tripping view over them, not a separate model.
 - `preview` — schema → mapping + document tree.
 - `api` — the JSON operations (load / introspect / preview / validate / save).
 - `server` — the axum router; serves the API and the embedded SPA.
-- `frontend/` — the Vite + React + TypeScript UI, built to `dist/` and embedded via
-  `rust-embed`. Rebuild with `npm --prefix frontend ci && npm --prefix frontend run build`.
+- `frontend/` — the Vite + React + TypeScript UI: a React Flow node-graph canvas where
+  each node is a place in the document (root / `object` group / join) and edges are
+  relations, with an inspector side-panel for the fine-grained grammar. Built to `dist/`
+  and embedded via `rust-embed`. Rebuild with `npm --prefix frontend ci && npm --prefix
+  frontend run build`.
 
 ## Use it
 
