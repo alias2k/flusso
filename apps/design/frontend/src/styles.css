@@ -339,7 +339,7 @@ pre.yaml {
 }
 
 .flow-node {
-  width: 250px;
+  width: 290px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -386,14 +386,25 @@ pre.yaml {
 .col-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   padding: 2px 0;
 }
-.col-row .col-name { color: var(--muted); flex: 1; }
+.col-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+.col-row .col-name {
+  color: var(--muted);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .col-row.on .col-name { color: var(--text); }
-.col-row .col-type { color: var(--accent); font-family: ui-monospace, monospace; font-size: 10px; }
-.col-row .rename { flex: 1; padding: 2px 4px; font-size: 12px; }
-.col-row select { padding: 1px 2px; font-size: 11px; }
+.col-row .col-type { color: var(--accent); font-family: ui-monospace, monospace; font-size: 10px; flex: 0 0 auto; }
+/* The rename input must be allowed to shrink (min-width:0) so the type chip
+   beside it never pushes past the node edge — `.node-cols`'s overflow-y:auto
+   forces overflow-x:auto, which would otherwise clip the chip. */
+.col-row .rename { flex: 1 1 auto; min-width: 0; padding: 2px 4px; font-size: 12px; }
+.col-row select { flex: 0 0 84px; width: 84px; padding: 1px 2px; font-size: 11px; }
 .col-row.special { cursor: pointer; }
 .col-row .leaf-kind {
   font-size: 10px;
