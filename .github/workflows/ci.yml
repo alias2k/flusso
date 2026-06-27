@@ -117,3 +117,34 @@ jobs:
           name: fuzz-artifacts
           path: libs/1-sources/1-postgres/fuzz/artifacts/
           if-no-files-found: ignore
+
+  designer-frontend:
+    name: designer SPA (build + no drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/design/frontend/package-lock.json
+
+      # The built SPA is committed to `apps/design/dist/` so the Rust crate
+      # (rust-embed) builds with no Node toolchain. Rebuild it from source and
+      # fail if it drifts from what's committed — a reproducible `npm ci` + Vite
+      # build yields identical (content-hashed) output for the same source.
+      - name: Build the SPA
+        working-directory: apps/design/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Check the committed dist is up to date
+        run: |
+          if ! git diff --quiet -- apps/design/dist; then
+            echo "::error::apps/design/dist is stale — run 'npm --prefix apps/design/frontend ci && npm --prefix apps/design/frontend run build' and commit the result."
+            git --no-pager diff --stat -- apps/design/dist
+            exit 1
+          fi

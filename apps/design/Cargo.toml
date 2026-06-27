@@ -10,6 +10,9 @@ homepage.workspace = true
 keywords.workspace = true
 categories = ["database", "development-tools"]
 readme.workspace = true
+# The published crate needs only the built `dist/` (embedded via rust-embed),
+# not the frontend toolchain/source that produces it.
+exclude = ["frontend"]
 
 [lib]
 name = "design"

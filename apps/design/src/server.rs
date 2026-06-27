@@ -2,7 +2,7 @@
 //!
 //! [`serve`] binds a local address and runs until the process is signalled. The
 //! API is rooted at `/api/*`; everything else falls through to the embedded
-//! frontend ([`crate::assets`]). State is just the path to the `flusso.toml`
+//! frontend (the `assets` module). State is just the path to the `flusso.toml`
 //! being edited — the file is the source of truth, re-read per request, so the
 //! server holds no model of its own.
 
