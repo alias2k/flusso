@@ -62,16 +62,20 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema, indexName, setNodes, setEdges]);
 
-  // Estimates can't know real heights, so once React Flow has *measured* every
-  // node, re-run the tidy layout with those true heights. Re-tidies when the
-  // node set changes (add/remove/switch index) or when the catalog first loads
-  // (FK suggestions change node heights) — not on every field edit, so editing
-  // never reshuffles the canvas. Manual drags (overrides) still win.
+  // Estimates can't know real heights, so re-run the tidy layout keyed on the
+  // *measured* heights themselves: whenever a node's real height changes — the
+  // catalog loading (FK suggestions grow the footer), adding/removing a field,
+  // switching index — re-tidy with the true heights. Renames/type changes don't
+  // change height, so they don't reshuffle. Position-only updates don't change
+  // the signature, so this never loops. Manual drags (overrides) still win.
   const laidOut = useRef("");
   useEffect(() => {
-    const sig = `${indexName}|${catalog ? "c" : ""}|${nodes.map((n) => n.id).sort().join(",")}`;
-    if (sig === laidOut.current) return;
     if (!nodes.length || nodes.some((n) => !n.measured?.height)) return; // wait for measurement
+    const sig = `${indexName}|${nodes
+      .map((n) => `${n.id}:${Math.round(n.measured?.height ?? 0)}`)
+      .sort()
+      .join(",")}`;
+    if (sig === laidOut.current) return;
     laidOut.current = sig;
     const docNodes = nodes.map((n) => (n.data as { node: DocNode }).node);
     const heights = new Map(nodes.map((n) => [n.id, n.measured?.height ?? 0]));
@@ -80,7 +84,7 @@ export function Canvas() {
     setNodes((current) =>
       current.map((n) => ({ ...n, position: overrides[n.id] ?? auto[n.id] ?? n.position })),
     );
-  }, [nodes, indexName, catalog, setNodes]);
+  }, [nodes, indexName, setNodes]);
 
   return (
     <ReactFlow
