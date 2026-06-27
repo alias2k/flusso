@@ -33,6 +33,9 @@ pub(crate) struct DesignArgs {
 }
 
 pub(crate) async fn execute(args: DesignArgs) -> anyhow::Result<()> {
+    // Install the same stderr logging the daemon uses, so the designer's
+    // "listening at <url>" line (and any warnings) actually reach the terminal.
+    let _tracing = crate::telemetry::init_tracing();
     design::serve(DesignOptions {
         config_path: args.config,
         address: args.address,

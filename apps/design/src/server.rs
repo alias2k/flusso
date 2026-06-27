@@ -47,7 +47,7 @@ pub async fn serve(options: DesignOptions) -> Result<()> {
     let listener = TcpListener::bind(options.address).await?;
     let local = listener.local_addr()?;
     let url = format!("http://{local}");
-    tracing::info!(address = %local, url = %url, "flusso designer listening");
+    tracing::info!(%url, "flusso designer ready — open {url} in your browser");
 
     // Best-effort: the socket is already bound (connections queue until `serve`
     // accepts), so the browser can open immediately. A failure to launch one
