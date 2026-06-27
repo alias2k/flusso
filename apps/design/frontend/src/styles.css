@@ -473,8 +473,23 @@ pre.yaml {
 
 /* React Flow uses light defaults; nudge them toward the dark theme. */
 .react-flow__edge-text { fill: var(--muted); font-size: 10px; }
-.react-flow__controls button { background: var(--panel-2); color: var(--text); border-color: var(--border); }
 .react-flow__minimap { background: var(--panel) !important; }
+
+/* Theme the zoom/fit/lock controls via xyflow's own CSS variables — overriding
+   only `color`/`background` leaves their SVG icons at the light-theme fill, so
+   icons vanish against the dark buttons. */
+.react-flow {
+  --xy-controls-button-background-color: var(--panel-2);
+  --xy-controls-button-background-color-hover: var(--border);
+  --xy-controls-button-color: var(--text);
+  --xy-controls-button-color-hover: var(--accent);
+  --xy-controls-button-border-color: var(--border);
+}
+/* Belt-and-braces: force the icon fill in case a build predates those vars. */
+.react-flow__controls-button { background: var(--panel-2); border-bottom: 1px solid var(--border); }
+.react-flow__controls-button svg { fill: var(--text); }
+.react-flow__controls-button:hover { background: var(--border); }
+.react-flow__controls-button:hover svg { fill: var(--accent); }
 
 /* ── collapsible sidebars ───────────────────────────────────────────────── */
 .layout {
