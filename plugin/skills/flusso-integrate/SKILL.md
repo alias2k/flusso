@@ -28,6 +28,8 @@ For the field/schema syntax itself, lean on the **flusso-schema** skill. This sk
 4. flusso run                — backfill, then follow live
 ```
 
+> **Shortcut for steps 1–2:** once the `[source]` connection is set, `flusso design --config flusso.toml` opens a database-aware web UI that authors the `flusso.toml` index wiring and the `*.schema.yml` for you — pick tables/columns from the live DB, preview the document, save. Then resume at step 3.
+
 ### 1. `flusso.toml`
 
 ```toml

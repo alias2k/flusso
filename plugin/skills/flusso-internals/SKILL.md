@@ -24,6 +24,7 @@ Crates under `libs/` and `apps/`. A crate depends **only on lower-numbered layer
 - **Layer 2** — `2-engine` (the orchestrator) and `2-schema` (config loading: the file parsers `1-config-toml`/`1-index-yaml`, the assembled `Config`, conversion, loader). Parsers live at layer 2 **on purpose** so layer-1 backends can't reach config-loading machinery.
 - **`libs/3-daemon`** — the domain: assembles the pipeline from a `Config` but names **no** concrete backend (backends arrive via the `Backends` trait). Telemetry-agnostic, owns no transport.
 - **`apps/cli`** — the **composition root**: the one crate that names concrete backends, installs telemetry, serves HTTP, owns signals.
+- **`apps/design`** (`flusso-design`) — the `flusso design` visual schema designer: an axum server + embedded React SPA that introspects the source, edits the files, previews the document/mapping, and writes them back. Depends on `schema` + `sources-postgres`; the CLI's `design` subcommand is a thin wrapper.
 
 ## The pipeline (`libs/2-engine/src/lib.rs`)
 
@@ -45,6 +46,7 @@ The engine is the only orchestrator; everything it drives is a **trait object**.
 
 - **Add a source/sink backend** → a new match arm in `apps/cli/src/backends.rs` (`FlussoBackends`) plus its crate. The daemon and engine are untouched. The source builder takes a `SourceSpec` (enabled indexes + schemas, layer-0 types), not the whole `Config` — translation is `backends.rs`'s `source_spec` helper.
 - **Change the daemon wiring** → `libs/3-daemon/src/` (`lib.rs` `Daemon`/`RunningDaemon`, `observer.rs`, `status.rs`, `lag.rs`). It exposes *data*: `Observer` events + a `Status` handle.
+- **Catalog introspection (for the designer / discovery tooling)** → `sources-core`'s `SchemaIntrospection` trait (`introspection.rs`) enumerates the relational catalog (`RelationalCatalog`); `junction_candidates` is a free function over it. Backed per-source (`sources-postgres` over `pg_catalog`). It's the third source-neutral capability beside `Catalog` (one column's type) and `CaptureProvisioning` (coverage). Codegen/preview live in `apps/design` (`codegen.rs`, `preview.rs`); the designer's model is the validated vocabulary itself (`IndexSchema`/`ConfigToml` as JSON), so there's no parallel model.
 - **Transport/telemetry/signals** → `apps/cli/src/` (`telemetry/`, `http/` public+private routers + auth, `commands/run.rs` restart loop).
 
 ## Config layer — two-stage parse then convert

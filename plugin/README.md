@@ -22,7 +22,7 @@ One module per domain, layered the way flusso is (source → bridge → sink). T
 | Skill | Use when |
 | --- | --- |
 | `flusso-postgres` | Understanding/debugging the **source** — logical replication, the slot, the publication (`manage_publication`), `REPLICA IDENTITY`, relational→join mapping, privileges. |
-| `flusso-schema` | Creating/editing a `*.schema.yml` or `flusso.toml` — type-first fields, joins, aggregates, geo, filters, soft-delete, validation. |
+| `flusso-schema` | Creating/editing a `*.schema.yml` or `flusso.toml` — type-first fields, joins, aggregates, geo, filters, soft-delete, validation. Points to `flusso design` (the visual, DB-aware editor) for a no-grammar path. |
 | `flusso-query` | Writing read-side Rust with `flusso-query` + `#[derive(FlussoDocument)]` — typed query surface, nested filtering, custom value types, multi-index. |
 | `flusso-opensearch` | Understanding the **sink** — `dynamic:strict` ownership, hashed index + alias, generations/reindex, the `flusso_*` analyzers + subfields (which to query), refresh. |
 | `flusso-integrate` | Standing flusso up in a project or migrating from a hand-rolled indexer — prerequisites, config, first index, `check`, `run`, `build`. |
