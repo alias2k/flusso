@@ -13,11 +13,13 @@
   --warn: #e0b341;
   --ok: #34d399;
 
-  /* relation-kind hues (match theme.ts edgeColor) */
-  --k-root: #10b981;
-  --k-object: #a78bfa;
-  --k-toone: #38bdf8;
-  --k-tomany: #34d399;
+  /* relation-kind hues — one per kind (match theme.ts edgeColor) */
+  --k-root: #fb923c; /* orange */
+  --k-object: #a78bfa; /* violet */
+  --k-belongs_to: #38bdf8; /* sky */
+  --k-has_one: #818cf8; /* indigo */
+  --k-has_many: #34d399; /* green */
+  --k-many_to_many: #f472b6; /* pink */
 
   /* field-type hues */
   --t-string: #e2b15e;
@@ -431,10 +433,12 @@ pre.yaml {
   background: var(--panel-3);
   color: var(--muted);
 }
-.badge.root { background: var(--k-root); color: #04140e; }
-.badge.has_many, .badge.many_to_many { background: var(--k-tomany); color: #04140e; }
-.badge.belongs_to, .badge.has_one { background: var(--k-toone); color: #04140e; }
+.badge.root { background: var(--k-root); color: #2a1402; }
 .badge.object { background: var(--k-object); color: #1a0f2e; }
+.badge.belongs_to { background: var(--k-belongs_to); color: #04212e; }
+.badge.has_one { background: var(--k-has_one); color: #0f1130; }
+.badge.has_many { background: var(--k-has_many); color: #04140e; }
+.badge.many_to_many { background: var(--k-many_to_many); color: #2e0a1d; }
 
 .node-cols {
   padding: 6px 8px;
@@ -603,10 +607,10 @@ button.icon:hover {
 }
 .flow-node.kind-root { --kc: var(--k-root); }
 .flow-node.kind-object { --kc: var(--k-object); }
-.flow-node.kind-belongs_to,
-.flow-node.kind-has_one { --kc: var(--k-toone); }
-.flow-node.kind-has_many,
-.flow-node.kind-many_to_many { --kc: var(--k-tomany); }
+.flow-node.kind-belongs_to { --kc: var(--k-belongs_to); }
+.flow-node.kind-has_one { --kc: var(--k-has_one); }
+.flow-node.kind-has_many { --kc: var(--k-has_many); }
+.flow-node.kind-many_to_many { --kc: var(--k-many_to_many); }
 .flow-node.selected {
   border-color: var(--accent);
   box-shadow: inset 3px 0 0 var(--kc), 0 0 0 2px var(--accent), 0 12px 32px rgba(0, 0, 0, 0.5);

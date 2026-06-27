@@ -29,17 +29,19 @@ export function typeClass(label: string): string {
   return "t-other";
 }
 
-/// Edge stroke colour by relation verb (matches the node-kind hues in CSS).
+/// Edge stroke colour by relation verb (matches the per-kind hues in CSS).
 export function edgeColor(label: string): string {
   switch (label) {
     case "object":
-      return "#a78bfa";
+      return "#a78bfa"; // violet
     case "belongs_to":
+      return "#38bdf8"; // sky
     case "has_one":
-      return "#38bdf8";
+      return "#818cf8"; // indigo
     case "has_many":
+      return "#34d399"; // green
     case "many_to_many":
-      return "#34d399";
+      return "#f472b6"; // pink
     default:
       return "#8a93a3";
   }
