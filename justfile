@@ -76,6 +76,11 @@ help:
 run-live: up
     cargo run -- run --config {{config}} --public-address {{public_address}} --skip-backfill
 
+# Bring the stack up, then open the visual schema designer at http://127.0.0.1:7700
+# (introspects the dev Postgres, edits dev/*.schema.yml + dev/flusso.toml live).
+design: up
+    cargo run -- design --config {{config}}
+
 # Serve the dev read API (axum, dev/search-api) over the synced indexes (:8080).
 api: up
     cargo run -p flusso-dev-search-api
