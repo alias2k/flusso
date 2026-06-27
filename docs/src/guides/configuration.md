@@ -463,7 +463,7 @@ are set** — env is the fallback.
 
 | Variable | Flag | Commands |
 | --- | --- | --- |
-| `FLUSSO_CONFIG` | `--config` | `build`, `check`, `run` |
+| `FLUSSO_CONFIG` | `--config` | `build`, `check`, `run`, `design` |
 | `FLUSSO_OUT` | `--out` | `build` |
 | `FLUSSO_LOCK` | `--lock` | `run` |
 | `FLUSSO_LOCKED` | `--locked` | `run` |
@@ -482,6 +482,7 @@ are set** — env is the fallback.
 | `FLUSSO_INDEX_PREFIX` | `--index-prefix` | `run` |
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
 | `FLUSSO_FORMAT` | `--format` | `check` |
+| `FLUSSO_DESIGN_ADDRESS` | `--address` | `design` |
 | `FLUSSO_SCHEMA` | the schema-kind argument | `schema` |
 
 `flusso <cmd> --help` shows the matching `[env: FLUSSO_…]` next to each flag.

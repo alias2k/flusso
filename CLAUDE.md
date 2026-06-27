@@ -512,7 +512,8 @@ belongs in the linked docs.
   (license, repo, authors, keywords, readme) lives in `[workspace.package]`; crates inherit it
   with `.workspace = true`, and set their own `description` + `categories`. **Publish order is
   bottom-up** (a dep must be on crates.io before its dependents): `flusso-schema-core` → parsers →
-  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-query-derive` →
+  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-design`
+  (depends on `flusso-schema` + `flusso-sources-postgres`) → `flusso-query-derive` →
   `flusso-query` → `flusso-cli`.
 - `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
   completion live **inside the parser crate that owns each** (so they ship in the published
