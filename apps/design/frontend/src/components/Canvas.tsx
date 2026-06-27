@@ -40,41 +40,36 @@ export function Canvas() {
     return 64 + colsH + footerH;
   };
 
-  // Re-project the tree to nodes/edges on every schema change. Persisted drag
-  // positions (localStorage) win over the auto-layout, so manual arrangement
-  // survives structural edits; new nodes fall back to the tidy layout.
+  // Re-project the tree to nodes/edges on every schema change, but *keep each
+  // existing node's current position* — only brand-new nodes get an estimated
+  // slot. So a field edit never moves anything, and this never clobbers the
+  // measured layout (below) or a manual drag. Deliberately NOT keyed on
+  // `catalog`: it arrives async, and re-running here would reset positions.
   useEffect(() => {
     const graph = projectGraph(schema);
     const auto = autoLayout(graph.nodes, estimateHeight);
     const overrides = loadOverrides(indexName);
-    setNodes(
-      graph.nodes.map((n) => ({
+    setNodes((prev) => {
+      const prevPos = new Map(prev.map((n) => [n.id, n.position]));
+      return graph.nodes.map((n) => ({
         id: n.id,
         type: "doc",
-        position: overrides[n.id] ?? auto[n.id] ?? { x: 0, y: 0 },
+        position: overrides[n.id] ?? prevPos.get(n.id) ?? auto[n.id] ?? { x: 0, y: 0 },
         data: { node: n },
-      })),
-    );
-    setEdges(
-      graph.edges.map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        label: e.label,
-      })),
-    );
-    // `catalog` participates because the height estimate (and so the layout)
-    // depends on it; it arrives asynchronously after the first render.
+      }));
+    });
+    setEdges(graph.edges.map((e) => ({ id: e.id, source: e.source, target: e.target, label: e.label })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schema, indexName, catalog, setNodes, setEdges]);
+  }, [schema, indexName, setNodes, setEdges]);
 
   // Estimates can't know real heights, so once React Flow has *measured* every
-  // node, re-run the tidy layout with those true heights — but only when the
-  // node *set* changes (add/remove/switch index), not on every field edit, so
-  // editing never reshuffles the canvas. Manual drags (overrides) still win.
+  // node, re-run the tidy layout with those true heights. Re-tidies when the
+  // node set changes (add/remove/switch index) or when the catalog first loads
+  // (FK suggestions change node heights) — not on every field edit, so editing
+  // never reshuffles the canvas. Manual drags (overrides) still win.
   const laidOut = useRef("");
   useEffect(() => {
-    const sig = `${indexName}::${nodes.map((n) => n.id).sort().join(",")}`;
+    const sig = `${indexName}|${catalog ? "c" : ""}|${nodes.map((n) => n.id).sort().join(",")}`;
     if (sig === laidOut.current) return;
     if (!nodes.length || nodes.some((n) => !n.measured?.height)) return; // wait for measurement
     laidOut.current = sig;
@@ -85,7 +80,7 @@ export function Canvas() {
     setNodes((current) =>
       current.map((n) => ({ ...n, position: overrides[n.id] ?? auto[n.id] ?? n.position })),
     );
-  }, [nodes, indexName, setNodes]);
+  }, [nodes, indexName, catalog, setNodes]);
 
   return (
     <ReactFlow

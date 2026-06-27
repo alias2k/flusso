@@ -9,7 +9,7 @@ import type { DocNode } from "./tree";
 export type Positions = Record<string, { x: number; y: number }>;
 
 const COL_W = 360;
-const GAP = 44;
+const GAP = 28;
 
 /// `height(node)` is the caller's pixel estimate of a node's rendered height
 /// (the canvas knows the catalog, so it can estimate column/footer rows).
