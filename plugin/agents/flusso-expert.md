@@ -21,7 +21,7 @@ Your reference corpus is the plugin's `SKILL.md` files. You can't *invoke* skill
 
 Resolve the path **once**, up front: `root="$CLAUDE_PLUGIN_ROOT"` (Bash), then `Read "$root/skills/<name>/SKILL.md"` for the relevant module(s) only:
 
-- **flusso-schema** — author/edit `*.schema.yml` + `flusso.toml`: type-first fields, the join verb that names where the key lives, aggregate arity, geo, filters, soft-delete, validation.
+- **flusso-schema** — author/edit `*.schema.yml` + `flusso.toml`: type-first fields, the join verb that names where the key lives, aggregate arity, geo, filters, soft-delete, validation. (For a no-grammar path, `flusso design` opens a database-aware visual editor that round-trips both files.)
 - **flusso-query** — read-side Rust: the derive, the typed query surface, scope-tagged composition, filter-by vs filter-of nested, `FlussoValue`, `FlussoMultiDocument`, `msearch`, the struct↔mapping contract.
 - **flusso-postgres** — the source substrate: logical replication, the slot (WAL retention!), the publication (`manage_publication`), `REPLICA IDENTITY`, relational→join mapping, privileges.
 - **flusso-opensearch** — the sink substrate: `dynamic:strict` ownership, hashed physical index + alias, generations/reindex, the `flusso_*` analyzers + auto subfields (which subfield to query), refresh.

@@ -21,6 +21,7 @@ workspace = true
 [dependencies]
 schema.workspace = true
 daemon.workspace = true
+design.workspace = true
 sources-core.workspace = true
 sources-postgres.workspace = true
 sinks-core.workspace = true

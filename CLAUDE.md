@@ -73,6 +73,16 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   the build). Match these before assuming green. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step.
+- **The designer (`apps/design`) has three test layers.** (1) A property/"fuzz" round-trip
+  (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
+  `codegen → parse → convert` identity — an ordinary test, caught by the nextest step. (2) A
+  `designer-frontend` CI job: `npm ci && npm run build`, then a `git diff` guard that the committed
+  `apps/design/dist/` matches a fresh Vite build (the embedded SPA must not drift). (3) A
+  `designer-e2e` CI job: spins a seeded Postgres, builds the binary, then a **Playwright** suite
+  (`apps/design/frontend/e2e/`) drives the *real* served UI (load/add/edit/delete/collapse) and runs
+  the **UI-save → `flusso check`** pipeline. Locally: `just design-e2e` (needs Docker + downloads
+  Chromium). The browser e2e is the only net that catches *rendered/interaction* regressions —
+  builds and `curl` checks are blind to them.
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
   `flusso-query-derive`'s trybuild UI tests (`apps/query-derive/tests/ui/*.stderr`) compare
@@ -225,7 +235,14 @@ and, when allowed, provisions the gap. Postgres backs it with a **publication**
 WalChangeCapture`): `run` auto-creates/extends it on `live` (after `ensure_slot`) when the role
 is privileged enough and `manage_publication` isn't opted out, else warns with the exact SQL;
 `check` inspects read-only and prints the same. The trait/report never name "publication", so
-the daemon/CLI/printer stay backend-neutral. The daemon
+the daemon/CLI/printer stay backend-neutral. A third source-neutral capability is
+`SchemaIntrospection` (`libs/1-sources/0-core/src/introspection.rs`): where `Catalog` answers
+"the type of *this* column" and `CaptureProvisioning` answers "is this table set coverable",
+`introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
+columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven tooling can pick
+from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m
+junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual designer
+(`apps/design`) is its first consumer. The daemon
 wires a `StatusObserver` (`observer.rs`) that updates a
 shared `Status` (`status.rs`), runs the engine, and polls source capture lag out-of-band
 (`lag.rs` over `ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
@@ -440,7 +457,8 @@ belongs in the linked docs.
 | `flusso.toml` parsing (entities only; conversion is in the `schema` loader) | `libs/2-schema/1-config-toml/src/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/2-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/1-sources/1-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
-| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for the last two) |
+| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
+| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, `components/` the canvas/nodes/inspector, `e2e/` the Playwright suite + save→check pipeline), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs` |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/1-sinks/2-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
@@ -504,7 +522,8 @@ belongs in the linked docs.
   (license, repo, authors, keywords, readme) lives in `[workspace.package]`; crates inherit it
   with `.workspace = true`, and set their own `description` + `categories`. **Publish order is
   bottom-up** (a dep must be on crates.io before its dependents): `flusso-schema-core` → parsers →
-  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-query-derive` →
+  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-design`
+  (depends on `flusso-schema` + `flusso-sources-postgres`) → `flusso-query-derive` →
   `flusso-query` → `flusso-cli`.
 - `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
   completion live **inside the parser crate that owns each** (so they ship in the published

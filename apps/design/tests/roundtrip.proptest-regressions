@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b4e1ed281004c39b2fa8ce1e363386613440312285f3afcd6d1d01a27fec5d57 # shrinks to schema = IndexSchema { version: 1, table: TableName("t_a"), db_schema: DatabaseSchema("public"), primary_key: Some(ColumnName("a")), doc_id: None, soft_delete: None, filters: None, fields: [Field { field: FieldName("f0"), options: {}, source: Group([Field { field: FieldName("f0"), options: {}, source: Relation(Join(Join { table: TableName("t_a"), kind: HasMany { foreign_key: ColumnName("a") }, primary_key: ColumnName("a"), nullable: true, filters: None, order_by: None, limit: None, fields: [Field { field: FieldName("f0"), options: {}, source: Column(Column { column: ColumnName("a"), ty: Text, nullable: false, transforms: [], default: None }) }] })) }]) }] }

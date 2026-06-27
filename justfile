@@ -76,6 +76,17 @@ help:
 run-live: up
     cargo run -- run --config {{config}} --public-address {{public_address}} --skip-backfill
 
+# Bring the stack up, then open the visual schema designer at http://127.0.0.1:7700
+# (introspects the dev Postgres, edits dev/*.schema.yml + dev/flusso.toml live).
+design: up
+    cargo run -- design --config {{config}}
+
+# Run the designer's browser e2e suite (Playwright) + the save→check pipeline.
+# Needs the dev Postgres (brought up here); downloads Chromium on first run.
+design-e2e: up
+    cargo build -p flusso-cli
+    cd apps/design/frontend && npm ci && npx playwright install chromium && npm run test:e2e
+
 # Serve the dev read API (axum, dev/search-api) over the synced indexes (:8080).
 api: up
     cargo run -p flusso-dev-search-api
