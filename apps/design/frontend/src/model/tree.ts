@@ -69,10 +69,15 @@ function joinVerb(kind: JoinKind): NodeKind {
 import { fieldKind } from "../fields";
 
 /// The child fields of the container at `path` (the root's `fields` for `[]`).
+/// Returns `[]` for a stale path (an index past the array) — React Flow's
+/// controlled nodes lag a render behind a delete, so a just-removed node may
+/// briefly project against the new, shorter tree.
 export function nodeFields(schema: IndexSchema, path: number[]): Field[] {
   let fields = schema.fields;
   for (const idx of path) {
-    const cf = childFields(fields[idx]);
+    const field = fields[idx];
+    if (!field) return [];
+    const cf = childFields(field);
     if (!cf) return [];
     fields = cf;
   }
@@ -117,6 +122,7 @@ export function effectiveTable(schema: IndexSchema, path: number[]): string {
   let fields = schema.fields;
   for (const idx of path) {
     const field = fields[idx];
+    if (!field) break; // stale path (see `nodeFields`)
     const s = field.source;
     if ("relation" in s && "join" in s.relation) table = s.relation.join.table;
     fields = childFields(field) ?? [];
