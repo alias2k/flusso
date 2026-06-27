@@ -18,6 +18,9 @@
 //! - [`check`](commands::check) validates the config and every schema, prints the fully-typed
 //!   mapping (database-free), and — unless `--offline` — also confirms the
 //!   declared types and nullability agree with the live database.
+//! - [`design`](commands::design) opens a local web UI that introspects the
+//!   configured source through the source abstraction, edits the `flusso.toml`
+//!   and `*.schema.yml` files in place, and previews the document/mapping.
 //! - [`schema_cmd`](commands::schema_cmd) prints an embedded JSON Schema for editor assist — the
 //!   `flusso.toml` config schema or the `*.schema.yml` index schema — so a user
 //!   can pin the schema that matches their installed version.
@@ -37,6 +40,7 @@ use clap::{Parser, Subcommand};
 use commands::admin::{IndexesArgs, ReindexArgs};
 use commands::build::BuildArgs;
 use commands::check::CheckArgs;
+use commands::design::DesignArgs;
 use commands::run::RunArgs;
 use commands::schema_cmd::SchemaArgs;
 
@@ -63,6 +67,8 @@ enum Command {
     Run(RunArgs),
     /// Validate the config and schemas without running the pipeline.
     Check(CheckArgs),
+    /// Open the visual schema designer (a local web UI).
+    Design(DesignArgs),
     /// Print an embedded JSON Schema for editor assist.
     Schema(SchemaArgs),
     /// List a running server's indexes and their state.
@@ -77,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Build(args) => commands::build::execute(args),
         Command::Run(args) => commands::run::execute(args).await,
         Command::Check(args) => commands::check::execute(args).await,
+        Command::Design(args) => commands::design::execute(args).await,
         Command::Schema(args) => commands::schema_cmd::execute(args),
         Command::Indexes(args) => commands::admin::indexes(args).await,
         Command::Reindex(args) => commands::admin::reindex(args).await,

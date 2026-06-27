@@ -1027,6 +1027,7 @@ dependencies = [
  "base64",
  "clap",
  "flusso-daemon",
+ "flusso-design",
  "flusso-schema",
  "flusso-sinks-core",
  "flusso-sinks-opensearch",
