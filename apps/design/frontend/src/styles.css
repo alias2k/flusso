@@ -500,3 +500,10 @@ button.icon:hover {
   right: 8px;
   font-size: 13px;
 }
+
+/* node rows are now display-only: click to edit in the inspector */
+.col-row.on, .col-row.special { cursor: pointer; border-radius: 4px; }
+.col-row.on:hover, .col-row.special:hover { background: var(--panel-2); }
+.col-row.sel { background: var(--accent-2); }
+.col-row.sel .col-name, .col-row.sel .col-type, .col-row.sel .leaf-kind { color: #fff; }
+.col-from { color: var(--muted); font-size: 10px; margin-left: 4px; }

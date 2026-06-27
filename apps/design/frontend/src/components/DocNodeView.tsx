@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { SCALAR_TYPES, type Column, type Field, type FlussoType } from "../api";
+import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
 import * as edit from "../model/edit";
 import { suggestRelations } from "../model/relations";
 import { nodeFields, type DocNode, type LeafField } from "../model/tree";
@@ -11,7 +11,7 @@ const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as cons
 
 export function DocNodeView({ data, selected }: NodeProps) {
   const node = (data as { node: DocNode }).node;
-  const { catalog, schema, apply, select, columnsFor } = useDesign();
+  const { catalog, schema, apply, select, selection, columnsFor } = useDesign();
   const cols = columnsFor(node.table);
   const fields = nodeFields(schema, node.path);
 
@@ -26,8 +26,18 @@ export function DocNodeView({ data, selected }: NodeProps) {
     (l) => !((SCALAR_TYPES as string[]).includes(l.kind) && l.column && catalogCols.has(l.column)),
   );
 
-  const setLeaf = (index: number, field: Field) => apply((s) => edit.setLeaf(s, node.path, index, field));
-  const rename = (l: LeafField, name: string, original: Field) => setLeaf(l.index, { ...original, field: name });
+  const fieldSelected = (index: number) =>
+    selection?.kind === "field" && selection.path.join(".") === node.path.join(".") && selection.index === index;
+
+  const includeColumn = (c: ColumnShape) => {
+    // The new scalar appends to the container, so its index is the current count.
+    apply((s) => edit.toggleColumn(s, node.path, c.name, true, c.suggested_type ?? "keyword", c.nullable));
+    select({ kind: "field", path: node.path, index: fields.length });
+  };
+  const excludeColumn = (c: ColumnShape, inc: LeafField) => {
+    if (fieldSelected(inc.index)) select(null);
+    apply((s) => edit.toggleColumn(s, node.path, c.name, false));
+  };
 
   return (
     <div className={`flow-node kind-${node.kind}${selected ? " selected" : ""}`}>
@@ -57,49 +67,31 @@ export function DocNodeView({ data, selected }: NodeProps) {
       <div className="node-cols">
         {cols.map((c) => {
           const inc = includedByCol.get(c.name);
-          const field = inc ? fields[inc.index] : null;
+          const renamed = inc && inc.name !== c.name;
           return (
-            <div className={`col-row${inc ? " on" : ""}`} key={c.name}>
+            <div
+              className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}`}
+              key={c.name}
+              onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
+            >
               <input
                 type="checkbox"
                 checked={!!inc}
-                onChange={(e) =>
-                  apply((s) =>
-                    edit.toggleColumn(s, node.path, c.name, e.target.checked, c.suggested_type ?? "keyword", c.nullable),
-                  )
-                }
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => (e.target.checked ? includeColumn(c) : inc && excludeColumn(c, inc))}
               />
-              {inc && field ? (
-                <>
-                  <input
-                    className="rename"
-                    value={inc.name}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => rename(inc, e.target.value, field)}
-                  />
-                  <select
-                    value={inc.ty as string}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => setLeaf(inc.index, withTy(field, e.target.value as FlussoType))}
-                  >
-                    {(SCALAR_TYPES as string[]).map((t) => (
-                      <option key={t}>{t}</option>
-                    ))}
-                  </select>
-                </>
-              ) : (
-                <>
-                  <span className="col-name">{c.name}</span>
-                  <span className="col-type">{typeLabel(c.suggested_type)}</span>
-                </>
-              )}
+              <span className="col-name" title={renamed ? `column: ${c.name}` : undefined}>
+                {inc ? inc.name : c.name}
+                {renamed ? <span className="col-from"> ← {c.name}</span> : null}
+              </span>
+              <span className="col-type">{inc ? (inc.ty as string) : typeLabel(c.suggested_type)}</span>
             </div>
           );
         })}
 
         {extraLeaves.map((l) => (
           <div
-            className="col-row special"
+            className={`col-row special${fieldSelected(l.index) ? " sel" : ""}`}
             key={`x${l.index}`}
             onClick={() => select({ kind: "field", path: node.path, index: l.index })}
           >
@@ -136,14 +128,6 @@ export function DocNodeView({ data, selected }: NodeProps) {
       <Handle type="source" position={Position.Right} />
     </div>
   );
-}
-
-function withTy(field: Field, ty: FlussoType): Field {
-  if ("column" in field.source) {
-    const col: Column = { ...field.source.column, ty };
-    return { ...field, source: { column: col } };
-  }
-  return field;
 }
 
 function typeLabel(ty?: FlussoType): string {
