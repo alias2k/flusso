@@ -30,6 +30,7 @@ export default function App() {
   const [schemas, setSchemas] = useState<Record<string, IndexSchema>>({});
   const [active, setActive] = useState<string>("config"); // "config" or an index name
   const [selection, setSelection] = useState<Selection>(null);
+  const [leftOpen, setLeftOpen] = useState(true);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[] | null>(null);
   const [drawer, setDrawer] = useState(false);
@@ -57,6 +58,9 @@ export default function App() {
   }, [catalog]);
 
   const schema = active !== "config" ? schemas[active] : undefined;
+  // The inspector earns its column only when something's selected — otherwise the
+  // canvas gets the room.
+  const inspectorOpen = active !== "config" && !!schema && selection !== null;
 
   // Debounced live preview of the active index.
   useEffect(() => {
@@ -121,6 +125,9 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
+        <button className="icon" title={leftOpen ? "Hide sidebar" : "Show sidebar"} onClick={() => setLeftOpen((o) => !o)}>
+          ☰
+        </button>
         <span className="brand">flusso designer</span>
         <span className="path">{project.config_path}</span>
         <span className="spacer" />
@@ -135,20 +142,25 @@ export default function App() {
       {error && <div className="banner error">{error}</div>}
       {catalog?.error && <div className="banner warn">Database not reachable — offline authoring only.</div>}
 
-      <div className="layout">
-        <nav className="sidebar">
-          <button className={active === "config" ? "nav active" : "nav"} onClick={() => setActive("config")}>
-            ⚙ Deployment
-          </button>
-          <div className="nav-heading">Indexes</div>
-          {(config.index ?? []).map((e) => (
-            <button key={e.name} className={active === e.name ? "nav active" : "nav"} onClick={() => openIndex(e.name)}>
-              {e.name}
-              {!e.enabled && <span className="muted"> (off)</span>}
+      <div
+        className="layout"
+        style={{ gridTemplateColumns: `${leftOpen ? "210px" : "0"} 1fr ${inspectorOpen ? "360px" : "0"}` }}
+      >
+        {leftOpen && (
+          <nav className="sidebar">
+            <button className={active === "config" ? "nav active" : "nav"} onClick={() => setActive("config")}>
+              ⚙ Deployment
             </button>
-          ))}
-          <NewIndex tables={catalog?.catalog.tables.map((t) => t.name) ?? []} onCreate={createIndex} />
-        </nav>
+            <div className="nav-heading">Indexes</div>
+            {(config.index ?? []).map((e) => (
+              <button key={e.name} className={active === e.name ? "nav active" : "nav"} onClick={() => openIndex(e.name)}>
+                {e.name}
+                {!e.enabled && <span className="muted"> (off)</span>}
+              </button>
+            ))}
+            <NewIndex tables={catalog?.catalog.tables.map((t) => t.name) ?? []} onCreate={createIndex} />
+          </nav>
+        )}
 
         {active === "config" ? (
           <main className="editor">
@@ -164,9 +176,14 @@ export default function App() {
                 </div>
               )}
             </main>
-            <aside className="inspector-pane">
-              <Inspector />
-            </aside>
+            {inspectorOpen && (
+              <aside className="inspector-pane">
+                <button className="icon collapse" title="Close" onClick={() => setSelection(null)}>
+                  ✕
+                </button>
+                <Inspector />
+              </aside>
+            )}
           </DesignProvider>
         ) : null}
       </div>

@@ -464,3 +464,28 @@ pre.yaml {
 .react-flow__edge-text { fill: var(--muted); font-size: 10px; }
 .react-flow__controls button { background: var(--panel-2); color: var(--text); border-color: var(--border); }
 .react-flow__minimap { background: var(--panel) !important; }
+
+/* ── collapsible sidebars ───────────────────────────────────────────────── */
+.layout {
+  transition: grid-template-columns 0.15s ease;
+}
+button.icon {
+  background: none;
+  border: none;
+  font-size: 16px;
+  padding: 2px 8px;
+  color: var(--muted);
+}
+button.icon:hover {
+  color: var(--text);
+  border: none;
+}
+.inspector-pane {
+  position: relative;
+}
+.inspector-pane .collapse {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 13px;
+}
