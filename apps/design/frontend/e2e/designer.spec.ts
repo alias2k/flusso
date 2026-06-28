@@ -54,6 +54,20 @@ test("collapsing the sidebar keeps the canvas visible (regression)", async ({ pa
   await expect(page.locator(".flow-node")).not.toHaveCount(0);
 });
 
+test("undo reverts a structural edit", async ({ page }) => {
+  const before = await page.locator(".flow-node").count();
+  await page.locator(".flow-node.kind-root .suggest").first().click();
+  await expect(page.locator(".flow-node")).toHaveCount(before + 1);
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect(page.locator(".flow-node")).toHaveCount(before);
+});
+
+test("editing marks the index unsaved", async ({ page }) => {
+  await expect(page.locator(".sidebar .dirty-dot")).toHaveCount(0);
+  await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
+  await expect(page.locator(".sidebar .dirty-dot")).not.toHaveCount(0);
+});
+
 test("toggles the minimap", async ({ page }) => {
   await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
   await page.locator(".map-toggle").click();

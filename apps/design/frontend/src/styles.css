@@ -644,3 +644,21 @@ button.icon:hover {
 /* edge label as a subtle pill on the panel colour */
 .react-flow__edge-text { fill: var(--text); font-weight: 600; }
 .react-flow__edge-textbg { fill: var(--panel-2); }
+
+/* unsaved-changes dot + disabled buttons (undo/redo) */
+.dirty-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+button:disabled:hover {
+  border-color: var(--border);
+}

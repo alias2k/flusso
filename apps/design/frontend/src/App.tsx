@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   CatalogResponse,
   ColumnShape,
+  ConfigToml,
   DiagnosticDto,
   IndexSchema,
   PreviewResponse,
@@ -10,11 +11,19 @@ import type {
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { ConfigPanel } from "./components/ConfigPanel";
+import { Icon } from "./components/Icon";
 import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
-import { Icon } from "./components/Icon";
 import { Select, Text } from "./components/widgets";
+import { useHistory } from "./history";
 import { DesignProvider, type Selection } from "./state";
+
+/// The whole editable document: the deployment config + every index's schema.
+/// Held as one value so undo/redo and dirty-tracking cover it uniformly.
+interface Doc {
+  config: ConfigToml;
+  schemas: Record<string, IndexSchema>;
+}
 
 const emptySchema = (table: string, pk?: string): IndexSchema => ({
   version: 1,
@@ -27,9 +36,9 @@ const emptySchema = (table: string, pk?: string): IndexSchema => ({
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
-  const [config, setConfig] = useState<Project["config"] | null>(null);
-  const [schemas, setSchemas] = useState<Record<string, IndexSchema>>({});
-  const [active, setActive] = useState<string>("config"); // "config" or an index name
+  const { present: doc, set: setDoc, undo, redo, reset, canUndo, canRedo } = useHistory<Doc | null>(null);
+  const [saved, setSaved] = useState<string>(""); // JSON of the last loaded/saved doc
+  const [active, setActive] = useState<string>("config");
   const [selection, setSelection] = useState<Selection>(null);
   const [leftOpen, setLeftOpen] = useState(true);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
@@ -43,24 +52,31 @@ export default function App() {
       .project()
       .then((p) => {
         setProject(p);
-        setConfig(p.config);
-        const map: Record<string, IndexSchema> = {};
-        for (const idx of p.indexes) if (idx.schema) map[idx.name] = idx.schema;
-        setSchemas(map);
+        const schemas: Record<string, IndexSchema> = {};
+        for (const idx of p.indexes) if (idx.schema) schemas[idx.name] = idx.schema;
+        const initial: Doc = { config: p.config, schemas };
+        reset(initial);
+        setSaved(JSON.stringify(initial));
         setActive(p.indexes[0]?.name ?? "config");
       })
       .catch((e) => setError(String(e)));
     api.catalog().then(setCatalog).catch((e) => setError(String(e)));
-  }, []);
+  }, [reset]);
 
   const columnsFor = useMemo(() => {
     const tables = catalog?.catalog.tables ?? [];
     return (table: string): ColumnShape[] => tables.find((t) => t.name === table)?.columns ?? [];
   }, [catalog]);
 
-  const schema = active !== "config" ? schemas[active] : undefined;
-  // The inspector earns its column only when something's selected — otherwise the
-  // canvas gets the room.
+  const dirty = !!doc && JSON.stringify(doc) !== saved;
+  const indexDirty = (name: string): boolean => {
+    if (!doc || !saved) return false;
+    const savedDoc = JSON.parse(saved) as Doc;
+    return JSON.stringify(doc.schemas[name]) !== JSON.stringify(savedDoc.schemas[name]);
+  };
+
+  const config = doc?.config;
+  const schema = doc && active !== "config" ? doc.schemas[active] : undefined;
   const inspectorOpen = active !== "config" && !!schema && selection !== null;
 
   // Debounced live preview of the active index.
@@ -75,10 +91,40 @@ export default function App() {
     return () => clearTimeout(handle);
   }, [active, schema]);
 
+  // Undo/redo keybindings — but only when not inside a text field, so native
+  // text undo keeps working while you're typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z") return;
+      const el = document.activeElement as HTMLElement | null;
+      const editing =
+        el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      if (editing) return;
+      e.preventDefault();
+      e.shiftKey ? redo() : undo();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
+
+  // Warn before leaving with unsaved changes.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
   const apply = (fn: (s: IndexSchema) => IndexSchema) => {
     if (active === "config") return;
-    setSchemas((all) => ({ ...all, [active]: fn(all[active] ?? emptySchema("")) }));
+    setDoc((d) =>
+      d ? { ...d, schemas: { ...d.schemas, [active]: fn(d.schemas[active] ?? emptySchema("")) } } : d,
+    );
   };
+  const setConfig = (next: ConfigToml) => setDoc((d) => (d ? { ...d, config: next } : d));
 
   const openIndex = (name: string) => {
     setActive(name);
@@ -87,12 +133,13 @@ export default function App() {
   };
 
   const save = async () => {
-    if (!config) return;
+    if (!doc) return;
     try {
-      const indexes = (config.index ?? [])
-        .filter((e) => schemas[e.name])
-        .map((e) => ({ schema_path: e.schema, schema: schemas[e.name] }));
-      const res = await api.save(config, indexes);
+      const indexes = (doc.config.index ?? [])
+        .filter((e) => doc.schemas[e.name])
+        .map((e) => ({ schema_path: e.schema, schema: doc.schemas[e.name] }));
+      const res = await api.save(doc.config, indexes);
+      setSaved(JSON.stringify(doc));
       setStatus(`Saved ${res.written.length} file(s).`);
       setError("");
     } catch (e) {
@@ -101,9 +148,9 @@ export default function App() {
   };
 
   const validate = async () => {
-    if (!config) return;
-    const indexes = Object.entries(schemas).map(([name, s]) => ({ name, schema: s }));
-    const res = await api.validate(config, indexes);
+    if (!doc) return;
+    const indexes = Object.entries(doc.schemas).map(([name, s]) => ({ name, schema: s }));
+    const res = await api.validate(doc.config, indexes);
     if (!res.db_reachable) {
       setStatus(`Database not reachable: ${res.error}`);
       setDiagnostics(null);
@@ -116,12 +163,18 @@ export default function App() {
 
   const createIndex = (name: string, table: string) => {
     const pk = catalog?.catalog.tables.find((t) => t.name === table)?.primary_key[0];
-    setConfig((c) => (c ? { ...c, index: [...(c.index ?? []), { name, schema: `${name}.schema.yml`, enabled: true }] } : c));
-    setSchemas((all) => ({ ...all, [name]: emptySchema(table, pk) }));
+    setDoc((d) =>
+      d
+        ? {
+            config: { ...d.config, index: [...(d.config.index ?? []), { name, schema: `${name}.schema.yml`, enabled: true }] },
+            schemas: { ...d.schemas, [name]: emptySchema(table, pk) },
+          }
+        : d,
+    );
     openIndex(name);
   };
 
-  if (!project || !config) return <div className="loading">{error || "Loading project…"}</div>;
+  if (!project || !doc || !config) return <div className="loading">{error || "Loading project…"}</div>;
 
   return (
     <div className="app">
@@ -138,9 +191,16 @@ export default function App() {
         <span className="path">{project.config_path}</span>
         <span className="spacer" />
         {status && <span className="status">{status}</span>}
+        <button className="icon" title="Undo (⌘Z)" disabled={!canUndo} onClick={undo}>
+          <Icon name="undo" />
+        </button>
+        <button className="icon" title="Redo (⇧⌘Z)" disabled={!canRedo} onClick={redo}>
+          <Icon name="redo" />
+        </button>
         <button onClick={() => setDrawer((d) => !d)}>{drawer ? "Hide" : "YAML"}</button>
         <button onClick={validate}>Validate</button>
-        <button className="primary" onClick={save}>
+        <button className="primary" onClick={save} title={dirty ? "Unsaved changes" : "Up to date"}>
+          {dirty && <span className="dirty-dot" />}
           Save
         </button>
       </header>
@@ -160,6 +220,7 @@ export default function App() {
             <div className="nav-heading">Indexes</div>
             {(config.index ?? []).map((e) => (
               <button key={e.name} className={active === e.name ? "nav active" : "nav"} onClick={() => openIndex(e.name)}>
+                {indexDirty(e.name) && <span className="dirty-dot" />}
                 {e.name}
                 {!e.enabled && <span className="muted"> (off)</span>}
               </button>

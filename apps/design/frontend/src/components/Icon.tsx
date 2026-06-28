@@ -1,7 +1,7 @@
 // A tiny inline-SVG icon set (lucide-style strokes) so the UI doesn't rely on
 // emoji, which render inconsistently across platforms. No dependency.
 
-type IconName = "menu" | "close" | "map" | "plus" | "chevron" | "flow";
+type IconName = "menu" | "close" | "map" | "plus" | "chevron" | "flow" | "undo" | "redo";
 
 const paths: Record<IconName, JSX.Element> = {
   menu: (
@@ -31,6 +31,18 @@ const paths: Record<IconName, JSX.Element> = {
     </>
   ),
   chevron: <polyline points="5 8 10 13 15 8" />,
+  undo: (
+    <>
+      <path d="M7.5 11.5 4 8l3.5-3.5" />
+      <path d="M4 8h8a5 5 0 0 1 0 10H8.5" />
+    </>
+  ),
+  redo: (
+    <>
+      <path d="M12.5 11.5 16 8l-3.5-3.5" />
+      <path d="M16 8H8a5 5 0 0 0 0 10h3.5" />
+    </>
+  ),
   // A stylised "flow" mark for the wordmark.
   flow: (
     <>
