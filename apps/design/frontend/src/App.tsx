@@ -12,6 +12,7 @@ import type {
 } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
+import { CatalogBrowser } from "./components/CatalogBrowser";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
 import { Inspector } from "./components/Inspector";
@@ -57,6 +58,7 @@ export default function App() {
   const [rawMode, setRawMode] = useState(false);
   const [rawText, setRawText] = useState("");
   const [diffs, setDiffs] = useState<FileDiff[] | null>(null);
+  const [browseCatalog, setBrowseCatalog] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(
     () => (localStorage.getItem("flusso-design.theme") as "dark" | "light") || "dark",
   );
@@ -409,6 +411,9 @@ export default function App() {
           {catalog && !catalog.error ? "DB connected" : "DB offline"}
         </button>
         <span className="spacer" />
+        <button onClick={() => setBrowseCatalog(true)} title="Browse the database">
+          Tables
+        </button>
         {active !== "config" && (
           <button onClick={() => (rawMode ? setRawMode(false) : openRaw())}>{rawMode ? "Visual" : "Raw YAML"}</button>
         )}
@@ -523,6 +528,7 @@ export default function App() {
       </div>
 
       {diffs && <DiffModal diffs={diffs} saving={saving} onConfirm={performSave} onCancel={() => setDiffs(null)} />}
+      {browseCatalog && catalog && <CatalogBrowser catalog={catalog} onClose={() => setBrowseCatalog(false)} />}
 
       {toast && (
         <div className={`toast ${toast.kind}`} role="status" onClick={() => setToast(null)}>

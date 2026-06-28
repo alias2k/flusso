@@ -167,6 +167,11 @@ test("duplicating an index adds a sidebar entry", async ({ page }) => {
   await expect(page.locator(".sidebar .nav")).toHaveCount(before + 1);
 });
 
+test("catalog browser lists the database tables", async ({ page }) => {
+  await page.getByRole("button", { name: "Tables" }).click();
+  await expect(page.locator(".catalog-table")).not.toHaveCount(0);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

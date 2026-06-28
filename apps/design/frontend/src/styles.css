@@ -983,3 +983,14 @@ button:disabled:hover {
   align-items: center;
   margin: 4px 0;
 }
+
+/* ── catalog browser (item 7) ───────────────────────────────────────────── */
+.catalog-filter { width: 100%; margin-bottom: 8px; }
+.catalog-list { overflow-y: auto; flex: 1; }
+.catalog-table { border-bottom: 1px solid var(--border); padding: 4px 0; }
+.catalog-table summary { color: var(--text); font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.catalog-cols { padding: 6px 0 6px 14px; }
+.catalog-col { display: flex; justify-content: space-between; font-size: 12px; padding: 1px 0; }
+.catalog-col .col-type { font-family: ui-monospace, monospace; font-size: 11px; }
+.catalog-fk { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; padding: 1px 0; }
+.pk-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--k-root); margin-right: 6px; vertical-align: middle; }
