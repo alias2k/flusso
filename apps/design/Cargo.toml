@@ -35,7 +35,7 @@ toml.workspace = true
 tracing.workspace = true
 url.workspace = true
 axum.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
 rust-embed.workspace = true
 mime_guess.workspace = true
 open.workspace = true

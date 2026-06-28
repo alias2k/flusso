@@ -201,7 +201,6 @@ fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {
     prop_oneof![
         // belongs_to: to-one, no order_by/limit.
         (table(), col(), col(), any::<bool>(), fields(depth - 1)).prop_map({
-            let mk = mk;
             move |(t, pk, column, nullable, fs)| {
                 mk(
                     t,
@@ -224,7 +223,6 @@ fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {
             fields(depth - 1)
         )
             .prop_map({
-                let mk = mk;
                 move |(t, pk, fk, nullable, ob, fs)| {
                     mk(
                         t,
@@ -247,7 +245,6 @@ fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {
             fields(depth - 1)
         )
             .prop_map({
-                let mk = mk;
                 move |(t, pk, fk, ob, limit, fs)| {
                     mk(
                         t,
@@ -270,7 +267,6 @@ fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {
             fields(depth - 1)
         )
             .prop_map({
-                let mk = mk;
                 move |(t, pk, thr, ob, limit, fs)| {
                     mk(
                         t,
@@ -325,10 +321,10 @@ fn fields(depth: u32) -> BoxedStrategy<Vec<Field>> {
 /// The options the *parser* would attach to a field of this source, so the
 /// generated schema matches what re-parsing produces.
 fn options_for(source: &FieldSource) -> BTreeMap<String, GenericValue> {
-    if let FieldSource::Column(c) = source {
-        if matches!(c.ty, FlussoType::Map { .. }) {
-            return BTreeMap::from([("dynamic".to_owned(), GenericValue::Bool(true))]);
-        }
+    if let FieldSource::Column(c) = source
+        && matches!(c.ty, FlussoType::Map { .. })
+    {
+        return BTreeMap::from([("dynamic".to_owned(), GenericValue::Bool(true))]);
     }
     BTreeMap::new()
 }
@@ -353,7 +349,7 @@ proptest! {
 
     #[test]
     fn any_valid_schema_roundtrips_through_codegen(schema in schema()) {
-        let yaml = design::codegen::schema_to_yaml(&schema).expect("codegen should never fail");
+        let yaml = design::codegen::schema_to_yaml(&schema).unwrap();
         let entity = SchemaYaml::try_parse(&yaml)
             .map_err(|e| TestCaseError::fail(format!("generated YAML did not parse: {e}\n{yaml}")))?;
         let reparsed = IndexSchema::try_from(entity)

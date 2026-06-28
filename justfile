@@ -87,6 +87,12 @@ design-e2e: up
     cargo build -p flusso-cli
     cd apps/design/frontend && npm ci && npx playwright install chromium && npm run test:e2e
 
+# Measure the designer's backend test coverage (unit + integration + property).
+# Needs cargo-llvm-cov: `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`.
+coverage:
+    cargo llvm-cov nextest -p flusso-design --html
+    @echo "HTML report → target/llvm-cov/html/index.html"
+
 # Serve the dev read API (axum, dev/search-api) over the synced indexes (:8080).
 api: up
     cargo run -p flusso-dev-search-api
