@@ -54,6 +54,14 @@ export function loadOverrides(index: string): Positions {
   }
 }
 
+export function clearOverrides(index: string) {
+  try {
+    localStorage.removeItem(key(index));
+  } catch {
+    /* storage disabled */
+  }
+}
+
 export function saveOverride(index: string, id: string, x: number, y: number) {
   const all = loadOverrides(index);
   all[id] = { x, y };

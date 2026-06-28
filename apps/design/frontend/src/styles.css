@@ -583,7 +583,7 @@ button.icon:hover {
 .col-from { color: var(--muted); font-size: 10px; margin-left: 4px; }
 
 /* minimap toggle (the minimap is hidden by default) */
-.react-flow__panel .map-toggle {
+.react-flow__panel .panel-btn {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -591,7 +591,7 @@ button.icon:hover {
   padding: 3px 7px;
   opacity: 0.65;
 }
-.react-flow__panel .map-toggle:hover {
+.react-flow__panel .panel-btn:hover {
   opacity: 1;
   border-color: var(--accent);
 }

@@ -13,7 +13,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useEffect, useRef, useState } from "react";
 import { SCALAR_TYPES } from "../api";
-import { autoLayout, loadOverrides, saveOverride } from "../model/layout";
+import { autoLayout, clearOverrides, loadOverrides, saveOverride } from "../model/layout";
 import { suggestRelations } from "../model/relations";
 import { type DocNode, projectGraph } from "../model/tree";
 import { useDesign } from "../state";
@@ -100,6 +100,16 @@ export function Canvas() {
     );
   }, [nodes, indexName, setNodes]);
 
+  // Drop manual positions and re-tidy from the measured heights.
+  const resetLayout = () => {
+    clearOverrides(indexName);
+    const docNodes = nodes.map((n) => (n.data as { node: DocNode }).node);
+    const heights = new Map(nodes.map((n) => [n.id, n.measured?.height ?? 0]));
+    const auto = autoLayout(docNodes, (dn) => heights.get(dn.id) ?? 300);
+    laidOut.current = "";
+    setNodes((current) => current.map((n) => ({ ...n, position: auto[n.id] ?? n.position })));
+  };
+
   return (
     <ReactFlow
       nodes={nodes}
@@ -126,8 +136,11 @@ export function Canvas() {
         <NodeSearch />
       </Panel>
       <Panel position="bottom-right">
+        <button className="icon panel-btn" title="Reset layout" onClick={resetLayout}>
+          <Icon name="tidy" />
+        </button>
         <button
-          className="icon map-toggle"
+          className="icon panel-btn map-toggle"
           title={showMap ? "Hide minimap" : "Show minimap"}
           onClick={() => setShowMap((m) => !m)}
         >

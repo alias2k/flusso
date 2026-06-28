@@ -1,9 +1,10 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { type MouseEvent, useState } from "react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
+import { aggregateIncomplete, joinIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
 import { suggestRelations } from "../model/relations";
-import { nodeFields, type DocNode, type LeafField } from "../model/tree";
+import { fieldAtPath, nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useDesign } from "../state";
 import { typeClass } from "../theme";
 import { Icon } from "./Icon";
@@ -32,6 +33,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
   // lookup once; a node shows a count badge, a row shows its message on hover.
   const diagByField = new Map(diagnostics.map((d) => [d.field, d]));
   const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
+  const selfIncomplete = joinIncomplete(fieldAtPath(schema, node.path));
 
   const includedByCol = new Map<string, LeafField>();
   for (const l of node.leaves) {
@@ -76,6 +78,11 @@ export function DocNodeView({ data, selected }: NodeProps) {
         {nodeIssues > 0 && (
           <span className="issue-badge" title={`${nodeIssues} field(s) disagree with the database`}>
             {nodeIssues}
+          </span>
+        )}
+        {selfIncomplete && (
+          <span className="issue-badge warn" title="This join is missing a required key — set it in the inspector">
+            !
           </span>
         )}
         {node.path.length > 0 && (
@@ -186,11 +193,12 @@ export function DocNodeView({ data, selected }: NodeProps) {
               .filter((l) => matches(l.name))
               .map((l) => {
                 const diag = diagByField.get(l.name);
+                const incomplete = aggregateIncomplete(fields[l.index]);
                 return (
                   <div
-                    className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
+                    className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${incomplete ? " diag-warning" : ""}`}
                     key={`x${l.index}`}
-                    title={diag?.message}
+                    title={diag?.message ?? (incomplete ? "incomplete — set its key/column in the inspector" : undefined)}
                     onClick={() => select({ kind: "field", path: node.path, index: l.index })}
                   >
                     <span className="leaf-kind">{l.kind}</span>
