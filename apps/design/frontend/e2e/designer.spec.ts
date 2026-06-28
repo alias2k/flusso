@@ -82,6 +82,26 @@ test("include-all checks every column", async ({ page }) => {
   await expect(root.locator('.col-row input[type="checkbox"]:checked')).toHaveCount(n);
 });
 
+test("node search jumps to a node", async ({ page }) => {
+  await page.locator(".node-search input").fill("users");
+  await page.locator(".node-search li").first().click();
+  await expect(page.locator(".inspector")).toBeVisible();
+});
+
+test("Delete key removes the selected node", async ({ page }) => {
+  const before = await page.locator(".flow-node").count();
+  await page.locator(".flow-node:not(.kind-root) header").first().click();
+  await page.keyboard.press("Delete");
+  await expect(page.locator(".flow-node")).toHaveCount(before - 1);
+});
+
+test("Escape clears the selection", async ({ page }) => {
+  await page.locator(".flow-node.kind-root .col-row.on").first().click();
+  await expect(page.locator(".inspector")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".inspector")).toHaveCount(0);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

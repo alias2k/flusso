@@ -758,3 +758,45 @@ button:disabled:hover {
 .row-move .up {
   transform: rotate(180deg);
 }
+
+/* ── canvas navigation (group D) ────────────────────────────────────────── */
+/* node entry animation — runs once when a node's DOM is created (per id), not
+   on data updates, so editing doesn't replay it. */
+.flow-node {
+  animation: nodeIn 0.18s ease-out;
+}
+@keyframes nodeIn {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* jump-to-node search */
+.node-search {
+  position: relative;
+  width: 200px;
+}
+.node-search input {
+  width: 100%;
+  background: var(--panel-2);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.node-search ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.node-search li {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.node-search li:hover {
+  background: var(--panel-2);
+  color: var(--accent);
+}

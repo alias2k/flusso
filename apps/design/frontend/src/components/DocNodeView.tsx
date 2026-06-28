@@ -89,6 +89,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
         <div className="node-sub">
           {node.table}
           {node.primaryKey ? ` · pk: ${node.primaryKey}` : ""}
+          {node.leaves.length > 0 ? ` · ${node.leaves.length} field${node.leaves.length === 1 ? "" : "s"}` : ""}
         </div>
       </header>
 

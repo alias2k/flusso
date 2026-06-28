@@ -8,6 +8,7 @@ import {
   ReactFlow,
   useEdgesState,
   useNodesState,
+  useReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useRef, useState } from "react";
@@ -108,12 +109,22 @@ export function Canvas() {
       onEdgesChange={onEdgesChange}
       onNodeDragStop={(_, node) => saveOverride(indexName, node.id, node.position.x, node.position.y)}
       onPaneClick={() => select(null)}
+      onEdgeClick={(_, edge) => {
+        const target = nodes.find((n) => n.id === edge.target);
+        if (target) {
+          const dn = (target.data as { node: DocNode }).node;
+          select(dn.path.length ? { kind: "node", path: dn.path } : { kind: "root" });
+        }
+      }}
       fitView
       minZoom={0.2}
     >
       <Background />
       <Controls />
       {showMap && <MiniMap pannable zoomable style={{ marginBottom: 40 }} />}
+      <Panel position="top-left">
+        <NodeSearch />
+      </Panel>
       <Panel position="bottom-right">
         <button
           className="icon map-toggle"
@@ -124,5 +135,48 @@ export function Canvas() {
         </button>
       </Panel>
     </ReactFlow>
+  );
+}
+
+/// Type-ahead jump: filter nodes by name/table, click to centre on one and
+/// select it. Lives inside <ReactFlow> so it can use the flow instance.
+function NodeSearch() {
+  const { getNodes, setCenter } = useReactFlow();
+  const { select } = useDesign();
+  const [q, setQ] = useState("");
+
+  const label = (n: Node) => {
+    const dn = (n.data as { node: DocNode }).node;
+    return dn.name ?? dn.table;
+  };
+  const results = q
+    ? getNodes()
+        .filter((n) => `${label(n)} ${(n.data as { node: DocNode }).node.table}`.toLowerCase().includes(q.toLowerCase()))
+        .slice(0, 8)
+    : [];
+
+  const jump = (n: Node) => {
+    const w = n.measured?.width ?? 145;
+    const h = n.measured?.height ?? 80;
+    setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: 1, duration: 300 });
+    const dn = (n.data as { node: DocNode }).node;
+    select(dn.path.length ? { kind: "node", path: dn.path } : { kind: "root" });
+    setQ("");
+  };
+
+  return (
+    <div className="node-search">
+      <input placeholder="jump to node…" value={q} onChange={(e) => setQ(e.target.value)} />
+      {results.length > 0 && (
+        <ul>
+          {results.map((n) => (
+            <li key={n.id} onClick={() => jump(n)}>
+              {label(n)}
+              <span className="muted"> · {(n.data as { node: DocNode }).node.table}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

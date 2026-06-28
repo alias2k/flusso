@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CatalogResponse,
   ColumnShape,
@@ -16,6 +16,7 @@ import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
+import { removeAt, removeNode } from "./model/edit";
 import { DesignProvider, type Selection } from "./state";
 
 /// The whole editable document: the deployment config + every index's schema.
@@ -103,21 +104,45 @@ export default function App() {
     return () => clearTimeout(handle);
   }, [active, schema]);
 
-  // Undo/redo keybindings — but only when not inside a text field, so native
-  // text undo keeps working while you're typing.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z") return;
-      const el = document.activeElement as HTMLElement | null;
-      const editing =
-        el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  // Keyboard shortcuts. Held in a ref so the listener subscribes once but always
+  // sees the latest state; undo/delete are suppressed while typing in a field so
+  // native text editing keeps working.
+  const keyHandler = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyHandler.current = (e: KeyboardEvent) => {
+    const el = document.activeElement as HTMLElement | null;
+    const editing = !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+    const mod = e.metaKey || e.ctrlKey;
+
+    if (mod && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      void save();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "z") {
       if (editing) return;
       e.preventDefault();
       e.shiftKey ? redo() : undo();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo]);
+      return;
+    }
+    if (e.key === "Escape") {
+      setSelection(null);
+      return;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && !editing && selection) {
+      if (selection.kind === "node" && selection.path.length > 0) {
+        apply((s) => removeNode(s, selection.path));
+        setSelection(null);
+      } else if (selection.kind === "field") {
+        apply((s) => removeAt(s, selection.path, selection.index));
+        setSelection(null);
+      }
+    }
+  };
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => keyHandler.current(e);
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, []);
 
   // Warn before leaving with unsaved changes.
   useEffect(() => {
