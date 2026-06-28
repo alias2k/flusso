@@ -13,9 +13,14 @@ const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as cons
 
 export function DocNodeView({ data, selected }: NodeProps) {
   const node = (data as { node: DocNode }).node;
-  const { catalog, schema, apply, select, selection, columnsFor } = useDesign();
+  const { catalog, schema, apply, select, selection, columnsFor, diagnostics } = useDesign();
   const cols = columnsFor(node.table);
   const fields = nodeFields(schema, node.path);
+
+  // Diagnostics are reported by field name (no path), so match by name. Build a
+  // lookup once; a node shows a count badge, a row shows its message on hover.
+  const diagByField = new Map(diagnostics.map((d) => [d.field, d]));
+  const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
 
   const includedByCol = new Map<string, LeafField>();
   for (const l of node.leaves) {
@@ -47,6 +52,11 @@ export function DocNodeView({ data, selected }: NodeProps) {
       <header onClick={() => select(node.path.length ? { kind: "node", path: node.path } : { kind: "root" })}>
         <span className={`badge ${node.kind}`}>{node.kind}</span>
         <span className="node-title">{node.name ?? node.table}</span>
+        {nodeIssues > 0 && (
+          <span className="issue-badge" title={`${nodeIssues} field(s) disagree with the database`}>
+            {nodeIssues}
+          </span>
+        )}
         {node.path.length > 0 && (
           <button
             className="x"
@@ -70,10 +80,12 @@ export function DocNodeView({ data, selected }: NodeProps) {
         {cols.map((c) => {
           const inc = includedByCol.get(c.name);
           const renamed = inc && inc.name !== c.name;
+          const diag = inc ? diagByField.get(inc.name) : undefined;
           return (
             <div
-              className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}`}
+              className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
               key={c.name}
+              title={diag?.message}
               onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
             >
               <input
@@ -94,10 +106,13 @@ export function DocNodeView({ data, selected }: NodeProps) {
           );
         })}
 
-        {extraLeaves.map((l) => (
+        {extraLeaves.map((l) => {
+          const diag = diagByField.get(l.name);
+          return (
           <div
-            className={`col-row special${fieldSelected(l.index) ? " sel" : ""}`}
+            className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
             key={`x${l.index}`}
+            title={diag?.message}
             onClick={() => select({ kind: "field", path: node.path, index: l.index })}
           >
             <span className="leaf-kind">{l.kind}</span>
@@ -112,7 +127,8 @@ export function DocNodeView({ data, selected }: NodeProps) {
               <Icon name="close" size={13} />
             </button>
           </div>
-        ))}
+          );
+        })}
 
         {cols.length === 0 && <ManualColumn onAdd={(name) => apply((s) => edit.toggleColumn(s, node.path, name, true))} />}
       </div>

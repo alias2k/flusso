@@ -68,6 +68,11 @@ test("editing marks the index unsaved", async ({ page }) => {
   await expect(page.locator(".sidebar .dirty-dot")).not.toHaveCount(0);
 });
 
+test("validate surfaces a result toast", async ({ page }) => {
+  await page.getByRole("button", { name: "Validate" }).click();
+  await expect(page.locator(".toast")).toBeVisible();
+});
+
 test("toggles the minimap", async ({ page }) => {
   await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
   await page.locator(".map-toggle").click();

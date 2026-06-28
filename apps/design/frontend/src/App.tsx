@@ -25,6 +25,8 @@ interface Doc {
   schemas: Record<string, IndexSchema>;
 }
 
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 const emptySchema = (table: string, pk?: string): IndexSchema => ({
   version: 1,
   table,
@@ -44,8 +46,17 @@ export default function App() {
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[] | null>(null);
   const [drawer, setDrawer] = useState(false);
-  const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [toast, setToast] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [validating, setValidating] = useState(false);
+
+  // Auto-dismiss toasts.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   useEffect(() => {
     api
@@ -133,31 +144,44 @@ export default function App() {
   };
 
   const save = async () => {
-    if (!doc) return;
+    if (!doc || saving) return;
+    setSaving(true);
     try {
       const indexes = (doc.config.index ?? [])
         .filter((e) => doc.schemas[e.name])
         .map((e) => ({ schema_path: e.schema, schema: doc.schemas[e.name] }));
       const res = await api.save(doc.config, indexes);
       setSaved(JSON.stringify(doc));
-      setStatus(`Saved ${res.written.length} file(s).`);
-      setError("");
+      setToast({ kind: "ok", text: `Saved ${res.written.length} file(s)` });
     } catch (e) {
-      setError(String(e));
+      setToast({ kind: "error", text: `Save failed: ${errText(e)}` });
+    } finally {
+      setSaving(false);
     }
   };
 
   const validate = async () => {
-    if (!doc) return;
-    const indexes = Object.entries(doc.schemas).map(([name, s]) => ({ name, schema: s }));
-    const res = await api.validate(doc.config, indexes);
-    if (!res.db_reachable) {
-      setStatus(`Database not reachable: ${res.error}`);
-      setDiagnostics(null);
-    } else {
-      setDiagnostics(res.diagnostics);
-      setStatus(res.diagnostics.length ? `${res.diagnostics.length} issue(s) found.` : "Schemas match the database.");
-      setDrawer(true);
+    if (!doc || validating) return;
+    setValidating(true);
+    try {
+      const indexes = Object.entries(doc.schemas).map(([name, s]) => ({ name, schema: s }));
+      const res = await api.validate(doc.config, indexes);
+      if (!res.db_reachable) {
+        setDiagnostics(null);
+        setToast({ kind: "error", text: `Database not reachable: ${res.error ?? "unknown"}` });
+      } else {
+        setDiagnostics(res.diagnostics);
+        if (res.diagnostics.length) {
+          setToast({ kind: "error", text: `${res.diagnostics.length} issue(s) — see the highlighted fields` });
+          setDrawer(true);
+        } else {
+          setToast({ kind: "ok", text: "Schemas match the database" });
+        }
+      }
+    } catch (e) {
+      setToast({ kind: "error", text: `Validate failed: ${errText(e)}` });
+    } finally {
+      setValidating(false);
     }
   };
 
@@ -190,7 +214,6 @@ export default function App() {
         </span>
         <span className="path">{project.config_path}</span>
         <span className="spacer" />
-        {status && <span className="status">{status}</span>}
         <button className="icon" title="Undo (⌘Z)" disabled={!canUndo} onClick={undo}>
           <Icon name="undo" />
         </button>
@@ -198,9 +221,12 @@ export default function App() {
           <Icon name="redo" />
         </button>
         <button onClick={() => setDrawer((d) => !d)}>{drawer ? "Hide" : "YAML"}</button>
-        <button onClick={validate}>Validate</button>
-        <button className="primary" onClick={save} title={dirty ? "Unsaved changes" : "Up to date"}>
-          {dirty && <span className="dirty-dot" />}
+        <button onClick={validate} disabled={validating}>
+          {validating && <span className="spinner" />}
+          Validate
+        </button>
+        <button className="primary" onClick={save} disabled={saving} title={dirty ? "Unsaved changes" : "Up to date"}>
+          {saving ? <span className="spinner" /> : dirty && <span className="dirty-dot" />}
           Save
         </button>
       </header>
@@ -234,7 +260,18 @@ export default function App() {
             <ConfigPanel config={config} onChange={setConfig} />
           </main>
         ) : schema ? (
-          <DesignProvider value={{ catalog, schema, indexName: active, apply, selection, select: setSelection, columnsFor }}>
+          <DesignProvider
+            value={{
+              catalog,
+              schema,
+              indexName: active,
+              apply,
+              selection,
+              select: setSelection,
+              columnsFor,
+              diagnostics: (diagnostics ?? []).filter((d) => d.index === active),
+            }}
+          >
             <main className="canvas-wrap">
               <Canvas />
               {drawer && (
@@ -254,6 +291,12 @@ export default function App() {
           </DesignProvider>
         ) : null}
       </div>
+
+      {toast && (
+        <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
+          {toast.text}
+        </div>
+      )}
     </div>
   );
 }

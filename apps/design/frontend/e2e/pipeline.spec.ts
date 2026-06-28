@@ -16,7 +16,7 @@ test("UI edit → save → flusso check accepts the output", async ({ page }) =>
   await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
 
   await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator(".status")).toContainText("Saved");
+  await expect(page.locator(".toast.ok")).toContainText("Saved");
 
   // The files on disk are now canonical-regenerated; `flusso check` must accept
   // them (parse + convert + typed mapping). `--offline` keeps the assertion

@@ -2,7 +2,7 @@
 // only receive `data`) can read the catalog and dispatch path-addressed edits.
 
 import { createContext, useContext } from "react";
-import type { CatalogResponse, ColumnShape, IndexSchema } from "./api";
+import type { CatalogResponse, ColumnShape, DiagnosticDto, IndexSchema } from "./api";
 
 export type Selection =
   | { kind: "root" }
@@ -18,6 +18,8 @@ export interface DesignCtx {
   selection: Selection;
   select: (s: Selection) => void;
   columnsFor: (table: string) => ColumnShape[];
+  /// Live DB-validation diagnostics for the active index, keyed by field name.
+  diagnostics: DiagnosticDto[];
 }
 
 const Ctx = createContext<DesignCtx | null>(null);

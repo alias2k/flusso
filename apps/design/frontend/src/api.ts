@@ -241,7 +241,16 @@ export interface ValidateResponse {
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(body || `${res.status} ${res.statusText}`);
+    // The server reports handler failures as `{ "error": "..." }`; surface that
+    // message rather than the raw JSON/HTTP status.
+    let message = body || `${res.status} ${res.statusText}`;
+    try {
+      const parsed = JSON.parse(body) as { error?: string };
+      if (parsed.error) message = parsed.error;
+    } catch {
+      /* not JSON — use the text */
+    }
+    throw new Error(message);
   }
   return res.json() as Promise<T>;
 }

@@ -662,3 +662,50 @@ button:disabled {
 button:disabled:hover {
   border-color: var(--border);
 }
+
+/* ── feedback (group B) ─────────────────────────────────────────────────── */
+/* validation diagnostics highlighted on the node rows + a count badge */
+.col-row.diag-error { background: rgba(248, 113, 113, 0.16); box-shadow: inset 2px 0 0 var(--error); }
+.col-row.diag-warning { background: rgba(224, 179, 65, 0.16); box-shadow: inset 2px 0 0 var(--warn); }
+.issue-badge {
+  margin-left: 6px;
+  background: var(--error);
+  color: #1a0606;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+/* button spinner */
+.spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* toast */
+.toast {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+.toast.ok { border-color: var(--accent); }
+.toast.error { border-color: var(--error); color: #fca5a5; }
