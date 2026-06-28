@@ -40,6 +40,7 @@ use clap::{Parser, Subcommand};
 use commands::admin::{IndexesArgs, ReindexArgs};
 use commands::build::BuildArgs;
 use commands::check::CheckArgs;
+#[cfg(feature = "design")]
 use commands::design::DesignArgs;
 use commands::run::RunArgs;
 use commands::schema_cmd::SchemaArgs;
@@ -68,6 +69,7 @@ enum Command {
     /// Validate the config and schemas without running the pipeline.
     Check(CheckArgs),
     /// Open the visual schema designer (a local web UI).
+    #[cfg(feature = "design")]
     Design(DesignArgs),
     /// Print an embedded JSON Schema for editor assist.
     Schema(SchemaArgs),
@@ -83,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Build(args) => commands::build::execute(args),
         Command::Run(args) => commands::run::execute(args).await,
         Command::Check(args) => commands::check::execute(args).await,
+        #[cfg(feature = "design")]
         Command::Design(args) => commands::design::execute(args).await,
         Command::Schema(args) => commands::schema_cmd::execute(args),
         Command::Indexes(args) => commands::admin::indexes(args).await,

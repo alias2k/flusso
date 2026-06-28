@@ -49,6 +49,11 @@ jobs:
       - name: Check all targets (benches, examples)
         run: cargo check --workspace --all-targets
 
+      # The Docker runtime image builds the CLI without the designer; make sure
+      # that server-only configuration keeps compiling.
+      - name: Check server-only build (no designer)
+        run: cargo check -p flusso-cli --no-default-features
+
       # `--run-ignored all` includes the `#[ignore]`d container-backed e2e
       # tests; the `ci` profile gives them retries and a longer timeout. The
       # `query.rs` proptests are ordinary `#[test]`s, so they run here too.

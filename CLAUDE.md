@@ -105,9 +105,12 @@ Prometheus config and Grafana provisioning live under `dev/prometheus/` and `dev
 
 The `Dockerfile` is a **registry-ready, config-less** image (its default `runtime` target
 bakes no config and no secrets; you mount a `flusso.toml`/`flusso.lock` and pass `--config`,
-or bake a lock into a child image). It also defines a `demo` target that extends that runtime
-with the repo's dev config compiled into `/app/flusso.lock` — that target is what the demo
-compose builds.
+or bake a lock into a child image). It builds the CLI with `-p flusso-cli
+--no-default-features`, which **drops the visual designer** (`flusso design`) — the `design`
+Cargo feature (default-on for a host install) pulls in the `flusso-design` crate + embedded
+SPA, none of which a server image needs. It also defines a `demo` target that extends that
+runtime with the repo's dev config compiled into `/app/flusso.lock` — that target is what the
+demo compose builds.
 
 For a **self-contained demo** that runs flusso *in* the cluster too (no host toolchain),
 layer the demo override on the base the Docker way:
