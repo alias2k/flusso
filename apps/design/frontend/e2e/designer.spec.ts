@@ -197,6 +197,16 @@ test("marking a nullable source column required demands a default", async ({ pag
   await expect(page.locator(".inspector input.invalid")).toHaveCount(0);
 });
 
+test("a belongs_to join is steered by its FK column", async ({ page }) => {
+  // orders has an outgoing FK (user_id → users), which is NOT NULL in the source.
+  await page.locator(".sidebar .nav", { hasText: "orders" }).click();
+  await page.locator(".flow-node.kind-root").first().waitFor();
+  await page.locator(".flow-node.kind-root .suggest", { hasText: "belongs_to" }).first().click();
+  await page.locator(".flow-node.kind-belongs_to header").first().click();
+  await expect(page.locator(".inspector")).toContainText("FK column");
+  await expect(page.locator(".inspector")).toContainText("NOT NULL");
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

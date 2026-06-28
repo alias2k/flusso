@@ -132,6 +132,16 @@ function NodeInspector({ path }: { path: number[] }) {
   const setJoin = (j: Join) => setField({ ...field, source: { relation: { join: j } } });
   const toMany = verb === "has_many" || verb === "many_to_many";
 
+  // A belongs_to's optionality is owned by its FK column (on the parent table):
+  // a nullable FK means the target may be absent. Surface it so the required
+  // toggle is a guided choice, not a guess. Undefined when the column isn't in
+  // the catalog (offline, or hand-typed).
+  const btColumn = "belongs_to" in join.kind ? join.kind.belongs_to.column : undefined;
+  const parentTable = effectiveTable(schema, path.slice(0, -1));
+  const fkNullable = btColumn
+    ? catalog?.catalog.tables.find((t) => t.name === parentTable)?.columns.find((c) => c.name === btColumn)?.nullable
+    : undefined;
+
   return (
     <div className="inspector">
       <h3>Join · {verb}</h3>
@@ -172,7 +182,21 @@ function NodeInspector({ path }: { path: number[] }) {
       {"many_to_many" in join.kind && (
         <ThroughEditor through={join.kind.many_to_many.through} tables={tables} onChange={(through) => setJoin({ ...join, kind: { many_to_many: { through } } })} />
       )}
-      {!toMany && <Check value={!join.nullable} label="required" onChange={(req) => setJoin({ ...join, nullable: !req })} />}
+      {!toMany && (
+        <>
+          {fkNullable === true && (
+            <p className="hint">
+              FK column <b>{btColumn}</b> is nullable — the target may be absent, so this join is optional.
+            </p>
+          )}
+          {fkNullable === false && (
+            <p className="hint">
+              FK column <b>{btColumn}</b> is <b>NOT NULL</b> — the target is always present.
+            </p>
+          )}
+          <Check value={!join.nullable} label="required" onChange={(req) => setJoin({ ...join, nullable: !req })} />
+        </>
+      )}
       {verb !== "belongs_to" && <OrderByEditor value={join.order_by ?? []} cols={relCols} onChange={(order_by) => setJoin({ ...join, order_by })} />}
       {toMany && (
         <Row label="limit">
