@@ -207,6 +207,16 @@ test("a belongs_to join is steered by its FK column", async ({ page }) => {
   await expect(page.locator(".inspector")).toContainText("NOT NULL");
 });
 
+test("the type dropdown nudges toward the source-suggested type", async ({ page }) => {
+  await page.locator(".flow-node.kind-root .col-row", { hasText: "full_name" }).first().click();
+  await expect(page.locator(".inspector")).toBeVisible();
+  const typeField = page.locator(".inspector .field", { hasText: "type" }).locator("select");
+  await typeField.selectOption("boolean"); // a text column never suggests boolean
+  await expect(page.locator(".inspector")).toContainText("suggests");
+  await page.locator(".inspector").getByRole("button", { name: "use", exact: true }).click();
+  await expect(page.locator(".inspector")).not.toContainText("suggests");
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

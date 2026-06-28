@@ -46,7 +46,9 @@ field could be missing from the document — and the designer flags it (a red de
 and a highlighted column) until you set one. A `belongs_to` join follows the same logic
 from its foreign-key column: a nullable FK starts optional, a `NOT NULL` FK required. The
 designer steers you toward a correct schema but doesn't force it — you can save anyway, or
-drop to *Raw YAML* and take full control.
+drop to *Raw YAML* and take full control. A field's **type** is a softer case: the SQL type
+only *suggests* a flusso type (`keyword` vs `text` is a real authoring choice), so the
+inspector shows the suggestion — with a one-click *use* — only when your pick diverges from it.
 
 ### Working faster
 

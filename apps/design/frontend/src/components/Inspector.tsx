@@ -229,13 +229,14 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
   const s = field.source;
 
-  // Nullability of the bound source column, when known — drives the
-  // source-guided required/default rule (see RequiredDefault). Undefined when
-  // the column isn't in the catalog (offline, or a hand-typed name).
+  // The bound source column, when known — drives the source-guided required/
+  // default rule (its nullability) and the type suggestion. Undefined when the
+  // column isn't in the catalog (offline, or a hand-typed name).
   const boundColumn = "column" in s ? s.column.column : undefined;
-  const srcNullable = boundColumn
-    ? catalog?.catalog.tables.find((t) => t.name === table)?.columns.find((c) => c.name === boundColumn)?.nullable
+  const srcCol = boundColumn
+    ? catalog?.catalog.tables.find((t) => t.name === table)?.columns.find((c) => c.name === boundColumn)
     : undefined;
+  const srcNullable = srcCol?.nullable;
 
   const helpKind = fieldHelpKind(s);
   return (
@@ -252,7 +253,9 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
         <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       </Row>
 
-      {"column" in s && typeof s.column.ty === "string" && <ScalarBody field={field} column={s.column} srcNullable={srcNullable} set={set} />}
+      {"column" in s && typeof s.column.ty === "string" && (
+        <ScalarBody field={field} column={s.column} srcNullable={srcNullable} suggested={srcCol?.suggested_type} sqlType={srcCol?.sql_type} set={set} />
+      )}
       {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && <MapBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
@@ -282,7 +285,21 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
 // The column is fixed by the catalog checkbox on the node; the inspector edits
 // only what's *about* the field — its type, nullability, transforms, default.
 // (The document field name is renamed in the header above.)
-function ScalarBody({ field, column, srcNullable, set }: { field: Field; column: Column; srcNullable?: boolean; set: (f: Field) => void }) {
+function ScalarBody({
+  field,
+  column,
+  srcNullable,
+  suggested,
+  sqlType,
+  set,
+}: {
+  field: Field;
+  column: Column;
+  srcNullable?: boolean;
+  suggested?: FlussoType;
+  sqlType?: string;
+  set: (f: Field) => void;
+}) {
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   const has = (t: "lowercase" | "trim") => (column.transforms ?? []).includes(t);
   const toggle = (t: "lowercase" | "trim", on: boolean) => {
@@ -290,12 +307,24 @@ function ScalarBody({ field, column, srcNullable, set }: { field: Field; column:
     on ? next.add(t) : next.delete(t);
     setCol({ ...column, transforms: next.size ? [...next] : undefined });
   };
+  // A soft nudge, not a rule: the SQL type only *suggests* a flusso type
+  // (keyword vs text is a legitimate authoring choice), so this surfaces the
+  // suggestion only when the current pick diverges from it.
+  const showSuggestion = typeof suggested === "string" && suggested !== column.ty;
   return (
     <>
       <p className="hint">column: {column.column}</p>
       <Row label="type">
         <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
       </Row>
+      {showSuggestion && (
+        <p className="hint">
+          Source column is <code>{sqlType}</code> — suggests <b>{suggested}</b>.{" "}
+          <button className="link" onClick={() => setCol({ ...column, ty: suggested })}>
+            use
+          </button>
+        </p>
+      )}
       <Check value={has("lowercase")} label="lowercase" onChange={(on) => toggle("lowercase", on)} />
       <Check value={has("trim")} label="trim" onChange={(on) => toggle("trim", on)} />
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
