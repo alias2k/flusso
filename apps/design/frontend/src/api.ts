@@ -254,6 +254,7 @@ export interface ValidateResponse {
 
 export interface SampleResponse {
   document?: unknown;
+  synthetic: boolean;
   db_reachable: boolean;
   note?: string;
   error?: string;

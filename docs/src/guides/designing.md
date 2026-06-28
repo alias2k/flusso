@@ -74,7 +74,9 @@ aren't written to the files (the files only hold the document tree).
   tree and the derived OpenSearch mapping, recomputed on every edit from the schema
   alone — the same database-free projection `flusso check` prints. On demand it also
   builds a **sample document** from one real row — exactly what the sink would write —
-  so you can sanity-check the schema against actual data.
+  so you can sanity-check the schema against actual data. If the table has no rows yet,
+  it shows example data synthesized from the declared types instead (marked *example*),
+  so you still see the document's shape.
 - **Validation against the real schema.** *Validate against DB* checks every field's
   column, type, and nullability against the live store and reports disagreements inline —
   the late-bound errors that otherwise surface only at `flusso check` time.

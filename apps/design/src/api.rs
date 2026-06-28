@@ -419,11 +419,17 @@ pub struct SampleRequest {
 #[derive(Debug, Serialize, Default)]
 pub struct SampleResponse {
     /// The sample document, or `None` when none could be produced (see `note`).
+    /// When `synthetic` is true it's example data derived from the schema types,
+    /// not a real row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document: Option<serde_json::Value>,
+    /// Whether `document` is synthesized from the schema (the root table had no
+    /// rows) rather than built from a real row.
+    pub synthetic: bool,
     /// Whether the database was reachable; when false, `error` says why.
     pub db_reachable: bool,
-    /// Why no document could be produced even though the DB was reachable.
+    /// Context for the document — e.g. that it's example data, or why none could
+    /// be produced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// Why the database could not be reached/queried.
@@ -431,11 +437,12 @@ pub struct SampleResponse {
     pub error: Option<String>,
 }
 
-/// Why a reachable database still produced no sample document.
+/// The outcome of a sample request against a reachable database.
 enum SampleOutcome {
+    /// A real document built from a live row.
     Document(serde_json::Value),
-    /// The root table has no rows to sample.
-    EmptyTable,
+    /// The root table had no rows, so this is example data from the schema types.
+    Synthetic(serde_json::Value),
     /// The index has no single-column primary key, so a row can't be keyed.
     NoPrimaryKey,
 }
@@ -449,9 +456,13 @@ pub async fn sample(request: SampleRequest) -> SampleResponse {
             db_reachable: true,
             ..Default::default()
         },
-        Ok(SampleOutcome::EmptyTable) => SampleResponse {
+        Ok(SampleOutcome::Synthetic(document)) => SampleResponse {
+            document: Some(document),
+            synthetic: true,
             db_reachable: true,
-            note: Some("the root table has no rows to sample".to_owned()),
+            note: Some(
+                "the root table has no rows — showing example data from the schema".to_owned(),
+            ),
             ..Default::default()
         },
         Ok(SampleOutcome::NoPrimaryKey) => SampleResponse {
@@ -472,7 +483,7 @@ pub async fn sample(request: SampleRequest) -> SampleResponse {
 async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
     // A missing single-column primary key is a schema property — report it
     // without touching the database (it's also why `sample_document` would
-    // return `None`, so distinguishing it here keeps the empty-table note clean).
+    // return `None`, so distinguishing it here keeps the empty-table case clean).
     if request.schema.primary_key.is_none() {
         return Ok(SampleOutcome::NoPrimaryKey);
     }
@@ -483,21 +494,29 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
         .resolve_connection_url()
         .context("resolving the source connection URL")?;
 
+    let name = request.name.clone();
     let mut indexes: BTreeMap<IndexName, IndexSchema> = BTreeMap::new();
-    indexes.insert(request.name.clone(), request.schema);
+    indexes.insert(name.clone(), request.schema);
     let spec = Arc::new(SourceSpec::new(indexes));
 
     let documents = PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec))
         .await
         .context("connecting to the database")?;
-    let body = documents
-        .sample_document(&request.name)
+    if let Some(body) = documents
+        .sample_document(&name)
         .await
-        .context("building a sample document")?;
-    Ok(match body.as_ref().map(sinks_core::to_json) {
-        Some(document) => SampleOutcome::Document(document),
-        None => SampleOutcome::EmptyTable,
-    })
+        .context("building a sample document")?
+    {
+        return Ok(SampleOutcome::Document(sinks_core::to_json(&body)));
+    }
+
+    // No live row — synthesize example data from the schema's declared types.
+    let schema = spec
+        .schema(&name)
+        .context("index missing from its own spec")?;
+    Ok(SampleOutcome::Synthetic(preview::example_document(
+        schema, &name,
+    )))
 }
 
 fn diagnostic_dto(diagnostic: Diagnostic) -> DiagnosticDto {

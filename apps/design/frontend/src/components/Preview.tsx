@@ -103,6 +103,7 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
     <div className="sample-doc">
       <h3 className="yaml-head">
         Sample from DB
+        {result?.synthetic && <span className="badge object">example</span>}
         <button className="link" onClick={fetchSample} disabled={loading}>
           <Icon name="play" size={13} /> {loading ? "building…" : result ? "refresh" : "fetch"}
         </button>

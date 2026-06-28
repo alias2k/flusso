@@ -19,7 +19,8 @@ truth — the UI is a round-tripping view over them, not a separate model.
   source/sink/index wiring.
 - **Preview** — derive the search document tree and OpenSearch mapping from the schema
   alone (database-free), recomputed on every edit; and, on demand, build a **sample
-  document** from one real row — exactly what the sink would write.
+  document** from one real row — exactly what the sink would write (or, when the table is
+  empty, example data synthesized from the declared types).
 - **Validate** — check the edited schemas against the live database and report
   disagreements inline.
 - **Save** — canonical regeneration back to `*.schema.yml` / `flusso.toml`. The
