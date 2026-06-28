@@ -43,7 +43,10 @@ the database, so the **required** toggle follows it: a `NOT NULL` column is requ
 default (you may relax it to optional), while a nullable column is optional by default. If
 you mark a nullable column **required**, a **default** becomes mandatory — otherwise the
 field could be missing from the document — and the designer flags it (a red default field
-and a highlighted column) until you set one.
+and a highlighted column) until you set one. A `belongs_to` join follows the same logic
+from its foreign-key column: a nullable FK starts optional, a `NOT NULL` FK required. The
+designer steers you toward a correct schema but doesn't force it — you can save anyway, or
+drop to *Raw YAML* and take full control.
 
 ### Working faster
 

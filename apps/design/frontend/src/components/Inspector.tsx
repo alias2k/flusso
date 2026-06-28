@@ -424,6 +424,7 @@ function GeoBody({ field, set, cols }: { field: Field; set: (f: Field) => void; 
         <Text value={geo.lon} list={cols} onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })} />
       </Row>
       <Check value={!geo.nullable} label="required" onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
+      <p className="hint">A point is absent when either column is null (never sent as {"{lat:null}"}). Mark required to forbid that absence.</p>
     </>
   );
 }

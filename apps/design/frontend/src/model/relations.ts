@@ -30,13 +30,16 @@ export function suggestRelations(catalog: CatalogResponse, fromTable: string): R
   const out: RelationSuggestion[] = [];
   const self = table(catalog, fromTable);
 
-  // belongs_to — this table's outgoing foreign keys.
+  // belongs_to — this table's outgoing foreign keys. The join's optionality
+  // follows the FK column: a nullable FK means the target may be absent, so the
+  // join is optional; a NOT NULL FK makes it always present.
   for (const fk of self?.foreign_keys ?? []) {
     const target = fk.references_table;
+    const nullable = self?.columns.find((c) => c.name === fk.columns[0])?.nullable ?? false;
     out.push({
       key: `bt:${target}:${fk.columns[0]}`,
       label: `${target} · belongs_to`,
-      detail: `this table's ${fk.columns[0]} → ${target}.${fk.references_columns[0] ?? "id"} (single nested object)`,
+      detail: `this table's ${fk.columns[0]} → ${target}.${fk.references_columns[0] ?? "id"} (single nested object${nullable ? ", optional" : ""})`,
       verb: "belongs_to",
       build: () =>
         join(target, {
@@ -45,7 +48,7 @@ export function suggestRelations(catalog: CatalogResponse, fromTable: string): R
               table: target,
               kind: { belongs_to: { column: fk.columns[0] } },
               primary_key: fk.references_columns[0] ?? pkOf(table(catalog, target)),
-              nullable: false,
+              nullable,
               fields: [],
             },
           },
