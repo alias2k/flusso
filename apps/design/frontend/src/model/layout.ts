@@ -54,6 +54,31 @@ export function loadOverrides(index: string): Positions {
   }
 }
 
+export interface Viewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+const vpKey = (index: string) => `flusso-design.viewport.${index}`;
+
+export function saveViewport(index: string, vp: Viewport) {
+  try {
+    localStorage.setItem(vpKey(index), JSON.stringify(vp));
+  } catch {
+    /* storage disabled */
+  }
+}
+
+export function loadViewport(index: string): Viewport | null {
+  try {
+    const s = localStorage.getItem(vpKey(index));
+    return s ? (JSON.parse(s) as Viewport) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function clearOverrides(index: string) {
   try {
     localStorage.removeItem(key(index));

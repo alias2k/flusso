@@ -13,7 +13,14 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useEffect, useRef, useState } from "react";
 import { SCALAR_TYPES } from "../api";
-import { autoLayout, clearOverrides, loadOverrides, saveOverride } from "../model/layout";
+import {
+  autoLayout,
+  clearOverrides,
+  loadOverrides,
+  loadViewport,
+  saveOverride,
+  saveViewport,
+} from "../model/layout";
 import { suggestRelations } from "../model/relations";
 import { type DocNode, projectGraph } from "../model/tree";
 import { useDesign } from "../state";
@@ -118,6 +125,7 @@ export function Canvas() {
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onNodeDragStop={(_, node) => saveOverride(indexName, node.id, node.position.x, node.position.y)}
+      onMoveEnd={(_, vp) => saveViewport(indexName, vp)}
       onPaneClick={() => select(null)}
       onEdgeClick={(_, edge) => {
         const target = nodes.find((n) => n.id === edge.target);
@@ -132,6 +140,7 @@ export function Canvas() {
       <Background />
       <Controls />
       {showMap && <MiniMap pannable zoomable style={{ marginBottom: 40 }} />}
+      <RestoreViewport index={indexName} />
       <Panel position="top-left">
         <NodeSearch />
       </Panel>
@@ -149,6 +158,23 @@ export function Canvas() {
       </Panel>
     </ReactFlow>
   );
+}
+
+/// Restore each index's pan/zoom on switch (the initial fit is handled by the
+/// `fitView` prop, so this skips the first run); edits don't refit.
+function RestoreViewport({ index }: { index: string }) {
+  const { setViewport, fitView } = useReactFlow();
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    const vp = loadViewport(index);
+    if (vp) void setViewport(vp);
+    else void fitView({ duration: 300 });
+  }, [index, setViewport, fitView]);
+  return null;
 }
 
 /// Type-ahead jump: filter nodes by name/table, click to centre on one and
