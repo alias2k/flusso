@@ -32,9 +32,9 @@ export function ConfigPanel({
 
   return (
     <div className="config-panel">
-      <h2>{t("Deployment")}</h2>
-      <Field label={t("index prefix")}>
-        <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder={t("(none)")} />
+      <h2>{t("sidebar.deployment")}</h2>
+      <Field label={t("config.indexPrefix")}>
+        <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder={t("config.none")} />
       </Field>
       <ConnectionEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
       <Check
@@ -66,7 +66,7 @@ export function ConfigPanel({
         </Field>
       </div>
 
-      <h3>{t("Sinks")}</h3>
+      <h3>{t("config.sinks")}</h3>
       {Object.entries(sinks).map(([name, sink]) => (
         <SinkEditor key={name} name={name} sink={sink} onChange={(s) => setSink(name, s)} onRemove={() => removeSink(name)} />
       ))}
@@ -74,27 +74,27 @@ export function ConfigPanel({
         className="link"
         onClick={() => setSink(`sink${Object.keys(sinks).length + 1}`, { type: "opensearch", url: "http://127.0.0.1:9200" })}
       >
-        + {t("sink")}
+        + {t("config.sink")}
       </button>
 
-      <h3>{t("Indexes")}</h3>
+      <h3>{t("sidebar.indexes")}</h3>
       {index.map((e, i) => (
         <div className="index-entry" key={i}>
-          <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder={t("name")} />
+          <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder={t("config.name")} />
           <Text value={e.schema} onChange={(schema) => setEntry(i, { ...e, schema })} placeholder="x.schema.yml" />
-          <Check value={e.enabled} label={t("enabled")} onChange={(enabled) => setEntry(i, { ...e, enabled })} />
+          <Check value={e.enabled} label={t("config.enabled")} onChange={(enabled) => setEntry(i, { ...e, enabled })} />
           <Select
             value={((e.on_error as string) ?? "default") as "default" | "stop" | "skip"}
             options={["default", "stop", "skip"]}
             onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
           />
-          <button className="link" title={t("duplicate")} onClick={() => onDuplicate(i)}>
-            {t("dup")}
+          <button className="link" title={t("config.duplicate")} onClick={() => onDuplicate(i)}>
+            {t("config.dup")}
           </button>
           <button
             className="link danger"
             onClick={() => {
-              if (confirm(t('Remove index "{name}"? (the schema file is left on disk)', { name: e.name })))
+              if (confirm(t("config.removeIndex", { name: e.name })))
                 onChange({ ...config, index: index.filter((_, j) => j !== i) });
             }}
           >
@@ -108,7 +108,7 @@ export function ConfigPanel({
           onChange({ ...config, index: [...index, { name: "new_index", schema: "new_index.schema.yml", enabled: true }] })
         }
       >
-        + {t("index")}
+        + {t("config.index")}
       </button>
     </div>
   );
@@ -127,7 +127,7 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
 
   return (
     <div className="connection-editor">
-      <Field label={t("connection")}>
+      <Field label={t("config.connection")}>
         <Select
           value={mode}
           options={["url", "env", "parts"]}
@@ -144,33 +144,33 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
         </Field>
       )}
       {mode === "env" && (
-        <Field label={t("env var")}>
+        <Field label={t("config.envVar")}>
           <Text value={(obj.env as string) ?? ""} onChange={(v) => setCu({ env: v })} placeholder="DATABASE_URL" />
         </Field>
       )}
       {mode === "parts" && (
         <>
           <div className="row">
-            <Field label={t("host")}>
+            <Field label={t("config.host")}>
               <Text value={(obj.host as string) ?? ""} onChange={(v) => setCu({ ...obj, host: v })} />
             </Field>
-            <Field label={t("port")}>
+            <Field label={t("config.port")}>
               <Num
                 value={typeof obj.port === "number" ? (obj.port as number) : undefined}
                 onChange={(v) => setCu({ ...obj, port: v })}
               />
             </Field>
           </div>
-          <Field label={t("user")}>
+          <Field label={t("config.user")}>
             <Text value={(obj.user as string) ?? ""} onChange={(v) => setCu({ ...obj, user: v })} />
           </Field>
-          <Field label={t("password")}>
+          <Field label={t("config.password")}>
             <Text
               value={typeof obj.password === "string" ? (obj.password as string) : ""}
               onChange={(v) => setCu({ ...obj, password: v || undefined })}
             />
           </Field>
-          <Field label={t("database")}>
+          <Field label={t("config.database")}>
             <Text value={(obj.database as string) ?? ""} onChange={(v) => setCu({ ...obj, database: v })} />
           </Field>
         </>
@@ -205,7 +205,7 @@ function SinkEditor({
         <strong>{name}</strong>
         <Select value={type} options={["opensearch", "stdout"]} onChange={(ty) => set("type", ty)} />
         <button className="link danger" onClick={onRemove}>
-          {t("remove")}
+          {t("common.remove")}
         </button>
       </div>
       {type === "opensearch" ? (

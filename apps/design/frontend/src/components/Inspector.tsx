@@ -16,23 +16,24 @@ import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
 
-/// One-line explanations of the grammar, shown for the selected node/field.
+/// i18n key of the one-line grammar explanation per field/join kind, shown for
+/// the selected node/field (resolved through `t(...)`).
 const KIND_HELP: Record<string, string> = {
-  belongs_to: "This row points at one target row (single nested object).",
-  has_one: "One related row points back here (single nested object).",
-  has_many: "Many related rows point back here (array of objects).",
-  many_to_many: "Related rows linked through a junction table (array of objects).",
-  object: "Groups columns of the same table under a nested object — no new table.",
-  count: "Counts the related rows into a number.",
-  sum: "Sums a column of the related rows.",
-  avg: "Averages a column of the related rows (result is a double).",
-  min: "Smallest value of a column across the related rows.",
-  max: "Largest value of a column across the related rows.",
-  ids: "Collects the related table's primary keys into an array.",
-  geo: "A geo point from two columns (lat/lon).",
-  map: "A dynamic-key object over a json/jsonb column; keys stay searchable.",
-  custom: "A type flusso doesn't model — you give the Postgres + OpenSearch types.",
-  constant: "A fixed value baked into every document.",
+  belongs_to: "kindHelp.belongs_to",
+  has_one: "kindHelp.has_one",
+  has_many: "kindHelp.has_many",
+  many_to_many: "kindHelp.many_to_many",
+  object: "kindHelp.object",
+  count: "kindHelp.count",
+  sum: "kindHelp.sum",
+  avg: "kindHelp.avg",
+  min: "kindHelp.min",
+  max: "kindHelp.max",
+  ids: "kindHelp.ids",
+  geo: "kindHelp.geo",
+  map: "kindHelp.map",
+  custom: "kindHelp.custom",
+  constant: "kindHelp.constant",
 };
 
 function Breadcrumb() {
@@ -54,7 +55,7 @@ import { Check, Field as Row, Num, Select, Text } from "./widgets";
 export function Inspector() {
   const { selection } = useDesign();
   const { t } = useT();
-  if (!selection) return <div className="inspector empty">{t("Select a node or field to edit its details.")}</div>;
+  if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
   return (
     <>
       <Breadcrumb />
@@ -76,11 +77,11 @@ function RootInspector() {
   const cols = catalog?.catalog.tables.find((tbl) => tbl.name === schema.table)?.columns.map((c) => c.name) ?? [];
   return (
     <div className="inspector">
-      <h3>{t("Index root")}</h3>
-      <Row label={t("root table")}>
+      <h3>{t("inspector.indexRoot")}</h3>
+      <Row label={t("inspector.rootTable")}>
         <Text value={schema.table} list={tables} onChange={(table) => apply((s) => edit.setRootMeta(s, { table }))} />
       </Row>
-      <Row label={t("schema")}>
+      <Row label={t("inspector.schema")}>
         <Text value={schema.db_schema} onChange={(db_schema) => apply((s) => edit.setRootMeta(s, { db_schema }))} placeholder="public" />
       </Row>
       <Row label="primary_key">
@@ -88,7 +89,7 @@ function RootInspector() {
       </Row>
       <SoftDeleteEditor value={schema.soft_delete} onChange={(soft_delete) => apply((s) => ({ ...s, soft_delete }))} cols={cols} />
       <details>
-        <summary>{t("root filters")}</summary>
+        <summary>{t("inspector.rootFilters")}</summary>
         <Filters value={schema.filters ?? []} onChange={(filters) => apply((s) => ({ ...s, filters }))} columns={cols} />
       </details>
     </div>
@@ -113,17 +114,17 @@ function NodeInspector({ path }: { path: number[] }) {
   if ("group" in field.source) {
     return (
       <div className="inspector">
-        <h3>{t("Object group")}</h3>
+        <h3>{t("inspector.objectGroup")}</h3>
         <div className="inspector-actions">
-          <button onClick={duplicate}>{t("Duplicate")}</button>
+          <button onClick={duplicate}>{t("inspector.duplicate")}</button>
           <button className="link danger" onClick={remove}>
-            {t("Delete")}
+            {t("inspector.delete")}
           </button>
         </div>
-        <Row label={t("field name")}>
+        <Row label={t("inspector.fieldName")}>
           <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
         </Row>
-        <p className="hint">{t("A group nests columns of the same table. Add fields on its node.")}</p>
+        <p className="hint">{t("inspector.groupHint")}</p>
       </div>
     );
   }
@@ -148,38 +149,38 @@ function NodeInspector({ path }: { path: number[] }) {
 
   return (
     <div className="inspector">
-      <h3>{t("Join")} · {verb}</h3>
+      <h3>{t("inspector.join")} · {verb}</h3>
       {KIND_HELP[verb] && <p className="kind-help">{t(KIND_HELP[verb])}</p>}
       <div className="inspector-actions">
-        <button onClick={duplicate}>{t("Duplicate")}</button>
+        <button onClick={duplicate}>{t("inspector.duplicate")}</button>
         <button className="link danger" onClick={remove}>
-          {t("Delete")}
+          {t("inspector.delete")}
         </button>
       </div>
-      <Row label={t("field name")}>
+      <Row label={t("inspector.fieldName")}>
         <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
       </Row>
-      <Row label={t("verb")}>
+      <Row label={t("inspector.verb")}>
         <Select value={verb} options={["belongs_to", "has_one", "has_many", "many_to_many"]} onChange={(v) => setJoin({ ...join, kind: blankKind(v) })} />
       </Row>
-      <Row label={t("table")}>
+      <Row label={t("inspector.table")}>
         <Text value={join.table} list={tables} onChange={(table) => setJoin({ ...join, table })} />
       </Row>
       <Row label="primary_key">
         <Text value={join.primary_key} list={relCols} onChange={(primary_key) => setJoin({ ...join, primary_key })} />
       </Row>
       {"belongs_to" in join.kind && (
-        <Row label={t("column (this table → target)")}>
+        <Row label={t("inspector.btColumn")}>
           <Text value={join.kind.belongs_to.column} onChange={(c) => setJoin({ ...join, kind: { belongs_to: { column: c } } })} />
         </Row>
       )}
       {"has_one" in join.kind && (
-        <Row label={t("foreign_key (on target)")}>
+        <Row label={t("inspector.fkOnTarget")}>
           <Text value={join.kind.has_one.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_one: { foreign_key: c } } })} />
         </Row>
       )}
       {"has_many" in join.kind && (
-        <Row label={t("foreign_key (on target)")}>
+        <Row label={t("inspector.fkOnTarget")}>
           <Text value={join.kind.has_many.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_many: { foreign_key: c } } })} />
         </Row>
       )}
@@ -189,12 +190,12 @@ function NodeInspector({ path }: { path: number[] }) {
       {!toMany && (
         <>
           {fkNullable === true && (
-            <p className="hint">{t("FK column {col} is nullable — the target may be absent, so this join is optional.", { col: btColumn ?? "" })}</p>
+            <p className="hint">{t("inspector.fkNullable", { col: btColumn ?? "" })}</p>
           )}
           {fkNullable === false && (
-            <p className="hint">{t("FK column {col} is NOT NULL — the target is always present.", { col: btColumn ?? "" })}</p>
+            <p className="hint">{t("inspector.fkNotNull", { col: btColumn ?? "" })}</p>
           )}
-          <Check value={!join.nullable} label={t("required")} onChange={(req) => setJoin({ ...join, nullable: !req })} />
+          <Check value={!join.nullable} label={t("inspector.required")} onChange={(req) => setJoin({ ...join, nullable: !req })} />
         </>
       )}
       {verb !== "belongs_to" && <OrderByEditor value={join.order_by ?? []} cols={relCols} onChange={(order_by) => setJoin({ ...join, order_by })} />}
@@ -204,7 +205,7 @@ function NodeInspector({ path }: { path: number[] }) {
         </Row>
       )}
       <details>
-        <summary>{t("filters")}</summary>
+        <summary>{t("inspector.filters")}</summary>
         <Filters value={join.filters ?? []} columns={relCols} onChange={(filters) => setJoin({ ...join, filters })} />
       </details>
     </div>
@@ -242,15 +243,15 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const helpKind = fieldHelpKind(s);
   return (
     <div className="inspector">
-      <h3>{t("Field")} · {field.field}</h3>
+      <h3>{t("inspector.field")} · {field.field}</h3>
       {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
       <div className="inspector-actions">
-        <button onClick={duplicate}>{t("Duplicate")}</button>
+        <button onClick={duplicate}>{t("inspector.duplicate")}</button>
         <button className="link danger" onClick={remove}>
-          {t("Delete")}
+          {t("inspector.delete")}
         </button>
       </div>
-      <Row label={t("field name")}>
+      <Row label={t("inspector.fieldName")}>
         <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       </Row>
 
@@ -261,7 +262,7 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
       {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
       {"constant" in s && (
-        <Row label={t("value (JSON)")}>
+        <Row label={t("inspector.valueJson")}>
           <Text
             value={JSON.stringify(s.constant)}
             onChange={(text) => {
@@ -315,20 +316,20 @@ function ScalarBody({
   const showSuggestion = typeof suggested === "string" && suggested !== column.ty;
   return (
     <>
-      <p className="hint">{t("column")}: {column.column}</p>
-      <Row label={t("type")}>
+      <p className="hint">{t("common.column")}: {column.column}</p>
+      <Row label={t("inspector.type")}>
         <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
       </Row>
       {showSuggestion && (
         <p className="hint">
-          {t("Source column is {sql} — suggests {ty}.", { sql: sqlType ?? "", ty: suggested })}{" "}
+          {t("inspector.suggestType", { sql: sqlType ?? "", ty: suggested })}{" "}
           <button className="link" onClick={() => setCol({ ...column, ty: suggested })}>
-            {t("use")}
+            {t("inspector.use")}
           </button>
         </p>
       )}
-      <Check value={has("lowercase")} label={t("lowercase")} onChange={(on) => toggle("lowercase", on)} />
-      <Check value={has("trim")} label={t("trim")} onChange={(on) => toggle("trim", on)} />
+      <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
+      <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
     </>
   );
@@ -353,13 +354,13 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
   return (
     <>
       {srcNullable === false && (
-        <p className="hint">{t("Source column is NOT NULL — required by default; uncheck to make it optional in the document.")}</p>
+        <p className="hint">{t("inspector.srcNotNull")}</p>
       )}
       {srcNullable === true && (
-        <p className="hint">{t("Source column is nullable — optional by default; to make it required you must set a default.")}</p>
+        <p className="hint">{t("inspector.srcNullable")}</p>
       )}
-      <Check value={required} label={t("required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
-      <Row label={mustDefault ? t("default (required)") : t("default (optional, JSON)")}>
+      <Check value={required} label={t("inspector.required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
+      <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
         <Text
           invalid={defaultMissing}
           value={column.default === undefined ? "" : JSON.stringify(column.default)}
@@ -378,7 +379,7 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
         />
       </Row>
       {defaultMissing && (
-        <p className="error-hint">{t("A required field over a nullable column must set a default, or the document field could be missing.")}</p>
+        <p className="error-hint">{t("inspector.defaultError")}</p>
       )}
     </>
   );
@@ -403,10 +404,10 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   };
   return (
     <details>
-      <summary>{t("options ({n})", { n: entries.length })}</summary>
+      <summary>{t("inspector.options", { n: entries.length })}</summary>
       {entries.map(([k, v]) => (
         <div className="opt-row" key={k}>
-          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("key")} />
+          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
           <Text
             value={JSON.stringify(v)}
             onChange={(text) => {
@@ -416,7 +417,7 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
                 /* keep typing */
               }
             }}
-            placeholder={t("value")}
+            placeholder={t("inspector.optValue")}
           />
           <button className="link danger" onClick={() => removeOpt(k)}>
             ✕
@@ -424,7 +425,7 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
         </div>
       ))}
       <button className="link" onClick={() => setOpt(`option${entries.length + 1}`, "")}>
-        + {t("option")}
+        + {t("inspector.option")}
       </button>
     </details>
   );
@@ -436,10 +437,10 @@ function MapBody({ field, column, cols, srcNullable, set }: { field: Field; colu
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Row label={t("values")}>
+      <Row label={t("inspector.values")}>
         <Select value={ty.map.values as string} options={LEAF_TYPES as string[]} onChange={(v) => setCol({ ...column, ty: { map: { values: v as FlussoType } } })} />
       </Row>
-      <Row label={t("column (json/jsonb)")}>
+      <Row label={t("inspector.columnJson")}>
         <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
       </Row>
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
@@ -453,13 +454,13 @@ function CustomBody({ field, column, cols, srcNullable, set }: { field: Field; c
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Row label={t("postgres types (comma)")}>
+      <Row label={t("inspector.pgTypes")}>
         <Text value={ty.custom.postgres.join(", ")} onChange={(text) => setCol({ ...column, ty: { custom: { ...ty.custom, postgres: text.split(",").map((x) => x.trim()).filter(Boolean) } } })} />
       </Row>
-      <Row label={t("opensearch type")}>
+      <Row label={t("inspector.osType")}>
         <Text value={ty.custom.opensearch} onChange={(o) => setCol({ ...column, ty: { custom: { ...ty.custom, opensearch: o } } })} />
       </Row>
-      <Row label={t("column")}>
+      <Row label={t("common.column")}>
         <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
       </Row>
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
@@ -473,14 +474,14 @@ function GeoBody({ field, set, cols }: { field: Field; set: (f: Field) => void; 
   const geo = field.source.geo;
   return (
     <>
-      <Row label={t("lat column")}>
+      <Row label={t("inspector.latColumn")}>
         <Text value={geo.lat} list={cols} onChange={(lat) => set({ ...field, source: { geo: { ...geo, lat } } })} />
       </Row>
-      <Row label={t("lon column")}>
+      <Row label={t("inspector.lonColumn")}>
         <Text value={geo.lon} list={cols} onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })} />
       </Row>
-      <Check value={!geo.nullable} label={t("required")} onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
-      <p className="hint">{t("A point is absent when either column is null (never sent as {lat:null}). Mark required to forbid that absence.")}</p>
+      <Check value={!geo.nullable} label={t("inspector.required")} onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
+      <p className="hint">{t("inspector.geoHint")}</p>
     </>
   );
 }
@@ -495,11 +496,11 @@ function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggrega
   const aggCols = columnsFor(agg.table).map((c) => c.name);
   return (
     <>
-      <Row label={t("related table")}>
+      <Row label={t("inspector.relatedTable")}>
         <Text value={agg.table} list={tables} onChange={(table) => setAgg({ ...agg, table })} />
       </Row>
       {opCol !== null && (
-        <Row label={t("column (to aggregate)")}>
+        <Row label={t("inspector.aggColumn")}>
           <Text value={opCol} list={aggCols} onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })} />
         </Row>
       )}
@@ -515,7 +516,7 @@ function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggrega
       )}
       <AggregateKeyEditor value={agg.key} tables={tables} onChange={(key) => setAgg({ ...agg, key })} />
       <details>
-        <summary>{t("filters")}</summary>
+        <summary>{t("inspector.filters")}</summary>
         <Filters value={agg.filters ?? []} onChange={(filters) => setAgg({ ...agg, filters })} />
       </details>
     </>
@@ -542,7 +543,7 @@ function AggregateKeyEditor({ value, tables, onChange }: { value: AggregateKey; 
   const direct = "direct" in value;
   return (
     <div className="key-editor">
-      <Row label={t("key")}>
+      <Row label={t("inspector.optKey")}>
         <Select value={direct ? "direct" : "through"} options={["direct", "through"]} onChange={(k) => onChange(k === "direct" ? { direct: "" } : { through: { table: "", left_key: "", right_key: "" } })} />
       </Row>
       {direct ? (
@@ -560,7 +561,7 @@ function ThroughEditor({ through, tables, onChange }: { through: { table: string
   const { t } = useT();
   return (
     <div className="through">
-      <Row label={t("junction table")}>
+      <Row label={t("inspector.junctionTable")}>
         <Text value={through.table} list={tables} onChange={(table) => onChange({ ...through, table })} />
       </Row>
       <Row label="left_key">
@@ -585,7 +586,7 @@ function OrderByEditor({ value, cols, onChange }: { value: { column: string; dir
       <span className="field-label">order_by</span>
       {value.map((ob, i) => (
         <div className="order-row" key={i}>
-          <Text value={ob.column} list={cols} onChange={(column) => set(i, { ...ob, column })} placeholder={t("column")} />
+          <Text value={ob.column} list={cols} onChange={(column) => set(i, { ...ob, column })} placeholder={t("common.column")} />
           <Select value={ob.direction ?? "asc"} options={["asc", "desc"]} onChange={(direction) => set(i, { ...ob, direction })} />
           <button className="link danger" onClick={() => onChange(value.filter((_, j) => j !== i).length ? value.filter((_, j) => j !== i) : undefined)}>
             ✕
@@ -604,11 +605,11 @@ function SoftDeleteEditor({ value, onChange, cols }: { value: SoftDelete | undef
   const kind = value === undefined ? "none" : "field" in value ? "field" : "column";
   return (
     <div className="soft-delete">
-      <Row label={t("soft delete")}>
+      <Row label={t("inspector.softDelete")}>
         <Select value={kind} options={["none", "field", "column"]} onChange={(k) => onChange(k === "none" ? undefined : k === "field" ? { field: "" } : { column: "" })} />
       </Row>
-      {value && "field" in value && <Text value={value.field} onChange={(f) => onChange({ ...value, field: f })} placeholder={t("document field")} />}
-      {value && "column" in value && <Text value={value.column} list={cols} onChange={(c) => onChange({ ...value, column: c })} placeholder={t("column")} />}
+      {value && "field" in value && <Text value={value.field} onChange={(f) => onChange({ ...value, field: f })} placeholder={t("inspector.documentField")} />}
+      {value && "column" in value && <Text value={value.column} list={cols} onChange={(c) => onChange({ ...value, column: c })} placeholder={t("common.column")} />}
     </div>
   );
 }

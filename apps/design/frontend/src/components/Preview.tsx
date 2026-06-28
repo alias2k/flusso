@@ -33,7 +33,7 @@ export function Preview({
 }) {
   const { t } = useT();
   const [copied, setCopied] = useState(false);
-  if (!preview) return <div className="preview empty">{t("Select or edit an index to preview it.")}</div>;
+  if (!preview) return <div className="preview empty">{t("preview.empty")}</div>;
   const copy = () => {
     navigator.clipboard?.writeText(preview.yaml).then(
       () => {
@@ -47,12 +47,12 @@ export function Preview({
     <div className="preview">
       {!preview.parse_ok && (
         <div className="banner error">
-          <strong>{t("This schema does not parse:")}</strong> {preview.parse_error}
+          <strong>{t("preview.parseError")}</strong> {preview.parse_error}
         </div>
       )}
       {diagnostics && diagnostics.length > 0 && (
         <div className="diagnostics">
-          <h3>{t("Database check")}</h3>
+          <h3>{t("preview.dbCheck")}</h3>
           {diagnostics.map((d, i) => (
             <div key={i} className={`diag ${d.severity}`}>
               <span className="diag-where">
@@ -63,7 +63,7 @@ export function Preview({
           ))}
         </div>
       )}
-      <h3>{t("Document")}</h3>
+      <h3>{t("preview.document")}</h3>
       <div className="doc-tree">
         {preview.preview.document.map((n, i) => (
           <Node key={i} node={n} depth={0} />
@@ -71,14 +71,14 @@ export function Preview({
       </div>
       {onSample && preview.parse_ok && <SampleDoc onSample={onSample} />}
       <h3 className="yaml-head">
-        {t("schema.yml")}
-        <button className="link copy" onClick={copy} title={t("Copy YAML")}>
-          <Icon name="copy" size={13} /> {copied ? t("copied") : t("copy")}
+        {t("preview.schemaYml")}
+        <button className="link copy" onClick={copy} title={t("preview.copyYaml")}>
+          <Icon name="copy" size={13} /> {copied ? t("preview.copied") : t("preview.copy")}
         </button>
       </h3>
       <pre className="yaml">{preview.yaml}</pre>
       <details className="mapping-details">
-        <summary>{t("OpenSearch mapping")}</summary>
+        <summary>{t("preview.osMapping")}</summary>
         <pre className="yaml">{JSON.stringify(preview.preview.mapping, null, 2)}</pre>
       </details>
     </div>
@@ -105,15 +105,15 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
   return (
     <div className="sample-doc">
       <h3 className="yaml-head">
-        {t("Sample from DB")}
-        {result?.synthetic && <span className="badge object">{t("example")}</span>}
+        {t("preview.sampleFromDb")}
+        {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
         <button className="link" onClick={fetchSample} disabled={loading}>
-          <Icon name="play" size={13} /> {loading ? t("building…") : result ? t("refresh") : t("fetch")}
+          <Icon name="play" size={13} /> {loading ? t("preview.building") : result ? t("preview.refresh") : t("preview.fetch")}
         </button>
       </h3>
       {error && <div className="banner error">{error}</div>}
       {result && !result.db_reachable && <div className="banner error">{result.error}</div>}
-      {result?.note && <p className="hint">{t(result.note)}</p>}
+      {result?.note && <p className="hint">{result.note}</p>}
       {result?.document !== undefined && result.document !== null && (
         <pre className="yaml">{JSON.stringify(result.document, null, 2)}</pre>
       )}

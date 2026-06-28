@@ -38,9 +38,11 @@ truth — the UI is a round-tripping view over them, not a separate model.
   relations, with an inspector side-panel for the fine-grained grammar. Built to `dist/`
   and embedded via `rust-embed`. Rebuild with `npm --prefix frontend ci && npm --prefix
   frontend run build`. The UI is localizable (`frontend/src/i18n.tsx` + per-language
-  catalogs in `frontend/src/locales/`, currently English and Italian); the English source
-  string is the message key, so other languages only translate the catalog and any gap
-  falls back to English.
+  catalogs in `frontend/src/locales/`, currently English and Italian): namespaced symbolic
+  keys (`inspector.required`) resolved through a small **ICU MessageFormat** evaluator
+  (`plural`/`select` via the platform `Intl.PluralRules`, so plurals are CLDR-correct), with
+  `en` as the base catalog every other language falls back to. Add a language by copying a
+  `locales/*.ts` catalog and registering it in `LANGS`/`catalogs`.
 
 ## Use it
 

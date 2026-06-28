@@ -14,26 +14,26 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={t("Database tables")} onClick={(e) => e.stopPropagation()}>
-        <h3>{t("Database ({n} tables)", { n: catalog.catalog.tables.length })}</h3>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={t("catalog.aria")} onClick={(e) => e.stopPropagation()}>
+        <h3>{t("catalog.title", { n: catalog.catalog.tables.length })}</h3>
         {catalog.error ? (
-          <p className="banner warn">{t("Database not reachable — {err}", { err: catalog.error })}</p>
+          <p className="banner warn">{t("catalog.dbError", { err: catalog.error })}</p>
         ) : (
           <>
-            <input className="catalog-filter" placeholder={t("filter tables…")} value={q} onChange={(e) => setQ(e.target.value)} />
+            <input className="catalog-filter" placeholder={t("catalog.filter")} value={q} onChange={(e) => setQ(e.target.value)} />
             <div className="catalog-list">
               {tables.map((tbl) => (
                 <details key={tbl.name} className="catalog-table">
                   <summary>
                     {tbl.name}
-                    {junctions.has(tbl.name) && <span className="badge many_to_many">{t("junction")}</span>}
-                    <span className="muted"> · {t("{n} cols", { n: tbl.columns.length })}</span>
+                    {junctions.has(tbl.name) && <span className="badge many_to_many">{t("catalog.junction")}</span>}
+                    <span className="muted"> · {t("catalog.cols", { n: tbl.columns.length })}</span>
                   </summary>
                   <div className="catalog-cols">
                     {tbl.columns.map((c) => (
                       <div className="catalog-col" key={c.name}>
                         <span>
-                          {c.is_primary_key && <span className="pk-dot" title={t("primary key")} />}
+                          {c.is_primary_key && <span className="pk-dot" title={t("catalog.pk")} />}
                           {c.name}
                           {c.nullable ? <span className="muted">?</span> : null}
                         </span>
@@ -54,7 +54,7 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
           </>
         )}
         <div className="modal-actions">
-          <button onClick={onClose}>{t("Close")}</button>
+          <button onClick={onClose}>{t("common.close")}</button>
         </div>
       </div>
     </div>

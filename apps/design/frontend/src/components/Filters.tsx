@@ -97,7 +97,7 @@ export function Filters({
                   value={"column" in f ? f.column : ""}
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
-                  placeholder={t("column")}
+                  placeholder={t("common.column")}
                 />
                 <Select
                   value={f.op as "is_null" | "is_not_null"}
@@ -112,7 +112,7 @@ export function Filters({
                   value={"column" in f ? (f.column as string) : ""}
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
-                  placeholder={t("column")}
+                  placeholder={t("common.column")}
                 />
                 <Select
                   value={f.op as (typeof VALUE_OPS)[number]}
@@ -122,18 +122,18 @@ export function Filters({
                 <Text
                   value={valueText(f)}
                   onChange={(text) => set(i, { ...f, value: coerceValue(f.op as string, text) })}
-                  placeholder={f.op === "between" ? t("lo, hi") : f.op === "in" ? t("a, b, c") : t("value")}
+                  placeholder={f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")}
                 />
               </>
             )}
             <button className="link danger" onClick={() => remove(i)}>
-              {t("remove")}
+              {t("common.remove")}
             </button>
           </div>
         );
       })}
       <button className="link" onClick={() => onChange([...value, blank("value_op")])}>
-        + {t("filter")}
+        + {t("filters.filter")}
       </button>
     </div>
   );
