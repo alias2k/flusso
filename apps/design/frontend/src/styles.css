@@ -970,3 +970,16 @@ button:disabled:hover {
   gap: 4px;
   font-size: 11px;
 }
+
+/* inspector duplicate/delete actions + field options rows */
+.inspector-actions {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.opt-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+}

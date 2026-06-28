@@ -345,6 +345,34 @@ export default function App() {
     }
   };
 
+  const dupIndex = (i: number) => {
+    if (!doc) return;
+    const entries = doc.config.index ?? [];
+    const src = entries[i];
+    if (!src) return;
+    let name = `${src.name}_copy`;
+    let n = 1;
+    while (entries.some((e) => e.name === name)) name = `${src.name}_copy${++n}`;
+    setDoc((d) =>
+      d
+        ? {
+            config: {
+              ...d.config,
+              index: [
+                ...entries.slice(0, i + 1),
+                { name, schema: `${name}.schema.yml`, enabled: src.enabled },
+                ...entries.slice(i + 1),
+              ],
+            },
+            schemas: d.schemas[src.name]
+              ? { ...d.schemas, [name]: structuredClone(d.schemas[src.name]) }
+              : d.schemas,
+          }
+        : d,
+    );
+    openIndex(name);
+  };
+
   const createIndex = (name: string, table: string) => {
     const pk = catalog?.catalog.tables.find((t) => t.name === table)?.primary_key[0];
     setDoc((d) =>
@@ -444,7 +472,7 @@ export default function App() {
 
         {active === "config" ? (
           <main className="editor">
-            <ConfigPanel config={config} onChange={setConfig} />
+            <ConfigPanel config={config} onChange={setConfig} onDuplicate={dupIndex} />
           </main>
         ) : rawMode ? (
           <main className="raw-pane">

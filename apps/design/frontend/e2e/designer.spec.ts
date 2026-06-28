@@ -147,6 +147,20 @@ test("preview drawer shows the OpenSearch mapping", async ({ page }) => {
   await expect(page.locator(".mapping-details")).toBeVisible();
 });
 
+test("duplicating a node adds a copy", async ({ page }) => {
+  const before = await page.locator(".flow-node").count();
+  await page.locator(".flow-node:not(.kind-root) header").first().click();
+  await page.getByRole("button", { name: "Duplicate" }).click();
+  await expect(page.locator(".flow-node")).toHaveCount(before + 1);
+});
+
+test("duplicating an index adds a sidebar entry", async ({ page }) => {
+  const before = await page.locator(".sidebar .nav").count();
+  await page.getByRole("button", { name: /Deployment/ }).click();
+  await page.locator(".index-entry .link", { hasText: "dup" }).first().click();
+  await expect(page.locator(".sidebar .nav")).toHaveCount(before + 1);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

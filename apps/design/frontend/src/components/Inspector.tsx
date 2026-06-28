@@ -93,7 +93,15 @@ function RootInspector() {
 }
 
 function NodeInspector({ path }: { path: number[] }) {
-  const { schema, apply, catalog } = useDesign();
+  const { schema, apply, catalog, select } = useDesign();
+  const duplicate = () => {
+    apply((s) => edit.duplicateNode(s, path));
+    select({ kind: "node", path: [...path.slice(0, -1), path[path.length - 1] + 1] });
+  };
+  const remove = () => {
+    apply((s) => edit.removeNode(s, path));
+    select(null);
+  };
   const field = fieldAtPath(schema, path);
   if (!field) return null;
   const setField = (f: Field) => apply((s) => edit.setNode(s, path, f));
@@ -102,6 +110,12 @@ function NodeInspector({ path }: { path: number[] }) {
     return (
       <div className="inspector">
         <h3>Object group</h3>
+        <div className="inspector-actions">
+          <button onClick={duplicate}>Duplicate</button>
+          <button className="link danger" onClick={remove}>
+            Delete
+          </button>
+        </div>
         <Row label="field name">
           <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
         </Row>
@@ -122,6 +136,12 @@ function NodeInspector({ path }: { path: number[] }) {
     <div className="inspector">
       <h3>Join · {verb}</h3>
       {KIND_HELP[verb] && <p className="kind-help">{KIND_HELP[verb]}</p>}
+      <div className="inspector-actions">
+        <button onClick={duplicate}>Duplicate</button>
+        <button className="link danger" onClick={remove}>
+          Delete
+        </button>
+      </div>
       <Row label="field name">
         <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
       </Row>
@@ -168,7 +188,15 @@ function NodeInspector({ path }: { path: number[] }) {
 }
 
 function FieldInspector({ path, index }: { path: number[]; index: number }) {
-  const { schema, apply, catalog } = useDesign();
+  const { schema, apply, catalog, select } = useDesign();
+  const duplicate = () => {
+    apply((s) => edit.duplicateAt(s, path, index));
+    select({ kind: "field", path, index: index + 1 });
+  };
+  const remove = () => {
+    apply((s) => edit.removeAt(s, path, index));
+    select(null);
+  };
   const field = nodeFields(schema, path)[index];
   if (!field) return null;
   const table = effectiveTable(schema, path);
@@ -182,6 +210,12 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
     <div className="inspector">
       <h3>Field · {field.field}</h3>
       {KIND_HELP[helpKind] && <p className="kind-help">{KIND_HELP[helpKind]}</p>}
+      <div className="inspector-actions">
+        <button onClick={duplicate}>Duplicate</button>
+        <button className="link danger" onClick={remove}>
+          Delete
+        </button>
+      </div>
       <Row label="field name">
         <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       </Row>

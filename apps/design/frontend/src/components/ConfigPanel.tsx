@@ -13,9 +13,11 @@ function connectionUrl(config: ConfigToml): string | null {
 export function ConfigPanel({
   config,
   onChange,
+  onDuplicate,
 }: {
   config: ConfigToml;
   onChange: (c: ConfigToml) => void;
+  onDuplicate: (i: number) => void;
 }) {
   const url = connectionUrl(config);
   const index = config.index ?? [];
@@ -101,6 +103,9 @@ export function ConfigPanel({
             options={["default", "stop", "skip"]}
             onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
           />
+          <button className="link" title="duplicate" onClick={() => onDuplicate(i)}>
+            dup
+          </button>
           <button
             className="link danger"
             onClick={() => {

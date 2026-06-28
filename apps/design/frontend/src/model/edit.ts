@@ -59,6 +59,34 @@ export function clearColumns(schema: IndexSchema, path: number[]): IndexSchema {
   );
 }
 
+/// Insert a deep copy of the field at `index` (with a fresh unique name) right
+/// after it. Works for leaves and whole container subtrees alike.
+export function duplicateAt(schema: IndexSchema, path: number[], index: number): IndexSchema {
+  const fields = nodeFields(schema, path);
+  const orig = fields[index];
+  if (!orig) return schema;
+  const copy: Field = { ...structuredClone(orig), field: uniqueName(fields.map((f) => f.field), orig.field) };
+  const next = fields.slice();
+  next.splice(index + 1, 0, copy);
+  return withNodeFields(schema, path, next);
+}
+
+/// Duplicate the container field that *is* the node at `path` within its parent.
+export function duplicateNode(schema: IndexSchema, path: number[]): IndexSchema {
+  if (path.length === 0) return schema;
+  return duplicateAt(schema, path.slice(0, -1), path[path.length - 1]);
+}
+
+function uniqueName(existing: string[], base: string): string {
+  let name = `${base}_copy`;
+  let n = 1;
+  while (existing.includes(name)) {
+    n += 1;
+    name = `${base}_copy${n}`;
+  }
+  return name;
+}
+
 /// Move the field at `index` one slot up (`dir = -1`) or down (`dir = +1`).
 export function moveField(schema: IndexSchema, path: number[], index: number, dir: -1 | 1): IndexSchema {
   const fields = nodeFields(schema, path).slice();
