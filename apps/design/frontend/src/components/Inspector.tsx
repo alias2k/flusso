@@ -205,6 +205,14 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
   const s = field.source;
 
+  // Nullability of the bound source column, when known — drives the
+  // source-guided required/default rule (see RequiredDefault). Undefined when
+  // the column isn't in the catalog (offline, or a hand-typed name).
+  const boundColumn = "column" in s ? s.column.column : undefined;
+  const srcNullable = boundColumn
+    ? catalog?.catalog.tables.find((t) => t.name === table)?.columns.find((c) => c.name === boundColumn)?.nullable
+    : undefined;
+
   const helpKind = fieldHelpKind(s);
   return (
     <div className="inspector">
@@ -220,9 +228,9 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
         <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       </Row>
 
-      {"column" in s && typeof s.column.ty === "string" && <ScalarBody field={field} column={s.column} set={set} />}
-      {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && <MapBody field={field} column={s.column} cols={cols} set={set} />}
-      {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} set={set} />}
+      {"column" in s && typeof s.column.ty === "string" && <ScalarBody field={field} column={s.column} srcNullable={srcNullable} set={set} />}
+      {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && <MapBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
+      {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
       {"constant" in s && (
         <Row label="value (JSON)">
@@ -250,7 +258,7 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
 // The column is fixed by the catalog checkbox on the node; the inspector edits
 // only what's *about* the field — its type, nullability, transforms, default.
 // (The document field name is renamed in the header above.)
-function ScalarBody({ field, column, set }: { field: Field; column: Column; set: (f: Field) => void }) {
+function ScalarBody({ field, column, srcNullable, set }: { field: Field; column: Column; srcNullable?: boolean; set: (f: Field) => void }) {
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   const has = (t: "lowercase" | "trim") => (column.transforms ?? []).includes(t);
   const toggle = (t: "lowercase" | "trim", on: boolean) => {
@@ -264,11 +272,44 @@ function ScalarBody({ field, column, set }: { field: Field; column: Column; set:
       <Row label="type">
         <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
       </Row>
-      <Check value={!column.nullable} label="required" onChange={(req) => setCol({ ...column, nullable: !req })} />
       <Check value={has("lowercase")} label="lowercase" onChange={(on) => toggle("lowercase", on)} />
       <Check value={has("trim")} label="trim" onChange={(on) => toggle("trim", on)} />
-      <Row label="default (optional, JSON)">
+      <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
+    </>
+  );
+}
+
+/// The source-guided **required** + **default** pair. A column's nullability is
+/// determined by the database, so this constrains the choice rather than leaving
+/// it free:
+/// - a **NOT NULL** source column is required by default; you may relax it to
+///   optional, and need no default;
+/// - a **nullable** source column is optional by default; you may mark it
+///   required, but then a `default` is mandatory (else the document field could
+///   be missing). The default input is flagged invalid until one is set.
+///
+/// When the column isn't in the catalog (offline, or a hand-typed name) the
+/// source nullability is unknown and both stay freely editable.
+function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcNullable?: boolean; setCol: (c: Column) => void }) {
+  const required = !column.nullable;
+  const mustDefault = srcNullable === true && required;
+  const defaultMissing = mustDefault && column.default === undefined;
+  return (
+    <>
+      {srcNullable === false && (
+        <p className="hint">
+          Source column is <b>NOT NULL</b> — required by default; uncheck to make it optional in the document.
+        </p>
+      )}
+      {srcNullable === true && (
+        <p className="hint">
+          Source column is <b>nullable</b> — optional by default; to make it required you must set a default.
+        </p>
+      )}
+      <Check value={required} label="required" onChange={(req) => setCol({ ...column, nullable: !req })} />
+      <Row label={mustDefault ? "default (required)" : "default (optional, JSON)"}>
         <Text
+          invalid={defaultMissing}
           value={column.default === undefined ? "" : JSON.stringify(column.default)}
           onChange={(t) => {
             if (!t.trim()) {
@@ -284,6 +325,9 @@ function ScalarBody({ field, column, set }: { field: Field; column: Column; set:
           placeholder='e.g. 0 or "n/a"'
         />
       </Row>
+      {defaultMissing && (
+        <p className="error-hint">A required field over a nullable column must set a default, or the document field could be missing.</p>
+      )}
     </>
   );
 }
@@ -333,7 +377,7 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   );
 }
 
-function MapBody({ field, column, cols, set }: { field: Field; column: Column; cols: string[]; set: (f: Field) => void }) {
+function MapBody({ field, column, cols, srcNullable, set }: { field: Field; column: Column; cols: string[]; srcNullable?: boolean; set: (f: Field) => void }) {
   const ty = column.ty as { map: { values: FlussoType } };
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
@@ -344,12 +388,12 @@ function MapBody({ field, column, cols, set }: { field: Field; column: Column; c
       <Row label="column (json/jsonb)">
         <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
       </Row>
-      <Check value={!column.nullable} label="required" onChange={(req) => setCol({ ...column, nullable: !req })} />
+      <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
     </>
   );
 }
 
-function CustomBody({ field, column, cols, set }: { field: Field; column: Column; cols: string[]; set: (f: Field) => void }) {
+function CustomBody({ field, column, cols, srcNullable, set }: { field: Field; column: Column; cols: string[]; srcNullable?: boolean; set: (f: Field) => void }) {
   const ty = column.ty as { custom: { postgres: string[]; opensearch: string } };
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
@@ -363,7 +407,7 @@ function CustomBody({ field, column, cols, set }: { field: Field; column: Column
       <Row label="column">
         <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
       </Row>
-      <Check value={!column.nullable} label="required" onChange={(req) => setCol({ ...column, nullable: !req })} />
+      <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
     </>
   );
 }

@@ -20,6 +20,7 @@ import { Preview } from "./components/Preview";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
 import { removeAt, removeNode } from "./model/edit";
+import { requiredDefaultIssues } from "./model/issues";
 import { DesignProvider, type Selection } from "./state";
 
 /// The whole editable document: the deployment config + every index's schema.
@@ -133,6 +134,14 @@ export default function App() {
   const config = doc?.config;
   const schema = doc && active !== "config" ? doc.schemas[active] : undefined;
   const inspectorOpen = active !== "config" && !!schema && selection !== null;
+
+  // Database diagnostics (from Validate) plus always-on, catalog-only schema
+  // checks (e.g. required-over-nullable needs a default) — same channel, so
+  // both highlight the fields and list in the preview.
+  const allDiagnostics = useMemo(() => {
+    const live = (schema ? requiredDefaultIssues(schema, catalog, active) : []) as DiagnosticDto[];
+    return [...(diagnostics ?? []), ...live];
+  }, [schema, catalog, active, diagnostics]);
 
   // Debounced live preview of the active index.
   useEffect(() => {
@@ -502,7 +511,7 @@ export default function App() {
               selection,
               select: setSelection,
               columnsFor,
-              diagnostics: (diagnostics ?? []).filter((d) => d.index === active),
+              diagnostics: allDiagnostics.filter((d) => d.index === active),
               collapsed,
               toggleCollapsed,
             }}
@@ -513,7 +522,7 @@ export default function App() {
                 <div className="drawer">
                   <Preview
                     preview={preview}
-                    diagnostics={diagnostics}
+                    diagnostics={allDiagnostics.filter((d) => d.index === active)}
                     onSample={
                       doc && schema && active !== "config"
                         ? () => api.sample(doc.config, active, schema)

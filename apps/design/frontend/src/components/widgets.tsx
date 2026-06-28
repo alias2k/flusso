@@ -17,17 +17,20 @@ export function Text({
   onChange,
   placeholder,
   list,
+  invalid,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   list?: string[];
+  invalid?: boolean;
 }) {
   const id = list ? nextId() : undefined;
   return (
     <>
       <input
         type="text"
+        className={invalid ? "invalid" : undefined}
         value={value}
         placeholder={placeholder}
         list={id}

@@ -998,3 +998,7 @@ button:disabled:hover {
 /* ── sample document (item 6) ───────────────────────────────────────────── */
 .sample-doc { margin-top: 8px; }
 .sample-doc .yaml-head { display: flex; align-items: center; gap: 8px; }
+
+/* ── source-guided validation (required/default) ────────────────────────── */
+input.invalid { border-color: var(--danger, #ef4444); outline-color: var(--danger, #ef4444); }
+.error-hint { color: var(--danger, #ef4444); font-size: 12px; margin: 2px 0 6px; }

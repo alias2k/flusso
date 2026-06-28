@@ -38,6 +38,13 @@ cleanly — join keys and verb, `order_by`, `limit`, filters, `value_type`/`elem
 transforms, soft-delete, nullability. Node positions are remembered in your browser; they
 aren't written to the files (the files only hold the document tree).
 
+**Some choices are guided by the source, not free.** A column's nullability comes from
+the database, so the **required** toggle follows it: a `NOT NULL` column is required by
+default (you may relax it to optional), while a nullable column is optional by default. If
+you mark a nullable column **required**, a **default** becomes mandatory — otherwise the
+field could be missing from the document — and the designer flags it (a red default field
+and a highlighted column) until you set one.
+
 ### Working faster
 
 - **Undo/redo** (`⌘/Ctrl+Z`, `⇧⌘Z`) over the whole document; an **unsaved-changes** dot

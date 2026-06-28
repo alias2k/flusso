@@ -180,6 +180,23 @@ test("catalog browser lists the database tables", async ({ page }) => {
   await expect(page.locator(".catalog-table")).not.toHaveCount(0);
 });
 
+test("marking a nullable source column required demands a default", async ({ page }) => {
+  // fullName maps to users.full_name, which is nullable in the source.
+  await page.locator(".flow-node.kind-root .col-row", { hasText: "full_name" }).first().click();
+  await expect(page.locator(".inspector")).toBeVisible();
+  const required = page.locator(".inspector").getByRole("checkbox", { name: "required" });
+  await required.check();
+  // required over a nullable column → the default becomes mandatory.
+  await expect(page.locator(".inspector .error-hint")).toBeVisible();
+  await expect(page.locator(".inspector input.invalid")).toBeVisible();
+  // the node highlights it as an error too.
+  await expect(page.locator(".flow-node.kind-root .col-row.diag-error")).not.toHaveCount(0);
+  // setting a default clears the requirement.
+  await page.locator(".inspector").getByPlaceholder(/e\.g\. 0/).fill('"n/a"');
+  await expect(page.locator(".inspector .error-hint")).toHaveCount(0);
+  await expect(page.locator(".inspector input.invalid")).toHaveCount(0);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();
