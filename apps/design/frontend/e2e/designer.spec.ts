@@ -142,6 +142,11 @@ test("the DB chip re-tests the connection", async ({ page }) => {
   await expect(page.locator(".toast")).toBeVisible();
 });
 
+test("preview drawer shows the OpenSearch mapping", async ({ page }) => {
+  await page.getByRole("button", { name: "YAML", exact: true }).click();
+  await expect(page.locator(".mapping-details")).toBeVisible();
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

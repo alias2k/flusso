@@ -72,6 +72,10 @@ export function Preview({
         </button>
       </h3>
       <pre className="yaml">{preview.yaml}</pre>
+      <details className="mapping-details">
+        <summary>OpenSearch mapping</summary>
+        <pre className="yaml">{JSON.stringify(preview.preview.mapping, null, 2)}</pre>
+      </details>
     </div>
   );
 }

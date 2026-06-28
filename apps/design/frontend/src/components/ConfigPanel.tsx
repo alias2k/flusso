@@ -50,6 +50,34 @@ export function ConfigPanel({
       ) : (
         <p className="hint">Connection is set via parts or an env ref — edit it in flusso.toml.</p>
       )}
+      <Check
+        value={(config.source as Record<string, unknown>)?.manage_publication !== false}
+        label="manage_publication"
+        onChange={(v) => onChange({ ...config, source: { ...config.source, manage_publication: v } })}
+      />
+      <Field label="on_error (global)">
+        <Select
+          value={((config.on_error as string) ?? "stop") as "stop" | "skip"}
+          options={["stop", "skip"]}
+          onChange={(v) => onChange({ ...config, on_error: v })}
+        />
+      </Field>
+      <div className="row">
+        <Field label="public_address">
+          <Text
+            value={((config.server as Record<string, unknown>)?.public_address as string) ?? ""}
+            onChange={(v) => onChange({ ...config, server: { ...config.server, public_address: v || undefined } })}
+            placeholder="127.0.0.1:9464"
+          />
+        </Field>
+        <Field label="private_address">
+          <Text
+            value={((config.server as Record<string, unknown>)?.private_address as string) ?? ""}
+            onChange={(v) => onChange({ ...config, server: { ...config.server, private_address: v || undefined } })}
+            placeholder="127.0.0.1:9465"
+          />
+        </Field>
+      </div>
 
       <h3>Sinks</h3>
       {Object.entries(sinks).map(([name, sink]) => (
@@ -68,7 +96,18 @@ export function ConfigPanel({
           <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder="name" />
           <Text value={e.schema} onChange={(schema) => setEntry(i, { ...e, schema })} placeholder="x.schema.yml" />
           <Check value={e.enabled} label="enabled" onChange={(enabled) => setEntry(i, { ...e, enabled })} />
-          <button className="link danger" onClick={() => onChange({ ...config, index: index.filter((_, j) => j !== i) })}>
+          <Select
+            value={((e.on_error as string) ?? "default") as "default" | "stop" | "skip"}
+            options={["default", "stop", "skip"]}
+            onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
+          />
+          <button
+            className="link danger"
+            onClick={() => {
+              if (confirm(`Remove index "${e.name}"? (the schema file is left on disk)`))
+                onChange({ ...config, index: index.filter((_, j) => j !== i) });
+            }}
+          >
             ✕
           </button>
         </div>
