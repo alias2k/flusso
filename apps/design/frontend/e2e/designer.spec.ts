@@ -129,6 +129,12 @@ test("config panel edits sinks", async ({ page }) => {
   await expect(page.locator(".sink-editor")).not.toHaveCount(0);
 });
 
+test("connection editor switches to env mode", async ({ page }) => {
+  await page.getByRole("button", { name: /Deployment/ }).click();
+  await page.locator(".connection-editor select").selectOption("env");
+  await expect(page.getByText("env var")).toBeVisible();
+});
+
 test("renaming an index keeps its schema (regression)", async ({ page }) => {
   await page.getByRole("button", { name: /Deployment/ }).click();
   await page.locator(".index-entry input").first().fill("renamed_idx");

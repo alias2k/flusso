@@ -2,13 +2,7 @@ import type { ConfigToml, IndexEntry } from "../api";
 import { Check, Field, Num, Select, Text } from "./widgets";
 
 type Sink = Record<string, unknown>;
-
-/// Read the connection URL out of the loose `[source]` table, if present as a
-/// plain string. Parts-form / env-ref connections are shown read-only.
-function connectionUrl(config: ConfigToml): string | null {
-  const url = (config.source as Record<string, unknown>)?.connection_url;
-  return typeof url === "string" ? url : null;
-}
+type Source = Record<string, unknown>;
 
 export function ConfigPanel({
   config,
@@ -19,7 +13,6 @@ export function ConfigPanel({
   onChange: (c: ConfigToml) => void;
   onDuplicate: (i: number) => void;
 }) {
-  const url = connectionUrl(config);
   const index = config.index ?? [];
   const sinks = (config.sinks ?? {}) as Record<string, Sink>;
 
@@ -41,17 +34,7 @@ export function ConfigPanel({
       <Field label="index prefix">
         <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder="(none)" />
       </Field>
-      {url !== null ? (
-        <Field label="connection_url">
-          <Text
-            value={url}
-            onChange={(v) => onChange({ ...config, source: { ...config.source, connection_url: v } })}
-            placeholder="postgres://user:pass@host:5432/db"
-          />
-        </Field>
-      ) : (
-        <p className="hint">Connection is set via parts or an env ref — edit it in flusso.toml.</p>
-      )}
+      <ConnectionEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
       <Check
         value={(config.source as Record<string, unknown>)?.manage_publication !== false}
         label="manage_publication"
@@ -125,6 +108,70 @@ export function ConfigPanel({
       >
         + index
       </button>
+    </div>
+  );
+}
+
+/// The source connection in any of its three forms: a plain URL, an env ref
+/// (`{ env = "VAR" }`), or host/port/user/password/database parts.
+function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: Source) => void }) {
+  const cu = source.connection_url as unknown;
+  const isObj = !!cu && typeof cu === "object";
+  const obj = (cu ?? {}) as Record<string, unknown>;
+  const mode: "url" | "env" | "parts" =
+    typeof cu === "string" ? "url" : isObj && "env" in obj ? "env" : isObj && "host" in obj ? "parts" : "url";
+  const setCu = (v: unknown) => onChange({ ...source, connection_url: v });
+
+  return (
+    <div className="connection-editor">
+      <Field label="connection">
+        <Select
+          value={mode}
+          options={["url", "env", "parts"]}
+          onChange={(m) => {
+            if (m === "url") setCu("postgres://user:pass@127.0.0.1:5432/db");
+            else if (m === "env") setCu({ env: "DATABASE_URL" });
+            else setCu({ host: "127.0.0.1", port: 5432, user: "postgres", password: "", database: "postgres" });
+          }}
+        />
+      </Field>
+      {mode === "url" && (
+        <Field label="url">
+          <Text value={typeof cu === "string" ? cu : ""} onChange={setCu} placeholder="postgres://user:pass@host:5432/db" />
+        </Field>
+      )}
+      {mode === "env" && (
+        <Field label="env var">
+          <Text value={(obj.env as string) ?? ""} onChange={(v) => setCu({ env: v })} placeholder="DATABASE_URL" />
+        </Field>
+      )}
+      {mode === "parts" && (
+        <>
+          <div className="row">
+            <Field label="host">
+              <Text value={(obj.host as string) ?? ""} onChange={(v) => setCu({ ...obj, host: v })} />
+            </Field>
+            <Field label="port">
+              <Num
+                value={typeof obj.port === "number" ? (obj.port as number) : undefined}
+                onChange={(v) => setCu({ ...obj, port: v })}
+              />
+            </Field>
+          </div>
+          <Field label="user">
+            <Text value={(obj.user as string) ?? ""} onChange={(v) => setCu({ ...obj, user: v })} />
+          </Field>
+          <Field label="password">
+            <Text
+              value={typeof obj.password === "string" ? (obj.password as string) : ""}
+              onChange={(v) => setCu({ ...obj, password: v || undefined })}
+            />
+          </Field>
+          <Field label="database">
+            <Text value={(obj.database as string) ?? ""} onChange={(v) => setCu({ ...obj, database: v })} />
+          </Field>
+        </>
+      )}
     </div>
   );
 }
