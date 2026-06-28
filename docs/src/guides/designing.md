@@ -26,16 +26,40 @@ It opens the UI in the default browser on start; `--no-open` (or
 
 Each index is a **node graph**. A node is a place in the document — the root, an `object`
 group, or a join — and shows the table it draws from plus a checklist of that table's
-columns (check to include, rename inline, set the type). Pull in a related table by
-clicking one of the node's FK suggestions: the verb (`belongs_to` / `has_one` / `has_many`,
-or `many_to_many` through a detected junction) is inferred from the foreign-key direction,
-and a new child node appears. Aggregates (`count`/`sum`/`ids`/…), `geo`, `map`, `custom`,
-and `constant` are added from the node's **+ field** menu as leaf fields, not child nodes.
+columns (check to include; click a row to rename it and set its type in the inspector).
+Pull in a related table by clicking one of the node's FK suggestions: the verb (`belongs_to`
+/ `has_one` / `has_many`, or `many_to_many` through a detected junction) is inferred from
+the foreign-key direction, and a new child node appears. Aggregates (`count`/`sum`/`ids`/…),
+`geo`, `map`, `custom`, and `constant` are added from the node's **+ field** menu as leaf
+fields, not child nodes.
 
 Selecting a node or field opens the **inspector** for the details a node can't show
 cleanly — join keys and verb, `order_by`, `limit`, filters, `value_type`/`element_type`,
 transforms, soft-delete, nullability. Node positions are remembered in your browser; they
 aren't written to the files (the files only hold the document tree).
+
+### Working faster
+
+- **Undo/redo** (`⌘/Ctrl+Z`, `⇧⌘Z`) over the whole document; an **unsaved-changes** dot
+  per index, and a warning before you navigate away with edits.
+- **Per-node column tools**: include-all/clear, a filter for wide tables, reorder rows, and
+  collapse a node to just its header.
+- **Jump-to-node** search and shortcuts: `⌘/Ctrl+S` save, `Delete` remove the selected
+  node/field, `Esc` deselect; click an edge to select its join.
+- **Guidance**: a kind-colour legend, FK tooltips, a one-line grammar hint per field kind,
+  and an inspector breadcrumb. A **light/dark** theme toggle.
+
+### Saving, validating, and escape hatches
+
+- **Diff before save**: *Save* shows exactly what would change on disk per file; it writes
+  only on confirm.
+- **Validate against the DB** highlights the offending fields right on the canvas (with the
+  message on hover), not just a list.
+- **Editable `flusso.toml`**: the source connection, index entries, and **sinks** (the
+  OpenSearch URL, shards, analyzers, …) are all editable; a DB-status chip re-tests the
+  connection.
+- **Raw-YAML fallback**: when the visual editor can't represent something, switch an index
+  to *Raw YAML*, edit the file text directly, and save it verbatim.
 
 ## What it gives you
 
