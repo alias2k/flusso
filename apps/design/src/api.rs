@@ -51,6 +51,10 @@ pub struct IndexFile {
     /// The parsed schema, or `None` when the file is missing/invalid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<IndexSchema>,
+    /// The raw on-disk file text — the escape hatch when the visual editor can't
+    /// represent something (and the source for the diff-before-save).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
     /// Why the schema failed to load, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -69,15 +73,21 @@ pub fn load_project(config_path: &Path) -> Result<Project> {
         .iter()
         .map(|entry| {
             let schema_path = entry.schema.as_ref();
-            let (schema, error) = match load_schema(base_dir, schema_path) {
-                Ok(schema) => (Some(schema), None),
-                Err(e) => (None, Some(format!("{e:#}"))),
+            let resolved = resolve(base_dir, schema_path);
+            let raw = std::fs::read_to_string(&resolved).ok();
+            let (schema, error) = match raw.as_deref() {
+                Some(text) => match parse_schema_text(text) {
+                    Ok(s) => (Some(s), None),
+                    Err(e) => (None, Some(format!("{e:#}"))),
+                },
+                None => (None, Some(format!("could not read {}", resolved.display()))),
             };
             IndexFile {
                 name: entry.name.to_string(),
                 enabled: entry.enabled,
                 schema_path: schema_path.display().to_string(),
                 schema,
+                raw,
                 error,
             }
         })
@@ -90,11 +100,8 @@ pub fn load_project(config_path: &Path) -> Result<Project> {
     })
 }
 
-fn load_schema(base_dir: &Path, schema_path: &Path) -> Result<IndexSchema> {
-    let resolved = resolve(base_dir, schema_path);
-    let raw = std::fs::read_to_string(&resolved)
-        .with_context(|| format!("reading {}", resolved.display()))?;
-    let entity = SchemaYaml::try_parse(&raw).context("parsing schema")?;
+fn parse_schema_text(text: &str) -> Result<IndexSchema> {
+    let entity = SchemaYaml::try_parse(text).context("parsing schema")?;
     IndexSchema::try_from(entity).context("validating schema")
 }
 
@@ -158,6 +165,10 @@ pub struct SaveSchema {
     pub schema_path: PathBuf,
     /// The schema to render.
     pub schema: IndexSchema,
+    /// Raw YAML to write verbatim instead of regenerating from `schema` — the
+    /// raw-edit escape hatch. When `None`, codegen renders `schema`.
+    #[serde(default)]
+    pub raw: Option<String>,
 }
 
 /// What was written.
@@ -180,7 +191,10 @@ pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResp
     written.push(config_path.display().to_string());
 
     for index in &request.indexes {
-        let yaml = codegen::schema_to_yaml(&index.schema)?;
+        let yaml = match &index.raw {
+            Some(raw) => raw.clone(),
+            None => codegen::schema_to_yaml(&index.schema)?,
+        };
         let resolved = resolve(&base_dir, &index.schema_path);
         if let Some(parent) = resolved.parent() {
             std::fs::create_dir_all(parent)
@@ -192,6 +206,52 @@ pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResp
     }
 
     Ok(SaveResponse { written })
+}
+
+/// One file's on-disk text vs what a save would write.
+#[derive(Debug, Serialize)]
+pub struct FileDiff {
+    /// Absolute path of the file.
+    pub path: String,
+    /// Current on-disk text (empty when the file doesn't exist yet).
+    pub current: String,
+    /// Text a save would write.
+    pub next: String,
+    /// Whether the save would change the file.
+    pub changed: bool,
+}
+
+/// Compute, without writing anything, what a save of `request` would change on
+/// disk — the config plus every index file.
+pub fn diff_project(config_path: &Path, request: SaveRequest) -> Result<Vec<FileDiff>> {
+    let base_dir = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut diffs = Vec::with_capacity(request.indexes.len() + 1);
+
+    let next = codegen::config_to_toml(&request.config)?;
+    let current = std::fs::read_to_string(config_path).unwrap_or_default();
+    diffs.push(FileDiff {
+        changed: current != next,
+        path: config_path.display().to_string(),
+        current,
+        next,
+    });
+
+    for index in &request.indexes {
+        let next = match &index.raw {
+            Some(raw) => raw.clone(),
+            None => codegen::schema_to_yaml(&index.schema)?,
+        };
+        let resolved = resolve(&base_dir, &index.schema_path);
+        let current = std::fs::read_to_string(&resolved).unwrap_or_default();
+        diffs.push(FileDiff {
+            changed: current != next,
+            path: resolved.display().to_string(),
+            current,
+            next,
+        });
+    }
+
+    Ok(diffs)
 }
 
 /// The introspected relational catalog plus detected junction tables.

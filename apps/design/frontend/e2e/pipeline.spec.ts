@@ -15,7 +15,10 @@ test("UI edit → save → flusso check accepts the output", async ({ page }) =>
   // detach the element before check()'s post-assertion.
   await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
 
+  // Save shows a diff of what would change; confirm to write.
   await page.getByRole("button", { name: "Save" }).click();
+  await page.locator(".modal").waitFor();
+  await page.getByRole("button", { name: /Write/ }).click();
   await expect(page.locator(".toast.ok")).toContainText("Saved");
 
   // The files on disk are now canonical-regenerated; `flusso check` must accept

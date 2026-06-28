@@ -95,6 +95,7 @@ fn router(state: AppState) -> Router {
         .route("/api/catalog", get(catalog))
         .route("/api/preview", post(preview))
         .route("/api/validate", post(validate))
+        .route("/api/diff", post(diff))
         .route("/api/save", post(save))
         .with_state(state)
         .fallback(assets::serve)
@@ -116,6 +117,14 @@ async fn preview(Json(request): Json<api::PreviewRequest>) -> Result<Response, A
 
 async fn validate(Json(request): Json<api::ValidateRequest>) -> Response {
     Json(api::validate(request).await).into_response()
+}
+
+async fn diff(
+    State(state): State<AppState>,
+    Json(request): Json<api::SaveRequest>,
+) -> Result<Response, ApiError> {
+    let diffs = api::diff_project(&state.config_path, request)?;
+    Ok(Json(diffs).into_response())
 }
 
 async fn save(

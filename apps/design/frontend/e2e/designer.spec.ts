@@ -112,6 +112,23 @@ test("the sidebar shows a kind legend", async ({ page }) => {
   await expect(page.locator(".legend-row")).toHaveCount(6);
 });
 
+test("save shows a diff before writing", async ({ page }) => {
+  await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.locator(".modal")).toBeVisible();
+  await expect(page.locator(".diff-file")).not.toHaveCount(0);
+});
+
+test("raw YAML mode opens an editor", async ({ page }) => {
+  await page.getByRole("button", { name: "Raw YAML" }).click();
+  await expect(page.locator(".raw-editor")).toBeVisible();
+});
+
+test("config panel edits sinks", async ({ page }) => {
+  await page.getByRole("button", { name: /Deployment/ }).click();
+  await expect(page.locator(".sink-editor")).not.toHaveCount(0);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

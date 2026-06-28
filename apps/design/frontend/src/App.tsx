@@ -4,9 +4,11 @@ import type {
   ColumnShape,
   ConfigToml,
   DiagnosticDto,
+  FileDiff,
   IndexSchema,
   PreviewResponse,
   Project,
+  SaveSchemaInput,
 } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
@@ -52,6 +54,9 @@ export default function App() {
   const [toast, setToast] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
+  const [rawMode, setRawMode] = useState(false);
+  const [rawText, setRawText] = useState("");
+  const [diffs, setDiffs] = useState<FileDiff[] | null>(null);
 
   // Auto-dismiss toasts.
   useEffect(() => {
@@ -75,6 +80,29 @@ export default function App() {
       .catch((e) => setError(String(e)));
     api.catalog().then(setCatalog).catch((e) => setError(String(e)));
   }, [reset]);
+
+  const refreshCatalog = () =>
+    api
+      .catalog()
+      .then((c) => {
+        setCatalog(c);
+        setToast({ kind: c.error ? "error" : "ok", text: c.error ? "Database not reachable" : "Database connected" });
+      })
+      .catch((e) => setToast({ kind: "error", text: errText(e) }));
+
+  // Re-read everything from disk (after a raw save), keeping the active index.
+  const reloadProject = () =>
+    api
+      .project()
+      .then((p) => {
+        setProject(p);
+        const schemas: Record<string, IndexSchema> = {};
+        for (const idx of p.indexes) if (idx.schema) schemas[idx.name] = idx.schema;
+        const fresh: Doc = { config: p.config, schemas };
+        reset(fresh);
+        setSaved(JSON.stringify(fresh));
+      })
+      .catch((e) => setToast({ kind: "error", text: errText(e) }));
 
   const columnsFor = useMemo(() => {
     const tables = catalog?.catalog.tables ?? [];
@@ -192,16 +220,57 @@ export default function App() {
     setDiagnostics(null);
   };
 
+  const saveIndexes = (): SaveSchemaInput[] =>
+    (doc?.config.index ?? [])
+      .filter((e) => doc?.schemas[e.name])
+      .map((e) => ({ schema_path: e.schema, schema: doc!.schemas[e.name] }));
+
+  // Save first shows a diff of what would change on disk; performSave writes it.
   const save = async () => {
     if (!doc || saving) return;
     setSaving(true);
     try {
-      const indexes = (doc.config.index ?? [])
-        .filter((e) => doc.schemas[e.name])
-        .map((e) => ({ schema_path: e.schema, schema: doc.schemas[e.name] }));
-      const res = await api.save(doc.config, indexes);
+      const result = await api.diff(doc.config, saveIndexes());
+      if (result.some((d) => d.changed)) setDiffs(result);
+      else setToast({ kind: "ok", text: "Already up to date" });
+    } catch (e) {
+      setToast({ kind: "error", text: `Diff failed: ${errText(e)}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const performSave = async () => {
+    if (!doc) return;
+    setSaving(true);
+    try {
+      const res = await api.save(doc.config, saveIndexes());
       setSaved(JSON.stringify(doc));
+      setDiffs(null);
       setToast({ kind: "ok", text: `Saved ${res.written.length} file(s)` });
+    } catch (e) {
+      setToast({ kind: "error", text: `Save failed: ${errText(e)}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Raw-YAML escape hatch: write the active index's file verbatim, then reload.
+  const openRaw = () => {
+    const onDisk = project?.indexes.find((i) => i.name === active)?.raw;
+    setRawText(preview?.yaml ?? onDisk ?? "");
+    setRawMode(true);
+  };
+  const saveRaw = async () => {
+    if (!doc || active === "config" || saving) return;
+    const entry = doc.config.index?.find((e) => e.name === active);
+    if (!entry) return;
+    setSaving(true);
+    try {
+      await api.save(doc.config, [{ schema_path: entry.schema, schema: doc.schemas[active] ?? emptySchema(""), raw: rawText }]);
+      setRawMode(false);
+      await reloadProject();
+      setToast({ kind: "ok", text: "Saved raw YAML" });
     } catch (e) {
       setToast({ kind: "error", text: `Save failed: ${errText(e)}` });
     } finally {
@@ -262,7 +331,17 @@ export default function App() {
           flusso
         </span>
         <span className="path">{project.config_path}</span>
+        <button
+          className={`db-chip ${catalog && !catalog.error ? "ok" : "off"}`}
+          title="Re-test the database connection"
+          onClick={refreshCatalog}
+        >
+          {catalog && !catalog.error ? "DB connected" : "DB offline"}
+        </button>
         <span className="spacer" />
+        {active !== "config" && (
+          <button onClick={() => (rawMode ? setRawMode(false) : openRaw())}>{rawMode ? "Visual" : "Raw YAML"}</button>
+        )}
         <button className="icon" title="Undo (⌘Z)" disabled={!canUndo} onClick={undo}>
           <Icon name="undo" />
         </button>
@@ -317,6 +396,19 @@ export default function App() {
           <main className="editor">
             <ConfigPanel config={config} onChange={setConfig} />
           </main>
+        ) : rawMode ? (
+          <main className="raw-pane">
+            <div className="banner warn">
+              Editing raw YAML for <strong>{active}</strong> — Save raw writes this file verbatim, then reloads.
+            </div>
+            <textarea className="raw-editor" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
+            <div className="raw-actions">
+              <button className="primary" onClick={saveRaw} disabled={saving}>
+                Save raw
+              </button>
+              <button onClick={() => setRawMode(false)}>Cancel</button>
+            </div>
+          </main>
         ) : schema ? (
           <DesignProvider
             value={{
@@ -352,11 +444,52 @@ export default function App() {
         ) : null}
       </div>
 
+      {diffs && <DiffModal diffs={diffs} saving={saving} onConfirm={performSave} onCancel={() => setDiffs(null)} />}
+
       {toast && (
         <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
           {toast.text}
         </div>
       )}
+    </div>
+  );
+}
+
+function DiffModal({
+  diffs,
+  saving,
+  onConfirm,
+  onCancel,
+}: {
+  diffs: FileDiff[];
+  saving: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const changed = diffs.filter((d) => d.changed);
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>Review changes ({changed.length} file{changed.length === 1 ? "" : "s"})</h3>
+        <div className="diff-list">
+          {changed.map((d) => (
+            <div className="diff-file" key={d.path}>
+              <div className="diff-path">{d.path}</div>
+              <div className="diff-cols">
+                <pre className="yaml current">{d.current || "(new file)"}</pre>
+                <pre className="yaml next">{d.next}</pre>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="modal-actions">
+          <button className="primary" onClick={onConfirm} disabled={saving}>
+            {saving && <span className="spinner" />}
+            Write {changed.length} file{changed.length === 1 ? "" : "s"}
+          </button>
+          <button onClick={onCancel}>Cancel</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -201,7 +201,21 @@ export interface IndexFile {
   enabled: boolean;
   schema_path: string;
   schema?: IndexSchema;
+  raw?: string;
   error?: string;
+}
+
+export interface FileDiff {
+  path: string;
+  current: string;
+  next: string;
+  changed: boolean;
+}
+
+export interface SaveSchemaInput {
+  schema_path: string;
+  schema: IndexSchema;
+  raw?: string;
 }
 
 export interface Project {
@@ -270,10 +284,13 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ config, indexes }),
     }).then((r) => json<ValidateResponse>(r)),
-  save: (
-    config: ConfigToml,
-    indexes: { schema_path: string; schema: IndexSchema }[],
-  ) =>
+  diff: (config: ConfigToml, indexes: SaveSchemaInput[]) =>
+    fetch("/api/diff", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ config, indexes }),
+    }).then((r) => json<FileDiff[]>(r)),
+  save: (config: ConfigToml, indexes: SaveSchemaInput[]) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },

@@ -46,6 +46,7 @@ fn project_previews_saves_and_reopens() {
     let project = api::load_project(&config_path).unwrap();
     assert_eq!(project.indexes.len(), 3);
     let orders = project.indexes.iter().find(|i| i.name == "orders").unwrap();
+    assert!(orders.raw.is_some(), "load includes the raw file text");
     let schema = orders.schema.clone().unwrap();
 
     // Preview: derives a mapping + document and self-checks the generated YAML.
@@ -71,6 +72,7 @@ fn project_previews_saves_and_reopens() {
             .map(|i| SaveSchema {
                 schema_path: PathBuf::from(&i.schema_path),
                 schema: i.schema.clone().unwrap(),
+                raw: None,
             })
             .collect(),
     };
