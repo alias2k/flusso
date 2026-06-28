@@ -186,7 +186,7 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
         <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       </Row>
 
-      {"column" in s && typeof s.column.ty === "string" && <ScalarBody field={field} column={s.column} cols={cols} set={set} />}
+      {"column" in s && typeof s.column.ty === "string" && <ScalarBody field={field} column={s.column} set={set} />}
       {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && <MapBody field={field} column={s.column} cols={cols} set={set} />}
       {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} set={set} />}
       {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
@@ -205,13 +205,18 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
         </Row>
       )}
       {"relation" in s && "aggregate" in s.relation && <AggregateBody field={field} agg={s.relation.aggregate} tables={tables} set={set} />}
+
+      <OptionsEditor field={field} set={set} />
     </div>
   );
 }
 
 // --- leaf bodies ---
 
-function ScalarBody({ field, column, cols, set }: { field: Field; column: Column; cols: string[]; set: (f: Field) => void }) {
+// The column is fixed by the catalog checkbox on the node; the inspector edits
+// only what's *about* the field — its type, nullability, transforms, default.
+// (The document field name is renamed in the header above.)
+function ScalarBody({ field, column, set }: { field: Field; column: Column; set: (f: Field) => void }) {
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   const has = (t: "lowercase" | "trim") => (column.transforms ?? []).includes(t);
   const toggle = (t: "lowercase" | "trim", on: boolean) => {
@@ -221,16 +226,76 @@ function ScalarBody({ field, column, cols, set }: { field: Field; column: Column
   };
   return (
     <>
-      <Row label="column">
-        <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
-      </Row>
+      <p className="hint">column: {column.column}</p>
       <Row label="type">
         <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
       </Row>
       <Check value={!column.nullable} label="required" onChange={(req) => setCol({ ...column, nullable: !req })} />
       <Check value={has("lowercase")} label="lowercase" onChange={(on) => toggle("lowercase", on)} />
       <Check value={has("trim")} label="trim" onChange={(on) => toggle("trim", on)} />
+      <Row label="default (optional, JSON)">
+        <Text
+          value={column.default === undefined ? "" : JSON.stringify(column.default)}
+          onChange={(t) => {
+            if (!t.trim()) {
+              setCol({ ...column, default: undefined });
+              return;
+            }
+            try {
+              setCol({ ...column, default: JSON.parse(t) });
+            } catch {
+              /* keep typing until valid JSON */
+            }
+          }}
+          placeholder='e.g. 0 or "n/a"'
+        />
+      </Row>
     </>
+  );
+}
+
+/// Edit a field's arbitrary `options` (analyzer, boost, OpenSearch mapping
+/// knobs…) as key → JSON-value rows.
+function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }) {
+  const options = field.options ?? {};
+  const entries = Object.entries(options);
+  const setOpt = (key: string, value: unknown) => set({ ...field, options: { ...options, [key]: value } });
+  const renameOpt = (oldKey: string, newKey: string) => {
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(options)) next[k === oldKey ? newKey : k] = v;
+    set({ ...field, options: next });
+  };
+  const removeOpt = (key: string) => {
+    const next = { ...options };
+    delete next[key];
+    set({ ...field, options: Object.keys(next).length ? next : undefined });
+  };
+  return (
+    <details>
+      <summary>options ({entries.length})</summary>
+      {entries.map(([k, v]) => (
+        <div className="opt-row" key={k}>
+          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder="key" />
+          <Text
+            value={JSON.stringify(v)}
+            onChange={(t) => {
+              try {
+                setOpt(k, JSON.parse(t));
+              } catch {
+                /* keep typing */
+              }
+            }}
+            placeholder="value"
+          />
+          <button className="link danger" onClick={() => removeOpt(k)}>
+            ✕
+          </button>
+        </div>
+      ))}
+      <button className="link" onClick={() => setOpt(`option${entries.length + 1}`, "")}>
+        + option
+      </button>
+    </details>
   );
 }
 
