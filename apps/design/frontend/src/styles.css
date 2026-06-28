@@ -563,7 +563,6 @@ button.icon {
 }
 button.icon:hover {
   color: var(--text);
-  border: none;
 }
 .inspector-pane {
   position: relative;
@@ -1005,3 +1004,43 @@ input.invalid { border-color: var(--danger, #ef4444); outline-color: var(--dange
 
 /* ── language switcher ──────────────────────────────────────────────────── */
 .lang-select { height: 28px; border-radius: 6px; background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 0 6px; }
+
+/* ── hover tooltips for icon buttons ────────────────────────────────────── */
+/* A styled description on hover/focus, above the control by default (canvas
+   panel buttons sit near the bottom); `.tip-below` flips it under for buttons
+   at the top edge (the topbar). */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 60;
+}
+[data-tip].tip-below::after {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+}
+/* A consistent, on-theme focus ring (replaces the bulky default that read as a
+   size change next to the hover border). */
+button.icon:focus-visible,
+.react-flow__panel .panel-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

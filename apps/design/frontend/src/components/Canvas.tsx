@@ -23,6 +23,7 @@ import {
 } from "../model/layout";
 import { suggestRelations } from "../model/relations";
 import { type DocNode, projectGraph } from "../model/tree";
+import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { edgeColor } from "../theme";
 import { DocNodeView } from "./DocNodeView";
@@ -32,6 +33,7 @@ const nodeTypes = { doc: DocNodeView };
 
 export function Canvas() {
   const { schema, indexName, select, catalog } = useDesign();
+  const { t } = useT();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [showMap, setShowMap] = useState(false);
@@ -145,12 +147,18 @@ export function Canvas() {
         <NodeSearch />
       </Panel>
       <Panel position="bottom-right">
-        <button className="icon panel-btn" title="Reset layout" onClick={resetLayout}>
+        <button
+          className="icon panel-btn"
+          data-tip={t("canvas.resetLayout")}
+          aria-label={t("canvas.resetLayout")}
+          onClick={resetLayout}
+        >
           <Icon name="tidy" />
         </button>
         <button
           className="icon panel-btn map-toggle"
-          title={showMap ? "Hide minimap" : "Show minimap"}
+          data-tip={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
+          aria-label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
           onClick={() => setShowMap((m) => !m)}
         >
           <Icon name="map" />
@@ -182,6 +190,7 @@ function RestoreViewport({ index }: { index: string }) {
 function NodeSearch() {
   const { getNodes, setCenter } = useReactFlow();
   const { select } = useDesign();
+  const { t } = useT();
   const [q, setQ] = useState("");
 
   const label = (n: Node) => {
@@ -205,7 +214,7 @@ function NodeSearch() {
 
   return (
     <div className="node-search">
-      <input placeholder="jump to node…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input placeholder={t("canvas.jumpToNode")} value={q} onChange={(e) => setQ(e.target.value)} />
       {results.length > 0 && (
         <ul>
           {results.map((n) => (

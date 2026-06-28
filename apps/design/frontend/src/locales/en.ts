@@ -202,4 +202,10 @@ export const en: Record<string, string> = {
   "filters.loHi": "lo, hi",
   "filters.abc": "a, b, c",
   "filters.filter": "filter",
+
+  // canvas controls
+  "canvas.resetLayout": "Reset layout",
+  "canvas.showMinimap": "Show minimap",
+  "canvas.hideMinimap": "Hide minimap",
+  "canvas.jumpToNode": "jump to node…",
 };

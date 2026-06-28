@@ -238,6 +238,11 @@ test("toggles the light/dark theme", async ({ page }) => {
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
+test("canvas controls carry hover descriptions", async ({ page }) => {
+  await expect(page.locator('.panel-btn[data-tip="Reset layout"]')).toBeVisible();
+  await expect(page.locator('.panel-btn[data-tip="Show minimap"]')).toBeVisible();
+});
+
 test("toggles the minimap", async ({ page }) => {
   await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
   await page.locator(".map-toggle").click();

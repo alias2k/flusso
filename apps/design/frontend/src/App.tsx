@@ -404,7 +404,12 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <button className="icon" title={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")} onClick={() => setLeftOpen((o) => !o)}>
+        <button
+          className="icon tip-below"
+          data-tip={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
+          aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
+          onClick={() => setLeftOpen((o) => !o)}
+        >
           <Icon name="menu" />
         </button>
         <span className="brand">
@@ -415,8 +420,8 @@ export default function App() {
         </span>
         <span className="path">{project.config_path}</span>
         <button
-          className={`db-chip ${catalog && !catalog.error ? "ok" : "off"}`}
-          title={t("topbar.retestDb")}
+          className={`db-chip tip-below ${catalog && !catalog.error ? "ok" : "off"}`}
+          data-tip={t("topbar.retestDb")}
           onClick={refreshCatalog}
         >
           {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
@@ -428,16 +433,16 @@ export default function App() {
         {active !== "config" && (
           <button onClick={() => (rawMode ? setRawMode(false) : openRaw())}>{rawMode ? t("topbar.visual") : t("topbar.rawYaml")}</button>
         )}
-        <button className="icon" title={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
+        <button className="icon tip-below" data-tip={t("topbar.undo")} aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
           <Icon name="undo" />
         </button>
-        <button className="icon" title={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
+        <button className="icon tip-below" data-tip={t("topbar.redo")} aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
           <Icon name="redo" />
         </button>
         <button
-          className="icon"
+          className="icon tip-below"
           aria-label={t("topbar.toggleThemeAria")}
-          title={t("topbar.toggleTheme")}
+          data-tip={t("topbar.toggleTheme")}
           onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
         >
           <Icon name="theme" />

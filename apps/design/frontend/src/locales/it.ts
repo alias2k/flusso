@@ -202,4 +202,10 @@ export const it: Record<string, string> = {
   "filters.loHi": "min, max",
   "filters.abc": "a, b, c",
   "filters.filter": "filtro",
+
+  // canvas controls
+  "canvas.resetLayout": "Reimposta layout",
+  "canvas.showMinimap": "Mostra minimappa",
+  "canvas.hideMinimap": "Nascondi minimappa",
+  "canvas.jumpToNode": "vai al nodo…",
 };
