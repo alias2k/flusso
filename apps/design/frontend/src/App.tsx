@@ -42,6 +42,7 @@ export default function App() {
   const [saved, setSaved] = useState<string>(""); // JSON of the last loaded/saved doc
   const [active, setActive] = useState<string>("config");
   const [selection, setSelection] = useState<Selection>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [leftOpen, setLeftOpen] = useState(true);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[] | null>(null);
@@ -136,6 +137,29 @@ export default function App() {
     );
   };
   const setConfig = (next: ConfigToml) => setDoc((d) => (d ? { ...d, config: next } : d));
+
+  // Collapsed-node ids persist per index (like layout) so they survive reloads.
+  const collapseKey = (index: string) => `flusso-design.collapsed.${index}`;
+  useEffect(() => {
+    if (active === "config") return;
+    try {
+      setCollapsed(new Set(JSON.parse(localStorage.getItem(collapseKey(active)) ?? "[]") as string[]));
+    } catch {
+      setCollapsed(new Set());
+    }
+  }, [active]);
+  const toggleCollapsed = (id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      try {
+        localStorage.setItem(collapseKey(active), JSON.stringify([...next]));
+      } catch {
+        /* storage disabled — collapse just won't persist */
+      }
+      return next;
+    });
+  };
 
   const openIndex = (name: string) => {
     setActive(name);
@@ -270,6 +294,8 @@ export default function App() {
               select: setSelection,
               columnsFor,
               diagnostics: (diagnostics ?? []).filter((d) => d.index === active),
+              collapsed,
+              toggleCollapsed,
             }}
           >
             <main className="canvas-wrap">

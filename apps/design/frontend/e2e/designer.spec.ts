@@ -68,6 +68,20 @@ test("editing marks the index unsaved", async ({ page }) => {
   await expect(page.locator(".sidebar .dirty-dot")).not.toHaveCount(0);
 });
 
+test("collapsing a node hides its columns", async ({ page }) => {
+  await expect(page.locator(".flow-node.kind-root .node-cols")).toBeVisible();
+  await page.locator(".flow-node.kind-root .chevron").click();
+  await expect(page.locator(".flow-node.kind-root .node-cols")).toHaveCount(0);
+});
+
+test("include-all checks every column", async ({ page }) => {
+  const root = page.locator(".flow-node.kind-root");
+  const boxes = root.locator('.col-row input[type="checkbox"]');
+  const n = await boxes.count();
+  await root.getByRole("button", { name: "all", exact: true }).click();
+  await expect(root.locator('.col-row input[type="checkbox"]:checked')).toHaveCount(n);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

@@ -28,6 +28,46 @@ export function addField(schema: IndexSchema, path: number[], field: Field): Ind
   return withNodeFields(schema, path, [...nodeFields(schema, path), field]);
 }
 
+/// Include every catalog column not already present as a scalar field.
+export function includeColumns(
+  schema: IndexSchema,
+  path: number[],
+  columns: { name: string; ty?: FlussoType; nullable?: boolean }[],
+): IndexSchema {
+  const fields = nodeFields(schema, path);
+  const present = new Set(
+    fields
+      .filter((f) => "column" in f.source && typeof f.source.column.ty === "string")
+      .map((f) => ("column" in f.source ? f.source.column.column : "")),
+  );
+  const added = columns
+    .filter((c) => !present.has(c.name))
+    .map((c): Field => ({
+      field: c.name,
+      source: { column: { column: c.name, ty: c.ty ?? "keyword", nullable: c.nullable ?? true } },
+    }));
+  return withNodeFields(schema, path, [...fields, ...added]);
+}
+
+/// Drop every plain scalar-column field on the node (keeps geo/map/custom/
+/// aggregate/object — only the checkbox-driven columns clear).
+export function clearColumns(schema: IndexSchema, path: number[]): IndexSchema {
+  return withNodeFields(
+    schema,
+    path,
+    nodeFields(schema, path).filter((f) => !("column" in f.source && typeof f.source.column.ty === "string")),
+  );
+}
+
+/// Move the field at `index` one slot up (`dir = -1`) or down (`dir = +1`).
+export function moveField(schema: IndexSchema, path: number[], index: number, dir: -1 | 1): IndexSchema {
+  const fields = nodeFields(schema, path).slice();
+  const target = index + dir;
+  if (target < 0 || target >= fields.length) return schema;
+  [fields[index], fields[target]] = [fields[target], fields[index]];
+  return withNodeFields(schema, path, fields);
+}
+
 /// Append a fresh special/leaf field of `kind` (geo/map/custom/constant/aggregate
 /// op) or an `object` group to the node at `path`.
 export function addSpecial(schema: IndexSchema, path: number[], kind: string): IndexSchema {

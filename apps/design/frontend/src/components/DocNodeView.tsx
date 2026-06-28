@@ -1,4 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { type MouseEvent, useState } from "react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
 import * as edit from "../model/edit";
 import { suggestRelations } from "../model/relations";
@@ -13,9 +14,14 @@ const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as cons
 
 export function DocNodeView({ data, selected }: NodeProps) {
   const node = (data as { node: DocNode }).node;
-  const { catalog, schema, apply, select, selection, columnsFor, diagnostics } = useDesign();
+  const { catalog, schema, apply, select, selection, columnsFor, diagnostics, collapsed, toggleCollapsed } =
+    useDesign();
   const cols = columnsFor(node.table);
   const fields = nodeFields(schema, node.path);
+  const [filter, setFilter] = useState("");
+  const isCollapsed = collapsed.has(node.id);
+  const move = (index: number, dir: -1 | 1) => apply((s) => edit.moveField(s, node.path, index, dir));
+  const matches = (name: string) => name.toLowerCase().includes(filter.toLowerCase());
 
   // Diagnostics are reported by field name (no path), so match by name. Build a
   // lookup once; a node shows a count badge, a row shows its message on hover.
@@ -50,6 +56,16 @@ export function DocNodeView({ data, selected }: NodeProps) {
     <div className={`flow-node kind-${node.kind}${selected ? " selected" : ""}`}>
       <Handle type="target" position={Position.Left} />
       <header onClick={() => select(node.path.length ? { kind: "node", path: node.path } : { kind: "root" })}>
+        <button
+          className={`chevron${isCollapsed ? " collapsed" : ""}`}
+          title={isCollapsed ? "Expand" : "Collapse"}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleCollapsed(node.id);
+          }}
+        >
+          <Icon name="chevron" size={12} />
+        </button>
         <span className={`badge ${node.kind}`}>{node.kind}</span>
         <span className="node-title">{node.name ?? node.table}</span>
         {nodeIssues > 0 && (
@@ -76,75 +92,114 @@ export function DocNodeView({ data, selected }: NodeProps) {
         </div>
       </header>
 
-      <div className="node-cols">
-        {cols.map((c) => {
-          const inc = includedByCol.get(c.name);
-          const renamed = inc && inc.name !== c.name;
-          const diag = inc ? diagByField.get(inc.name) : undefined;
-          return (
-            <div
-              className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
-              key={c.name}
-              title={diag?.message}
-              onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
-            >
+      {!isCollapsed && (
+        <>
+          {cols.length > 0 && (
+            <div className="col-tools" onClick={(e) => e.stopPropagation()}>
               <input
-                type="checkbox"
-                checked={!!inc}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) => (e.target.checked ? includeColumn(c) : inc && excludeColumn(c, inc))}
+                className="col-filter"
+                placeholder="filter columns…"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
               />
-              <span className="col-name" title={renamed ? `column: ${c.name}` : undefined}>
-                {inc ? inc.name : c.name}
-                {renamed ? <span className="col-from"> ← {c.name}</span> : null}
-              </span>
-              {(() => {
-                const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
-                return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
-              })()}
+              <button
+                className="link"
+                title="include all columns"
+                onClick={() =>
+                  apply((s) =>
+                    edit.includeColumns(
+                      s,
+                      node.path,
+                      cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
+                    ),
+                  )
+                }
+              >
+                all
+              </button>
+              <button className="link" title="clear all columns" onClick={() => apply((s) => edit.clearColumns(s, node.path))}>
+                none
+              </button>
             </div>
-          );
-        })}
+          )}
 
-        {extraLeaves.map((l) => {
-          const diag = diagByField.get(l.name);
-          return (
-          <div
-            className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
-            key={`x${l.index}`}
-            title={diag?.message}
-            onClick={() => select({ kind: "field", path: node.path, index: l.index })}
-          >
-            <span className="leaf-kind">{l.kind}</span>
-            <span className="col-name">{l.name}</span>
-            <button
-              className="x"
-              onClick={(e) => {
-                e.stopPropagation();
-                apply((s) => edit.removeAt(s, node.path, l.index));
-              }}
-            >
-              <Icon name="close" size={13} />
-            </button>
+          <div className="node-cols">
+            {cols.filter((c) => matches(c.name)).map((c) => {
+              const inc = includedByCol.get(c.name);
+              const renamed = inc && inc.name !== c.name;
+              const diag = inc ? diagByField.get(inc.name) : undefined;
+              return (
+                <div
+                  className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
+                  key={c.name}
+                  title={diag?.message}
+                  onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!inc}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => (e.target.checked ? includeColumn(c) : inc && excludeColumn(c, inc))}
+                  />
+                  <span className="col-name" title={renamed ? `column: ${c.name}` : undefined}>
+                    {inc ? inc.name : c.name}
+                    {renamed ? <span className="col-from"> ← {c.name}</span> : null}
+                  </span>
+                  {(() => {
+                    const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
+                    return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
+                  })()}
+                  {inc && <RowMove onUp={() => move(inc.index, -1)} onDown={() => move(inc.index, 1)} />}
+                </div>
+              );
+            })}
+
+            {extraLeaves
+              .filter((l) => matches(l.name))
+              .map((l) => {
+                const diag = diagByField.get(l.name);
+                return (
+                  <div
+                    className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
+                    key={`x${l.index}`}
+                    title={diag?.message}
+                    onClick={() => select({ kind: "field", path: node.path, index: l.index })}
+                  >
+                    <span className="leaf-kind">{l.kind}</span>
+                    <span className="col-name">{l.name}</span>
+                    <RowMove onUp={() => move(l.index, -1)} onDown={() => move(l.index, 1)} />
+                    <button
+                      className="x"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        apply((s) => edit.removeAt(s, node.path, l.index));
+                      }}
+                    >
+                      <Icon name="close" size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+
+            {cols.length === 0 && (
+              <ManualColumn onAdd={(name) => apply((s) => edit.toggleColumn(s, node.path, name, true))} />
+            )}
           </div>
-          );
-        })}
 
-        {cols.length === 0 && <ManualColumn onAdd={(name) => apply((s) => edit.toggleColumn(s, node.path, name, true))} />}
-      </div>
-
-      <footer className="node-add">
-        {catalog &&
-          suggestRelations(catalog, node.table).map((sg) => (
-            <button key={sg.key} className="suggest" onClick={() => apply((s) => edit.addField(s, node.path, sg.build()))}>
-              + {sg.label}
-            </button>
-          ))}
-        <div className="add-menus">
-          <AddMenu label="+ join" kinds={JOIN_KINDS} onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))} />
-          <AddMenu label="+ field" kinds={[...FIELD_KINDS, ...AGG_KINDS]} onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))} />
-        </div>
-      </footer>
+          <footer className="node-add">
+            {catalog &&
+              suggestRelations(catalog, node.table).map((sg) => (
+                <button key={sg.key} className="suggest" onClick={() => apply((s) => edit.addField(s, node.path, sg.build()))}>
+                  + {sg.label}
+                </button>
+              ))}
+            <div className="add-menus">
+              <AddMenu label="+ join" kinds={JOIN_KINDS} onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))} />
+              <AddMenu label="+ field" kinds={[...FIELD_KINDS, ...AGG_KINDS]} onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))} />
+            </div>
+          </footer>
+        </>
+      )}
 
       <Handle type="source" position={Position.Right} />
     </div>
@@ -181,6 +236,23 @@ function AddMenu({
         </option>
       ))}
     </select>
+  );
+}
+
+function RowMove({ onUp, onDown }: { onUp: () => void; onDown: () => void }) {
+  const stop = (fn: () => void) => (e: MouseEvent) => {
+    e.stopPropagation();
+    fn();
+  };
+  return (
+    <span className="row-move">
+      <button className="up" title="move up" onClick={stop(onUp)}>
+        <Icon name="chevron" size={10} />
+      </button>
+      <button className="down" title="move down" onClick={stop(onDown)}>
+        <Icon name="chevron" size={10} />
+      </button>
+    </span>
   );
 }
 

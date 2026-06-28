@@ -709,3 +709,52 @@ button:disabled:hover {
 }
 .toast.ok { border-color: var(--accent); }
 .toast.error { border-color: var(--error); color: #fca5a5; }
+
+/* ── node column ergonomics (group C) ───────────────────────────────────── */
+.flow-node header .chevron {
+  background: none;
+  border: none;
+  padding: 0 4px 0 0;
+  color: var(--muted);
+  transition: transform 0.12s ease;
+}
+.flow-node header .chevron.collapsed {
+  transform: rotate(-90deg);
+}
+.col-tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px 0;
+}
+.col-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  padding: 3px 6px;
+}
+.col-tools .link {
+  font-size: 11px;
+}
+.row-move {
+  display: inline-flex;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.col-row:hover .row-move {
+  opacity: 1;
+}
+.row-move button {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--muted);
+  line-height: 0;
+}
+.row-move button:hover {
+  color: var(--accent);
+}
+.row-move .up {
+  transform: rotate(180deg);
+}
