@@ -222,6 +222,17 @@ test("validate surfaces a result toast", async ({ page }) => {
   await expect(page.locator(".toast")).toBeVisible();
 });
 
+test("switches the UI language", async ({ page }) => {
+  await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
+  await page.locator(".lang-select").selectOption("it");
+  // labels switch to Italian…
+  await expect(page.getByRole("button", { name: "Salva" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Convalida" })).toBeVisible();
+  // …and back to English.
+  await page.locator(".lang-select").selectOption("en");
+  await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
+});
+
 test("toggles the light/dark theme", async ({ page }) => {
   await page.getByRole("button", { name: "Toggle light/dark theme" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");

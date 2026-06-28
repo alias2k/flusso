@@ -1,4 +1,5 @@
 import type { ConfigToml, IndexEntry } from "../api";
+import { useT } from "../i18n";
 import { Check, Field, Num, Select, Text } from "./widgets";
 
 type Sink = Record<string, unknown>;
@@ -13,6 +14,7 @@ export function ConfigPanel({
   onChange: (c: ConfigToml) => void;
   onDuplicate: (i: number) => void;
 }) {
+  const { t } = useT();
   const index = config.index ?? [];
   const sinks = (config.sinks ?? {}) as Record<string, Sink>;
 
@@ -30,9 +32,9 @@ export function ConfigPanel({
 
   return (
     <div className="config-panel">
-      <h2>Deployment</h2>
-      <Field label="index prefix">
-        <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder="(none)" />
+      <h2>{t("Deployment")}</h2>
+      <Field label={t("index prefix")}>
+        <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder={t("(none)")} />
       </Field>
       <ConnectionEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
       <Check
@@ -64,7 +66,7 @@ export function ConfigPanel({
         </Field>
       </div>
 
-      <h3>Sinks</h3>
+      <h3>{t("Sinks")}</h3>
       {Object.entries(sinks).map(([name, sink]) => (
         <SinkEditor key={name} name={name} sink={sink} onChange={(s) => setSink(name, s)} onRemove={() => removeSink(name)} />
       ))}
@@ -72,27 +74,27 @@ export function ConfigPanel({
         className="link"
         onClick={() => setSink(`sink${Object.keys(sinks).length + 1}`, { type: "opensearch", url: "http://127.0.0.1:9200" })}
       >
-        + sink
+        + {t("sink")}
       </button>
 
-      <h3>Indexes</h3>
+      <h3>{t("Indexes")}</h3>
       {index.map((e, i) => (
         <div className="index-entry" key={i}>
-          <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder="name" />
+          <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder={t("name")} />
           <Text value={e.schema} onChange={(schema) => setEntry(i, { ...e, schema })} placeholder="x.schema.yml" />
-          <Check value={e.enabled} label="enabled" onChange={(enabled) => setEntry(i, { ...e, enabled })} />
+          <Check value={e.enabled} label={t("enabled")} onChange={(enabled) => setEntry(i, { ...e, enabled })} />
           <Select
             value={((e.on_error as string) ?? "default") as "default" | "stop" | "skip"}
             options={["default", "stop", "skip"]}
             onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
           />
-          <button className="link" title="duplicate" onClick={() => onDuplicate(i)}>
-            dup
+          <button className="link" title={t("duplicate")} onClick={() => onDuplicate(i)}>
+            {t("dup")}
           </button>
           <button
             className="link danger"
             onClick={() => {
-              if (confirm(`Remove index "${e.name}"? (the schema file is left on disk)`))
+              if (confirm(t('Remove index "{name}"? (the schema file is left on disk)', { name: e.name })))
                 onChange({ ...config, index: index.filter((_, j) => j !== i) });
             }}
           >
@@ -106,7 +108,7 @@ export function ConfigPanel({
           onChange({ ...config, index: [...index, { name: "new_index", schema: "new_index.schema.yml", enabled: true }] })
         }
       >
-        + index
+        + {t("index")}
       </button>
     </div>
   );
@@ -115,6 +117,7 @@ export function ConfigPanel({
 /// The source connection in any of its three forms: a plain URL, an env ref
 /// (`{ env = "VAR" }`), or host/port/user/password/database parts.
 function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: Source) => void }) {
+  const { t } = useT();
   const cu = source.connection_url as unknown;
   const isObj = !!cu && typeof cu === "object";
   const obj = (cu ?? {}) as Record<string, unknown>;
@@ -124,7 +127,7 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
 
   return (
     <div className="connection-editor">
-      <Field label="connection">
+      <Field label={t("connection")}>
         <Select
           value={mode}
           options={["url", "env", "parts"]}
@@ -141,33 +144,33 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
         </Field>
       )}
       {mode === "env" && (
-        <Field label="env var">
+        <Field label={t("env var")}>
           <Text value={(obj.env as string) ?? ""} onChange={(v) => setCu({ env: v })} placeholder="DATABASE_URL" />
         </Field>
       )}
       {mode === "parts" && (
         <>
           <div className="row">
-            <Field label="host">
+            <Field label={t("host")}>
               <Text value={(obj.host as string) ?? ""} onChange={(v) => setCu({ ...obj, host: v })} />
             </Field>
-            <Field label="port">
+            <Field label={t("port")}>
               <Num
                 value={typeof obj.port === "number" ? (obj.port as number) : undefined}
                 onChange={(v) => setCu({ ...obj, port: v })}
               />
             </Field>
           </div>
-          <Field label="user">
+          <Field label={t("user")}>
             <Text value={(obj.user as string) ?? ""} onChange={(v) => setCu({ ...obj, user: v })} />
           </Field>
-          <Field label="password">
+          <Field label={t("password")}>
             <Text
               value={typeof obj.password === "string" ? (obj.password as string) : ""}
               onChange={(v) => setCu({ ...obj, password: v || undefined })}
             />
           </Field>
-          <Field label="database">
+          <Field label={t("database")}>
             <Text value={(obj.database as string) ?? ""} onChange={(v) => setCu({ ...obj, database: v })} />
           </Field>
         </>
@@ -189,6 +192,7 @@ function SinkEditor({
   onChange: (s: Sink) => void;
   onRemove: () => void;
 }) {
+  const { t } = useT();
   const type = (sink.type as string) ?? "opensearch";
   const set = (key: string, value: unknown) => onChange({ ...sink, [key]: value });
   const str = (key: string) => (typeof sink[key] === "string" ? (sink[key] as string) : "");
@@ -199,9 +203,9 @@ function SinkEditor({
     <div className="sink-editor">
       <div className="sink-head">
         <strong>{name}</strong>
-        <Select value={type} options={["opensearch", "stdout"]} onChange={(t) => set("type", t)} />
+        <Select value={type} options={["opensearch", "stdout"]} onChange={(ty) => set("type", ty)} />
         <button className="link danger" onClick={onRemove}>
-          remove
+          {t("remove")}
         </button>
       </div>
       {type === "opensearch" ? (

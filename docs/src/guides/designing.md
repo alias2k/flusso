@@ -59,7 +59,8 @@ inspector shows the suggestion — with a one-click *use* — only when your pic
 - **Jump-to-node** search and shortcuts: `⌘/Ctrl+S` save, `Delete` remove the selected
   node/field, `Esc` deselect; click an edge to select its join.
 - **Guidance**: a kind-colour legend, FK tooltips, a one-line grammar hint per field kind,
-  and an inspector breadcrumb. A **light/dark** theme toggle.
+  and an inspector breadcrumb. A **light/dark** theme toggle and a **language** switch
+  (English and Italian; the choice is remembered in your browser).
 - **Browse the database**: a *Tables* explorer lists every table with its columns, primary
   keys, and foreign keys (and which tables are junctions) — to explore the schema on its
   own, independent of what's on the canvas.

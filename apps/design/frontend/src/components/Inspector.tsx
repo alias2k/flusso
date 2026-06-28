@@ -11,6 +11,7 @@ import {
   type SoftDelete,
 } from "../api";
 import { LEAF_TYPES } from "../fields";
+import { useT } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
@@ -52,7 +53,8 @@ import { Check, Field as Row, Num, Select, Text } from "./widgets";
 
 export function Inspector() {
   const { selection } = useDesign();
-  if (!selection) return <div className="inspector empty">Select a node or field to edit its details.</div>;
+  const { t } = useT();
+  if (!selection) return <div className="inspector empty">{t("Select a node or field to edit its details.")}</div>;
   return (
     <>
       <Breadcrumb />
@@ -69,15 +71,16 @@ export function Inspector() {
 
 function RootInspector() {
   const { schema, apply, catalog } = useDesign();
-  const tables = catalog?.catalog.tables.map((t) => t.name) ?? [];
-  const cols = catalog?.catalog.tables.find((t) => t.name === schema.table)?.columns.map((c) => c.name) ?? [];
+  const { t } = useT();
+  const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
+  const cols = catalog?.catalog.tables.find((tbl) => tbl.name === schema.table)?.columns.map((c) => c.name) ?? [];
   return (
     <div className="inspector">
-      <h3>Index root</h3>
-      <Row label="root table">
+      <h3>{t("Index root")}</h3>
+      <Row label={t("root table")}>
         <Text value={schema.table} list={tables} onChange={(table) => apply((s) => edit.setRootMeta(s, { table }))} />
       </Row>
-      <Row label="schema">
+      <Row label={t("schema")}>
         <Text value={schema.db_schema} onChange={(db_schema) => apply((s) => edit.setRootMeta(s, { db_schema }))} placeholder="public" />
       </Row>
       <Row label="primary_key">
@@ -85,7 +88,7 @@ function RootInspector() {
       </Row>
       <SoftDeleteEditor value={schema.soft_delete} onChange={(soft_delete) => apply((s) => ({ ...s, soft_delete }))} cols={cols} />
       <details>
-        <summary>root filters</summary>
+        <summary>{t("root filters")}</summary>
         <Filters value={schema.filters ?? []} onChange={(filters) => apply((s) => ({ ...s, filters }))} columns={cols} />
       </details>
     </div>
@@ -94,6 +97,7 @@ function RootInspector() {
 
 function NodeInspector({ path }: { path: number[] }) {
   const { schema, apply, catalog, select } = useDesign();
+  const { t } = useT();
   const duplicate = () => {
     apply((s) => edit.duplicateNode(s, path));
     select({ kind: "node", path: [...path.slice(0, -1), path[path.length - 1] + 1] });
@@ -109,17 +113,17 @@ function NodeInspector({ path }: { path: number[] }) {
   if ("group" in field.source) {
     return (
       <div className="inspector">
-        <h3>Object group</h3>
+        <h3>{t("Object group")}</h3>
         <div className="inspector-actions">
-          <button onClick={duplicate}>Duplicate</button>
+          <button onClick={duplicate}>{t("Duplicate")}</button>
           <button className="link danger" onClick={remove}>
-            Delete
+            {t("Delete")}
           </button>
         </div>
-        <Row label="field name">
+        <Row label={t("field name")}>
           <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
         </Row>
-        <p className="hint">A group nests columns of the same table. Add fields on its node.</p>
+        <p className="hint">{t("A group nests columns of the same table. Add fields on its node.")}</p>
       </div>
     );
   }
@@ -127,8 +131,8 @@ function NodeInspector({ path }: { path: number[] }) {
   const join = joinOf(field);
   if (!join) return null;
   const verb = joinVerb(join.kind);
-  const tables = catalog?.catalog.tables.map((t) => t.name) ?? [];
-  const relCols = catalog?.catalog.tables.find((t) => t.name === join.table)?.columns.map((c) => c.name) ?? [];
+  const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
+  const relCols = catalog?.catalog.tables.find((tbl) => tbl.name === join.table)?.columns.map((c) => c.name) ?? [];
   const setJoin = (j: Join) => setField({ ...field, source: { relation: { join: j } } });
   const toMany = verb === "has_many" || verb === "many_to_many";
 
@@ -139,43 +143,43 @@ function NodeInspector({ path }: { path: number[] }) {
   const btColumn = "belongs_to" in join.kind ? join.kind.belongs_to.column : undefined;
   const parentTable = effectiveTable(schema, path.slice(0, -1));
   const fkNullable = btColumn
-    ? catalog?.catalog.tables.find((t) => t.name === parentTable)?.columns.find((c) => c.name === btColumn)?.nullable
+    ? catalog?.catalog.tables.find((tbl) => tbl.name === parentTable)?.columns.find((c) => c.name === btColumn)?.nullable
     : undefined;
 
   return (
     <div className="inspector">
-      <h3>Join · {verb}</h3>
-      {KIND_HELP[verb] && <p className="kind-help">{KIND_HELP[verb]}</p>}
+      <h3>{t("Join")} · {verb}</h3>
+      {KIND_HELP[verb] && <p className="kind-help">{t(KIND_HELP[verb])}</p>}
       <div className="inspector-actions">
-        <button onClick={duplicate}>Duplicate</button>
+        <button onClick={duplicate}>{t("Duplicate")}</button>
         <button className="link danger" onClick={remove}>
-          Delete
+          {t("Delete")}
         </button>
       </div>
-      <Row label="field name">
+      <Row label={t("field name")}>
         <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
       </Row>
-      <Row label="verb">
+      <Row label={t("verb")}>
         <Select value={verb} options={["belongs_to", "has_one", "has_many", "many_to_many"]} onChange={(v) => setJoin({ ...join, kind: blankKind(v) })} />
       </Row>
-      <Row label="table">
+      <Row label={t("table")}>
         <Text value={join.table} list={tables} onChange={(table) => setJoin({ ...join, table })} />
       </Row>
       <Row label="primary_key">
         <Text value={join.primary_key} list={relCols} onChange={(primary_key) => setJoin({ ...join, primary_key })} />
       </Row>
       {"belongs_to" in join.kind && (
-        <Row label="column (this table → target)">
+        <Row label={t("column (this table → target)")}>
           <Text value={join.kind.belongs_to.column} onChange={(c) => setJoin({ ...join, kind: { belongs_to: { column: c } } })} />
         </Row>
       )}
       {"has_one" in join.kind && (
-        <Row label="foreign_key (on target)">
+        <Row label={t("foreign_key (on target)")}>
           <Text value={join.kind.has_one.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_one: { foreign_key: c } } })} />
         </Row>
       )}
       {"has_many" in join.kind && (
-        <Row label="foreign_key (on target)">
+        <Row label={t("foreign_key (on target)")}>
           <Text value={join.kind.has_many.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_many: { foreign_key: c } } })} />
         </Row>
       )}
@@ -185,16 +189,12 @@ function NodeInspector({ path }: { path: number[] }) {
       {!toMany && (
         <>
           {fkNullable === true && (
-            <p className="hint">
-              FK column <b>{btColumn}</b> is nullable — the target may be absent, so this join is optional.
-            </p>
+            <p className="hint">{t("FK column {col} is nullable — the target may be absent, so this join is optional.", { col: btColumn ?? "" })}</p>
           )}
           {fkNullable === false && (
-            <p className="hint">
-              FK column <b>{btColumn}</b> is <b>NOT NULL</b> — the target is always present.
-            </p>
+            <p className="hint">{t("FK column {col} is NOT NULL — the target is always present.", { col: btColumn ?? "" })}</p>
           )}
-          <Check value={!join.nullable} label="required" onChange={(req) => setJoin({ ...join, nullable: !req })} />
+          <Check value={!join.nullable} label={t("required")} onChange={(req) => setJoin({ ...join, nullable: !req })} />
         </>
       )}
       {verb !== "belongs_to" && <OrderByEditor value={join.order_by ?? []} cols={relCols} onChange={(order_by) => setJoin({ ...join, order_by })} />}
@@ -204,7 +204,7 @@ function NodeInspector({ path }: { path: number[] }) {
         </Row>
       )}
       <details>
-        <summary>filters</summary>
+        <summary>{t("filters")}</summary>
         <Filters value={join.filters ?? []} columns={relCols} onChange={(filters) => setJoin({ ...join, filters })} />
       </details>
     </div>
@@ -213,6 +213,7 @@ function NodeInspector({ path }: { path: number[] }) {
 
 function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const { schema, apply, catalog, select } = useDesign();
+  const { t } = useT();
   const duplicate = () => {
     apply((s) => edit.duplicateAt(s, path, index));
     select({ kind: "field", path, index: index + 1 });
@@ -224,8 +225,8 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const field = nodeFields(schema, path)[index];
   if (!field) return null;
   const table = effectiveTable(schema, path);
-  const cols = catalog?.catalog.tables.find((t) => t.name === table)?.columns.map((c) => c.name) ?? [];
-  const tables = catalog?.catalog.tables.map((t) => t.name) ?? [];
+  const cols = catalog?.catalog.tables.find((tbl) => tbl.name === table)?.columns.map((c) => c.name) ?? [];
+  const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
   const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
   const s = field.source;
 
@@ -234,22 +235,22 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   // column isn't in the catalog (offline, or a hand-typed name).
   const boundColumn = "column" in s ? s.column.column : undefined;
   const srcCol = boundColumn
-    ? catalog?.catalog.tables.find((t) => t.name === table)?.columns.find((c) => c.name === boundColumn)
+    ? catalog?.catalog.tables.find((tbl) => tbl.name === table)?.columns.find((c) => c.name === boundColumn)
     : undefined;
   const srcNullable = srcCol?.nullable;
 
   const helpKind = fieldHelpKind(s);
   return (
     <div className="inspector">
-      <h3>Field · {field.field}</h3>
-      {KIND_HELP[helpKind] && <p className="kind-help">{KIND_HELP[helpKind]}</p>}
+      <h3>{t("Field")} · {field.field}</h3>
+      {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
       <div className="inspector-actions">
-        <button onClick={duplicate}>Duplicate</button>
+        <button onClick={duplicate}>{t("Duplicate")}</button>
         <button className="link danger" onClick={remove}>
-          Delete
+          {t("Delete")}
         </button>
       </div>
-      <Row label="field name">
+      <Row label={t("field name")}>
         <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       </Row>
 
@@ -260,12 +261,12 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
       {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
       {"constant" in s && (
-        <Row label="value (JSON)">
+        <Row label={t("value (JSON)")}>
           <Text
             value={JSON.stringify(s.constant)}
-            onChange={(t) => {
+            onChange={(text) => {
               try {
-                set({ ...field, source: { constant: JSON.parse(t) } });
+                set({ ...field, source: { constant: JSON.parse(text) } });
               } catch {
                 /* keep typing */
               }
@@ -300,11 +301,12 @@ function ScalarBody({
   sqlType?: string;
   set: (f: Field) => void;
 }) {
+  const { t } = useT();
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
-  const has = (t: "lowercase" | "trim") => (column.transforms ?? []).includes(t);
-  const toggle = (t: "lowercase" | "trim", on: boolean) => {
+  const has = (tr: "lowercase" | "trim") => (column.transforms ?? []).includes(tr);
+  const toggle = (tr: "lowercase" | "trim", on: boolean) => {
     const next = new Set(column.transforms ?? []);
-    on ? next.add(t) : next.delete(t);
+    on ? next.add(tr) : next.delete(tr);
     setCol({ ...column, transforms: next.size ? [...next] : undefined });
   };
   // A soft nudge, not a rule: the SQL type only *suggests* a flusso type
@@ -313,20 +315,20 @@ function ScalarBody({
   const showSuggestion = typeof suggested === "string" && suggested !== column.ty;
   return (
     <>
-      <p className="hint">column: {column.column}</p>
-      <Row label="type">
+      <p className="hint">{t("column")}: {column.column}</p>
+      <Row label={t("type")}>
         <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
       </Row>
       {showSuggestion && (
         <p className="hint">
-          Source column is <code>{sqlType}</code> — suggests <b>{suggested}</b>.{" "}
+          {t("Source column is {sql} — suggests {ty}.", { sql: sqlType ?? "", ty: suggested })}{" "}
           <button className="link" onClick={() => setCol({ ...column, ty: suggested })}>
-            use
+            {t("use")}
           </button>
         </p>
       )}
-      <Check value={has("lowercase")} label="lowercase" onChange={(on) => toggle("lowercase", on)} />
-      <Check value={has("trim")} label="trim" onChange={(on) => toggle("trim", on)} />
+      <Check value={has("lowercase")} label={t("lowercase")} onChange={(on) => toggle("lowercase", on)} />
+      <Check value={has("trim")} label={t("trim")} onChange={(on) => toggle("trim", on)} />
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
     </>
   );
@@ -344,33 +346,30 @@ function ScalarBody({
 /// When the column isn't in the catalog (offline, or a hand-typed name) the
 /// source nullability is unknown and both stay freely editable.
 function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcNullable?: boolean; setCol: (c: Column) => void }) {
+  const { t } = useT();
   const required = !column.nullable;
   const mustDefault = srcNullable === true && required;
   const defaultMissing = mustDefault && column.default === undefined;
   return (
     <>
       {srcNullable === false && (
-        <p className="hint">
-          Source column is <b>NOT NULL</b> — required by default; uncheck to make it optional in the document.
-        </p>
+        <p className="hint">{t("Source column is NOT NULL — required by default; uncheck to make it optional in the document.")}</p>
       )}
       {srcNullable === true && (
-        <p className="hint">
-          Source column is <b>nullable</b> — optional by default; to make it required you must set a default.
-        </p>
+        <p className="hint">{t("Source column is nullable — optional by default; to make it required you must set a default.")}</p>
       )}
-      <Check value={required} label="required" onChange={(req) => setCol({ ...column, nullable: !req })} />
-      <Row label={mustDefault ? "default (required)" : "default (optional, JSON)"}>
+      <Check value={required} label={t("required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
+      <Row label={mustDefault ? t("default (required)") : t("default (optional, JSON)")}>
         <Text
           invalid={defaultMissing}
           value={column.default === undefined ? "" : JSON.stringify(column.default)}
-          onChange={(t) => {
-            if (!t.trim()) {
+          onChange={(text) => {
+            if (!text.trim()) {
               setCol({ ...column, default: undefined });
               return;
             }
             try {
-              setCol({ ...column, default: JSON.parse(t) });
+              setCol({ ...column, default: JSON.parse(text) });
             } catch {
               /* keep typing until valid JSON */
             }
@@ -379,7 +378,7 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
         />
       </Row>
       {defaultMissing && (
-        <p className="error-hint">A required field over a nullable column must set a default, or the document field could be missing.</p>
+        <p className="error-hint">{t("A required field over a nullable column must set a default, or the document field could be missing.")}</p>
       )}
     </>
   );
@@ -388,6 +387,7 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
 /// Edit a field's arbitrary `options` (analyzer, boost, OpenSearch mapping
 /// knobs…) as key → JSON-value rows.
 function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }) {
+  const { t } = useT();
   const options = field.options ?? {};
   const entries = Object.entries(options);
   const setOpt = (key: string, value: unknown) => set({ ...field, options: { ...options, [key]: value } });
@@ -403,20 +403,20 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   };
   return (
     <details>
-      <summary>options ({entries.length})</summary>
+      <summary>{t("options ({n})", { n: entries.length })}</summary>
       {entries.map(([k, v]) => (
         <div className="opt-row" key={k}>
-          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder="key" />
+          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("key")} />
           <Text
             value={JSON.stringify(v)}
-            onChange={(t) => {
+            onChange={(text) => {
               try {
-                setOpt(k, JSON.parse(t));
+                setOpt(k, JSON.parse(text));
               } catch {
                 /* keep typing */
               }
             }}
-            placeholder="value"
+            placeholder={t("value")}
           />
           <button className="link danger" onClick={() => removeOpt(k)}>
             ✕
@@ -424,21 +424,22 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
         </div>
       ))}
       <button className="link" onClick={() => setOpt(`option${entries.length + 1}`, "")}>
-        + option
+        + {t("option")}
       </button>
     </details>
   );
 }
 
 function MapBody({ field, column, cols, srcNullable, set }: { field: Field; column: Column; cols: string[]; srcNullable?: boolean; set: (f: Field) => void }) {
+  const { t } = useT();
   const ty = column.ty as { map: { values: FlussoType } };
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Row label="values">
+      <Row label={t("values")}>
         <Select value={ty.map.values as string} options={LEAF_TYPES as string[]} onChange={(v) => setCol({ ...column, ty: { map: { values: v as FlussoType } } })} />
       </Row>
-      <Row label="column (json/jsonb)">
+      <Row label={t("column (json/jsonb)")}>
         <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
       </Row>
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
@@ -447,17 +448,18 @@ function MapBody({ field, column, cols, srcNullable, set }: { field: Field; colu
 }
 
 function CustomBody({ field, column, cols, srcNullable, set }: { field: Field; column: Column; cols: string[]; srcNullable?: boolean; set: (f: Field) => void }) {
+  const { t } = useT();
   const ty = column.ty as { custom: { postgres: string[]; opensearch: string } };
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Row label="postgres types (comma)">
-        <Text value={ty.custom.postgres.join(", ")} onChange={(t) => setCol({ ...column, ty: { custom: { ...ty.custom, postgres: t.split(",").map((x) => x.trim()).filter(Boolean) } } })} />
+      <Row label={t("postgres types (comma)")}>
+        <Text value={ty.custom.postgres.join(", ")} onChange={(text) => setCol({ ...column, ty: { custom: { ...ty.custom, postgres: text.split(",").map((x) => x.trim()).filter(Boolean) } } })} />
       </Row>
-      <Row label="opensearch type">
+      <Row label={t("opensearch type")}>
         <Text value={ty.custom.opensearch} onChange={(o) => setCol({ ...column, ty: { custom: { ...ty.custom, opensearch: o } } })} />
       </Row>
-      <Row label="column">
+      <Row label={t("column")}>
         <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
       </Row>
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
@@ -466,24 +468,26 @@ function CustomBody({ field, column, cols, srcNullable, set }: { field: Field; c
 }
 
 function GeoBody({ field, set, cols }: { field: Field; set: (f: Field) => void; cols: string[] }) {
+  const { t } = useT();
   if (!("geo" in field.source)) return null;
   const geo = field.source.geo;
   return (
     <>
-      <Row label="lat column">
+      <Row label={t("lat column")}>
         <Text value={geo.lat} list={cols} onChange={(lat) => set({ ...field, source: { geo: { ...geo, lat } } })} />
       </Row>
-      <Row label="lon column">
+      <Row label={t("lon column")}>
         <Text value={geo.lon} list={cols} onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })} />
       </Row>
-      <Check value={!geo.nullable} label="required" onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
-      <p className="hint">A point is absent when either column is null (never sent as {"{lat:null}"}). Mark required to forbid that absence.</p>
+      <Check value={!geo.nullable} label={t("required")} onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
+      <p className="hint">{t("A point is absent when either column is null (never sent as {lat:null}). Mark required to forbid that absence.")}</p>
     </>
   );
 }
 
 function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggregate; tables: string[]; set: (f: Field) => void }) {
   const { columnsFor } = useDesign();
+  const { t } = useT();
   const setAgg = (a: Aggregate) => set({ ...field, source: { relation: { aggregate: a } } });
   const op = agg.op;
   const opCol = typeof op === "string" ? null : "sum" in op ? op.sum : "avg" in op ? op.avg : "min" in op ? op.min : "max" in op ? op.max : null;
@@ -491,11 +495,11 @@ function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggrega
   const aggCols = columnsFor(agg.table).map((c) => c.name);
   return (
     <>
-      <Row label="related table">
+      <Row label={t("related table")}>
         <Text value={agg.table} list={tables} onChange={(table) => setAgg({ ...agg, table })} />
       </Row>
       {opCol !== null && (
-        <Row label="column (to aggregate)">
+        <Row label={t("column (to aggregate)")}>
           <Text value={opCol} list={aggCols} onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })} />
         </Row>
       )}
@@ -511,7 +515,7 @@ function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggrega
       )}
       <AggregateKeyEditor value={agg.key} tables={tables} onChange={(key) => setAgg({ ...agg, key })} />
       <details>
-        <summary>filters</summary>
+        <summary>{t("filters")}</summary>
         <Filters value={agg.filters ?? []} onChange={(filters) => setAgg({ ...agg, filters })} />
       </details>
     </>
@@ -534,10 +538,11 @@ function withAggColumn(kind: string, col: string): Aggregate["op"] {
 // --- shared sub-editors ---
 
 function AggregateKeyEditor({ value, tables, onChange }: { value: AggregateKey; tables: string[]; onChange: (k: AggregateKey) => void }) {
+  const { t } = useT();
   const direct = "direct" in value;
   return (
     <div className="key-editor">
-      <Row label="key">
+      <Row label={t("key")}>
         <Select value={direct ? "direct" : "through"} options={["direct", "through"]} onChange={(k) => onChange(k === "direct" ? { direct: "" } : { through: { table: "", left_key: "", right_key: "" } })} />
       </Row>
       {direct ? (
@@ -552,9 +557,10 @@ function AggregateKeyEditor({ value, tables, onChange }: { value: AggregateKey; 
 }
 
 function ThroughEditor({ through, tables, onChange }: { through: { table: string; left_key: string; right_key: string }; tables: string[]; onChange: (t: { table: string; left_key: string; right_key: string }) => void }) {
+  const { t } = useT();
   return (
     <div className="through">
-      <Row label="junction table">
+      <Row label={t("junction table")}>
         <Text value={through.table} list={tables} onChange={(table) => onChange({ ...through, table })} />
       </Row>
       <Row label="left_key">
@@ -568,6 +574,7 @@ function ThroughEditor({ through, tables, onChange }: { through: { table: string
 }
 
 function OrderByEditor({ value, cols, onChange }: { value: { column: string; direction?: "asc" | "desc" }[]; cols: string[]; onChange: (v: { column: string; direction?: "asc" | "desc" }[] | undefined) => void }) {
+  const { t } = useT();
   const set = (i: number, ob: { column: string; direction?: "asc" | "desc" }) => {
     const next = value.slice();
     next[i] = ob;
@@ -578,7 +585,7 @@ function OrderByEditor({ value, cols, onChange }: { value: { column: string; dir
       <span className="field-label">order_by</span>
       {value.map((ob, i) => (
         <div className="order-row" key={i}>
-          <Text value={ob.column} list={cols} onChange={(column) => set(i, { ...ob, column })} placeholder="column" />
+          <Text value={ob.column} list={cols} onChange={(column) => set(i, { ...ob, column })} placeholder={t("column")} />
           <Select value={ob.direction ?? "asc"} options={["asc", "desc"]} onChange={(direction) => set(i, { ...ob, direction })} />
           <button className="link danger" onClick={() => onChange(value.filter((_, j) => j !== i).length ? value.filter((_, j) => j !== i) : undefined)}>
             ✕
@@ -593,14 +600,15 @@ function OrderByEditor({ value, cols, onChange }: { value: { column: string; dir
 }
 
 function SoftDeleteEditor({ value, onChange, cols }: { value: SoftDelete | undefined; onChange: (v: SoftDelete | undefined) => void; cols: string[] }) {
+  const { t } = useT();
   const kind = value === undefined ? "none" : "field" in value ? "field" : "column";
   return (
     <div className="soft-delete">
-      <Row label="soft delete">
+      <Row label={t("soft delete")}>
         <Select value={kind} options={["none", "field", "column"]} onChange={(k) => onChange(k === "none" ? undefined : k === "field" ? { field: "" } : { column: "" })} />
       </Row>
-      {value && "field" in value && <Text value={value.field} onChange={(f) => onChange({ ...value, field: f })} placeholder="document field" />}
-      {value && "column" in value && <Text value={value.column} list={cols} onChange={(c) => onChange({ ...value, column: c })} placeholder="column" />}
+      {value && "field" in value && <Text value={value.field} onChange={(f) => onChange({ ...value, field: f })} placeholder={t("document field")} />}
+      {value && "column" in value && <Text value={value.column} list={cols} onChange={(c) => onChange({ ...value, column: c })} placeholder={t("column")} />}
     </div>
   );
 }

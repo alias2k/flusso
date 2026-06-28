@@ -19,6 +19,7 @@ import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
+import { LANGS, useT } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
 import { requiredDefaultIssues } from "./model/issues";
 import { DesignProvider, type Selection } from "./state";
@@ -41,6 +42,7 @@ const emptySchema = (table: string, pk?: string): IndexSchema => ({
 });
 
 export default function App() {
+  const { t, lang, setLang } = useT();
   const [project, setProject] = useState<Project | null>(null);
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const { present: doc, set: setDoc, undo, redo, reset, canUndo, canRedo } = useHistory<Doc | null>(null);
@@ -101,7 +103,7 @@ export default function App() {
     (doc ? api.testConnection(doc.config) : api.catalog())
       .then((c) => {
         setCatalog(c);
-        setToast({ kind: c.error ? "error" : "ok", text: c.error ? "Database not reachable" : "Database connected" });
+        setToast({ kind: c.error ? "error" : "ok", text: c.error ? t("Database not reachable") : t("Database connected") });
       })
       .catch((e) => setToast({ kind: "error", text: errText(e) }));
 
@@ -285,9 +287,9 @@ export default function App() {
     try {
       const result = await api.diff(doc.config, saveIndexes());
       if (result.some((d) => d.changed)) setDiffs(result);
-      else setToast({ kind: "ok", text: "Already up to date" });
+      else setToast({ kind: "ok", text: t("Already up to date") });
     } catch (e) {
-      setToast({ kind: "error", text: `Diff failed: ${errText(e)}` });
+      setToast({ kind: "error", text: t("Diff failed: {err}", { err: errText(e) }) });
     } finally {
       setSaving(false);
     }
@@ -300,9 +302,9 @@ export default function App() {
       const res = await api.save(doc.config, saveIndexes());
       setSaved(JSON.stringify(doc));
       setDiffs(null);
-      setToast({ kind: "ok", text: `Saved ${res.written.length} file(s)` });
+      setToast({ kind: "ok", text: t("Saved {n} file(s)", { n: res.written.length }) });
     } catch (e) {
-      setToast({ kind: "error", text: `Save failed: ${errText(e)}` });
+      setToast({ kind: "error", text: t("Save failed: {err}", { err: errText(e) }) });
     } finally {
       setSaving(false);
     }
@@ -323,9 +325,9 @@ export default function App() {
       await api.save(doc.config, [{ schema_path: entry.schema, schema: doc.schemas[active] ?? emptySchema(""), raw: rawText }]);
       setRawMode(false);
       await reloadProject();
-      setToast({ kind: "ok", text: "Saved raw YAML" });
+      setToast({ kind: "ok", text: t("Saved raw YAML") });
     } catch (e) {
-      setToast({ kind: "error", text: `Save failed: ${errText(e)}` });
+      setToast({ kind: "error", text: t("Save failed: {err}", { err: errText(e) }) });
     } finally {
       setSaving(false);
     }
@@ -339,18 +341,18 @@ export default function App() {
       const res = await api.validate(doc.config, indexes);
       if (!res.db_reachable) {
         setDiagnostics(null);
-        setToast({ kind: "error", text: `Database not reachable: ${res.error ?? "unknown"}` });
+        setToast({ kind: "error", text: t("Database not reachable: {err}", { err: res.error ?? "unknown" }) });
       } else {
         setDiagnostics(res.diagnostics);
         if (res.diagnostics.length) {
-          setToast({ kind: "error", text: `${res.diagnostics.length} issue(s) — see the highlighted fields` });
+          setToast({ kind: "error", text: t("{n} issue(s) — see the highlighted fields", { n: res.diagnostics.length }) });
           setDrawer(true);
         } else {
-          setToast({ kind: "ok", text: "Schemas match the database" });
+          setToast({ kind: "ok", text: t("Schemas match the database") });
         }
       }
     } catch (e) {
-      setToast({ kind: "error", text: `Validate failed: ${errText(e)}` });
+      setToast({ kind: "error", text: t("Validate failed: {err}", { err: errText(e) }) });
     } finally {
       setValidating(false);
     }
@@ -402,7 +404,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <button className="icon" title={leftOpen ? "Hide sidebar" : "Show sidebar"} onClick={() => setLeftOpen((o) => !o)}>
+        <button className="icon" title={leftOpen ? t("Hide sidebar") : t("Show sidebar")} onClick={() => setLeftOpen((o) => !o)}>
           <Icon name="menu" />
         </button>
         <span className="brand">
@@ -414,45 +416,52 @@ export default function App() {
         <span className="path">{project.config_path}</span>
         <button
           className={`db-chip ${catalog && !catalog.error ? "ok" : "off"}`}
-          title="Re-test the database connection"
+          title={t("Re-test the database connection")}
           onClick={refreshCatalog}
         >
-          {catalog && !catalog.error ? "DB connected" : "DB offline"}
+          {catalog && !catalog.error ? t("DB connected") : t("DB offline")}
         </button>
         <span className="spacer" />
-        <button onClick={() => setBrowseCatalog(true)} title="Browse the database">
-          Tables
+        <button onClick={() => setBrowseCatalog(true)} title={t("Browse the database")}>
+          {t("Tables")}
         </button>
         {active !== "config" && (
-          <button onClick={() => (rawMode ? setRawMode(false) : openRaw())}>{rawMode ? "Visual" : "Raw YAML"}</button>
+          <button onClick={() => (rawMode ? setRawMode(false) : openRaw())}>{rawMode ? t("Visual") : t("Raw YAML")}</button>
         )}
-        <button className="icon" title="Undo (⌘Z)" disabled={!canUndo} onClick={undo}>
+        <button className="icon" title={t("Undo (⌘Z)")} disabled={!canUndo} onClick={undo}>
           <Icon name="undo" />
         </button>
-        <button className="icon" title="Redo (⇧⌘Z)" disabled={!canRedo} onClick={redo}>
+        <button className="icon" title={t("Redo (⇧⌘Z)")} disabled={!canRedo} onClick={redo}>
           <Icon name="redo" />
         </button>
         <button
           className="icon"
-          aria-label="Toggle light/dark theme"
-          title="Toggle theme"
-          onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+          aria-label={t("Toggle light/dark theme")}
+          title={t("Toggle theme")}
+          onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
         >
           <Icon name="theme" />
         </button>
-        <button onClick={() => setDrawer((d) => !d)}>{drawer ? "Hide" : "YAML"}</button>
+        <select className="lang-select" aria-label={t("Language")} value={lang} onChange={(e) => setLang(e.target.value)}>
+          {Object.entries(LANGS).map(([code, name]) => (
+            <option key={code} value={code}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <button onClick={() => setDrawer((d) => !d)}>{drawer ? t("Hide") : t("YAML")}</button>
         <button onClick={validate} disabled={validating}>
           {validating && <span className="spinner" />}
-          Validate
+          {t("Validate")}
         </button>
-        <button className="primary" onClick={save} disabled={saving} title={dirty ? "Unsaved changes" : "Up to date"}>
+        <button className="primary" onClick={save} disabled={saving} title={dirty ? t("Unsaved changes") : t("Up to date")}>
           {saving ? <span className="spinner" /> : dirty && <span className="dirty-dot" />}
-          Save
+          {t("Save")}
         </button>
       </header>
 
       {error && <div className="banner error">{error}</div>}
-      {catalog?.error && <div className="banner warn">Database not reachable — offline authoring only.</div>}
+      {catalog?.error && <div className="banner warn">{t("Database not reachable — offline authoring only.")}</div>}
 
       <div
         className="layout"
@@ -461,19 +470,19 @@ export default function App() {
         {leftOpen && (
           <nav className="sidebar">
             <button className={active === "config" ? "nav active" : "nav"} onClick={() => setActive("config")}>
-              ⚙ Deployment
+              ⚙ {t("Deployment")}
             </button>
-            <div className="nav-heading">Indexes</div>
+            <div className="nav-heading">{t("Indexes")}</div>
             {(config.index ?? []).map((e) => (
               <button key={e.name} className={active === e.name ? "nav active" : "nav"} onClick={() => openIndex(e.name)}>
                 {indexDirty(e.name) && <span className="dirty-dot" />}
                 {e.name}
-                {!e.enabled && <span className="muted"> (off)</span>}
+                {!e.enabled && <span className="muted"> {t("(off)")}</span>}
               </button>
             ))}
-            <NewIndex tables={catalog?.catalog.tables.map((t) => t.name) ?? []} onCreate={createIndex} />
+            <NewIndex tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []} onCreate={createIndex} />
             <div className="legend">
-              <div className="nav-heading">Kinds</div>
+              <div className="nav-heading">{t("Kinds")}</div>
               {["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"].map((k) => (
                 <div className="legend-row" key={k}>
                   <span className={`legend-dot ${k}`} />
@@ -491,14 +500,14 @@ export default function App() {
         ) : rawMode ? (
           <main className="raw-pane">
             <div className="banner warn">
-              Editing raw YAML for <strong>{active}</strong> — Save raw writes this file verbatim, then reloads.
+              {t("Editing raw YAML for")} <strong>{active}</strong> — {t("Save raw writes this file verbatim, then reloads.")}
             </div>
             <textarea className="raw-editor" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
             <div className="raw-actions">
               <button className="primary" onClick={saveRaw} disabled={saving}>
-                Save raw
+                {t("Save raw")}
               </button>
-              <button onClick={() => setRawMode(false)}>Cancel</button>
+              <button onClick={() => setRawMode(false)}>{t("Cancel")}</button>
             </div>
           </main>
         ) : schema ? (
@@ -567,6 +576,7 @@ function DiffModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   const changed = diffs.filter((d) => d.changed);
   const confirmRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -579,14 +589,14 @@ function DiffModal({
   }, [onCancel]);
   return (
     <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label="Review changes" onClick={(e) => e.stopPropagation()}>
-        <h3>Review changes ({changed.length} file{changed.length === 1 ? "" : "s"})</h3>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={t("Review changes")} onClick={(e) => e.stopPropagation()}>
+        <h3>{t("Review changes ({n} file(s))", { n: changed.length })}</h3>
         <div className="diff-list">
           {changed.map((d) => (
             <div className="diff-file" key={d.path}>
               <div className="diff-path">{d.path}</div>
               <div className="diff-cols">
-                <pre className="yaml current">{d.current || "(new file)"}</pre>
+                <pre className="yaml current">{d.current || t("(new file)")}</pre>
                 <pre className="yaml next">{d.next}</pre>
               </div>
             </div>
@@ -595,9 +605,9 @@ function DiffModal({
         <div className="modal-actions">
           <button ref={confirmRef} className="primary" onClick={onConfirm} disabled={saving}>
             {saving && <span className="spinner" />}
-            Write {changed.length} file{changed.length === 1 ? "" : "s"}
+            {t("Write {n} file(s)", { n: changed.length })}
           </button>
-          <button onClick={onCancel}>Cancel</button>
+          <button onClick={onCancel}>{t("Cancel")}</button>
         </div>
       </div>
     </div>
@@ -605,23 +615,24 @@ function DiffModal({
 }
 
 function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: string, table: string) => void }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [table, setTable] = useState(tables[0] ?? "");
   if (!open) {
     return (
       <button className="nav new" onClick={() => setOpen(true)}>
-        + New index
+        + {t("New index")}
       </button>
     );
   }
   return (
     <div className="new-index">
-      <Text value={name} onChange={setName} placeholder="index name" />
+      <Text value={name} onChange={setName} placeholder={t("index name")} />
       {tables.length ? (
         <Select value={table} options={tables} onChange={setTable} />
       ) : (
-        <Text value={table} onChange={setTable} placeholder="root table" />
+        <Text value={table} onChange={setTable} placeholder={t("root table")} />
       )}
       <div className="row">
         <button
@@ -633,9 +644,9 @@ function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: str
             setName("");
           }}
         >
-          Create
+          {t("Create")}
         </button>
-        <button onClick={() => setOpen(false)}>Cancel</button>
+        <button onClick={() => setOpen(false)}>{t("Cancel")}</button>
       </div>
     </div>
   );

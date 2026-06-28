@@ -37,7 +37,10 @@ truth — the UI is a round-tripping view over them, not a separate model.
   each node is a place in the document (root / `object` group / join) and edges are
   relations, with an inspector side-panel for the fine-grained grammar. Built to `dist/`
   and embedded via `rust-embed`. Rebuild with `npm --prefix frontend ci && npm --prefix
-  frontend run build`.
+  frontend run build`. The UI is localizable (`frontend/src/i18n.tsx` + per-language
+  catalogs in `frontend/src/locales/`, currently English and Italian); the English source
+  string is the message key, so other languages only translate the catalog and any gap
+  falls back to English.
 
 ## Use it
 

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
+import { useT } from "../i18n";
 import { typeClass } from "../theme";
 import { Icon } from "./Icon";
 
@@ -30,8 +31,9 @@ export function Preview({
   diagnostics: DiagnosticDto[] | null;
   onSample?: () => Promise<SampleResponse>;
 }) {
+  const { t } = useT();
   const [copied, setCopied] = useState(false);
-  if (!preview) return <div className="preview empty">Select or edit an index to preview it.</div>;
+  if (!preview) return <div className="preview empty">{t("Select or edit an index to preview it.")}</div>;
   const copy = () => {
     navigator.clipboard?.writeText(preview.yaml).then(
       () => {
@@ -45,12 +47,12 @@ export function Preview({
     <div className="preview">
       {!preview.parse_ok && (
         <div className="banner error">
-          <strong>This schema does not parse:</strong> {preview.parse_error}
+          <strong>{t("This schema does not parse:")}</strong> {preview.parse_error}
         </div>
       )}
       {diagnostics && diagnostics.length > 0 && (
         <div className="diagnostics">
-          <h3>Database check</h3>
+          <h3>{t("Database check")}</h3>
           {diagnostics.map((d, i) => (
             <div key={i} className={`diag ${d.severity}`}>
               <span className="diag-where">
@@ -61,7 +63,7 @@ export function Preview({
           ))}
         </div>
       )}
-      <h3>Document</h3>
+      <h3>{t("Document")}</h3>
       <div className="doc-tree">
         {preview.preview.document.map((n, i) => (
           <Node key={i} node={n} depth={0} />
@@ -69,14 +71,14 @@ export function Preview({
       </div>
       {onSample && preview.parse_ok && <SampleDoc onSample={onSample} />}
       <h3 className="yaml-head">
-        schema.yml
-        <button className="link copy" onClick={copy} title="Copy YAML">
-          <Icon name="copy" size={13} /> {copied ? "copied" : "copy"}
+        {t("schema.yml")}
+        <button className="link copy" onClick={copy} title={t("Copy YAML")}>
+          <Icon name="copy" size={13} /> {copied ? t("copied") : t("copy")}
         </button>
       </h3>
       <pre className="yaml">{preview.yaml}</pre>
       <details className="mapping-details">
-        <summary>OpenSearch mapping</summary>
+        <summary>{t("OpenSearch mapping")}</summary>
         <pre className="yaml">{JSON.stringify(preview.preview.mapping, null, 2)}</pre>
       </details>
     </div>
@@ -86,6 +88,7 @@ export function Preview({
 /// Fetches a real document built from one live row — exactly what the sink would
 /// write — on demand, so you can sanity-check the schema against actual data.
 function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
+  const { t } = useT();
   const [result, setResult] = useState<SampleResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,15 +105,15 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
   return (
     <div className="sample-doc">
       <h3 className="yaml-head">
-        Sample from DB
-        {result?.synthetic && <span className="badge object">example</span>}
+        {t("Sample from DB")}
+        {result?.synthetic && <span className="badge object">{t("example")}</span>}
         <button className="link" onClick={fetchSample} disabled={loading}>
-          <Icon name="play" size={13} /> {loading ? "building…" : result ? "refresh" : "fetch"}
+          <Icon name="play" size={13} /> {loading ? t("building…") : result ? t("refresh") : t("fetch")}
         </button>
       </h3>
       {error && <div className="banner error">{error}</div>}
       {result && !result.db_reachable && <div className="banner error">{result.error}</div>}
-      {result?.note && <p className="hint">{result.note}</p>}
+      {result?.note && <p className="hint">{t(result.note)}</p>}
       {result?.document !== undefined && result.document !== null && (
         <pre className="yaml">{JSON.stringify(result.document, null, 2)}</pre>
       )}

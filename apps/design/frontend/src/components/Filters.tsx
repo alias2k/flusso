@@ -1,4 +1,5 @@
 import type { Filter } from "../api";
+import { useT } from "../i18n";
 import { Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
@@ -60,6 +61,7 @@ export function Filters({
   onChange: (v: Filter[] | undefined) => void;
   columns?: string[];
 }) {
+  const { t } = useT();
   const set = (i: number, f: Filter) => {
     const next = value.slice();
     next[i] = f;
@@ -95,7 +97,7 @@ export function Filters({
                   value={"column" in f ? f.column : ""}
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
-                  placeholder="column"
+                  placeholder={t("column")}
                 />
                 <Select
                   value={f.op as "is_null" | "is_not_null"}
@@ -110,7 +112,7 @@ export function Filters({
                   value={"column" in f ? (f.column as string) : ""}
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
-                  placeholder="column"
+                  placeholder={t("column")}
                 />
                 <Select
                   value={f.op as (typeof VALUE_OPS)[number]}
@@ -120,18 +122,18 @@ export function Filters({
                 <Text
                   value={valueText(f)}
                   onChange={(text) => set(i, { ...f, value: coerceValue(f.op as string, text) })}
-                  placeholder={f.op === "between" ? "lo, hi" : f.op === "in" ? "a, b, c" : "value"}
+                  placeholder={f.op === "between" ? t("lo, hi") : f.op === "in" ? t("a, b, c") : t("value")}
                 />
               </>
             )}
             <button className="link danger" onClick={() => remove(i)}>
-              remove
+              {t("remove")}
             </button>
           </div>
         );
       })}
       <button className="link" onClick={() => onChange([...value, blank("value_op")])}>
-        + filter
+        + {t("filter")}
       </button>
     </div>
   );

@@ -1002,3 +1002,6 @@ button:disabled:hover {
 /* ── source-guided validation (required/default) ────────────────────────── */
 input.invalid { border-color: var(--danger, #ef4444); outline-color: var(--danger, #ef4444); }
 .error-hint { color: var(--danger, #ef4444); font-size: 12px; margin: 2px 0 6px; }
+
+/* ── language switcher ──────────────────────────────────────────────────── */
+.lang-select { height: 28px; border-radius: 6px; background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 0 6px; }
