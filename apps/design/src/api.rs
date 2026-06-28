@@ -340,10 +340,12 @@ pub struct ValidateIndex {
 pub struct ValidateResponse {
     /// One entry per disagreement between a schema and the database.
     pub diagnostics: Vec<DiagnosticDto>,
-    /// Whether the database was reachable; when false, `error` says why and
-    /// `diagnostics` is empty.
+    /// Whether the database was reachable. When false, `error` says why the
+    /// connection failed and `diagnostics` is empty. When true, validation ran;
+    /// any `error` is a validation/query failure (the DB was fine).
     pub db_reachable: bool,
-    /// Why the database could not be reached/queried.
+    /// A connection failure (when `db_reachable` is false) or a validation/query
+    /// error that occurred after connecting (when true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -361,29 +363,25 @@ pub struct DiagnosticDto {
     pub message: String,
 }
 
-/// Validate `request`'s schemas against the live database. A DB connection
-/// failure is reported in [`ValidateResponse::error`], not as an error result.
+/// Validate `request`'s schemas against the live database.
+///
+/// Connecting and validating are kept distinct: only a failure to *connect*
+/// sets `db_reachable: false` ("Database not reachable"). Once connected, a
+/// schema↔DB mismatch comes back as a per-field [`DiagnosticDto`] (an unknown
+/// column is one of these now, not a hard error), and any residual query failure
+/// is reported with `db_reachable: true` — never mislabelled as unreachable.
 pub async fn validate(request: ValidateRequest) -> ValidateResponse {
-    match validate_inner(request).await {
-        Ok(diagnostics) => ValidateResponse {
-            diagnostics,
-            db_reachable: true,
-            error: None,
-        },
-        Err(e) => ValidateResponse {
-            db_reachable: false,
-            error: Some(format!("{e:#}")),
-            ..Default::default()
-        },
-    }
-}
+    let unreachable = |context: &str, e: String| ValidateResponse {
+        db_reachable: false,
+        error: Some(format!("{context}: {e}")),
+        ..Default::default()
+    };
 
-async fn validate_inner(request: ValidateRequest) -> Result<Vec<DiagnosticDto>> {
     let config = Config::from(request.config);
-    let connection_url = config
-        .source
-        .resolve_connection_url()
-        .context("resolving the source connection URL")?;
+    let connection_url = match config.source.resolve_connection_url() {
+        Ok(url) => url,
+        Err(e) => return unreachable("resolving the source connection URL", e.to_string()),
+    };
 
     let indexes: BTreeMap<IndexName, IndexSchema> = request
         .indexes
@@ -392,14 +390,25 @@ async fn validate_inner(request: ValidateRequest) -> Result<Vec<DiagnosticDto>> 
         .collect();
     let spec = Arc::new(SourceSpec::new(indexes));
 
-    let documents = PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec))
-        .await
-        .context("connecting to the database")?;
-    let diagnostics = validate_indexes(&spec, &documents)
-        .await
-        .context("validating schemas against the database")?;
+    let documents =
+        match PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec)).await {
+            Ok(documents) => documents,
+            Err(e) => return unreachable("connecting to the database", e.to_string()),
+        };
 
-    Ok(diagnostics.into_iter().map(diagnostic_dto).collect())
+    // Connected → the database is reachable; a failure here is about the schemas.
+    match validate_indexes(&spec, &documents).await {
+        Ok(diagnostics) => ValidateResponse {
+            diagnostics: diagnostics.into_iter().map(diagnostic_dto).collect(),
+            db_reachable: true,
+            error: None,
+        },
+        Err(e) => ValidateResponse {
+            db_reachable: true,
+            error: Some(format!("validating schemas: {e}")),
+            ..Default::default()
+        },
+    }
 }
 
 /// A sample-document request: the edited config (for its connection) and one

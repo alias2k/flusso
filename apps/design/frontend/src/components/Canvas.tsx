@@ -214,7 +214,7 @@ function NodeSearch() {
 
   return (
     <div className="node-search">
-      <input placeholder={t("canvas.jumpToNode")} value={q} onChange={(e) => setQ(e.target.value)} />
+      <input type="text" placeholder={t("canvas.jumpToNode")} value={q} onChange={(e) => setQ(e.target.value)} />
       {results.length > 0 && (
         <ul>
           {results.map((n) => (

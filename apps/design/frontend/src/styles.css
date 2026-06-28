@@ -776,7 +776,11 @@ button:disabled:hover {
 }
 .node-search input {
   width: 100%;
+  color: var(--text);
   background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
   font-size: 12px;
   padding: 5px 8px;
 }

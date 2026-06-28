@@ -280,8 +280,8 @@ impl PgDocumentBuilder {
                 }
             }
             None => {
-                return Err(SourceError::Query(format!(
-                    "references unknown column `{schema}.{table}.{column}`"
+                return Err(SourceError::UnknownColumn(format!(
+                    "{schema}.{table}.{column}"
                 )));
             }
         };

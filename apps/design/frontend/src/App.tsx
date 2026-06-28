@@ -342,6 +342,10 @@ export default function App() {
       if (!res.db_reachable) {
         setDiagnostics(null);
         setToast({ kind: "error", text: t("toast.dbNotReachableErr", { err: res.error ?? "unknown" }) });
+      } else if (res.error) {
+        // Reachable, but validation itself failed — not a connectivity problem.
+        setDiagnostics(null);
+        setToast({ kind: "error", text: t("toast.validateFailed", { err: res.error }) });
       } else {
         setDiagnostics(res.diagnostics);
         if (res.diagnostics.length) {

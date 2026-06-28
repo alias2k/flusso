@@ -22,7 +22,7 @@ use schema_core::{
     AggregateOp, Column, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation, TableName,
 };
 
-use crate::{Result, SourceSpec};
+use crate::{Result, SourceError, SourceSpec};
 
 /// How a store reports one base-table column: its native type name (as the
 /// store spells it, e.g. Postgres `character varying(255)`) and whether it
@@ -69,6 +69,35 @@ pub struct Diagnostic {
 }
 
 type FieldName = schema_core::common::FieldName;
+
+/// Look up a column, turning a "no such column" into an Error [`Diagnostic`] on
+/// the field — so validation keeps going and points right at it — instead of
+/// aborting. A real transport failure (the store became unreachable) still
+/// propagates. Returns `None` when the column was missing (a diagnostic was
+/// emitted); callers skip their remaining checks for that field.
+async fn lookup_column(
+    catalog: &dyn Catalog,
+    index: &IndexName,
+    db_schema: &DatabaseSchema,
+    table: &TableName,
+    field: &FieldName,
+    column: &ColumnName,
+    out: &mut Vec<Diagnostic>,
+) -> Result<Option<ColumnInfo>> {
+    match catalog.column(db_schema, table, column).await {
+        Ok(info) => Ok(Some(info)),
+        Err(SourceError::UnknownColumn(what)) => {
+            out.push(Diagnostic {
+                index: index.clone(),
+                field: field.clone(),
+                severity: Severity::Error,
+                message: format!("references unknown column `{what}`"),
+            });
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
 
 /// Validate every index in `spec` against the store behind `catalog`, returning
 /// the disagreements found. An empty result means the declared schema matches
@@ -193,7 +222,11 @@ async fn validate_geo(
         FlussoType::Short,
     ];
     for column in [&geo.lat, &geo.lon] {
-        let info = catalog.column(db_schema, table, column).await?;
+        let Some(info) =
+            lookup_column(catalog, index, db_schema, table, field, column, out).await?
+        else {
+            continue;
+        };
         if !NUMERIC.iter().any(|ty| ty.accepts_pg(&info.sql_type)) {
             out.push(Diagnostic {
                 index: index.clone(),
@@ -220,7 +253,11 @@ async fn validate_column(
     catalog: &dyn Catalog,
     out: &mut Vec<Diagnostic>,
 ) -> Result<()> {
-    let info = catalog.column(db_schema, table, &column.column).await?;
+    let Some(info) =
+        lookup_column(catalog, index, db_schema, table, field, &column.column, out).await?
+    else {
+        return Ok(());
+    };
 
     if !column.ty.accepts_pg(&info.sql_type) {
         out.push(Diagnostic {
@@ -261,7 +298,10 @@ async fn check_type(
     catalog: &dyn Catalog,
     out: &mut Vec<Diagnostic>,
 ) -> Result<()> {
-    let info = catalog.column(db_schema, table, column).await?;
+    let Some(info) = lookup_column(catalog, index, db_schema, table, field, column, out).await?
+    else {
+        return Ok(());
+    };
     if !declared.accepts_pg(&info.sql_type) {
         out.push(Diagnostic {
             index: index.clone(),
@@ -274,4 +314,67 @@ async fn check_type(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use schema_core::IndexSchema;
+    use schema_core::common::IndexName;
+    use serde_json::json;
+
+    use super::*;
+
+    /// A catalog whose every column lookup fails as "unknown" — the post-stale-DB
+    /// case from the designer.
+    struct NoColumns;
+
+    #[async_trait]
+    impl Catalog for NoColumns {
+        async fn column(
+            &self,
+            schema: &DatabaseSchema,
+            table: &TableName,
+            column: &ColumnName,
+        ) -> Result<ColumnInfo> {
+            Err(SourceError::UnknownColumn(format!(
+                "{schema}.{table}.{column}"
+            )))
+        }
+    }
+
+    /// An unknown column is a per-field Error diagnostic, not a fatal error that
+    /// aborts validation (and gets mislabelled "database not reachable").
+    #[test]
+    fn unknown_column_is_a_diagnostic_not_a_fatal_error() {
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1,
+            "table": "products",
+            "db_schema": "public",
+            "fields": [{
+                "field": "title",
+                "source": { "column": { "column": "title", "ty": "keyword", "nullable": true } },
+            }],
+        }))
+        .unwrap();
+        let mut indexes = BTreeMap::new();
+        indexes.insert(IndexName::try_new("products").unwrap(), schema);
+        let spec = SourceSpec::new(indexes);
+
+        let diagnostics = futures::executor::block_on(validate_indexes(&spec, &NoColumns)).unwrap();
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "the unknown column should produce one diagnostic"
+        );
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert!(
+            diagnostics[0].message.contains("unknown column"),
+            "got: {}",
+            diagnostics[0].message,
+        );
+    }
 }
