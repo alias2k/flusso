@@ -81,6 +81,11 @@ run-live: up
 design: up
     cargo run -- design --config {{config}}
 
+# Check the designer's translations are complete (every UI string has a key in
+# every locale catalog). Run after adding/changing any designer UI string.
+design-i18n:
+    cd apps/design/frontend && npm run check:i18n
+
 # Run the designer's browser e2e suite (Playwright) + the save→check pipeline.
 # Needs the dev Postgres (brought up here); downloads Chromium on first run.
 design-e2e: up

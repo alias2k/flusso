@@ -76,7 +76,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
 - **The designer (`apps/design`) has three test layers.** (1) A property/"fuzz" round-trip
   (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
   `codegen → parse → convert` identity — an ordinary test, caught by the nextest step. (2) A
-  `designer-frontend` CI job: `npm ci && npm run build`, then a `git diff` guard that the committed
+  `designer-frontend` CI job: `npm ci`, an **i18n completeness check** (`npm run check:i18n` →
+  `apps/design/frontend/scripts/check-i18n.mjs`: every `t("…")` key the UI uses exists in the
+  `en` base catalog and every locale defines the same key set — so a feature can't ship UI without
+  its translations), then `npm run build` + a `git diff` guard that the committed
   `apps/design/dist/` matches a fresh Vite build (the embedded SPA must not drift). (3) A
   `designer-e2e` CI job: spins a seeded Postgres, builds the binary, then a **Playwright** suite
   (`apps/design/frontend/e2e/`) drives the *real* served UI (load/add/edit/delete/collapse) and runs
@@ -445,6 +448,21 @@ change: a crate added/moved/renamed (fix the layering + "Where things live" tabl
 command or test workflow that changes, a new engine invariant or guard test, a lint policy
 change, or a config/schema format change. Don't let it drift; don't pad it with detail that
 belongs in the linked docs.
+
+## Keeping the designer current (every feature aligns it)
+
+The visual designer (`apps/design`) is part of the product surface, not an optional extra:
+a feature isn't done until the designer can author it **and** its UI is fully translated.
+When a change adds or alters something a user authors — a `*.schema.yml`/`flusso.toml` key,
+a field type tag/sibling, an enum token, a sink option, a source/sink capability — align the
+designer in the **same** change: model/codegen/preview (`apps/design/`), the canvas/inspector
+controls (`apps/design/frontend/`), and the introspection/source-steer if the source informs it.
+And any user-facing string goes through `t("ns.key")` with the key added to **every** locale
+catalog in `apps/design/frontend/src/locales/` (English `en.ts` is the base; translate the rest).
+Two CI guards in the `designer-frontend` job enforce this and will fail the build otherwise: the
+**i18n check** (`npm run check:i18n`, key parity across locales) and the **dist-drift** guard
+(committed `apps/design/dist/` must match a fresh build — so rebuild + commit the SPA). Locally:
+`just design-i18n`, then rebuild the SPA. The `/implement` flow has an explicit step for this.
 
 ## Where things live (jump here first)
 

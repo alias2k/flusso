@@ -136,15 +136,24 @@ jobs:
           cache: npm
           cache-dependency-path: apps/design/frontend/package-lock.json
 
+      - name: Install deps
+        working-directory: apps/design/frontend
+        run: npm ci
+
+      # Every `t("…")` string the UI uses must have a key in the English base
+      # catalog, and every locale must define the same key set — so a new feature
+      # can't ship UI without its translations. See scripts/check-i18n.mjs.
+      - name: Check translations are complete
+        working-directory: apps/design/frontend
+        run: npm run check:i18n
+
       # The built SPA is committed to `apps/design/dist/` so the Rust crate
       # (rust-embed) builds with no Node toolchain. Rebuild it from source and
       # fail if it drifts from what's committed — a reproducible `npm ci` + Vite
       # build yields identical (content-hashed) output for the same source.
       - name: Build the SPA
         working-directory: apps/design/frontend
-        run: |
-          npm ci
-          npm run build
+        run: npm run build
 
       - name: Check the committed dist is up to date
         run: |
