@@ -272,6 +272,12 @@ async function json<T>(res: Response): Promise<T> {
 export const api = {
   project: () => fetch("/api/project").then((r) => json<Project>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
+  testConnection: (config: ConfigToml) =>
+    fetch("/api/test-connection", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(config),
+    }).then((r) => json<CatalogResponse>(r)),
   preview: (index: string, schema: IndexSchema) =>
     fetch("/api/preview", {
       method: "POST",

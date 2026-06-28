@@ -289,7 +289,27 @@ async fn introspect_inner(
 ) -> Result<(RelationalCatalog, Vec<JunctionCandidate>)> {
     let config =
         schema::load(config_path).with_context(|| format!("loading {}", config_path.display()))?;
-    let capture = build_capture(&config)?;
+    introspect_with(&config).await
+}
+
+/// Introspect the source described by an *edited* (unsaved) config, so the UI
+/// can test a connection URL before it's written to disk.
+pub async fn test_connection(config: ConfigToml) -> CatalogResponse {
+    match introspect_with(&Config::from(config)).await {
+        Ok((catalog, junctions)) => CatalogResponse {
+            catalog,
+            junctions,
+            error: None,
+        },
+        Err(e) => CatalogResponse {
+            error: Some(format!("{e:#}")),
+            ..Default::default()
+        },
+    }
+}
+
+async fn introspect_with(config: &Config) -> Result<(RelationalCatalog, Vec<JunctionCandidate>)> {
+    let capture = build_capture(config)?;
     let catalog = capture.introspect().await?;
     let junctions = junction_candidates(&catalog);
     Ok((catalog, junctions))

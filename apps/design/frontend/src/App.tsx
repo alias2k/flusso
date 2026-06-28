@@ -93,9 +93,9 @@ export default function App() {
     api.catalog().then(setCatalog).catch((e) => setError(String(e)));
   }, [reset]);
 
+  // Test the *currently edited* connection (not the on-disk one).
   const refreshCatalog = () =>
-    api
-      .catalog()
+    (doc ? api.testConnection(doc.config) : api.catalog())
       .then((c) => {
         setCatalog(c);
         setToast({ kind: c.error ? "error" : "ok", text: c.error ? "Database not reachable" : "Database connected" });
@@ -201,7 +201,37 @@ export default function App() {
       d ? { ...d, schemas: { ...d.schemas, [active]: fn(d.schemas[active] ?? emptySchema("")) } } : d,
     );
   };
-  const setConfig = (next: ConfigToml) => setDoc((d) => (d ? { ...d, config: next } : d));
+  // Editing the index list can rename or remove indexes. Schemas are keyed by
+  // index name, so re-key renamed ones (matched by position) and drop removed
+  // ones — otherwise a renamed index's schema is silently lost on save.
+  const setConfig = (next: ConfigToml) => {
+    if (!doc) return;
+    const oldIdx = doc.config.index ?? [];
+    const newIdx = next.index ?? [];
+    const renames = new Map<string, string>();
+    for (let i = 0; i < Math.min(oldIdx.length, newIdx.length); i += 1) {
+      if (oldIdx[i].name !== newIdx[i].name) renames.set(oldIdx[i].name, newIdx[i].name);
+    }
+    const removed = oldIdx
+      .filter((o) => !newIdx.some((n) => n.name === o.name) && !renames.has(o.name))
+      .map((o) => o.name);
+
+    setDoc((d) => {
+      if (!d) return d;
+      const schemas = { ...d.schemas };
+      for (const [oldName, newName] of renames) {
+        if (oldName in schemas) {
+          schemas[newName] = schemas[oldName];
+          delete schemas[oldName];
+        }
+      }
+      for (const name of removed) delete schemas[name];
+      return { config: next, schemas };
+    });
+
+    if (renames.has(active)) setActive(renames.get(active)!);
+    else if (removed.includes(active)) setActive("config");
+  };
 
   // Collapsed-node ids persist per index (like layout) so they survive reloads.
   const collapseKey = (index: string) => `flusso-design.collapsed.${index}`;

@@ -129,6 +129,19 @@ test("config panel edits sinks", async ({ page }) => {
   await expect(page.locator(".sink-editor")).not.toHaveCount(0);
 });
 
+test("renaming an index keeps its schema (regression)", async ({ page }) => {
+  await page.getByRole("button", { name: /Deployment/ }).click();
+  await page.locator(".index-entry input").first().fill("renamed_idx");
+  await page.locator(".sidebar .nav", { hasText: "renamed_idx" }).click();
+  // schema preserved → the root node still has its column list (not the empty state)
+  await expect(page.locator(".flow-node.kind-root .node-cols")).toBeVisible();
+});
+
+test("the DB chip re-tests the connection", async ({ page }) => {
+  await page.locator(".db-chip").click();
+  await expect(page.locator(".toast")).toBeVisible();
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();
