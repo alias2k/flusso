@@ -116,6 +116,16 @@ export function setNodeField(schema: IndexSchema, path: number[], field: Field):
   return withNodeFields(schema, parentPath, parent);
 }
 
+/// The field names of the containers along `path` (for an inspector breadcrumb).
+export function pathLabels(schema: IndexSchema, path: number[]): string[] {
+  const out: string[] = [];
+  for (let i = 1; i <= path.length; i += 1) {
+    const field = fieldAtPath(schema, path.slice(0, i));
+    if (field) out.push(field.field);
+  }
+  return out;
+}
+
 /// The table whose columns a node reads (root table, or the nearest enclosing join's table).
 export function effectiveTable(schema: IndexSchema, path: number[]): string {
   let table = schema.table;

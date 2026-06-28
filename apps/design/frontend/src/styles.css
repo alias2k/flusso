@@ -800,3 +800,49 @@ button:disabled:hover {
   background: var(--panel-2);
   color: var(--accent);
 }
+
+/* ── onboarding & discoverability (group E) ─────────────────────────────── */
+.empty-state {
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.legend {
+  margin-top: 14px;
+}
+.legend-row {
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 6px;
+}
+.legend-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 7px;
+}
+.legend-dot.root { background: var(--k-root); }
+.legend-dot.object { background: var(--k-object); }
+.legend-dot.belongs_to { background: var(--k-belongs_to); }
+.legend-dot.has_one { background: var(--k-has_one); }
+.legend-dot.has_many { background: var(--k-has_many); }
+.legend-dot.many_to_many { background: var(--k-many_to_many); }
+
+.crumbs {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  word-break: break-word;
+}
+.kind-help {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -2px 0 10px;
+  line-height: 1.4;
+}

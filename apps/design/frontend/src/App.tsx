@@ -301,6 +301,15 @@ export default function App() {
               </button>
             ))}
             <NewIndex tables={catalog?.catalog.tables.map((t) => t.name) ?? []} onCreate={createIndex} />
+            <div className="legend">
+              <div className="nav-heading">Kinds</div>
+              {["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"].map((k) => (
+                <div className="legend-row" key={k}>
+                  <span className={`legend-dot ${k}`} />
+                  {k}
+                </div>
+              ))}
+            </div>
           </nav>
         )}
 

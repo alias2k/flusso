@@ -4,6 +4,7 @@ import {
   type AggregateKey,
   type Column,
   type Field,
+  type FieldSource,
   type FlussoType,
   type Join,
   type JoinKind,
@@ -11,17 +12,59 @@ import {
 } from "../api";
 import { LEAF_TYPES } from "../fields";
 import * as edit from "../model/edit";
-import { effectiveTable, fieldAtPath, joinOf, nodeFields } from "../model/tree";
+import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
+
+/// One-line explanations of the grammar, shown for the selected node/field.
+const KIND_HELP: Record<string, string> = {
+  belongs_to: "This row points at one target row (single nested object).",
+  has_one: "One related row points back here (single nested object).",
+  has_many: "Many related rows point back here (array of objects).",
+  many_to_many: "Related rows linked through a junction table (array of objects).",
+  object: "Groups columns of the same table under a nested object — no new table.",
+  count: "Counts the related rows into a number.",
+  sum: "Sums a column of the related rows.",
+  avg: "Averages a column of the related rows (result is a double).",
+  min: "Smallest value of a column across the related rows.",
+  max: "Largest value of a column across the related rows.",
+  ids: "Collects the related table's primary keys into an array.",
+  geo: "A geo point from two columns (lat/lon).",
+  map: "A dynamic-key object over a json/jsonb column; keys stay searchable.",
+  custom: "A type flusso doesn't model — you give the Postgres + OpenSearch types.",
+  constant: "A fixed value baked into every document.",
+};
+
+function Breadcrumb() {
+  const { schema, selection } = useDesign();
+  if (!selection) return null;
+  const root = schema.table || "(root)";
+  let crumbs: string[];
+  if (selection.kind === "root") crumbs = [root];
+  else if (selection.kind === "node") crumbs = [root, ...pathLabels(schema, selection.path)];
+  else {
+    const field = nodeFields(schema, selection.path)[selection.index];
+    crumbs = [root, ...pathLabels(schema, selection.path), field?.field ?? "?"];
+  }
+  return <div className="crumbs">{crumbs.join(" › ")}</div>;
+}
 import { Filters } from "./Filters";
 import { Check, Field as Row, Num, Select, Text } from "./widgets";
 
 export function Inspector() {
   const { selection } = useDesign();
   if (!selection) return <div className="inspector empty">Select a node or field to edit its details.</div>;
-  if (selection.kind === "root") return <RootInspector />;
-  if (selection.kind === "node") return <NodeInspector path={selection.path} />;
-  return <FieldInspector path={selection.path} index={selection.index} />;
+  return (
+    <>
+      <Breadcrumb />
+      {selection.kind === "root" ? (
+        <RootInspector />
+      ) : selection.kind === "node" ? (
+        <NodeInspector path={selection.path} />
+      ) : (
+        <FieldInspector path={selection.path} index={selection.index} />
+      )}
+    </>
+  );
 }
 
 function RootInspector() {
@@ -78,6 +121,7 @@ function NodeInspector({ path }: { path: number[] }) {
   return (
     <div className="inspector">
       <h3>Join · {verb}</h3>
+      {KIND_HELP[verb] && <p className="kind-help">{KIND_HELP[verb]}</p>}
       <Row label="field name">
         <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
       </Row>
@@ -133,9 +177,11 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
   const s = field.source;
 
+  const helpKind = fieldHelpKind(s);
   return (
     <div className="inspector">
       <h3>Field · {field.field}</h3>
+      {KIND_HELP[helpKind] && <p className="kind-help">{KIND_HELP[helpKind]}</p>}
       <Row label="field name">
         <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       </Row>
@@ -367,6 +413,19 @@ function joinVerb(kind: JoinKind): "belongs_to" | "has_one" | "has_many" | "many
   if ("has_one" in kind) return "has_one";
   if ("has_many" in kind) return "has_many";
   return "many_to_many";
+}
+
+/// The KIND_HELP key for a leaf field's source (empty for plain scalars).
+function fieldHelpKind(s: FieldSource): string {
+  if ("geo" in s) return "geo";
+  if ("constant" in s) return "constant";
+  if ("column" in s && typeof s.column.ty !== "string") return "map" in s.column.ty ? "map" : "custom";
+  if ("relation" in s && "aggregate" in s.relation) {
+    const op = s.relation.aggregate.op;
+    if (typeof op === "string") return "count";
+    return "sum" in op ? "sum" : "avg" in op ? "avg" : "min" in op ? "min" : "max" in op ? "max" : "ids";
+  }
+  return "";
 }
 
 function blankKind(verb: string): JoinKind {

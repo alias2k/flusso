@@ -102,6 +102,16 @@ test("Escape clears the selection", async ({ page }) => {
   await expect(page.locator(".inspector")).toHaveCount(0);
 });
 
+test("inspector shows a breadcrumb for the selection", async ({ page }) => {
+  await page.locator(".flow-node.kind-root .col-row.on").first().click();
+  await expect(page.locator(".crumbs")).toBeVisible();
+});
+
+test("the sidebar shows a kind legend", async ({ page }) => {
+  await expect(page.locator(".legend")).toBeVisible();
+  await expect(page.locator(".legend-row")).toHaveCount(6);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

@@ -22,6 +22,11 @@ export function DocNodeView({ data, selected }: NodeProps) {
   const isCollapsed = collapsed.has(node.id);
   const move = (index: number, dir: -1 | 1) => apply((s) => edit.moveField(s, node.path, index, dir));
   const matches = (name: string) => name.toLowerCase().includes(filter.toLowerCase());
+  const pickRootTable = (t: string) => {
+    if (!t) return;
+    const pk = catalog?.catalog.tables.find((x) => x.name === t)?.primary_key[0];
+    apply((s) => edit.setRootMeta(s, { table: t, primary_key: pk }));
+  };
 
   // Diagnostics are reported by field name (no path), so match by name. Build a
   // lookup once; a node shows a count badge, a row shows its message on hover.
@@ -93,7 +98,29 @@ export function DocNodeView({ data, selected }: NodeProps) {
         </div>
       </header>
 
-      {!isCollapsed && (
+      {node.kind === "root" && !node.table ? (
+        <div className="empty-state">
+          <span>Pick a root table to begin</span>
+          {(catalog?.catalog.tables.length ?? 0) > 0 ? (
+            <select value="" onChange={(e) => pickRootTable(e.target.value)}>
+              <option value="">choose a table…</option>
+              {catalog?.catalog.tables.map((t) => (
+                <option key={t.name} value={t.name}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              placeholder="root table name, Enter"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && e.currentTarget.value.trim()) pickRootTable(e.currentTarget.value.trim());
+              }}
+            />
+          )}
+        </div>
+      ) : (
+        !isCollapsed && (
         <>
           {cols.length > 0 && (
             <div className="col-tools" onClick={(e) => e.stopPropagation()}>
@@ -190,7 +217,12 @@ export function DocNodeView({ data, selected }: NodeProps) {
           <footer className="node-add">
             {catalog &&
               suggestRelations(catalog, node.table).map((sg) => (
-                <button key={sg.key} className="suggest" onClick={() => apply((s) => edit.addField(s, node.path, sg.build()))}>
+                <button
+                  key={sg.key}
+                  className="suggest"
+                  title={sg.detail}
+                  onClick={() => apply((s) => edit.addField(s, node.path, sg.build()))}
+                >
                   + {sg.label}
                 </button>
               ))}
@@ -200,6 +232,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
             </div>
           </footer>
         </>
+        )
       )}
 
       <Handle type="source" position={Position.Right} />
