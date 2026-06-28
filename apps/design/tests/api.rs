@@ -94,5 +94,28 @@ fn project_previews_saves_and_reopens() {
         serde_json::to_value(&reorders).unwrap(),
     );
 
+    // Saving the reopened (already-canonical) project again writes nothing —
+    // only changed files are touched.
+    let resave = SaveRequest {
+        config: reopened.config.clone(),
+        indexes: reopened
+            .indexes
+            .iter()
+            .filter_map(|i| {
+                i.schema.clone().map(|schema| SaveSchema {
+                    schema_path: PathBuf::from(&i.schema_path),
+                    schema,
+                    raw: None,
+                })
+            })
+            .collect(),
+    };
+    let again = api::save_project(&config_path, resave).unwrap();
+    assert!(
+        again.written.is_empty(),
+        "re-saving unchanged files writes nothing: {:?}",
+        again.written
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }

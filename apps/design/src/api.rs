@@ -178,17 +178,17 @@ pub struct SaveResponse {
     pub written: Vec<String>,
 }
 
-/// Render and write the config and every schema in `request`. The config is
-/// written first; a failure leaves earlier writes in place (the caller can
-/// re-save). Canonical regeneration — see [`codegen`].
+/// Render and write the config and every schema in `request` — but only the
+/// files that actually change, so unchanged files keep their mtime (and we don't
+/// reflow files the user didn't touch). Canonical regeneration — see [`codegen`].
 pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResponse> {
     let base_dir = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut written = Vec::with_capacity(request.indexes.len() + 1);
 
     let toml = codegen::config_to_toml(&request.config)?;
-    std::fs::write(config_path, toml)
-        .with_context(|| format!("writing {}", config_path.display()))?;
-    written.push(config_path.display().to_string());
+    if write_if_changed(config_path, &toml)? {
+        written.push(config_path.display().to_string());
+    }
 
     for index in &request.indexes {
         let yaml = match &index.raw {
@@ -200,9 +200,9 @@ pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResp
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::write(&resolved, yaml)
-            .with_context(|| format!("writing {}", resolved.display()))?;
-        written.push(resolved.display().to_string());
+        if write_if_changed(&resolved, &yaml)? {
+            written.push(resolved.display().to_string());
+        }
     }
 
     Ok(SaveResponse { written })
@@ -447,6 +447,16 @@ fn replication_config(connection_url: &str) -> Result<ReplicationConfig> {
         "flusso_design",
     )
     .with_port(port))
+}
+
+/// Write `contents` to `path` only if it differs from what's there; returns
+/// whether a write happened.
+fn write_if_changed(path: &Path, contents: &str) -> Result<bool> {
+    if std::fs::read_to_string(path).ok().as_deref() == Some(contents) {
+        return Ok(false);
+    }
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
 }
 
 /// Resolve a schema path against the config directory (absolute paths as-is).
