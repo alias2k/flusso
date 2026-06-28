@@ -57,6 +57,18 @@ export default function App() {
   const [rawMode, setRawMode] = useState(false);
   const [rawText, setRawText] = useState("");
   const [diffs, setDiffs] = useState<FileDiff[] | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">(
+    () => (localStorage.getItem("flusso-design.theme") as "dark" | "light") || "dark",
+  );
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("flusso-design.theme", theme);
+    } catch {
+      /* storage disabled */
+    }
+  }, [theme]);
 
   // Auto-dismiss toasts.
   useEffect(() => {
@@ -348,6 +360,14 @@ export default function App() {
         <button className="icon" title="Redo (⇧⌘Z)" disabled={!canRedo} onClick={redo}>
           <Icon name="redo" />
         </button>
+        <button
+          className="icon"
+          aria-label="Toggle light/dark theme"
+          title="Toggle theme"
+          onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+        >
+          <Icon name="theme" />
+        </button>
         <button onClick={() => setDrawer((d) => !d)}>{drawer ? "Hide" : "YAML"}</button>
         <button onClick={validate} disabled={validating}>
           {validating && <span className="spinner" />}
@@ -447,7 +467,7 @@ export default function App() {
       {diffs && <DiffModal diffs={diffs} saving={saving} onConfirm={performSave} onCancel={() => setDiffs(null)} />}
 
       {toast && (
-        <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
+        <div className={`toast ${toast.kind}`} role="status" onClick={() => setToast(null)}>
           {toast.text}
         </div>
       )}
@@ -467,9 +487,18 @@ function DiffModal({
   onCancel: () => void;
 }) {
   const changed = diffs.filter((d) => d.changed);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    confirmRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
   return (
     <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label="Review changes" onClick={(e) => e.stopPropagation()}>
         <h3>Review changes ({changed.length} file{changed.length === 1 ? "" : "s"})</h3>
         <div className="diff-list">
           {changed.map((d) => (
@@ -483,7 +512,7 @@ function DiffModal({
           ))}
         </div>
         <div className="modal-actions">
-          <button className="primary" onClick={onConfirm} disabled={saving}>
+          <button ref={confirmRef} className="primary" onClick={onConfirm} disabled={saving}>
             {saving && <span className="spinner" />}
             Write {changed.length} file{changed.length === 1 ? "" : "s"}
           </button>

@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse } from "../api";
 import { typeClass } from "../theme";
+import { Icon } from "./Icon";
 
 function Node({ node, depth }: { node: DocumentNode; depth: number }) {
   return (
@@ -26,7 +28,17 @@ export function Preview({
   preview: PreviewResponse | null;
   diagnostics: DiagnosticDto[] | null;
 }) {
+  const [copied, setCopied] = useState(false);
   if (!preview) return <div className="preview empty">Select or edit an index to preview it.</div>;
+  const copy = () => {
+    navigator.clipboard?.writeText(preview.yaml).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {},
+    );
+  };
   return (
     <div className="preview">
       {!preview.parse_ok && (
@@ -53,7 +65,12 @@ export function Preview({
           <Node key={i} node={n} depth={0} />
         ))}
       </div>
-      <h3>schema.yml</h3>
+      <h3 className="yaml-head">
+        schema.yml
+        <button className="link copy" onClick={copy} title="Copy YAML">
+          <Icon name="copy" size={13} /> {copied ? "copied" : "copy"}
+        </button>
+      </h3>
       <pre className="yaml">{preview.yaml}</pre>
     </div>
   );

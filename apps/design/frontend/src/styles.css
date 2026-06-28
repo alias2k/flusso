@@ -938,3 +938,35 @@ button:disabled:hover {
   gap: 8px;
   margin-top: 12px;
 }
+
+/* ── polish (group G) ───────────────────────────────────────────────────── */
+/* light theme: override the neutral palette; the kind/type hues carry over. */
+:root[data-theme="light"] {
+  --bg: #f5f7fa;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --panel-3: #e2e7ee;
+  --border: #d3d9e2;
+  --text: #1b2230;
+  --muted: #5c6573;
+  --accent-soft: rgba(16, 185, 129, 0.16);
+}
+:root[data-theme="light"] .flow-node {
+  box-shadow: inset 3px 0 0 var(--kc), 0 4px 14px rgba(20, 30, 50, 0.1);
+}
+:root[data-theme="light"] body,
+:root[data-theme="light"] .react-flow__minimap {
+  /* nudge the dotted background so it reads on light */
+}
+
+.yaml-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}

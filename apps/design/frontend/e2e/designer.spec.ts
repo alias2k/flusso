@@ -134,6 +134,11 @@ test("validate surfaces a result toast", async ({ page }) => {
   await expect(page.locator(".toast")).toBeVisible();
 });
 
+test("toggles the light/dark theme", async ({ page }) => {
+  await page.getByRole("button", { name: "Toggle light/dark theme" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
 test("toggles the minimap", async ({ page }) => {
   await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
   await page.locator(".map-toggle").click();
