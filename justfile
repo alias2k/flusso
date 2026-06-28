@@ -33,10 +33,27 @@ up:
 down:
     docker compose down
 
-# Wipe volumes and bring the stack back up fresh (re-seeds Postgres + OpenSearch).
-reset:
-    docker compose down -v
-    docker compose up -d --wait
+# `just reset db` recreates only the database (re-seeds Postgres); leaves the
+# rest running. Volume names are explicit/compose-scoped — no cross-project grep.
+# Reset the dev stack: `just reset` wipes all volumes + re-seeds; `reset db` = DB only.
+reset target="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+      all)
+        docker compose down -v
+        docker compose up -d --wait
+        ;;
+      db)
+        docker compose rm -sf postgres
+        docker volume rm flusso_flusso-pgdata 2>/dev/null || true
+        docker compose up -d --wait postgres
+        ;;
+      *)
+        echo "unknown reset target '{{target}}' — use 'all' (default) or 'db'" >&2
+        exit 1
+        ;;
+    esac
 
 # Show stack status.
 ps:
