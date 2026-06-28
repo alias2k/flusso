@@ -418,8 +418,7 @@ pub struct SampleRequest {
 /// would write — for previewing a schema against live data.
 #[derive(Debug, Serialize, Default)]
 pub struct SampleResponse {
-    /// The sample document, or `None` when the root table is empty / has no
-    /// single-column primary key (see `note`).
+    /// The sample document, or `None` when none could be produced (see `note`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document: Option<serde_json::Value>,
     /// Whether the database was reachable; when false, `error` says why.
@@ -432,19 +431,33 @@ pub struct SampleResponse {
     pub error: Option<String>,
 }
 
+/// Why a reachable database still produced no sample document.
+enum SampleOutcome {
+    Document(serde_json::Value),
+    /// The root table has no rows to sample.
+    EmptyTable,
+    /// The index has no single-column primary key, so a row can't be keyed.
+    NoPrimaryKey,
+}
+
 /// Build a sample document for `request`'s index against the live database. A DB
 /// connection failure is reported in [`SampleResponse::error`], not as an error.
 pub async fn sample(request: SampleRequest) -> SampleResponse {
     match sample_inner(request).await {
-        Ok(Some(document)) => SampleResponse {
+        Ok(SampleOutcome::Document(document)) => SampleResponse {
             document: Some(document),
             db_reachable: true,
             ..Default::default()
         },
-        Ok(None) => SampleResponse {
+        Ok(SampleOutcome::EmptyTable) => SampleResponse {
+            db_reachable: true,
+            note: Some("the root table has no rows to sample".to_owned()),
+            ..Default::default()
+        },
+        Ok(SampleOutcome::NoPrimaryKey) => SampleResponse {
             db_reachable: true,
             note: Some(
-                "the root table is empty, or the index has no single-column primary key".to_owned(),
+                "this index has no single-column primary key, so a row can't be sampled".to_owned(),
             ),
             ..Default::default()
         },
@@ -456,7 +469,14 @@ pub async fn sample(request: SampleRequest) -> SampleResponse {
     }
 }
 
-async fn sample_inner(request: SampleRequest) -> Result<Option<serde_json::Value>> {
+async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
+    // A missing single-column primary key is a schema property — report it
+    // without touching the database (it's also why `sample_document` would
+    // return `None`, so distinguishing it here keeps the empty-table note clean).
+    if request.schema.primary_key.is_none() {
+        return Ok(SampleOutcome::NoPrimaryKey);
+    }
+
     let config = Config::from(request.config);
     let connection_url = config
         .source
@@ -474,7 +494,10 @@ async fn sample_inner(request: SampleRequest) -> Result<Option<serde_json::Value
         .sample_document(&request.name)
         .await
         .context("building a sample document")?;
-    Ok(body.as_ref().map(sinks_core::to_json))
+    Ok(match body.as_ref().map(sinks_core::to_json) {
+        Some(document) => SampleOutcome::Document(document),
+        None => SampleOutcome::EmptyTable,
+    })
 }
 
 fn diagnostic_dto(diagnostic: Diagnostic) -> DiagnosticDto {
