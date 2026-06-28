@@ -1,5 +1,6 @@
 //! The designer's JSON API: load the project, introspect the database, preview
-//! a schema, validate against the live store, and write the files back.
+//! a schema, validate against the live store, build a sample document from a
+//! live row, and write the files back.
 //!
 //! Every operation works in the validated vocabulary — requests carry
 //! [`IndexSchema`]/[`ConfigToml`] as JSON (so invalid identifiers are rejected
@@ -399,6 +400,81 @@ async fn validate_inner(request: ValidateRequest) -> Result<Vec<DiagnosticDto>> 
         .context("validating schemas against the database")?;
 
     Ok(diagnostics.into_iter().map(diagnostic_dto).collect())
+}
+
+/// A sample-document request: the edited config (for its connection) and one
+/// index's schema to build a real document from.
+#[derive(Debug, Deserialize)]
+pub struct SampleRequest {
+    /// The edited config — its connection drives which database to read.
+    pub config: ConfigToml,
+    /// Logical index name.
+    pub name: IndexName,
+    /// The schema to build a sample document for.
+    pub schema: IndexSchema,
+}
+
+/// A real document built from one arbitrary root row — exactly what the sink
+/// would write — for previewing a schema against live data.
+#[derive(Debug, Serialize, Default)]
+pub struct SampleResponse {
+    /// The sample document, or `None` when the root table is empty / has no
+    /// single-column primary key (see `note`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<serde_json::Value>,
+    /// Whether the database was reachable; when false, `error` says why.
+    pub db_reachable: bool,
+    /// Why no document could be produced even though the DB was reachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Why the database could not be reached/queried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Build a sample document for `request`'s index against the live database. A DB
+/// connection failure is reported in [`SampleResponse::error`], not as an error.
+pub async fn sample(request: SampleRequest) -> SampleResponse {
+    match sample_inner(request).await {
+        Ok(Some(document)) => SampleResponse {
+            document: Some(document),
+            db_reachable: true,
+            ..Default::default()
+        },
+        Ok(None) => SampleResponse {
+            db_reachable: true,
+            note: Some(
+                "the root table is empty, or the index has no single-column primary key".to_owned(),
+            ),
+            ..Default::default()
+        },
+        Err(e) => SampleResponse {
+            db_reachable: false,
+            error: Some(format!("{e:#}")),
+            ..Default::default()
+        },
+    }
+}
+
+async fn sample_inner(request: SampleRequest) -> Result<Option<serde_json::Value>> {
+    let config = Config::from(request.config);
+    let connection_url = config
+        .source
+        .resolve_connection_url()
+        .context("resolving the source connection URL")?;
+
+    let mut indexes: BTreeMap<IndexName, IndexSchema> = BTreeMap::new();
+    indexes.insert(request.name.clone(), request.schema);
+    let spec = Arc::new(SourceSpec::new(indexes));
+
+    let documents = PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec))
+        .await
+        .context("connecting to the database")?;
+    let body = documents
+        .sample_document(&request.name)
+        .await
+        .context("building a sample document")?;
+    Ok(body.as_ref().map(sinks_core::to_json))
 }
 
 fn diagnostic_dto(diagnostic: Diagnostic) -> DiagnosticDto {

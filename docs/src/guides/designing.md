@@ -48,6 +48,9 @@ aren't written to the files (the files only hold the document tree).
   node/field, `Esc` deselect; click an edge to select its join.
 - **Guidance**: a kind-colour legend, FK tooltips, a one-line grammar hint per field kind,
   and an inspector breadcrumb. A **light/dark** theme toggle.
+- **Browse the database**: a *Tables* explorer lists every table with its columns, primary
+  keys, and foreign keys (and which tables are junctions) — to explore the schema on its
+  own, independent of what's on the canvas.
 
 ### Saving, validating, and escape hatches
 
@@ -69,7 +72,9 @@ aren't written to the files (the files only hold the document tree).
   really there; each column carries a suggested flusso type derived from its SQL type.
 - **The document, as you build it.** A live preview shows the resulting search document
   tree and the derived OpenSearch mapping, recomputed on every edit from the schema
-  alone — the same database-free projection `flusso check` prints.
+  alone — the same database-free projection `flusso check` prints. On demand it also
+  builds a **sample document** from one real row — exactly what the sink would write —
+  so you can sanity-check the schema against actual data.
 - **Validation against the real schema.** *Validate against DB* checks every field's
   column, type, and nullability against the live store and reports disagreements inline —
   the late-bound errors that otherwise surface only at `flusso check` time.

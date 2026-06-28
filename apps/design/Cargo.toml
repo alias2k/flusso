@@ -27,6 +27,7 @@ schema-config-toml.workspace = true
 schema-index-yaml.workspace = true
 sources-core.workspace = true
 sources-postgres.workspace = true
+sinks-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

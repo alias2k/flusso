@@ -12,6 +12,7 @@ type IconName =
   | "redo"
   | "theme"
   | "copy"
+  | "play"
   | "tidy";
 
 const paths: Record<IconName, JSX.Element> = {
@@ -71,6 +72,9 @@ const paths: Record<IconName, JSX.Element> = {
       <rect x="3" y="3" width="6" height="14" rx="1" />
       <rect x="11" y="3" width="6" height="9" rx="1" />
     </>
+  ),
+  play: (
+    <path d="M5 3.5v13l11-6.5z" />
   ),
   // A stylised "flow" mark for the wordmark.
   flow: (

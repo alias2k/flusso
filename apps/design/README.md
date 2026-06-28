@@ -12,12 +12,14 @@ truth — the UI is a round-tripping view over them, not a separate model.
 ## What it does
 
 - **Introspect** — enumerate the live relational catalog (tables, columns + suggested
-  flusso types, primary keys, foreign keys, junction candidates).
+  flusso types, primary keys, foreign keys, junction candidates), browsable on its own
+  in a read-only table explorer.
 - **Edit** — the full grammar: scalars, `map`/`custom`/`geo`/`object`, the four join
   verbs, the six aggregate ops, filters, `order_by`, soft-delete, plus the `flusso.toml`
   source/sink/index wiring.
 - **Preview** — derive the search document tree and OpenSearch mapping from the schema
-  alone (database-free), recomputed on every edit.
+  alone (database-free), recomputed on every edit; and, on demand, build a **sample
+  document** from one real row — exactly what the sink would write.
 - **Validate** — check the edited schemas against the live database and report
   disagreements inline.
 - **Save** — canonical regeneration back to `*.schema.yml` / `flusso.toml`. The
@@ -28,7 +30,7 @@ truth — the UI is a round-tripping view over them, not a separate model.
 
 - `codegen` — model → type-first YAML / TOML.
 - `preview` — schema → mapping + document tree.
-- `api` — the JSON operations (load / introspect / preview / validate / save).
+- `api` — the JSON operations (load / introspect / preview / validate / sample / save).
 - `server` — the axum router; serves the API and the embedded SPA.
 - `frontend/` — the Vite + React + TypeScript UI: a React Flow node-graph canvas where
   each node is a place in the document (root / `object` group / join) and edges are

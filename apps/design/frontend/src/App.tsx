@@ -511,7 +511,15 @@ export default function App() {
               <Canvas />
               {drawer && (
                 <div className="drawer">
-                  <Preview preview={preview} diagnostics={diagnostics} />
+                  <Preview
+                    preview={preview}
+                    diagnostics={diagnostics}
+                    onSample={
+                      doc && schema && active !== "config"
+                        ? () => api.sample(doc.config, active, schema)
+                        : undefined
+                    }
+                  />
                 </div>
               )}
             </main>

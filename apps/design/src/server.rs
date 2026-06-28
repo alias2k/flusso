@@ -96,6 +96,7 @@ fn router(state: AppState) -> Router {
         .route("/api/test-connection", post(test_connection))
         .route("/api/preview", post(preview))
         .route("/api/validate", post(validate))
+        .route("/api/sample", post(sample))
         .route("/api/diff", post(diff))
         .route("/api/save", post(save))
         .with_state(state)
@@ -122,6 +123,10 @@ async fn preview(Json(request): Json<api::PreviewRequest>) -> Result<Response, A
 
 async fn validate(Json(request): Json<api::ValidateRequest>) -> Response {
     Json(api::validate(request).await).into_response()
+}
+
+async fn sample(Json(request): Json<api::SampleRequest>) -> Response {
+    Json(api::sample(request).await).into_response()
 }
 
 async fn diff(

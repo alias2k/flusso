@@ -153,6 +153,14 @@ test("preview drawer shows the OpenSearch mapping", async ({ page }) => {
   await expect(page.locator(".mapping-details")).toBeVisible();
 });
 
+test("sample document builds a real row from the database", async ({ page }) => {
+  await page.getByRole("button", { name: "YAML", exact: true }).click();
+  await expect(page.locator(".sample-doc")).toBeVisible();
+  await page.locator(".sample-doc").getByRole("button", { name: /fetch/ }).click();
+  // DB is seeded → a JSON document is rendered (a note/banner would mean empty).
+  await expect(page.locator(".sample-doc pre")).toBeVisible();
+});
+
 test("duplicating a node adds a copy", async ({ page }) => {
   const before = await page.locator(".flow-node").count();
   await page.locator(".flow-node:not(.kind-root) header").first().click();

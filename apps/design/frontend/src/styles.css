@@ -994,3 +994,7 @@ button:disabled:hover {
 .catalog-col .col-type { font-family: ui-monospace, monospace; font-size: 11px; }
 .catalog-fk { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; padding: 1px 0; }
 .pk-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--k-root); margin-right: 6px; vertical-align: middle; }
+
+/* ── sample document (item 6) ───────────────────────────────────────────── */
+.sample-doc { margin-top: 8px; }
+.sample-doc .yaml-head { display: flex; align-items: center; gap: 8px; }

@@ -112,6 +112,49 @@ impl PgDocumentBuilder {
         Ok(Self::new(pool, spec))
     }
 
+    /// Build a real document for one arbitrary row of an index's root table —
+    /// exactly what the sink would write, for previewing a schema against live
+    /// data. Picks any row with a non-null primary key, then runs it through the
+    /// normal [`build`](DocumentBuilder::build) path. Returns `Ok(None)` when the
+    /// index has no single-column primary key or its root table is empty.
+    pub async fn sample_document(
+        &self,
+        index: &IndexName,
+    ) -> Result<Option<schema_core::GenericValue>> {
+        let schema = self
+            .spec
+            .schema(index)
+            .ok_or_else(|| SourceError::Query(format!("unknown index `{index}`")))?;
+        let Some(pk_column) = schema.primary_key.clone() else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT \"{pk}\" FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
+            pk = pk_column,
+            db_schema = schema.db_schema,
+            table = schema.table,
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(query_err)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let key_value = value::first_column_to_generic(&row);
+        if matches!(key_value, schema_core::GenericValue::Null) {
+            return Ok(None);
+        }
+        let id = DocumentId {
+            index: index.clone(),
+            key: RowKey(vec![(pk_column, key_value)]),
+        };
+        match self.build(&id).await? {
+            Document::Upsert { body, .. } => Ok(Some(body)),
+            Document::Delete { .. } => Ok(None),
+        }
+    }
+
     /// The single-column primary key of a table, from the Postgres catalog
     /// (cached). Relations match against this, so a composite or missing
     /// primary key is an error.

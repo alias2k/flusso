@@ -252,6 +252,13 @@ export interface ValidateResponse {
   error?: string;
 }
 
+export interface SampleResponse {
+  document?: unknown;
+  db_reachable: boolean;
+  note?: string;
+  error?: string;
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
@@ -290,6 +297,12 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ config, indexes }),
     }).then((r) => json<ValidateResponse>(r)),
+  sample: (config: ConfigToml, name: string, schema: IndexSchema) =>
+    fetch("/api/sample", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ config, name, schema }),
+    }).then((r) => json<SampleResponse>(r)),
   diff: (config: ConfigToml, indexes: SaveSchemaInput[]) =>
     fetch("/api/diff", {
       method: "POST",

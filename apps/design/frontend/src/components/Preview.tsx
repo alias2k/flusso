@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { DiagnosticDto, DocumentNode, PreviewResponse } from "../api";
+import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
 import { typeClass } from "../theme";
 import { Icon } from "./Icon";
 
@@ -24,9 +24,11 @@ function Node({ node, depth }: { node: DocumentNode; depth: number }) {
 export function Preview({
   preview,
   diagnostics,
+  onSample,
 }: {
   preview: PreviewResponse | null;
   diagnostics: DiagnosticDto[] | null;
+  onSample?: () => Promise<SampleResponse>;
 }) {
   const [copied, setCopied] = useState(false);
   if (!preview) return <div className="preview empty">Select or edit an index to preview it.</div>;
@@ -65,6 +67,7 @@ export function Preview({
           <Node key={i} node={n} depth={0} />
         ))}
       </div>
+      {onSample && preview.parse_ok && <SampleDoc onSample={onSample} />}
       <h3 className="yaml-head">
         schema.yml
         <button className="link copy" onClick={copy} title="Copy YAML">
@@ -76,6 +79,40 @@ export function Preview({
         <summary>OpenSearch mapping</summary>
         <pre className="yaml">{JSON.stringify(preview.preview.mapping, null, 2)}</pre>
       </details>
+    </div>
+  );
+}
+
+/// Fetches a real document built from one live row — exactly what the sink would
+/// write — on demand, so you can sanity-check the schema against actual data.
+function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
+  const [result, setResult] = useState<SampleResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSample = () => {
+    setLoading(true);
+    setError(null);
+    onSample()
+      .then(setResult)
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  };
+
+  return (
+    <div className="sample-doc">
+      <h3 className="yaml-head">
+        Sample from DB
+        <button className="link" onClick={fetchSample} disabled={loading}>
+          <Icon name="play" size={13} /> {loading ? "building…" : result ? "refresh" : "fetch"}
+        </button>
+      </h3>
+      {error && <div className="banner error">{error}</div>}
+      {result && !result.db_reachable && <div className="banner error">{result.error}</div>}
+      {result?.note && <p className="hint">{result.note}</p>}
+      {result?.document !== undefined && result.document !== null && (
+        <pre className="yaml">{JSON.stringify(result.document, null, 2)}</pre>
+      )}
     </div>
   );
 }

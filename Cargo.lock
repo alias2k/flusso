@@ -1076,6 +1076,7 @@ dependencies = [
  "flusso-schema-config-toml",
  "flusso-schema-core",
  "flusso-schema-index-yaml",
+ "flusso-sinks-core",
  "flusso-sources-core",
  "flusso-sources-postgres",
  "mime_guess",
