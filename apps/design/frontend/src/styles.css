@@ -229,8 +229,12 @@ h3 {
   font-size: 11px;
   color: var(--muted);
 }
+/* `input:not([type])` covers type-less text inputs (filter boxes, the manual
+   column entry) so they get the theme too — checkboxes/radios always carry an
+   explicit type, so they're excluded. */
 input[type="text"],
 input[type="number"],
+input:not([type]),
 select {
   background: var(--panel-2);
   color: var(--text);
