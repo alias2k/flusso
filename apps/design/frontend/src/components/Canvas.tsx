@@ -142,7 +142,7 @@ export function Canvas() {
     >
       <Background />
       <Controls />
-      {showMap && <MiniMap pannable zoomable style={{ marginBottom: 40 }} />}
+      {showMap && <MiniMap pannable zoomable style={{ marginBottom: "2.5rem" }} />}
       <RestoreViewport index={indexName} />
       <Panel position="top-left">
         <NodeSearch />

@@ -474,7 +474,7 @@ export default function App() {
 
       <div
         className="layout"
-        style={{ gridTemplateColumns: `${leftOpen ? "210px" : "0"} 1fr ${inspectorOpen ? "360px" : "0"}` }}
+        style={{ gridTemplateColumns: `${leftOpen ? "13.125rem" : "0"} 1fr ${inspectorOpen ? "22.5rem" : "0"}` }}
       >
         {leftOpen && (
           <nav className="sidebar">
