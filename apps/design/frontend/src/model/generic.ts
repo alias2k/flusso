@@ -21,7 +21,9 @@ export function toGeneric(v: unknown): Generic {
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) m[k] = toGeneric(val);
     return { Map: m };
   }
-  return { String: String(v) };
+  // Exotic leftovers (bigint/symbol/function) — primitives/objects handled above.
+  if (typeof v === "bigint") return { String: v.toString() };
+  return { String: JSON.stringify(v) ?? "" };
 }
 
 /// Tagged `GenericValue` → plain JS value (the inverse of [`toGeneric`], lossy

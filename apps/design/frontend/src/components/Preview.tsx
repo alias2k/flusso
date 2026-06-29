@@ -40,7 +40,9 @@ export function Preview({
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       },
-      () => {},
+      () => {
+        /* ignore clipboard rejection */
+      },
     );
   };
   return (

@@ -152,7 +152,7 @@ export default function App() {
   // checks (e.g. required-over-nullable needs a default) — same channel, so
   // both highlight the fields and list in the preview.
   const allDiagnostics = useMemo(() => {
-    const live = (schema ? requiredDefaultIssues(schema, catalog, active) : []) as DiagnosticDto[];
+    const live = (schema ? requiredDefaultIssues(schema, catalog, active) : []);
     return [...(diagnostics ?? []), ...live];
   }, [schema, catalog, active, diagnostics]);
 
@@ -379,7 +379,9 @@ export default function App() {
   // so the listener subscribes once but always sees the latest state; undo/
   // delete are suppressed while typing so native text editing keeps working.
   // Declared here, after the handlers it calls (save/undo/apply/…).
-  const keyHandler = useRef<(e: KeyboardEvent) => void>(() => {});
+  const keyHandler = useRef<(e: KeyboardEvent) => void>(() => {
+    /* replaced by handleKey in an effect below */
+  });
   const handleKey = (e: KeyboardEvent) => {
     const el = document.activeElement as HTMLElement | null;
     const editing = !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
@@ -448,7 +450,7 @@ export default function App() {
               "db-chip rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
               catalog && !catalog.error ? "ok border-primary text-primary" : "off border-warn text-warn",
             )}
-            onClick={refreshCatalog}
+            onClick={() => void refreshCatalog()}
           >
             {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
           </button>
@@ -488,11 +490,11 @@ export default function App() {
         <Button variant="secondary" size="sm" onClick={() => setDrawer((d) => !d)}>
           {drawer ? t("topbar.hide") : t("topbar.yaml")}
         </Button>
-        <Button variant="secondary" size="sm" onClick={validate} disabled={validating}>
+        <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
           {validating && <span className="spinner" />}
           {t("topbar.validate")}
         </Button>
-        <Button size="sm" onClick={save} disabled={saving} title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
+        <Button size="sm" onClick={() => void save()} disabled={saving} title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
           {saving ? <span className="spinner" /> : dirty && <span className="dirty-dot" />}
           {t("topbar.save")}
         </Button>
@@ -542,7 +544,7 @@ export default function App() {
             </div>
             <Textarea className="raw-editor m-2.5 min-h-0 flex-1 resize-none font-mono text-xs leading-relaxed" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
             <div className="raw-actions flex gap-2 px-2.5 pb-2.5">
-              <Button size="sm" onClick={saveRaw} disabled={saving}>
+              <Button size="sm" onClick={() => void saveRaw()} disabled={saving}>
                 {t("raw.save")}
               </Button>
               <Button variant="secondary" size="sm" onClick={() => setRawMode(false)}>
@@ -600,11 +602,11 @@ export default function App() {
         ) : null}
       </div>
 
-      {diffs && <DiffModal diffs={diffs} saving={saving} onConfirm={performSave} onCancel={() => setDiffs(null)} />}
+      {diffs && <DiffModal diffs={diffs} saving={saving} onConfirm={() => void performSave()} onCancel={() => setDiffs(null)} />}
       {browseCatalog && catalog && <CatalogBrowser catalog={catalog} onClose={() => setBrowseCatalog(false)} />}
 
       {toast && (
-        <div className={`toast ${toast.kind}`} role="status" onClick={() => setToast(null)}>
+        <div className={`toast ${toast.kind}`} role="status">
           {toast.text}
         </div>
       )}

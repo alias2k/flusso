@@ -42,7 +42,7 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                           {c.name}
                           {c.nullable ? <span className="muted">?</span> : null}
                         </span>
-                        <span className={`col-type ${c.suggested_type ? typeClass(String(c.suggested_type)) : "t-other"}`}>
+                        <span className={`col-type ${typeClass(typeof c.suggested_type === "string" ? c.suggested_type : "other")}`}>
                           {c.sql_type}
                         </span>
                       </div>

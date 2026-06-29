@@ -38,7 +38,7 @@ export function ConfigPanel({
       </Field>
       <ConnectionEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
       <Check
-        value={(config.source as Record<string, unknown>)?.manage_publication !== false}
+        value={(config.source)?.manage_publication !== false}
         label="manage_publication"
         onChange={(v) => onChange({ ...config, source: { ...config.source, manage_publication: v } })}
       />
@@ -52,14 +52,14 @@ export function ConfigPanel({
       <div className="row">
         <Field label="public_address">
           <Text
-            value={((config.server as Record<string, unknown>)?.public_address as string) ?? ""}
+            value={((config.server)?.public_address as string) ?? ""}
             onChange={(v) => onChange({ ...config, server: { ...config.server, public_address: v || undefined } })}
             placeholder="127.0.0.1:9464"
           />
         </Field>
         <Field label="private_address">
           <Text
-            value={((config.server as Record<string, unknown>)?.private_address as string) ?? ""}
+            value={((config.server)?.private_address as string) ?? ""}
             onChange={(v) => onChange({ ...config, server: { ...config.server, private_address: v || undefined } })}
             placeholder="127.0.0.1:9465"
           />
@@ -118,7 +118,7 @@ export function ConfigPanel({
 /// (`{ env = "VAR" }`), or host/port/user/password/database parts.
 function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: Source) => void }) {
   const { t } = useT();
-  const cu = source.connection_url as unknown;
+  const cu = source.connection_url;
   const isObj = !!cu && typeof cu === "object";
   const obj = (cu ?? {}) as Record<string, unknown>;
   const mode: "url" | "env" | "parts" =
@@ -156,7 +156,7 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
             </Field>
             <Field label={t("config.port")}>
               <Num
-                value={typeof obj.port === "number" ? (obj.port as number) : undefined}
+                value={typeof obj.port === "number" ? (obj.port) : undefined}
                 onChange={(v) => setCu({ ...obj, port: v })}
               />
             </Field>
@@ -166,7 +166,7 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
           </Field>
           <Field label={t("config.password")}>
             <Text
-              value={typeof obj.password === "string" ? (obj.password as string) : ""}
+              value={typeof obj.password === "string" ? (obj.password) : ""}
               onChange={(v) => setCu({ ...obj, password: v || undefined })}
             />
           </Field>
@@ -195,8 +195,8 @@ function SinkEditor({
   const { t } = useT();
   const type = (sink.type as string) ?? "opensearch";
   const set = (key: string, value: unknown) => onChange({ ...sink, [key]: value });
-  const str = (key: string) => (typeof sink[key] === "string" ? (sink[key] as string) : "");
-  const num = (key: string) => (typeof sink[key] === "number" ? (sink[key] as number) : undefined);
+  const str = (key: string) => (typeof sink[key] === "string" ? (sink[key]) : "");
+  const num = (key: string) => (typeof sink[key] === "number" ? (sink[key]) : undefined);
   const bool = (key: string) => sink[key] === true;
 
   return (

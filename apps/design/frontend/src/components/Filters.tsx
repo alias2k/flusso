@@ -47,7 +47,10 @@ function valueText(f: Filter): string {
   if ("value" in f) {
     const v = (f as { value: unknown }).value;
     if (Array.isArray(v)) return v.join(", ");
-    return v == null ? "" : String(v);
+    if (v == null) return "";
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "bigint" || typeof v === "boolean") return String(v);
+    return JSON.stringify(v) ?? "";
   }
   return "";
 }
@@ -110,7 +113,7 @@ export function Filters({
             {kind === "value_op" && "value" in f && (
               <>
                 <Text
-                  value={"column" in f ? (f.column as string) : ""}
+                  value={"column" in f ? (f.column) : ""}
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
                   placeholder={t("common.column")}
@@ -122,7 +125,7 @@ export function Filters({
                 />
                 <Text
                   value={valueText(f)}
-                  onChange={(text) => set(i, { ...f, value: coerceValue(f.op as string, text) })}
+                  onChange={(text) => set(i, { ...f, value: coerceValue(f.op, text) })}
                   placeholder={f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")}
                 />
               </>

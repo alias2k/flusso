@@ -206,7 +206,7 @@ function NodeSearch() {
   const jump = (n: Node) => {
     const w = n.measured?.width ?? 145;
     const h = n.measured?.height ?? 80;
-    setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: 1, duration: 300 });
+    void setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: 1, duration: 300 });
     const dn = (n.data as { node: DocNode }).node;
     select(dn.path.length ? { kind: "node", path: dn.path } : { kind: "root" });
     setQ("");

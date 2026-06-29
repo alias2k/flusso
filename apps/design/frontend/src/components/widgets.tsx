@@ -102,7 +102,7 @@ export function Text({
       <Input
         type="text"
         className={cn(invalid && "invalid", className)}
-        aria-invalid={invalid || undefined}
+        aria-invalid={invalid ? true : undefined}
         value={value}
         placeholder={placeholder}
         list={id}
@@ -132,8 +132,9 @@ export function GenericInput({
   invalid,
   emptyTo,
 }: {
-  value: Generic | undefined;
-  onChange: (v: Generic | undefined) => void;
+  // Generic is `unknown` (any JSON value, incl. undefined), so no `| undefined`.
+  value: Generic;
+  onChange: (v: Generic) => void;
   placeholder?: string;
   invalid?: boolean;
   emptyTo?: Generic;
@@ -153,7 +154,7 @@ export function GenericInput({
       /* keep typing until valid JSON */
     }
   };
-  return <Text value={text} onChange={handle} placeholder={placeholder} invalid={invalid || !parseable} />;
+  return <Text value={text} onChange={handle} placeholder={placeholder} invalid={!!invalid || !parseable} />;
 }
 
 export function Num({
