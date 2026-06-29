@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
+import { SectionTitle } from "./widgets";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Icon } from "./Icon";
@@ -56,7 +57,7 @@ export function Preview({
       )}
       {diagnostics && diagnostics.length > 0 && (
         <div className="mb-3">
-          <h3>{t("preview.dbCheck")}</h3>
+          <SectionTitle>{t("preview.dbCheck")}</SectionTitle>
           {diagnostics.map((d, i) => (
             <div key={i} className={cn("py-1 text-sm", d.severity === "error" ? "text-destructive" : d.severity === "warning" ? "text-warn" : "")}>
               <span className="font-mono text-muted-foreground">
@@ -67,19 +68,19 @@ export function Preview({
           ))}
         </div>
       )}
-      <h3>{t("preview.document")}</h3>
+      <SectionTitle>{t("preview.document")}</SectionTitle>
       <div className="rounded-md border border-border bg-secondary p-2">
         {preview.preview.document.map((n, i) => (
           <Node key={i} node={n} depth={0} />
         ))}
       </div>
       {onSample && preview.parse_ok && <SampleDoc onSample={onSample} />}
-      <h3 className="flex items-center justify-between">
+      <SectionTitle className="flex items-center justify-between">
         {t("preview.schemaYml")}
         <Button variant="link" size="sm" className="ml-auto gap-1" onClick={copy} title={t("preview.copyYaml")}>
           <Icon name="copy" size={13} /> {copied ? t("preview.copied") : t("preview.copy")}
         </Button>
-      </h3>
+      </SectionTitle>
       <pre className="yaml">{preview.yaml}</pre>
       <details className="mapping-details">
         <summary>{t("preview.osMapping")}</summary>
@@ -108,13 +109,13 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
 
   return (
     <div className="sample-doc mt-2">
-      <h3 className="flex items-center gap-2">
+      <SectionTitle className="flex items-center gap-2">
         {t("preview.sampleFromDb")}
         {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
         <Button variant="link" size="sm" className="gap-1" onClick={fetchSample} disabled={loading}>
           <Icon name="play" size={13} /> {loading ? t("preview.building") : result ? t("preview.refresh") : t("preview.fetch")}
         </Button>
-      </h3>
+      </SectionTitle>
       {error && <div className="banner error">{error}</div>}
       {result && !result.db_reachable && <div className="banner error">{result.error}</div>}
       {result?.note && <p className="hint">{result.note}</p>}

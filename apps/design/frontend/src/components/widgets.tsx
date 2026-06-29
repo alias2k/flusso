@@ -10,6 +10,18 @@ import { cn } from "@/lib/utils";
 let uid = 0;
 const nextId = () => `w${uid++}`;
 
+/// A panel title (the top heading of a settings panel). Renders an `<h2>`.
+export function PanelTitle({ children, className }: { children: ReactNode; className?: string }) {
+  return <h2 className={cn("mb-3 text-lg", className)}>{children}</h2>;
+}
+
+/// A muted section sub-heading inside a panel. Renders an `<h3>`; pass
+/// `className` to tweak spacing/layout (e.g. `mt-0` when it leads a block, or
+/// flex utilities when it carries an inline action).
+export function SectionTitle({ children, className }: { children: ReactNode; className?: string }) {
+  return <h3 className={cn("mt-4 mb-2 text-sm text-muted-foreground", className)}>{children}</h3>;
+}
+
 // A div, not a <label>: it wraps Radix controls (Select is a button) where a
 // wrapping label's click-to-focus would fight the control's own behaviour.
 export function Field({ label, children }: { label: string; children: ReactNode }) {

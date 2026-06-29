@@ -139,10 +139,6 @@
 .t-geo { color: var(--t-geo); }
 .t-other { color: var(--t-other); }
 
-* {
-  box-sizing: border-box;
-}
-
 body {
   margin: 0;
   background: var(--bg);
@@ -169,16 +165,7 @@ body {
   color: var(--muted);
 }
 
-h2 {
-  margin: 0 0 0.75rem;
-  font-size: 1.125rem;
-}
-h3 {
-  margin: 1rem 0 0.5rem;
-  font-size: 0.875rem;
-  color: var(--muted);
-}
-
+/* headings are <PanelTitle>/<SectionTitle> molecules now (widgets.tsx). */
 /* .row is Tailwind now (flex flex-wrap gap-3 inline). */
 
 .field {
@@ -392,7 +379,6 @@ pre.yaml {
 /* the preview bottom sheet is now the shadcn Drawer (vaul); the old absolute
    .drawer is gone. */
 
-.inspector h3 { margin-top: 0; }
 .inspector.empty { color: var(--muted); }
 
 

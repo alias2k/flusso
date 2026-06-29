@@ -1,7 +1,7 @@
 import type { ConfigToml, IndexEntry } from "../api";
 import { useT } from "../i18n";
 import { Button } from "@/components/ui/button";
-import { Check, Field, Num, Select, Text } from "./widgets";
+import { Check, Field, Num, PanelTitle, SectionTitle, Select, Text } from "./widgets";
 
 type Sink = Record<string, unknown>;
 type Source = Record<string, unknown>;
@@ -33,7 +33,7 @@ export function ConfigPanel({
 
   return (
     <div className="config-panel max-w-3xl">
-      <h2>{t("sidebar.deployment")}</h2>
+      <PanelTitle>{t("sidebar.deployment")}</PanelTitle>
       <Field label={t("config.indexPrefix")}>
         <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder={t("config.none")} />
       </Field>
@@ -67,7 +67,7 @@ export function ConfigPanel({
         </Field>
       </div>
 
-      <h3>{t("config.sinks")}</h3>
+      <SectionTitle>{t("config.sinks")}</SectionTitle>
       {Object.entries(sinks).map(([name, sink]) => (
         <SinkEditor key={name} name={name} sink={sink} onChange={(s) => setSink(name, s)} onRemove={() => removeSink(name)} />
       ))}
@@ -79,7 +79,7 @@ export function ConfigPanel({
         + {t("config.sink")}
       </Button>
 
-      <h3>{t("sidebar.indexes")}</h3>
+      <SectionTitle>{t("sidebar.indexes")}</SectionTitle>
       {index.map((e, i) => (
         <div className="index-entry my-1 flex items-center gap-1.5" key={i}>
           <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder={t("config.name")} />

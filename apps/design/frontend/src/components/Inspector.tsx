@@ -51,7 +51,7 @@ function Breadcrumb() {
 }
 import { Button } from "@/components/ui/button";
 import { Filters } from "./Filters";
-import { Block, Bridge, Check, Drawer, Field as Row, GenericInput, Num, Select, Text } from "./widgets";
+import { Block, Bridge, Check, Drawer, Field as Row, GenericInput, Num, SectionTitle, Select, Text } from "./widgets";
 
 /// snake_case / "spaced" → camelCase, the usual document-field convention.
 const camel = (s: string) => s.replace(/[_\s]+(.)/g, (_m, c: string) => c.toUpperCase()).replace(/^(.)/, (_m, c: string) => c.toLowerCase());
@@ -112,7 +112,7 @@ function RootInspector() {
   const cols = catalog?.catalog.tables.find((tbl) => tbl.name === schema.table)?.columns.map((c) => c.name) ?? [];
   return (
     <div className="inspector">
-      <h3>{t("inspector.indexRoot")}</h3>
+      <SectionTitle className="mt-0">{t("inspector.indexRoot")}</SectionTitle>
       <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("inspector.rootTable")}>
           <Text value={schema.table} list={tables} onChange={(table) => apply((s) => edit.setRootMeta(s, { table }))} />
@@ -150,7 +150,7 @@ function NodeInspector({ path }: { path: number[] }) {
   if ("group" in field.source) {
     return (
       <div className="inspector">
-        <h3>{t("inspector.objectGroup")}</h3>
+        <SectionTitle className="mt-0">{t("inspector.objectGroup")}</SectionTitle>
         <div className="mb-3 flex gap-3.5">
           <Button variant="link" size="sm" onClick={duplicate}>{t("inspector.duplicate")}</Button>
           <Button variant="link" size="sm" className="text-destructive" onClick={remove}>
@@ -185,7 +185,7 @@ function NodeInspector({ path }: { path: number[] }) {
 
   return (
     <div className="inspector">
-      <h3>{t("inspector.join")} · {verb}</h3>
+      <SectionTitle className="mt-0">{t("inspector.join")} · {verb}</SectionTitle>
       {KIND_HELP[verb] && <p className="kind-help">{t(KIND_HELP[verb])}</p>}
       <div className="mb-3 flex gap-3.5">
         <Button variant="link" size="sm" onClick={duplicate}>{t("inspector.duplicate")}</Button>
@@ -275,7 +275,7 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const helpKind = fieldHelpKind(s);
   return (
     <div className="inspector">
-      <h3>{t("inspector.field")} · {field.field}</h3>
+      <SectionTitle className="mt-0">{t("inspector.field")} · {field.field}</SectionTitle>
       {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
       <div className="mb-3 flex gap-3.5">
         <Button variant="link" size="sm" onClick={duplicate}>{t("inspector.duplicate")}</Button>
