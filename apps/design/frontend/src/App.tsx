@@ -19,6 +19,7 @@ import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Hint } from "./components/Hint";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -562,8 +563,15 @@ export default function App() {
           >
             <main className="canvas-wrap">
               <Canvas />
-              {drawer && (
-                <div className="drawer">
+            </main>
+            {/* The preview is a non-modal bottom drawer (modal=false + no overlay),
+                so the topbar toggle and the canvas stay interactive while it's open. */}
+            <Drawer open={drawer} onOpenChange={setDrawer} direction="bottom" modal={false}>
+              <DrawerContent overlay={false} className="h-[55vh]">
+                <DrawerHeader className="sr-only">
+                  <DrawerTitle>{t("topbar.yaml")}</DrawerTitle>
+                </DrawerHeader>
+                <div className="min-h-0 flex-1 overflow-y-auto p-4">
                   <Preview
                     preview={preview}
                     diagnostics={allDiagnostics.filter((d) => d.index === active)}
@@ -574,8 +582,8 @@ export default function App() {
                     }
                   />
                 </div>
-              )}
-            </main>
+              </DrawerContent>
+            </Drawer>
             {inspectorOpen && (
               <aside className="inspector-pane">
                 <Button variant="ghost" size="icon-sm" className="collapse absolute right-2 top-2" aria-label="Close" onClick={() => setSelection(null)}>

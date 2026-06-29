@@ -614,18 +614,8 @@ pre.yaml {
 }
 .col-row .x { position: static; margin-left: auto; }
 
-.drawer {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  max-height: 45%;
-  overflow-y: auto;
-  background: var(--panel);
-  border-top: 0.0625rem solid var(--border);
-  padding: 0.75rem;
-  box-shadow: 0 -0.25rem 1rem rgba(0, 0, 0, 0.3);
-}
+/* the preview bottom sheet is now the shadcn Drawer (vaul); the old absolute
+   .drawer is gone. */
 
 .inspector h3 { margin-top: 0; }
 .inspector.empty { color: var(--muted); }
