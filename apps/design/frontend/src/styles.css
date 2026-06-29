@@ -547,25 +547,26 @@ pre.yaml {
 }
 .nav.new { color: var(--accent); border: 1px dashed var(--border); margin-top: 6px; }
 
-/* React Flow uses light defaults; nudge them toward the dark theme. */
-.react-flow__edge-text { fill: var(--muted); font-size: 10px; }
-.react-flow__minimap { background: var(--panel) !important; }
-
-/* Theme the zoom/fit/lock controls via xyflow's own CSS variables — overriding
-   only `color`/`background` leaves their SVG icons at the light-theme fill, so
-   icons vanish against the dark buttons. */
+/* Theme React Flow's own chrome through its `--xy-*` variables rather than
+   overriding each `.react-flow__*` element — controls, minimap, background dots,
+   edge labels, connection line. The values track our palette vars, so they
+   follow the light/dark toggle for free. Bound to our `--xy-*` overrides win
+   over RF's light-mode defaults, so no `colorMode` plumbing is needed. */
 .react-flow {
   --xy-controls-button-background-color: var(--panel-2);
   --xy-controls-button-background-color-hover: var(--border);
   --xy-controls-button-color: var(--text);
   --xy-controls-button-color-hover: var(--accent);
   --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+  --xy-minimap-background-color: var(--panel);
+  --xy-background-pattern-color: var(--border);
+  --xy-edge-label-color: var(--text);
+  --xy-edge-label-background-color: var(--panel-2);
+  --xy-connectionline-stroke: var(--accent);
+  --xy-edge-stroke-selected: var(--accent);
+  --xy-attribution-background-color: var(--panel);
 }
-/* Belt-and-braces: force the icon fill in case a build predates those vars. */
-.react-flow__controls-button { background: var(--panel-2); border-bottom: 1px solid var(--border); }
-.react-flow__controls-button svg { fill: var(--text); }
-.react-flow__controls-button:hover { background: var(--border); }
-.react-flow__controls-button:hover svg { fill: var(--accent); }
 
 /* ── collapsible sidebars ───────────────────────────────────────────────── */
 button.icon {
@@ -653,10 +654,6 @@ button.icon:hover {
   background: var(--kc, var(--accent));
   border: 2px solid var(--panel);
 }
-
-/* edge label as a subtle pill on the panel colour */
-.react-flow__edge-text { fill: var(--text); font-weight: 600; }
-.react-flow__edge-textbg { fill: var(--panel-2); }
 
 /* unsaved-changes dot + disabled buttons (undo/redo) */
 .dirty-dot {
@@ -947,10 +944,6 @@ button:disabled:hover {
 }
 :root[data-theme="light"] .flow-node {
   box-shadow: inset 3px 0 0 var(--kc), 0 4px 14px rgba(20, 30, 50, 0.1);
-}
-:root[data-theme="light"] body,
-:root[data-theme="light"] .react-flow__minimap {
-  /* nudge the dotted background so it reads on light */
 }
 
 .yaml-head {
