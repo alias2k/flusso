@@ -31,7 +31,7 @@ import { requiredDefaultIssues } from "./model/issues";
 import { DesignProvider, type Selection } from "./state";
 
 // sidebar nav item classes (kept .nav/.active as hooks for e2e).
-const NAV = "nav mb-0.5 block w-full rounded-md border-0 bg-transparent px-2.5 py-2 text-left hover:bg-secondary";
+const NAV = "nav mb-0.5 block w-full cursor-pointer rounded-md border-0 bg-transparent px-2.5 py-2 text-left hover:bg-secondary";
 const NAV_ACTIVE = "active bg-secondary text-primary";
 const NAV_HEADING = "mx-1 mb-1 mt-3 text-2xs uppercase text-muted-foreground";
 
@@ -447,7 +447,7 @@ export default function App() {
         <Hint label={t("topbar.retestDb")}>
           <button
             className={cn(
-              "db-chip rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
+              "db-chip cursor-pointer rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
               catalog && !catalog.error ? "ok border-primary text-primary" : "off border-warn text-warn",
             )}
             onClick={() => void refreshCatalog()}

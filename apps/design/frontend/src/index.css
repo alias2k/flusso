@@ -152,21 +152,10 @@ body {
 
 /* .app / topbar / brand / path / spacer are Tailwind now (App.tsx). */
 
-/* Legacy chrome for raw <button>s only (canvas/nav). shadcn atoms all carry a
-   `data-slot`, so excluding them keeps this padding/border off the Radix
-   button-based controls — e.g. Checkbox, whose box-sizing:border-box would
-   otherwise be floored at padding+border (22×14px) instead of its `size-*`. */
-button:not([data-slot]) {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 0.0625rem solid var(--border);
-  border-radius: 0.375rem;
-  padding: 0.375rem 0.625rem;
-  cursor: pointer;
-}
-button:not([data-slot]):hover {
-  border-color: var(--accent);
-}
+/* No global <button> chrome: Tailwind's preflight already resets buttons, and
+   every styled button is either a shadcn atom (brings its own look) or a raw
+   button with explicit utilities/canvas classes. Buttons that want a pointer
+   cursor (which v4 preflight drops) declare `cursor: pointer` themselves. */
 /* banners are Tailwind now (App.tsx). */
 
 /* The 3-pane layout grid is Tailwind now (App.tsx): a `grid` whose track widths
@@ -385,6 +374,7 @@ pre.yaml {
   color: var(--accent);
   padding: 0.1875rem 0.375rem;
   font-size: 0.6875rem;
+  cursor: pointer;
 }
 /* .add-menus / .add-menu are Tailwind now (the add menus are the Select widget). */
 .flow-node .x {
@@ -395,6 +385,7 @@ pre.yaml {
   border: none;
   color: var(--error);
   padding: 0 0.25rem;
+  cursor: pointer;
 }
 .col-row .x { position: static; margin-left: auto; }
 
@@ -433,6 +424,7 @@ button.icon {
   font-size: 1rem;
   padding: 0.125rem 0.5rem;
   color: var(--muted);
+  cursor: pointer;
 }
 button.icon:hover {
   color: var(--text);
@@ -459,6 +451,7 @@ button.icon:hover {
   font-size: 0.875rem;
   padding: 0.1875rem 0.4375rem;
   opacity: 0.65;
+  cursor: pointer;
 }
 .react-flow__panel .panel-btn:hover {
   opacity: 1;
@@ -510,7 +503,7 @@ button.icon:hover {
   border: 0.125rem solid var(--panel);
 }
 
-/* unsaved-changes dot + disabled buttons (undo/redo) */
+/* unsaved-changes dot (shown beside a dirty index in the nav) */
 .dirty-dot {
   display: inline-block;
   width: 0.4375rem;
@@ -519,13 +512,6 @@ button.icon:hover {
   background: var(--warn);
   margin-right: 0.375rem;
   vertical-align: middle;
-}
-button:not([data-slot]):disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-button:not([data-slot]):disabled:hover {
-  border-color: var(--border);
 }
 
 /* ── feedback (group B) ─────────────────────────────────────────────────── */
@@ -582,6 +568,7 @@ button:not([data-slot]):disabled:hover {
   padding: 0 0.25rem 0 0;
   color: var(--muted);
   transition: transform 0.12s ease;
+  cursor: pointer;
 }
 .flow-node header .chevron.collapsed {
   transform: rotate(-90deg);

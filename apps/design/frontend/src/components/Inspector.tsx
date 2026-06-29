@@ -382,7 +382,7 @@ function ScalarBody({
         {showSuggestion && (
           <p className="nudge mt-1.5 text-2xs text-muted-foreground">
             <span className="font-mono text-string">{suggested}</span> {t("inspector.suggested")} ·{" "}
-            <button type="button" className="cursor-pointer text-primary" onClick={() => setCol({ ...column, ty: suggested })}>
+            <button type="button" className="cursor-pointer text-primary hover:underline" onClick={() => setCol({ ...column, ty: suggested })}>
               {t("inspector.use")}
             </button>
           </p>
