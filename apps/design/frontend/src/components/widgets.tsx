@@ -142,7 +142,6 @@ export function GenericInput({
   const [text, setText] = useState(external);
   // Resync from the model only when the model itself changes (undo, switching
   // fields) — not on every keystroke, so partial JSON survives typing.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => setText(external), [external]);
   const parseable = text.trim() === "" || (() => { try { JSON.parse(text); return true; } catch { return false; } })();
   const handle = (s: string) => {

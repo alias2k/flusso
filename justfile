@@ -110,6 +110,11 @@ design-dev: up
     trap 'kill $backend 2>/dev/null || true' EXIT
     cd apps/design/frontend && npm install && npm run dev
 
+# Lint the designer frontend (ESLint: TypeScript + react-hooks + react-refresh).
+# `just design-lint fix` auto-fixes what it can.
+design-lint fix="":
+    cd apps/design/frontend && npm run {{ if fix == "fix" { "lint:fix" } else { "lint" } }}
+
 # Check the designer's translations are complete (every UI string has a key in
 # every locale catalog). Run after adding/changing any designer UI string.
 design-i18n:

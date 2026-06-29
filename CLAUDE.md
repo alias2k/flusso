@@ -76,7 +76,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
 - **The designer (`apps/design`) has three test layers.** (1) A property/"fuzz" round-trip
   (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
   `codegen → parse → convert` identity — an ordinary test, caught by the nextest step. (2) A
-  `designer-frontend` CI job: `npm ci`, an **i18n completeness check** (`npm run check:i18n` →
+  `designer-frontend` CI job: `npm ci`, **ESLint** (`npm run lint`, flat config — TS + react-hooks +
+  react-refresh; CI runs it `--max-warnings 0`; `just design-lint [fix]`), an **i18n completeness
+  check** (`npm run check:i18n` →
   `apps/design/frontend/scripts/check-i18n.mjs`: every `t("…")` key the UI uses exists in the
   `en` base catalog and every locale defines the same key set — so a feature can't ship UI without
   its translations), then `npm run build` + a `git diff` guard that the committed

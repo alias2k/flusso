@@ -184,7 +184,8 @@ export default function App() {
     if (mod && e.key.toLowerCase() === "z") {
       if (editing) return;
       e.preventDefault();
-      e.shiftKey ? redo() : undo();
+      if (e.shiftKey) redo();
+      else undo();
       return;
     }
     if (e.key === "Escape") {
@@ -269,7 +270,8 @@ export default function App() {
   const toggleCollapsed = (id: string) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       try {
         localStorage.setItem(collapseKey(active), JSON.stringify([...next]));
       } catch {

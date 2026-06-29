@@ -140,6 +140,10 @@ jobs:
         working-directory: apps/design/frontend
         run: npm ci
 
+      - name: Lint
+        working-directory: apps/design/frontend
+        run: npm run lint -- --max-warnings 0
+
       # Every `t("…")` string the UI uses must have a key in the English base
       # catalog, and every locale must define the same key set — so a new feature
       # can't ship UI without its translations. See scripts/check-i18n.mjs.

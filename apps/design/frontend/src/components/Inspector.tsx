@@ -359,7 +359,8 @@ function ScalarBody({
   const has = (tr: "lowercase" | "trim") => (column.transforms ?? []).includes(tr);
   const toggle = (tr: "lowercase" | "trim", on: boolean) => {
     const next = new Set(column.transforms ?? []);
-    on ? next.add(tr) : next.delete(tr);
+    if (on) next.add(tr);
+    else next.delete(tr);
     setCol({ ...column, transforms: next.size ? [...next] : undefined });
   };
   // A soft nudge, not a rule: the SQL type only *suggests* a flusso type
