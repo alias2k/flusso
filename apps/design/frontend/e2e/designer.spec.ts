@@ -282,8 +282,8 @@ test("toggles the light/dark theme", async ({ page }) => {
 });
 
 test("canvas controls carry hover descriptions", async ({ page }) => {
-  await expect(page.locator('.panel-btn[data-tip="Reset layout"]')).toBeVisible();
-  await expect(page.locator('.panel-btn[data-tip="Show minimap"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reset layout" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show minimap" })).toBeVisible();
 });
 
 test("toggles the minimap", async ({ page }) => {

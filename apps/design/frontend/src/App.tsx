@@ -19,6 +19,7 @@ import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Hint } from "./components/Hint";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
 import { LANGS, useT } from "./i18n";
@@ -410,16 +411,16 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="tip-below"
-          data-tip={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
-          aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
-          onClick={() => setLeftOpen((o) => !o)}
-        >
-          <Icon name="menu" />
-        </Button>
+        <Hint label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
+            onClick={() => setLeftOpen((o) => !o)}
+          >
+            <Icon name="menu" />
+          </Button>
+        </Hint>
         <span className="brand">
           <span className="brand-mark">
             <Icon name="flow" size={18} />
@@ -427,13 +428,11 @@ export default function App() {
           flusso
         </span>
         <span className="path">{project.config_path}</span>
-        <button
-          className={`db-chip tip-below ${catalog && !catalog.error ? "ok" : "off"}`}
-          data-tip={t("topbar.retestDb")}
-          onClick={refreshCatalog}
-        >
-          {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
-        </button>
+        <Hint label={t("topbar.retestDb")}>
+          <button className={`db-chip ${catalog && !catalog.error ? "ok" : "off"}`} onClick={refreshCatalog}>
+            {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
+          </button>
+        </Hint>
         <span className="spacer" />
         <Button variant="secondary" size="sm" onClick={() => setBrowseCatalog(true)} title={t("topbar.browseDb")}>
           {t("topbar.tables")}
@@ -443,22 +442,26 @@ export default function App() {
             {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
           </Button>
         )}
-        <Button variant="ghost" size="icon-sm" className="tip-below" data-tip={t("topbar.undo")} aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
-          <Icon name="undo" />
-        </Button>
-        <Button variant="ghost" size="icon-sm" className="tip-below" data-tip={t("topbar.redo")} aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
-          <Icon name="redo" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="tip-below"
-          aria-label={t("topbar.toggleThemeAria")}
-          data-tip={t("topbar.toggleTheme")}
-          onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
-        >
-          <Icon name="theme" />
-        </Button>
+        <Hint label={t("topbar.undo")}>
+          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
+            <Icon name="undo" />
+          </Button>
+        </Hint>
+        <Hint label={t("topbar.redo")}>
+          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
+            <Icon name="redo" />
+          </Button>
+        </Hint>
+        <Hint label={t("topbar.toggleTheme")}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t("topbar.toggleThemeAria")}
+            onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
+          >
+            <Icon name="theme" />
+          </Button>
+        </Hint>
         <select className="lang-select" aria-label={t("topbar.language")} value={lang} onChange={(e) => setLang(e.target.value)}>
           {Object.entries(LANGS).map(([code, name]) => (
             <option key={code} value={code}>

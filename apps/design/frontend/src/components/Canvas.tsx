@@ -27,6 +27,7 @@ import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { edgeColor } from "../theme";
 import { DocNodeView } from "./DocNodeView";
+import { Hint } from "./Hint";
 import { Text } from "./widgets";
 import { Icon } from "./Icon";
 
@@ -148,22 +149,20 @@ export function Canvas() {
         <NodeSearch />
       </Panel>
       <Panel position="bottom-right">
-        <button
-          className="icon panel-btn"
-          data-tip={t("canvas.resetLayout")}
-          aria-label={t("canvas.resetLayout")}
-          onClick={resetLayout}
-        >
-          <Icon name="tidy" />
-        </button>
-        <button
-          className="icon panel-btn map-toggle"
-          data-tip={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
-          aria-label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
-          onClick={() => setShowMap((m) => !m)}
-        >
-          <Icon name="map" />
-        </button>
+        <Hint label={t("canvas.resetLayout")} side="left">
+          <button className="icon panel-btn" aria-label={t("canvas.resetLayout")} onClick={resetLayout}>
+            <Icon name="tidy" />
+          </button>
+        </Hint>
+        <Hint label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")} side="left">
+          <button
+            className="icon panel-btn map-toggle"
+            aria-label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
+            onClick={() => setShowMap((m) => !m)}
+          >
+            <Icon name="map" />
+          </button>
+        </Hint>
       </Panel>
     </ReactFlow>
   );
