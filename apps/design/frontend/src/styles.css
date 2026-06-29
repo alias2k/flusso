@@ -255,11 +255,32 @@ select:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 input[type="checkbox"] {
-  accent-color: var(--accent);
-  width: 14px;
-  height: 14px;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  border: 1.5px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
   cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
+input[type="checkbox"]:hover { border-color: var(--muted); }
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type="checkbox"]:checked::after {
+  content: "✓";
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  color: #04211a;
+}
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
 .check {
   display: inline-flex;
   align-items: center;
@@ -550,8 +571,9 @@ pre.yaml {
 .col-row {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 0;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 6px;
 }
 .col-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
 .col-row .col-name {
@@ -692,9 +714,16 @@ button.icon:hover {
 }
 
 /* node rows are now display-only: click to edit in the inspector */
-.col-row.on, .col-row.special { cursor: pointer; border-radius: 4px; }
+.col-row.on, .col-row.special { cursor: pointer; }
 .col-row.on:hover, .col-row.special:hover { background: var(--panel-2); }
-.col-row.sel { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+/* selection reads as elevation: a tinted pill lifted off the list with a ring
+   + drop shadow, inset from the node edge by the list padding. */
+.col-row.sel {
+  position: relative;
+  z-index: 1;
+  background: color-mix(in srgb, var(--accent) 13%, var(--panel-2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 4px 12px rgba(0, 0, 0, 0.4);
+}
 .col-from { color: var(--muted); font-size: 10px; margin-left: 4px; }
 
 /* minimap toggle (the minimap is hidden by default) */
