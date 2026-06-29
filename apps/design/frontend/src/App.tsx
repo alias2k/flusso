@@ -17,6 +17,7 @@ import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
 import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
+import { Button } from "@/components/ui/button";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
 import { LANGS, useT } from "./i18n";
@@ -408,14 +409,16 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <button
-          className="icon tip-below"
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="tip-below"
           data-tip={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
           aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
           onClick={() => setLeftOpen((o) => !o)}
         >
           <Icon name="menu" />
-        </button>
+        </Button>
         <span className="brand">
           <span className="brand-mark">
             <Icon name="flow" size={18} />
@@ -431,26 +434,30 @@ export default function App() {
           {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
         </button>
         <span className="spacer" />
-        <button onClick={() => setBrowseCatalog(true)} title={t("topbar.browseDb")}>
+        <Button variant="secondary" size="sm" onClick={() => setBrowseCatalog(true)} title={t("topbar.browseDb")}>
           {t("topbar.tables")}
-        </button>
+        </Button>
         {active !== "config" && (
-          <button onClick={() => (rawMode ? setRawMode(false) : openRaw())}>{rawMode ? t("topbar.visual") : t("topbar.rawYaml")}</button>
+          <Button variant="secondary" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
+            {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
+          </Button>
         )}
-        <button className="icon tip-below" data-tip={t("topbar.undo")} aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
+        <Button variant="ghost" size="icon-sm" className="tip-below" data-tip={t("topbar.undo")} aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
           <Icon name="undo" />
-        </button>
-        <button className="icon tip-below" data-tip={t("topbar.redo")} aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
+        </Button>
+        <Button variant="ghost" size="icon-sm" className="tip-below" data-tip={t("topbar.redo")} aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
           <Icon name="redo" />
-        </button>
-        <button
-          className="icon tip-below"
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="tip-below"
           aria-label={t("topbar.toggleThemeAria")}
           data-tip={t("topbar.toggleTheme")}
           onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
         >
           <Icon name="theme" />
-        </button>
+        </Button>
         <select className="lang-select" aria-label={t("topbar.language")} value={lang} onChange={(e) => setLang(e.target.value)}>
           {Object.entries(LANGS).map(([code, name]) => (
             <option key={code} value={code}>
@@ -458,15 +465,17 @@ export default function App() {
             </option>
           ))}
         </select>
-        <button onClick={() => setDrawer((d) => !d)}>{drawer ? t("topbar.hide") : t("topbar.yaml")}</button>
-        <button onClick={validate} disabled={validating}>
+        <Button variant="secondary" size="sm" onClick={() => setDrawer((d) => !d)}>
+          {drawer ? t("topbar.hide") : t("topbar.yaml")}
+        </Button>
+        <Button variant="secondary" size="sm" onClick={validate} disabled={validating}>
           {validating && <span className="spinner" />}
           {t("topbar.validate")}
-        </button>
-        <button className="primary" onClick={save} disabled={saving} title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
+        </Button>
+        <Button size="sm" onClick={save} disabled={saving} title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
           {saving ? <span className="spinner" /> : dirty && <span className="dirty-dot" />}
           {t("topbar.save")}
-        </button>
+        </Button>
       </header>
 
       {error && <div className="banner error">{error}</div>}
@@ -513,10 +522,12 @@ export default function App() {
             </div>
             <textarea className="raw-editor" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
             <div className="raw-actions">
-              <button className="primary" onClick={saveRaw} disabled={saving}>
+              <Button size="sm" onClick={saveRaw} disabled={saving}>
                 {t("raw.save")}
-              </button>
-              <button onClick={() => setRawMode(false)}>{t("common.cancel")}</button>
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setRawMode(false)}>
+                {t("common.cancel")}
+              </Button>
             </div>
           </main>
         ) : schema ? (
