@@ -12,6 +12,8 @@ flusso syncs OpenSearch from Postgres off declarative files. You write two kinds
 
 `schema::load("flusso.toml")` reads the config and every schema it references, validates both, and produces the index mapping with no database needed.
 
+**Don't want to hand-write the grammar?** `flusso design --config flusso.toml` opens a local, database-aware web UI that authors both file kinds — pick tables and columns from the live database, preview the resulting document and mapping, and save the files in place (canonical regeneration: it preserves meaning, not comments). It's the no-grammar path to a correct schema; this skill is still the reference for what the files mean and for reviewing/refining them by hand.
+
 ## First: get live validation, never guess the format
 
 Wire your editor to flusso's published schema. Add this line to the **top of every `*.schema.yml`**:

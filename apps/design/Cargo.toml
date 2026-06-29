@@ -1,0 +1,49 @@
+[package]
+name = "flusso-design"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "flusso visual schema designer: introspect Postgres, author *.schema.yml + flusso.toml, preview the document."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database", "development-tools"]
+readme.workspace = true
+# The published crate needs only the built `dist/` (embedded via rust-embed),
+# not the frontend toolchain/source that produces it.
+exclude = ["frontend"]
+
+[lib]
+name = "design"
+
+[lints]
+workspace = true
+
+[dependencies]
+schema.workspace = true
+schema-core.workspace = true
+schema-config-toml.workspace = true
+schema-index-yaml.workspace = true
+sources-core.workspace = true
+sources-postgres.workspace = true
+sinks-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
+rust-embed.workspace = true
+mime_guess.workspace = true
+open.workspace = true
+
+[dev-dependencies]
+schema-core.workspace = true
+schema-index-yaml.workspace = true
+serde_json.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }

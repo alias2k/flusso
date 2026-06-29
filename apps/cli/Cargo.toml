@@ -18,9 +18,18 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# The visual schema designer (`flusso design`) is on by default, but optional so
+# a server-only build can drop it: `cargo build -p flusso-cli --no-default-features`
+# compiles no designer, no embedded SPA, no browser-open — which is what the
+# Docker runtime image does (it only ever runs `flusso run`).
+default = ["design"]
+design = ["dep:design"]
+
 [dependencies]
 schema.workspace = true
 daemon.workspace = true
+design = { workspace = true, optional = true }
 sources-core.workspace = true
 sources-postgres.workspace = true
 sinks-core.workspace = true

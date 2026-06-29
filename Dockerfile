@@ -46,10 +46,12 @@ COPY --from=planner /usr/src/flusso/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Now the workspace itself. Its dependencies are already compiled in target/, so
-# this only builds flusso's own crates (default-members = apps/cli → the `flusso`
-# binary). Copy the binary out to a real path for the runtime stage.
+# this only builds the `flusso` binary. `--no-default-features` drops the visual
+# designer (`flusso design`): the server image only ever runs `flusso run`, so it
+# needs no embedded SPA, rust-embed, or browser-launcher. Copy the binary out to
+# a real path for the runtime stage.
 COPY . .
-RUN cargo build --release --locked \
+RUN cargo build --release --locked -p flusso-cli --no-default-features \
     && cp target/release/flusso /usr/local/bin/flusso
 
 # ---- runtime (the published image) ----

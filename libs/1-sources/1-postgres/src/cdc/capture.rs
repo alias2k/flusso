@@ -85,9 +85,9 @@ impl WalChangeCapture {
     }
 
     /// The shared admin pool, opened on first call and reused thereafter. Kept
-    /// deliberately small — it serves only the slot check and lag probes, not
-    /// the change or snapshot paths.
-    async fn admin_pool(&self) -> Result<&PgPool> {
+    /// deliberately small — it serves only the slot check, lag probes, and
+    /// catalog introspection, not the change or snapshot paths.
+    pub(super) async fn admin_pool(&self) -> Result<&PgPool> {
         self.admin_pool
             .get_or_try_init(|| async {
                 sqlx::postgres::PgPoolOptions::new()

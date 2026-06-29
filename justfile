@@ -33,10 +33,27 @@ up:
 down:
     docker compose down
 
-# Wipe volumes and bring the stack back up fresh (re-seeds Postgres + OpenSearch).
-reset:
-    docker compose down -v
-    docker compose up -d --wait
+# `just reset db` recreates only the database (re-seeds Postgres); leaves the
+# rest running. Volume names are explicit/compose-scoped — no cross-project grep.
+# Reset the dev stack: `just reset` wipes all volumes + re-seeds; `reset db` = DB only.
+reset target="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+      all)
+        docker compose down -v
+        docker compose up -d --wait
+        ;;
+      db)
+        docker compose rm -sf postgres
+        docker volume rm flusso_flusso-pgdata 2>/dev/null || true
+        docker compose up -d --wait postgres
+        ;;
+      *)
+        echo "unknown reset target '{{target}}' — use 'all' (default) or 'db'" >&2
+        exit 1
+        ;;
+    esac
 
 # Show stack status.
 ps:
@@ -75,6 +92,45 @@ help:
 # Same as `run` but skip the backfill (resume live capture only).
 run-live: up
     cargo run -- run --config {{config}} --public-address {{public_address}} --skip-backfill
+
+# Bring the stack up, then open the visual schema designer at http://127.0.0.1:7700
+# (introspects the dev Postgres, edits dev/*.schema.yml + dev/flusso.toml live).
+design: up
+    cargo run -- design --config {{config}}
+
+# Hot-reload dev for the designer UI: runs the backend (JSON API on :7700) plus
+# the Vite dev server (the SPA with HMR, proxying /api → :7700). Edit anything
+# under apps/design/frontend/src and the browser updates instantly — open the
+# URL Vite prints (default http://localhost:5173). Ctrl-C stops both.
+design-dev: up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run -- design --config {{config}} --no-open &
+    backend=$!
+    trap 'kill $backend 2>/dev/null || true' EXIT
+    cd apps/design/frontend && npm install && npm run dev
+
+# Lint the designer frontend (ESLint: TypeScript + react-hooks + react-refresh).
+# `just design-lint fix` auto-fixes what it can.
+design-lint fix="":
+    cd apps/design/frontend && npm run {{ if fix == "fix" { "lint:fix" } else { "lint" } }}
+
+# Check the designer's translations are complete (every UI string has a key in
+# every locale catalog). Run after adding/changing any designer UI string.
+design-i18n:
+    cd apps/design/frontend && npm run check:i18n
+
+# Run the designer's browser e2e suite (Playwright) + the save→check pipeline.
+# Needs the dev Postgres (brought up here); downloads Chromium on first run.
+design-e2e: up
+    cargo build -p flusso-cli
+    cd apps/design/frontend && npm ci && npx playwright install chromium && npm run test:e2e
+
+# Measure the designer's backend test coverage (unit + integration + property).
+# Needs cargo-llvm-cov: `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`.
+coverage:
+    cargo llvm-cov nextest -p flusso-design --html
+    @echo "HTML report → target/llvm-cov/html/index.html"
 
 # Serve the dev read API (axum, dev/search-api) over the synced indexes (:8080).
 api: up

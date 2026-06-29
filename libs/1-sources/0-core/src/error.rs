@@ -33,6 +33,12 @@ pub enum SourceError {
     #[error("query error: {0}")]
     Query(String),
 
+    /// A field or filter names a column the database doesn't have. A schema↔DB
+    /// disagreement, not a transport failure — validation surfaces it as a
+    /// per-field diagnostic rather than aborting.
+    #[error("references unknown column `{0}`")]
+    UnknownColumn(String),
+
     /// The configuration uses a feature the active source implementation does
     /// not support yet.
     #[error("unsupported: {0}")]
