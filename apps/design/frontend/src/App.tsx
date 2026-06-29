@@ -20,12 +20,18 @@ import { Preview } from "./components/Preview";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Hint } from "./components/Hint";
+import { cn } from "@/lib/utils";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
 import { LANGS, useT } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
 import { requiredDefaultIssues } from "./model/issues";
 import { DesignProvider, type Selection } from "./state";
+
+// sidebar nav item classes (kept .nav/.active as hooks for e2e).
+const NAV = "nav mb-0.5 block w-full rounded-md border-0 bg-transparent px-2.5 py-2 text-left hover:bg-secondary";
+const NAV_ACTIVE = "active bg-secondary text-[var(--accent)]";
+const NAV_HEADING = "mx-1 mb-1 mt-3 text-[0.6875rem] uppercase text-muted-foreground";
 
 /// The whole editable document: the deployment config + every index's schema.
 /// Held as one value so undo/redo and dirty-tracking cover it uniformly.
@@ -490,24 +496,24 @@ export default function App() {
         style={{ gridTemplateColumns: `${leftOpen ? "13.125rem" : "0"} 1fr ${inspectorOpen ? "22.5rem" : "0"}` }}
       >
         {leftOpen && (
-          <nav className="sidebar">
-            <button className={active === "config" ? "nav active" : "nav"} onClick={() => setActive("config")}>
+          <nav className="sidebar overflow-y-auto border-r border-border bg-card p-2">
+            <button className={cn(NAV, active === "config" && NAV_ACTIVE)} onClick={() => setActive("config")}>
               ⚙ {t("sidebar.deployment")}
             </button>
-            <div className="nav-heading">{t("sidebar.indexes")}</div>
+            <div className={NAV_HEADING}>{t("sidebar.indexes")}</div>
             {(config.index ?? []).map((e) => (
-              <button key={e.name} className={active === e.name ? "nav active" : "nav"} onClick={() => openIndex(e.name)}>
+              <button key={e.name} className={cn(NAV, active === e.name && NAV_ACTIVE)} onClick={() => openIndex(e.name)}>
                 {indexDirty(e.name) && <span className="dirty-dot" />}
                 {e.name}
-                {!e.enabled && <span className="muted"> {t("sidebar.off")}</span>}
+                {!e.enabled && <span className="text-muted-foreground"> {t("sidebar.off")}</span>}
               </button>
             ))}
             <NewIndex tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []} onCreate={createIndex} />
-            <div className="legend">
-              <div className="nav-heading">{t("sidebar.kinds")}</div>
+            <div className="legend mt-3.5">
+              <div className={NAV_HEADING}>{t("sidebar.kinds")}</div>
               {["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"].map((k) => (
-                <div className="legend-row" key={k}>
-                  <span className={`legend-dot ${k}`} />
+                <div className="legend-row flex items-center px-1.5 py-0.5 text-[0.6875rem] text-muted-foreground" key={k}>
+                  <span className="mr-[0.4375rem] inline-block size-[0.5625rem] rounded-full" style={{ background: `var(--k-${k})` }} />
                   {k}
                 </div>
               ))}
@@ -640,22 +646,22 @@ function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: str
   const [table, setTable] = useState(tables[0] ?? "");
   if (!open) {
     return (
-      <button className="nav new" onClick={() => setOpen(true)}>
+      <button className={cn(NAV, "mt-1.5 border border-dashed border-border text-[var(--accent)]")} onClick={() => setOpen(true)}>
         + {t("sidebar.newIndex")}
       </button>
     );
   }
   return (
-    <div className="new-index">
+    <div className="mt-1.5 flex flex-col gap-1.5 rounded-lg border border-border p-2">
       <Text value={name} onChange={setName} placeholder={t("sidebar.indexName")} />
       {tables.length ? (
         <Select value={table} options={tables} onChange={setTable} />
       ) : (
         <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />
       )}
-      <div className="row">
-        <button
-          className="primary"
+      <div className="row flex flex-wrap gap-2">
+        <Button
+          size="sm"
           disabled={!name || !table}
           onClick={() => {
             onCreate(name, table);
@@ -664,8 +670,10 @@ function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: str
           }}
         >
           {t("sidebar.create")}
-        </button>
-        <button onClick={() => setOpen(false)}>{t("common.cancel")}</button>
+        </Button>
+        <Button variant="secondary" size="sm" onClick={() => setOpen(false)}>
+          {t("common.cancel")}
+        </Button>
       </div>
     </div>
   );

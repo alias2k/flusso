@@ -242,32 +242,7 @@ button.add {
 .layout > .canvas-wrap { grid-column: 2; }
 .layout > .inspector-pane { grid-column: 3; }
 
-.sidebar {
-  background: var(--panel);
-  border-right: 0.0625rem solid var(--border);
-  padding: 0.5rem;
-  overflow-y: auto;
-}
-.nav {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
-  border-radius: 0.375rem;
-  padding: 0.5rem 0.625rem;
-  margin-bottom: 0.125rem;
-}
-.nav.active {
-  background: var(--panel-2);
-  color: var(--accent);
-}
-.nav-heading {
-  margin: 0.75rem 0.25rem 0.25rem;
-  font-size: 0.6875rem;
-  text-transform: uppercase;
-  color: var(--muted);
-}
+/* sidebar / nav / legend are Tailwind now (App.tsx); .muted is still shared. */
 .muted {
   color: var(--muted);
 }
@@ -699,16 +674,6 @@ pre.yaml {
 .inspector.empty { color: var(--muted); }
 .key-editor, .through, .order-by, .soft-delete { margin: 0.375rem 0; }
 
-.new-index {
-  border: 0.0625rem solid var(--border);
-  border-radius: 0.5rem;
-  padding: 0.5rem;
-  margin-top: 0.375rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-}
-.nav.new { color: var(--accent); border: 0.0625rem dashed var(--border); margin-top: 0.375rem; }
 
 /* Theme React Flow's own chrome through its `--xy-*` variables rather than
    overriding each `.react-flow__*` element — controls, minimap, background dots,
@@ -970,29 +935,7 @@ button:disabled:hover {
   color: var(--muted);
   font-size: 0.75rem;
 }
-.legend {
-  margin-top: 0.875rem;
-}
-.legend-row {
-  display: flex;
-  align-items: center;
-  font-size: 0.6875rem;
-  color: var(--muted);
-  padding: 0.125rem 0.375rem;
-}
-.legend-dot {
-  display: inline-block;
-  width: 0.5625rem;
-  height: 0.5625rem;
-  border-radius: 50%;
-  margin-right: 0.4375rem;
-}
-.legend-dot.root { background: var(--k-root); }
-.legend-dot.object { background: var(--k-object); }
-.legend-dot.belongs_to { background: var(--k-belongs_to); }
-.legend-dot.has_one { background: var(--k-has_one); }
-.legend-dot.has_many { background: var(--k-has_many); }
-.legend-dot.many_to_many { background: var(--k-many_to_many); }
+/* legend is Tailwind now (App.tsx); dots get their kind colour via inline style. */
 
 .crumbs {
   font-size: 0.6875rem;
