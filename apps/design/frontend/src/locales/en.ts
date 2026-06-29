@@ -250,6 +250,11 @@ export const en: Record<string, string> = {
     "Restrict which rows feed this field — a raw SQL condition, a null check, or a column/operator/value test. All must hold.",
 
   // canvas controls
+  "canvas.zoomIn": "Zoom in",
+  "canvas.zoomOut": "Zoom out",
+  "canvas.fitView": "Fit to view",
+  "canvas.lock": "Lock layout",
+  "canvas.unlock": "Unlock layout",
   "canvas.resetLayout": "Reset layout",
   "canvas.showMinimap": "Show minimap",
   "canvas.hideMinimap": "Hide minimap",

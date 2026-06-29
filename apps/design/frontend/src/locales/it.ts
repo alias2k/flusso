@@ -255,6 +255,11 @@ export const it: Record<string, string> = {
     "Limita quali righe alimentano questo campo — una condizione SQL grezza, un controllo null, o un test colonna/operatore/valore. Devono valere tutte.",
 
   // canvas controls
+  "canvas.zoomIn": "Ingrandisci",
+  "canvas.zoomOut": "Rimpicciolisci",
+  "canvas.fitView": "Adatta alla vista",
+  "canvas.lock": "Blocca layout",
+  "canvas.unlock": "Sblocca layout",
   "canvas.resetLayout": "Reimposta layout",
   "canvas.showMinimap": "Mostra minimappa",
   "canvas.hideMinimap": "Nascondi minimappa",

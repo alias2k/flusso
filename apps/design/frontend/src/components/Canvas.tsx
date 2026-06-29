@@ -1,6 +1,5 @@
 import {
   Background,
-  Controls,
   type Edge,
   MiniMap,
   type Node,
@@ -13,6 +12,7 @@ import {
 // React Flow's stylesheet is imported (layered) from index.css, not here — a JS
 // import is unlayered and would beat our `@layer components` handle overrides.
 import { useEffect, useRef, useState } from "react";
+import { Lock, Maximize2, Unlock, ZoomIn, ZoomOut } from "lucide-react";
 import { SCALAR_TYPES } from "../api";
 import { autoLayout, clearOverrides, loadOverrides, loadViewport, saveOverride, saveViewport } from "../model/layout";
 import { suggestRelations } from "../model/relations";
@@ -34,6 +34,7 @@ export function Canvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [showMap, setShowMap] = useState(false);
+  const [locked, setLocked] = useState(false);
 
   // Estimate a node's rendered height so the auto-layout reserves the right
   // vertical band (header + column rows, capped by the scroll area, + footer
@@ -133,9 +134,10 @@ export function Canvas() {
       }}
       fitView
       minZoom={0.2}
+      nodesDraggable={!locked}
     >
       <Background />
-      <Controls />
+      <FlowControls locked={locked} onToggle={() => setLocked((l) => !l)} />
       {showMap && <MiniMap pannable zoomable style={{ marginBottom: "2.5rem" }} />}
       <RestoreViewport index={indexName} />
       <Panel position="top-left">
@@ -161,6 +163,45 @@ export function Canvas() {
         </div>
       </Panel>
     </ReactFlow>
+  );
+}
+
+/// Canvas controls (zoom / fit / lock) as our shadcn icon buttons, replacing
+/// React Flow's built-in `<Controls>`. Lives inside `<ReactFlow>` for the zoom
+/// hooks; `locked` (lifted to Canvas) freezes node dragging.
+function FlowControls({ locked, onToggle }: { locked: boolean; onToggle: () => void }) {
+  const { t } = useT();
+  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  return (
+    <Panel position="bottom-left">
+      <div className="flex flex-col gap-1.5">
+        <Hint label={t("canvas.zoomIn")} side="right">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomIn")} onClick={() => void zoomIn()}>
+            <ZoomIn />
+          </Button>
+        </Hint>
+        <Hint label={t("canvas.zoomOut")} side="right">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomOut")} onClick={() => void zoomOut()}>
+            <ZoomOut />
+          </Button>
+        </Hint>
+        <Hint label={t("canvas.fitView")} side="right">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.fitView")} onClick={() => void fitView()}>
+            <Maximize2 />
+          </Button>
+        </Hint>
+        <Hint label={locked ? t("canvas.unlock") : t("canvas.lock")} side="right">
+          <Button
+            variant="secondary"
+            size="icon-sm"
+            aria-label={locked ? t("canvas.unlock") : t("canvas.lock")}
+            onClick={onToggle}
+          >
+            {locked ? <Lock /> : <Unlock />}
+          </Button>
+        </Hint>
+      </div>
+    </Panel>
   );
 }
 

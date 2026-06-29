@@ -495,17 +495,11 @@
   }
 
   /* Theme React Flow's own chrome through its `--xy-*` variables rather than
-   overriding each `.react-flow__*` element — controls, minimap, background dots,
-   edge labels, connection line. The values track our palette vars, so they
-   follow the light/dark toggle for free. Bound to our `--xy-*` overrides win
-   over RF's light-mode defaults, so no `colorMode` plumbing is needed. */
+   overriding each `.react-flow__*` element — minimap, background dots, edge
+   labels, connection line. The values track our palette vars, so they follow
+   the light/dark toggle for free. (Zoom/fit/lock are our own shadcn buttons in
+   `FlowControls`, not RF's `<Controls>`.) */
   .react-flow {
-    --xy-controls-button-background-color: var(--panel-2);
-    --xy-controls-button-background-color-hover: var(--panel-3);
-    --xy-controls-button-color: var(--muted);
-    --xy-controls-button-color-hover: var(--text);
-    --xy-controls-button-border-color: var(--border);
-    --xy-controls-box-shadow: 0 0.125rem 0.625rem rgba(0, 0, 0, 0.3);
     --xy-minimap-background-color: var(--panel);
     --xy-background-pattern-color: var(--border);
     --xy-edge-label-color: var(--text);
@@ -513,21 +507,6 @@
     --xy-connectionline-stroke: var(--accent);
     --xy-edge-stroke-selected: var(--accent);
     --xy-attribution-background-color: var(--panel);
-  }
-
-  /* The zoom/fit/lock controls, restyled to read as our icon buttons —
-     individual rounded squares on the panel surface, not RF's connected
-     box-shadowed toolbar. (Colours come from the --xy-* vars above.) */
-  .react-flow__controls {
-    box-shadow: none;
-    gap: 0.25rem;
-  }
-  .react-flow__controls-button {
-    border: 0.0625rem solid var(--border);
-    border-radius: 0.375rem;
-  }
-  .react-flow__controls-button:hover {
-    border-color: var(--accent);
   }
 
   /* node rows are now display-only: click to edit in the inspector */
