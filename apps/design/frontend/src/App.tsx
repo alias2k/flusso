@@ -416,7 +416,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="topbar">
+      <header className="topbar flex items-center gap-3 border-b border-border bg-card px-4 py-2.5">
         <Hint label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}>
           <Button
             variant="ghost"
@@ -427,19 +427,25 @@ export default function App() {
             <Icon name="menu" />
           </Button>
         </Hint>
-        <span className="brand">
-          <span className="brand-mark">
+        <span className="brand inline-flex items-center gap-2 bg-[linear-gradient(90deg,var(--accent),var(--accent-2))] bg-clip-text text-[0.9375rem] font-bold tracking-[0.0125rem] text-transparent">
+          <span className="inline-flex text-[var(--accent)]">
             <Icon name="flow" size={18} />
           </span>
           flusso
         </span>
-        <span className="path">{project.config_path}</span>
+        <span className="path text-xs text-muted-foreground">{project.config_path}</span>
         <Hint label={t("topbar.retestDb")}>
-          <button className={`db-chip ${catalog && !catalog.error ? "ok" : "off"}`} onClick={refreshCatalog}>
+          <button
+            className={cn(
+              "db-chip rounded-full border border-border bg-secondary px-2 py-0.5 text-[0.6875rem]",
+              catalog && !catalog.error ? "ok border-[var(--accent)] text-[var(--accent)]" : "off border-[var(--warn)] text-[var(--warn)]",
+            )}
+            onClick={refreshCatalog}
+          >
             {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
           </button>
         </Hint>
-        <span className="spacer" />
+        <span className="spacer flex-1" />
         <Button variant="secondary" size="sm" onClick={() => setBrowseCatalog(true)} title={t("topbar.browseDb")}>
           {t("topbar.tables")}
         </Button>
@@ -468,7 +474,7 @@ export default function App() {
             <Icon name="theme" />
           </Button>
         </Hint>
-        <select className="lang-select" aria-label={t("topbar.language")} value={lang} onChange={(e) => setLang(e.target.value)}>
+        <select className="lang-select h-7 rounded-md border border-border bg-card px-1.5 text-foreground" aria-label={t("topbar.language")} value={lang} onChange={(e) => setLang(e.target.value)}>
           {Object.entries(LANGS).map(([code, name]) => (
             <option key={code} value={code}>
               {name}
@@ -488,8 +494,8 @@ export default function App() {
         </Button>
       </header>
 
-      {error && <div className="banner error">{error}</div>}
-      {catalog?.error && <div className="banner warn">{t("topbar.offlineBanner")}</div>}
+      {error && <div className="banner error bg-[rgba(255,107,107,0.12)] px-4 py-2 text-[0.8125rem] text-[var(--error)]">{error}</div>}
+      {catalog?.error && <div className="banner warn bg-[rgba(224,179,65,0.12)] px-4 py-2 text-[0.8125rem] text-[var(--warn)]">{t("topbar.offlineBanner")}</div>}
 
       <div
         className="layout"
@@ -527,7 +533,7 @@ export default function App() {
           </main>
         ) : rawMode ? (
           <main className="raw-pane">
-            <div className="banner warn">
+            <div className="banner warn bg-[rgba(224,179,65,0.12)] px-4 py-2 text-[0.8125rem] text-[var(--warn)]">
               {t("raw.editingFor")} <strong>{active}</strong> — {t("raw.help")}
             </div>
             <textarea className="raw-editor" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
