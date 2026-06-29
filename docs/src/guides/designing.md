@@ -35,8 +35,11 @@ fields, not child nodes.
 
 Selecting a node or field opens the **inspector** for the details a node can't show
 cleanly — join keys and verb, `order_by`, `limit`, filters, `value_type`/`element_type`,
-transforms, soft-delete, nullability. Node positions are remembered in your browser; they
-aren't written to the files (the files only hold the document tree).
+transforms, soft-delete, nullability. A field's panel is banded into **Identity** (its
+document name), **Source** (the bound column's facts — name, SQL type, `NOT NULL`/nullable),
+and **Mapping** (its flusso type, transforms, required/default), so what comes from the
+database and what you're choosing stay visually separate. Node positions are remembered in
+your browser; they aren't written to the files (the files only hold the document tree).
 
 **Some choices are guided by the source, not free.** A column's nullability comes from
 the database, so the **required** toggle follows it: a `NOT NULL` column is required by

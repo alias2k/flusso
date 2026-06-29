@@ -12,6 +12,17 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
+/// A titled group in the inspector — the panel reads as IDENTITY / SOURCE /
+/// MAPPING / … bands rather than one flat run of controls.
+export function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="section">
+      <div className="section-title">{title}</div>
+      {children}
+    </div>
+  );
+}
+
 /// The one text-input primitive — every text field in the designer goes through
 /// it, so styling/behaviour stay consistent (and no raw `<input>` can drift off
 /// the theme). `list` adds a datalist; `onKeyDown` covers Enter-to-submit boxes;

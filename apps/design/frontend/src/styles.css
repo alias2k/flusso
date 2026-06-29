@@ -338,6 +338,23 @@ summary {
   font-size: 12px;
 }
 
+/* inspector bands: IDENTITY / SOURCE / MAPPING / … */
+.section {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.section:first-of-type { border-top: none; padding-top: 0; }
+.section-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.check-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 6px 0; }
+
 /* read-only facts about a field's bound source column */
 .src-col {
   display: flex;

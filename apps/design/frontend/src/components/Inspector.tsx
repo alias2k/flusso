@@ -50,7 +50,7 @@ function Breadcrumb() {
   return <div className="crumbs">{crumbs.join(" › ")}</div>;
 }
 import { Filters } from "./Filters";
-import { Check, Field as Row, Num, Select, Text } from "./widgets";
+import { Check, Field as Row, Num, Section, Select, Text } from "./widgets";
 
 export function Inspector() {
   const { selection } = useDesign();
@@ -251,9 +251,11 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
           {t("inspector.delete")}
         </button>
       </div>
-      <Row label={t("inspector.fieldName")}>
-        <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
-      </Row>
+      <Section title={t("inspector.secIdentity")}>
+        <Row label={t("inspector.fieldName")}>
+          <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
+        </Row>
+      </Section>
 
       {"column" in s && typeof s.column.ty === "string" && (
         <ScalarBody field={field} column={s.column} srcNullable={srcNullable} suggested={srcCol?.suggested_type} sqlType={srcCol?.sql_type} set={set} />
@@ -262,18 +264,20 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
       {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
       {"constant" in s && (
-        <Row label={t("inspector.valueJson")}>
-          <Text
-            value={JSON.stringify(s.constant)}
-            onChange={(text) => {
-              try {
-                set({ ...field, source: { constant: JSON.parse(text) } });
-              } catch {
-                /* keep typing */
-              }
-            }}
-          />
-        </Row>
+        <Section title={t("inspector.secMapping")}>
+          <Row label={t("inspector.valueJson")}>
+            <Text
+              value={JSON.stringify(s.constant)}
+              onChange={(text) => {
+                try {
+                  set({ ...field, source: { constant: JSON.parse(text) } });
+                } catch {
+                  /* keep typing */
+                }
+              }}
+            />
+          </Row>
+        </Section>
       )}
       {"relation" in s && "aggregate" in s.relation && <AggregateBody field={field} agg={s.relation.aggregate} tables={tables} set={set} />}
 
@@ -316,21 +320,27 @@ function ScalarBody({
   const showSuggestion = typeof suggested === "string" && suggested !== column.ty;
   return (
     <>
-      <SourceColumn name={column.column} sqlType={sqlType} srcNullable={srcNullable} />
-      <Row label={t("inspector.type")}>
-        <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
-      </Row>
-      {showSuggestion && (
-        <p className="hint">
-          {t("inspector.suggestType", { sql: sqlType ?? "", ty: suggested })}{" "}
-          <button type="button" className="link" onClick={() => setCol({ ...column, ty: suggested })}>
-            {t("inspector.use")}
-          </button>
-        </p>
-      )}
-      <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
-      <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
-      <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
+      <Section title={t("inspector.secSource")}>
+        <SourceColumn name={column.column} sqlType={sqlType} srcNullable={srcNullable} />
+      </Section>
+      <Section title={t("inspector.secMapping")}>
+        <Row label={t("inspector.type")}>
+          <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
+        </Row>
+        {showSuggestion && (
+          <p className="hint">
+            {t("inspector.suggestType", { sql: sqlType ?? "", ty: suggested })}{" "}
+            <button type="button" className="link" onClick={() => setCol({ ...column, ty: suggested })}>
+              {t("inspector.use")}
+            </button>
+          </p>
+        )}
+        <div className="check-row">
+          <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
+          <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
+        </div>
+        <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
+      </Section>
     </>
   );
 }
@@ -368,9 +378,6 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
   const defaultMissing = mustDefault && column.default === undefined;
   return (
     <>
-      {srcNullable === false && (
-        <p className="hint">{t("inspector.srcNotNull")}</p>
-      )}
       {srcNullable === true && (
         <p className="hint">{t("inspector.srcNullable")}</p>
       )}
@@ -454,13 +461,17 @@ function MapBody({ field, column, cols, srcNullable, set }: { field: Field; colu
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Row label={t("inspector.values")}>
-        <Select value={ty.map.values as string} options={LEAF_TYPES as string[]} onChange={(v) => setCol({ ...column, ty: { map: { values: v as FlussoType } } })} />
-      </Row>
-      <Row label={t("inspector.columnJson")}>
-        <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
-      </Row>
-      <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
+      <Section title={t("inspector.secSource")}>
+        <Row label={t("inspector.columnJson")}>
+          <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
+        </Row>
+      </Section>
+      <Section title={t("inspector.secMapping")}>
+        <Row label={t("inspector.values")}>
+          <Select value={ty.map.values as string} options={LEAF_TYPES as string[]} onChange={(v) => setCol({ ...column, ty: { map: { values: v as FlussoType } } })} />
+        </Row>
+        <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
+      </Section>
     </>
   );
 }
@@ -471,16 +482,20 @@ function CustomBody({ field, column, cols, srcNullable, set }: { field: Field; c
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Row label={t("inspector.pgTypes")}>
-        <Text value={ty.custom.postgres.join(", ")} onChange={(text) => setCol({ ...column, ty: { custom: { ...ty.custom, postgres: text.split(",").map((x) => x.trim()).filter(Boolean) } } })} />
-      </Row>
-      <Row label={t("inspector.osType")}>
-        <Text value={ty.custom.opensearch} onChange={(o) => setCol({ ...column, ty: { custom: { ...ty.custom, opensearch: o } } })} />
-      </Row>
-      <Row label={t("common.column")}>
-        <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
-      </Row>
-      <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
+      <Section title={t("inspector.secSource")}>
+        <Row label={t("common.column")}>
+          <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
+        </Row>
+        <Row label={t("inspector.pgTypes")}>
+          <Text value={ty.custom.postgres.join(", ")} onChange={(text) => setCol({ ...column, ty: { custom: { ...ty.custom, postgres: text.split(",").map((x) => x.trim()).filter(Boolean) } } })} />
+        </Row>
+      </Section>
+      <Section title={t("inspector.secMapping")}>
+        <Row label={t("inspector.osType")}>
+          <Text value={ty.custom.opensearch} onChange={(o) => setCol({ ...column, ty: { custom: { ...ty.custom, opensearch: o } } })} />
+        </Row>
+        <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
+      </Section>
     </>
   );
 }
@@ -491,14 +506,18 @@ function GeoBody({ field, set, cols }: { field: Field; set: (f: Field) => void; 
   const geo = field.source.geo;
   return (
     <>
-      <Row label={t("inspector.latColumn")}>
-        <Text value={geo.lat} list={cols} onChange={(lat) => set({ ...field, source: { geo: { ...geo, lat } } })} />
-      </Row>
-      <Row label={t("inspector.lonColumn")}>
-        <Text value={geo.lon} list={cols} onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })} />
-      </Row>
-      <Check value={!geo.nullable} label={t("inspector.required")} onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
-      <p className="hint">{t("inspector.geoHint")}</p>
+      <Section title={t("inspector.secSource")}>
+        <Row label={t("inspector.latColumn")}>
+          <Text value={geo.lat} list={cols} onChange={(lat) => set({ ...field, source: { geo: { ...geo, lat } } })} />
+        </Row>
+        <Row label={t("inspector.lonColumn")}>
+          <Text value={geo.lon} list={cols} onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })} />
+        </Row>
+      </Section>
+      <Section title={t("inspector.secMapping")}>
+        <Check value={!geo.nullable} label={t("inspector.required")} onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
+        <p className="hint">{t("inspector.geoHint")}</p>
+      </Section>
     </>
   );
 }
@@ -511,27 +530,34 @@ function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggrega
   const opCol = typeof op === "string" ? null : "sum" in op ? op.sum : "avg" in op ? op.avg : "min" in op ? op.min : "max" in op ? op.max : null;
   const kind = typeof op === "string" ? "count" : "sum" in op ? "sum" : "avg" in op ? "avg" : "min" in op ? "min" : "max" in op ? "max" : "ids";
   const aggCols = columnsFor(agg.table).map((c) => c.name);
+  const hasMappingType = kind === "sum" || kind === "min" || kind === "max" || kind === "ids";
   return (
     <>
-      <Row label={t("inspector.relatedTable")}>
-        <Text value={agg.table} list={tables} onChange={(table) => setAgg({ ...agg, table })} />
-      </Row>
-      {opCol !== null && (
-        <Row label={t("inspector.aggColumn")}>
-          <Text value={opCol} list={aggCols} onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })} />
+      <Section title={t("inspector.secSource")}>
+        <Row label={t("inspector.relatedTable")}>
+          <Text value={agg.table} list={tables} onChange={(table) => setAgg({ ...agg, table })} />
         </Row>
+        {opCol !== null && (
+          <Row label={t("inspector.aggColumn")}>
+            <Text value={opCol} list={aggCols} onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })} />
+          </Row>
+        )}
+        <AggregateKeyEditor value={agg.key} tables={tables} onChange={(key) => setAgg({ ...agg, key })} />
+      </Section>
+      {hasMappingType && (
+        <Section title={t("inspector.secMapping")}>
+          {(kind === "sum" || kind === "min" || kind === "max") && (
+            <Row label="value_type">
+              <Select value={(agg.value_type as string) ?? "integer"} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, value_type: v as FlussoType })} />
+            </Row>
+          )}
+          {kind === "ids" && typeof op !== "string" && "ids" in op && (
+            <Row label="element_type">
+              <Select value={op.ids.element_type as string} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, op: { ids: { element_type: v as FlussoType } } })} />
+            </Row>
+          )}
+        </Section>
       )}
-      {(kind === "sum" || kind === "min" || kind === "max") && (
-        <Row label="value_type">
-          <Select value={(agg.value_type as string) ?? "integer"} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, value_type: v as FlussoType })} />
-        </Row>
-      )}
-      {kind === "ids" && typeof op !== "string" && "ids" in op && (
-        <Row label="element_type">
-          <Select value={op.ids.element_type as string} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, op: { ids: { element_type: v as FlussoType } } })} />
-        </Row>
-      )}
-      <AggregateKeyEditor value={agg.key} tables={tables} onChange={(key) => setAgg({ ...agg, key })} />
       <details>
         <summary>{t("inspector.filters")}</summary>
         <Filters value={agg.filters ?? []} onChange={(filters) => setAgg({ ...agg, filters })} />
