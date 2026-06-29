@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { type MouseEvent, useState } from "react";
+import { useState } from "react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
 import { aggregateIncomplete, joinIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
@@ -23,7 +23,6 @@ export function DocNodeView({ data, selected }: NodeProps) {
   const fields = nodeFields(schema, node.path);
   const [filter, setFilter] = useState("");
   const isCollapsed = collapsed.has(node.id);
-  const move = (index: number, dir: -1 | 1) => apply((s) => edit.moveField(s, node.path, index, dir));
   const matches = (name: string) => name.toLowerCase().includes(filter.toLowerCase());
   const pickRootTable = (t: string) => {
     if (!t) return;
@@ -186,7 +185,6 @@ export function DocNodeView({ data, selected }: NodeProps) {
                     const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
                     return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
                   })()}
-                  {inc && <RowMove onUp={() => move(inc.index, -1)} onDown={() => move(inc.index, 1)} />}
                 </div>
               );
             })}
@@ -205,7 +203,6 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   >
                     <span className="leaf-kind">{l.kind}</span>
                     <span className="col-name">{l.name}</span>
-                    <RowMove onUp={() => move(l.index, -1)} onDown={() => move(l.index, 1)} />
                     <button
                       className="x"
                       onClick={(e) => {
@@ -280,24 +277,6 @@ function AddMenu({
         </option>
       ))}
     </select>
-  );
-}
-
-function RowMove({ onUp, onDown }: { onUp: () => void; onDown: () => void }) {
-  const { t } = useT();
-  const stop = (fn: () => void) => (e: MouseEvent) => {
-    e.stopPropagation();
-    fn();
-  };
-  return (
-    <span className="row-move">
-      <button className="up" title={t("node.moveUp")} onClick={stop(onUp)}>
-        <Icon name="chevron" size={10} />
-      </button>
-      <button className="down" title={t("node.moveDown")} onClick={stop(onDown)}>
-        <Icon name="chevron" size={10} />
-      </button>
-    </span>
   );
 }
 

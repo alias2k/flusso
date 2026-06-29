@@ -88,14 +88,6 @@ function uniqueName(existing: string[], base: string): string {
 }
 
 /// Move the field at `index` one slot up (`dir = -1`) or down (`dir = +1`).
-export function moveField(schema: IndexSchema, path: number[], index: number, dir: -1 | 1): IndexSchema {
-  const fields = nodeFields(schema, path).slice();
-  const target = index + dir;
-  if (target < 0 || target >= fields.length) return schema;
-  [fields[index], fields[target]] = [fields[target], fields[index]];
-  return withNodeFields(schema, path, fields);
-}
-
 /// Append a fresh special/leaf field of `kind` (geo/map/custom/constant/aggregate
 /// op) or an `object` group to the node at `path`.
 export function addSpecial(schema: IndexSchema, path: number[], kind: string): IndexSchema {

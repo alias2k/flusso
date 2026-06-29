@@ -400,9 +400,23 @@ pre.yaml {
   width: 290px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
+  /* Clip children (header gradient, kind stripe) to the radius — without this
+     the square header fill shows through the rounded corners ("fake rounded"). */
+  overflow: hidden;
   font-size: 12px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+/* Sit the connection dots just inside the edge so `overflow: hidden` doesn't
+   clip their outer half (React Flow centres them on the border by default). */
+.react-flow__handle-left {
+  left: 1px;
+  transform: translateY(-50%);
+}
+.react-flow__handle-right {
+  right: 1px;
+  left: auto;
+  transform: translateY(-50%);
 }
 .flow-node.selected {
   border-color: var(--accent);
@@ -735,29 +749,6 @@ button:disabled:hover {
 .col-tools .link {
   font-size: 11px;
 }
-.row-move {
-  display: inline-flex;
-  gap: 1px;
-  opacity: 0;
-  transition: opacity 0.1s ease;
-}
-.col-row:hover .row-move {
-  opacity: 1;
-}
-.row-move button {
-  background: none;
-  border: none;
-  padding: 0 2px;
-  color: var(--muted);
-  line-height: 0;
-}
-.row-move button:hover {
-  color: var(--accent);
-}
-.row-move .up {
-  transform: rotate(180deg);
-}
-
 /* ── canvas navigation (group D) ────────────────────────────────────────── */
 /* node entry animation — runs once when a node's DOM is created (per id), not
    on data updates, so editing doesn't replay it. */

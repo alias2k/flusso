@@ -174,8 +174,6 @@ export const it: Record<string, string> = {
   "node.incomplete": "incompleto — imposta la sua chiave/colonna nell'ispettore",
   "node.addJoin": "+ relazione",
   "node.addField": "+ campo",
-  "node.moveUp": "sposta su",
-  "node.moveDown": "sposta giù",
   "node.addColumn": "+ nome colonna, Invio",
 
   // config panel

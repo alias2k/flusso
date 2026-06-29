@@ -174,8 +174,6 @@ export const en: Record<string, string> = {
   "node.incomplete": "incomplete — set its key/column in the inspector",
   "node.addJoin": "+ join",
   "node.addField": "+ field",
-  "node.moveUp": "move up",
-  "node.moveDown": "move down",
   "node.addColumn": "+ column name, Enter",
 
   // config panel
