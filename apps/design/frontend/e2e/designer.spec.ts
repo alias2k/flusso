@@ -120,7 +120,7 @@ test("the sidebar shows a kind legend", async ({ page }) => {
 test("save shows a diff before writing", async ({ page }) => {
   await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
   await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator(".modal")).toBeVisible();
+  await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.locator(".diff-file")).not.toHaveCount(0);
 });
 

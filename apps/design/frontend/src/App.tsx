@@ -18,6 +18,7 @@ import { Icon } from "./components/Icon";
 import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
 import { LANGS, useT } from "./i18n";
@@ -598,20 +599,13 @@ function DiffModal({
 }) {
   const { t } = useT();
   const changed = diffs.filter((d) => d.changed);
-  const confirmRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    confirmRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={t("diff.aria")} onClick={(e) => e.stopPropagation()}>
-        <h3>{t("diff.title", { n: changed.length })}</h3>
-        <div className="diff-list">
+    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+      <DialogContent className="flex flex-col w-[min(56rem,92vw)] max-w-none max-h-[85vh]" aria-label={t("diff.aria")}>
+        <DialogHeader>
+          <DialogTitle>{t("diff.title", { n: changed.length })}</DialogTitle>
+        </DialogHeader>
+        <div className="diff-list min-h-0">
           {changed.map((d) => (
             <div className="diff-file" key={d.path}>
               <div className="diff-path">{d.path}</div>
@@ -622,15 +616,17 @@ function DiffModal({
             </div>
           ))}
         </div>
-        <div className="modal-actions">
-          <button ref={confirmRef} className="primary" onClick={onConfirm} disabled={saving}>
+        <DialogFooter>
+          <Button variant="secondary" size="sm" onClick={onCancel}>
+            {t("common.cancel")}
+          </Button>
+          <Button size="sm" onClick={onConfirm} disabled={saving}>
             {saving && <span className="spinner" />}
             {t("diff.write", { n: changed.length })}
-          </button>
-          <button onClick={onCancel}>{t("common.cancel")}</button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

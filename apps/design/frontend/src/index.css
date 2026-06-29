@@ -21,6 +21,18 @@
   --radius: 0.5rem;
 }
 
+/* Respect the OS "reduce motion" setting — kill animations/transitions (also
+   makes overlay entrance instant, which keeps interactions snappy). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* Map shadcn's token names straight onto the flusso palette (defined in
    styles.css `:root`), so there's one source of truth and the light/dark
    switch flows through for free. `inline` means utilities reference the flusso

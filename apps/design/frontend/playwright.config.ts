@@ -19,6 +19,9 @@ export default defineConfig({
     headless: true,
     viewport: { width: 1680, height: 1000 },
     screenshot: "only-on-failure",
+    // shadcn overlays animate in; honour reduced motion so they settle instantly
+    // (also what users with the OS setting get).
+    reducedMotion: "reduce",
   },
   webServer: {
     command: "node e2e/server.mjs",
