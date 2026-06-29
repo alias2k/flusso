@@ -284,11 +284,11 @@ input[type="checkbox"]:checked {
 }
 input[type="checkbox"]:checked::after {
   content: "";
-  width: 0.25rem;
-  height: 0.5rem;
-  margin-top: -0.125rem;
+  width: 0.1875rem;
+  height: 0.375rem;
+  margin-top: -0.0625rem;
   border: solid #04211a;
-  border-width: 0 0.125rem 0.125rem 0;
+  border-width: 0 0.09375rem 0.09375rem 0;
   transform: rotate(45deg);
 }
 input[type="checkbox"]:focus-visible { outline: 0.125rem solid var(--accent-2); outline-offset: 0.0625rem; }

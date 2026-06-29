@@ -98,6 +98,18 @@ run-live: up
 design: up
     cargo run -- design --config {{config}}
 
+# Hot-reload dev for the designer UI: runs the backend (JSON API on :7700) plus
+# the Vite dev server (the SPA with HMR, proxying /api → :7700). Edit anything
+# under apps/design/frontend/src and the browser updates instantly — open the
+# URL Vite prints (default http://localhost:5173). Ctrl-C stops both.
+design-dev: up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run -- design --config {{config}} --no-open &
+    backend=$!
+    trap 'kill $backend 2>/dev/null || true' EXIT
+    cd apps/design/frontend && npm install && npm run dev
+
 # Check the designer's translations are complete (every UI string has a key in
 # every locale catalog). Run after adding/changing any designer UI string.
 design-i18n:
