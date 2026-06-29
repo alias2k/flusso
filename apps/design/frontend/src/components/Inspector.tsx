@@ -50,7 +50,7 @@ function Breadcrumb() {
   return <div className="crumbs">{crumbs.join(" › ")}</div>;
 }
 import { Filters } from "./Filters";
-import { Check, Field as Row, Num, Section, Select, Text } from "./widgets";
+import { Check, Field as Row, GenericInput, Num, Section, Select, Text } from "./widgets";
 
 export function Inspector() {
   const { selection } = useDesign();
@@ -266,15 +266,10 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
       {"constant" in s && (
         <Section title={t("inspector.secMapping")}>
           <Row label={t("inspector.valueJson")}>
-            <Text
-              value={JSON.stringify(s.constant)}
-              onChange={(text) => {
-                try {
-                  set({ ...field, source: { constant: JSON.parse(text) } });
-                } catch {
-                  /* keep typing */
-                }
-              }}
+            <GenericInput
+              value={s.constant}
+              emptyTo="Null"
+              onChange={(constant) => set({ ...field, source: { constant: constant ?? "Null" } })}
             />
           </Row>
         </Section>
@@ -384,20 +379,10 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
       <Check value={required} label={t("inspector.required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
       {(srcNullable !== false || column.default !== undefined) && (
         <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
-          <Text
+          <GenericInput
             invalid={defaultMissing}
-            value={column.default === undefined ? "" : JSON.stringify(column.default)}
-            onChange={(text) => {
-              if (!text.trim()) {
-                setCol({ ...column, default: undefined });
-                return;
-              }
-              try {
-                setCol({ ...column, default: JSON.parse(text) });
-              } catch {
-                /* keep typing until valid JSON */
-              }
-            }}
+            value={column.default}
+            onChange={(def) => setCol({ ...column, default: def })}
             placeholder='e.g. 0 or "n/a"'
           />
         </Row>
@@ -429,26 +414,17 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   return (
     <details>
       <summary>{t("inspector.options", { n: entries.length })}</summary>
+      <p className="hint">{t("inspector.optionsHelp")}</p>
       {entries.map(([k, v]) => (
         <div className="opt-row" key={k}>
           <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
-          <Text
-            value={JSON.stringify(v)}
-            onChange={(text) => {
-              try {
-                setOpt(k, JSON.parse(text));
-              } catch {
-                /* keep typing */
-              }
-            }}
-            placeholder={t("inspector.optValue")}
-          />
-          <button className="link danger" onClick={() => removeOpt(k)}>
+          <GenericInput value={v} emptyTo={{ String: "" }} onChange={(nv) => setOpt(k, nv ?? { String: "" })} placeholder={t("inspector.optValue")} />
+          <button type="button" className="link danger" onClick={() => removeOpt(k)}>
             ✕
           </button>
         </div>
       ))}
-      <button className="link" onClick={() => setOpt(`option${entries.length + 1}`, "")}>
+      <button type="button" className="link" onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })}>
         + {t("inspector.option")}
       </button>
     </details>

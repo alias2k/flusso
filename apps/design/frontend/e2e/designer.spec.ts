@@ -222,6 +222,19 @@ test("the type dropdown nudges toward the source-suggested type", async ({ page 
   await expect(page.locator(".inspector")).not.toContainText("suggests");
 });
 
+test("adding an option keeps the schema valid (regression)", async ({ page }) => {
+  // a fresh option used to post an empty string — an invalid GenericValue —
+  // which 400'd the live preview/validate instantly. It must now round-trip.
+  await page.locator(".flow-node.kind-root .col-row.on").first().click();
+  await page.locator(".inspector summary", { hasText: "options" }).click();
+  await page.locator(".inspector").getByRole("button", { name: /option/ }).click();
+  await expect(page.locator(".inspector .opt-row")).toHaveCount(1);
+  await expect(page.locator(".banner.error")).toHaveCount(0);
+  await page.getByRole("button", { name: "Validate" }).click();
+  await expect(page.locator(".toast")).toBeVisible();
+  await expect(page.locator(".toast")).not.toContainText(/failed|deserialize/i);
+});
+
 test("validate surfaces a result toast", async ({ page }) => {
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.locator(".toast")).toBeVisible();

@@ -1030,11 +1030,19 @@ button:disabled:hover {
   margin: 0 0 12px;
 }
 .opt-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
   gap: 6px;
   align-items: center;
   margin: 4px 0;
 }
+/* let inputs shrink inside flex/grid rows so the panel never scrolls sideways */
+.opt-row input,
+.filter-row input,
+.filter-row select,
+.order-row input { min-width: 0; }
+.filter-row > input,
+.filter-row > select { flex: 1 1 0; }
 
 /* ── catalog browser (item 7) ───────────────────────────────────────────── */
 .catalog-filter { width: 100%; margin-bottom: 8px; }

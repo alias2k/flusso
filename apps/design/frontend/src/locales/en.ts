@@ -101,8 +101,9 @@ export const en: Record<string, string> = {
   "inspector.secMapping": "Mapping",
   "inspector.defaultError": "A required field over a nullable column must set a default, or the document field could be missing.",
   "inspector.options": "options ({n})",
+  "inspector.optionsHelp": "Extra OpenSearch mapping properties merged beside the derived type (e.g. analyzer, boost, scaling_factor). Each value is JSON.",
   "inspector.optKey": "key",
-  "inspector.optValue": "value",
+  "inspector.optValue": 'value (JSON, e.g. "english" or 2)',
   "inspector.option": "option",
   "inspector.values": "values",
   "inspector.columnJson": "column (json/jsonb)",
@@ -207,6 +208,7 @@ export const en: Record<string, string> = {
   "filters.loHi": "lo, hi",
   "filters.abc": "a, b, c",
   "filters.filter": "filter",
+  "filters.help": "Restrict which rows feed this field — a raw SQL condition, a null check, or a column/operator/value test. All must hold.",
 
   // canvas controls
   "canvas.resetLayout": "Reset layout",

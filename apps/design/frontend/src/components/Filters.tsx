@@ -75,6 +75,7 @@ export function Filters({
 
   return (
     <div className="filters">
+      <p className="hint">{t("filters.help")}</p>
       {value.map((f, i) => {
         const kind = kindOf(f);
         return (

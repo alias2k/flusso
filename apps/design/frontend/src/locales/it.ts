@@ -101,8 +101,9 @@ export const it: Record<string, string> = {
   "inspector.secMapping": "Mappatura",
   "inspector.defaultError": "Un campo obbligatorio su una colonna che ammette null deve impostare un valore predefinito, altrimenti il campo del documento potrebbe mancare.",
   "inspector.options": "opzioni ({n})",
+  "inspector.optionsHelp": "Proprietà di mappatura OpenSearch aggiuntive, unite accanto al tipo derivato (es. analyzer, boost, scaling_factor). Ogni valore è JSON.",
   "inspector.optKey": "chiave",
-  "inspector.optValue": "valore",
+  "inspector.optValue": 'valore (JSON, es. "english" o 2)',
   "inspector.option": "opzione",
   "inspector.values": "valori",
   "inspector.columnJson": "colonna (json/jsonb)",
@@ -207,6 +208,7 @@ export const it: Record<string, string> = {
   "filters.loHi": "min, max",
   "filters.abc": "a, b, c",
   "filters.filter": "filtro",
+  "filters.help": "Limita quali righe alimentano questo campo — una condizione SQL grezza, un controllo null, o un test colonna/operatore/valore. Devono valere tutte.",
 
   // canvas controls
   "canvas.resetLayout": "Reimposta layout",

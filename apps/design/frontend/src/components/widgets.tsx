@@ -1,4 +1,5 @@
-import type { KeyboardEvent, ReactNode } from "react";
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import { fromGeneric, type Generic, toGeneric } from "../model/generic";
 
 let uid = 0;
 const nextId = () => `w${uid++}`;
@@ -66,6 +67,43 @@ export function Text({
       )}
     </>
   );
+}
+
+/// A JSON value box for a `GenericValue`-typed field (`options`, a column
+/// `default`, a `constant`). Shows the plain decoded value, posts the tagged
+/// form. Keeps a local text buffer so half-typed JSON isn't reverted by the
+/// controlled value — the model only updates on a parse, and empty maps to
+/// `undefined` (a cleared default) unless `emptyTo` overrides it.
+export function GenericInput({
+  value,
+  onChange,
+  placeholder,
+  invalid,
+  emptyTo,
+}: {
+  value: Generic | undefined;
+  onChange: (v: Generic | undefined) => void;
+  placeholder?: string;
+  invalid?: boolean;
+  emptyTo?: Generic;
+}) {
+  const external = value === undefined ? "" : JSON.stringify(fromGeneric(value));
+  const [text, setText] = useState(external);
+  // Resync from the model only when the model itself changes (undo, switching
+  // fields) — not on every keystroke, so partial JSON survives typing.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => setText(external), [external]);
+  const parseable = text.trim() === "" || (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+  const handle = (s: string) => {
+    setText(s);
+    if (s.trim() === "") return onChange(emptyTo);
+    try {
+      onChange(toGeneric(JSON.parse(s)));
+    } catch {
+      /* keep typing until valid JSON */
+    }
+  };
+  return <Text value={text} onChange={handle} placeholder={placeholder} invalid={invalid || !parseable} />;
 }
 
 export function Num({
