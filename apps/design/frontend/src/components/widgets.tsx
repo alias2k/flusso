@@ -13,14 +13,46 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
-/// A titled group in the inspector — the panel reads as IDENTITY / SOURCE /
-/// MAPPING / … bands rather than one flat run of controls.
-export function Section({ title, children }: { title: string; children: ReactNode }) {
+// (the IDENTITY/SOURCE/MAPPING Section bands were replaced by the Source/
+// Document Block pair below.)
+
+/// A titled block in the inspector. `src` (warm) states where a value comes
+/// from; `doc` (accent) holds what you author. The pair, with a [`Bridge`]
+/// between, is the "source ⟷ document" reading the panel is built around.
+export function Block({ variant, title, children }: { variant: "src" | "doc"; title: string; children: ReactNode }) {
   return (
-    <div className="section">
-      <div className="section-title">{title}</div>
+    <div className={`blk ${variant}`}>
+      <div className="blk-h">{title}</div>
       {children}
     </div>
+  );
+}
+
+/// The rule a source imposes on a choice, shown between a [`Block`] pair —
+/// e.g. "NOT NULL → required, locked". A cyan connector, cause above, effect
+/// below.
+export function Bridge({ children }: { children: ReactNode }) {
+  return (
+    <div className="bridge">
+      <span className="arrow">↓</span>
+      <span className="rule">{children}</span>
+    </div>
+  );
+}
+
+/// A collapsible "expert" drawer (advanced mapping knobs, filters): quieter
+/// than the source/document blocks — slate, monospace-leaning, closed by
+/// default — so secondary tuning never competes with the primary choices.
+export function Drawer({ title, count, defaultOpen, children }: { title: string; count?: number; defaultOpen?: boolean; children: ReactNode }) {
+  return (
+    <details className="drawer" open={defaultOpen}>
+      <summary className="drawer-h">
+        <span className="chev" aria-hidden="true" />
+        <span className="dh-name">{title}</span>
+        {count !== undefined && <span className="count">{count}</span>}
+      </summary>
+      <div className="drawer-body">{children}</div>
+    </details>
   );
 }
 

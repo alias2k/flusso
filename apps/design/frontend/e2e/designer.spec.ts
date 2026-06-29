@@ -217,17 +217,40 @@ test("the type dropdown nudges toward the source-suggested type", async ({ page 
   await expect(page.locator(".inspector")).toBeVisible();
   const typeField = page.locator(".inspector .field", { hasText: "type" }).locator("select");
   await typeField.selectOption("boolean"); // a text column never suggests boolean
-  await expect(page.locator(".inspector")).toContainText("suggests");
+  await expect(page.locator(".inspector .nudge")).toContainText("suggested");
   await page.locator(".inspector").getByRole("button", { name: "use", exact: true }).click();
-  await expect(page.locator(".inspector")).not.toContainText("suggests");
+  await expect(page.locator(".inspector .nudge")).toHaveCount(0);
+});
+
+test("rename chips offer source-derived names", async ({ page }) => {
+  // the field is named 'fullName' over column 'full_name', so the chip back to
+  // the raw column name is offered; clicking it renames the document field.
+  await page.locator(".flow-node.kind-root .col-row", { hasText: "full_name" }).first().click();
+  await expect(page.locator(".inspector .rename-chips")).toBeVisible();
+  await page.locator(".inspector .rchip", { hasText: "full_name" }).click();
+  await expect(page.locator(".inspector .blk.doc input").first()).toHaveValue("full_name");
+});
+
+test("the inspector reads as source → document blocks", async ({ page }) => {
+  await page.locator(".flow-node.kind-root .col-row.on").first().click();
+  await expect(page.locator(".inspector .blk.src")).toBeVisible();
+  await expect(page.locator(".inspector .blk.doc")).toBeVisible();
+});
+
+test("advanced drawer adds a knob without breaking validation", async ({ page }) => {
+  await page.locator(".flow-node.kind-root .col-row.on").first().click();
+  await page.locator(".inspector .drawer-h", { hasText: /advanced/i }).click();
+  await page.locator(".inspector .knob", { hasText: /^analyzer$/ }).click();
+  await expect(page.locator(".inspector .opt-row")).toHaveCount(1);
+  await expect(page.locator(".banner.error")).toHaveCount(0);
 });
 
 test("adding an option keeps the schema valid (regression)", async ({ page }) => {
   // a fresh option used to post an empty string — an invalid GenericValue —
   // which 400'd the live preview/validate instantly. It must now round-trip.
   await page.locator(".flow-node.kind-root .col-row.on").first().click();
-  await page.locator(".inspector summary", { hasText: "options" }).click();
-  await page.locator(".inspector").getByRole("button", { name: /option/ }).click();
+  await page.locator(".inspector .drawer-h", { hasText: /advanced/i }).click();
+  await page.locator(".inspector .addline", { hasText: /option/ }).click();
   await expect(page.locator(".inspector .opt-row")).toHaveCount(1);
   await expect(page.locator(".banner.error")).toHaveCount(0);
   await page.getByRole("button", { name: "Validate" }).click();

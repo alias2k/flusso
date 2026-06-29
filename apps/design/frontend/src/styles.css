@@ -9,6 +9,7 @@
   --accent: #10b981; /* emerald */
   --accent-2: #06b6d4; /* cyan — the "flow" partner */
   --accent-soft: rgba(16, 185, 129, 0.14);
+  --slate: #94a3b8;
   --error: #f87171;
   --warn: #e0b341;
   --ok: #34d399;
@@ -338,22 +339,57 @@ summary {
   font-size: 12px;
 }
 
-/* inspector bands: IDENTITY / SOURCE / MAPPING / … */
-.section {
-  margin-top: 14px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-.section:first-of-type { border-top: none; padding-top: 0; }
-.section-title {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-bottom: 8px;
-}
 .check-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 6px 0; }
+
+/* ── C1 inspector: Source ⟷ Document blocks, bridge, expert drawers ──── */
+.blk { border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; border-left-width: 2px; }
+.blk + .blk { margin-top: 4px; }
+.blk.src { background: color-mix(in srgb, var(--string) 7%, var(--panel-2)); border-left-color: var(--string); }
+.blk.doc { background: var(--panel); border-left-color: var(--accent); }
+.blk-h { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; margin-bottom: 9px; }
+.blk.src .blk-h::before { content: "◧ "; }
+.blk.doc .blk-h::before { content: "◨ "; }
+.blk.src .blk-h { color: var(--string); }
+.blk.doc .blk-h { color: var(--accent); }
+.blk .field { margin: 0 0 9px; }
+.blk .field:last-child { margin-bottom: 0; }
+
+.bridge { display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px; margin: 2px 0; font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+.bridge .arrow { color: var(--accent-2); font-weight: 700; flex: 0 0 auto; }
+
+/* the type-suggestion nudge (replaces the old plain .hint) */
+.nudge { font-size: 11.5px; color: var(--muted); margin: 5px 0 0; }
+.nudge .from { color: var(--string); font-family: ui-monospace, monospace; }
+.nudge .use { background: none; border: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
+
+/* rename chips beside the document-field name */
+.rename-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.rc-lead { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.rchip { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 1px 9px; cursor: pointer; }
+.rchip:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* "no database source" marker (constant / object group) */
+.no-source { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--slate, #94a3b8); background: var(--panel-2); border: 1px solid var(--border); border-left: 2px solid var(--slate, #94a3b8); border-radius: 8px; padding: 9px 11px; margin-bottom: 4px; line-height: 1.35; }
+.nested-note { font-size: 12px; color: var(--muted); background: var(--panel-2); border: 1px dashed var(--border); border-radius: 6px; padding: 7px 9px; margin: 0 0 9px; }
+
+/* expert drawer: a quiet, slate, collapsed <details> for tuning + filters */
+.drawer { width: 100%; margin: 10px 0 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.drawer-h { list-style: none; display: flex; align-items: center; gap: 8px; padding: 9px 11px; cursor: pointer; user-select: none; background: var(--panel-2); }
+.drawer-h::-webkit-details-marker { display: none; }
+.drawer-h .chev { width: 0; height: 0; border-left: 5px solid var(--slate, #94a3b8); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform 0.15s ease; }
+.drawer[open] .drawer-h .chev { transform: rotate(90deg); }
+.drawer-h .dh-name { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; font-weight: 700; color: var(--slate, #94a3b8); }
+.drawer-h .count { margin-left: auto; font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+.drawer-body { padding: 11px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--slate, #94a3b8) 4%, var(--panel)); }
+.drawer-hint { font-size: 11.5px; color: var(--muted); margin: 0 0 10px; line-height: 1.4; }
+
+/* quick-add knob chips in the Advanced drawer */
+.knobs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 11px; }
+.knob { font-family: ui-monospace, monospace; font-size: 11px; color: var(--slate, #94a3b8); background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; cursor: pointer; }
+.knob::before { content: "+ "; color: var(--muted); }
+.knob:hover { border-color: var(--slate, #94a3b8); color: var(--text); }
+.opt-row .x { background: none; border: none; color: var(--error); cursor: pointer; font-size: 12px; padding: 0; }
+.addline { background: none; border: none; padding: 2px 0 0; font: inherit; font-size: 12px; color: var(--accent); cursor: pointer; }
 
 /* read-only facts about a field's bound source column */
 .src-col {

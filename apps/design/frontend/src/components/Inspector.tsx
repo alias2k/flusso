@@ -50,7 +50,41 @@ function Breadcrumb() {
   return <div className="crumbs">{crumbs.join(" › ")}</div>;
 }
 import { Filters } from "./Filters";
-import { Check, Field as Row, GenericInput, Num, Section, Select, Text } from "./widgets";
+import { Block, Bridge, Check, Drawer, Field as Row, GenericInput, Num, Select, Text } from "./widgets";
+
+/// snake_case / "spaced" → camelCase, the usual document-field convention.
+const camel = (s: string) => s.replace(/[_\s]+(.)/g, (_m, c: string) => c.toUpperCase()).replace(/^(.)/, (_m, c: string) => c.toLowerCase());
+const pascal = (s: string) => { const c = camel(s); return c.charAt(0).toUpperCase() + c.slice(1); };
+/// Naive singular — good enough for table→element names (orders → order).
+const singular = (s: string) => (s.endsWith("ies") ? `${s.slice(0, -3)}y` : s.endsWith("s") && !s.endsWith("ss") ? s.slice(0, -1) : s);
+
+/// One-click name suggestions for the document field, by what the field draws
+/// from: a column offers itself + its camelCase; a join its table singular; an
+/// aggregate an op-flavoured name. The current name is filtered out by the row.
+function nameSuggestions(field: Field): string[] {
+  const s = field.source;
+  if ("column" in s) {
+    const col = s.column.column;
+    return [col, camel(col)];
+  }
+  if ("geo" in s) return ["location", "coordinates", camel(s.geo.lat)];
+  if ("constant" in s) return [];
+  if ("relation" in s) {
+    if ("join" in s.relation) {
+      const tbl = s.relation.join.table;
+      const k = s.relation.join.kind;
+      const many = "has_many" in k || "many_to_many" in k;
+      return [tbl, many ? camel(tbl) : camel(singular(tbl)), singular(tbl)];
+    }
+    const agg = s.relation.aggregate;
+    const op = typeof agg.op === "string" ? "count" : "sum" in agg.op ? "sum" : "avg" in agg.op ? "avg" : "min" in agg.op ? "min" : "max" in agg.op ? "max" : "ids";
+    const col = typeof agg.op === "string" ? "" : "sum" in agg.op ? agg.op.sum : "avg" in agg.op ? agg.op.avg : "min" in agg.op ? agg.op.min : "max" in agg.op ? agg.op.max : "";
+    if (op === "count") return [`${camel(singular(agg.table))}Count`, `${camel(agg.table)}Count`];
+    if (op === "ids") return [`${camel(singular(agg.table))}Ids`];
+    return col ? [camel(col), `${camel(col)}${pascal(op)}`] : [];
+  }
+  return [];
+}
 
 export function Inspector() {
   const { selection } = useDesign();
@@ -78,20 +112,21 @@ function RootInspector() {
   return (
     <div className="inspector">
       <h3>{t("inspector.indexRoot")}</h3>
-      <Row label={t("inspector.rootTable")}>
-        <Text value={schema.table} list={tables} onChange={(table) => apply((s) => edit.setRootMeta(s, { table }))} />
-      </Row>
-      <Row label={t("inspector.schema")}>
-        <Text value={schema.db_schema} onChange={(db_schema) => apply((s) => edit.setRootMeta(s, { db_schema }))} placeholder="public" />
-      </Row>
-      <Row label="primary_key">
-        <Text value={schema.primary_key ?? ""} list={cols} onChange={(pk) => apply((s) => edit.setRootMeta(s, { primary_key: pk || undefined }))} />
-      </Row>
+      <Block variant="src" title={t("inspector.fromDb")}>
+        <Row label={t("inspector.rootTable")}>
+          <Text value={schema.table} list={tables} onChange={(table) => apply((s) => edit.setRootMeta(s, { table }))} />
+        </Row>
+        <Row label={t("inspector.schema")}>
+          <Text value={schema.db_schema} onChange={(db_schema) => apply((s) => edit.setRootMeta(s, { db_schema }))} placeholder="public" />
+        </Row>
+        <Row label="primary_key">
+          <Text value={schema.primary_key ?? ""} list={cols} onChange={(pk) => apply((s) => edit.setRootMeta(s, { primary_key: pk || undefined }))} />
+        </Row>
+      </Block>
       <SoftDeleteEditor value={schema.soft_delete} onChange={(soft_delete) => apply((s) => ({ ...s, soft_delete }))} cols={cols} />
-      <details>
-        <summary>{t("inspector.rootFilters")}</summary>
+      <Drawer title={t("inspector.rootFilters")} count={(schema.filters ?? []).length}>
         <Filters value={schema.filters ?? []} onChange={(filters) => apply((s) => ({ ...s, filters }))} columns={cols} />
-      </details>
+      </Drawer>
     </div>
   );
 }
@@ -121,10 +156,10 @@ function NodeInspector({ path }: { path: number[] }) {
             {t("inspector.delete")}
           </button>
         </div>
-        <Row label={t("inspector.fieldName")}>
-          <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
-        </Row>
-        <p className="hint">{t("inspector.groupHint")}</p>
+        <div className="no-source">⊘ {t("inspector.groupHint")}</div>
+        <Block variant="doc" title={t("inspector.inDoc")}>
+          <NameField field={field} set={setField} />
+        </Block>
       </div>
     );
   }
@@ -157,57 +192,53 @@ function NodeInspector({ path }: { path: number[] }) {
           {t("inspector.delete")}
         </button>
       </div>
-      <Row label={t("inspector.fieldName")}>
-        <Text value={field.field} onChange={(name) => setField({ ...field, field: name })} />
-      </Row>
-      <Row label={t("inspector.verb")}>
-        <Select value={verb} options={["belongs_to", "has_one", "has_many", "many_to_many"]} onChange={(v) => setJoin({ ...join, kind: blankKind(v) })} />
-      </Row>
-      <Row label={t("inspector.table")}>
-        <Text value={join.table} list={tables} onChange={(table) => setJoin({ ...join, table })} />
-      </Row>
-      <Row label="primary_key">
-        <Text value={join.primary_key} list={relCols} onChange={(primary_key) => setJoin({ ...join, primary_key })} />
-      </Row>
-      {"belongs_to" in join.kind && (
-        <Row label={t("inspector.btColumn")}>
-          <Text value={join.kind.belongs_to.column} onChange={(c) => setJoin({ ...join, kind: { belongs_to: { column: c } } })} />
+      <Block variant="src" title={t("inspector.relationship")}>
+        <Row label={t("inspector.verb")}>
+          <Select value={verb} options={["belongs_to", "has_one", "has_many", "many_to_many"]} onChange={(v) => setJoin({ ...join, kind: blankKind(v) })} />
         </Row>
-      )}
-      {"has_one" in join.kind && (
-        <Row label={t("inspector.fkOnTarget")}>
-          <Text value={join.kind.has_one.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_one: { foreign_key: c } } })} />
+        <Row label={t("inspector.table")}>
+          <Text value={join.table} list={tables} onChange={(table) => setJoin({ ...join, table })} />
         </Row>
-      )}
-      {"has_many" in join.kind && (
-        <Row label={t("inspector.fkOnTarget")}>
-          <Text value={join.kind.has_many.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_many: { foreign_key: c } } })} />
+        <Row label="primary_key">
+          <Text value={join.primary_key} list={relCols} onChange={(primary_key) => setJoin({ ...join, primary_key })} />
         </Row>
-      )}
-      {"many_to_many" in join.kind && (
-        <ThroughEditor through={join.kind.many_to_many.through} tables={tables} onChange={(through) => setJoin({ ...join, kind: { many_to_many: { through } } })} />
-      )}
-      {!toMany && (
-        <>
-          {fkNullable === true && (
-            <p className="hint">{t("inspector.fkNullable", { col: btColumn ?? "" })}</p>
-          )}
-          {fkNullable === false && (
-            <p className="hint">{t("inspector.fkNotNull", { col: btColumn ?? "" })}</p>
-          )}
+        {"belongs_to" in join.kind && (
+          <Row label={t("inspector.btColumn")}>
+            <Text value={join.kind.belongs_to.column} onChange={(c) => setJoin({ ...join, kind: { belongs_to: { column: c } } })} />
+          </Row>
+        )}
+        {"has_one" in join.kind && (
+          <Row label={t("inspector.fkOnTarget")}>
+            <Text value={join.kind.has_one.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_one: { foreign_key: c } } })} />
+          </Row>
+        )}
+        {"has_many" in join.kind && (
+          <Row label={t("inspector.fkOnTarget")}>
+            <Text value={join.kind.has_many.foreign_key} list={relCols} onChange={(c) => setJoin({ ...join, kind: { has_many: { foreign_key: c } } })} />
+          </Row>
+        )}
+        {"many_to_many" in join.kind && (
+          <ThroughEditor through={join.kind.many_to_many.through} tables={tables} onChange={(through) => setJoin({ ...join, kind: { many_to_many: { through } } })} />
+        )}
+      </Block>
+      {!toMany && fkNullable === true && <Bridge>{t("inspector.fkNullable", { col: btColumn ?? "" })}</Bridge>}
+      {!toMany && fkNullable === false && <Bridge>{t("inspector.fkNotNull", { col: btColumn ?? "" })}</Bridge>}
+      <Block variant="doc" title={t("inspector.inDoc")}>
+        <NameField field={field} set={setField} />
+        <div className="nested-note">{t("inspector.nestedNote")}</div>
+        {!toMany && (
           <Check value={!join.nullable} label={t("inspector.required")} onChange={(req) => setJoin({ ...join, nullable: !req })} />
-        </>
-      )}
-      {verb !== "belongs_to" && <OrderByEditor value={join.order_by ?? []} cols={relCols} onChange={(order_by) => setJoin({ ...join, order_by })} />}
-      {toMany && (
-        <Row label="limit">
-          <Num value={join.limit} onChange={(limit) => setJoin({ ...join, limit })} />
-        </Row>
-      )}
-      <details>
-        <summary>{t("inspector.filters")}</summary>
+        )}
+        {verb !== "belongs_to" && <OrderByEditor value={join.order_by ?? []} cols={relCols} onChange={(order_by) => setJoin({ ...join, order_by })} />}
+        {toMany && (
+          <Row label="limit">
+            <Num value={join.limit} onChange={(limit) => setJoin({ ...join, limit })} />
+          </Row>
+        )}
+      </Block>
+      <Drawer title={t("inspector.filters")} count={(join.filters ?? []).length}>
         <Filters value={join.filters ?? []} columns={relCols} onChange={(filters) => setJoin({ ...join, filters })} />
-      </details>
+      </Drawer>
     </div>
   );
 }
@@ -251,29 +282,13 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
           {t("inspector.delete")}
         </button>
       </div>
-      <Section title={t("inspector.secIdentity")}>
-        <Row label={t("inspector.fieldName")}>
-          <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
-        </Row>
-      </Section>
-
       {"column" in s && typeof s.column.ty === "string" && (
         <ScalarBody field={field} column={s.column} srcNullable={srcNullable} suggested={srcCol?.suggested_type} sqlType={srcCol?.sql_type} set={set} />
       )}
       {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && <MapBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && <CustomBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />}
       {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
-      {"constant" in s && (
-        <Section title={t("inspector.secMapping")}>
-          <Row label={t("inspector.valueJson")}>
-            <GenericInput
-              value={s.constant}
-              emptyTo="Null"
-              onChange={(constant) => set({ ...field, source: { constant: constant ?? "Null" } })}
-            />
-          </Row>
-        </Section>
-      )}
+      {"constant" in s && <ConstantBody field={field} set={set} value={s.constant} />}
       {"relation" in s && "aggregate" in s.relation && <AggregateBody field={field} agg={s.relation.aggregate} tables={tables} set={set} />}
 
       <OptionsEditor field={field} set={set} />
@@ -283,9 +298,42 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
 
 // --- leaf bodies ---
 
-// The column is fixed by the catalog checkbox on the node; the inspector edits
-// only what's *about* the field — its type, nullability, transforms, default.
-// (The document field name is renamed in the header above.)
+/// The document-field name plus one-click rename chips derived from the source
+/// (see [`nameSuggestions`]). Goes first in every Document block.
+function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
+  const { t } = useT();
+  const chips = nameSuggestions(field)
+    .filter((n, i, a) => n && n !== field.field && a.indexOf(n) === i)
+    .slice(0, 3);
+  return (
+    <div className="fb">
+      <span className="lbl">{t("inspector.fieldName")}</span>
+      <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
+      {chips.length > 0 && (
+        <div className="rename-chips">
+          <span className="rc-lead">{t("inspector.renameTo")}</span>
+          {chips.map((n) => (
+            <button type="button" key={n} className="rchip" onClick={() => set({ ...field, field: n })}>
+              {n}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// The source-imposed nullability rule, as a [`Bridge`] — nothing when the
+/// column's nullability is unknown (offline / hand-typed).
+function NullBridge({ srcNullable }: { srcNullable?: boolean }) {
+  const { t } = useT();
+  if (srcNullable === false) return <Bridge>{t("inspector.bridgeNotNull")}</Bridge>;
+  if (srcNullable === true) return <Bridge>{t("inspector.bridgeNullable")}</Bridge>;
+  return null;
+}
+
+// The column is fixed by the catalog checkbox on the node; the Document block
+// edits only what's *about* the field — its type, transforms, required/default.
 function ScalarBody({
   field,
   column,
@@ -315,17 +363,19 @@ function ScalarBody({
   const showSuggestion = typeof suggested === "string" && suggested !== column.ty;
   return (
     <>
-      <Section title={t("inspector.secSource")}>
+      <Block variant="src" title={t("inspector.fromDb")}>
         <SourceColumn name={column.column} sqlType={sqlType} srcNullable={srcNullable} />
-      </Section>
-      <Section title={t("inspector.secMapping")}>
+      </Block>
+      <NullBridge srcNullable={srcNullable} />
+      <Block variant="doc" title={t("inspector.inDoc")}>
+        <NameField field={field} set={set} />
         <Row label={t("inspector.type")}>
           <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
         </Row>
         {showSuggestion && (
-          <p className="hint">
-            {t("inspector.suggestType", { sql: sqlType ?? "", ty: suggested })}{" "}
-            <button type="button" className="link" onClick={() => setCol({ ...column, ty: suggested })}>
+          <p className="nudge">
+            <span className="from">{suggested}</span> {t("inspector.suggested")} ·{" "}
+            <button type="button" className="use" onClick={() => setCol({ ...column, ty: suggested })}>
               {t("inspector.use")}
             </button>
           </p>
@@ -335,7 +385,7 @@ function ScalarBody({
           <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
         </div>
         <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
-      </Section>
+      </Block>
     </>
   );
 }
@@ -373,9 +423,6 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
   const defaultMissing = mustDefault && column.default === undefined;
   return (
     <>
-      {srcNullable === true && (
-        <p className="hint">{t("inspector.srcNullable")}</p>
-      )}
       <Check value={required} label={t("inspector.required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
       {(srcNullable !== false || column.default !== undefined) && (
         <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
@@ -411,23 +458,42 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
     delete next[key];
     set({ ...field, options: Object.keys(next).length ? next : undefined });
   };
+  // Quick-adds for the common OpenSearch mapping knobs; numeric ones seed a
+  // number, the rest a string — both valid GenericValues, so adding never errors.
+  const KNOBS: { key: string; seed: unknown }[] = [
+    { key: "analyzer", seed: { String: "" } },
+    { key: "search_analyzer", seed: { String: "" } },
+    { key: "boost", seed: { Double: 1 } },
+    { key: "null_value", seed: { String: "" } },
+    { key: "copy_to", seed: { String: "" } },
+    { key: "scaling_factor", seed: { Double: 100 } },
+  ];
+  const available = KNOBS.filter((k) => !(k.key in options));
   return (
-    <details>
-      <summary>{t("inspector.options", { n: entries.length })}</summary>
-      <p className="hint">{t("inspector.optionsHelp")}</p>
+    <Drawer title={t("inspector.advanced")} count={entries.length}>
+      <p className="drawer-hint">{t("inspector.optionsHelp")}</p>
+      {available.length > 0 && (
+        <div className="knobs">
+          {available.map((k) => (
+            <button type="button" key={k.key} className="knob" onClick={() => setOpt(k.key, k.seed)}>
+              {k.key}
+            </button>
+          ))}
+        </div>
+      )}
       {entries.map(([k, v]) => (
         <div className="opt-row" key={k}>
-          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
+          <Text className="mini" value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
           <GenericInput value={v} emptyTo={{ String: "" }} onChange={(nv) => setOpt(k, nv ?? { String: "" })} placeholder={t("inspector.optValue")} />
-          <button type="button" className="link danger" onClick={() => removeOpt(k)}>
+          <button type="button" className="x" onClick={() => removeOpt(k)} aria-label={t("common.remove")}>
             ✕
           </button>
         </div>
       ))}
-      <button type="button" className="link" onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })}>
+      <button type="button" className="addline" onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })}>
         + {t("inspector.option")}
       </button>
-    </details>
+    </Drawer>
   );
 }
 
@@ -437,17 +503,19 @@ function MapBody({ field, column, cols, srcNullable, set }: { field: Field; colu
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Section title={t("inspector.secSource")}>
+      <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("inspector.columnJson")}>
           <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
         </Row>
-      </Section>
-      <Section title={t("inspector.secMapping")}>
+      </Block>
+      <NullBridge srcNullable={srcNullable} />
+      <Block variant="doc" title={t("inspector.inDoc")}>
+        <NameField field={field} set={set} />
         <Row label={t("inspector.values")}>
           <Select value={ty.map.values as string} options={LEAF_TYPES as string[]} onChange={(v) => setCol({ ...column, ty: { map: { values: v as FlussoType } } })} />
         </Row>
         <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
-      </Section>
+      </Block>
     </>
   );
 }
@@ -458,20 +526,37 @@ function CustomBody({ field, column, cols, srcNullable, set }: { field: Field; c
   const setCol = (c: Column) => set({ ...field, source: { column: c } });
   return (
     <>
-      <Section title={t("inspector.secSource")}>
+      <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("common.column")}>
           <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
         </Row>
         <Row label={t("inspector.pgTypes")}>
           <Text value={ty.custom.postgres.join(", ")} onChange={(text) => setCol({ ...column, ty: { custom: { ...ty.custom, postgres: text.split(",").map((x) => x.trim()).filter(Boolean) } } })} />
         </Row>
-      </Section>
-      <Section title={t("inspector.secMapping")}>
+      </Block>
+      <NullBridge srcNullable={srcNullable} />
+      <Block variant="doc" title={t("inspector.inDoc")}>
+        <NameField field={field} set={set} />
         <Row label={t("inspector.osType")}>
           <Text value={ty.custom.opensearch} onChange={(o) => setCol({ ...column, ty: { custom: { ...ty.custom, opensearch: o } } })} />
         </Row>
         <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
-      </Section>
+      </Block>
+    </>
+  );
+}
+
+function ConstantBody({ field, value, set }: { field: Field; value: unknown; set: (f: Field) => void }) {
+  const { t } = useT();
+  return (
+    <>
+      <div className="no-source">⊘ {t("inspector.noSource")}</div>
+      <Block variant="doc" title={t("inspector.inDoc")}>
+        <NameField field={field} set={set} />
+        <Row label={t("inspector.valueJson")}>
+          <GenericInput value={value} emptyTo="Null" onChange={(constant) => set({ ...field, source: { constant: constant ?? "Null" } })} />
+        </Row>
+      </Block>
     </>
   );
 }
@@ -482,18 +567,19 @@ function GeoBody({ field, set, cols }: { field: Field; set: (f: Field) => void; 
   const geo = field.source.geo;
   return (
     <>
-      <Section title={t("inspector.secSource")}>
+      <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("inspector.latColumn")}>
           <Text value={geo.lat} list={cols} onChange={(lat) => set({ ...field, source: { geo: { ...geo, lat } } })} />
         </Row>
         <Row label={t("inspector.lonColumn")}>
           <Text value={geo.lon} list={cols} onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })} />
         </Row>
-      </Section>
-      <Section title={t("inspector.secMapping")}>
+      </Block>
+      <Bridge>{t("inspector.geoHint")}</Bridge>
+      <Block variant="doc" title={t("inspector.inDoc")}>
+        <NameField field={field} set={set} />
         <Check value={!geo.nullable} label={t("inspector.required")} onChange={(req) => set({ ...field, source: { geo: { ...geo, nullable: !req } } })} />
-        <p className="hint">{t("inspector.geoHint")}</p>
-      </Section>
+      </Block>
     </>
   );
 }
@@ -509,7 +595,7 @@ function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggrega
   const hasMappingType = kind === "sum" || kind === "min" || kind === "max" || kind === "ids";
   return (
     <>
-      <Section title={t("inspector.secSource")}>
+      <Block variant="src" title={t("inspector.aggFrom")}>
         <Row label={t("inspector.relatedTable")}>
           <Text value={agg.table} list={tables} onChange={(table) => setAgg({ ...agg, table })} />
         </Row>
@@ -519,25 +605,24 @@ function AggregateBody({ field, agg, tables, set }: { field: Field; agg: Aggrega
           </Row>
         )}
         <AggregateKeyEditor value={agg.key} tables={tables} onChange={(key) => setAgg({ ...agg, key })} />
-      </Section>
-      {hasMappingType && (
-        <Section title={t("inspector.secMapping")}>
-          {(kind === "sum" || kind === "min" || kind === "max") && (
-            <Row label="value_type">
-              <Select value={(agg.value_type as string) ?? "integer"} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, value_type: v as FlussoType })} />
-            </Row>
-          )}
-          {kind === "ids" && typeof op !== "string" && "ids" in op && (
-            <Row label="element_type">
-              <Select value={op.ids.element_type as string} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, op: { ids: { element_type: v as FlussoType } } })} />
-            </Row>
-          )}
-        </Section>
-      )}
-      <details>
-        <summary>{t("inspector.filters")}</summary>
+      </Block>
+      <Block variant="doc" title={t("inspector.inDoc")}>
+        <NameField field={field} set={set} />
+        {(kind === "sum" || kind === "min" || kind === "max") && (
+          <Row label="value_type">
+            <Select value={(agg.value_type as string) ?? "integer"} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, value_type: v as FlussoType })} />
+          </Row>
+        )}
+        {kind === "ids" && typeof op !== "string" && "ids" in op && (
+          <Row label="element_type">
+            <Select value={op.ids.element_type as string} options={SCALAR_TYPES as string[]} onChange={(v) => setAgg({ ...agg, op: { ids: { element_type: v as FlussoType } } })} />
+          </Row>
+        )}
+        {!hasMappingType && <p className="hint">{t("inspector.countResult")}</p>}
+      </Block>
+      <Drawer title={t("inspector.filters")} count={(agg.filters ?? []).length}>
         <Filters value={agg.filters ?? []} onChange={(filters) => setAgg({ ...agg, filters })} />
-      </details>
+      </Drawer>
     </>
   );
 }
