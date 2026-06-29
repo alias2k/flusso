@@ -1003,9 +1003,9 @@ function OrderByEditor({
       <div className="mb-1 text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">order_by</div>
       {value.map((ob, i) => (
         <div className="my-1 flex items-center gap-1.5" key={i}>
-          <Text
+          <Select
             value={ob.column}
-            list={cols}
+            options={ob.column && !cols.includes(ob.column) ? [ob.column, ...cols] : cols}
             onChange={(column) => set(i, { ...ob, column })}
             placeholder={t("common.column")}
             className="min-w-0 flex-1"
@@ -1028,7 +1028,12 @@ function OrderByEditor({
           </Button>
         </div>
       ))}
-      <Button variant="link" size="sm" onClick={() => onChange([...value, { column: "", direction: "asc" }])}>
+      <Button
+        variant="link"
+        size="sm"
+        disabled={!cols.length}
+        onClick={() => onChange([...value, { column: cols[0] ?? "", direction: "asc" }])}
+      >
         + order_by
       </Button>
     </div>
