@@ -14,14 +14,7 @@ import {
 // import is unlayered and would beat our `@layer components` handle overrides.
 import { useEffect, useRef, useState } from "react";
 import { SCALAR_TYPES } from "../api";
-import {
-  autoLayout,
-  clearOverrides,
-  loadOverrides,
-  loadViewport,
-  saveOverride,
-  saveViewport,
-} from "../model/layout";
+import { autoLayout, clearOverrides, loadOverrides, loadViewport, saveOverride, saveViewport } from "../model/layout";
 import { suggestRelations } from "../model/relations";
 import { type DocNode, projectGraph } from "../model/tree";
 import { useT } from "../i18n";
@@ -107,9 +100,7 @@ export function Canvas() {
     const heights = new Map(nodes.map((n) => [n.id, n.measured?.height ?? 0]));
     const auto = autoLayout(docNodes, (dn) => heights.get(dn.id) ?? 300);
     const overrides = loadOverrides(indexName);
-    setNodes((current) =>
-      current.map((n) => ({ ...n, position: overrides[n.id] ?? auto[n.id] ?? n.position })),
-    );
+    setNodes((current) => current.map((n) => ({ ...n, position: overrides[n.id] ?? auto[n.id] ?? n.position })));
   }, [nodes, indexName, setNodes]);
 
   // Drop manual positions and re-tidy from the measured heights.
@@ -200,7 +191,9 @@ function NodeSearch() {
   };
   const results = q
     ? getNodes()
-        .filter((n) => `${label(n)} ${(n.data as { node: DocNode }).node.table}`.toLowerCase().includes(q.toLowerCase()))
+        .filter((n) =>
+          `${label(n)} ${(n.data as { node: DocNode }).node.table}`.toLowerCase().includes(q.toLowerCase()),
+        )
         .slice(0, 8)
     : [];
 

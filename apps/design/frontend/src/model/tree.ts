@@ -198,7 +198,9 @@ function nodeKind(field: Field): NodeKind {
 }
 
 function isContainerKind(kind: string): boolean {
-  return kind === "object" || kind === "belongs_to" || kind === "has_one" || kind === "has_many" || kind === "many_to_many";
+  return (
+    kind === "object" || kind === "belongs_to" || kind === "has_one" || kind === "has_many" || kind === "many_to_many"
+  );
 }
 
 function nodePrimaryKey(schema: IndexSchema, path: number[], field: Field | null): string | undefined {

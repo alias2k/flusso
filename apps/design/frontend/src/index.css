@@ -606,11 +606,7 @@
       0 0.75rem 2rem rgba(0, 0, 0, 0.5);
   }
   .flow-node header {
-    background: linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--kc) 16%, transparent),
-      transparent
-    );
+    background: linear-gradient(180deg, color-mix(in srgb, var(--kc) 16%, transparent), transparent);
   }
 
   /* FK suggestions as accent pills */

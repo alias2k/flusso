@@ -5,19 +5,7 @@ import { Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
 
-const VALUE_OPS = [
-  "eq",
-  "neq",
-  "lt",
-  "lte",
-  "gt",
-  "gte",
-  "in",
-  "not_in",
-  "like",
-  "ilike",
-  "between",
-] as const;
+const VALUE_OPS = ["eq", "neq", "lt", "lte", "gt", "gte", "in", "not_in", "like", "ilike", "between"] as const;
 
 function kindOf(f: Filter): FilterKind {
   if ("raw" in f) return "raw";
@@ -35,7 +23,10 @@ function blank(kind: FilterKind): Filter {
 /// commas into an array, `between` into a two-element range, others stay scalar.
 function coerceValue(op: string, text: string): unknown {
   if (op === "in" || op === "not_in") {
-    return text.split(",").map((s) => s.trim()).filter(Boolean);
+    return text
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   if (op === "between") {
     const parts = text.split(",").map((s) => s.trim());
@@ -118,7 +109,7 @@ export function Filters({
             {kind === "value_op" && "value" in f && (
               <>
                 <Text
-                  value={"column" in f ? (f.column) : ""}
+                  value={"column" in f ? f.column : ""}
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
                   placeholder={t("common.column")}
@@ -133,7 +124,9 @@ export function Filters({
                 <Text
                   value={valueText(f)}
                   onChange={(text) => set(i, { ...f, value: coerceValue(f.op, text) })}
-                  placeholder={f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")}
+                  placeholder={
+                    f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")
+                  }
                   className="flex-1"
                 />
               </>

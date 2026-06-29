@@ -27,7 +27,9 @@ export function SectionTitle({ children, className }: { children: ReactNode; cla
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="field mb-2 flex flex-col gap-1">
-      <span className="field-label text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">{label}</span>
+      <span className="field-label text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">
+        {label}
+      </span>
       {children}
     </div>
   );
@@ -45,12 +47,15 @@ export function Block({ variant, title, children }: { variant: "src" | "doc"; ti
     <div
       className={cn(
         "blk mt-1 rounded-lg border border-l-2 border-border p-3 first:mt-0",
-        src
-          ? "src bg-string/10 border-l-string"
-          : "doc bg-card border-l-primary",
+        src ? "src bg-string/10 border-l-string" : "doc bg-card border-l-primary",
       )}
     >
-      <div className={cn("blk-h mb-2 text-3xs font-bold uppercase tracking-[0.08em]", src ? "text-string" : "text-primary")}>
+      <div
+        className={cn(
+          "blk-h mb-2 text-3xs font-bold uppercase tracking-[0.08em]",
+          src ? "text-string" : "text-primary",
+        )}
+      >
         {src ? "◧ " : "◨ "}
         {title}
       </div>
@@ -74,9 +79,22 @@ export function Bridge({ children }: { children: ReactNode }) {
 /// A collapsible "expert" drawer (advanced mapping knobs, filters): quieter
 /// than the source/document blocks — slate, monospace-leaning, closed by
 /// default — so secondary tuning never competes with the primary choices.
-export function Drawer({ title, count, defaultOpen, children }: { title: string; count?: number; defaultOpen?: boolean; children: ReactNode }) {
+export function Drawer({
+  title,
+  count,
+  defaultOpen,
+  children,
+}: {
+  title: string;
+  count?: number;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <details className="expert-drawer group mt-2.5 w-full overflow-hidden rounded-lg border border-border" open={defaultOpen}>
+    <details
+      className="expert-drawer group mt-2.5 w-full overflow-hidden rounded-lg border border-border"
+      open={defaultOpen}
+    >
       <summary className="drawer-h flex cursor-pointer list-none items-center gap-2 bg-secondary px-3 py-2 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-3 text-slate transition-transform group-open:rotate-90" aria-hidden="true" />
         <span className="text-2xs font-bold uppercase tracking-[0.07em] text-slate">{title}</span>
@@ -156,7 +174,16 @@ export function GenericInput({
   // Resync from the model only when the model itself changes (undo, switching
   // fields) — not on every keystroke, so partial JSON survives typing.
   useEffect(() => setText(external), [external]);
-  const parseable = text.trim() === "" || (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+  const parseable =
+    text.trim() === "" ||
+    (() => {
+      try {
+        JSON.parse(text);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
   const handle = (s: string) => {
     setText(s);
     if (s.trim() === "") return onChange(emptyTo);
@@ -188,15 +215,7 @@ export function Num({
   );
 }
 
-export function Check({
-  value,
-  onChange,
-  label,
-}: {
-  value: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-}) {
+export function Check({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label: string }) {
   const id = useId();
   return (
     <div className="check inline-flex items-center gap-1.5 text-xs">

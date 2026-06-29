@@ -4,18 +4,7 @@
 import type { ReactElement } from "react";
 
 type IconName =
-  | "menu"
-  | "close"
-  | "map"
-  | "plus"
-  | "chevron"
-  | "flow"
-  | "undo"
-  | "redo"
-  | "theme"
-  | "copy"
-  | "play"
-  | "tidy";
+  "menu" | "close" | "map" | "plus" | "chevron" | "flow" | "undo" | "redo" | "theme" | "copy" | "play" | "tidy";
 
 const paths: Record<IconName, ReactElement> = {
   menu: (
@@ -75,9 +64,7 @@ const paths: Record<IconName, ReactElement> = {
       <rect x="11" y="3" width="6" height="9" rx="1" />
     </>
   ),
-  play: (
-    <path d="M5 3.5v13l11-6.5z" />
-  ),
+  play: <path d="M5 3.5v13l11-6.5z" />,
   // A stylised "flow" mark for the wordmark.
   flow: (
     <>

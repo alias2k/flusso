@@ -19,7 +19,9 @@ export function toggleColumn(
     const field: Field = { field: column, source: { column: { column, ty, nullable } } };
     return withNodeFields(schema, path, [...fields, field]);
   }
-  const next = fields.filter((f) => !("column" in f.source && typeof f.source.column.ty === "string" && f.source.column.column === column));
+  const next = fields.filter(
+    (f) => !("column" in f.source && typeof f.source.column.ty === "string" && f.source.column.column === column),
+  );
   return withNodeFields(schema, path, next);
 }
 
@@ -65,7 +67,13 @@ export function duplicateAt(schema: IndexSchema, path: number[], index: number):
   const fields = nodeFields(schema, path);
   const orig = fields[index];
   if (!orig) return schema;
-  const copy: Field = { ...structuredClone(orig), field: uniqueName(fields.map((f) => f.field), orig.field) };
+  const copy: Field = {
+    ...structuredClone(orig),
+    field: uniqueName(
+      fields.map((f) => f.field),
+      orig.field,
+    ),
+  };
   const next = fields.slice();
   next.splice(index + 1, 0, copy);
   return withNodeFields(schema, path, next);

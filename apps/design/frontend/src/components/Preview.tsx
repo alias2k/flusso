@@ -59,7 +59,13 @@ export function Preview({
         <div className="mb-3">
           <SectionTitle>{t("preview.dbCheck")}</SectionTitle>
           {diagnostics.map((d, i) => (
-            <div key={i} className={cn("py-1 text-sm", d.severity === "error" ? "text-destructive" : d.severity === "warning" ? "text-warn" : "")}>
+            <div
+              key={i}
+              className={cn(
+                "py-1 text-sm",
+                d.severity === "error" ? "text-destructive" : d.severity === "warning" ? "text-warn" : "",
+              )}
+            >
               <span className="font-mono text-muted-foreground">
                 {d.index}.{d.field}
               </span>{" "}
@@ -113,7 +119,8 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
         {t("preview.sampleFromDb")}
         {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
         <Button variant="link" size="sm" className="gap-1" onClick={fetchSample} disabled={loading}>
-          <Icon name="play" size={13} /> {loading ? t("preview.building") : result ? t("preview.refresh") : t("preview.fetch")}
+          <Icon name="play" size={13} />{" "}
+          {loading ? t("preview.building") : result ? t("preview.refresh") : t("preview.fetch")}
         </Button>
       </SectionTitle>
       {error && <div className="banner error">{error}</div>}

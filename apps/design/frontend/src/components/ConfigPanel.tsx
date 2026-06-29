@@ -35,11 +35,15 @@ export function ConfigPanel({
     <div className="config-panel max-w-3xl">
       <PanelTitle>{t("sidebar.deployment")}</PanelTitle>
       <Field label={t("config.indexPrefix")}>
-        <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder={t("config.none")} />
+        <Text
+          value={config.prefix ?? ""}
+          onChange={(prefix) => onChange({ ...config, prefix })}
+          placeholder={t("config.none")}
+        />
       </Field>
       <ConnectionEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
       <Check
-        value={(config.source)?.manage_publication !== false}
+        value={config.source?.manage_publication !== false}
         label="manage_publication"
         onChange={(v) => onChange({ ...config, source: { ...config.source, manage_publication: v } })}
       />
@@ -53,14 +57,14 @@ export function ConfigPanel({
       <div className="flex flex-wrap gap-3">
         <Field label="public_address">
           <Text
-            value={((config.server)?.public_address as string) ?? ""}
+            value={(config.server?.public_address as string) ?? ""}
             onChange={(v) => onChange({ ...config, server: { ...config.server, public_address: v || undefined } })}
             placeholder="127.0.0.1:9464"
           />
         </Field>
         <Field label="private_address">
           <Text
-            value={((config.server)?.private_address as string) ?? ""}
+            value={(config.server?.private_address as string) ?? ""}
             onChange={(v) => onChange({ ...config, server: { ...config.server, private_address: v || undefined } })}
             placeholder="127.0.0.1:9465"
           />
@@ -69,12 +73,20 @@ export function ConfigPanel({
 
       <SectionTitle>{t("config.sinks")}</SectionTitle>
       {Object.entries(sinks).map(([name, sink]) => (
-        <SinkEditor key={name} name={name} sink={sink} onChange={(s) => setSink(name, s)} onRemove={() => removeSink(name)} />
+        <SinkEditor
+          key={name}
+          name={name}
+          sink={sink}
+          onChange={(s) => setSink(name, s)}
+          onRemove={() => removeSink(name)}
+        />
       ))}
       <Button
         variant="link"
         size="sm"
-        onClick={() => setSink(`sink${Object.keys(sinks).length + 1}`, { type: "opensearch", url: "http://127.0.0.1:9200" })}
+        onClick={() =>
+          setSink(`sink${Object.keys(sinks).length + 1}`, { type: "opensearch", url: "http://127.0.0.1:9200" })
+        }
       >
         + {t("config.sink")}
       </Button>
@@ -110,7 +122,10 @@ export function ConfigPanel({
         variant="link"
         size="sm"
         onClick={() =>
-          onChange({ ...config, index: [...index, { name: "new_index", schema: "new_index.schema.yml", enabled: true }] })
+          onChange({
+            ...config,
+            index: [...index, { name: "new_index", schema: "new_index.schema.yml", enabled: true }],
+          })
         }
       >
         + {t("config.index")}
@@ -145,7 +160,11 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
       </Field>
       {mode === "url" && (
         <Field label="url">
-          <Text value={typeof cu === "string" ? cu : ""} onChange={setCu} placeholder="postgres://user:pass@host:5432/db" />
+          <Text
+            value={typeof cu === "string" ? cu : ""}
+            onChange={setCu}
+            placeholder="postgres://user:pass@host:5432/db"
+          />
         </Field>
       )}
       {mode === "env" && (
@@ -161,7 +180,7 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
             </Field>
             <Field label={t("config.port")}>
               <Num
-                value={typeof obj.port === "number" ? (obj.port) : undefined}
+                value={typeof obj.port === "number" ? obj.port : undefined}
                 onChange={(v) => setCu({ ...obj, port: v })}
               />
             </Field>
@@ -171,7 +190,7 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
           </Field>
           <Field label={t("config.password")}>
             <Text
-              value={typeof obj.password === "string" ? (obj.password) : ""}
+              value={typeof obj.password === "string" ? obj.password : ""}
               onChange={(v) => setCu({ ...obj, password: v || undefined })}
             />
           </Field>
@@ -200,8 +219,8 @@ function SinkEditor({
   const { t } = useT();
   const type = (sink.type as string) ?? "opensearch";
   const set = (key: string, value: unknown) => onChange({ ...sink, [key]: value });
-  const str = (key: string) => (typeof sink[key] === "string" ? (sink[key]) : "");
-  const num = (key: string) => (typeof sink[key] === "number" ? (sink[key]) : undefined);
+  const str = (key: string) => (typeof sink[key] === "string" ? sink[key] : "");
+  const num = (key: string) => (typeof sink[key] === "number" ? sink[key] : undefined);
   const bool = (key: string) => sink[key] === true;
 
   return (
@@ -234,7 +253,11 @@ function SinkEditor({
             </Field>
           </div>
           <Field label="refresh_interval">
-            <Text value={str("refresh_interval")} onChange={(v) => set("refresh_interval", v || undefined)} placeholder="1s" />
+            <Text
+              value={str("refresh_interval")}
+              onChange={(v) => set("refresh_interval", v || undefined)}
+              placeholder="1s"
+            />
           </Field>
         </>
       ) : (

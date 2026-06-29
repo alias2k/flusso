@@ -109,11 +109,7 @@ export interface Aggregate {
 export type Relation = { join: Join } | { aggregate: Aggregate };
 
 export type FieldSource =
-  | { column: Column }
-  | { group: Field[] }
-  | { geo: Geo }
-  | { relation: Relation }
-  | { constant: unknown };
+  { column: Column } | { group: Field[] } | { geo: Geo } | { relation: Relation } | { constant: unknown };
 
 export interface Field {
   field: string;
@@ -122,13 +118,9 @@ export interface Field {
 }
 
 export type Filter =
-  | { raw: string }
-  | { column: string; op: "is_null" | "is_not_null" }
-  | { column: string; op: string; value: unknown };
+  { raw: string } | { column: string; op: "is_null" | "is_not_null" } | { column: string; op: string; value: unknown };
 
-export type SoftDelete =
-  | { field: string; when?: Filter[] }
-  | { column: string; when?: Filter[] };
+export type SoftDelete = { field: string; when?: Filter[] } | { column: string; when?: Filter[] };
 
 export interface IndexSchema {
   version: number;

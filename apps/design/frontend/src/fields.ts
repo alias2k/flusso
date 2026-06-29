@@ -4,32 +4,12 @@
 // shape — scalar types, map/custom/geo/object, the four join verbs, the six
 // aggregate ops, and constant.
 
-import type {
-  Aggregate,
-  AggregateOp,
-  Field,
-  FieldSource,
-  FlussoType,
-  Join,
-  JoinKind,
-} from "./api";
+import type { Aggregate, AggregateOp, Field, FieldSource, FlussoType, Join, JoinKind } from "./api";
 import { SCALAR_TYPES } from "./api";
 
-export const JOIN_KINDS = [
-  "belongs_to",
-  "has_one",
-  "has_many",
-  "many_to_many",
-] as const;
+export const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as const;
 export const AGGREGATE_OPS = ["count", "sum", "avg", "min", "max", "ids"] as const;
-export const LEAF_TYPES: FlussoType[] = [
-  "text",
-  "keyword",
-  "integer",
-  "long",
-  "double",
-  "date",
-];
+export const LEAF_TYPES: FlussoType[] = ["text", "keyword", "integer", "long", "double", "date"];
 
 export type FieldKind = string;
 

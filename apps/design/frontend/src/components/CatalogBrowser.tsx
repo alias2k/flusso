@@ -17,7 +17,10 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex flex-col w-[min(40rem,92vw)] max-w-none max-h-[85vh]" aria-label={t("catalog.aria")}>
+      <DialogContent
+        className="flex flex-col w-[min(40rem,92vw)] max-w-none max-h-[85vh]"
+        aria-label={t("catalog.aria")}
+      >
         <DialogHeader>
           <DialogTitle>{t("catalog.title", { n: catalog.catalog.tables.length })}</DialogTitle>
         </DialogHeader>
@@ -42,7 +45,9 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                           {c.name}
                           {c.nullable ? <span className="muted">?</span> : null}
                         </span>
-                        <span className={`font-mono text-2xs ${typeClass(typeof c.suggested_type === "string" ? c.suggested_type : "other")}`}>
+                        <span
+                          className={`font-mono text-2xs ${typeClass(typeof c.suggested_type === "string" ? c.suggested_type : "other")}`}
+                        >
                           {c.sql_type}
                         </span>
                       </div>

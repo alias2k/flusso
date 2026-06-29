@@ -9,7 +9,11 @@ import type { CatalogResponse, DiagnosticDto, Field, IndexSchema } from "../api"
 ///
 /// Returned as [`DiagnosticDto`]s keyed by field name so they flow through the
 /// exact same highlight/tooltip/list surface as the database validation.
-export function requiredDefaultIssues(schema: IndexSchema, catalog: CatalogResponse | null, index: string): DiagnosticDto[] {
+export function requiredDefaultIssues(
+  schema: IndexSchema,
+  catalog: CatalogResponse | null,
+  index: string,
+): DiagnosticDto[] {
   if (!catalog || catalog.error) return []; // can't know source nullability offline
   const sourceNullable = (table: string, column: string): boolean | undefined =>
     catalog.catalog.tables.find((t) => t.name === table)?.columns.find((c) => c.name === column)?.nullable;

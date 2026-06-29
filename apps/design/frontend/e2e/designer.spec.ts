@@ -81,10 +81,10 @@ test("collapsing a node hides its columns", async ({ page }) => {
 
 test("include-all checks every column", async ({ page }) => {
   const root = page.locator(".flow-node.kind-root");
-  const boxes = root.locator('.col-row [role=checkbox]');
+  const boxes = root.locator(".col-row [role=checkbox]");
   const n = await boxes.count();
   await root.getByRole("button", { name: "all", exact: true }).click();
-  await expect(root.locator('.col-row [role=checkbox][data-state=checked]')).toHaveCount(n);
+  await expect(root.locator(".col-row [role=checkbox][data-state=checked]")).toHaveCount(n);
 });
 
 test("node search jumps to a node", async ({ page }) => {
@@ -198,7 +198,10 @@ test("marking a nullable source column required demands a default", async ({ pag
   // the node highlights it as an error too.
   await expect(page.locator(".flow-node.kind-root .col-row.diag-error")).not.toHaveCount(0);
   // setting a default clears the requirement.
-  await page.locator(".inspector").getByPlaceholder(/e\.g\. 0/).fill('"n/a"');
+  await page
+    .locator(".inspector")
+    .getByPlaceholder(/e\.g\. 0/)
+    .fill('"n/a"');
   await expect(page.locator(".inspector .error-hint")).toHaveCount(0);
   await expect(page.locator(".inspector input.invalid")).toHaveCount(0);
 });

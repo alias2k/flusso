@@ -5,10 +5,7 @@ import { createContext, useContext } from "react";
 import type { CatalogResponse, ColumnShape, DiagnosticDto, IndexSchema } from "./api";
 
 export type Selection =
-  | { kind: "root" }
-  | { kind: "node"; path: number[] }
-  | { kind: "field"; path: number[]; index: number }
-  | null;
+  { kind: "root" } | { kind: "node"; path: number[] } | { kind: "field"; path: number[]; index: number } | null;
 
 export interface DesignCtx {
   catalog: CatalogResponse | null;

@@ -75,7 +75,7 @@ function formatArg(inner: string, vars: Vars, lang: Lang): string {
 /// catalog's needs; the syntax is standard ICU, so messages stay portable.
 function format(message: string, vars: Vars, lang: Lang): string {
   let out = "";
-  for (let i = 0; i < message.length; ) {
+  for (let i = 0; i < message.length;) {
     const ch = message[i];
     if (ch === "'") {
       if (message[i + 1] === "'") {

@@ -29,7 +29,8 @@ export const it: Record<string, string> = {
   "toast.saveFailed": "Salvataggio non riuscito: {err}",
   "toast.savedRaw": "YAML grezzo salvato",
   "toast.validateFailed": "Convalida non riuscita: {err}",
-  "toast.issues": "{n, plural, one {# problema — vedi il campo evidenziato} other {# problemi — vedi i campi evidenziati}}",
+  "toast.issues":
+    "{n, plural, one {# problema — vedi il campo evidenziato} other {# problemi — vedi i campi evidenziati}}",
   "toast.dbNotReachable": "Database non raggiungibile",
   "toast.dbConnected": "Database connesso",
   "toast.alreadyUpToDate": "Già aggiornato",
@@ -81,7 +82,8 @@ export const it: Record<string, string> = {
   "inspector.table": "tabella",
   "inspector.btColumn": "colonna (questa tabella → destinazione)",
   "inspector.fkOnTarget": "foreign_key (sulla destinazione)",
-  "inspector.fkNullable": "La colonna FK {col} ammette null — la destinazione può mancare, quindi questa relazione è facoltativa.",
+  "inspector.fkNullable":
+    "La colonna FK {col} ammette null — la destinazione può mancare, quindi questa relazione è facoltativa.",
   "inspector.fkNotNull": "La colonna FK {col} è NOT NULL — la destinazione è sempre presente.",
   "inspector.filters": "filtri",
   "inspector.valueJson": "valore (JSON)",
@@ -105,10 +107,14 @@ export const it: Record<string, string> = {
   "inspector.noSource": "Nessuna origine dal database — un valore fisso in ogni documento.",
   "inspector.nestedNote": "↳ un oggetto annidato — scegli le sue colonne e sotto-relazioni sul nodo.",
   "inspector.countResult": "Conta le righe correlate in un intero.",
-  "inspector.bridgeNotNull": "NOT NULL → obbligatorio per impostazione predefinita. Deseleziona per renderlo facoltativo nel documento.",
-  "inspector.bridgeNullable": "Ammette null → facoltativo per impostazione predefinita. Segnalo obbligatorio e un valore predefinito diventa necessario.",
-  "inspector.defaultError": "Un campo obbligatorio su una colonna che ammette null deve impostare un valore predefinito, altrimenti il campo del documento potrebbe mancare.",
-  "inspector.optionsHelp": "Proprietà di mappatura OpenSearch aggiuntive, unite accanto al tipo derivato. Scegline una comune o aggiungi la tua. Ogni valore è JSON.",
+  "inspector.bridgeNotNull":
+    "NOT NULL → obbligatorio per impostazione predefinita. Deseleziona per renderlo facoltativo nel documento.",
+  "inspector.bridgeNullable":
+    "Ammette null → facoltativo per impostazione predefinita. Segnalo obbligatorio e un valore predefinito diventa necessario.",
+  "inspector.defaultError":
+    "Un campo obbligatorio su una colonna che ammette null deve impostare un valore predefinito, altrimenti il campo del documento potrebbe mancare.",
+  "inspector.optionsHelp":
+    "Proprietà di mappatura OpenSearch aggiuntive, unite accanto al tipo derivato. Scegline una comune o aggiungi la tua. Ogni valore è JSON.",
   "inspector.optKey": "chiave",
   "inspector.optValue": 'valore (JSON, es. "english" o 2)',
   "inspector.option": "opzione",
@@ -118,7 +124,8 @@ export const it: Record<string, string> = {
   "inspector.osType": "tipo opensearch",
   "inspector.latColumn": "colonna lat",
   "inspector.lonColumn": "colonna lon",
-  "inspector.geoHint": "Un punto è assente quando una delle colonne è null (mai inviato come '{'lat:null'}'). Segna obbligatorio per vietare tale assenza.",
+  "inspector.geoHint":
+    "Un punto è assente quando una delle colonne è null (mai inviato come '{'lat:null'}'). Segna obbligatorio per vietare tale assenza.",
   "inspector.relatedTable": "tabella correlata",
   "inspector.aggColumn": "colonna (da aggregare)",
   "inspector.junctionTable": "tabella di giunzione",
@@ -172,7 +179,8 @@ export const it: Record<string, string> = {
   "node.collapse": "Comprimi",
   "node.pk": "cp",
   "node.fields": "{n, plural, one {# campo} other {# campi}}",
-  "node.diagCount": "{n, plural, one {# campo non concorda con il database} other {# campi non concordano con il database}}",
+  "node.diagCount":
+    "{n, plural, one {# campo non concorda con il database} other {# campi non concordano con il database}}",
   "node.joinIncomplete": "A questa relazione manca una chiave obbligatoria — impostala nell'ispettore",
   "node.pickRoot": "Scegli una tabella radice per iniziare",
   "node.chooseTable": "scegli una tabella…",
@@ -215,7 +223,8 @@ export const it: Record<string, string> = {
   "filters.loHi": "min, max",
   "filters.abc": "a, b, c",
   "filters.filter": "filtro",
-  "filters.help": "Limita quali righe alimentano questo campo — una condizione SQL grezza, un controllo null, o un test colonna/operatore/valore. Devono valere tutte.",
+  "filters.help":
+    "Limita quali righe alimentano questo campo — una condizione SQL grezza, un controllo null, o un test colonna/operatore/valore. Devono valere tutte.",
 
   // canvas controls
   "canvas.resetLayout": "Reimposta layout",

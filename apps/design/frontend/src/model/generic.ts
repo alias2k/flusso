@@ -33,7 +33,21 @@ export function fromGeneric(g: Generic): unknown {
   if (g === "Null" || g === null || g === undefined) return null;
   if (typeof g !== "object") return g;
   const o = g as Record<string, unknown>;
-  for (const k of ["Bool", "String", "Uuid", "SmallInt", "Int", "BigInt", "Float", "Double", "Decimal", "Date", "Time", "Timestamp", "TimestampTz"]) {
+  for (const k of [
+    "Bool",
+    "String",
+    "Uuid",
+    "SmallInt",
+    "Int",
+    "BigInt",
+    "Float",
+    "Double",
+    "Decimal",
+    "Date",
+    "Time",
+    "Timestamp",
+    "TimestampTz",
+  ]) {
     if (k in o) return o[k];
   }
   if ("Array" in o && Array.isArray(o.Array)) return o.Array.map(fromGeneric);

@@ -31,7 +31,8 @@ import { requiredDefaultIssues } from "./model/issues";
 import { DesignProvider, type Selection } from "./state";
 
 // sidebar nav item classes (kept .nav/.active as hooks for e2e).
-const NAV = "nav mb-0.5 block w-full cursor-pointer rounded-md border-0 bg-transparent px-2.5 py-2 text-left hover:bg-secondary";
+const NAV =
+  "nav mb-0.5 block w-full cursor-pointer rounded-md border-0 bg-transparent px-2.5 py-2 text-left hover:bg-secondary";
 const NAV_ACTIVE = "active bg-secondary text-primary";
 const NAV_HEADING = "mx-1 mb-1 mt-3 text-2xs uppercase text-muted-foreground";
 
@@ -106,7 +107,10 @@ export default function App() {
         setActive(p.indexes[0]?.name ?? "config");
       })
       .catch((e) => setError(String(e)));
-    api.catalog().then(setCatalog).catch((e) => setError(String(e)));
+    api
+      .catalog()
+      .then(setCatalog)
+      .catch((e) => setError(String(e)));
   }, [reset]);
 
   // Test the *currently edited* connection (not the on-disk one).
@@ -114,7 +118,10 @@ export default function App() {
     (doc ? api.testConnection(doc.config) : api.catalog())
       .then((c) => {
         setCatalog(c);
-        setToast({ kind: c.error ? "error" : "ok", text: c.error ? t("toast.dbNotReachable") : t("toast.dbConnected") });
+        setToast({
+          kind: c.error ? "error" : "ok",
+          text: c.error ? t("toast.dbNotReachable") : t("toast.dbConnected"),
+        });
       })
       .catch((e) => setToast({ kind: "error", text: errText(e) }));
 
@@ -152,7 +159,7 @@ export default function App() {
   // checks (e.g. required-over-nullable needs a default) — same channel, so
   // both highlight the fields and list in the preview.
   const allDiagnostics = useMemo(() => {
-    const live = (schema ? requiredDefaultIssues(schema, catalog, active) : []);
+    const live = schema ? requiredDefaultIssues(schema, catalog, active) : [];
     return [...(diagnostics ?? []), ...live];
   }, [schema, catalog, active, diagnostics]);
 
@@ -163,7 +170,10 @@ export default function App() {
       return;
     }
     const handle = setTimeout(() => {
-      api.preview(active, schema).then(setPreview).catch((e) => setError(String(e)));
+      api
+        .preview(active, schema)
+        .then(setPreview)
+        .catch((e) => setError(String(e)));
     }, 250);
     return () => clearTimeout(handle);
   }, [active, schema]);
@@ -181,9 +191,7 @@ export default function App() {
 
   const apply = (fn: (s: IndexSchema) => IndexSchema) => {
     if (active === "config") return;
-    setDoc((d) =>
-      d ? { ...d, schemas: { ...d.schemas, [active]: fn(d.schemas[active] ?? emptySchema("")) } } : d,
-    );
+    setDoc((d) => (d ? { ...d, schemas: { ...d.schemas, [active]: fn(d.schemas[active] ?? emptySchema("")) } } : d));
   };
   // Editing the index list can rename or remove indexes. Schemas are keyed by
   // index name, so re-key renamed ones (matched by position) and drop removed
@@ -294,7 +302,9 @@ export default function App() {
     if (!entry) return;
     setSaving(true);
     try {
-      await api.save(doc.config, [{ schema_path: entry.schema, schema: doc.schemas[active] ?? emptySchema(""), raw: rawText }]);
+      await api.save(doc.config, [
+        { schema_path: entry.schema, schema: doc.schemas[active] ?? emptySchema(""), raw: rawText },
+      ]);
       setRawMode(false);
       await reloadProject();
       setToast({ kind: "ok", text: t("toast.savedRaw") });
@@ -353,9 +363,7 @@ export default function App() {
                 ...entries.slice(i + 1),
               ],
             },
-            schemas: d.schemas[src.name]
-              ? { ...d.schemas, [name]: structuredClone(d.schemas[src.name]) }
-              : d.schemas,
+            schemas: d.schemas[src.name] ? { ...d.schemas, [name]: structuredClone(d.schemas[src.name]) } : d.schemas,
           }
         : d,
     );
@@ -367,7 +375,10 @@ export default function App() {
     setDoc((d) =>
       d
         ? {
-            config: { ...d.config, index: [...(d.config.index ?? []), { name, schema: `${name}.schema.yml`, enabled: true }] },
+            config: {
+              ...d.config,
+              index: [...(d.config.index ?? []), { name, schema: `${name}.schema.yml`, enabled: true }],
+            },
             schemas: { ...d.schemas, [name]: emptySchema(table, pk) },
           }
         : d,
@@ -422,7 +433,8 @@ export default function App() {
     return () => window.removeEventListener("keydown", fn);
   }, []);
 
-  if (!project || !doc || !config) return <div className="p-10 text-muted-foreground">{error || "Loading project…"}</div>;
+  if (!project || !doc || !config)
+    return <div className="p-10 text-muted-foreground">{error || "Loading project…"}</div>;
 
   return (
     <div className="flex h-screen flex-col">
@@ -485,7 +497,11 @@ export default function App() {
           </Button>
         </Hint>
         <div className="lang-select w-28">
-          <Select value={lang} options={Object.entries(LANGS).map(([value, label]) => ({ value, label }))} onChange={setLang} />
+          <Select
+            value={lang}
+            options={Object.entries(LANGS).map(([value, label]) => ({ value, label }))}
+            onChange={setLang}
+          />
         </div>
         <Button variant="secondary" size="sm" onClick={() => setDrawer((d) => !d)}>
           {drawer ? t("topbar.hide") : t("topbar.yaml")}
@@ -494,14 +510,21 @@ export default function App() {
           {validating && <span className="spinner" />}
           {t("topbar.validate")}
         </Button>
-        <Button size="sm" onClick={() => void save()} disabled={saving} title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
+        <Button
+          size="sm"
+          onClick={() => void save()}
+          disabled={saving}
+          title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}
+        >
           {saving ? <span className="spinner" /> : dirty && <span className="dirty-dot" />}
           {t("topbar.save")}
         </Button>
       </header>
 
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
-      {catalog?.error && <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>}
+      {catalog?.error && (
+        <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>
+      )}
 
       <div
         className="grid min-h-0 flex-1 transition-all duration-150"
@@ -514,7 +537,11 @@ export default function App() {
             </button>
             <div className={NAV_HEADING}>{t("sidebar.indexes")}</div>
             {(config.index ?? []).map((e) => (
-              <button key={e.name} className={cn(NAV, active === e.name && NAV_ACTIVE)} onClick={() => openIndex(e.name)}>
+              <button
+                key={e.name}
+                className={cn(NAV, active === e.name && NAV_ACTIVE)}
+                onClick={() => openIndex(e.name)}
+              >
                 {indexDirty(e.name) && <span className="dirty-dot" />}
                 {e.name}
                 {!e.enabled && <span className="text-muted-foreground"> {t("sidebar.off")}</span>}
@@ -542,7 +569,12 @@ export default function App() {
             <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">
               {t("raw.editingFor")} <strong>{active}</strong> — {t("raw.help")}
             </div>
-            <Textarea className="raw-editor m-2.5 min-h-0 flex-1 resize-none font-mono text-xs leading-relaxed" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
+            <Textarea
+              className="raw-editor m-2.5 min-h-0 flex-1 resize-none font-mono text-xs leading-relaxed"
+              value={rawText}
+              onChange={(e) => setRawText(e.target.value)}
+              spellCheck={false}
+            />
             <div className="raw-actions flex gap-2 px-2.5 pb-2.5">
               <Button size="sm" onClick={() => void saveRaw()} disabled={saving}>
                 {t("raw.save")}
@@ -582,9 +614,7 @@ export default function App() {
                     preview={preview}
                     diagnostics={allDiagnostics.filter((d) => d.index === active)}
                     onSample={
-                      doc && schema && active !== "config"
-                        ? () => api.sample(doc.config, active, schema)
-                        : undefined
+                      doc && schema && active !== "config" ? () => api.sample(doc.config, active, schema) : undefined
                     }
                   />
                 </div>
@@ -592,7 +622,13 @@ export default function App() {
             </Drawer>
             {inspectorOpen && (
               <aside className="col-start-3 relative min-h-0 overflow-y-auto border-l border-border bg-card p-3.5">
-                <Button variant="ghost" size="icon-sm" className="absolute right-2 top-2" aria-label="Close" onClick={() => setSelection(null)}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="absolute right-2 top-2"
+                  aria-label="Close"
+                  onClick={() => setSelection(null)}
+                >
                   <Icon name="close" />
                 </Button>
                 <Inspector />
@@ -602,7 +638,9 @@ export default function App() {
         ) : null}
       </div>
 
-      {diffs && <DiffModal diffs={diffs} saving={saving} onConfirm={() => void performSave()} onCancel={() => setDiffs(null)} />}
+      {diffs && (
+        <DiffModal diffs={diffs} saving={saving} onConfirm={() => void performSave()} onCancel={() => setDiffs(null)} />
+      )}
       {browseCatalog && catalog && <CatalogBrowser catalog={catalog} onClose={() => setBrowseCatalog(false)} />}
 
       {toast && (
@@ -665,7 +703,10 @@ function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: str
   const [table, setTable] = useState(tables[0] ?? "");
   if (!open) {
     return (
-      <button className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")} onClick={() => setOpen(true)}>
+      <button
+        className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")}
+        onClick={() => setOpen(true)}
+      >
         + {t("sidebar.newIndex")}
       </button>
     );

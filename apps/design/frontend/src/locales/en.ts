@@ -29,7 +29,8 @@ export const en: Record<string, string> = {
   "toast.saveFailed": "Save failed: {err}",
   "toast.savedRaw": "Saved raw YAML",
   "toast.validateFailed": "Validate failed: {err}",
-  "toast.issues": "{n, plural, one {# issue — see the highlighted field} other {# issues — see the highlighted fields}}",
+  "toast.issues":
+    "{n, plural, one {# issue — see the highlighted field} other {# issues — see the highlighted fields}}",
   "toast.dbNotReachable": "Database not reachable",
   "toast.dbConnected": "Database connected",
   "toast.alreadyUpToDate": "Already up to date",
@@ -107,8 +108,10 @@ export const en: Record<string, string> = {
   "inspector.countResult": "Counts the related rows into an integer.",
   "inspector.bridgeNotNull": "NOT NULL → required by default. Uncheck to make it optional in the document.",
   "inspector.bridgeNullable": "Nullable → optional by default. Mark it required and a default becomes mandatory.",
-  "inspector.defaultError": "A required field over a nullable column must set a default, or the document field could be missing.",
-  "inspector.optionsHelp": "Extra OpenSearch mapping properties merged beside the derived type. Pick a common one or add your own. Each value is JSON.",
+  "inspector.defaultError":
+    "A required field over a nullable column must set a default, or the document field could be missing.",
+  "inspector.optionsHelp":
+    "Extra OpenSearch mapping properties merged beside the derived type. Pick a common one or add your own. Each value is JSON.",
   "inspector.optKey": "key",
   "inspector.optValue": 'value (JSON, e.g. "english" or 2)',
   "inspector.option": "option",
@@ -118,7 +121,8 @@ export const en: Record<string, string> = {
   "inspector.osType": "opensearch type",
   "inspector.latColumn": "lat column",
   "inspector.lonColumn": "lon column",
-  "inspector.geoHint": "A point is absent when either column is null (never sent as '{'lat:null'}'). Mark required to forbid that absence.",
+  "inspector.geoHint":
+    "A point is absent when either column is null (never sent as '{'lat:null'}'). Mark required to forbid that absence.",
   "inspector.relatedTable": "related table",
   "inspector.aggColumn": "column (to aggregate)",
   "inspector.junctionTable": "junction table",
@@ -172,7 +176,8 @@ export const en: Record<string, string> = {
   "node.collapse": "Collapse",
   "node.pk": "pk",
   "node.fields": "{n, plural, one {# field} other {# fields}}",
-  "node.diagCount": "{n, plural, one {# field disagrees with the database} other {# fields disagree with the database}}",
+  "node.diagCount":
+    "{n, plural, one {# field disagrees with the database} other {# fields disagree with the database}}",
   "node.joinIncomplete": "This join is missing a required key — set it in the inspector",
   "node.pickRoot": "Pick a root table to begin",
   "node.chooseTable": "choose a table…",
@@ -215,7 +220,8 @@ export const en: Record<string, string> = {
   "filters.loHi": "lo, hi",
   "filters.abc": "a, b, c",
   "filters.filter": "filter",
-  "filters.help": "Restrict which rows feed this field — a raw SQL condition, a null check, or a column/operator/value test. All must hold.",
+  "filters.help":
+    "Restrict which rows feed this field — a raw SQL condition, a null check, or a column/operator/value test. All must hold.",
 
   // canvas controls
   "canvas.resetLayout": "Reset layout",
