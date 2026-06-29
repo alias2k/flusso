@@ -29,6 +29,18 @@ export function typeClass(label: string): string {
   return "t-other";
 }
 
+/// The field-type colour families, for the sidebar legend. `varKey` is the
+/// `--t-*` CSS var suffix (the same hue `typeClass` colours a label with), so a
+/// row's swatch matches every type label in that family across the UI.
+export const TYPE_FAMILIES: { varKey: string; label: string }[] = [
+  { varKey: "string", label: "string" },
+  { varKey: "number", label: "number" },
+  { varKey: "temporal", label: "date" },
+  { varKey: "bool", label: "boolean" },
+  { varKey: "uuid", label: "uuid" },
+  { varKey: "geo", label: "geo" },
+];
+
 /// Edge stroke colour by relation verb (matches the per-kind hues in CSS).
 export function edgeColor(label: string): string {
   switch (label) {

@@ -43,6 +43,7 @@ export const en: Record<string, string> = {
   "sidebar.indexes": "Indexes",
   "sidebar.off": "(off)",
   "sidebar.kinds": "Kinds",
+  "sidebar.types": "Types",
   "sidebar.newIndex": "New index",
   "sidebar.indexName": "index name",
   "sidebar.rootTable": "root table",

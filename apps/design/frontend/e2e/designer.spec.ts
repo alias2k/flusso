@@ -112,9 +112,10 @@ test("inspector shows a breadcrumb for the selection", async ({ page }) => {
   await expect(page.locator(".crumbs")).toBeVisible();
 });
 
-test("the sidebar shows a kind legend", async ({ page }) => {
-  await expect(page.locator(".legend")).toBeVisible();
-  await expect(page.locator(".legend-row")).toHaveCount(6);
+test("the sidebar shows kind + type legends", async ({ page }) => {
+  await expect(page.locator(".legend")).toHaveCount(2);
+  // 6 relation kinds + 6 field-type colour families.
+  await expect(page.locator(".legend-row")).toHaveCount(12);
 });
 
 test("save shows a diff before writing", async ({ page }) => {

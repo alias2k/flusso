@@ -15,6 +15,7 @@ import { useT } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
+import { typeClass } from "../theme";
 
 /// i18n key of the one-line grammar explanation per field/join kind, shown for
 /// the selected node/field (resolved through `t(...)`).
@@ -469,7 +470,7 @@ function ScalarBody({
   return (
     <>
       <Block variant="src" title={t("inspector.fromDb")}>
-        <SourceColumn name={column.column} sqlType={sqlType} srcNullable={srcNullable} />
+        <SourceColumn name={column.column} sqlType={sqlType} suggested={suggested} srcNullable={srcNullable} />
       </Block>
       <NullBridge srcNullable={srcNullable} />
       <Block variant="doc" title={t("inspector.inDoc")}>
@@ -479,11 +480,12 @@ function ScalarBody({
             value={column.ty as string}
             options={SCALAR_TYPES as string[]}
             onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })}
+            className={`font-mono ${typeClass(column.ty as string)}`}
           />
         </Row>
         {showSuggestion && (
           <p className="nudge mt-1.5 text-2xs text-muted-foreground">
-            <span className="font-mono text-string">{suggested}</span> {t("inspector.suggested")} ·{" "}
+            <span className={`font-mono ${typeClass(suggested)}`}>{suggested}</span> {t("inspector.suggested")} ·{" "}
             <button
               type="button"
               className="cursor-pointer text-primary hover:underline"
@@ -506,13 +508,26 @@ function ScalarBody({
 /// A compact, read-only line of facts about the bound source column — its
 /// name, SQL type, and nullability — so the panel actually says what the field
 /// draws from. Omits what it doesn't know (offline / hand-typed name).
-function SourceColumn({ name, sqlType, srcNullable }: { name: string; sqlType?: string; srcNullable?: boolean }) {
+function SourceColumn({
+  name,
+  sqlType,
+  suggested,
+  srcNullable,
+}: {
+  name: string;
+  sqlType?: string;
+  suggested?: FlussoType;
+  srcNullable?: boolean;
+}) {
   const { t } = useT();
   const tag = "rounded border border-border bg-secondary px-1.5 text-2xs leading-[1.125rem]";
+  // Colour the SQL-type chip by the family its column maps to (the suggested
+  // flusso type), so it reads the same hue as the type everywhere else.
+  const sqlFamily = typeClass((suggested ?? sqlType ?? "") as string);
   return (
     <div className="src-col mb-2 flex flex-wrap items-center gap-1.5">
       <span className="font-mono text-xs text-foreground">{name}</span>
-      {sqlType && <span className={`${tag} text-muted-foreground`}>{sqlType}</span>}
+      {sqlType && <span className={`${tag} ${sqlFamily}`}>{sqlType}</span>}
       {srcNullable === false && (
         <span className={`${tag} border-primary/40 text-primary`}>{t("inspector.colNotNull")}</span>
       )}

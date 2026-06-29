@@ -29,6 +29,7 @@ import { LANGS, useT } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
 import { requiredDefaultIssues } from "./model/issues";
 import { DesignProvider, type Selection } from "./state";
+import { TYPE_FAMILIES } from "./theme";
 
 // sidebar nav item classes (kept .nav/.active as hooks for e2e).
 const NAV =
@@ -554,6 +555,21 @@ export default function App() {
                 <div className="legend-row flex items-center px-1.5 py-0.5 text-2xs text-muted-foreground" key={k}>
                   <span className="mr-1.5 inline-block size-2.5 rounded-full" style={{ background: `var(--k-${k})` }} />
                   {k}
+                </div>
+              ))}
+            </div>
+            <div className="legend mt-3.5">
+              <div className={NAV_HEADING}>{t("sidebar.types")}</div>
+              {TYPE_FAMILIES.map((f) => (
+                <div
+                  className="legend-row flex items-center px-1.5 py-0.5 text-2xs text-muted-foreground"
+                  key={f.varKey}
+                >
+                  <span
+                    className="mr-1.5 inline-block size-2.5 rounded-full"
+                    style={{ background: `var(--t-${f.varKey})` }}
+                  />
+                  {f.label}
                 </div>
               ))}
             </div>
