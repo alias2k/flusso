@@ -85,7 +85,20 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   (`apps/design/frontend/e2e/`) drives the *real* served UI (load/add/edit/delete/collapse) and runs
   the **UI-save → `flusso check`** pipeline. Locally: `just design-e2e` (needs Docker + downloads
   Chromium). The browser e2e is the only net that catches *rendered/interaction* regressions —
-  builds and `curl` checks are blind to them.
+  builds and `curl` checks are blind to them. **Gotcha:** `e2e/server.mjs` runs the prebuilt
+  `target/debug/flusso` which *embeds* the SPA (rust-embed) — it does **not** rebuild — so a bare
+  `npm run test:e2e` serves a stale UI. Always `cargo build -p flusso-cli` first (this is why
+  `just design-e2e` builds the binary before Playwright).
+- **The designer frontend is Tailwind v4 + shadcn/Radix, atomic-design.** UI primitives are
+  shadcn components in `apps/design/frontend/src/components/ui/` (`button`/`input`/`select`/
+  `checkbox`/`dialog`/`tooltip`/…), tuned to the flusso palette; molecules like `Hint`, `Field`,
+  `Block`/`Bridge`/`Drawer` (in `widgets.tsx`) compose them. There is **one** stylesheet,
+  `src/index.css` (the Tailwind entry) — no `styles.css`. It maps shadcn's tokens onto the flusso
+  palette via `@theme inline` (so `--primary` = brand emerald, `--accent` = the panel-3 hover
+  surface — the flusso `--accent`/`--border`/`--muted` vars are never shadowed), binds `dark:` to
+  `html[data-theme=dark]` (the app's dark-first signal), and holds the remaining bespoke
+  component + React Flow `--xy-*` theming under `@layer components` (utilities still win). Keep
+  new UI on shadcn atoms + Tailwind utilities (rem, not px).
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
   `flusso-query-derive`'s trybuild UI tests (`apps/query-derive/tests/ui/*.stderr`) compare
