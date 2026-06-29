@@ -103,7 +103,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   `html[data-theme=dark]` (the app's dark-first signal), exposes the rest of the flusso palette as
   `@theme` tokens (`string`/`accent2`/`slate`/`warn`/`kind-*`) plus bespoke sizes (`text-2xs`/
   `text-3xs`), and holds the remaining bespoke component + React Flow `--xy-*` theming under
-  `@layer components` (utilities still win). Keep new UI on shadcn atoms + Tailwind utilities, in
+  `@layer components` (utilities still win). **React Flow's own `style.css` is `@import`ed into a
+  dedicated `reactflow` layer** (ordered `theme, base, reactflow, components, utilities`) from
+  `index.css` — *not* JS-imported in `Canvas.tsx`, because a JS import is unlayered and would beat
+  the `@layer components` overrides (e.g. the connection-handle dots would fall back to RF's gray
+  border-centred defaults). Keep new UI on shadcn atoms + Tailwind utilities, in
   **rem not px**, and **custom values — especially colours — as `@theme` tokens, never arbitrary
   `[var(--x)]`/`[0.6875rem]`** (`text-string`, not `text-[var(--string)]`).
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
