@@ -3,14 +3,15 @@ import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } fro
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { Icon } from "./Icon";
 
 function Node({ node, depth }: { node: DocumentNode; depth: number }) {
   return (
     <div>
-      <div className="doc-node" style={{ paddingLeft: depth * 16 }}>
-        <span className="doc-name">{node.name}</span>
-        <span className={`doc-type ${typeClass(node.type)}`}>
+      <div className="flex justify-between py-0.5" style={{ paddingLeft: depth * 16 }}>
+        <span className="text-foreground">{node.name}</span>
+        <span className={cn("font-mono text-xs", typeClass(node.type))}>
           {node.type}
           {node.array ? "[]" : ""}
           {node.nullable ? "?" : ""}
@@ -34,7 +35,7 @@ export function Preview({
 }) {
   const { t } = useT();
   const [copied, setCopied] = useState(false);
-  if (!preview) return <div className="preview empty">{t("preview.empty")}</div>;
+  if (!preview) return <div className="text-muted-foreground">{t("preview.empty")}</div>;
   const copy = () => {
     navigator.clipboard?.writeText(preview.yaml).then(
       () => {
@@ -47,18 +48,18 @@ export function Preview({
     );
   };
   return (
-    <div className="preview">
+    <div>
       {!preview.parse_ok && (
         <div className="banner error">
           <strong>{t("preview.parseError")}</strong> {preview.parse_error}
         </div>
       )}
       {diagnostics && diagnostics.length > 0 && (
-        <div className="diagnostics">
+        <div className="mb-3">
           <h3>{t("preview.dbCheck")}</h3>
           {diagnostics.map((d, i) => (
-            <div key={i} className={`diag ${d.severity}`}>
-              <span className="diag-where">
+            <div key={i} className={cn("py-1 text-sm", d.severity === "error" ? "text-destructive" : d.severity === "warning" ? "text-warn" : "")}>
+              <span className="font-mono text-muted-foreground">
                 {d.index}.{d.field}
               </span>{" "}
               {d.message}
@@ -67,13 +68,13 @@ export function Preview({
         </div>
       )}
       <h3>{t("preview.document")}</h3>
-      <div className="doc-tree">
+      <div className="rounded-md border border-border bg-secondary p-2">
         {preview.preview.document.map((n, i) => (
           <Node key={i} node={n} depth={0} />
         ))}
       </div>
       {onSample && preview.parse_ok && <SampleDoc onSample={onSample} />}
-      <h3 className="yaml-head">
+      <h3 className="flex items-center justify-between">
         {t("preview.schemaYml")}
         <Button variant="link" size="sm" className="ml-auto gap-1" onClick={copy} title={t("preview.copyYaml")}>
           <Icon name="copy" size={13} /> {copied ? t("preview.copied") : t("preview.copy")}
@@ -106,8 +107,8 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
   };
 
   return (
-    <div className="sample-doc">
-      <h3 className="yaml-head">
+    <div className="sample-doc mt-2">
+      <h3 className="flex items-center gap-2">
         {t("preview.sampleFromDb")}
         {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
         <Button variant="link" size="sm" className="gap-1" onClick={fetchSample} disabled={loading}>
