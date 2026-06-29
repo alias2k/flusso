@@ -47,7 +47,7 @@ test("deleting a node does not crash (regression)", async ({ page }) => {
 
 test("collapsing the sidebar keeps the canvas visible (regression)", async ({ page }) => {
   await expect(page.locator(".sidebar")).toBeVisible();
-  await page.locator(".topbar button.icon").first().click();
+  await page.getByRole("button", { name: "Hide sidebar" }).click();
   await expect(page.locator(".sidebar")).toHaveCount(0);
   // the canvas (and its nodes) must still render, not go dark
   await expect(page.locator(".react-flow")).toBeVisible();
@@ -136,7 +136,8 @@ test("config panel edits sinks", async ({ page }) => {
 
 test("connection editor switches to env mode", async ({ page }) => {
   await page.getByRole("button", { name: /Deployment/ }).click();
-  await page.locator(".connection-editor select").selectOption("env");
+  await page.locator(".connection-editor").getByRole("combobox").click();
+  await page.locator("[data-slot=select-content]").getByRole("option", { name: "env", exact: true }).click();
   await expect(page.getByText("env var")).toBeVisible();
 });
 
@@ -190,7 +191,7 @@ test("marking a nullable source column required demands a default", async ({ pag
   await page.locator(".flow-node.kind-root .col-row", { hasText: "full_name" }).first().click();
   await expect(page.locator(".inspector")).toBeVisible();
   const required = page.locator(".inspector").getByRole("checkbox", { name: "required" });
-  await required.check();
+  await required.click();
   // required over a nullable column → the default becomes mandatory.
   await expect(page.locator(".inspector .error-hint")).toBeVisible();
   await expect(page.locator(".inspector input.invalid")).toBeVisible();
@@ -215,8 +216,9 @@ test("a belongs_to join is steered by its FK column", async ({ page }) => {
 test("the type dropdown nudges toward the source-suggested type", async ({ page }) => {
   await page.locator(".flow-node.kind-root .col-row", { hasText: "full_name" }).first().click();
   await expect(page.locator(".inspector")).toBeVisible();
-  const typeField = page.locator(".inspector .field", { hasText: "type" }).locator("select");
-  await typeField.selectOption("boolean"); // a text column never suggests boolean
+  // a text column never suggests boolean → picking it shows the nudge
+  await page.locator(".inspector .field", { hasText: "type" }).getByRole("combobox").click();
+  await page.locator("[data-slot=select-content]").getByRole("option", { name: "boolean", exact: true }).click();
   await expect(page.locator(".inspector .nudge")).toContainText("suggested");
   await page.locator(".inspector").getByRole("button", { name: "use", exact: true }).click();
   await expect(page.locator(".inspector .nudge")).toHaveCount(0);

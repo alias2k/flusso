@@ -1,17 +1,22 @@
-import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { Select as SelectRoot, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 let uid = 0;
 const nextId = () => `w${uid++}`;
 
+// A div, not a <label>: it wraps Radix controls (Select is a button) where a
+// wrapping label's click-to-focus would fight the control's own behaviour.
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="field">
+    <div className="field">
       <span className="field-label">{label}</span>
       {children}
-    </label>
+    </div>
   );
 }
 
@@ -168,14 +173,19 @@ export function Check({
   onChange: (v: boolean) => void;
   label: string;
 }) {
+  const id = useId();
   return (
-    <label className="check">
-      <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
-      {label}
-    </label>
+    <div className="check">
+      <Checkbox id={id} checked={value} onCheckedChange={(c) => onChange(c === true)} />
+      <Label htmlFor={id} className="cursor-pointer font-normal">
+        {label}
+      </Label>
+    </div>
   );
 }
 
+/// A select. Keeps its plain `{ value, onChange, options }` API while rendering
+/// shadcn's Radix select underneath (portalled list, full-width trigger).
 export function Select<T extends string>({
   value,
   onChange,
@@ -187,12 +197,17 @@ export function Select<T extends string>({
 }) {
   const opts = options.map((o) => (typeof o === "string" ? { label: o, value: o } : o));
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value as T)}>
-      {opts.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+    <SelectRoot value={value} onValueChange={(v) => onChange(v as T)}>
+      <SelectTrigger className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {opts.map((o) => (
+          <SelectItem key={o.value} value={o.value}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </SelectRoot>
   );
 }
