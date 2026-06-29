@@ -1,9 +1,11 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
-import { ChevronRight } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronRight } from "lucide-react";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select as SelectRoot, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
@@ -267,5 +269,81 @@ export function Select<T extends string>({
         ))}
       </SelectContent>
     </SelectRoot>
+  );
+}
+
+/// A searchable dropdown (shadcn combobox: Popover + cmdk). Like [`Select`] but
+/// type-to-filter, and — with `allowCustom` — you can enter a value the list
+/// doesn't have (so it replaces a free-text + datalist field). Options carry the
+/// same `description`/`className` as `Select`, shown as a trailing detail and a
+/// label colour.
+export function Combobox({
+  value,
+  onChange,
+  options,
+  placeholder,
+  allowCustom = false,
+  className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: Opt<string>[];
+  placeholder?: string;
+  allowCustom?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selected = options.find((o) => o.value === value);
+  const pick = (v: string) => {
+    onChange(v);
+    setOpen(false);
+    setQuery("");
+  };
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "flex w-full cursor-pointer items-center justify-between gap-2 rounded-md border border-border bg-secondary px-2.5 py-1 text-sm whitespace-nowrap transition-colors outline-none hover:border-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
+            className,
+          )}
+        >
+          <span className={cn("truncate", selected?.className)}>
+            {selected?.label ?? value ?? ""}
+            {!selected && !value && <span className="text-muted-foreground">{placeholder}</span>}
+          </span>
+          <ChevronDownIcon className="size-3.5 shrink-0 opacity-50" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-(--radix-popover-trigger-width) p-0">
+        <Command>
+          <CommandInput value={query} onValueChange={setQuery} placeholder={placeholder} />
+          <CommandList>
+            <CommandEmpty>{allowCustom ? "" : "No match"}</CommandEmpty>
+            {allowCustom && query && !options.some((o) => o.value === query) && (
+              <CommandItem value={query} onSelect={() => pick(query)}>
+                Use “{query}”
+              </CommandItem>
+            )}
+            {options.map((o) => (
+              <CommandItem key={o.value} value={o.value} onSelect={() => pick(o.value)}>
+                <span className={cn("font-mono", o.className)}>{o.label}</span>
+                {o.description && (
+                  <span className="truncate pl-2 font-mono text-2xs text-muted-foreground">{o.description}</span>
+                )}
+                <CheckIcon
+                  className={cn(
+                    "ml-auto size-3.5 shrink-0 text-primary",
+                    value === o.value ? "opacity-100" : "opacity-0",
+                  )}
+                />
+              </CommandItem>
+            ))}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }

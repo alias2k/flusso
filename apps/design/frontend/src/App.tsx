@@ -28,6 +28,7 @@ import { useHistory } from "./history";
 import { LANGS, useT } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
 import { requiredDefaultIssues } from "./model/issues";
+import { prunedForPreview } from "./model/prune";
 import { DesignProvider, type Selection } from "./state";
 import { TYPE_FAMILIES } from "./theme";
 
@@ -172,7 +173,7 @@ export default function App() {
     }
     const handle = setTimeout(() => {
       api
-        .preview(active, schema)
+        .preview(active, prunedForPreview(schema))
         .then(setPreview)
         .catch((e) => setError(String(e)));
     }, 250);

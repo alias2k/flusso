@@ -3,6 +3,7 @@ import {
   type Aggregate,
   type AggregateKey,
   type Column,
+  type ColumnShape,
   type Field,
   type FieldSource,
   type FlussoType,
@@ -61,7 +62,19 @@ function Breadcrumb() {
 }
 import { Button } from "@/components/ui/button";
 import { Filters } from "./Filters";
-import { Block, Bridge, Check, Drawer, Field as Row, GenericInput, Num, SectionTitle, Select, Text } from "./widgets";
+import {
+  Block,
+  Bridge,
+  Check,
+  Combobox,
+  Drawer,
+  Field as Row,
+  GenericInput,
+  Num,
+  SectionTitle,
+  Select,
+  Text,
+} from "./widgets";
 
 /// snake_case / "spaced" → camelCase, the usual document-field convention.
 const camel = (s: string) =>
@@ -224,7 +237,8 @@ function NodeInspector({ path }: { path: number[] }) {
   if (!join) return null;
   const verb = joinVerb(join.kind);
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
-  const relCols = catalog?.catalog.tables.find((tbl) => tbl.name === join.table)?.columns.map((c) => c.name) ?? [];
+  const relColShapes = catalog?.catalog.tables.find((tbl) => tbl.name === join.table)?.columns ?? [];
+  const relCols = relColShapes.map((c) => c.name);
   const setJoin = (j: Join) => setField({ ...field, source: { relation: { join: j } } });
   const toMany = verb === "has_many" || verb === "many_to_many";
 
@@ -316,7 +330,7 @@ function NodeInspector({ path }: { path: number[] }) {
         {verb !== "belongs_to" && (
           <OrderByEditor
             value={join.order_by ?? []}
-            cols={relCols}
+            columns={relColShapes}
             onChange={(order_by) => setJoin({ ...join, order_by })}
           />
         )}
@@ -985,11 +999,11 @@ function ThroughEditor({
 
 function OrderByEditor({
   value,
-  cols,
+  columns,
   onChange,
 }: {
   value: { column: string; direction?: "asc" | "desc" }[];
-  cols: string[];
+  columns: ColumnShape[];
   onChange: (v: { column: string; direction?: "asc" | "desc" }[] | undefined) => void;
 }) {
   const { t } = useT();
@@ -998,14 +1012,22 @@ function OrderByEditor({
     next[i] = ob;
     onChange(next);
   };
+  // Column choices, coloured by type family with the SQL type as the detail.
+  const colOpts = columns.map((c) => ({
+    value: c.name,
+    label: c.name,
+    description: c.sql_type,
+    className: typeClass((c.suggested_type ?? c.sql_type) as string),
+  }));
   return (
     <div className="my-1.5">
       <div className="mb-1 text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">order_by</div>
       {value.map((ob, i) => (
         <div className="my-1 flex items-center gap-1.5" key={i}>
-          <Select
+          <Combobox
             value={ob.column}
-            options={ob.column && !cols.includes(ob.column) ? [ob.column, ...cols] : cols}
+            options={colOpts}
+            allowCustom
             onChange={(column) => set(i, { ...ob, column })}
             placeholder={t("common.column")}
             className="min-w-0 flex-1"
@@ -1031,8 +1053,8 @@ function OrderByEditor({
       <Button
         variant="link"
         size="sm"
-        disabled={!cols.length}
-        onClick={() => onChange([...value, { column: cols[0] ?? "", direction: "asc" }])}
+        disabled={!columns.length}
+        onClick={() => onChange([...value, { column: columns[0]?.name ?? "", direction: "asc" }])}
       >
         + order_by
       </Button>
