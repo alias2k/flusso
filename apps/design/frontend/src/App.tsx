@@ -27,7 +27,7 @@ import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
 import { LANGS, useT } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
-import { requiredDefaultIssues } from "./model/issues";
+import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
 import { DesignProvider, type Selection } from "./state";
 import { TYPE_FAMILIES } from "./theme";
@@ -161,9 +161,15 @@ export default function App() {
   // checks (e.g. required-over-nullable needs a default) — same channel, so
   // both highlight the fields and list in the preview.
   const allDiagnostics = useMemo(() => {
-    const live = schema ? requiredDefaultIssues(schema, catalog, active) : [];
+    const live = schema ? requiredDefaultIssues(schema, catalog, active, t) : [];
     return [...(diagnostics ?? []), ...live];
-  }, [schema, catalog, active, diagnostics]);
+  }, [schema, catalog, active, diagnostics, t]);
+
+  // Count of fields whose chosen type is a sharp change from the source column,
+  // and a one-click bulk fix. The "ignore" dismissal resets per active index.
+  const typeMismatches = useMemo(() => (schema ? countTypeMismatches(schema, catalog) : 0), [schema, catalog]);
+  const [ignoreTypeWarn, setIgnoreTypeWarn] = useState(false);
+  useEffect(() => setIgnoreTypeWarn(false), [active]);
 
   // Debounced live preview of the active index.
   useEffect(() => {
@@ -541,6 +547,17 @@ export default function App() {
       </header>
 
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
+      {active !== "config" && typeMismatches > 0 && !ignoreTypeWarn && (
+        <div className="banner warn flex items-center gap-3 bg-warn/10 px-4 py-2 text-xs text-warn">
+          <span className="flex-1">{t("typeWarn.banner", { n: typeMismatches })}</span>
+          <Button size="sm" variant="secondary" onClick={() => apply((s) => fixAllTypes(s, catalog))}>
+            {t("typeWarn.fixAll")}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setIgnoreTypeWarn(true)}>
+            {t("typeWarn.ignore")}
+          </Button>
+        </div>
+      )}
       {catalog?.error && (
         <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>
       )}

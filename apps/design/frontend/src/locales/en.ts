@@ -23,6 +23,12 @@ export const en: Record<string, string> = {
   "topbar.reset": "Reset",
   "topbar.resetHint": "Discard unsaved changes",
   "topbar.unsaved": "Unsaved changes",
+  "typeWarn.banner":
+    "{n, plural, one {# field maps a column to a sharply different type} other {# fields map columns to sharply different types}}.",
+  "typeWarn.fixAll": "Fix all",
+  "typeWarn.ignore": "Ignore",
+  "diag.requiredDefault": 'required, but its source column "{col}" is nullable — set a default value',
+  "diag.typeMismatch": 'type "{ty}" is a sharp change from source column "{col}" ({src}) — values may fail to index',
   "topbar.upToDate": "Up to date",
   "topbar.language": "Language",
 

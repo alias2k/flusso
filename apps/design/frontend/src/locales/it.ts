@@ -23,6 +23,13 @@ export const it: Record<string, string> = {
   "topbar.reset": "Ripristina",
   "topbar.resetHint": "Scarta le modifiche non salvate",
   "topbar.unsaved": "Modifiche non salvate",
+  "typeWarn.banner":
+    "{n, plural, one {# campo mappa una colonna a un tipo nettamente diverso} other {# campi mappano colonne a tipi nettamente diversi}}.",
+  "typeWarn.fixAll": "Correggi tutto",
+  "typeWarn.ignore": "Ignora",
+  "diag.requiredDefault": 'obbligatorio, ma la colonna sorgente "{col}" ammette null — imposta un valore predefinito',
+  "diag.typeMismatch":
+    'il tipo "{ty}" è un cambiamento netto rispetto alla colonna sorgente "{col}" ({src}) — i valori potrebbero non indicizzarsi',
   "topbar.upToDate": "Aggiornato",
   "topbar.language": "Lingua",
 
