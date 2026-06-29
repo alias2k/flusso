@@ -647,7 +647,8 @@ export default function App() {
                     <span>{t("typeWarn.banner", { n: typeMismatches })}</span>
                     <Button
                       size="sm"
-                      className="border-0 bg-warn text-bg hover:bg-warn/90"
+                      variant="secondary"
+                      className="border-warn bg-warn font-semibold text-background hover:border-warn hover:bg-warn/90"
                       onClick={() => apply((s) => fixAllTypes(s, catalog))}
                     >
                       {t("typeWarn.fixAll")}
