@@ -522,9 +522,9 @@
    over RF's light-mode defaults, so no `colorMode` plumbing is needed. */
   .react-flow {
     --xy-controls-button-background-color: var(--panel-2);
-    --xy-controls-button-background-color-hover: var(--border);
-    --xy-controls-button-color: var(--text);
-    --xy-controls-button-color-hover: var(--accent);
+    --xy-controls-button-background-color-hover: var(--panel-3);
+    --xy-controls-button-color: var(--muted);
+    --xy-controls-button-color-hover: var(--text);
     --xy-controls-button-border-color: var(--border);
     --xy-controls-box-shadow: 0 0.125rem 0.625rem rgba(0, 0, 0, 0.3);
     --xy-minimap-background-color: var(--panel);
@@ -534,6 +534,21 @@
     --xy-connectionline-stroke: var(--accent);
     --xy-edge-stroke-selected: var(--accent);
     --xy-attribution-background-color: var(--panel);
+  }
+
+  /* The zoom/fit/lock controls, restyled to read as our icon buttons —
+     individual rounded squares on the panel surface, not RF's connected
+     box-shadowed toolbar. (Colours come from the --xy-* vars above.) */
+  .react-flow__controls {
+    box-shadow: none;
+    gap: 0.25rem;
+  }
+  .react-flow__controls-button {
+    border: 0.0625rem solid var(--border);
+    border-radius: 0.375rem;
+  }
+  .react-flow__controls-button:hover {
+    border-color: var(--accent);
   }
 
   /* ── collapsible sidebars ───────────────────────────────────────────────── */
@@ -574,19 +589,19 @@
     margin-left: 0.25rem;
   }
 
-  /* minimap toggle (the minimap is hidden by default) */
+  /* minimap toggle (the minimap is hidden by default) — same icon-button look */
   .react-flow__panel .panel-btn {
     background: var(--panel-2);
     border: 0.0625rem solid var(--border);
     border-radius: 0.375rem;
     font-size: 0.875rem;
-    padding: 0.1875rem 0.4375rem;
-    opacity: 0.65;
+    padding: 0.25rem 0.4375rem;
+    color: var(--muted);
     cursor: pointer;
   }
   .react-flow__panel .panel-btn:hover {
-    opacity: 1;
     border-color: var(--accent);
+    color: var(--text);
   }
 
   /* ── flow polish ─────────────────────────────────────────────────────────── */

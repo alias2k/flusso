@@ -120,7 +120,17 @@ export interface Field {
 export type Filter =
   { raw: string } | { column: string; op: "is_null" | "is_not_null" } | { column: string; op: string; value: unknown };
 
-export type SoftDelete = { field: string; when?: Filter[] } | { column: string; when?: Filter[] };
+// Externally-tagged enum over struct payloads (matches schema-core's serde):
+// `{ field: { field, when? } }` or `{ column: { column, when? } }`.
+export interface SoftDeleteField {
+  field: string;
+  when?: Filter[];
+}
+export interface SoftDeleteColumn {
+  column: string;
+  when?: Filter[];
+}
+export type SoftDelete = { field: SoftDeleteField } | { column: SoftDeleteColumn };
 
 export interface IndexSchema {
   version: number;

@@ -999,8 +999,8 @@ function OrderByEditor({
     onChange(next);
   };
   return (
-    <div className="my-1.5 flex flex-wrap items-end gap-2">
-      <span className="text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">order_by</span>
+    <div className="my-1.5">
+      <div className="mb-1 text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">order_by</div>
       {value.map((ob, i) => (
         <div className="my-1 flex items-center gap-1.5" key={i}>
           <Text
@@ -1014,6 +1014,7 @@ function OrderByEditor({
             value={ob.direction ?? "asc"}
             options={["asc", "desc"]}
             onChange={(direction) => set(i, { ...ob, direction })}
+            className="w-24"
           />
           <Button
             variant="link"
@@ -1051,21 +1052,23 @@ function SoftDeleteEditor({
         <Select
           value={kind}
           options={["none", "field", "column"]}
-          onChange={(k) => onChange(k === "none" ? undefined : k === "field" ? { field: "" } : { column: "" })}
+          onChange={(k) =>
+            onChange(k === "none" ? undefined : k === "field" ? { field: { field: "" } } : { column: { column: "" } })
+          }
         />
       </Row>
       {value && "field" in value && (
         <Text
-          value={value.field}
-          onChange={(f) => onChange({ ...value, field: f })}
+          value={value.field.field}
+          onChange={(f) => onChange({ field: { ...value.field, field: f } })}
           placeholder={t("inspector.documentField")}
         />
       )}
       {value && "column" in value && (
         <Text
-          value={value.column}
+          value={value.column.column}
           list={cols}
-          onChange={(c) => onChange({ ...value, column: c })}
+          onChange={(c) => onChange({ column: { ...value.column, column: c } })}
           placeholder={t("common.column")}
         />
       )}
