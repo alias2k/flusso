@@ -261,6 +261,14 @@ export default function App() {
       .filter((e) => doc?.schemas[e.name])
       .map((e) => ({ schema_path: e.schema, schema: doc!.schemas[e.name] }));
 
+  // Discard every unsaved edit, reverting to the last loaded/saved state. Goes
+  // through setDoc (not history reset) so the revert itself is undoable.
+  const revertChanges = () => {
+    if (!saved) return;
+    setDoc(() => JSON.parse(saved) as Doc);
+    setSelection(null);
+  };
+
   // Save first shows a diff of what would change on disk; performSave writes it.
   const save = async () => {
     if (!doc || saving) return;
@@ -510,6 +518,15 @@ export default function App() {
         <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
           {validating && <span className="spinner" />}
           {t("topbar.validate")}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={revertChanges}
+          disabled={!dirty || saving}
+          title={t("topbar.resetHint")}
+        >
+          {t("topbar.reset")}
         </Button>
         <Button
           size="sm"

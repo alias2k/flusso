@@ -20,6 +20,8 @@ export const it: Record<string, string> = {
   "topbar.yaml": "YAML",
   "topbar.validate": "Convalida",
   "topbar.save": "Salva",
+  "topbar.reset": "Ripristina",
+  "topbar.resetHint": "Scarta le modifiche non salvate",
   "topbar.unsaved": "Modifiche non salvate",
   "topbar.upToDate": "Aggiornato",
   "topbar.language": "Lingua",
