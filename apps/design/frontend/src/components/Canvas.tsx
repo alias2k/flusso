@@ -10,7 +10,8 @@ import {
   useNodesState,
   useReactFlow,
 } from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
+// React Flow's stylesheet is imported (layered) from index.css, not here — a JS
+// import is unlayered and would beat our `@layer components` handle overrides.
 import { useEffect, useRef, useState } from "react";
 import { SCALAR_TYPES } from "../api";
 import {

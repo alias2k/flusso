@@ -1,13 +1,17 @@
 /* Tailwind v4 + shadcn entry — the single stylesheet for the designer.
-   Layer order: preflight in `base`, then the bespoke component/React-Flow CSS
-   in `components` (moved here from the old styles.css), then Tailwind/shadcn
-   `utilities` on top so utility-styled components always win. */
-@layer theme, base, components, utilities;
+   Layer order: preflight in `base`, React Flow's own stylesheet in `reactflow`,
+   then the bespoke component/React-Flow theming in `components` (moved here from
+   the old styles.css), then Tailwind/shadcn `utilities` on top so utility-styled
+   components always win. React Flow's CSS is imported into a layer (not via JS,
+   which would be unlayered and beat our overrides) so our `components` rules —
+   e.g. the connection-handle dots — win cleanly. */
+@layer theme, base, reactflow, components, utilities;
 
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/preflight.css" layer(base);
 @import "tailwindcss/utilities.css" layer(utilities);
 @import "tw-animate-css";
+@import "@xyflow/react/dist/style.css" layer(reactflow);
 
 /* The app is dark-first and signals theme via `html[data-theme=dark|light]`
    (set in App). Bind Tailwind's `dark:` variant to that so shadcn's dark
@@ -263,14 +267,16 @@ pre.yaml {
   font-size: 0.75rem;
   box-shadow: 0 0.125rem 0.625rem rgba(0, 0, 0, 0.25);
 }
-/* Sit the connection dots just inside the edge so `overflow: hidden` doesn't
-   clip their outer half (React Flow centres them on the border by default). */
+/* Sit the dots just inside the edge (not React Flow's default border-centred
+   spot, whose outer half `overflow: hidden` would clip) and drop the default
+   translateX so the dot is fully inside. The edge anchor tracks the measured
+   handle box, so it meets the dot at its outer edge, vertical-centred. */
 .react-flow__handle-left {
-  left: 0.0625rem;
+  left: 0.125rem;
   transform: translateY(-50%);
 }
 .react-flow__handle-right {
-  right: 0.0625rem;
+  right: 0.125rem;
   left: auto;
   transform: translateY(-50%);
 }
@@ -481,12 +487,15 @@ button.icon:hover {
 }
 
 /* connection points as small kind-coloured dots */
+/* Connection dot: a small node-kind-coloured pin ringed by the canvas bg so it
+   reads as a deliberate endpoint and ties to the node's kind badge/edge colour.
+   These win over React Flow's own (lower `reactflow` layer) defaults. */
 .react-flow__handle {
   width: 0.5625rem;
   height: 0.5625rem;
   border-radius: 50%;
   background: var(--kc, var(--accent));
-  border: 0.125rem solid var(--panel);
+  border: 0.125rem solid var(--bg);
 }
 
 /* unsaved-changes dot (shown beside a dirty index in the nav) */
