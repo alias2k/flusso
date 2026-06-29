@@ -161,7 +161,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
               </div>
             )}
 
-            <div className="node-cols max-h-[16.25rem] overflow-y-auto px-2 py-1.5">
+            <div className="node-cols px-2 py-1.5">
               {cols
                 .filter((c) => matches(c.name))
                 .map((c) => {

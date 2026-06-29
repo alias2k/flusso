@@ -402,28 +402,8 @@
     color: #04210f;
   }
 
-  /* .node-cols layout is Tailwind now (DocNodeView); the scrollbar is themed here
-   (thin, on-palette) so the default chunky one doesn't break the card. */
-  .node-cols {
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-  }
-  .node-cols::-webkit-scrollbar {
-    width: 0.5rem;
-  }
-  .node-cols::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .node-cols::-webkit-scrollbar-thumb {
-    background: var(--border);
-    border-radius: 62.4375rem;
-    border: 0.125rem solid transparent;
-    background-clip: padding-box;
-  }
-  .node-cols::-webkit-scrollbar-thumb:hover {
-    background: var(--muted);
-    background-clip: padding-box;
-  }
+  /* .node-cols layout is Tailwind now (DocNodeView); the node grows to fit all
+     its columns (no inner scroll — React Flow would hijack the wheel to zoom). */
   .col-row {
     display: flex;
     align-items: center;
@@ -470,8 +450,7 @@
     font-size: 0.6875rem;
   }
   /* The rename input must be allowed to shrink (min-width:0) so the type chip
-   beside it never pushes past the node edge — `.node-cols`'s overflow-y:auto
-   forces overflow-x:auto, which would otherwise clip the chip. */
+   beside it never pushes past the node edge. */
   .col-row.special {
     cursor: pointer;
   }
