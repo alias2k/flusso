@@ -29,16 +29,29 @@ export function typeClass(label: string): string {
   return "t-other";
 }
 
-/// Text-colour class for a field/relation kind (the kind hues from the "Kinds"
-/// legend), for colour-coding the kind pickers. Empty for kinds with no
-/// established hue (map/custom/constant/aggregates stay neutral).
+/// Text-colour class for a field/relation kind, for colour-coding the kind
+/// pickers. Relations use their "Kinds"-legend hue; the aggregates all share
+/// the number hue (they yield numbers); the structured kinds take a distinct
+/// type hue each so every option in the menu is colour-coded.
 const KIND_HUE: Record<string, string> = {
+  // relations (match the Kinds legend)
   belongs_to: "k-belongs_to",
   has_one: "k-has_one",
   has_many: "k-has_many",
   many_to_many: "k-many_to_many",
   object: "k-object",
+  // structured leaf kinds
   geo: "t-geo",
+  map: "t-temporal",
+  custom: "t-uuid",
+  constant: "t-string",
+  // aggregates → the number hue (they reduce to a number / array of numbers)
+  count: "t-number",
+  sum: "t-number",
+  avg: "t-number",
+  min: "t-number",
+  max: "t-number",
+  ids: "t-number",
 };
 export function kindColorClass(kind: string): string {
   return KIND_HUE[kind] ?? "";
