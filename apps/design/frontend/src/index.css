@@ -530,19 +530,6 @@
     border-color: var(--accent);
   }
 
-  /* ── collapsible sidebars ───────────────────────────────────────────────── */
-  button.icon {
-    background: none;
-    border: none;
-    font-size: 1rem;
-    padding: 0.125rem 0.5rem;
-    color: var(--muted);
-    cursor: pointer;
-  }
-  button.icon:hover {
-    color: var(--text);
-  }
-
   /* node rows are now display-only: click to edit in the inspector */
   .col-row.on,
   .col-row.special {
@@ -568,20 +555,8 @@
     margin-left: 0.25rem;
   }
 
-  /* minimap toggle (the minimap is hidden by default) — same icon-button look */
-  .react-flow__panel .panel-btn {
-    background: var(--panel-2);
-    border: 0.0625rem solid var(--border);
-    border-radius: 0.375rem;
-    font-size: 0.875rem;
-    padding: 0.25rem 0.4375rem;
-    color: var(--muted);
-    cursor: pointer;
-  }
-  .react-flow__panel .panel-btn:hover {
-    border-color: var(--accent);
-    color: var(--text);
-  }
+  /* canvas panel buttons (reset layout / minimap toggle) are shadcn icon
+     Buttons now (Canvas.tsx). */
 
   /* ── flow polish ─────────────────────────────────────────────────────────── */
   /* Each node carries its kind colour (--kc): an inset left stripe + a tinted
@@ -844,14 +819,6 @@
     outline-color: var(--danger, #ef4444);
   }
 
-  /* lang-select is Tailwind now; the old [data-tip] CSS tooltips are gone
-   (replaced by the Radix-backed Hint molecule). */
-
-  /* A consistent, on-theme focus ring (replaces the bulky default that read as a
-   size change next to the hover border). */
-  button.icon:focus-visible,
-  .react-flow__panel .panel-btn:focus-visible {
-    outline: 0.125rem solid var(--accent);
-    outline-offset: 0.0625rem;
-  }
+  /* the old [data-tip] CSS tooltips are gone (replaced by the Radix-backed Hint
+   molecule); canvas buttons are shadcn Buttons with their own focus ring. */
 }

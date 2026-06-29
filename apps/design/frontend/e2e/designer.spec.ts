@@ -297,6 +297,6 @@ test("canvas controls carry hover descriptions", async ({ page }) => {
 
 test("toggles the minimap", async ({ page }) => {
   await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
-  await page.locator(".map-toggle").click();
+  await page.getByRole("button", { name: "Show minimap" }).click();
   await expect(page.locator(".react-flow__minimap")).toHaveCount(1);
 });
