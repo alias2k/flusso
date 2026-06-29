@@ -29,27 +29,36 @@ export function typeClass(label: string): string {
   return "t-other";
 }
 
-/// The coarse storage family a type belongs to, for compatibility checks.
-/// `uuid` is string-like (stored as a keyword).
-function typeGroup(label: string): string {
-  const base = label.replace(/<.*/, "").trim();
-  if (STRING.has(base) || base === "uuid") return "stringy";
-  if (NUMBER.has(base)) return "numeric";
-  if (TEMPORAL.has(base)) return "temporal";
-  if (base === "boolean") return "bool";
-  if (base === "geo_point" || base === "geo") return "geo";
-  if (base === "binary") return "binary";
-  return "other";
+// Free-form string sinks: any value coerces to them, so they never warn.
+const FREE_SINK = new Set(["text", "keyword", "identifier"]);
+// String-ish sources that can plausibly feed a constrained string type
+// (uuid/enum) — but a number/date/bool cannot.
+const STRINGISH = new Set([...STRING, "uuid"]);
+
+/// The source types a given document `target` can accept without a drastic
+/// reinterpretation. `null` means "anything" (a free-form string sink) or "we
+/// don't second-guess this target" (map/custom/object/unknown).
+function compatibleSources(target: string): Set<string> | null {
+  if (FREE_SINK.has(target)) return null;
+  if (target === "uuid" || target === "enum") return STRINGISH;
+  if (NUMBER.has(target)) return NUMBER;
+  if (TEMPORAL.has(target)) return TEMPORAL;
+  if (target === "boolean") return new Set(["boolean"]);
+  if (target === "geo_point" || target === "geo") return new Set(["geo_point", "geo"]);
+  if (target === "binary") return new Set(["binary"]);
+  return null;
 }
 
 /// Is mapping a source column of `sourceType` to the document `chosenType` a
-/// *drastic* change — a different storage family the target can't safely hold
-/// (e.g. a text column forced to integer, where ingestion will likely fail)?
-/// Coercing anything to a string-like type is always safe, so it never warns.
+/// *drastic* change — a target whose values the source can't plausibly satisfy
+/// (e.g. a timestamp forced to uuid, or a text column to integer)? Coercing to a
+/// free-form string (text/keyword/identifier) is always fine, so it never warns.
 export function drasticTypeChange(sourceType: string, chosenType: string): boolean {
-  const to = typeGroup(chosenType);
-  if (to === "stringy" || to === "other") return false;
-  return typeGroup(sourceType) !== to;
+  const src = sourceType.replace(/<.*/, "").trim();
+  const tgt = chosenType.replace(/<.*/, "").trim();
+  if (src === tgt) return false;
+  const ok = compatibleSources(tgt);
+  return ok !== null && !ok.has(src);
 }
 
 /// Text-colour class for a field/relation kind, for colour-coding the kind
