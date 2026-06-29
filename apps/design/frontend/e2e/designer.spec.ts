@@ -64,7 +64,7 @@ test("undo reverts a structural edit", async ({ page }) => {
 
 test("editing marks the index unsaved", async ({ page }) => {
   await expect(page.locator(".sidebar .dirty-dot")).toHaveCount(0);
-  await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
+  await page.locator(".flow-node.kind-root .col-row:not(.on) [role=checkbox]").first().click();
   await expect(page.locator(".sidebar .dirty-dot")).not.toHaveCount(0);
 });
 
@@ -81,10 +81,10 @@ test("collapsing a node hides its columns", async ({ page }) => {
 
 test("include-all checks every column", async ({ page }) => {
   const root = page.locator(".flow-node.kind-root");
-  const boxes = root.locator('.col-row input[type="checkbox"]');
+  const boxes = root.locator('.col-row [role=checkbox]');
   const n = await boxes.count();
   await root.getByRole("button", { name: "all", exact: true }).click();
-  await expect(root.locator('.col-row input[type="checkbox"]:checked')).toHaveCount(n);
+  await expect(root.locator('.col-row [role=checkbox][data-state=checked]')).toHaveCount(n);
 });
 
 test("node search jumps to a node", async ({ page }) => {
@@ -118,7 +118,7 @@ test("the sidebar shows a kind legend", async ({ page }) => {
 });
 
 test("save shows a diff before writing", async ({ page }) => {
-  await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
+  await page.locator(".flow-node.kind-root .col-row:not(.on) [role=checkbox]").first().click();
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.locator(".diff-file")).not.toHaveCount(0);
@@ -267,12 +267,14 @@ test("validate surfaces a result toast", async ({ page }) => {
 
 test("switches the UI language", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
-  await page.locator(".lang-select").selectOption("it");
+  await page.locator(".lang-select").getByRole("combobox").click();
+  await page.locator("[data-slot=select-content]").getByRole("option", { name: "Italiano" }).click();
   // labels switch to Italian…
   await expect(page.getByRole("button", { name: "Salva" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Convalida" })).toBeVisible();
   // …and back to English.
-  await page.locator(".lang-select").selectOption("en");
+  await page.locator(".lang-select").getByRole("combobox").click();
+  await page.locator("[data-slot=select-content]").getByRole("option", { name: "English" }).click();
   await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
 });
 

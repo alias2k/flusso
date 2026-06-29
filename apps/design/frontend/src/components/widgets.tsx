@@ -197,21 +197,27 @@ export function Check({
 }
 
 /// A select. Keeps its plain `{ value, onChange, options }` API while rendering
-/// shadcn's Radix select underneath (portalled list, full-width trigger).
+/// shadcn's Radix select underneath (portalled list). `placeholder` shows when
+/// `value` is empty (also makes it an action-menu: a `value=""` + `onChange`
+/// picks without storing). `className` sizes the trigger (defaults full-width).
 export function Select<T extends string>({
   value,
   onChange,
   options,
+  placeholder,
+  className,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: readonly T[] | { label: string; value: T }[];
+  placeholder?: string;
+  className?: string;
 }) {
   const opts = options.map((o) => (typeof o === "string" ? { label: o, value: o } : o));
   return (
-    <SelectRoot value={value} onValueChange={(v) => onChange(v as T)}>
-      <SelectTrigger className="w-full">
-        <SelectValue />
+    <SelectRoot value={value || undefined} onValueChange={(v) => onChange(v as T)}>
+      <SelectTrigger className={cn("w-full", className)}>
+        <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent>
         {opts.map((o) => (

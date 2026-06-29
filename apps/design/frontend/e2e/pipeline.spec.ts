@@ -13,7 +13,7 @@ test("UI edit → save → flusso check accepts the output", async ({ page }) =>
   // Make a real change: include the first not-yet-included column on the root.
   // Use click (not check): including a column re-renders the row, which would
   // detach the element before check()'s post-assertion.
-  await page.locator(".flow-node.kind-root .col-row:not(.on) input[type=checkbox]").first().click();
+  await page.locator(".flow-node.kind-root .col-row:not(.on) [role=checkbox]").first().click();
 
   // Save shows a diff of what would change; confirm to write.
   await page.getByRole("button", { name: "Save" }).click();

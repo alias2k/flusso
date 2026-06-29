@@ -9,7 +9,8 @@ import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { typeClass } from "../theme";
 import { Icon } from "./Icon";
-import { Text } from "./widgets";
+import { Select, Text } from "./widgets";
+import { Checkbox } from "@/components/ui/checkbox";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant"] as const;
 const AGG_KINDS = ["count", "sum", "avg", "min", "max", "ids"] as const;
@@ -108,17 +109,15 @@ export function DocNodeView({ data, selected }: NodeProps) {
       </header>
 
       {node.kind === "root" && !node.table ? (
-        <div className="empty-state">
+        <div className="empty-state flex flex-col gap-2 p-3 text-2xs text-muted-foreground">
           <span>{t("node.pickRoot")}</span>
           {(catalog?.catalog.tables.length ?? 0) > 0 ? (
-            <select value="" onChange={(e) => pickRootTable(e.target.value)}>
-              <option value="">{t("node.chooseTable")}</option>
-              {catalog?.catalog.tables.map((tbl) => (
-                <option key={tbl.name} value={tbl.name}>
-                  {tbl.name}
-                </option>
-              ))}
-            </select>
+            <Select<string>
+              value=""
+              placeholder={t("node.chooseTable")}
+              options={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
+              onChange={pickRootTable}
+            />
           ) : (
             <RootTableInput onPick={pickRootTable} />
           )}
@@ -127,10 +126,11 @@ export function DocNodeView({ data, selected }: NodeProps) {
         !isCollapsed && (
         <>
           {cols.length > 0 && (
-            <div className="col-tools" onClick={(e) => e.stopPropagation()}>
-              <Text className="col-filter" value={filter} onChange={setFilter} placeholder={t("node.filterCols")} />
+            <div className="col-tools flex items-center gap-1.5 px-2 pt-2" onClick={(e) => e.stopPropagation()}>
+              <Text className="col-filter flex-1" value={filter} onChange={setFilter} placeholder={t("node.filterCols")} />
               <button
-                className="link"
+                type="button"
+                className="cursor-pointer border-0 bg-transparent p-0 text-2xs text-primary"
                 title={t("node.includeAll")}
                 onClick={() =>
                   apply((s) =>
@@ -144,13 +144,13 @@ export function DocNodeView({ data, selected }: NodeProps) {
               >
                 {t("node.all")}
               </button>
-              <button className="link" title={t("node.clearAll")} onClick={() => apply((s) => edit.clearColumns(s, node.path))}>
+              <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-2xs text-primary" title={t("node.clearAll")} onClick={() => apply((s) => edit.clearColumns(s, node.path))}>
                 {t("node.none")}
               </button>
             </div>
           )}
 
-          <div className="node-cols">
+          <div className="node-cols max-h-[16.25rem] overflow-y-auto px-2 py-1.5">
             {cols.filter((c) => matches(c.name)).map((c) => {
               const inc = includedByCol.get(c.name);
               const renamed = inc && inc.name !== c.name;
@@ -171,11 +171,10 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   title={diag?.message}
                   onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
                 >
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={!!inc}
                     onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => (e.target.checked ? includeColumn(c) : inc && excludeColumn(c, inc))}
+                    onCheckedChange={(ch) => (ch === true ? includeColumn(c) : inc && excludeColumn(c, inc))}
                   />
                   <span className="col-name" title={renamed ? t("node.columnOf", { name: c.name }) : undefined}>
                     {inc ? inc.name : c.name}
@@ -230,7 +229,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
             )}
           </div>
 
-          <footer className="node-add">
+          <footer className="node-add flex flex-col gap-1.5 border-t border-border p-2">
             {catalog &&
               suggestRelations(catalog, node.table).map((sg) => (
                 <button
@@ -242,7 +241,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   + {sg.label}
                 </button>
               ))}
-            <div className="add-menus">
+            <div className="add-menus flex gap-1.5">
               <AddMenu label={t("node.addJoin")} kinds={JOIN_KINDS} onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))} />
               <AddMenu label={t("node.addField")} kinds={[...FIELD_KINDS, ...AGG_KINDS]} onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))} />
             </div>
@@ -270,23 +269,8 @@ function AddMenu({
   kinds: readonly string[];
   onPick: (k: string) => void;
 }) {
-  return (
-    <select
-      className="add-menu"
-      value=""
-      onChange={(e) => {
-        if (e.target.value) onPick(e.target.value);
-        e.target.value = "";
-      }}
-    >
-      <option value="">{label}</option>
-      {kinds.map((k) => (
-        <option key={k} value={k}>
-          {k}
-        </option>
-      ))}
-    </select>
-  );
+  // An action menu: value stays "" (placeholder = label), each pick fires onPick.
+  return <Select<string> value="" placeholder={label} options={kinds} onChange={onPick} className="add-menu flex-1" />;
 }
 
 /// Type a column name the catalog doesn't list (offline, or a view) and Enter to
@@ -296,7 +280,7 @@ function ManualColumn({ onAdd }: { onAdd: (name: string) => void }) {
   const [name, setName] = useState("");
   return (
     <Text
-      className="manual-col"
+      className="manual-col w-full text-xs"
       value={name}
       onChange={setName}
       placeholder={t("node.addColumn")}

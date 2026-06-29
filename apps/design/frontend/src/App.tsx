@@ -20,6 +20,7 @@ import { Preview } from "./components/Preview";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Hint } from "./components/Hint";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Select, Text } from "./components/widgets";
 import { useHistory } from "./history";
@@ -474,13 +475,9 @@ export default function App() {
             <Icon name="theme" />
           </Button>
         </Hint>
-        <select className="lang-select h-7 rounded-md border border-border bg-card px-1.5 text-foreground" aria-label={t("topbar.language")} value={lang} onChange={(e) => setLang(e.target.value)}>
-          {Object.entries(LANGS).map(([code, name]) => (
-            <option key={code} value={code}>
-              {name}
-            </option>
-          ))}
-        </select>
+        <div className="lang-select w-28">
+          <Select value={lang} options={Object.entries(LANGS).map(([value, label]) => ({ value, label }))} onChange={setLang} />
+        </div>
         <Button variant="secondary" size="sm" onClick={() => setDrawer((d) => !d)}>
           {drawer ? t("topbar.hide") : t("topbar.yaml")}
         </Button>
@@ -532,12 +529,12 @@ export default function App() {
             <ConfigPanel config={config} onChange={setConfig} onDuplicate={dupIndex} />
           </main>
         ) : rawMode ? (
-          <main className="raw-pane">
+          <main className="raw-pane col-start-2 flex min-h-0 flex-col">
             <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">
               {t("raw.editingFor")} <strong>{active}</strong> — {t("raw.help")}
             </div>
-            <textarea className="raw-editor" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
-            <div className="raw-actions">
+            <Textarea className="raw-editor m-2.5 min-h-0 flex-1 resize-none font-mono text-xs leading-relaxed" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
+            <div className="raw-actions flex gap-2 px-2.5 pb-2.5">
               <Button size="sm" onClick={saveRaw} disabled={saving}>
                 {t("raw.save")}
               </Button>
@@ -579,9 +576,9 @@ export default function App() {
             </main>
             {inspectorOpen && (
               <aside className="inspector-pane">
-                <button className="icon collapse" title="Close" onClick={() => setSelection(null)}>
+                <Button variant="ghost" size="icon-sm" className="collapse absolute right-2 top-2" aria-label="Close" onClick={() => setSelection(null)}>
                   <Icon name="close" />
-                </button>
+                </Button>
                 <Inspector />
               </aside>
             )}
