@@ -547,17 +547,6 @@ export default function App() {
       </header>
 
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
-      {active !== "config" && typeMismatches > 0 && !ignoreTypeWarn && (
-        <div className="banner warn flex items-center gap-3 bg-warn/10 px-4 py-2 text-xs text-warn">
-          <span className="flex-1">{t("typeWarn.banner", { n: typeMismatches })}</span>
-          <Button size="sm" variant="secondary" onClick={() => apply((s) => fixAllTypes(s, catalog))}>
-            {t("typeWarn.fixAll")}
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => setIgnoreTypeWarn(true)}>
-            {t("typeWarn.ignore")}
-          </Button>
-        </div>
-      )}
       {catalog?.error && (
         <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>
       )}
@@ -652,6 +641,19 @@ export default function App() {
           >
             <main className="canvas-wrap col-start-2 relative h-full min-h-0">
               <Canvas />
+              {typeMismatches > 0 && !ignoreTypeWarn && (
+                <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center px-4">
+                  <div className="pointer-events-auto flex items-center gap-3 rounded-lg border border-warn/40 bg-warn/15 px-4 py-2 text-xs text-warn shadow-lg backdrop-blur-sm">
+                    <span>{t("typeWarn.banner", { n: typeMismatches })}</span>
+                    <Button size="sm" variant="secondary" onClick={() => apply((s) => fixAllTypes(s, catalog))}>
+                      {t("typeWarn.fixAll")}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setIgnoreTypeWarn(true)}>
+                      {t("typeWarn.ignore")}
+                    </Button>
+                  </div>
+                </div>
+              )}
             </main>
             {/* The preview is a non-modal bottom drawer (modal=false + no overlay),
                 so the topbar toggle and the canvas stay interactive while it's open. */}
