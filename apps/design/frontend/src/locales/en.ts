@@ -4,14 +4,12 @@ export const en: Record<string, string> = {
   // topbar
   "topbar.hideSidebar": "Hide sidebar",
   "topbar.showSidebar": "Show sidebar",
-  "topbar.browseDb": "Browse the database",
   "topbar.tables": "Tables",
   "topbar.visual": "Visual",
   "topbar.rawYaml": "Raw YAML",
   "topbar.undo": "Undo (⌘Z)",
   "topbar.redo": "Redo (⇧⌘Z)",
   "topbar.toggleTheme": "Toggle theme",
-  "topbar.toggleThemeAria": "Toggle light/dark theme",
   "topbar.retestDb": "Re-test the database connection",
   "topbar.dbConnected": "DB connected",
   "topbar.dbOffline": "DB offline",
@@ -31,6 +29,7 @@ export const en: Record<string, string> = {
   "diag.typeMismatch": 'type "{ty}" is a sharp change from source column "{col}" ({src}) — values may fail to index',
   "topbar.upToDate": "Up to date",
   "topbar.language": "Language",
+  "topbar.more": "More",
 
   // toasts / status
   "toast.saved": "{n, plural, one {Saved # file} other {Saved # files}}",

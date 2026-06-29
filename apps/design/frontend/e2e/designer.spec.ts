@@ -126,7 +126,8 @@ test("save shows a diff before writing", async ({ page }) => {
 });
 
 test("raw YAML mode opens an editor", async ({ page }) => {
-  await page.getByRole("button", { name: "Raw YAML" }).click();
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Raw YAML" }).click();
   await expect(page.locator(".raw-editor")).toBeVisible();
 });
 
@@ -183,7 +184,8 @@ test("duplicating an index adds a sidebar entry", async ({ page }) => {
 });
 
 test("catalog browser lists the database tables", async ({ page }) => {
-  await page.getByRole("button", { name: "Tables" }).click();
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Tables" }).click();
   await expect(page.locator(".catalog-table")).not.toHaveCount(0);
 });
 
@@ -271,19 +273,20 @@ test("validate surfaces a result toast", async ({ page }) => {
 
 test("switches the UI language", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
-  await page.locator(".lang-select").getByRole("combobox").click();
-  await page.locator("[data-slot=select-content]").getByRole("option", { name: "Italiano" }).click();
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitemradio", { name: "Italiano" }).click();
   // labels switch to Italian…
   await expect(page.getByRole("button", { name: "Salva" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Convalida" })).toBeVisible();
-  // …and back to English.
-  await page.locator(".lang-select").getByRole("combobox").click();
-  await page.locator("[data-slot=select-content]").getByRole("option", { name: "English" }).click();
+  // …and back to English (the menu trigger is now "Altro").
+  await page.getByRole("button", { name: "Altro" }).click();
+  await page.getByRole("menuitemradio", { name: "English" }).click();
   await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
 });
 
 test("toggles the light/dark theme", async ({ page }) => {
-  await page.getByRole("button", { name: "Toggle light/dark theme" }).click();
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Toggle theme" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 

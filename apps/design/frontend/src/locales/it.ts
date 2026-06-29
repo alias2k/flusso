@@ -4,14 +4,12 @@ export const it: Record<string, string> = {
   // topbar
   "topbar.hideSidebar": "Nascondi pannello",
   "topbar.showSidebar": "Mostra pannello",
-  "topbar.browseDb": "Esplora il database",
   "topbar.tables": "Tabelle",
   "topbar.visual": "Visuale",
   "topbar.rawYaml": "YAML grezzo",
   "topbar.undo": "Annulla (⌘Z)",
   "topbar.redo": "Ripeti (⇧⌘Z)",
   "topbar.toggleTheme": "Cambia tema",
-  "topbar.toggleThemeAria": "Cambia tema chiaro/scuro",
   "topbar.retestDb": "Riprova la connessione al database",
   "topbar.dbConnected": "DB connesso",
   "topbar.dbOffline": "DB offline",
@@ -32,6 +30,7 @@ export const it: Record<string, string> = {
     'il tipo "{ty}" è un cambiamento netto rispetto alla colonna sorgente "{col}" ({src}) — i valori potrebbero non indicizzarsi',
   "topbar.upToDate": "Aggiornato",
   "topbar.language": "Lingua",
+  "topbar.more": "Altro",
 
   // toasts / status
   "toast.saved": "{n, plural, one {Salvato # file} other {Salvati # file}}",

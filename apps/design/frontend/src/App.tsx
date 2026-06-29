@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CircleCheck, Eye, FileCode2, Moon, MoreHorizontal, RotateCcw, Save, Sun, Table2 } from "lucide-react";
 import type {
   CatalogResponse,
   ColumnShape,
@@ -19,6 +20,16 @@ import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Hint } from "./components/Hint";
 import { Textarea } from "@/components/ui/textarea";
@@ -484,14 +495,8 @@ export default function App() {
           </button>
         </Hint>
         <span className="spacer flex-1" />
-        <Button variant="secondary" size="sm" onClick={() => setBrowseCatalog(true)} title={t("topbar.browseDb")}>
-          {t("topbar.tables")}
-        </Button>
-        {active !== "config" && (
-          <Button variant="secondary" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
-            {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
-          </Button>
-        )}
+
+        {/* history */}
         <Hint label={t("topbar.undo")}>
           <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
             <Icon name="undo" />
@@ -502,29 +507,50 @@ export default function App() {
             <Icon name="redo" />
           </Button>
         </Hint>
-        <Hint label={t("topbar.toggleTheme")}>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={t("topbar.toggleThemeAria")}
-            onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
-          >
-            <Icon name="theme" />
-          </Button>
-        </Hint>
-        <div className="lang-select w-28">
-          <Select
-            value={lang}
-            options={Object.entries(LANGS).map(([value, label]) => ({ value, label }))}
-            onChange={setLang}
-          />
-        </div>
+
+        <div className="mx-1 h-5 w-px bg-border" />
+
+        {/* preview */}
         <Button variant="secondary" size="sm" onClick={() => setDrawer((d) => !d)}>
-          {drawer ? t("topbar.hide") : t("topbar.yaml")}
+          <Eye /> {drawer ? t("topbar.hide") : t("topbar.yaml")}
         </Button>
+
+        {/* view + appearance, grouped in a menu */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.more")}>
+              <MoreHorizontal />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => setBrowseCatalog(true)}>
+              <Table2 /> {t("topbar.tables")}
+            </DropdownMenuItem>
+            {active !== "config" && (
+              <DropdownMenuItem onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
+                <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}>
+              {theme === "dark" ? <Sun /> : <Moon />} {t("topbar.toggleTheme")}
+            </DropdownMenuItem>
+            <DropdownMenuLabel>{t("topbar.language")}</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={lang} onValueChange={setLang}>
+              {Object.entries(LANGS).map(([value, label]) => (
+                <DropdownMenuRadioItem key={value} value={value}>
+                  {label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <div className="mx-1 h-5 w-px bg-border" />
+
+        {/* actions */}
         <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
-          {validating && <span className="spinner" />}
-          {t("topbar.validate")}
+          {validating ? <span className="spinner" /> : <CircleCheck />} {t("topbar.validate")}
         </Button>
         <Button
           variant="secondary"
@@ -533,7 +559,7 @@ export default function App() {
           disabled={!dirty || saving}
           title={t("topbar.resetHint")}
         >
-          {t("topbar.reset")}
+          <RotateCcw /> {t("topbar.reset")}
         </Button>
         <Button
           size="sm"
@@ -541,7 +567,7 @@ export default function App() {
           disabled={saving}
           title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}
         >
-          {saving ? <span className="spinner" /> : dirty && <span className="dirty-dot" />}
+          {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
           {t("topbar.save")}
         </Button>
       </header>
