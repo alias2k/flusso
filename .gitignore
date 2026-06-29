@@ -3,3 +3,7 @@
 
 # mdBook build output (the docs site is built fresh in CI)
 /docs/book
+
+# OS + coverage artifacts
+.DS_Store
+*.profraw

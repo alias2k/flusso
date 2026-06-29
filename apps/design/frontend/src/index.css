@@ -1,0 +1,50 @@
+/* Tailwind v4 + shadcn entry. Layer order is deliberate so Tailwind can
+   coexist with the legacy hand-written styles during the atomic-design
+   migration: preflight lives in `base` (below `legacy`), so its resets don't
+   clobber the not-yet-migrated UI, while `utilities` sits above `legacy`, so
+   migrated components styled with Tailwind win. Once everything is migrated,
+   `styles.css` (the `legacy` layer) goes away. */
+@layer theme, base, legacy, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "tw-animate-css";
+@import "./styles.css" layer(legacy);
+
+:root {
+  --radius: 0.5rem;
+}
+
+/* Map shadcn's token names straight onto the flusso palette (defined in
+   styles.css `:root`), so there's one source of truth and the light/dark
+   switch flows through for free. `inline` means utilities reference the flusso
+   var directly. shadcn's `--primary` is our brand emerald; its `--accent` is a
+   subtle hover surface (panel-3), NOT the brand colour — so we never shadow
+   the flusso `--accent`/`--border`/`--muted` the legacy CSS relies on. */
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--text);
+  --color-popover: var(--panel-2);
+  --color-popover-foreground: var(--text);
+  --color-primary: var(--accent);
+  --color-primary-foreground: #04140e;
+  --color-secondary: var(--panel-2);
+  --color-secondary-foreground: var(--text);
+  --color-muted: var(--panel-2);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--panel-3);
+  --color-accent-foreground: var(--text);
+  --color-destructive: var(--error);
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-ring: var(--accent-2);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
