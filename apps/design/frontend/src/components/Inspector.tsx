@@ -49,6 +49,7 @@ function Breadcrumb() {
   }
   return <div className="crumbs">{crumbs.join(" › ")}</div>;
 }
+import { Button } from "@/components/ui/button";
 import { Filters } from "./Filters";
 import { Block, Bridge, Check, Drawer, Field as Row, GenericInput, Num, Select, Text } from "./widgets";
 
@@ -150,11 +151,11 @@ function NodeInspector({ path }: { path: number[] }) {
     return (
       <div className="inspector">
         <h3>{t("inspector.objectGroup")}</h3>
-        <div className="inspector-actions">
-          <button onClick={duplicate}>{t("inspector.duplicate")}</button>
-          <button className="link danger" onClick={remove}>
+        <div className="mb-3 flex gap-3.5">
+          <Button variant="link" size="sm" onClick={duplicate}>{t("inspector.duplicate")}</Button>
+          <Button variant="link" size="sm" className="text-destructive" onClick={remove}>
             {t("inspector.delete")}
-          </button>
+          </Button>
         </div>
         <div className="no-source">⊘ {t("inspector.groupHint")}</div>
         <Block variant="doc" title={t("inspector.inDoc")}>
@@ -186,11 +187,11 @@ function NodeInspector({ path }: { path: number[] }) {
     <div className="inspector">
       <h3>{t("inspector.join")} · {verb}</h3>
       {KIND_HELP[verb] && <p className="kind-help">{t(KIND_HELP[verb])}</p>}
-      <div className="inspector-actions">
-        <button onClick={duplicate}>{t("inspector.duplicate")}</button>
-        <button className="link danger" onClick={remove}>
+      <div className="mb-3 flex gap-3.5">
+        <Button variant="link" size="sm" onClick={duplicate}>{t("inspector.duplicate")}</Button>
+        <Button variant="link" size="sm" className="text-destructive" onClick={remove}>
           {t("inspector.delete")}
-        </button>
+        </Button>
       </div>
       <Block variant="src" title={t("inspector.relationship")}>
         <Row label={t("inspector.verb")}>
@@ -276,11 +277,11 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
     <div className="inspector">
       <h3>{t("inspector.field")} · {field.field}</h3>
       {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
-      <div className="inspector-actions">
-        <button onClick={duplicate}>{t("inspector.duplicate")}</button>
-        <button className="link danger" onClick={remove}>
+      <div className="mb-3 flex gap-3.5">
+        <Button variant="link" size="sm" onClick={duplicate}>{t("inspector.duplicate")}</Button>
+        <Button variant="link" size="sm" className="text-destructive" onClick={remove}>
           {t("inspector.delete")}
-        </button>
+        </Button>
       </div>
       {"column" in s && typeof s.column.ty === "string" && (
         <ScalarBody field={field} column={s.column} srcNullable={srcNullable} suggested={srcCol?.suggested_type} sqlType={srcCol?.sql_type} set={set} />
@@ -671,7 +672,7 @@ function AggregateKeyEditor({ value, tables, onChange }: { value: AggregateKey; 
   const { t } = useT();
   const direct = "direct" in value;
   return (
-    <div className="key-editor">
+    <div className="my-1.5 flex flex-wrap items-end gap-2">
       <Row label={t("inspector.optKey")}>
         <Select value={direct ? "direct" : "through"} options={["direct", "through"]} onChange={(k) => onChange(k === "direct" ? { direct: "" } : { through: { table: "", left_key: "", right_key: "" } })} />
       </Row>
@@ -689,7 +690,7 @@ function AggregateKeyEditor({ value, tables, onChange }: { value: AggregateKey; 
 function ThroughEditor({ through, tables, onChange }: { through: { table: string; left_key: string; right_key: string }; tables: string[]; onChange: (t: { table: string; left_key: string; right_key: string }) => void }) {
   const { t } = useT();
   return (
-    <div className="through">
+    <div className="my-1.5 flex flex-wrap items-end gap-2">
       <Row label={t("inspector.junctionTable")}>
         <Text value={through.table} list={tables} onChange={(table) => onChange({ ...through, table })} />
       </Row>
@@ -711,20 +712,20 @@ function OrderByEditor({ value, cols, onChange }: { value: { column: string; dir
     onChange(next);
   };
   return (
-    <div className="order-by">
-      <span className="field-label">order_by</span>
+    <div className="my-1.5 flex flex-wrap items-end gap-2">
+      <span className="text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">order_by</span>
       {value.map((ob, i) => (
-        <div className="order-row" key={i}>
-          <Text value={ob.column} list={cols} onChange={(column) => set(i, { ...ob, column })} placeholder={t("common.column")} />
+        <div className="my-1 flex items-center gap-1.5" key={i}>
+          <Text value={ob.column} list={cols} onChange={(column) => set(i, { ...ob, column })} placeholder={t("common.column")} className="min-w-0 flex-1" />
           <Select value={ob.direction ?? "asc"} options={["asc", "desc"]} onChange={(direction) => set(i, { ...ob, direction })} />
-          <button className="link danger" onClick={() => onChange(value.filter((_, j) => j !== i).length ? value.filter((_, j) => j !== i) : undefined)}>
+          <Button variant="link" size="sm" className="text-destructive" onClick={() => onChange(value.filter((_, j) => j !== i).length ? value.filter((_, j) => j !== i) : undefined)}>
             ✕
-          </button>
+          </Button>
         </div>
       ))}
-      <button className="link" onClick={() => onChange([...value, { column: "", direction: "asc" }])}>
+      <Button variant="link" size="sm" onClick={() => onChange([...value, { column: "", direction: "asc" }])}>
         + order_by
-      </button>
+      </Button>
     </div>
   );
 }
@@ -733,7 +734,7 @@ function SoftDeleteEditor({ value, onChange, cols }: { value: SoftDelete | undef
   const { t } = useT();
   const kind = value === undefined ? "none" : "field" in value ? "field" : "column";
   return (
-    <div className="soft-delete">
+    <div className="my-1.5 flex flex-wrap items-end gap-2">
       <Row label={t("inspector.softDelete")}>
         <Select value={kind} options={["none", "field", "column"]} onChange={(k) => onChange(k === "none" ? undefined : k === "field" ? { field: "" } : { column: "" })} />
       </Row>

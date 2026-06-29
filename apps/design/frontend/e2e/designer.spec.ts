@@ -177,7 +177,7 @@ test("duplicating a node adds a copy", async ({ page }) => {
 test("duplicating an index adds a sidebar entry", async ({ page }) => {
   const before = await page.locator(".sidebar .nav").count();
   await page.getByRole("button", { name: /Deployment/ }).click();
-  await page.locator(".index-entry .link", { hasText: "dup" }).first().click();
+  await page.locator(".index-entry button", { hasText: "dup" }).first().click();
   await expect(page.locator(".sidebar .nav")).toHaveCount(before + 1);
 });
 

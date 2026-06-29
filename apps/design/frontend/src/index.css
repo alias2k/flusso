@@ -174,30 +174,6 @@ button {
 button:hover {
   border-color: var(--accent);
 }
-button.primary {
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  border: none;
-  color: #04140e;
-  font-weight: 600;
-}
-button.primary:hover {
-  filter: brightness(1.08);
-}
-button.link {
-  background: none;
-  border: none;
-  color: var(--accent);
-  padding: 0.125rem 0.375rem;
-}
-button.link.danger {
-  color: var(--error);
-}
-button.add {
-  margin-top: 0.5rem;
-  width: 100%;
-  border-style: dashed;
-}
-
 /* banners are Tailwind now (App.tsx). */
 
 .layout {
@@ -241,11 +217,7 @@ h3 {
   color: var(--muted);
 }
 
-.row {
-  display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-}
+/* .row is Tailwind now (flex flex-wrap gap-3 inline). */
 
 .field {
   display: flex;
@@ -253,15 +225,6 @@ h3 {
   gap: 0.1875rem;
   margin-bottom: 0.5rem;
 }
-.field-label {
-  font-size: 0.65625rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-/* the document-field name + its rename chips read as one stacked group */
-.name-field .rename-chips { margin-top: 0.4375rem; }
 /* `input:not([type])` covers type-less text inputs (filter boxes, the manual
    column entry) so they get the theme too — checkboxes/radios always carry an
    explicit type, so they're excluded. */
@@ -319,49 +282,6 @@ input[type="checkbox"]:focus-visible { outline: 0.125rem solid var(--accent-2); 
   font-size: 0.8125rem;
 }
 
-.fields {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.field-card {
-  background: var(--panel);
-  border: 0.0625rem solid var(--border);
-  border-radius: 0.5rem;
-  padding: 0.625rem;
-}
-.field-head {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-.field-name {
-  flex: 1;
-  font-weight: 600;
-}
-.field-body {
-  margin-top: 0.5rem;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  align-items: flex-end;
-}
-.nested {
-  width: 100%;
-  margin-top: 0.5rem;
-  padding-left: 0.75rem;
-  border-left: 0.125rem solid var(--border);
-}
-
-.through,
-.key-editor,
-.order-by,
-.soft-delete {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  align-items: flex-end;
-}
 details {
   width: 100%;
   margin: 0.25rem 0;
@@ -371,20 +291,7 @@ summary {
   color: var(--muted);
   font-size: 0.75rem;
 }
-.filter-row,
-.order-row {
-  display: flex;
-  gap: 0.375rem;
-  align-items: center;
-  margin: 0.25rem 0;
-}
 
-.index-entry {
-  display: flex;
-  gap: 0.375rem;
-  align-items: center;
-  margin: 0.25rem 0;
-}
 .hint {
   color: var(--muted);
   font-size: 0.75rem;
@@ -619,7 +526,6 @@ pre.yaml {
 
 .inspector h3 { margin-top: 0; }
 .inspector.empty { color: var(--muted); }
-.key-editor, .through, .order-by, .soft-delete { margin: 0.375rem 0; }
 
 
 /* Theme React Flow's own chrome through its `--xy-*` variables rather than
@@ -878,18 +784,7 @@ button:disabled:hover {
 /* ── config & escape hatches (group F) ──────────────────────────────────── */
 /* db-chip is Tailwind now (App.tsx). */
 
-.sink-editor {
-  border: 0.0625rem solid var(--border);
-  border-radius: 0.5rem;
-  padding: 0.625rem;
-  margin: 0.375rem 0;
-}
-.sink-head {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  margin-bottom: 0.5rem;
-}
+/* sink-editor / sink-head are Tailwind now (ConfigPanel.tsx; .sink-editor kept as e2e marker only). */
 
 /* raw-pane / raw-editor / raw-actions are Tailwind now (App.tsx). */
 
@@ -932,37 +827,6 @@ button:disabled:hover {
   align-items: center;
   justify-content: space-between;
 }
-.copy {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-size: 0.6875rem;
-}
-
-/* inspector duplicate/delete actions + field options rows */
-.inspector-actions {
-  display: flex;
-  gap: 0.875rem;
-  margin: 0 0 0.75rem;
-}
-/* both actions are text buttons so they sit on one aligned baseline (Duplicate
-   was a bordered button, Delete a link → misaligned). */
-.inspector-actions button {
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  font-size: 0.78125rem;
-  color: var(--accent);
-  cursor: pointer;
-}
-.inspector-actions button.danger { color: var(--error); }
-/* let inputs shrink inside flex/grid rows so the panel never scrolls sideways */
-.filter-row input,
-.filter-row select,
-.order-row input { min-width: 0; }
-.filter-row > input,
-.filter-row > select { flex: 1 1 0; }
 
 /* ── catalog browser (item 7) ───────────────────────────────────────────── */
 .catalog-filter { width: 100%; margin-bottom: 0.5rem; }

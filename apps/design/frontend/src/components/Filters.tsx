@@ -1,5 +1,6 @@
 import type { Filter } from "../api";
 import { useT } from "../i18n";
+import { Button } from "@/components/ui/button";
 import { Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
@@ -82,17 +83,19 @@ export function Filters({
       {value.map((f, i) => {
         const kind = kindOf(f);
         return (
-          <div className="filter-row" key={i}>
+          <div className="my-1 flex items-center gap-1.5" key={i}>
             <Select<FilterKind>
               value={kind}
               onChange={(k) => set(i, blank(k))}
               options={["raw", "null_check", "value_op"]}
+              className="flex-1"
             />
             {kind === "raw" && (
               <Text
                 value={"raw" in f ? f.raw : ""}
                 onChange={(raw) => set(i, { raw })}
                 placeholder="status <> 'archived'"
+                className="flex-1"
               />
             )}
             {kind === "null_check" && "op" in f && (
@@ -102,11 +105,13 @@ export function Filters({
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
                   placeholder={t("common.column")}
+                  className="flex-1"
                 />
                 <Select
                   value={f.op as "is_null" | "is_not_null"}
                   onChange={(op) => set(i, { ...f, op })}
                   options={["is_null", "is_not_null"]}
+                  className="flex-1"
                 />
               </>
             )}
@@ -117,28 +122,31 @@ export function Filters({
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
                   placeholder={t("common.column")}
+                  className="flex-1"
                 />
                 <Select
                   value={f.op as (typeof VALUE_OPS)[number]}
                   onChange={(op) => set(i, { ...f, op, value: coerceValue(op, valueText(f)) })}
                   options={VALUE_OPS}
+                  className="flex-1"
                 />
                 <Text
                   value={valueText(f)}
                   onChange={(text) => set(i, { ...f, value: coerceValue(f.op, text) })}
                   placeholder={f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")}
+                  className="flex-1"
                 />
               </>
             )}
-            <button className="link danger" onClick={() => remove(i)}>
+            <Button variant="link" size="sm" className="text-destructive" onClick={() => remove(i)}>
               {t("common.remove")}
-            </button>
+            </Button>
           </div>
         );
       })}
-      <button className="link" onClick={() => onChange([...value, blank("value_op")])}>
+      <Button variant="link" size="sm" onClick={() => onChange([...value, blank("value_op")])}>
         + {t("filters.filter")}
-      </button>
+      </Button>
     </div>
   );
 }

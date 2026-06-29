@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
+import { Button } from "@/components/ui/button";
 import { Icon } from "./Icon";
 
 function Node({ node, depth }: { node: DocumentNode; depth: number }) {
@@ -74,9 +75,9 @@ export function Preview({
       {onSample && preview.parse_ok && <SampleDoc onSample={onSample} />}
       <h3 className="yaml-head">
         {t("preview.schemaYml")}
-        <button className="link copy" onClick={copy} title={t("preview.copyYaml")}>
+        <Button variant="link" size="sm" className="ml-auto gap-1" onClick={copy} title={t("preview.copyYaml")}>
           <Icon name="copy" size={13} /> {copied ? t("preview.copied") : t("preview.copy")}
-        </button>
+        </Button>
       </h3>
       <pre className="yaml">{preview.yaml}</pre>
       <details className="mapping-details">
@@ -109,9 +110,9 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
       <h3 className="yaml-head">
         {t("preview.sampleFromDb")}
         {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
-        <button className="link" onClick={fetchSample} disabled={loading}>
+        <Button variant="link" size="sm" className="gap-1" onClick={fetchSample} disabled={loading}>
           <Icon name="play" size={13} /> {loading ? t("preview.building") : result ? t("preview.refresh") : t("preview.fetch")}
-        </button>
+        </Button>
       </h3>
       {error && <div className="banner error">{error}</div>}
       {result && !result.db_reachable && <div className="banner error">{result.error}</div>}

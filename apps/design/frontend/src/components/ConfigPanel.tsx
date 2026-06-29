@@ -1,5 +1,6 @@
 import type { ConfigToml, IndexEntry } from "../api";
 import { useT } from "../i18n";
+import { Button } from "@/components/ui/button";
 import { Check, Field, Num, Select, Text } from "./widgets";
 
 type Sink = Record<string, unknown>;
@@ -31,7 +32,7 @@ export function ConfigPanel({
   };
 
   return (
-    <div className="config-panel">
+    <div className="config-panel max-w-3xl">
       <h2>{t("sidebar.deployment")}</h2>
       <Field label={t("config.indexPrefix")}>
         <Text value={config.prefix ?? ""} onChange={(prefix) => onChange({ ...config, prefix })} placeholder={t("config.none")} />
@@ -49,7 +50,7 @@ export function ConfigPanel({
           onChange={(v) => onChange({ ...config, on_error: v })}
         />
       </Field>
-      <div className="row">
+      <div className="flex flex-wrap gap-3">
         <Field label="public_address">
           <Text
             value={((config.server)?.public_address as string) ?? ""}
@@ -70,16 +71,17 @@ export function ConfigPanel({
       {Object.entries(sinks).map(([name, sink]) => (
         <SinkEditor key={name} name={name} sink={sink} onChange={(s) => setSink(name, s)} onRemove={() => removeSink(name)} />
       ))}
-      <button
-        className="link"
+      <Button
+        variant="link"
+        size="sm"
         onClick={() => setSink(`sink${Object.keys(sinks).length + 1}`, { type: "opensearch", url: "http://127.0.0.1:9200" })}
       >
         + {t("config.sink")}
-      </button>
+      </Button>
 
       <h3>{t("sidebar.indexes")}</h3>
       {index.map((e, i) => (
-        <div className="index-entry" key={i}>
+        <div className="index-entry my-1 flex items-center gap-1.5" key={i}>
           <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder={t("config.name")} />
           <Text value={e.schema} onChange={(schema) => setEntry(i, { ...e, schema })} placeholder="x.schema.yml" />
           <Check value={e.enabled} label={t("config.enabled")} onChange={(enabled) => setEntry(i, { ...e, enabled })} />
@@ -88,28 +90,31 @@ export function ConfigPanel({
             options={["default", "stop", "skip"]}
             onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
           />
-          <button className="link" title={t("config.duplicate")} onClick={() => onDuplicate(i)}>
+          <Button variant="link" size="sm" title={t("config.duplicate")} onClick={() => onDuplicate(i)}>
             {t("config.dup")}
-          </button>
-          <button
-            className="link danger"
+          </Button>
+          <Button
+            variant="link"
+            size="sm"
+            className="text-destructive"
             onClick={() => {
               if (confirm(t("config.removeIndex", { name: e.name })))
                 onChange({ ...config, index: index.filter((_, j) => j !== i) });
             }}
           >
             ✕
-          </button>
+          </Button>
         </div>
       ))}
-      <button
-        className="link"
+      <Button
+        variant="link"
+        size="sm"
         onClick={() =>
           onChange({ ...config, index: [...index, { name: "new_index", schema: "new_index.schema.yml", enabled: true }] })
         }
       >
         + {t("config.index")}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -150,7 +155,7 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
       )}
       {mode === "parts" && (
         <>
-          <div className="row">
+          <div className="flex flex-wrap gap-3">
             <Field label={t("config.host")}>
               <Text value={(obj.host as string) ?? ""} onChange={(v) => setCu({ ...obj, host: v })} />
             </Field>
@@ -200,13 +205,13 @@ function SinkEditor({
   const bool = (key: string) => sink[key] === true;
 
   return (
-    <div className="sink-editor">
-      <div className="sink-head">
+    <div className="sink-editor my-1.5 rounded-lg border border-border p-2.5">
+      <div className="sink-head mb-2 flex items-center gap-2.5">
         <strong>{name}</strong>
         <Select value={type} options={["opensearch", "stdout"]} onChange={(ty) => set("type", ty)} />
-        <button className="link danger" onClick={onRemove}>
+        <Button variant="link" size="sm" className="text-destructive" onClick={onRemove}>
           {t("common.remove")}
-        </button>
+        </Button>
       </div>
       {type === "opensearch" ? (
         <>
@@ -217,7 +222,7 @@ function SinkEditor({
             <Text value={str("username")} onChange={(v) => set("username", v || undefined)} />
           </Field>
           <Check value={bool("tls_verify")} label="tls_verify" onChange={(v) => set("tls_verify", v)} />
-          <div className="row">
+          <div className="flex flex-wrap gap-3">
             <Field label="batch_size">
               <Num value={num("batch_size")} onChange={(v) => set("batch_size", v)} />
             </Field>
