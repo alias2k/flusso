@@ -1033,26 +1033,6 @@ button:disabled:hover {
   padding: 0 0.625rem 0.625rem;
 }
 
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.modal {
-  background: var(--panel);
-  border: 0.0625rem solid var(--border);
-  border-radius: 0.75rem;
-  padding: 1rem;
-  width: min(56.25rem, 92vw);
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.5);
-}
 .diff-list {
   overflow-y: auto;
   flex: 1;
@@ -1071,12 +1051,6 @@ button:disabled:hover {
 }
 .diff-cols .current { border-left: 0.125rem solid var(--error); }
 .diff-cols .next { border-left: 0.125rem solid var(--accent); }
-.modal-actions {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-}
-
 /* ── polish (group G) ───────────────────────────────────────────────────── */
 /* light theme: override the neutral palette; the kind/type hues carry over. */
 :root[data-theme="light"] {

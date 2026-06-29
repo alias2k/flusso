@@ -3,6 +3,8 @@ import type { CatalogResponse } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
 import { Text } from "./widgets";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /// A read-only browser of the introspected database: every table with its
 /// columns (type, pk, nullable), outgoing foreign keys, and the detected
@@ -14,15 +16,17 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
   const junctions = new Set(catalog.junctions.map((j) => j.table.table));
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={t("catalog.aria")} onClick={(e) => e.stopPropagation()}>
-        <h3>{t("catalog.title", { n: catalog.catalog.tables.length })}</h3>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="flex flex-col w-[min(40rem,92vw)] max-w-none max-h-[85vh]" aria-label={t("catalog.aria")}>
+        <DialogHeader>
+          <DialogTitle>{t("catalog.title", { n: catalog.catalog.tables.length })}</DialogTitle>
+        </DialogHeader>
         {catalog.error ? (
           <p className="banner warn">{t("catalog.dbError", { err: catalog.error })}</p>
         ) : (
           <>
             <Text className="catalog-filter" value={q} onChange={setQ} placeholder={t("catalog.filter")} />
-            <div className="catalog-list">
+            <div className="catalog-list min-h-0">
               {tables.map((tbl) => (
                 <details key={tbl.name} className="catalog-table">
                   <summary>
@@ -54,10 +58,12 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
             </div>
           </>
         )}
-        <div className="modal-actions">
-          <button onClick={onClose}>{t("common.close")}</button>
-        </div>
-      </div>
-    </div>
+        <DialogFooter>
+          <Button variant="secondary" size="sm" onClick={onClose}>
+            {t("common.close")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
