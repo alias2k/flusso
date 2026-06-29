@@ -7,9 +7,6 @@ import { Label } from "@/components/ui/label";
 import { Select as SelectRoot, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
-let uid = 0;
-const nextId = () => `w${uid++}`;
-
 /// A panel title (the top heading of a settings panel). Renders an `<h2>`.
 export function PanelTitle({ children, className }: { children: ReactNode; className?: string }) {
   return <h2 className={cn("mb-3 text-lg", className)}>{children}</h2>;
@@ -126,7 +123,10 @@ export function Text({
   className?: string;
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
 }) {
-  const id = list ? nextId() : undefined;
+  // A *stable* id (not the per-render counter) — otherwise every keystroke
+  // re-renders with a new id, orphaning the open datalist so picks do nothing.
+  const generatedId = useId();
+  const id = list ? generatedId : undefined;
   return (
     <>
       <Input
