@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 
 let uid = 0;
 const nextId = () => `w${uid++}`;
@@ -12,29 +12,39 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
+/// The one text-input primitive — every text field in the designer goes through
+/// it, so styling/behaviour stay consistent (and no raw `<input>` can drift off
+/// the theme). `list` adds a datalist; `onKeyDown` covers Enter-to-submit boxes;
+/// `className` lets a caller size it (e.g. a compact filter).
 export function Text({
   value,
   onChange,
   placeholder,
   list,
   invalid,
+  className,
+  onKeyDown,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   list?: string[];
   invalid?: boolean;
+  className?: string;
+  onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
 }) {
   const id = list ? nextId() : undefined;
+  const classes = [className, invalid && "invalid"].filter(Boolean).join(" ") || undefined;
   return (
     <>
       <input
         type="text"
-        className={invalid ? "invalid" : undefined}
+        className={classes}
         value={value}
         placeholder={placeholder}
         list={id}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
       />
       {list && (
         <datalist id={id}>

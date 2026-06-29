@@ -27,6 +27,7 @@ import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { edgeColor } from "../theme";
 import { DocNodeView } from "./DocNodeView";
+import { Text } from "./widgets";
 import { Icon } from "./Icon";
 
 const nodeTypes = { doc: DocNodeView };
@@ -214,7 +215,7 @@ function NodeSearch() {
 
   return (
     <div className="node-search">
-      <input type="text" placeholder={t("canvas.jumpToNode")} value={q} onChange={(e) => setQ(e.target.value)} />
+      <Text value={q} onChange={setQ} placeholder={t("canvas.jumpToNode")} />
       {results.length > 0 && (
         <ul>
           {results.map((n) => (

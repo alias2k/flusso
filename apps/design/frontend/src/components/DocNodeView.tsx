@@ -9,6 +9,7 @@ import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { typeClass } from "../theme";
 import { Icon } from "./Icon";
+import { Text } from "./widgets";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant"] as const;
 const AGG_KINDS = ["count", "sum", "avg", "min", "max", "ids"] as const;
@@ -119,12 +120,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
               ))}
             </select>
           ) : (
-            <input
-              placeholder={t("node.rootTableEnter")}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && e.currentTarget.value.trim()) pickRootTable(e.currentTarget.value.trim());
-              }}
-            />
+            <RootTableInput onPick={pickRootTable} />
           )}
         </div>
       ) : (
@@ -132,12 +128,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
         <>
           {cols.length > 0 && (
             <div className="col-tools" onClick={(e) => e.stopPropagation()}>
-              <input
-                className="col-filter"
-                placeholder={t("node.filterCols")}
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-              />
+              <Text className="col-filter" value={filter} onChange={setFilter} placeholder={t("node.filterCols")} />
               <button
                 className="link"
                 title={t("node.includeAll")}
@@ -280,17 +271,38 @@ function AddMenu({
   );
 }
 
+/// Type a column name the catalog doesn't list (offline, or a view) and Enter to
+/// add it.
 function ManualColumn({ onAdd }: { onAdd: (name: string) => void }) {
   const { t } = useT();
+  const [name, setName] = useState("");
   return (
-    <input
+    <Text
       className="manual-col"
+      value={name}
+      onChange={setName}
       placeholder={t("node.addColumn")}
       onKeyDown={(e) => {
-        if (e.key === "Enter" && e.currentTarget.value.trim()) {
-          onAdd(e.currentTarget.value.trim());
-          e.currentTarget.value = "";
+        if (e.key === "Enter" && name.trim()) {
+          onAdd(name.trim());
+          setName("");
         }
+      }}
+    />
+  );
+}
+
+/// The empty-state root-table entry (when the catalog has no tables to pick).
+function RootTableInput({ onPick }: { onPick: (table: string) => void }) {
+  const { t } = useT();
+  const [name, setName] = useState("");
+  return (
+    <Text
+      value={name}
+      onChange={setName}
+      placeholder={t("node.rootTableEnter")}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && name.trim()) onPick(name.trim());
       }}
     />
   );

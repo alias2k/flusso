@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { CatalogResponse } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
+import { Text } from "./widgets";
 
 /// A read-only browser of the introspected database: every table with its
 /// columns (type, pk, nullable), outgoing foreign keys, and the detected
@@ -20,7 +21,7 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
           <p className="banner warn">{t("catalog.dbError", { err: catalog.error })}</p>
         ) : (
           <>
-            <input className="catalog-filter" placeholder={t("catalog.filter")} value={q} onChange={(e) => setQ(e.target.value)} />
+            <Text className="catalog-filter" value={q} onChange={setQ} placeholder={t("catalog.filter")} />
             <div className="catalog-list">
               {tables.map((tbl) => (
                 <details key={tbl.name} className="catalog-table">
