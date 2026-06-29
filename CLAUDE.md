@@ -96,9 +96,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   `src/index.css` (the Tailwind entry) — no `styles.css`. It maps shadcn's tokens onto the flusso
   palette via `@theme inline` (so `--primary` = brand emerald, `--accent` = the panel-3 hover
   surface — the flusso `--accent`/`--border`/`--muted` vars are never shadowed), binds `dark:` to
-  `html[data-theme=dark]` (the app's dark-first signal), and holds the remaining bespoke
-  component + React Flow `--xy-*` theming under `@layer components` (utilities still win). Keep
-  new UI on shadcn atoms + Tailwind utilities (rem, not px).
+  `html[data-theme=dark]` (the app's dark-first signal), exposes the rest of the flusso palette as
+  `@theme` tokens (`string`/`accent2`/`slate`/`warn`/`kind-*`) plus bespoke sizes (`text-2xs`/
+  `text-3xs`), and holds the remaining bespoke component + React Flow `--xy-*` theming under
+  `@layer components` (utilities still win). Keep new UI on shadcn atoms + Tailwind utilities, in
+  **rem not px**, and **custom values — especially colours — as `@theme` tokens, never arbitrary
+  `[var(--x)]`/`[0.6875rem]`** (`text-string`, not `text-[var(--string)]`).
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
   `flusso-query-derive`'s trybuild UI tests (`apps/query-derive/tests/ui/*.stderr`) compare

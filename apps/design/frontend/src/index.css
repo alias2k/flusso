@@ -57,6 +57,24 @@
   --color-input: var(--border);
   --color-ring: var(--accent-2);
 
+  /* flusso-specific palette as tokens (so utilities use them, never arbitrary
+     [var(--x)]): the cyan "flow" accent, the type-string hue, the slate used by
+     expert/neutral bits, the warn amber, and the six relation-kind hues. */
+  --color-accent2: var(--accent-2);
+  --color-string: var(--string);
+  --color-slate: var(--slate);
+  --color-warn: var(--warn);
+  --color-kind-root: var(--k-root);
+  --color-kind-object: var(--k-object);
+  --color-kind-belongs_to: var(--k-belongs_to);
+  --color-kind-has_one: var(--k-has_one);
+  --color-kind-has_many: var(--k-has_many);
+  --color-kind-many_to_many: var(--k-many_to_many);
+
+  /* the bespoke small sizes the dense UI uses (10px / 11px at the 16px root) */
+  --text-2xs: 0.6875rem;
+  --text-3xs: 0.625rem;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

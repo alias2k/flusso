@@ -15,7 +15,7 @@ const nextId = () => `w${uid++}`;
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="field mb-2 flex flex-col gap-1">
-      <span className="field-label text-[0.65625rem] font-semibold uppercase tracking-[0.05em] text-muted-foreground">{label}</span>
+      <span className="field-label text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">{label}</span>
       {children}
     </div>
   );
@@ -34,11 +34,11 @@ export function Block({ variant, title, children }: { variant: "src" | "doc"; ti
       className={cn(
         "blk mt-1 rounded-lg border border-l-2 border-border p-3 first:mt-0",
         src
-          ? "src bg-[color-mix(in_srgb,var(--string)_7%,var(--panel-2))] border-l-[var(--string)]"
-          : "doc bg-card border-l-[var(--accent)]",
+          ? "src bg-string/10 border-l-string"
+          : "doc bg-card border-l-primary",
       )}
     >
-      <div className={cn("blk-h mb-2 text-[0.625rem] font-bold uppercase tracking-[0.08em]", src ? "text-[var(--string)]" : "text-[var(--accent)]")}>
+      <div className={cn("blk-h mb-2 text-3xs font-bold uppercase tracking-[0.08em]", src ? "text-string" : "text-primary")}>
         {src ? "◧ " : "◨ "}
         {title}
       </div>
@@ -52,8 +52,8 @@ export function Block({ variant, title, children }: { variant: "src" | "doc"; ti
 /// below.
 export function Bridge({ children }: { children: ReactNode }) {
   return (
-    <div className="bridge my-0.5 flex items-start gap-2 px-2.5 py-1.5 text-[0.6875rem] leading-snug text-muted-foreground">
-      <span className="shrink-0 font-bold text-[var(--accent-2)]">↓</span>
+    <div className="bridge my-0.5 flex items-start gap-2 px-2.5 py-1.5 text-2xs leading-snug text-muted-foreground">
+      <span className="shrink-0 font-bold text-accent2">↓</span>
       <span>{children}</span>
     </div>
   );
@@ -66,11 +66,11 @@ export function Drawer({ title, count, defaultOpen, children }: { title: string;
   return (
     <details className="expert-drawer group mt-2.5 w-full overflow-hidden rounded-lg border border-border" open={defaultOpen}>
       <summary className="drawer-h flex cursor-pointer list-none items-center gap-2 bg-secondary px-3 py-2 [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3 text-[var(--slate)] transition-transform group-open:rotate-90" aria-hidden="true" />
-        <span className="text-[0.6875rem] font-bold uppercase tracking-[0.07em] text-[var(--slate)]">{title}</span>
-        {count !== undefined && <span className="count ml-auto font-mono text-[0.6875rem] text-muted-foreground">{count}</span>}
+        <ChevronRight className="size-3 text-slate transition-transform group-open:rotate-90" aria-hidden="true" />
+        <span className="text-2xs font-bold uppercase tracking-[0.07em] text-slate">{title}</span>
+        {count !== undefined && <span className="count ml-auto font-mono text-2xs text-muted-foreground">{count}</span>}
       </summary>
-      <div className="border-t border-border bg-[color-mix(in_srgb,var(--slate)_4%,var(--panel))] p-3">{children}</div>
+      <div className="border-t border-border bg-slate/5 p-3">{children}</div>
     </details>
   );
 }
@@ -187,7 +187,7 @@ export function Check({
 }) {
   const id = useId();
   return (
-    <div className="check inline-flex items-center gap-1.5 text-[0.8125rem]">
+    <div className="check inline-flex items-center gap-1.5 text-xs">
       <Checkbox id={id} checked={value} onCheckedChange={(c) => onChange(c === true)} />
       <Label htmlFor={id} className="cursor-pointer font-normal">
         {label}

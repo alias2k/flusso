@@ -30,8 +30,8 @@ import { DesignProvider, type Selection } from "./state";
 
 // sidebar nav item classes (kept .nav/.active as hooks for e2e).
 const NAV = "nav mb-0.5 block w-full rounded-md border-0 bg-transparent px-2.5 py-2 text-left hover:bg-secondary";
-const NAV_ACTIVE = "active bg-secondary text-[var(--accent)]";
-const NAV_HEADING = "mx-1 mb-1 mt-3 text-[0.6875rem] uppercase text-muted-foreground";
+const NAV_ACTIVE = "active bg-secondary text-primary";
+const NAV_HEADING = "mx-1 mb-1 mt-3 text-2xs uppercase text-muted-foreground";
 
 /// The whole editable document: the deployment config + every index's schema.
 /// Held as one value so undo/redo and dirty-tracking cover it uniformly.
@@ -428,7 +428,7 @@ export default function App() {
           </Button>
         </Hint>
         <span className="brand inline-flex items-center gap-2 bg-[linear-gradient(90deg,var(--accent),var(--accent-2))] bg-clip-text text-[0.9375rem] font-bold tracking-[0.0125rem] text-transparent">
-          <span className="inline-flex text-[var(--accent)]">
+          <span className="inline-flex text-primary">
             <Icon name="flow" size={18} />
           </span>
           flusso
@@ -437,8 +437,8 @@ export default function App() {
         <Hint label={t("topbar.retestDb")}>
           <button
             className={cn(
-              "db-chip rounded-full border border-border bg-secondary px-2 py-0.5 text-[0.6875rem]",
-              catalog && !catalog.error ? "ok border-[var(--accent)] text-[var(--accent)]" : "off border-[var(--warn)] text-[var(--warn)]",
+              "db-chip rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
+              catalog && !catalog.error ? "ok border-primary text-primary" : "off border-warn text-warn",
             )}
             onClick={refreshCatalog}
           >
@@ -494,8 +494,8 @@ export default function App() {
         </Button>
       </header>
 
-      {error && <div className="banner error bg-[rgba(255,107,107,0.12)] px-4 py-2 text-[0.8125rem] text-[var(--error)]">{error}</div>}
-      {catalog?.error && <div className="banner warn bg-[rgba(224,179,65,0.12)] px-4 py-2 text-[0.8125rem] text-[var(--warn)]">{t("topbar.offlineBanner")}</div>}
+      {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
+      {catalog?.error && <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>}
 
       <div
         className="layout"
@@ -518,8 +518,8 @@ export default function App() {
             <div className="legend mt-3.5">
               <div className={NAV_HEADING}>{t("sidebar.kinds")}</div>
               {["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"].map((k) => (
-                <div className="legend-row flex items-center px-1.5 py-0.5 text-[0.6875rem] text-muted-foreground" key={k}>
-                  <span className="mr-[0.4375rem] inline-block size-[0.5625rem] rounded-full" style={{ background: `var(--k-${k})` }} />
+                <div className="legend-row flex items-center px-1.5 py-0.5 text-2xs text-muted-foreground" key={k}>
+                  <span className="mr-1.5 inline-block size-2.5 rounded-full" style={{ background: `var(--k-${k})` }} />
                   {k}
                 </div>
               ))}
@@ -533,7 +533,7 @@ export default function App() {
           </main>
         ) : rawMode ? (
           <main className="raw-pane">
-            <div className="banner warn bg-[rgba(224,179,65,0.12)] px-4 py-2 text-[0.8125rem] text-[var(--warn)]">
+            <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">
               {t("raw.editingFor")} <strong>{active}</strong> — {t("raw.help")}
             </div>
             <textarea className="raw-editor" value={rawText} onChange={(e) => setRawText(e.target.value)} spellCheck={false} />
@@ -652,7 +652,7 @@ function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: str
   const [table, setTable] = useState(tables[0] ?? "");
   if (!open) {
     return (
-      <button className={cn(NAV, "mt-1.5 border border-dashed border-border text-[var(--accent)]")} onClick={() => setOpen(true)}>
+      <button className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")} onClick={() => setOpen(true)}>
         + {t("sidebar.newIndex")}
       </button>
     );

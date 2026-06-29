@@ -14,10 +14,10 @@ const buttonVariants = cva(
           "bg-[linear-gradient(90deg,var(--accent),var(--accent-2))] text-primary-foreground font-semibold hover:brightness-110",
         destructive:
           "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20",
-        outline: "border border-border bg-card hover:border-[var(--accent)]",
+        outline: "border border-border bg-card hover:border-primary",
         // panel-2 + hairline border, accent border on hover = the plain button
         secondary:
-          "bg-secondary border border-border text-foreground hover:border-[var(--accent)]",
+          "bg-secondary border border-border text-foreground hover:border-primary",
         ghost: "hover:bg-accent hover:text-accent-foreground",
         link: "text-primary underline-offset-4 hover:underline",
       },
