@@ -33,15 +33,15 @@ export function typeClass(label: string): string {
 export function edgeColor(label: string): string {
   switch (label) {
     case "object":
-      return "#a78bfa"; // violet
+      return "#94a3b8"; // slate
     case "belongs_to":
-      return "#38bdf8"; // sky
+      return "#60a5fa"; // blue
     case "has_one":
-      return "#818cf8"; // indigo
+      return "#38bdf8"; // sky — close to belongs_to
     case "has_many":
-      return "#34d399"; // green
+      return "#2dd4bf"; // teal
     case "many_to_many":
-      return "#f472b6"; // pink
+      return "#4ade80"; // green — close to has_many
     default:
       return "#8a93a3";
   }
