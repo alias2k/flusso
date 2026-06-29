@@ -112,8 +112,8 @@ test("inspector shows a breadcrumb for the selection", async ({ page }) => {
   await expect(page.locator(".crumbs")).toBeVisible();
 });
 
-test("the sidebar shows kind + type legends", async ({ page }) => {
-  await expect(page.locator(".legend")).toHaveCount(2);
+test("the sidebar shows the collapsible legend", async ({ page }) => {
+  await expect(page.locator(".legend")).toHaveCount(1); // one collapsible, open by default
   // 6 relation kinds + 6 field-type colour families.
   await expect(page.locator(".legend-row")).toHaveCount(12);
 });

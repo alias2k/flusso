@@ -52,6 +52,7 @@ export const it: Record<string, string> = {
   "sidebar.off": "(disattivo)",
   "sidebar.kinds": "Tipi",
   "sidebar.types": "Tipi dato",
+  "sidebar.legend": "Legenda",
   "sidebar.newIndex": "Nuovo indice",
   "sidebar.indexName": "nome indice",
   "sidebar.rootTable": "tabella radice",

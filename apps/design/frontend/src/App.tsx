@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleCheck, Eye, FileCode2, Moon, MoreHorizontal, RotateCcw, Save, Sun, Table2 } from "lucide-react";
+import {
+  ChevronRight,
+  CircleCheck,
+  Eye,
+  FileCode2,
+  Moon,
+  MoreHorizontal,
+  RotateCcw,
+  Save,
+  Sun,
+  Table2,
+} from "lucide-react";
 import type {
   CatalogResponse,
   ColumnShape,
@@ -582,24 +593,32 @@ export default function App() {
         style={{ gridTemplateColumns: `${leftOpen ? "13.125rem" : "0"} 1fr ${inspectorOpen ? "22.5rem" : "0"}` }}
       >
         {leftOpen && (
-          <nav className="sidebar col-start-1 overflow-y-auto border-r border-border bg-card p-2">
-            <button className={cn(NAV, active === "config" && NAV_ACTIVE)} onClick={() => setActive("config")}>
-              ⚙ {t("sidebar.deployment")}
-            </button>
-            <div className={NAV_HEADING}>{t("sidebar.indexes")}</div>
-            {(config.index ?? []).map((e) => (
-              <button
-                key={e.name}
-                className={cn(NAV, active === e.name && NAV_ACTIVE)}
-                onClick={() => openIndex(e.name)}
-              >
-                {indexDirty(e.name) && <span className="dirty-dot" />}
-                {e.name}
-                {!e.enabled && <span className="text-muted-foreground"> {t("sidebar.off")}</span>}
+          <nav className="sidebar col-start-1 flex min-h-0 flex-col border-r border-border bg-card">
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              <button className={cn(NAV, active === "config" && NAV_ACTIVE)} onClick={() => setActive("config")}>
+                ⚙ {t("sidebar.deployment")}
               </button>
-            ))}
-            <NewIndex tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []} onCreate={createIndex} />
-            <div className="legend mt-3.5">
+              <div className={NAV_HEADING}>{t("sidebar.indexes")}</div>
+              {(config.index ?? []).map((e) => (
+                <button
+                  key={e.name}
+                  className={cn(NAV, active === e.name && NAV_ACTIVE)}
+                  onClick={() => openIndex(e.name)}
+                >
+                  {indexDirty(e.name) && <span className="dirty-dot" />}
+                  {e.name}
+                  {!e.enabled && <span className="text-muted-foreground"> {t("sidebar.off")}</span>}
+                </button>
+              ))}
+              <NewIndex tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []} onCreate={createIndex} />
+            </div>
+            {/* Colour key — open by default, but collapsible so a long index list
+                isn't crowded out. Pinned below the scrolling list. */}
+            <details className="legend group shrink-0 border-t border-border p-2" open>
+              <summary className="flex cursor-pointer list-none items-center gap-1.5 px-1.5 py-1 text-2xs font-semibold uppercase tracking-[0.06em] text-muted-foreground [&::-webkit-details-marker]:hidden">
+                <ChevronRight className="size-3 transition-transform group-open:rotate-90" aria-hidden="true" />
+                {t("sidebar.legend")}
+              </summary>
               <div className={NAV_HEADING}>{t("sidebar.kinds")}</div>
               {["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"].map((k) => (
                 <div className="legend-row flex items-center px-1.5 py-0.5 text-2xs text-muted-foreground" key={k}>
@@ -607,8 +626,6 @@ export default function App() {
                   {k}
                 </div>
               ))}
-            </div>
-            <div className="legend mt-3.5">
               <div className={NAV_HEADING}>{t("sidebar.types")}</div>
               {TYPE_FAMILIES.map((f) => (
                 <div
@@ -622,7 +639,7 @@ export default function App() {
                   {f.label}
                 </div>
               ))}
-            </div>
+            </details>
           </nav>
         )}
 

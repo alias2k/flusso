@@ -51,6 +51,7 @@ export const en: Record<string, string> = {
   "sidebar.off": "(off)",
   "sidebar.kinds": "Kinds",
   "sidebar.types": "Types",
+  "sidebar.legend": "Legend",
   "sidebar.newIndex": "New index",
   "sidebar.indexName": "index name",
   "sidebar.rootTable": "root table",
