@@ -35,13 +35,13 @@ export function edgeColor(label: string): string {
     case "object":
       return "#94a3b8"; // slate
     case "belongs_to":
-      return "#818cf8"; // indigo
+      return "#60a5fa"; // blue
     case "has_one":
       return "#38bdf8"; // sky
     case "has_many":
       return "#2dd4bf"; // teal
     case "many_to_many":
-      return "#4ade80"; // green
+      return "#22c55e"; // green
     default:
       return "#8a93a3";
   }
