@@ -150,13 +150,7 @@ body {
   font-size: 0.875rem;
 }
 
-.app {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-}
-
-/* topbar / brand / path / spacer are Tailwind now (App.tsx). */
+/* .app / topbar / brand / path / spacer are Tailwind now (App.tsx). */
 
 button {
   background: var(--panel-2);
@@ -171,35 +165,15 @@ button:hover {
 }
 /* banners are Tailwind now (App.tsx). */
 
-.layout {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 12.5rem 1fr 26.25rem;
-  min-height: 0;
-  transition: grid-template-columns 0.15s ease;
-}
-/* Pin each pane to its track explicitly: collapsing the nav removes it from the
-   DOM, and without this the canvas would fall into the now-zero-width first
-   column and render invisibly. */
-.layout > .sidebar { grid-column: 1; }
-.layout > .editor,
-.layout > .canvas-wrap { grid-column: 2; }
-.layout > .inspector-pane { grid-column: 3; }
+/* The 3-pane layout grid is Tailwind now (App.tsx): a `grid` whose track widths
+   are an inline style (they animate with the collapse state), and each pane
+   pins its track explicitly with `col-start-{1,2,3}` — collapsing the nav drops
+   it from the DOM, so without explicit pinning the canvas would fall into the
+   now-zero-width first column and render invisibly. */
 
 /* sidebar / nav / legend are Tailwind now (App.tsx); .muted is still shared. */
 .muted {
   color: var(--muted);
-}
-
-.editor,
-.preview-pane {
-  overflow-y: auto;
-  padding: 1rem;
-  min-height: 0;
-}
-.preview-pane {
-  background: var(--panel);
-  border-left: 0.0625rem solid var(--border);
 }
 
 h2 {
@@ -341,20 +315,10 @@ pre.yaml {
 /* preview document tree + diagnostics are Tailwind now (Preview.tsx). */
 
 /* ── canvas + nodes ─────────────────────────────────────────────────────── */
-.canvas-wrap {
-  position: relative;
-  height: 100%;
-  min-height: 0;
-}
+/* .canvas-wrap layout is Tailwind now (App.tsx); React Flow needs an explicit
+   height on its own root, which it owns, so that one rule stays here. */
 .canvas-wrap .react-flow {
   height: 100%;
-}
-.inspector-pane {
-  overflow-y: auto;
-  background: var(--panel);
-  border-left: 0.0625rem solid var(--border);
-  padding: 0.875rem;
-  min-height: 0;
 }
 
 .flow-node {
@@ -517,15 +481,6 @@ button.icon {
 }
 button.icon:hover {
   color: var(--text);
-}
-.inspector-pane {
-  position: relative;
-}
-.inspector-pane .collapse {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  font-size: 0.8125rem;
 }
 
 /* node rows are now display-only: click to edit in the inspector */
