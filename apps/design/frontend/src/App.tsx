@@ -168,47 +168,6 @@ export default function App() {
     return () => clearTimeout(handle);
   }, [active, schema]);
 
-  // Keyboard shortcuts. Held in a ref so the listener subscribes once but always
-  // sees the latest state; undo/delete are suppressed while typing in a field so
-  // native text editing keeps working.
-  const keyHandler = useRef<(e: KeyboardEvent) => void>(() => {});
-  keyHandler.current = (e: KeyboardEvent) => {
-    const el = document.activeElement as HTMLElement | null;
-    const editing = !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
-    const mod = e.metaKey || e.ctrlKey;
-
-    if (mod && e.key.toLowerCase() === "s") {
-      e.preventDefault();
-      void save();
-      return;
-    }
-    if (mod && e.key.toLowerCase() === "z") {
-      if (editing) return;
-      e.preventDefault();
-      if (e.shiftKey) redo();
-      else undo();
-      return;
-    }
-    if (e.key === "Escape") {
-      setSelection(null);
-      return;
-    }
-    if ((e.key === "Delete" || e.key === "Backspace") && !editing && selection) {
-      if (selection.kind === "node" && selection.path.length > 0) {
-        apply((s) => removeNode(s, selection.path));
-        setSelection(null);
-      } else if (selection.kind === "field") {
-        apply((s) => removeAt(s, selection.path, selection.index));
-        setSelection(null);
-      }
-    }
-  };
-  useEffect(() => {
-    const fn = (e: KeyboardEvent) => keyHandler.current(e);
-    window.addEventListener("keydown", fn);
-    return () => window.removeEventListener("keydown", fn);
-  }, []);
-
   // Warn before leaving with unsaved changes.
   useEffect(() => {
     if (!dirty) return;
@@ -415,6 +374,51 @@ export default function App() {
     );
     openIndex(name);
   };
+
+  // Keyboard shortcuts. Held in a ref (updated in an effect, not during render)
+  // so the listener subscribes once but always sees the latest state; undo/
+  // delete are suppressed while typing so native text editing keeps working.
+  // Declared here, after the handlers it calls (save/undo/apply/…).
+  const keyHandler = useRef<(e: KeyboardEvent) => void>(() => {});
+  const handleKey = (e: KeyboardEvent) => {
+    const el = document.activeElement as HTMLElement | null;
+    const editing = !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+    const mod = e.metaKey || e.ctrlKey;
+
+    if (mod && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      void save();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "z") {
+      if (editing) return;
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if (e.key === "Escape") {
+      setSelection(null);
+      return;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && !editing && selection) {
+      if (selection.kind === "node" && selection.path.length > 0) {
+        apply((s) => removeNode(s, selection.path));
+        setSelection(null);
+      } else if (selection.kind === "field") {
+        apply((s) => removeAt(s, selection.path, selection.index));
+        setSelection(null);
+      }
+    }
+  };
+  useEffect(() => {
+    keyHandler.current = handleKey;
+  });
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => keyHandler.current(e);
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, []);
 
   if (!project || !doc || !config) return <div className="loading">{error || "Loading project…"}</div>;
 

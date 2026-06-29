@@ -14,6 +14,11 @@ export default tseslint.config(
     plugins: { "react-hooks": reactHooks, "react-refresh": reactRefresh },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      // react-hooks 7's new rule flags setState-in-effect, but our uses are the
+      // legitimate kind it can't tell apart: debounced preview, one-shot
+      // localStorage init, and the controlled-input resync buffer. Keep
+      // rules-of-hooks + exhaustive-deps; drop this one.
+      "react-hooks/set-state-in-effect": "off",
       // shadcn ui components export a component + its cva variants alongside it.
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
     },

@@ -1,6 +1,8 @@
 // A tiny inline-SVG icon set (lucide-style strokes) so the UI doesn't rely on
 // emoji, which render inconsistently across platforms. No dependency.
 
+import type { ReactElement } from "react";
+
 type IconName =
   | "menu"
   | "close"
@@ -15,7 +17,7 @@ type IconName =
   | "play"
   | "tidy";
 
-const paths: Record<IconName, JSX.Element> = {
+const paths: Record<IconName, ReactElement> = {
   menu: (
     <>
       <line x1="3" y1="6" x2="17" y2="6" />
