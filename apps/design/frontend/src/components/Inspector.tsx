@@ -306,8 +306,8 @@ function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
     .filter((n, i, a) => n && n !== field.field && a.indexOf(n) === i)
     .slice(0, 3);
   return (
-    <div className="fb">
-      <span className="lbl">{t("inspector.fieldName")}</span>
+    <div className="field name-field">
+      <span className="field-label">{t("inspector.fieldName")}</span>
       <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       {chips.length > 0 && (
         <div className="rename-chips">
