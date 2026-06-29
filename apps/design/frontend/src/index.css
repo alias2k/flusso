@@ -267,16 +267,17 @@ pre.yaml {
   font-size: 0.75rem;
   box-shadow: 0 0.125rem 0.625rem rgba(0, 0, 0, 0.25);
 }
-/* Sit the dots just inside the edge (not React Flow's default border-centred
-   spot, whose outer half `overflow: hidden` would clip) and drop the default
-   translateX so the dot is fully inside. The edge anchor tracks the measured
-   handle box, so it meets the dot at its outer edge, vertical-centred. */
+/* Sit the dots on the node edge (poking slightly out). `.flow-node` is static,
+   so its `overflow: hidden` doesn't clip these absolutely-positioned handles
+   (their containing block is React Flow's positioned wrapper). Drop the default
+   translateX so the box sits where `left`/`right` put it; the edge anchor tracks
+   the measured box and meets the dot at its outer edge, vertical-centred. */
 .react-flow__handle-left {
-  left: 0.125rem;
+  left: -0.125rem;
   transform: translateY(-50%);
 }
 .react-flow__handle-right {
-  right: 0.125rem;
+  right: -0.125rem;
   left: auto;
   transform: translateY(-50%);
 }
@@ -316,7 +317,28 @@ pre.yaml {
 .badge.has_many { background: var(--k-has_many); color: #042b25; }
 .badge.many_to_many { background: var(--k-many_to_many); color: #04210f; }
 
-/* .node-cols is Tailwind now (DocNodeView). */
+/* .node-cols layout is Tailwind now (DocNodeView); the scrollbar is themed here
+   (thin, on-palette) so the default chunky one doesn't break the card. */
+.node-cols {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.node-cols::-webkit-scrollbar {
+  width: 0.5rem;
+}
+.node-cols::-webkit-scrollbar-track {
+  background: transparent;
+}
+.node-cols::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 62.4375rem;
+  border: 0.125rem solid transparent;
+  background-clip: padding-box;
+}
+.node-cols::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
+}
 .col-row {
   display: flex;
   align-items: center;
@@ -377,7 +399,7 @@ pre.yaml {
   background: none;
   border: none;
   color: var(--error);
-  padding: 0 0.25rem;
+  padding: 0;
   cursor: pointer;
 }
 .col-row .x { position: static; margin-left: auto; }
