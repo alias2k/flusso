@@ -185,7 +185,9 @@ export function DocNodeView({ data, selected }: NodeProps) {
                     <span
                       className={`col-req${override ? " override" : ""}`}
                       title={override ? t("node.reqOverride") : t("node.reqAligned")}
-                    />
+                    >
+                      *
+                    </span>
                   )}
                   {hasDefault && <span className="col-default" title={t("node.colDefault")}>=</span>}
                   {(() => {

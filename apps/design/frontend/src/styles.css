@@ -487,14 +487,16 @@ pre.yaml {
 /* required/default markers: a muted dot = required & aligned with a NOT NULL
    column; accent dot = required, overriding a nullable column; `=` = a default
    is set. No dot = optional. */
+/* required marker — an asterisk, the universal "this field is required" cue.
+   muted = required because the column is NOT NULL; accent = required over a
+   nullable column (an authored override). */
 .col-req {
   flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
 }
-.col-req.override { background: var(--accent); }
+.col-req.override { color: var(--accent); }
 .col-default { flex: 0 0 auto; color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
 /* The rename input must be allowed to shrink (min-width:0) so the type chip
    beside it never pushes past the node edge — `.node-cols`'s overflow-y:auto

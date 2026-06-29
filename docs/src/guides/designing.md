@@ -55,9 +55,9 @@ inspector shows the suggestion — with a one-click *use* — only when your pic
 - **Undo/redo** (`⌘/Ctrl+Z`, `⇧⌘Z`) over the whole document; an **unsaved-changes** dot
   per index, and a warning before you navigate away with edits.
 - **Per-node column tools**: include-all/clear, a filter for wide tables, and collapse a node
-  to just its header. Each included column shows its required state at a glance: a **muted dot**
-  = required and aligned with a `NOT NULL` column, an **accent dot** = required but overriding a
-  nullable column, an **`=`** = a default is set, and **no dot** = optional.
+  to just its header. Each included column shows its required state at a glance: a **muted `*`**
+  = required and aligned with a `NOT NULL` column, an **accent `*`** = required but overriding a
+  nullable column, an **`=`** = a default is set, and **nothing** = optional.
 - **Jump-to-node** search and shortcuts: `⌘/Ctrl+S` save, `Delete` remove the selected
   node/field, `Esc` deselect; click an edge to select its join.
 - **Guidance**: a kind-colour legend, FK tooltips, a one-line grammar hint per field kind,
