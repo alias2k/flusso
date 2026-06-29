@@ -1,4 +1,5 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
+import { ChevronRight } from "lucide-react";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -27,9 +28,20 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 /// from; `doc` (accent) holds what you author. The pair, with a [`Bridge`]
 /// between, is the "source ⟷ document" reading the panel is built around.
 export function Block({ variant, title, children }: { variant: "src" | "doc"; title: string; children: ReactNode }) {
+  const src = variant === "src";
   return (
-    <div className={`blk ${variant}`}>
-      <div className="blk-h">{title}</div>
+    <div
+      className={cn(
+        "blk mt-1 rounded-lg border border-l-2 border-border p-3 first:mt-0",
+        src
+          ? "src bg-[color-mix(in_srgb,var(--string)_7%,var(--panel-2))] border-l-[var(--string)]"
+          : "doc bg-card border-l-[var(--accent)]",
+      )}
+    >
+      <div className={cn("blk-h mb-2 text-[0.625rem] font-bold uppercase tracking-[0.08em]", src ? "text-[var(--string)]" : "text-[var(--accent)]")}>
+        {src ? "◧ " : "◨ "}
+        {title}
+      </div>
       {children}
     </div>
   );
@@ -40,9 +52,9 @@ export function Block({ variant, title, children }: { variant: "src" | "doc"; ti
 /// below.
 export function Bridge({ children }: { children: ReactNode }) {
   return (
-    <div className="bridge">
-      <span className="arrow">↓</span>
-      <span className="rule">{children}</span>
+    <div className="bridge my-0.5 flex items-start gap-2 px-2.5 py-1.5 text-[0.6875rem] leading-snug text-muted-foreground">
+      <span className="shrink-0 font-bold text-[var(--accent-2)]">↓</span>
+      <span>{children}</span>
     </div>
   );
 }
@@ -52,13 +64,13 @@ export function Bridge({ children }: { children: ReactNode }) {
 /// default — so secondary tuning never competes with the primary choices.
 export function Drawer({ title, count, defaultOpen, children }: { title: string; count?: number; defaultOpen?: boolean; children: ReactNode }) {
   return (
-    <details className="expert-drawer" open={defaultOpen}>
-      <summary className="drawer-h">
-        <span className="chev" aria-hidden="true" />
-        <span className="dh-name">{title}</span>
-        {count !== undefined && <span className="count">{count}</span>}
+    <details className="expert-drawer group mt-2.5 w-full overflow-hidden rounded-lg border border-border" open={defaultOpen}>
+      <summary className="drawer-h flex cursor-pointer list-none items-center gap-2 bg-secondary px-3 py-2 [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="size-3 text-[var(--slate)] transition-transform group-open:rotate-90" aria-hidden="true" />
+        <span className="text-[0.6875rem] font-bold uppercase tracking-[0.07em] text-[var(--slate)]">{title}</span>
+        {count !== undefined && <span className="count ml-auto font-mono text-[0.6875rem] text-muted-foreground">{count}</span>}
       </summary>
-      <div className="drawer-body">{children}</div>
+      <div className="border-t border-border bg-[color-mix(in_srgb,var(--slate)_4%,var(--panel))] p-3">{children}</div>
     </details>
   );
 }
