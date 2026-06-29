@@ -306,14 +306,19 @@ function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
     .filter((n, i, a) => n && n !== field.field && a.indexOf(n) === i)
     .slice(0, 3);
   return (
-    <div className="field name-field">
-      <span className="field-label">{t("inspector.fieldName")}</span>
+    <div className="field mb-2 flex flex-col gap-1">
+      <span className="field-label text-[0.65625rem] font-semibold uppercase tracking-[0.05em] text-muted-foreground">{t("inspector.fieldName")}</span>
       <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       {chips.length > 0 && (
-        <div className="rename-chips">
-          <span className="rc-lead">{t("inspector.renameTo")}</span>
+        <div className="rename-chips mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className="text-[0.65625rem] uppercase tracking-[0.05em] text-muted-foreground">{t("inspector.renameTo")}</span>
           {chips.map((n) => (
-            <button type="button" key={n} className="rchip" onClick={() => set({ ...field, field: n })}>
+            <button
+              type="button"
+              key={n}
+              className="rchip cursor-pointer rounded-full border border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-[var(--accent-soft)] px-2 py-px font-mono text-[0.71875rem] text-[var(--accent)] hover:bg-[color-mix(in_srgb,var(--accent)_22%,transparent)]"
+              onClick={() => set({ ...field, field: n })}
+            >
               {n}
             </button>
           ))}
@@ -373,14 +378,14 @@ function ScalarBody({
           <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
         </Row>
         {showSuggestion && (
-          <p className="nudge">
-            <span className="from">{suggested}</span> {t("inspector.suggested")} ·{" "}
-            <button type="button" className="use" onClick={() => setCol({ ...column, ty: suggested })}>
+          <p className="nudge mt-1.5 text-[0.71875rem] text-muted-foreground">
+            <span className="font-mono text-[var(--string)]">{suggested}</span> {t("inspector.suggested")} ·{" "}
+            <button type="button" className="cursor-pointer text-[var(--accent)]" onClick={() => setCol({ ...column, ty: suggested })}>
               {t("inspector.use")}
             </button>
           </p>
         )}
-        <div className="check-row">
+        <div className="check-row my-1.5 flex flex-wrap gap-4">
           <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
           <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
         </div>
@@ -395,12 +400,13 @@ function ScalarBody({
 /// draws from. Omits what it doesn't know (offline / hand-typed name).
 function SourceColumn({ name, sqlType, srcNullable }: { name: string; sqlType?: string; srcNullable?: boolean }) {
   const { t } = useT();
+  const tag = "rounded border border-border bg-secondary px-1.5 text-[0.6875rem] leading-[1.125rem]";
   return (
-    <div className="src-col">
-      <span className="src-col-name">{name}</span>
-      {sqlType && <span className="src-col-tag">{sqlType}</span>}
-      {srcNullable === false && <span className="src-col-tag notnull">{t("inspector.colNotNull")}</span>}
-      {srcNullable === true && <span className="src-col-tag">{t("inspector.colNullable")}</span>}
+    <div className="src-col mb-2 flex flex-wrap items-center gap-1.5">
+      <span className="font-mono text-xs text-foreground">{name}</span>
+      {sqlType && <span className={`${tag} text-muted-foreground`}>{sqlType}</span>}
+      {srcNullable === false && <span className={`${tag} border-[color-mix(in_srgb,var(--accent)_40%,var(--border))] text-[var(--accent)]`}>{t("inspector.colNotNull")}</span>}
+      {srcNullable === true && <span className={`${tag} text-muted-foreground`}>{t("inspector.colNullable")}</span>}
     </div>
   );
 }
@@ -429,11 +435,10 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
   const fromSource = srcNullable === false && required;
   return (
     <>
-      <label className="check req-check">
-        <input type="checkbox" checked={required} onChange={(e) => setCol({ ...column, nullable: !e.target.checked })} />
-        {t("inspector.required")}
-        {fromSource && <span className="from-source">🔒 {t("inspector.fromSource")}</span>}
-      </label>
+      <div className="req-check my-2 flex items-center gap-2">
+        <Check value={required} label={t("inspector.required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
+        {fromSource && <span className="text-[0.6875rem] text-[var(--accent)]">🔒 {t("inspector.fromSource")}</span>}
+      </div>
       {showDefault && (
         <>
           <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
@@ -444,7 +449,11 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
               placeholder='e.g. 0 or "n/a"'
             />
           </Row>
-          {mustDefault && <p className={defaultMissing ? "error-hint" : "hint"}>{t("inspector.defaultError")}</p>}
+          {mustDefault && (
+            <p className={defaultMissing ? "error-hint mt-0.5 mb-1.5 text-xs text-[var(--error)]" : "text-[0.71875rem] text-muted-foreground"}>
+              {t("inspector.defaultError")}
+            </p>
+          )}
         </>
       )}
     </>
@@ -481,26 +490,31 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   const available = KNOBS.filter((k) => !(k.key in options));
   return (
     <Drawer title={t("inspector.advanced")} count={entries.length}>
-      <p className="drawer-hint">{t("inspector.optionsHelp")}</p>
+      <p className="mb-2.5 text-[0.71875rem] leading-relaxed text-muted-foreground">{t("inspector.optionsHelp")}</p>
       {available.length > 0 && (
-        <div className="knobs">
+        <div className="knobs mb-2.5 flex flex-wrap gap-1.5">
           {available.map((k) => (
-            <button type="button" key={k.key} className="knob" onClick={() => setOpt(k.key, k.seed)}>
+            <button
+              type="button"
+              key={k.key}
+              className="knob cursor-pointer rounded-full border border-border bg-secondary px-2 py-0.5 font-mono text-[0.6875rem] text-[var(--slate)] before:text-muted-foreground before:content-['+_'] hover:border-[var(--slate)] hover:text-foreground"
+              onClick={() => setOpt(k.key, k.seed)}
+            >
               {k.key}
             </button>
           ))}
         </div>
       )}
       {entries.map(([k, v]) => (
-        <div className="opt-row" key={k}>
-          <Text className="mini" value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
+        <div className="opt-row mb-1.5 grid grid-cols-[1fr_1fr_auto] items-center gap-1.5" key={k}>
+          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
           <GenericInput value={v} emptyTo={{ String: "" }} onChange={(nv) => setOpt(k, nv ?? { String: "" })} placeholder={t("inspector.optValue")} />
-          <button type="button" className="x" onClick={() => removeOpt(k)} aria-label={t("common.remove")}>
+          <button type="button" className="cursor-pointer p-0 text-xs text-[var(--error)]" onClick={() => removeOpt(k)} aria-label={t("common.remove")}>
             ✕
           </button>
         </div>
       ))}
-      <button type="button" className="addline" onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })}>
+      <button type="button" className="addline cursor-pointer pt-0.5 text-xs text-[var(--accent)]" onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })}>
         + {t("inspector.option")}
       </button>
     </Drawer>

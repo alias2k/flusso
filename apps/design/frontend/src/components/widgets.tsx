@@ -14,8 +14,8 @@ const nextId = () => `w${uid++}`;
 // wrapping label's click-to-focus would fight the control's own behaviour.
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="field">
-      <span className="field-label">{label}</span>
+    <div className="field mb-2 flex flex-col gap-1">
+      <span className="field-label text-[0.65625rem] font-semibold uppercase tracking-[0.05em] text-muted-foreground">{label}</span>
       {children}
     </div>
   );
@@ -187,7 +187,7 @@ export function Check({
 }) {
   const id = useId();
   return (
-    <div className="check">
+    <div className="check inline-flex items-center gap-1.5 text-[0.8125rem]">
       <Checkbox id={id} checked={value} onCheckedChange={(c) => onChange(c === true)} />
       <Label htmlFor={id} className="cursor-pointer font-normal">
         {label}

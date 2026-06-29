@@ -371,43 +371,14 @@ summary {
   font-size: 0.75rem;
 }
 
-.check-row { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.375rem 0; }
-/* the required toggle on its own line, separated from the default below it */
-.req-check { display: flex; margin: 0.5rem 0 0.75rem; }
-.req-check .from-source { margin-left: 0.5rem; font-size: 0.6875rem; font-weight: 400; color: var(--accent); }
-
-/* ── C1 inspector: Source ⟷ Document blocks, bridge, expert drawers ──── */
-/* Block / Bridge / Drawer are now Tailwind (widgets.tsx); .blk stays as a hook
-   for these descendant rules + e2e. */
+/* C1 inspector: .blk stays as a hook for these descendant rules + e2e (Block/
+   Bridge/Drawer + the inspector one-offs are now Tailwind in the components). */
 .blk .field { margin: 0 0 0.5625rem; }
 .blk .field:last-child { margin-bottom: 0; }
-
-/* the type-suggestion nudge (replaces the old plain .hint) */
-.nudge { font-size: 0.71875rem; color: var(--muted); margin: 0.3125rem 0 0; }
-.nudge .from { color: var(--string); font-family: ui-monospace, monospace; }
-.nudge .use { background: none; border: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
-
-/* rename chips beside the document-field name */
-.rename-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 0.3125rem; margin-top: 0.375rem; }
-.rc-lead { font-size: 0.65625rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-.rchip { font-family: ui-monospace, monospace; font-size: 0.71875rem; color: var(--accent); background: var(--accent-soft); border: 0.0625rem solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 62.4375rem; padding: 0.0625rem 0.5625rem; cursor: pointer; }
-.rchip:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 
 /* "no database source" marker (constant / object group) */
 .no-source { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: var(--slate, #94a3b8); background: var(--panel-2); border: 0.0625rem solid var(--border); border-left: 0.125rem solid var(--slate, #94a3b8); border-radius: 0.5rem; padding: 0.5625rem 0.6875rem; margin-bottom: 0.25rem; line-height: 1.35; }
 .nested-note { font-size: 0.75rem; color: var(--muted); background: var(--panel-2); border: 0.0625rem dashed var(--border); border-radius: 0.375rem; padding: 0.4375rem 0.5625rem; margin: 0 0 0.5625rem; }
-
-/* expert drawer (the Drawer molecule) is now Tailwind; .drawer-hint stays for
-   the not-yet-migrated drawer bodies (options/filters). */
-.drawer-hint { font-size: 0.71875rem; color: var(--muted); margin: 0 0 0.625rem; line-height: 1.4; }
-
-/* quick-add knob chips in the Advanced drawer */
-.knobs { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.6875rem; }
-.knob { font-family: ui-monospace, monospace; font-size: 0.6875rem; color: var(--slate, #94a3b8); background: var(--panel-2); border: 0.0625rem solid var(--border); border-radius: 62.4375rem; padding: 0.125rem 0.5625rem; cursor: pointer; }
-.knob::before { content: "+ "; color: var(--muted); }
-.knob:hover { border-color: var(--slate, #94a3b8); color: var(--text); }
-.opt-row .x { background: none; border: none; color: var(--error); cursor: pointer; font-size: 0.75rem; padding: 0; }
-.addline { background: none; border: none; padding: 0.125rem 0 0; font: inherit; font-size: 0.75rem; color: var(--accent); cursor: pointer; }
 
 /* read-only facts about a field's bound source column */
 .src-col {
@@ -1077,15 +1048,7 @@ button:disabled:hover {
   cursor: pointer;
 }
 .inspector-actions button.danger { color: var(--error); }
-.opt-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr auto;
-  gap: 0.375rem;
-  align-items: center;
-  margin: 0.25rem 0;
-}
 /* let inputs shrink inside flex/grid rows so the panel never scrolls sideways */
-.opt-row input,
 .filter-row input,
 .filter-row select,
 .order-row input { min-width: 0; }
