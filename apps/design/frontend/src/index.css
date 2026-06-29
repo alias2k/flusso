@@ -152,7 +152,11 @@ body {
 
 /* .app / topbar / brand / path / spacer are Tailwind now (App.tsx). */
 
-button {
+/* Legacy chrome for raw <button>s only (canvas/nav). shadcn atoms all carry a
+   `data-slot`, so excluding them keeps this padding/border off the Radix
+   button-based controls — e.g. Checkbox, whose box-sizing:border-box would
+   otherwise be floored at padding+border (22×14px) instead of its `size-*`. */
+button:not([data-slot]) {
   background: var(--panel-2);
   color: var(--text);
   border: 0.0625rem solid var(--border);
@@ -160,7 +164,7 @@ button {
   padding: 0.375rem 0.625rem;
   cursor: pointer;
 }
-button:hover {
+button:not([data-slot]):hover {
   border-color: var(--accent);
 }
 /* banners are Tailwind now (App.tsx). */
@@ -516,11 +520,11 @@ button.icon:hover {
   margin-right: 0.375rem;
   vertical-align: middle;
 }
-button:disabled {
+button:not([data-slot]):disabled {
   opacity: 0.4;
   cursor: default;
 }
-button:disabled:hover {
+button:not([data-slot]):disabled:hover {
   border-color: var(--border);
 }
 
