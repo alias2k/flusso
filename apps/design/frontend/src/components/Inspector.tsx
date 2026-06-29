@@ -47,7 +47,7 @@ function Breadcrumb() {
     const field = nodeFields(schema, selection.path)[selection.index];
     crumbs = [root, ...pathLabels(schema, selection.path), field?.field ?? "?"];
   }
-  return <div className="crumbs">{crumbs.join(" › ")}</div>;
+  return <div className="crumbs mb-2.5 break-words text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
 }
 import { Button } from "@/components/ui/button";
 import { Filters } from "./Filters";

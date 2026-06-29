@@ -422,7 +422,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", fn);
   }, []);
 
-  if (!project || !doc || !config) return <div className="loading">{error || "Loading project…"}</div>;
+  if (!project || !doc || !config) return <div className="p-10 text-muted-foreground">{error || "Loading project…"}</div>;
 
   return (
     <div className="app">
