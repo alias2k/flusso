@@ -8,6 +8,26 @@ import type { Aggregate, AggregateOp, Field, FieldSource, FlussoType, Join, Join
 import { SCALAR_TYPES } from "./api";
 
 export const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as const;
+
+/// i18n key of the one-line explanation per field/join/aggregate kind — shown
+/// in the inspector and as the description under each kind in the add menus.
+export const KIND_HELP: Record<string, string> = {
+  belongs_to: "kindHelp.belongs_to",
+  has_one: "kindHelp.has_one",
+  has_many: "kindHelp.has_many",
+  many_to_many: "kindHelp.many_to_many",
+  object: "kindHelp.object",
+  count: "kindHelp.count",
+  sum: "kindHelp.sum",
+  avg: "kindHelp.avg",
+  min: "kindHelp.min",
+  max: "kindHelp.max",
+  ids: "kindHelp.ids",
+  geo: "kindHelp.geo",
+  map: "kindHelp.map",
+  custom: "kindHelp.custom",
+  constant: "kindHelp.constant",
+};
 export const AGGREGATE_OPS = ["count", "sum", "avg", "min", "max", "ids"] as const;
 export const LEAF_TYPES: FlussoType[] = ["text", "keyword", "integer", "long", "double", "date"];
 

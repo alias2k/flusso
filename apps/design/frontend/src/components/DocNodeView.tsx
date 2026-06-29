@@ -1,13 +1,14 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useState } from "react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
+import { KIND_HELP } from "../fields";
 import { aggregateIncomplete, joinIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
 import { suggestRelations } from "../model/relations";
 import { fieldAtPath, nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useT } from "../i18n";
 import { useDesign } from "../state";
-import { typeClass } from "../theme";
+import { kindColorClass, typeClass } from "../theme";
 import { Icon } from "./Icon";
 import { Select, Text } from "./widgets";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -285,8 +286,16 @@ function typeLabel(ty?: FlussoType): string {
 }
 
 function AddMenu({ label, kinds, onPick }: { label: string; kinds: readonly string[]; onPick: (k: string) => void }) {
+  const { t } = useT();
   // An action menu: value stays "" (placeholder = label), each pick fires onPick.
-  return <Select<string> value="" placeholder={label} options={kinds} onChange={onPick} className="add-menu flex-1" />;
+  // Each kind carries its hue (relation kinds + geo) and a one-line description.
+  const opts = kinds.map((k) => ({
+    label: k,
+    value: k,
+    description: KIND_HELP[k] ? t(KIND_HELP[k]) : undefined,
+    className: kindColorClass(k),
+  }));
+  return <Select<string> value="" placeholder={label} options={opts} onChange={onPick} className="add-menu flex-1" />;
 }
 
 /// Type a column name the catalog doesn't list (offline, or a view) and Enter to

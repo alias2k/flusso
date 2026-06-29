@@ -10,7 +10,7 @@ import {
   type JoinKind,
   type SoftDelete,
 } from "../api";
-import { LEAF_TYPES } from "../fields";
+import { KIND_HELP, LEAF_TYPES } from "../fields";
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
@@ -45,26 +45,6 @@ function scalarTypeOptions(t: Translate) {
     return { label: name, value: name, description: desc[name], className: `font-mono ${typeClass(name)}` };
   });
 }
-
-/// i18n key of the one-line grammar explanation per field/join kind, shown for
-/// the selected node/field (resolved through `t(...)`).
-const KIND_HELP: Record<string, string> = {
-  belongs_to: "kindHelp.belongs_to",
-  has_one: "kindHelp.has_one",
-  has_many: "kindHelp.has_many",
-  many_to_many: "kindHelp.many_to_many",
-  object: "kindHelp.object",
-  count: "kindHelp.count",
-  sum: "kindHelp.sum",
-  avg: "kindHelp.avg",
-  min: "kindHelp.min",
-  max: "kindHelp.max",
-  ids: "kindHelp.ids",
-  geo: "kindHelp.geo",
-  map: "kindHelp.map",
-  custom: "kindHelp.custom",
-  constant: "kindHelp.constant",
-};
 
 function Breadcrumb() {
   const { schema, selection } = useDesign();

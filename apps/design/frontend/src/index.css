@@ -163,6 +163,26 @@
     color: var(--t-other);
   }
 
+  /* relation-kind text colours (match the "Kinds" legend), for the kind pickers */
+  .k-root {
+    color: var(--k-root);
+  }
+  .k-object {
+    color: var(--k-object);
+  }
+  .k-belongs_to {
+    color: var(--k-belongs_to);
+  }
+  .k-has_one {
+    color: var(--k-has_one);
+  }
+  .k-has_many {
+    color: var(--k-has_many);
+  }
+  .k-many_to_many {
+    color: var(--k-many_to_many);
+  }
+
   body {
     margin: 0;
     background: var(--bg);
@@ -319,13 +339,13 @@
    the measured box and meets the dot at its outer edge, vertical-centred. */
   .react-flow__handle-left {
     left: -0.125rem;
-    margin-top: -0.15rem;
+    margin-top: -0.35rem;
     transform: translateY(-50%);
   }
   .react-flow__handle-right {
     right: -0.25rem;
     left: auto;
-    margin-top: -0.15rem;
+    margin-top: -0.25rem;
     transform: translateY(-50%);
   }
   .flow-node.selected {

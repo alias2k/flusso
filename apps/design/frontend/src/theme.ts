@@ -29,6 +29,21 @@ export function typeClass(label: string): string {
   return "t-other";
 }
 
+/// Text-colour class for a field/relation kind (the kind hues from the "Kinds"
+/// legend), for colour-coding the kind pickers. Empty for kinds with no
+/// established hue (map/custom/constant/aggregates stay neutral).
+const KIND_HUE: Record<string, string> = {
+  belongs_to: "k-belongs_to",
+  has_one: "k-has_one",
+  has_many: "k-has_many",
+  many_to_many: "k-many_to_many",
+  object: "k-object",
+  geo: "t-geo",
+};
+export function kindColorClass(kind: string): string {
+  return KIND_HUE[kind] ?? "";
+}
+
 /// The field-type colour families, for the sidebar legend. `varKey` is the
 /// `--t-*` CSS var suffix (the same hue `typeClass` colours a label with), so a
 /// row's swatch matches every type label in that family across the UI.
