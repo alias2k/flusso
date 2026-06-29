@@ -1,5 +1,7 @@
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 
 let uid = 0;
 const nextId = () => `w${uid++}`;
@@ -78,12 +80,12 @@ export function Text({
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
 }) {
   const id = list ? nextId() : undefined;
-  const classes = [className, invalid && "invalid"].filter(Boolean).join(" ") || undefined;
   return (
     <>
-      <input
+      <Input
         type="text"
-        className={classes}
+        className={cn(invalid && "invalid", className)}
+        aria-invalid={invalid || undefined}
         value={value}
         placeholder={placeholder}
         list={id}
@@ -148,7 +150,7 @@ export function Num({
   placeholder?: string;
 }) {
   return (
-    <input
+    <Input
       type="number"
       value={value ?? ""}
       placeholder={placeholder}

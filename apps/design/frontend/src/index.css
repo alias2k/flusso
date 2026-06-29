@@ -12,6 +12,11 @@
 @import "tw-animate-css";
 @import "./styles.css" layer(legacy);
 
+/* The app is dark-first and signals theme via `html[data-theme=dark|light]`
+   (set in App). Bind Tailwind's `dark:` variant to that so shadcn's dark
+   styles apply by default and flip off under the light theme. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
   --radius: 0.5rem;
 }
