@@ -316,14 +316,14 @@ function ScalarBody({
   const showSuggestion = typeof suggested === "string" && suggested !== column.ty;
   return (
     <>
-      <p className="hint">{t("common.column")}: {column.column}</p>
+      <SourceColumn name={column.column} sqlType={sqlType} srcNullable={srcNullable} />
       <Row label={t("inspector.type")}>
         <Select value={column.ty as string} options={SCALAR_TYPES as string[]} onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })} />
       </Row>
       {showSuggestion && (
         <p className="hint">
           {t("inspector.suggestType", { sql: sqlType ?? "", ty: suggested })}{" "}
-          <button className="link" onClick={() => setCol({ ...column, ty: suggested })}>
+          <button type="button" className="link" onClick={() => setCol({ ...column, ty: suggested })}>
             {t("inspector.use")}
           </button>
         </p>
@@ -332,6 +332,21 @@ function ScalarBody({
       <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
       <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
     </>
+  );
+}
+
+/// A compact, read-only line of facts about the bound source column — its
+/// name, SQL type, and nullability — so the panel actually says what the field
+/// draws from. Omits what it doesn't know (offline / hand-typed name).
+function SourceColumn({ name, sqlType, srcNullable }: { name: string; sqlType?: string; srcNullable?: boolean }) {
+  const { t } = useT();
+  return (
+    <div className="src-col">
+      <span className="src-col-name">{name}</span>
+      {sqlType && <span className="src-col-tag">{sqlType}</span>}
+      {srcNullable === false && <span className="src-col-tag notnull">{t("inspector.colNotNull")}</span>}
+      {srcNullable === true && <span className="src-col-tag">{t("inspector.colNullable")}</span>}
+    </div>
   );
 }
 
@@ -360,24 +375,26 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
         <p className="hint">{t("inspector.srcNullable")}</p>
       )}
       <Check value={required} label={t("inspector.required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
-      <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
-        <Text
-          invalid={defaultMissing}
-          value={column.default === undefined ? "" : JSON.stringify(column.default)}
-          onChange={(text) => {
-            if (!text.trim()) {
-              setCol({ ...column, default: undefined });
-              return;
-            }
-            try {
-              setCol({ ...column, default: JSON.parse(text) });
-            } catch {
-              /* keep typing until valid JSON */
-            }
-          }}
-          placeholder='e.g. 0 or "n/a"'
-        />
-      </Row>
+      {(srcNullable !== false || column.default !== undefined) && (
+        <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
+          <Text
+            invalid={defaultMissing}
+            value={column.default === undefined ? "" : JSON.stringify(column.default)}
+            onChange={(text) => {
+              if (!text.trim()) {
+                setCol({ ...column, default: undefined });
+                return;
+              }
+              try {
+                setCol({ ...column, default: JSON.parse(text) });
+              } catch {
+                /* keep typing until valid JSON */
+              }
+            }}
+            placeholder='e.g. 0 or "n/a"'
+          />
+        </Row>
+      )}
       {defaultMissing && (
         <p className="error-hint">{t("inspector.defaultError")}</p>
       )}

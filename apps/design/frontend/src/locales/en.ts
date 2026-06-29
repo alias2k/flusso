@@ -92,6 +92,8 @@ export const en: Record<string, string> = {
   "inspector.trim": "trim",
   "inspector.defaultRequired": "default (required)",
   "inspector.defaultOptional": "default (optional, JSON)",
+  "inspector.colNotNull": "NOT NULL",
+  "inspector.colNullable": "nullable",
   "inspector.suggestType": "Source column is {sql} — suggests {ty}.",
   "inspector.srcNotNull": "Source column is NOT NULL — required by default; uncheck to make it optional in the document.",
   "inspector.srcNullable": "Source column is nullable — optional by default; to make it required you must set a default.",

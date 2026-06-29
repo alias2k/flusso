@@ -338,6 +338,33 @@ summary {
   font-size: 12px;
 }
 
+/* read-only facts about a field's bound source column */
+.src-col {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 10px;
+}
+.src-col-name {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+.src-col-tag {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+  line-height: 18px;
+}
+.src-col-tag.notnull {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
 .preview.empty {
   color: var(--muted);
 }
@@ -614,8 +641,7 @@ button.icon:hover {
 /* node rows are now display-only: click to edit in the inspector */
 .col-row.on, .col-row.special { cursor: pointer; border-radius: 4px; }
 .col-row.on:hover, .col-row.special:hover { background: var(--panel-2); }
-.col-row.sel { background: var(--accent-2); }
-.col-row.sel .col-name, .col-row.sel .col-type, .col-row.sel .leaf-kind { color: #fff; }
+.col-row.sel { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
 .col-from { color: var(--muted); font-size: 10px; margin-left: 4px; }
 
 /* minimap toggle (the minimap is hidden by default) */

@@ -92,6 +92,8 @@ export const it: Record<string, string> = {
   "inspector.trim": "ritaglia",
   "inspector.defaultRequired": "valore predefinito (obbligatorio)",
   "inspector.defaultOptional": "valore predefinito (facoltativo, JSON)",
+  "inspector.colNotNull": "NOT NULL",
+  "inspector.colNullable": "ammette null",
   "inspector.suggestType": "La colonna di origine è {sql} — suggerisce {ty}.",
   "inspector.srcNotNull": "La colonna di origine è NOT NULL — obbligatoria per impostazione predefinita; deseleziona per renderla facoltativa nel documento.",
   "inspector.srcNullable": "La colonna di origine ammette null — facoltativa per impostazione predefinita; per renderla obbligatoria devi impostare un valore predefinito.",
