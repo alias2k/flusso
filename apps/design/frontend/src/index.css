@@ -590,8 +590,6 @@ pre.yaml {
 /* The rename input must be allowed to shrink (min-width:0) so the type chip
    beside it never pushes past the node edge — `.node-cols`'s overflow-y:auto
    forces overflow-x:auto, which would otherwise clip the chip. */
-.col-row .rename { flex: 1 1 auto; min-width: 0; padding: 0.125rem 0.25rem; font-size: 0.75rem; }
-.col-row select { flex: 0 0 5.25rem; width: 5.25rem; padding: 0.0625rem 0.125rem; font-size: 0.6875rem; }
 .col-row.special { cursor: pointer; }
 .col-row .leaf-kind {
   font-size: 0.625rem;
