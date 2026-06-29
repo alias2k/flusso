@@ -45,7 +45,7 @@ export function Bridge({ children }: { children: ReactNode }) {
 /// default — so secondary tuning never competes with the primary choices.
 export function Drawer({ title, count, defaultOpen, children }: { title: string; count?: number; defaultOpen?: boolean; children: ReactNode }) {
   return (
-    <details className="drawer" open={defaultOpen}>
+    <details className="expert-drawer" open={defaultOpen}>
       <summary className="drawer-h">
         <span className="chev" aria-hidden="true" />
         <span className="dh-name">{title}</span>

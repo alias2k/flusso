@@ -279,11 +279,13 @@ input[type="checkbox"]:checked {
   border-color: var(--accent);
 }
 input[type="checkbox"]:checked::after {
-  content: "✓";
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 1;
-  color: #04211a;
+  content: "";
+  width: 4px;
+  height: 8px;
+  margin-top: -2px;
+  border: solid #04211a;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
 }
 input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
 .check {
@@ -398,12 +400,15 @@ summary {
 .no-source { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--slate, #94a3b8); background: var(--panel-2); border: 1px solid var(--border); border-left: 2px solid var(--slate, #94a3b8); border-radius: 8px; padding: 9px 11px; margin-bottom: 4px; line-height: 1.35; }
 .nested-note { font-size: 12px; color: var(--muted); background: var(--panel-2); border: 1px dashed var(--border); border-radius: 6px; padding: 7px 9px; margin: 0 0 9px; }
 
-/* expert drawer: a quiet, slate, collapsed <details> for tuning + filters */
-.drawer { width: 100%; margin: 10px 0 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+/* expert drawer: a quiet, slate, collapsed <details> for tuning + filters.
+   NOTE: named `expert-drawer`, not `drawer` — `.drawer` is the absolute,
+   bottom-pinned preview sheet below, and the collision pinned this to the
+   pane bottom. */
+.expert-drawer { width: 100%; margin: 10px 0 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .drawer-h { list-style: none; display: flex; align-items: center; gap: 8px; padding: 9px 11px; cursor: pointer; user-select: none; background: var(--panel-2); }
 .drawer-h::-webkit-details-marker { display: none; }
 .drawer-h .chev { width: 0; height: 0; border-left: 5px solid var(--slate, #94a3b8); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform 0.15s ease; }
-.drawer[open] .drawer-h .chev { transform: rotate(90deg); }
+.expert-drawer[open] .drawer-h .chev { transform: rotate(90deg); }
 .drawer-h .dh-name { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; font-weight: 700; color: var(--slate, #94a3b8); }
 .drawer-h .count { margin-left: auto; font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
 .drawer-body { padding: 11px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--slate, #94a3b8) 4%, var(--panel)); }
@@ -1096,9 +1101,21 @@ button:disabled:hover {
 /* inspector duplicate/delete actions + field options rows */
 .inspector-actions {
   display: flex;
-  gap: 8px;
+  gap: 14px;
   margin: 0 0 12px;
 }
+/* both actions are text buttons so they sit on one aligned baseline (Duplicate
+   was a bordered button, Delete a link → misaligned). */
+.inspector-actions button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.inspector-actions button.danger { color: var(--error); }
 .opt-row {
   display: grid;
   grid-template-columns: 1fr 1fr auto;
