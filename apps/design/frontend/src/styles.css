@@ -480,6 +480,18 @@ pre.yaml {
 }
 .col-row.on .col-name { color: var(--text); }
 .col-row .col-type { font-family: ui-monospace, monospace; font-size: 10px; letter-spacing: 0.3px; flex: 0 0 auto; }
+/* required/default markers: a muted dot = required & aligned with a NOT NULL
+   column; accent dot = required, overriding a nullable column; `=` = a default
+   is set. No dot = optional. */
+.col-req {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.col-req.override { background: var(--accent); }
+.col-default { flex: 0 0 auto; color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
 /* The rename input must be allowed to shrink (min-width:0) so the type chip
    beside it never pushes past the node edge — `.node-cols`'s overflow-y:auto
    forces overflow-x:auto, which would otherwise clip the chip. */

@@ -68,6 +68,11 @@ test("editing marks the index unsaved", async ({ page }) => {
   await expect(page.locator(".sidebar .dirty-dot")).not.toHaveCount(0);
 });
 
+test("required columns carry a marker on the row", async ({ page }) => {
+  // the users root has a required column (email), so at least one dot renders.
+  await expect(page.locator(".flow-node.kind-root .col-req")).not.toHaveCount(0);
+});
+
 test("collapsing a node hides its columns", async ({ page }) => {
   await expect(page.locator(".flow-node.kind-root .node-cols")).toBeVisible();
   await page.locator(".flow-node.kind-root .chevron").click();

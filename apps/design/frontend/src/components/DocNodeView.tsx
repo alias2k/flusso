@@ -155,6 +155,15 @@ export function DocNodeView({ data, selected }: NodeProps) {
               const inc = includedByCol.get(c.name);
               const renamed = inc && inc.name !== c.name;
               const diag = inc ? diagByField.get(inc.name) : undefined;
+              // Required/default state, relative to the source column, so it
+              // reads at a glance: a dot = required (muted when it just mirrors a
+              // NOT NULL column, accent when it overrides a nullable one), and an
+              // `=` when a default fills the gap. No dot = optional.
+              const field = inc ? fields[inc.index] : undefined;
+              const col = field && "column" in field.source ? field.source.column : undefined;
+              const required = !!col && !col.nullable;
+              const override = required && c.nullable;
+              const hasDefault = col?.default !== undefined;
               return (
                 <div
                   className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
@@ -172,6 +181,13 @@ export function DocNodeView({ data, selected }: NodeProps) {
                     {inc ? inc.name : c.name}
                     {renamed ? <span className="col-from"> ← {c.name}</span> : null}
                   </span>
+                  {required && (
+                    <span
+                      className={`col-req${override ? " override" : ""}`}
+                      title={override ? t("node.reqOverride") : t("node.reqAligned")}
+                    />
+                  )}
+                  {hasDefault && <span className="col-default" title={t("node.colDefault")}>=</span>}
                   {(() => {
                     const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
                     return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
