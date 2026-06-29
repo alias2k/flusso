@@ -231,6 +231,13 @@ export function Check({ value, onChange, label }: { value: boolean; onChange: (v
 /// shadcn's Radix select underneath (portalled list). `placeholder` shows when
 /// `value` is empty (also makes it an action-menu: a `value=""` + `onChange`
 /// picks without storing). `className` sizes the trigger (defaults full-width).
+interface Opt<T extends string> {
+  label: string;
+  value: T;
+  description?: string;
+  className?: string;
+}
+
 export function Select<T extends string>({
   value,
   onChange,
@@ -240,11 +247,13 @@ export function Select<T extends string>({
 }: {
   value: T;
   onChange: (v: T) => void;
-  options: readonly T[] | { label: string; value: T }[];
+  // Plain string options, or rich ones with a per-item `description` (shown
+  // under the label) and `className` (e.g. a type-family colour).
+  options: readonly T[] | Opt<T>[];
   placeholder?: string;
   className?: string;
 }) {
-  const opts = options.map((o) => (typeof o === "string" ? { label: o, value: o } : o));
+  const opts: Opt<T>[] = options.map((o) => (typeof o === "string" ? { label: o, value: o } : o));
   return (
     <SelectRoot value={value || undefined} onValueChange={(v) => onChange(v as T)}>
       <SelectTrigger className={cn("w-full", className)}>
@@ -252,8 +261,8 @@ export function Select<T extends string>({
       </SelectTrigger>
       <SelectContent>
         {opts.map((o) => (
-          <SelectItem key={o.value} value={o.value}>
-            {o.label}
+          <SelectItem key={o.value} value={o.value} description={o.description}>
+            <span className={o.className}>{o.label}</span>
           </SelectItem>
         ))}
       </SelectContent>

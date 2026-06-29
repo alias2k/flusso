@@ -11,11 +11,40 @@ import {
   type SoftDelete,
 } from "../api";
 import { LEAF_TYPES } from "../fields";
-import { useT } from "../i18n";
+import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
 import { typeClass } from "../theme";
+
+/// Scalar-type options for the field TYPE dropdown: each carries its colour
+/// family (so the list is colour-coded like the canvas) and a one-line
+/// description shown under the label. Literal `t("typeDesc.*")` calls keep the
+/// i18n checker able to see every key.
+function scalarTypeOptions(t: Translate) {
+  const desc: Record<string, string> = {
+    text: t("typeDesc.text"),
+    identifier: t("typeDesc.identifier"),
+    keyword: t("typeDesc.keyword"),
+    enum: t("typeDesc.enum"),
+    uuid: t("typeDesc.uuid"),
+    boolean: t("typeDesc.boolean"),
+    short: t("typeDesc.short"),
+    integer: t("typeDesc.integer"),
+    long: t("typeDesc.long"),
+    float: t("typeDesc.float"),
+    double: t("typeDesc.double"),
+    decimal: t("typeDesc.decimal"),
+    date: t("typeDesc.date"),
+    timestamp: t("typeDesc.timestamp"),
+    binary: t("typeDesc.binary"),
+    json: t("typeDesc.json"),
+  };
+  return SCALAR_TYPES.map((ty) => {
+    const name = ty as string;
+    return { label: name, value: name, description: desc[name], className: `font-mono ${typeClass(name)}` };
+  });
+}
 
 /// i18n key of the one-line grammar explanation per field/join kind, shown for
 /// the selected node/field (resolved through `t(...)`).
@@ -478,7 +507,7 @@ function ScalarBody({
         <Row label={t("inspector.type")}>
           <Select
             value={column.ty as string}
-            options={SCALAR_TYPES as string[]}
+            options={scalarTypeOptions(t)}
             onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })}
             className={`font-mono ${typeClass(column.ty as string)}`}
           />
