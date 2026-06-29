@@ -101,6 +101,8 @@ export const it: Record<string, string> = {
   "inspector.colNotNull": "NOT NULL",
   "inspector.colNullable": "ammette null",
   "inspector.suggested": "suggerito",
+  "inspector.typeMismatch":
+    "{ty} è un cambiamento netto rispetto alla colonna sorgente ({col}) — i valori potrebbero non indicizzarsi.",
   "typeDesc.text": "Ricerca full-text analizzata",
   "typeDesc.identifier": "ID esatto; non analizzato",
   "typeDesc.keyword": "Match esatto; filtra e ordina",

@@ -16,7 +16,7 @@ import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
-import { typeClass } from "../theme";
+import { drasticTypeChange, typeClass } from "../theme";
 
 /// Scalar-type options for the field TYPE dropdown: each carries its colour
 /// family (so the list is colour-coded like the canvas) and a one-line
@@ -516,6 +516,12 @@ function ScalarBody({
             >
               {t("inspector.use")}
             </button>
+          </p>
+        )}
+        {typeof suggested === "string" && drasticTypeChange(suggested, column.ty as string) && (
+          <p className="mt-1.5 flex items-start gap-1 text-2xs text-warn">
+            <span aria-hidden>⚠</span>
+            <span>{t("inspector.typeMismatch", { col: sqlType ?? suggested, ty: column.ty as string })}</span>
           </p>
         )}
         <div className="check-row my-1.5 flex flex-wrap gap-4">

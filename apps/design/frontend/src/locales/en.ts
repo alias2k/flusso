@@ -100,6 +100,7 @@ export const en: Record<string, string> = {
   "inspector.colNotNull": "NOT NULL",
   "inspector.colNullable": "nullable",
   "inspector.suggested": "suggested",
+  "inspector.typeMismatch": "{ty} is a sharp change from the source column ({col}) — values may fail to index.",
   "typeDesc.text": "Analyzed full-text search",
   "typeDesc.identifier": "Exact ID; not analyzed",
   "typeDesc.keyword": "Exact match; filter & sort",
