@@ -76,7 +76,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
 - **The designer (`apps/design`) has three test layers.** (1) A property/"fuzz" round-trip
   (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
   `codegen → parse → convert` identity — an ordinary test, caught by the nextest step. (2) A
-  `designer-frontend` CI job: `npm ci`, **ESLint** (`npm run lint`, flat config, **type-aware** —
+  `designer-frontend` CI job: `npm ci`, a **Prettier** format check (`npm run format:check`,
+  `.prettierrc` printWidth 120 / double quotes / semicolons / trailing-all; `just design-fmt [check]`;
+  `eslint-config-prettier` is appended last so ESLint owns no formatting rules), **ESLint**
+  (`npm run lint`, flat config, **type-aware** —
   typescript-eslint recommended+stylistic *type-checked* sets, plus react / react-hooks / jsx-a11y /
   react-refresh, all as errors; CI runs it `--max-warnings 0`; `just design-lint [fix]`. Pinned to
   ESLint 9 because eslint-plugin-react/jsx-a11y don't support 10 yet; the canvas's pointer-driven
