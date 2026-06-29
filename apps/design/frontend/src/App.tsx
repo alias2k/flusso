@@ -642,10 +642,14 @@ export default function App() {
             <main className="canvas-wrap col-start-2 relative h-full min-h-0">
               <Canvas />
               {typeMismatches > 0 && !ignoreTypeWarn && (
-                <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center px-4">
+                <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-end px-4">
                   <div className="pointer-events-auto flex items-center gap-3 rounded-lg border border-warn/40 bg-warn/15 px-4 py-2 text-xs text-warn shadow-lg backdrop-blur-sm">
                     <span>{t("typeWarn.banner", { n: typeMismatches })}</span>
-                    <Button size="sm" variant="secondary" onClick={() => apply((s) => fixAllTypes(s, catalog))}>
+                    <Button
+                      size="sm"
+                      className="border-0 bg-warn text-bg hover:bg-warn/90"
+                      onClick={() => apply((s) => fixAllTypes(s, catalog))}
+                    >
                       {t("typeWarn.fixAll")}
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => setIgnoreTypeWarn(true)}>
