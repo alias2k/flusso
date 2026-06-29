@@ -16,15 +16,14 @@
   /* relation-kind hues — one per kind (match theme.ts edgeColor).
      root: its own warm hue. object: neutral slate — not a relation.
      the four joins share a cool blue→green band so a relation reads at a
-     glance: belongs_to/has_one a near-identical blue pair (they're nearly
-     the same join), has_many/many_to_many a near-identical green pair (both
-     build a list). */
+     glance, evenly stepped through it (indigo → sky → teal → green) so each
+     join still stands apart. */
   --k-root: #fb923c; /* orange */
   --k-object: #94a3b8; /* slate */
-  --k-belongs_to: #60a5fa; /* blue */
-  --k-has_one: #38bdf8; /* sky — close to belongs_to */
+  --k-belongs_to: #818cf8; /* indigo */
+  --k-has_one: #38bdf8; /* sky */
   --k-has_many: #2dd4bf; /* teal */
-  --k-many_to_many: #4ade80; /* green — close to has_many */
+  --k-many_to_many: #4ade80; /* green */
 
   /* field-type hues */
   --t-string: #e2b15e;
@@ -458,7 +457,7 @@ pre.yaml {
 }
 .badge.root { background: var(--k-root); color: #2a1402; }
 .badge.object { background: var(--k-object); color: #11161d; }
-.badge.belongs_to { background: var(--k-belongs_to); color: #04193a; }
+.badge.belongs_to { background: var(--k-belongs_to); color: #0f1130; }
 .badge.has_one { background: var(--k-has_one); color: #04212e; }
 .badge.has_many { background: var(--k-has_many); color: #042b25; }
 .badge.many_to_many { background: var(--k-many_to_many); color: #052e16; }
