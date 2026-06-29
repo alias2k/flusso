@@ -421,21 +421,31 @@ function RequiredDefault({ column, srcNullable, setCol }: { column: Column; srcN
   const required = !column.nullable;
   const mustDefault = srcNullable === true && required;
   const defaultMissing = mustDefault && column.default === undefined;
+  // A default only matters when it's mandatory (nullable column made required)
+  // or one's already set — otherwise it's noise (NOT NULL always has a value;
+  // an optional column just passes nulls through).
+  const showDefault = mustDefault || column.default !== undefined;
+  // Required is "from source" only when it matches a NOT NULL column's default.
+  const fromSource = srcNullable === false && required;
   return (
     <>
-      <Check value={required} label={t("inspector.required")} onChange={(req) => setCol({ ...column, nullable: !req })} />
-      {(srcNullable !== false || column.default !== undefined) && (
-        <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
-          <GenericInput
-            invalid={defaultMissing}
-            value={column.default}
-            onChange={(def) => setCol({ ...column, default: def })}
-            placeholder='e.g. 0 or "n/a"'
-          />
-        </Row>
-      )}
-      {defaultMissing && (
-        <p className="error-hint">{t("inspector.defaultError")}</p>
+      <label className="check req-check">
+        <input type="checkbox" checked={required} onChange={(e) => setCol({ ...column, nullable: !e.target.checked })} />
+        {t("inspector.required")}
+        {fromSource && <span className="from-source">🔒 {t("inspector.fromSource")}</span>}
+      </label>
+      {showDefault && (
+        <>
+          <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
+            <GenericInput
+              invalid={defaultMissing}
+              value={column.default}
+              onChange={(def) => setCol({ ...column, default: def })}
+              placeholder='e.g. 0 or "n/a"'
+            />
+          </Row>
+          {mustDefault && <p className={defaultMissing ? "error-hint" : "hint"}>{t("inspector.defaultError")}</p>}
+        </>
       )}
     </>
   );

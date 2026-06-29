@@ -86,6 +86,7 @@ export const en: Record<string, string> = {
   "inspector.filters": "filters",
   "inspector.valueJson": "value (JSON)",
   "inspector.required": "required",
+  "inspector.fromSource": "from source",
   "inspector.type": "type",
   "inspector.use": "use",
   "inspector.lowercase": "lowercase",
