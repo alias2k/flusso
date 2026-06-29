@@ -140,6 +140,10 @@ jobs:
         working-directory: apps/design/frontend
         run: npm ci
 
+      - name: Format check
+        working-directory: apps/design/frontend
+        run: npm run format:check
+
       - name: Lint
         working-directory: apps/design/frontend
         run: npm run lint -- --max-warnings 0

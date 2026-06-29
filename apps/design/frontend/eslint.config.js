@@ -5,6 +5,7 @@ import jsxA11y from "eslint-plugin-jsx-a11y";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
+import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
   { ignores: ["dist", "node_modules", "playwright-report", "test-results"] },
@@ -68,4 +69,7 @@ export default tseslint.config(
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: { ecmaVersion: 2022, globals: globals.node },
   },
+  // Last: turn off every ESLint rule that conflicts with Prettier, so formatting
+  // is owned solely by Prettier and the two can't fight. Keep this at the end.
+  prettier,
 );

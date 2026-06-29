@@ -115,6 +115,11 @@ design-dev: up
 design-lint fix="":
     cd apps/design/frontend && npm run {{ if fix == "fix" { "lint:fix" } else { "lint" } }}
 
+# Format the designer frontend with Prettier. `just design-fmt check` only
+# checks (what CI runs); bare `just design-fmt` rewrites in place.
+design-fmt check="":
+    cd apps/design/frontend && npm run {{ if check == "check" { "format:check" } else { "format" } }}
+
 # Check the designer's translations are complete (every UI string has a key in
 # every locale catalog). Run after adding/changing any designer UI string.
 design-i18n:
