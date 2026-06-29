@@ -788,24 +788,8 @@ button:disabled:hover {
 
 /* raw-pane / raw-editor / raw-actions are Tailwind now (App.tsx). */
 
-.diff-list {
-  overflow-y: auto;
-  flex: 1;
-}
-.diff-file { margin-bottom: 0.875rem; }
-.diff-path {
-  font-family: ui-monospace, monospace;
-  font-size: 0.75rem;
-  color: var(--muted);
-  margin-bottom: 0.25rem;
-}
-.diff-cols {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.5rem;
-}
-.diff-cols .current { border-left: 0.125rem solid var(--error); }
-.diff-cols .next { border-left: 0.125rem solid var(--accent); }
+/* diff view layout is Tailwind now (App.tsx). */
+
 /* ── polish (group G) ───────────────────────────────────────────────────── */
 /* light theme: override the neutral palette; the kind/type hues carry over. */
 :root[data-theme="light"] {
@@ -828,15 +812,7 @@ button:disabled:hover {
   justify-content: space-between;
 }
 
-/* ── catalog browser (item 7) ───────────────────────────────────────────── */
-.catalog-filter { width: 100%; margin-bottom: 0.5rem; }
-.catalog-list { overflow-y: auto; flex: 1; }
-.catalog-table { border-bottom: 0.0625rem solid var(--border); padding: 0.25rem 0; }
-.catalog-table summary { color: var(--text); font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
-.catalog-cols { padding: 0.375rem 0 0.375rem 0.875rem; }
-.catalog-col { display: flex; justify-content: space-between; font-size: 0.75rem; padding: 0.0625rem 0; }
-.catalog-col .col-type { font-family: ui-monospace, monospace; font-size: 0.6875rem; }
-.catalog-fk { font-size: 0.6875rem; color: var(--muted); font-family: ui-monospace, monospace; padding: 0.0625rem 0; }
+/* ── catalog browser (item 7) — layout is Tailwind now (CatalogBrowser.tsx) ── */
 .pk-dot { display: inline-block; width: 0.4375rem; height: 0.4375rem; border-radius: 50%; background: var(--k-root); margin-right: 0.375rem; vertical-align: middle; }
 
 /* ── sample document (item 6) ───────────────────────────────────────────── */

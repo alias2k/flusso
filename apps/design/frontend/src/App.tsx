@@ -633,13 +633,13 @@ function DiffModal({
         <DialogHeader>
           <DialogTitle>{t("diff.title", { n: changed.length })}</DialogTitle>
         </DialogHeader>
-        <div className="diff-list min-h-0">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           {changed.map((d) => (
-            <div className="diff-file" key={d.path}>
-              <div className="diff-path">{d.path}</div>
-              <div className="diff-cols">
-                <pre className="yaml current">{d.current || t("diff.newFile")}</pre>
-                <pre className="yaml next">{d.next}</pre>
+            <div className="diff-file mb-3.5" key={d.path}>
+              <div className="mb-1 font-mono text-xs text-muted-foreground">{d.path}</div>
+              <div className="grid grid-cols-2 gap-2">
+                <pre className="yaml border-l-2 border-l-destructive">{d.current || t("diff.newFile")}</pre>
+                <pre className="yaml border-l-2 border-l-primary">{d.next}</pre>
               </div>
             </div>
           ))}
