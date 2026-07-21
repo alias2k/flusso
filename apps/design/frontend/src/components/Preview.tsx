@@ -5,6 +5,7 @@ import { useT } from "../i18n";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { CodeBlock } from "./CodeBlock";
 import { Icon } from "./Icon";
 
 type Tab = "document" | "yaml" | "mapping" | "sample";
@@ -115,7 +116,7 @@ export function Preview({
             type="button"
             onClick={() => setTab(tb.id)}
             className={cn(
-              "-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-xs transition-colors",
+              "-mb-px flex cursor-pointer items-center gap-1.5 rounded-sm border-b-2 px-2.5 py-1.5 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
               tab === tb.id
                 ? "border-primary text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground",
@@ -165,7 +166,7 @@ export function Preview({
             <div className="mb-2 flex justify-end">
               <CopyButton text={preview.yaml} />
             </div>
-            <pre className="yaml">{preview.yaml}</pre>
+            <CodeBlock text={preview.yaml} lang="yaml" />
           </>
         )}
 
@@ -174,7 +175,7 @@ export function Preview({
             <div className="mb-2 flex justify-end">
               <CopyButton text={JSON.stringify(preview.preview.mapping, null, 2)} />
             </div>
-            <pre className="yaml">{JSON.stringify(preview.preview.mapping, null, 2)}</pre>
+            <CodeBlock text={JSON.stringify(preview.preview.mapping, null, 2)} lang="json" />
           </>
         )}
 
@@ -214,7 +215,7 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
       {result && !result.db_reachable && <div className="banner error">{result.error}</div>}
       {result?.note && <p className="hint">{result.note}</p>}
       {result?.document !== undefined && result.document !== null ? (
-        <pre className="yaml">{JSON.stringify(result.document, null, 2)}</pre>
+        <CodeBlock text={JSON.stringify(result.document, null, 2)} lang="json" />
       ) : (
         !loading && !error && <p className="text-sm text-muted-foreground">{t("preview.sampleHint")}</p>
       )}
