@@ -187,20 +187,20 @@ export const en: Record<string, string> = {
   "kindHelp.constant": "A fixed value baked into every document.",
 
   // preview
+  "preview.title": "Preview",
   "preview.empty": "Select or edit an index to preview it.",
   "preview.parseError": "This schema does not parse:",
-  "preview.dbCheck": "Database check",
   "preview.document": "Document",
-  "preview.schemaYml": "schema.yml",
-  "preview.copyYaml": "Copy YAML",
+  "preview.tabYaml": "YAML",
+  "preview.tabMapping": "Mapping",
+  "preview.tabSample": "Sample",
   "preview.copy": "copy",
   "preview.copied": "copied",
-  "preview.osMapping": "OpenSearch mapping",
-  "preview.sampleFromDb": "Sample from DB",
   "preview.example": "example",
   "preview.building": "building…",
   "preview.refresh": "refresh",
   "preview.fetch": "fetch",
+  "preview.sampleHint": "Build a document from a live database row.",
 
   // catalog browser
   "catalog.aria": "Database tables",

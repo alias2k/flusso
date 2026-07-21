@@ -192,20 +192,20 @@ export const it: Record<string, string> = {
   "kindHelp.constant": "Un valore fisso incluso in ogni documento.",
 
   // preview
+  "preview.title": "Anteprima",
   "preview.empty": "Seleziona o modifica un indice per visualizzarne l'anteprima.",
   "preview.parseError": "Questo schema non è analizzabile:",
-  "preview.dbCheck": "Controllo del database",
   "preview.document": "Documento",
-  "preview.schemaYml": "schema.yml",
-  "preview.copyYaml": "Copia YAML",
+  "preview.tabYaml": "YAML",
+  "preview.tabMapping": "Mappatura",
+  "preview.tabSample": "Esempio",
   "preview.copy": "copia",
   "preview.copied": "copiato",
-  "preview.osMapping": "Mappatura OpenSearch",
-  "preview.sampleFromDb": "Esempio dal DB",
   "preview.example": "esempio",
   "preview.building": "costruzione…",
   "preview.refresh": "aggiorna",
   "preview.fetch": "ottieni",
+  "preview.sampleHint": "Costruisci un documento da una riga reale del database.",
 
   // catalog browser
   "catalog.aria": "Tabelle del database",

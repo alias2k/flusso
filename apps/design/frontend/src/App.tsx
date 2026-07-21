@@ -12,6 +12,7 @@ import {
   Save,
   Sun,
   Table2,
+  X,
 } from "lucide-react";
 import type { ColumnShape, FileDiff, SaveSchemaInput } from "./api";
 import { api } from "./api";
@@ -34,7 +35,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
+import { Drawer, DrawerClose, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Kbd } from "@/components/ui/kbd";
 import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -742,22 +743,31 @@ export default function App() {
                 </div>
               )}
             </main>
-            {/* The preview is a non-modal bottom drawer (modal=false + no overlay),
+            {/* The preview is a non-modal right drawer (modal=false + no overlay),
                 so the topbar toggle and the canvas stay interactive while it's open. */}
-            <Drawer open={drawer} onOpenChange={setDrawer} direction="bottom" modal={false}>
-              <DrawerContent overlay={false} className="h-[55vh]">
-                <DrawerHeader className="sr-only">
-                  <DrawerTitle>{t("topbar.yaml")}</DrawerTitle>
+            <Drawer open={drawer} onOpenChange={setDrawer} direction="right" modal={false}>
+              <DrawerContent
+                overlay={false}
+                className="data-[vaul-drawer-direction=right]:top-14 data-[vaul-drawer-direction=right]:bottom-0 data-[vaul-drawer-direction=right]:w-[min(46rem,92vw)] data-[vaul-drawer-direction=right]:sm:max-w-none"
+              >
+                <DrawerHeader className="flex-row items-center gap-2 border-b border-border p-3">
+                  <DrawerTitle className="text-sm font-semibold">
+                    {t("preview.title")} <span className="font-normal text-muted-foreground">· {active}</span>
+                  </DrawerTitle>
+                  <span className="flex-1" />
+                  <DrawerClose asChild>
+                    <Button variant="ghost" size="icon-sm" aria-label={t("common.close")}>
+                      <X />
+                    </Button>
+                  </DrawerClose>
                 </DrawerHeader>
-                <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                  <Preview
-                    preview={preview}
-                    diagnostics={allDiagnostics.filter((d) => d.index === active)}
-                    onSample={
-                      doc && schema && active !== "config" ? () => api.sample(doc.config, active, schema) : undefined
-                    }
-                  />
-                </div>
+                <Preview
+                  preview={preview}
+                  diagnostics={allDiagnostics.filter((d) => d.index === active)}
+                  onSample={
+                    doc && schema && active !== "config" ? () => api.sample(doc.config, active, schema) : undefined
+                  }
+                />
               </DrawerContent>
             </Drawer>
             {inspectorOpen && (
