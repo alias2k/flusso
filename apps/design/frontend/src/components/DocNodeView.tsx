@@ -10,6 +10,7 @@ import { fieldAtPath, nodeFields, type DocNode, type LeafField } from "../model/
 import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { kindColorClass, typeClass } from "../theme";
+import { Hint } from "./Hint";
 import { Icon } from "./Icon";
 import { Select, Text } from "./widgets";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -136,33 +137,35 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   placeholder={t("node.filterCols")}
                 />
                 <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border bg-secondary">
-                  <button
-                    type="button"
-                    className="flex cursor-pointer items-center gap-1 px-2 py-1 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
-                    title={t("node.includeAll")}
-                    onClick={() =>
-                      apply((s) =>
-                        edit.includeColumns(
-                          s,
-                          node.path,
-                          cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
-                        ),
-                      )
-                    }
-                  >
-                    <CheckCheck className="size-3" />
-                    {t("node.all")}
-                  </button>
+                  <Hint label={t("node.includeAll")} side="top">
+                    <button
+                      type="button"
+                      aria-label={t("node.includeAll")}
+                      className="flex cursor-pointer items-center px-2 py-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
+                      onClick={() =>
+                        apply((s) =>
+                          edit.includeColumns(
+                            s,
+                            node.path,
+                            cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
+                          ),
+                        )
+                      }
+                    >
+                      <CheckCheck className="size-3.5" />
+                    </button>
+                  </Hint>
                   <span className="h-4 w-px bg-border" />
-                  <button
-                    type="button"
-                    className="flex cursor-pointer items-center gap-1 px-2 py-1 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    title={t("node.clearAll")}
-                    onClick={() => apply((s) => edit.clearColumns(s, node.path))}
-                  >
-                    <X className="size-3" />
-                    {t("node.none")}
-                  </button>
+                  <Hint label={t("node.clearAll")} side="top">
+                    <button
+                      type="button"
+                      aria-label={t("node.clearAll")}
+                      className="flex cursor-pointer items-center px-2 py-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      onClick={() => apply((s) => edit.clearColumns(s, node.path))}
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </Hint>
                 </div>
               </div>
             )}
