@@ -73,23 +73,25 @@ export function Filters({
       {value.map((f, i) => {
         const kind = kindOf(f);
         return (
-          <div className="my-1 flex items-center gap-1.5" key={i}>
-            <Select<FilterKind>
-              value={kind}
-              onChange={(k) => set(i, blank(k))}
-              options={["raw", "null_check", "value_op"]}
-              className="flex-1"
-            />
+          <div className="my-1.5 flex flex-col gap-1.5 rounded-lg border border-border p-2" key={i}>
+            <div className="flex items-center gap-1.5">
+              <Select<FilterKind>
+                value={kind}
+                onChange={(k) => set(i, blank(k))}
+                options={["raw", "null_check", "value_op"]}
+                className="flex-1"
+              />
+              <RemoveButton label={t("common.remove")} onClick={() => remove(i)} />
+            </div>
             {kind === "raw" && (
               <Text
                 value={"raw" in f ? f.raw : ""}
                 onChange={(raw) => set(i, { raw })}
                 placeholder="status <> 'archived'"
-                className="flex-1"
               />
             )}
             {kind === "null_check" && "op" in f && (
-              <>
+              <div className="flex items-center gap-1.5">
                 <Text
                   value={"column" in f ? f.column : ""}
                   onChange={(column) => set(i, { ...f, column })}
@@ -103,7 +105,7 @@ export function Filters({
                   options={["is_null", "is_not_null"]}
                   className="flex-1"
                 />
-              </>
+              </div>
             )}
             {kind === "value_op" && "value" in f && (
               <>
@@ -112,25 +114,25 @@ export function Filters({
                   onChange={(column) => set(i, { ...f, column })}
                   list={columns}
                   placeholder={t("common.column")}
-                  className="flex-1"
                 />
-                <Select
-                  value={f.op as (typeof VALUE_OPS)[number]}
-                  onChange={(op) => set(i, { ...f, op, value: coerceValue(op, valueText(f)) })}
-                  options={VALUE_OPS}
-                  className="flex-1"
-                />
-                <Text
-                  value={valueText(f)}
-                  onChange={(text) => set(i, { ...f, value: coerceValue(f.op, text) })}
-                  placeholder={
-                    f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")
-                  }
-                  className="flex-1"
-                />
+                <div className="flex items-center gap-1.5">
+                  <Select
+                    value={f.op as (typeof VALUE_OPS)[number]}
+                    onChange={(op) => set(i, { ...f, op, value: coerceValue(op, valueText(f)) })}
+                    options={VALUE_OPS}
+                    className="w-28 shrink-0"
+                  />
+                  <Text
+                    value={valueText(f)}
+                    onChange={(text) => set(i, { ...f, value: coerceValue(f.op, text) })}
+                    placeholder={
+                      f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")
+                    }
+                    className="flex-1"
+                  />
+                </div>
               </>
             )}
-            <RemoveButton label={t("common.remove")} onClick={() => remove(i)} />
           </div>
         );
       })}
