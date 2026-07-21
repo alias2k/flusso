@@ -1,4 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { CheckCheck, X } from "lucide-react";
 import { useState } from "react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
@@ -134,30 +135,35 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   onChange={setFilter}
                   placeholder={t("node.filterCols")}
                 />
-                <button
-                  type="button"
-                  className="cursor-pointer border-0 bg-transparent p-0 text-2xs text-primary"
-                  title={t("node.includeAll")}
-                  onClick={() =>
-                    apply((s) =>
-                      edit.includeColumns(
-                        s,
-                        node.path,
-                        cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
-                      ),
-                    )
-                  }
-                >
-                  {t("node.all")}
-                </button>
-                <button
-                  type="button"
-                  className="cursor-pointer border-0 bg-transparent p-0 text-2xs text-primary"
-                  title={t("node.clearAll")}
-                  onClick={() => apply((s) => edit.clearColumns(s, node.path))}
-                >
-                  {t("node.none")}
-                </button>
+                <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border bg-secondary">
+                  <button
+                    type="button"
+                    className="flex cursor-pointer items-center gap-1 px-2 py-1 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
+                    title={t("node.includeAll")}
+                    onClick={() =>
+                      apply((s) =>
+                        edit.includeColumns(
+                          s,
+                          node.path,
+                          cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
+                        ),
+                      )
+                    }
+                  >
+                    <CheckCheck className="size-3" />
+                    {t("node.all")}
+                  </button>
+                  <span className="h-4 w-px bg-border" />
+                  <button
+                    type="button"
+                    className="flex cursor-pointer items-center gap-1 px-2 py-1 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    title={t("node.clearAll")}
+                    onClick={() => apply((s) => edit.clearColumns(s, node.path))}
+                  >
+                    <X className="size-3" />
+                    {t("node.none")}
+                  </button>
+                </div>
               </div>
             )}
 
