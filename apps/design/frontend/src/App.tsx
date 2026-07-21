@@ -743,13 +743,9 @@ export default function App() {
                 </div>
               )}
             </main>
-            {/* The preview is a non-modal right drawer (modal=false + no overlay),
-                so the topbar toggle and the canvas stay interactive while it's open. */}
-            <Drawer open={drawer} onOpenChange={setDrawer} direction="right" modal={false}>
-              <DrawerContent
-                overlay={false}
-                className="data-[vaul-drawer-direction=right]:top-14 data-[vaul-drawer-direction=right]:bottom-0 data-[vaul-drawer-direction=right]:w-[min(46rem,92vw)] data-[vaul-drawer-direction=right]:sm:max-w-none"
-              >
+            {/* A modal right drawer: the dim backdrop closes it on click (plus Esc / ✕). */}
+            <Drawer open={drawer} onOpenChange={setDrawer} direction="right">
+              <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(46rem,92vw)] data-[vaul-drawer-direction=right]:sm:max-w-none">
                 <DrawerHeader className="flex-row items-center gap-2 border-b border-border p-3">
                   <DrawerTitle className="text-sm font-semibold">
                     {t("preview.title")} <span className="font-normal text-muted-foreground">· {active}</span>

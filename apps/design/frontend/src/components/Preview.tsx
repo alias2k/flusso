@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChevronDown } from "lucide-react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
@@ -8,20 +9,48 @@ import { Icon } from "./Icon";
 
 type Tab = "document" | "yaml" | "mapping" | "sample";
 
-function Node({ node, depth }: { node: DocumentNode; depth: number }) {
-  return (
-    <div>
-      <div className="flex justify-between py-0.5" style={{ paddingLeft: depth * 16 }}>
-        <span className="text-foreground">{node.name}</span>
-        <span className={cn("font-mono text-xs", typeClass(node.type))}>
-          {node.type}
-          {node.array ? "[]" : ""}
-          {node.nullable ? "?" : ""}
-        </span>
+/// A dotted leader that fills the gap between a field name and its type, so the
+/// two read together across a wide panel.
+const Leader = () => <span className="h-0 flex-1 self-center border-b border-dotted border-border/60" />;
+
+/// One document field: a leaf renders a coloured type chip; a container (object /
+/// nested) renders a group header (chevron + muted type tag) with its children
+/// indented under a nesting guide line.
+function Node({ node }: { node: DocumentNode }) {
+  const suffix = `${node.array ? "[]" : ""}${node.nullable ? "?" : ""}`;
+  if (node.children) {
+    return (
+      <div>
+        <div className="flex items-center gap-2 rounded-md px-2 py-1 hover:bg-accent">
+          <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+          <span className="font-medium whitespace-nowrap text-foreground">{node.name}</span>
+          <Leader />
+          <span className="shrink-0 rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-2xs text-muted-foreground">
+            {node.type}
+            {suffix}
+          </span>
+        </div>
+        <div className="ml-2.5 border-l border-border/50 pl-2.5">
+          {node.children.map((c, i) => (
+            <Node key={i} node={c} />
+          ))}
+        </div>
       </div>
-      {node.children?.map((c, i) => (
-        <Node key={i} node={c} depth={depth + 1} />
-      ))}
+    );
+  }
+  return (
+    <div className="flex items-center gap-3 rounded-md px-2 py-1 hover:bg-accent">
+      <span className="whitespace-nowrap text-foreground">{node.name}</span>
+      <Leader />
+      <span
+        className={cn(
+          "shrink-0 rounded border border-current/30 px-1.5 py-0.5 font-mono text-2xs",
+          typeClass(node.type),
+        )}
+      >
+        {node.type}
+        {suffix}
+      </span>
     </div>
   );
 }
@@ -123,9 +152,9 @@ export function Preview({
                 ))}
               </div>
             )}
-            <div className="rounded-md border border-border bg-secondary p-2">
+            <div className="text-sm">
               {preview.preview.document.map((n, i) => (
-                <Node key={i} node={n} depth={0} />
+                <Node key={i} node={n} />
               ))}
             </div>
           </>
