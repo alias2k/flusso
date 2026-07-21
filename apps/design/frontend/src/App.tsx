@@ -86,7 +86,7 @@ const typeDesc = (t: Translate, varKey: string): string => {
 
 function LegendRow({ color, label, desc }: { color: string; label: string; desc: string }) {
   return (
-    <Hint label={desc} side="top" className="max-w-52 text-center leading-snug">
+    <Hint label={desc} side="right" className="max-w-52 leading-snug">
       <div className="legend-row flex w-full cursor-default items-center gap-2 px-1.5 py-1 text-2xs text-muted-foreground select-none">
         <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
         {label}
