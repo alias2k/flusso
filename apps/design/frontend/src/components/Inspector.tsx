@@ -1,4 +1,5 @@
 import { Copy, Trash2, X } from "lucide-react";
+import pluralize from "pluralize";
 import {
   SCALAR_TYPES,
   type Aggregate,
@@ -139,16 +140,10 @@ const pascal = (s: string) => {
   const c = camel(s);
   return c.charAt(0).toUpperCase() + c.slice(1);
 };
-/// Naive singular — good enough for table→element names: `orders → order`,
-/// `categories → category`, `addresses → address`, `boxes → box`.
-const singular = (s: string) =>
-  s.endsWith("ies")
-    ? `${s.slice(0, -3)}y`
-    : /(sses|shes|ches|xes|zes)$/.test(s)
-      ? s.slice(0, -2)
-      : s.endsWith("s") && !s.endsWith("ss")
-        ? s.slice(0, -1)
-        : s;
+/// Singularise a table name for a suggested element name (`orders → order`,
+/// `addresses → address`, `people → person`). Backed by `pluralize`, so
+/// irregulars and uncountables (`series`, `status`) are handled correctly.
+const singular = (s: string) => pluralize.singular(s);
 
 /// One-click name suggestions for the document field, by what the field draws
 /// from: a column offers itself + its camelCase; a join its table singular; an
