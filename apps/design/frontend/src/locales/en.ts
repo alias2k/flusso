@@ -243,8 +243,9 @@ export const en: Record<string, string> = {
 
   // filters
   "filters.value": "value",
-  "filters.loHi": "lo, hi",
-  "filters.abc": "a, b, c",
+  "filters.rangeFrom": "from",
+  "filters.rangeTo": "to",
+  "filters.and": "and",
   "filters.filter": "filter",
   "filters.kindRaw": "Raw SQL",
   "filters.kindRawDesc": "Verbatim SQL condition",

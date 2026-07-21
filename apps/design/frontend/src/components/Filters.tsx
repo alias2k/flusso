@@ -52,30 +52,104 @@ function blank(kind: FilterKind): Filter {
   return { value_op: { column: "", op: "eq", value: { single: "" } } };
 }
 
-/// Interpret the free-text value box per operator into a tagged `FilterValue`:
-/// `in`/`not_in` split on commas → `list`, `between` → a two-element `range`,
-/// everything else → a scalar `single`.
-function coerceValue(op: FilterOp, text: string): FilterValue {
-  if (op === "in" || op === "not_in") {
-    return {
-      list: text
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-    };
-  }
-  if (op === "between") {
-    const parts = text.split(",").map((s) => s.trim());
-    return { range: [parts[0] ?? "", parts[1] ?? ""] };
-  }
-  return { single: text };
+/// How many operands an operator takes: `in`/`not_in` → a `list`, `between` → a
+/// two-element `range`, everything else → a scalar `single`. Drives which value
+/// inputs [`ValueOpEditor`] shows.
+function opArity(op: FilterOp): "single" | "range" | "list" {
+  if (op === "in" || op === "not_in") return "list";
+  if (op === "between") return "range";
+  return "single";
 }
 
-/// The value box's text for a `FilterValue` — the inverse of [`coerceValue`].
-function valueText(v: FilterValue): string {
-  if ("single" in v) return v.single;
-  if ("list" in v) return v.list.join(", ");
-  return v.range.join(", ");
+/// Reshape the value into the arity the new operator needs, carrying over what
+/// the user already typed (so switching `=` → `BETWEEN` keeps the first operand).
+function reshapeValue(op: FilterOp, prev: FilterValue): FilterValue {
+  const flat = "single" in prev ? [prev.single] : "list" in prev ? prev.list : prev.range;
+  const arity = opArity(op);
+  if (arity === "list") return { list: flat.length ? flat : [""] };
+  if (arity === "range") return { range: [flat[0] ?? "", flat[1] ?? ""] };
+  return { single: flat[0] ?? "" };
+}
+
+/// The `value_op` body: column + operator on one row, then the value input(s)
+/// underneath — one box for a scalar op, a `from`/`to` pair for `BETWEEN`, and a
+/// grow-on-demand list for `IN`/`NOT IN`.
+function ValueOpEditor({
+  filter,
+  cols,
+  onChange,
+}: {
+  filter: { column: string; op: FilterOp; value: FilterValue };
+  cols: ColumnShape[];
+  onChange: (f: { column: string; op: FilterOp; value: FilterValue }) => void;
+}) {
+  const { t } = useT();
+  const { op, value } = filter;
+  return (
+    <>
+      <div className="flex items-center gap-1.5">
+        <ColumnPicker
+          value={filter.column}
+          columns={cols}
+          onChange={(column) => onChange({ ...filter, column })}
+          placeholder={t("common.column")}
+          className="min-w-0 flex-1"
+        />
+        <Select
+          value={op}
+          onChange={(nextOp) => onChange({ ...filter, op: nextOp, value: reshapeValue(nextOp, value) })}
+          options={valueOpOptions(t)}
+          className="w-32 shrink-0"
+        />
+      </div>
+      {"single" in value && (
+        <Text
+          value={value.single}
+          onChange={(s) => onChange({ ...filter, value: { single: s } })}
+          placeholder={t("filters.value")}
+        />
+      )}
+      {"range" in value && (
+        <div className="flex items-center gap-1.5">
+          <Text
+            value={value.range[0]}
+            onChange={(lo) => onChange({ ...filter, value: { range: [lo, value.range[1]] } })}
+            placeholder={t("filters.rangeFrom")}
+            className="min-w-0 flex-1"
+          />
+          <span className="text-2xs text-muted-foreground">{t("filters.and")}</span>
+          <Text
+            value={value.range[1]}
+            onChange={(hi) => onChange({ ...filter, value: { range: [value.range[0], hi] } })}
+            placeholder={t("filters.rangeTo")}
+            className="min-w-0 flex-1"
+          />
+        </div>
+      )}
+      {"list" in value && (
+        <div className="flex flex-col gap-1.5">
+          {value.list.map((item, j) => (
+            <div className="flex items-center gap-1.5" key={j}>
+              <Text
+                value={item}
+                onChange={(s) => onChange({ ...filter, value: { list: value.list.map((x, k) => (k === j ? s : x)) } })}
+                placeholder={t("filters.value")}
+                className="min-w-0 flex-1"
+              />
+              <RemoveButton
+                label={t("common.remove")}
+                onClick={() => onChange({ ...filter, value: { list: value.list.filter((_, k) => k !== j) } })}
+              />
+            </div>
+          ))}
+          <AddButton
+            label={t("filters.value")}
+            onClick={() => onChange({ ...filter, value: { list: [...value.list, ""] } })}
+          />
+        </div>
+      )}
+    </>
+  );
 }
 
 export function Filters({
@@ -137,38 +211,7 @@ export function Filters({
               </div>
             )}
             {"value_op" in f && (
-              <>
-                <ColumnPicker
-                  value={f.value_op.column}
-                  columns={cols}
-                  onChange={(column) => set(i, { value_op: { ...f.value_op, column } })}
-                  placeholder={t("common.column")}
-                />
-                <div className="flex items-center gap-1.5">
-                  <Select
-                    value={f.value_op.op}
-                    onChange={(op) =>
-                      set(i, { value_op: { ...f.value_op, op, value: coerceValue(op, valueText(f.value_op.value)) } })
-                    }
-                    options={valueOpOptions(t)}
-                    className="w-28 shrink-0"
-                  />
-                  <Text
-                    value={valueText(f.value_op.value)}
-                    onChange={(text) =>
-                      set(i, { value_op: { ...f.value_op, value: coerceValue(f.value_op.op, text) } })
-                    }
-                    placeholder={
-                      f.value_op.op === "between"
-                        ? t("filters.loHi")
-                        : f.value_op.op === "in"
-                          ? t("filters.abc")
-                          : t("filters.value")
-                    }
-                    className="flex-1"
-                  />
-                </div>
-              </>
+              <ValueOpEditor filter={f.value_op} cols={cols} onChange={(vo) => set(i, { value_op: vo })} />
             )}
           </div>
         );

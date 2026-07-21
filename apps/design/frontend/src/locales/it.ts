@@ -248,8 +248,9 @@ export const it: Record<string, string> = {
 
   // filters
   "filters.value": "valore",
-  "filters.loHi": "min, max",
-  "filters.abc": "a, b, c",
+  "filters.rangeFrom": "da",
+  "filters.rangeTo": "a",
+  "filters.and": "e",
   "filters.filter": "filtro",
   "filters.kindRaw": "SQL grezzo",
   "filters.kindRawDesc": "Condizione SQL letterale",
