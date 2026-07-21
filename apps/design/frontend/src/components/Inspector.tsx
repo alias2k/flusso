@@ -1,4 +1,4 @@
-import { Copy, Trash2, X } from "lucide-react";
+import { Copy, Plus, Trash2, X } from "lucide-react";
 import {
   SCALAR_TYPES,
   type Aggregate,
@@ -86,7 +86,7 @@ function HeaderActions() {
     select(null);
   };
   return (
-    <div className="flex shrink-0 items-center gap-0.5">
+    <div className="-my-1 -mr-1.5 flex shrink-0 items-center gap-0.5">
       {canModify && (
         <>
           <Hint label={t("inspector.duplicate")}>
@@ -199,7 +199,7 @@ export function Inspector() {
   if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
   return (
     <>
-      <div className="mb-2.5 flex items-start justify-between gap-2">
+      <div className="mb-2.5 flex items-center justify-between gap-2">
         <Breadcrumb />
         <HeaderActions />
       </div>
@@ -1064,24 +1064,26 @@ function OrderByEditor({
             className="w-24"
           />
           <Button
-            variant="link"
-            size="sm"
-            className="text-destructive"
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            aria-label={t("common.remove")}
             onClick={() =>
               onChange(value.filter((_, j) => j !== i).length ? value.filter((_, j) => j !== i) : undefined)
             }
           >
-            ✕
+            <X />
           </Button>
         </div>
       ))}
       <Button
-        variant="link"
+        variant="ghost"
         size="sm"
+        className="text-primary"
         disabled={!columns.length}
         onClick={() => onChange([...value, { column: columns[0]?.name ?? "", direction: "asc" }])}
       >
-        + order_by
+        <Plus /> order_by
       </Button>
     </div>
   );
