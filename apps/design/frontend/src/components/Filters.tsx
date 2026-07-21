@@ -4,9 +4,8 @@ import { AddButton, ColumnPicker, RemoveButton, Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
 
-/// The three filter kinds, each with a dev-facing label plus a plain-English
-/// description shown under it. Literal `t("filters.*")` calls keep the i18n
-/// checker able to see every key.
+// The option builders switch on literal `t("filters.*")` calls (not a dynamic
+// lookup) so the i18n key-usage checker can see every key.
 function kindOptions(t: Translate) {
   return [
     { value: "raw" as const, label: t("filters.kindRaw"), description: t("filters.kindRawDesc") },
@@ -15,8 +14,6 @@ function kindOptions(t: Translate) {
   ];
 }
 
-/// Value operators as their SQL tokens (the dev lingo), each with a plain
-/// description of what it means.
 function valueOpOptions(t: Translate) {
   return [
     { value: "eq" as const, label: "=", description: t("filters.opEq") },
@@ -52,17 +49,14 @@ function blank(kind: FilterKind): Filter {
   return { value_op: { column: "", op: "eq", value: { single: "" } } };
 }
 
-/// How many operands an operator takes: `in`/`not_in` → a `list`, `between` → a
-/// two-element `range`, everything else → a scalar `single`. Drives which value
-/// inputs [`ValueOpEditor`] shows.
 function opArity(op: FilterOp): "single" | "range" | "list" {
   if (op === "in" || op === "not_in") return "list";
   if (op === "between") return "range";
   return "single";
 }
 
-/// Reshape the value into the arity the new operator needs, carrying over what
-/// the user already typed (so switching `=` → `BETWEEN` keeps the first operand).
+// Carries the operands over when the operator's arity changes, so switching
+// `=` → `BETWEEN` keeps what was already typed as the first bound.
 function reshapeValue(op: FilterOp, prev: FilterValue): FilterValue {
   const flat = "single" in prev ? [prev.single] : "list" in prev ? prev.list : prev.range;
   const arity = opArity(op);
@@ -71,9 +65,6 @@ function reshapeValue(op: FilterOp, prev: FilterValue): FilterValue {
   return { single: flat[0] ?? "" };
 }
 
-/// The `value_op` body: column + operator on one row, then the value input(s)
-/// underneath — one box for a scalar op, a `from`/`to` pair for `BETWEEN`, and a
-/// grow-on-demand list for `IN`/`NOT IN`.
 function ValueOpEditor({
   filter,
   cols,

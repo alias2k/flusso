@@ -48,8 +48,8 @@ import { TYPE_FAMILIES } from "./theme";
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-// The colour-legend rows and their one-line explanations. Literal `t("legend.*")`
-// calls keep the i18n checker able to see every key.
+// `kindDesc`/`typeDesc` switch on literal `t("legend.*")` calls (not a dynamic
+// lookup) so the i18n key-usage checker can see every key.
 const KIND_ROWS = ["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"];
 const kindDesc = (t: Translate, kind: string): string => {
   switch (kind) {
@@ -84,9 +84,6 @@ const typeDesc = (t: Translate, varKey: string): string => {
   }
 };
 
-// One legend entry: the colour swatch + label, with its explanation shown as a
-// tooltip above the row on hover. Not interactive, so it takes the default
-// cursor and doesn't select as text.
 function LegendRow({ color, label, desc }: { color: string; label: string; desc: string }) {
   return (
     <Hint label={desc} side="top" className="max-w-52 text-center leading-snug">

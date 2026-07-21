@@ -69,9 +69,7 @@ export function Block({ variant, title, children }: { variant: "src" | "doc"; ti
 /// The rule a source imposes on a choice, shown between a [`Block`] pair —
 /// e.g. "NOT NULL → required, locked". A cyan connector, cause above, effect
 /// below.
-/// The shared "+ add a row" affordance — a ghost button with a Plus icon in the
-/// brand accent. Used for every add-another action (a filter, an order_by, a
-/// sink, an index, an option) so they all read the same.
+/// The shared "+ add a row" button (ghost, Plus icon), for every add-another action.
 export function AddButton({ label, disabled, onClick }: { label: string; disabled?: boolean; onClick: () => void }) {
   return (
     <Button variant="ghost" size="sm" className="text-primary" disabled={disabled} onClick={onClick}>
@@ -81,9 +79,8 @@ export function AddButton({ label, disabled, onClick }: { label: string; disable
   );
 }
 
-/// The paired "remove this row" affordance — a ghost icon button that stays
-/// muted until hovered, then tints destructive. For the loud, primary delete of
-/// a whole node, use the inspector header action instead.
+/// The paired "remove this row" icon button (muted, destructive on hover). For a
+/// whole node's primary delete, use the inspector header action instead.
 export function RemoveButton({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <Button
@@ -380,10 +377,8 @@ export function Combobox({
   );
 }
 
-/// The canonical column picker — a searchable [`Combobox`] over the given
-/// catalog columns, each coloured by its type family (via `typeClass`) with the
-/// SQL type as a trailing detail. `allowCustom`, so an offline / hand-typed name
-/// still works. Use this everywhere a column is chosen, so they all look alike.
+/// The shared column picker: a [`Combobox`] over catalog columns, coloured by
+/// type family, `allowCustom` for offline / hand-typed names.
 export function ColumnPicker({
   value,
   columns,

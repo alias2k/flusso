@@ -62,10 +62,8 @@ function Breadcrumb() {
   return <div className="crumbs min-w-0 break-words text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
 }
 
-/// The header action cluster — duplicate / delete / close — pinned top-right of
-/// the inspector, grouped with the panel close. Duplicate and delete only apply
-/// to a selected node or field (the index root has neither), so they're hidden
-/// for the root; close is always present.
+// Delete/duplicate act on a node or field; the index root has neither, so only
+// close shows for it.
 function HeaderActions() {
   const { selection, apply, select } = useDesign();
   const { t } = useT();
