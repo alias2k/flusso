@@ -3,9 +3,10 @@ import { ChevronDown, ChevronsUpDown } from "lucide-react";
 import { useT } from "../i18n";
 import { cn } from "@/lib/utils";
 
-/// A unified, git-style diff of one file: line-level add/remove highlighting,
-/// old/new line-number gutters, and long unchanged stretches collapsed into
-/// expandable gaps — so a save review reads like a code review, not two dumps.
+/// A git-style diff of one file. Line-level add/remove highlighting with old/new
+/// line-number gutters, long unchanged stretches collapsed into expandable gaps,
+/// and four layouts: unified (both sides), split (old left / new right), or a
+/// single side (old / new) — so a save review reads like a code review.
 
 interface Row {
   type: "eq" | "add" | "del";
@@ -13,6 +14,9 @@ interface Row {
   oldNo?: number;
   newNo?: number;
 }
+
+/// Which layout to render, chosen from the review's view toggle.
+export type DiffMode = "unified" | "split" | "old" | "new";
 
 // Lines around a change kept as context; longer unchanged runs collapse.
 const CONTEXT = 3;
@@ -70,39 +74,87 @@ function diffLines(current: string, next: string): Row[] {
   return rows;
 }
 
-type Segment = { kind: "rows"; rows: Row[] } | { kind: "gap"; id: number; rows: Row[] };
+// A split-view row: the old line on the left, the new line on the right. A
+// change with unequal add/remove counts leaves one side empty.
+interface Pair {
+  left?: Row;
+  right?: Row;
+  changed: boolean;
+}
 
-// Keep every changed row plus `CONTEXT` unchanged rows on each side; group the
-// rest into collapsible gaps.
-function segment(rows: Row[]): Segment[] {
-  const keep = new Array<boolean>(rows.length).fill(false);
-  rows.forEach((r, idx) => {
-    if (r.type === "eq") return;
-    for (let k = Math.max(0, idx - CONTEXT); k <= Math.min(rows.length - 1, idx + CONTEXT); k++) keep[k] = true;
+function buildPairs(rows: Row[]): Pair[] {
+  const pairs: Pair[] = [];
+  let k = 0;
+  while (k < rows.length) {
+    if (rows[k].type === "eq") {
+      pairs.push({ left: rows[k], right: rows[k], changed: false });
+      k++;
+      continue;
+    }
+    const dels: Row[] = [];
+    const adds: Row[] = [];
+    while (k < rows.length && rows[k].type !== "eq") {
+      if (rows[k].type === "del") dels.push(rows[k]);
+      else adds.push(rows[k]);
+      k++;
+    }
+    const max = Math.max(dels.length, adds.length);
+    for (let x = 0; x < max; x++) {
+      pairs.push({
+        left: x < dels.length ? dels[x] : undefined,
+        right: x < adds.length ? adds[x] : undefined,
+        changed: true,
+      });
+    }
+  }
+  return pairs;
+}
+
+interface Block<T> {
+  kind: "rows" | "gap";
+  id: number;
+  items: T[];
+}
+
+// Keep every changed item plus `CONTEXT` unchanged items on each side; group the
+// rest into collapsible gaps. Shared by the unified (rows) and split (pairs) views.
+function collapse<T>(items: T[], isChange: (t: T) => boolean): Block<T>[] {
+  const keep = new Array<boolean>(items.length).fill(false);
+  items.forEach((t, idx) => {
+    if (!isChange(t)) return;
+    for (let k = Math.max(0, idx - CONTEXT); k <= Math.min(items.length - 1, idx + CONTEXT); k++) keep[k] = true;
   });
-  const out: Segment[] = [];
+  const out: Block<T>[] = [];
   let idx = 0;
-  while (idx < rows.length) {
+  while (idx < items.length) {
     const start = idx;
     const visible = keep[idx];
-    while (idx < rows.length && keep[idx] === visible) idx++;
-    const slice = rows.slice(start, idx);
-    out.push(visible ? { kind: "rows", rows: slice } : { kind: "gap", id: start, rows: slice });
+    while (idx < items.length && keep[idx] === visible) idx++;
+    out.push({ kind: visible ? "rows" : "gap", id: start, items: items.slice(start, idx) });
   }
   return out;
 }
 
-const GUTTER = "w-11 shrink-0 select-none px-2 text-right text-2xs tabular-nums";
+const GUTTER = "shrink-0 select-none px-2 text-right text-2xs tabular-nums";
 
+/// One line in the unified view: two gutters (old + new), a +/- sign, the text.
 function DiffRow({ row }: { row: Row }) {
   const add = row.type === "add";
   const del = row.type === "del";
   return (
     <div className={cn("flex w-full", add && "bg-primary/12", del && "bg-destructive/12")}>
-      <span className={cn(GUTTER, add ? "text-primary/70" : del ? "text-transparent" : "text-muted-foreground/50")}>
+      <span
+        className={cn(GUTTER, "w-11", add ? "text-primary/70" : del ? "text-transparent" : "text-muted-foreground/50")}
+      >
         {row.oldNo ?? ""}
       </span>
-      <span className={cn(GUTTER, del ? "text-destructive/70" : add ? "text-transparent" : "text-muted-foreground/50")}>
+      <span
+        className={cn(
+          GUTTER,
+          "w-11",
+          del ? "text-destructive/70" : add ? "text-transparent" : "text-muted-foreground/50",
+        )}
+      >
         {row.newNo ?? ""}
       </span>
       <span
@@ -120,10 +172,58 @@ function DiffRow({ row }: { row: Row }) {
   );
 }
 
-/// Which side of the change to show: `unified` keeps both, `old` hides
-/// additions (the file as it was), `new` hides removals (the file as it will
-/// be) — the surviving rows keep their add/remove colour either way.
-export type DiffMode = "unified" | "old" | "new";
+/// One side of a split row. A missing line renders as a muted placeholder so the
+/// two columns stay row-aligned.
+function SideCell({ row, side }: { row?: Row; side: "old" | "new" }) {
+  if (!row) return <div className="h-6 bg-muted/20" />;
+  const changed = side === "old" ? row.type === "del" : row.type === "add";
+  const no = side === "old" ? row.oldNo : row.newNo;
+  return (
+    <div
+      className={cn(
+        "flex h-6 w-full items-center",
+        changed && (side === "old" ? "bg-destructive/12" : "bg-primary/12"),
+      )}
+    >
+      <span
+        className={cn(
+          GUTTER,
+          "w-11",
+          changed ? (side === "old" ? "text-destructive/70" : "text-primary/70") : "text-muted-foreground/50",
+        )}
+      >
+        {no ?? ""}
+      </span>
+      <span
+        className={cn(
+          "w-4 shrink-0 select-none text-center",
+          changed ? (side === "old" ? "text-destructive" : "text-primary") : "text-transparent",
+        )}
+      >
+        {side === "old" ? "-" : "+"}
+      </span>
+      <span className={cn("grow whitespace-pre pr-3", changed ? "text-foreground" : "text-muted-foreground")}>
+        {row.text || " "}
+      </span>
+    </div>
+  );
+}
+
+/// The collapsed-gap expander. Rendered once (unified) or in both split columns
+/// at the same position, so the two sides stay aligned; either click expands.
+function GapBar({ count, label, onExpand }: { count: number; label?: boolean; onExpand: () => void }) {
+  const { t } = useT();
+  return (
+    <button
+      type="button"
+      onClick={onExpand}
+      className="flex h-6 w-full items-center gap-2 bg-accent/40 px-3 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+    >
+      <ChevronsUpDown className="size-3 shrink-0" />
+      {label && t("diff.unchanged", { n: count })}
+    </button>
+  );
+}
 
 function rowVisible(type: Row["type"], mode: DiffMode): boolean {
   if (mode === "old") return type !== "add";
@@ -145,12 +245,32 @@ export function DiffView({
   const { t } = useT();
   const [open, setOpen] = useState(true);
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
+  const expand = (id: number) => setExpanded((s) => new Set(s).add(id));
   const rows = diffLines(current, next);
-  const segments = segment(rows);
   const adds = rows.filter((r) => r.type === "add").length;
   const dels = rows.filter((r) => r.type === "del").length;
-  const renderRows = (rs: Row[]) =>
-    rs.filter((r) => rowVisible(r.type, mode)).map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
+
+  const unifiedBody = () =>
+    collapse(rows, (r) => r.type !== "eq").map((block) => {
+      if (block.kind === "gap" && !expanded.has(block.id))
+        return <GapBar key={block.id} count={block.items.length} label onExpand={() => expand(block.id)} />;
+      return block.items
+        .filter((r) => rowVisible(r.type, mode))
+        .map((r, k) => <DiffRow key={`${block.id}-${k}`} row={r} />);
+    });
+
+  // Split: two independently-scrolling columns fed the SAME block sequence, so
+  // matching row heights keep old (left) and new (right) aligned.
+  const splitColumn = (side: "old" | "new") =>
+    collapse(buildPairs(rows), (p) => p.changed).map((block) => {
+      if (block.kind === "gap" && !expanded.has(block.id))
+        return (
+          <GapBar key={block.id} count={block.items.length} label={side === "old"} onExpand={() => expand(block.id)} />
+        );
+      return block.items.map((p, k) => (
+        <SideCell key={`${block.id}-${k}`} row={side === "old" ? p.left : p.right} side={side} />
+      ));
+    });
 
   return (
     <div className="diff-file mb-4 overflow-hidden rounded-lg border border-border shadow-sm last:mb-0">
@@ -173,27 +293,21 @@ export function DiffView({
           <span className="text-destructive">-{dels}</span>
         </span>
       </button>
-      {open && (
-        <div className="overflow-x-auto">
-          <div className="w-max min-w-full font-mono text-xs leading-relaxed">
-            {segments.map((seg) => {
-              if (seg.kind === "rows") return renderRows(seg.rows);
-              if (expanded.has(seg.id)) return renderRows(seg.rows);
-              return (
-                <button
-                  key={seg.id}
-                  type="button"
-                  onClick={() => setExpanded((s) => new Set(s).add(seg.id))}
-                  className="flex w-full items-center gap-2 bg-accent/40 px-3 py-1 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  <ChevronsUpDown className="size-3 shrink-0" />
-                  {t("diff.unchanged", { n: seg.rows.length })}
-                </button>
-              );
-            })}
+      {open &&
+        (mode === "split" ? (
+          <div className="grid grid-cols-2 divide-x divide-border font-mono text-xs leading-relaxed">
+            <div className="overflow-x-auto">
+              <div className="w-max min-w-full">{splitColumn("old")}</div>
+            </div>
+            <div className="overflow-x-auto">
+              <div className="w-max min-w-full">{splitColumn("new")}</div>
+            </div>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="overflow-x-auto">
+            <div className="w-max min-w-full font-mono text-xs leading-relaxed">{unifiedBody()}</div>
+          </div>
+        ))}
     </div>
   );
 }

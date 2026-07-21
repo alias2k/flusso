@@ -83,6 +83,7 @@ export const it: Record<string, string> = {
   "diff.write": "{n, plural, one {Scrivi # file} other {Scrivi # file}}",
   "diff.unchanged": "{n, plural, one {# riga invariata} other {# righe invariate}}",
   "diff.viewUnified": "Unificata",
+  "diff.viewSplit": "Affiancata",
   "diff.viewOld": "Prima",
   "diff.viewNew": "Dopo",
 

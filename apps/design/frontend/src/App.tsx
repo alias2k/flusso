@@ -838,13 +838,14 @@ function DiffModal({
   const changed = diffs.filter((d) => d.changed);
   const modes: { id: DiffMode; label: string }[] = [
     { id: "unified", label: t("diff.viewUnified") },
+    { id: "split", label: t("diff.viewSplit") },
     { id: "old", label: t("diff.viewOld") },
     { id: "new", label: t("diff.viewNew") },
   ];
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent
-        className="flex w-[min(56rem,92vw)] max-w-none flex-col max-h-[85vh] sm:max-w-none"
+        className="flex w-[min(64rem,94vw)] max-w-none flex-col max-h-[85vh] sm:max-w-none"
         aria-label={t("diff.aria")}
       >
         <DialogHeader className="flex-row items-center justify-between gap-3 pr-8">
