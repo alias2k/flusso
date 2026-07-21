@@ -169,6 +169,16 @@ export function Text({
         list={id}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKeyDown}
+        // Not login fields — the data-*ignore attrs opt out of password managers
+        // (1Password/LastPass/Bitwarden/Dashlane) so no overlay covers the input.
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        data-1p-ignore="true"
+        data-lpignore="true"
+        data-bwignore="true"
+        data-form-type="other"
       />
       {list && (
         <datalist id={id}>
