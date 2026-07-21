@@ -83,6 +83,7 @@ export const en: Record<string, string> = {
   // shared
   "common.cancel": "Cancel",
   "common.remove": "remove",
+  "common.clear": "Clear",
   "common.close": "Close",
   "common.column": "column",
 
@@ -205,10 +206,13 @@ export const en: Record<string, string> = {
   "catalog.aria": "Database tables",
   "catalog.title": "{n, plural, one {Database (# table)} other {Database (# tables)}}",
   "catalog.dbError": "Database not reachable — {err}",
-  "catalog.filter": "filter tables…",
+  "catalog.filter": "Filter tables & columns…",
   "catalog.junction": "junction",
   "catalog.cols": "{n, plural, one {# col} other {# cols}}",
   "catalog.pk": "primary key",
+  "catalog.matchCount": "{n, plural, one {# table} other {# tables}}",
+  "catalog.referencedBy": "Referenced by",
+  "catalog.noMatch": "No matching tables or columns",
 
   // canvas node (DocNodeView)
   "node.expand": "Expand",

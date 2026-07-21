@@ -84,6 +84,7 @@ export const it: Record<string, string> = {
   // shared
   "common.cancel": "Annulla",
   "common.remove": "rimuovi",
+  "common.clear": "Cancella",
   "common.close": "Chiudi",
   "common.column": "colonna",
 
@@ -210,10 +211,13 @@ export const it: Record<string, string> = {
   "catalog.aria": "Tabelle del database",
   "catalog.title": "{n, plural, one {Database (# tabella)} other {Database (# tabelle)}}",
   "catalog.dbError": "Database non raggiungibile — {err}",
-  "catalog.filter": "filtra tabelle…",
+  "catalog.filter": "Filtra tabelle e colonne…",
   "catalog.junction": "giunzione",
   "catalog.cols": "{n, plural, one {# colonna} other {# colonne}}",
   "catalog.pk": "chiave primaria",
+  "catalog.matchCount": "{n, plural, one {# tabella} other {# tabelle}}",
+  "catalog.referencedBy": "Referenziata da",
+  "catalog.noMatch": "Nessuna tabella o colonna corrispondente",
 
   // canvas node (DocNodeView)
   "node.expand": "Espandi",

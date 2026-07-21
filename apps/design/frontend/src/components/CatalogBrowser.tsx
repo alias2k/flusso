@@ -1,69 +1,252 @@
 import { useState } from "react";
-import type { CatalogResponse } from "../api";
+import { KeyRound, Link2, Search, X } from "lucide-react";
+import type { CatalogResponse, ColumnShape, TableShape } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
-import { Text } from "./widgets";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 
-/// A read-only browser of the introspected database: every table with its
-/// columns (type, pk, nullable), outgoing foreign keys, and the detected
-/// junctions — so you can explore the schema independent of the canvas.
+const JunctionBadge = ({ label }: { label: string }) => (
+  <span className="shrink-0 rounded-full border border-kind-many_to_many/40 bg-kind-many_to_many/15 px-1.5 py-0.5 text-3xs font-bold tracking-wide text-kind-many_to_many uppercase">
+    {label}
+  </span>
+);
+
+/// Emphasise the first case-insensitive match of `q` within `text`.
+function Mark({ text, q }: { text: string; q: string }) {
+  const i = q ? text.toLowerCase().indexOf(q) : -1;
+  if (i < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, i)}
+      <span className="font-semibold text-primary">{text.slice(i, i + q.length)}</span>
+      {text.slice(i + q.length)}
+    </>
+  );
+}
+
+const suggested = (c: ColumnShape): string => (typeof c.suggested_type === "string" ? c.suggested_type : "other");
+
+/// Derive, from the catalog's foreign keys: each column's outgoing target
+/// (`orders.id`) and, per table, the incoming references that point at it.
+function relations(tables: TableShape[]) {
+  const fkTarget = new Map<string, Map<string, string>>();
+  const incoming = new Map<string, string[]>();
+  for (const tbl of tables) {
+    const cols = new Map<string, string>();
+    for (const fk of tbl.foreign_keys) {
+      fk.columns.forEach((c, i) =>
+        cols.set(c, `${fk.references_table}.${fk.references_columns[i] ?? fk.references_columns[0] ?? ""}`),
+      );
+      incoming.set(fk.references_table, [
+        ...(incoming.get(fk.references_table) ?? []),
+        `${tbl.name}.${fk.columns.join(", ")}`,
+      ]);
+    }
+    fkTarget.set(tbl.name, cols);
+  }
+  return { fkTarget, incoming };
+}
+
+/// A read-only browser of the introspected database: a table list on the left, the
+/// selected table's columns + relationships on the right. Foreign keys are shown
+/// inline on their column (→ target), incoming references in a footer. The filter
+/// spans table *and* column names — a column hit surfaces its table.
 export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse; onClose: () => void }) {
   const { t } = useT();
   const [q, setQ] = useState("");
-  const tables = catalog.catalog.tables.filter((tbl) => tbl.name.toLowerCase().includes(q.toLowerCase()));
+  const [selectedName, setSelectedName] = useState(catalog.catalog.tables[0]?.name ?? "");
+  const needle = q.trim().toLowerCase();
+  const tables = catalog.catalog.tables;
+
   const junctions = new Set(catalog.junctions.map((j) => j.table.table));
+  const { fkTarget, incoming } = relations(tables);
+
+  const matchesCol = (tbl: TableShape) =>
+    needle ? tbl.columns.filter((c) => c.name.toLowerCase().includes(needle)) : [];
+  const filtered = tables.filter(
+    (tbl) =>
+      !needle ||
+      tbl.name.toLowerCase().includes(needle) ||
+      tbl.columns.some((c) => c.name.toLowerCase().includes(needle)),
+  );
+  // Keep the selection valid without a state write: fall back to the first match.
+  const selected = filtered.find((tbl) => tbl.name === selectedName) ?? filtered[0] ?? null;
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
-        className="flex flex-col w-[min(40rem,92vw)] max-w-none max-h-[85vh]"
+        className="flex w-[min(46rem,92vw)] max-w-none flex-col gap-0 overflow-hidden p-0 max-h-[85vh]"
         aria-label={t("catalog.aria")}
       >
-        <DialogHeader>
-          <DialogTitle>{t("catalog.title", { n: catalog.catalog.tables.length })}</DialogTitle>
+        <DialogHeader className="px-4 pt-4 pb-2">
+          <DialogTitle>{t("catalog.title", { n: tables.length })}</DialogTitle>
         </DialogHeader>
+
         {catalog.error ? (
-          <p className="banner warn">{t("catalog.dbError", { err: catalog.error })}</p>
+          <p className="banner warn mx-4 mb-4">{t("catalog.dbError", { err: catalog.error })}</p>
         ) : (
           <>
-            <Text className="mb-2 w-full" value={q} onChange={setQ} placeholder={t("catalog.filter")} />
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              {tables.map((tbl) => (
-                <details key={tbl.name} className="catalog-table border-b border-border py-1">
-                  <summary className="flex items-center gap-2 font-semibold text-foreground">
-                    {tbl.name}
-                    {junctions.has(tbl.name) && <span className="badge many_to_many">{t("catalog.junction")}</span>}
-                    <span className="muted"> · {t("catalog.cols", { n: tbl.columns.length })}</span>
-                  </summary>
-                  <div className="pb-1.5 pl-3.5 pt-1.5">
-                    {tbl.columns.map((c) => (
-                      <div className="flex justify-between py-px text-xs" key={c.name}>
-                        <span>
-                          {c.is_primary_key && <span className="pk-dot" title={t("catalog.pk")} />}
-                          {c.name}
-                          {c.nullable ? <span className="muted">?</span> : null}
+            <div className="mx-4 mb-2 flex h-9 items-center gap-2.5 rounded-md border border-border bg-secondary px-3 focus-within:border-primary">
+              <Search className="size-4 shrink-0 text-muted-foreground" />
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder={t("catalog.filter")}
+                className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                data-1p-ignore="true"
+                data-lpignore="true"
+                data-bwignore="true"
+                data-form-type="other"
+              />
+              {needle && (
+                <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
+                  {t("catalog.matchCount", { n: filtered.length })}
+                </span>
+              )}
+              {q && (
+                <button
+                  type="button"
+                  onClick={() => setQ("")}
+                  aria-label={t("common.clear")}
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="grid min-h-0 flex-1 grid-cols-[14rem_1fr] border-t border-border">
+              <div className="min-h-0 overflow-y-auto border-r border-border p-1.5">
+                {filtered.length === 0 ? (
+                  <p className="p-3 text-2xs text-muted-foreground">{t("catalog.noMatch")}</p>
+                ) : (
+                  filtered.map((tbl) => {
+                    const cols = matchesCol(tbl);
+                    const nameHit = !needle || tbl.name.toLowerCase().includes(needle);
+                    return (
+                      <button
+                        key={tbl.name}
+                        type="button"
+                        onClick={() => setSelectedName(tbl.name)}
+                        className={cn(
+                          "flex w-full items-center gap-2 rounded-md border-l-2 px-2.5 py-2 text-left",
+                          selected?.name === tbl.name
+                            ? "border-primary bg-primary/10"
+                            : "border-transparent hover:bg-accent",
+                        )}
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="flex items-center gap-1.5">
+                            <span className="truncate text-sm font-medium">
+                              <Mark text={tbl.name} q={nameHit ? needle : ""} />
+                            </span>
+                            {junctions.has(tbl.name) && <JunctionBadge label={t("catalog.junction")} />}
+                          </span>
+                          {cols.length > 0 && !tbl.name.toLowerCase().includes(needle) && (
+                            <span className="truncate pt-0.5 font-mono text-2xs text-accent2">
+                              <Mark text={cols.map((c) => c.name).join(", ")} q={needle} />
+                            </span>
+                          )}
                         </span>
-                        <span
-                          className={`font-mono text-2xs ${typeClass(typeof c.suggested_type === "string" ? c.suggested_type : "other")}`}
-                        >
-                          {c.sql_type}
+                        <span className="ml-auto shrink-0 text-2xs text-muted-foreground tabular-nums">
+                          {tbl.columns.length}
                         </span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="min-h-0 overflow-y-auto px-4 py-3.5">
+                {selected && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-base font-semibold">{selected.name}</h4>
+                      {junctions.has(selected.name) && <JunctionBadge label={t("catalog.junction")} />}
+                    </div>
+                    <div className="mb-3 font-mono text-2xs text-muted-foreground">
+                      {selected.schema} · {t("catalog.cols", { n: selected.columns.length })}
+                    </div>
+
+                    <div>
+                      {selected.columns.map((c) => {
+                        const ref = fkTarget.get(selected.name)?.get(c.name);
+                        const hit = !!needle && c.name.toLowerCase().includes(needle);
+                        return (
+                          <div
+                            key={c.name}
+                            className={cn(
+                              "flex items-center gap-2.5 border-b border-border/50 px-1.5 py-1.5 last:border-none",
+                              hit && "rounded bg-primary/10",
+                            )}
+                          >
+                            <span className="grid w-4 shrink-0 place-items-center">
+                              {c.is_primary_key ? (
+                                <KeyRound className="size-3.5 text-kind-root" aria-label={t("catalog.pk")} />
+                              ) : ref ? (
+                                <Link2 className="size-3.5 text-accent2" />
+                              ) : null}
+                            </span>
+                            <span className="flex min-w-0 items-baseline gap-2">
+                              <span className="truncate text-sm">
+                                <Mark text={c.name} q={needle} />
+                              </span>
+                              {c.nullable && (
+                                <span className="shrink-0 rounded border border-border px-1 text-3xs text-muted-foreground">
+                                  {t("inspector.colNullable")}
+                                </span>
+                              )}
+                              {ref && (
+                                <span className="shrink-0 truncate font-mono text-2xs text-accent2/85">
+                                  <span className="text-muted-foreground/60">→</span> {ref}
+                                </span>
+                              )}
+                            </span>
+                            <span
+                              className={cn(
+                                "ml-auto shrink-0 rounded border border-current/30 px-1.5 py-0.5 font-mono text-2xs",
+                                typeClass(suggested(c)),
+                              )}
+                            >
+                              {c.sql_type}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {(incoming.get(selected.name)?.length ?? 0) > 0 && (
+                      <div className="mt-4 border-t border-border pt-3">
+                        <div className="mb-2 text-3xs font-bold tracking-wide text-muted-foreground uppercase">
+                          {t("catalog.referencedBy")}
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {incoming.get(selected.name)?.map((ref) => (
+                            <span
+                              key={ref}
+                              className="inline-flex items-center gap-1.5 rounded border border-border/60 bg-secondary px-2 py-1 font-mono text-2xs text-muted-foreground"
+                            >
+                              <Link2 className="size-3 shrink-0 -scale-x-100 text-accent2" />
+                              {ref}
+                            </span>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                    {tbl.foreign_keys.map((fk, i) => (
-                      <div className="py-px font-mono text-2xs text-muted-foreground" key={i}>
-                        {fk.columns.join(", ")} → {fk.references_table}.{fk.references_columns.join(", ")}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              ))}
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           </>
         )}
-        <DialogFooter>
+
+        <DialogFooter className="border-t border-border px-4 py-3">
           <Button variant="secondary" size="sm" onClick={onClose}>
             {t("common.close")}
           </Button>
