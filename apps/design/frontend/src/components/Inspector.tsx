@@ -1,3 +1,4 @@
+import { Copy, Trash2, X } from "lucide-react";
 import {
   SCALAR_TYPES,
   type Aggregate,
@@ -58,9 +59,64 @@ function Breadcrumb() {
     const field = nodeFields(schema, selection.path)[selection.index];
     crumbs = [root, ...pathLabels(schema, selection.path), field?.field ?? "?"];
   }
-  return <div className="crumbs mb-2.5 break-words text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
+  return <div className="crumbs min-w-0 break-words text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
+}
+
+/// The header action cluster — duplicate / delete / close — pinned top-right of
+/// the inspector, grouped with the panel close. Duplicate and delete only apply
+/// to a selected node or field (the index root has neither), so they're hidden
+/// for the root; close is always present.
+function HeaderActions() {
+  const { selection, apply, select } = useDesign();
+  const { t } = useT();
+  if (!selection) return null;
+  const canModify = (selection.kind === "node" && selection.path.length > 0) || selection.kind === "field";
+  const duplicate = () => {
+    if (selection.kind === "node") {
+      apply((s) => edit.duplicateNode(s, selection.path));
+      select({ kind: "node", path: [...selection.path.slice(0, -1), selection.path[selection.path.length - 1] + 1] });
+    } else if (selection.kind === "field") {
+      apply((s) => edit.duplicateAt(s, selection.path, selection.index));
+      select({ kind: "field", path: selection.path, index: selection.index + 1 });
+    }
+  };
+  const remove = () => {
+    if (selection.kind === "node") apply((s) => edit.removeNode(s, selection.path));
+    else if (selection.kind === "field") apply((s) => edit.removeAt(s, selection.path, selection.index));
+    select(null);
+  };
+  return (
+    <div className="flex shrink-0 items-center gap-0.5">
+      {canModify && (
+        <>
+          <Hint label={t("inspector.duplicate")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("inspector.duplicate")} onClick={duplicate}>
+              <Copy />
+            </Button>
+          </Hint>
+          <Hint label={t("inspector.delete")}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              aria-label={t("inspector.delete")}
+              onClick={remove}
+            >
+              <Trash2 />
+            </Button>
+          </Hint>
+        </>
+      )}
+      <Hint label={t("inspector.close")}>
+        <Button variant="ghost" size="icon-sm" aria-label={t("inspector.close")} onClick={() => select(null)}>
+          <X />
+        </Button>
+      </Hint>
+    </div>
+  );
 }
 import { Button } from "@/components/ui/button";
+import { Hint } from "./Hint";
 import { Filters } from "./Filters";
 import {
   Block,
@@ -143,7 +199,10 @@ export function Inspector() {
   if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
   return (
     <>
-      <Breadcrumb />
+      <div className="mb-2.5 flex items-start justify-between gap-2">
+        <Breadcrumb />
+        <HeaderActions />
+      </div>
       {selection.kind === "root" ? (
         <RootInspector />
       ) : selection.kind === "node" ? (
@@ -199,16 +258,8 @@ function RootInspector() {
 }
 
 function NodeInspector({ path }: { path: number[] }) {
-  const { schema, apply, catalog, select } = useDesign();
+  const { schema, apply, catalog } = useDesign();
   const { t } = useT();
-  const duplicate = () => {
-    apply((s) => edit.duplicateNode(s, path));
-    select({ kind: "node", path: [...path.slice(0, -1), path[path.length - 1] + 1] });
-  };
-  const remove = () => {
-    apply((s) => edit.removeNode(s, path));
-    select(null);
-  };
   const field = fieldAtPath(schema, path);
   if (!field) return null;
   const setField = (f: Field) => apply((s) => edit.setNode(s, path, f));
@@ -217,14 +268,6 @@ function NodeInspector({ path }: { path: number[] }) {
     return (
       <div className="inspector">
         <SectionTitle className="mt-0">{t("inspector.objectGroup")}</SectionTitle>
-        <div className="mb-3 flex gap-3.5">
-          <Button variant="link" size="sm" onClick={duplicate}>
-            {t("inspector.duplicate")}
-          </Button>
-          <Button variant="link" size="sm" className="text-destructive" onClick={remove}>
-            {t("inspector.delete")}
-          </Button>
-        </div>
         <div className="no-source">⊘ {t("inspector.groupHint")}</div>
         <Block variant="doc" title={t("inspector.inDoc")}>
           <NameField field={field} set={setField} />
@@ -259,14 +302,6 @@ function NodeInspector({ path }: { path: number[] }) {
         {t("inspector.join")} · {verb}
       </SectionTitle>
       {KIND_HELP[verb] && <p className="kind-help">{t(KIND_HELP[verb])}</p>}
-      <div className="mb-3 flex gap-3.5">
-        <Button variant="link" size="sm" onClick={duplicate}>
-          {t("inspector.duplicate")}
-        </Button>
-        <Button variant="link" size="sm" className="text-destructive" onClick={remove}>
-          {t("inspector.delete")}
-        </Button>
-      </div>
       <Block variant="src" title={t("inspector.relationship")}>
         <Row label={t("inspector.verb")}>
           <Select
@@ -348,16 +383,8 @@ function NodeInspector({ path }: { path: number[] }) {
 }
 
 function FieldInspector({ path, index }: { path: number[]; index: number }) {
-  const { schema, apply, catalog, select } = useDesign();
+  const { schema, apply, catalog } = useDesign();
   const { t } = useT();
-  const duplicate = () => {
-    apply((s) => edit.duplicateAt(s, path, index));
-    select({ kind: "field", path, index: index + 1 });
-  };
-  const remove = () => {
-    apply((s) => edit.removeAt(s, path, index));
-    select(null);
-  };
   const field = nodeFields(schema, path)[index];
   if (!field) return null;
   const table = effectiveTable(schema, path);
@@ -382,14 +409,6 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
         {t("inspector.field")} · {field.field}
       </SectionTitle>
       {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
-      <div className="mb-3 flex gap-3.5">
-        <Button variant="link" size="sm" onClick={duplicate}>
-          {t("inspector.duplicate")}
-        </Button>
-        <Button variant="link" size="sm" className="text-destructive" onClick={remove}>
-          {t("inspector.delete")}
-        </Button>
-      </div>
       {"column" in s && typeof s.column.ty === "string" && (
         <ScalarBody
           field={field}

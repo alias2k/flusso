@@ -83,6 +83,7 @@ export const en: Record<string, string> = {
   "inspector.objectGroup": "Object group",
   "inspector.duplicate": "Duplicate",
   "inspector.delete": "Delete",
+  "inspector.close": "Close",
   "inspector.groupHint": "A group nests columns of the same table. Add fields on its node.",
   "inspector.join": "Join",
   "inspector.field": "Field",

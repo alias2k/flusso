@@ -601,16 +601,7 @@ export default function App() {
               </DrawerContent>
             </Drawer>
             {inspectorOpen && (
-              <aside className="col-start-3 relative min-h-0 overflow-y-auto border-l border-border bg-card p-3.5">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="absolute right-2 top-2"
-                  aria-label="Close"
-                  onClick={() => setSelection(null)}
-                >
-                  <Icon name="close" />
-                </Button>
+              <aside className="col-start-3 min-h-0 overflow-y-auto border-l border-border bg-card p-3.5">
                 <Inspector />
               </aside>
             )}

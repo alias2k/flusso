@@ -84,6 +84,7 @@ export const it: Record<string, string> = {
   "inspector.objectGroup": "Gruppo oggetto",
   "inspector.duplicate": "Duplica",
   "inspector.delete": "Elimina",
+  "inspector.close": "Chiudi",
   "inspector.groupHint": "Un gruppo annida colonne della stessa tabella. Aggiungi campi sul suo nodo.",
   "inspector.join": "Relazione",
   "inspector.field": "Campo",
