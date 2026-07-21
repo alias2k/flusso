@@ -7,6 +7,8 @@ export const en: Record<string, string> = {
   "topbar.tables": "Tables",
   "topbar.visual": "Visual",
   "topbar.rawYaml": "Raw YAML",
+  "topbar.rawHint": "Edit the raw schema YAML file",
+  "topbar.visualHint": "Return to the visual editor",
   "topbar.undo": "Undo (⌘Z)",
   "topbar.redo": "Redo (⇧⌘Z)",
   "topbar.toggleTheme": "Toggle theme",

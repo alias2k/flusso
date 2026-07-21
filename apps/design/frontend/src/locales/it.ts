@@ -7,6 +7,8 @@ export const it: Record<string, string> = {
   "topbar.tables": "Tabelle",
   "topbar.visual": "Visuale",
   "topbar.rawYaml": "YAML grezzo",
+  "topbar.rawHint": "Modifica il file YAML grezzo dello schema",
+  "topbar.visualHint": "Torna all'editor visivo",
   "topbar.undo": "Annulla (⌘Z)",
   "topbar.redo": "Ripeti (⇧⌘Z)",
   "topbar.toggleTheme": "Cambia tema",

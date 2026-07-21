@@ -543,9 +543,11 @@ export default function App() {
         </button>
 
         {/* global: browse the whole database catalog */}
-        <Button variant="ghost" size="sm" onClick={() => setBrowseCatalog(true)}>
-          <Table2 /> {t("topbar.tables")}
-        </Button>
+        <Hint label={t("search.descTables")}>
+          <Button variant="ghost" size="sm" onClick={() => setBrowseCatalog(true)}>
+            <Table2 /> {t("topbar.tables")}
+          </Button>
+        </Hint>
 
         {/* global: edit history */}
         <Hint label={t("topbar.undo")}>
@@ -561,11 +563,13 @@ export default function App() {
 
         {/* global: app settings (theme + language) */}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.settings")} title={t("topbar.settings")}>
-              <Settings />
-            </Button>
-          </DropdownMenuTrigger>
+          <Hint label={t("topbar.settings")}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm" aria-label={t("topbar.settings")}>
+                <Settings />
+              </Button>
+            </DropdownMenuTrigger>
+          </Hint>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={toggleTheme}>
               {theme === "dark" ? <Sun /> : <Moon />} {t("topbar.toggleTheme")}
@@ -585,33 +589,28 @@ export default function App() {
         <div className="mx-1 h-5 w-px bg-border" />
 
         {/* deployment actions — the whole config */}
-        <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
-          <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
-          {t("topbar.validate")}
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={revertChanges}
-          disabled={!dirty || saving}
-          title={t("topbar.resetHint")}
-        >
-          <span className={BTN_ICON}>
-            <RotateCcw />
-          </span>
-          {t("topbar.reset")}
-        </Button>
-        <Button
-          size="sm"
-          onClick={() => void save()}
-          disabled={saving}
-          title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}
-        >
-          <span className={BTN_ICON}>
-            {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
-          </span>
-          {t("topbar.save")}
-        </Button>
+        <Hint label={t("search.descValidate")}>
+          <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
+            <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
+            {t("topbar.validate")}
+          </Button>
+        </Hint>
+        <Hint label={t("topbar.resetHint")}>
+          <Button variant="secondary" size="sm" onClick={revertChanges} disabled={!dirty || saving}>
+            <span className={BTN_ICON}>
+              <RotateCcw />
+            </span>
+            {t("topbar.reset")}
+          </Button>
+        </Hint>
+        <Hint label={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
+          <Button size="sm" onClick={() => void save()} disabled={saving}>
+            <span className={BTN_ICON}>
+              {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
+            </span>
+            {t("topbar.save")}
+          </Button>
+        </Hint>
       </header>
 
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
@@ -643,12 +642,16 @@ export default function App() {
               {schema.primary_key ? ` · ${t("node.pk")}: ${schema.primary_key}` : ""}
             </span>
             <span className="flex-1" />
-            <Button variant="secondary" size="sm" onClick={() => setDrawer(true)}>
-              <Eye /> {t("topbar.yaml")}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
-              <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
-            </Button>
+            <Hint label={t("search.descYaml")}>
+              <Button variant="secondary" size="sm" onClick={() => setDrawer(true)}>
+                <Eye /> {t("topbar.yaml")}
+              </Button>
+            </Hint>
+            <Hint label={rawMode ? t("topbar.visualHint") : t("topbar.rawHint")}>
+              <Button variant="ghost" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
+                <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
+              </Button>
+            </Hint>
           </div>
         )}
 
