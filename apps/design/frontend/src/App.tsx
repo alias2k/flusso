@@ -38,7 +38,7 @@ import { Hint } from "./components/Hint";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Select, Text } from "./components/widgets";
-import { LANGS, useT } from "./i18n";
+import { LANGS, useT, type Translate } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
@@ -47,6 +47,42 @@ import { BTN_ICON, NAV, NAV_ACTIVE, NAV_HEADING } from "./styles";
 import { TYPE_FAMILIES } from "./theme";
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+// The colour-legend rows and their one-line explanations (shown on hover).
+// Literal `t("legend.*")` calls keep the i18n checker able to see every key.
+const KIND_ROWS = ["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"];
+const kindDesc = (t: Translate, kind: string): string => {
+  switch (kind) {
+    case "root":
+      return t("legend.kindRoot");
+    case "object":
+      return t("legend.kindObject");
+    case "belongs_to":
+      return t("legend.kindBelongsTo");
+    case "has_one":
+      return t("legend.kindHasOne");
+    case "has_many":
+      return t("legend.kindHasMany");
+    default:
+      return t("legend.kindManyToMany");
+  }
+};
+const typeDesc = (t: Translate, varKey: string): string => {
+  switch (varKey) {
+    case "string":
+      return t("legend.typeString");
+    case "number":
+      return t("legend.typeNumber");
+    case "temporal":
+      return t("legend.typeDate");
+    case "bool":
+      return t("legend.typeBoolean");
+    case "uuid":
+      return t("legend.typeUuid");
+    default:
+      return t("legend.typeGeo");
+  }
+};
 
 export default function App() {
   const { t, lang, setLang } = useT();
@@ -499,25 +535,33 @@ export default function App() {
                 {t("sidebar.legend")}
               </summary>
               <div className={NAV_HEADING}>{t("sidebar.kinds")}</div>
-              {["root", "object", "belongs_to", "has_one", "has_many", "many_to_many"].map((k) => (
-                <div className="legend-row flex items-center px-1.5 py-0.5 text-2xs text-muted-foreground" key={k}>
-                  <span className="mr-1.5 inline-block size-2.5 rounded-full" style={{ background: `var(--k-${k})` }} />
-                  {k}
-                </div>
-              ))}
+              <div className="flex flex-col">
+                {KIND_ROWS.map((k) => (
+                  <Hint key={k} label={kindDesc(t, k)} side="right">
+                    <div className="legend-row flex w-full items-center px-1.5 py-0.5 text-2xs text-muted-foreground">
+                      <span
+                        className="mr-1.5 inline-block size-2.5 rounded-full"
+                        style={{ background: `var(--k-${k})` }}
+                      />
+                      {k}
+                    </div>
+                  </Hint>
+                ))}
+              </div>
               <div className={NAV_HEADING}>{t("sidebar.types")}</div>
-              {TYPE_FAMILIES.map((f) => (
-                <div
-                  className="legend-row flex items-center px-1.5 py-0.5 text-2xs text-muted-foreground"
-                  key={f.varKey}
-                >
-                  <span
-                    className="mr-1.5 inline-block size-2.5 rounded-full"
-                    style={{ background: `var(--t-${f.varKey})` }}
-                  />
-                  {f.label}
-                </div>
-              ))}
+              <div className="flex flex-col">
+                {TYPE_FAMILIES.map((f) => (
+                  <Hint key={f.varKey} label={typeDesc(t, f.varKey)} side="right">
+                    <div className="legend-row flex w-full items-center px-1.5 py-0.5 text-2xs text-muted-foreground">
+                      <span
+                        className="mr-1.5 inline-block size-2.5 rounded-full"
+                        style={{ background: `var(--t-${f.varKey})` }}
+                      />
+                      {f.label}
+                    </div>
+                  </Hint>
+                ))}
+              </div>
             </details>
           </nav>
         )}
