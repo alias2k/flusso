@@ -10,6 +10,30 @@
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/preflight.css" layer(base);
 @import "tailwindcss/utilities.css" layer(utilities);
+
+/* App-wide thin, themed scrollbars (unlayered, so they apply everywhere). Webkit
+   gets the styled track/thumb; Firefox the `scrollbar-*` shorthands. Colours are
+   the palette tokens, so they follow the light/dark theme. Engines without either
+   fall back to their native bar — fine. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--panel-3) transparent;
+}
+*::-webkit-scrollbar {
+  width: 0.5rem;
+  height: 0.5rem;
+}
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--panel-3);
+  border-radius: 9999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--slate);
+}
 @import "tw-animate-css";
 @import "@xyflow/react/dist/style.css" layer(reactflow);
 

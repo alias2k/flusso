@@ -544,7 +544,7 @@ export default function App() {
             </div>
             {/* Colour key — open by default, but collapsible so a long index list
                 isn't crowded out. Pinned below the scrolling list. */}
-            <details className="legend group shrink-0 border-t border-border p-2" open>
+            <details className="legend group shrink-0 border-t border-border py-2" open>
               <summary className="flex cursor-pointer list-none items-center gap-1.5 px-1.5 py-1 text-2xs font-semibold uppercase tracking-[0.06em] text-muted-foreground [&::-webkit-details-marker]:hidden">
                 <ChevronRight className="size-3 transition-transform group-open:rotate-90" aria-hidden="true" />
                 {t("sidebar.legend")}
