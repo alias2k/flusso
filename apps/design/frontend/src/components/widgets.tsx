@@ -267,6 +267,9 @@ interface Opt<T extends string> {
   value: T;
   description?: string;
   className?: string;
+  /// Extra terms the Combobox search matches, when the visible `value` isn't
+  /// what you'd type (e.g. an id-valued option searched by name).
+  keywords?: string[];
 }
 
 export function Select<T extends string>({
@@ -357,7 +360,7 @@ export function Combobox({
               </CommandItem>
             )}
             {options.map((o) => (
-              <CommandItem key={o.value} value={o.value} onSelect={() => pick(o.value)}>
+              <CommandItem key={o.value} value={o.value} keywords={o.keywords} onSelect={() => pick(o.value)}>
                 <span className={cn("font-mono", o.className)}>{o.label}</span>
                 {o.description && (
                   <span className="truncate pl-2 font-mono text-2xs text-muted-foreground">{o.description}</span>

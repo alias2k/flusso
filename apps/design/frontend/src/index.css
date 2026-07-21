@@ -732,40 +732,6 @@
   }
 
   /* jump-to-node search */
-  .node-search {
-    position: relative;
-    width: 12.5rem;
-  }
-  .node-search input {
-    width: 100%;
-    color: var(--text);
-    background: var(--panel-2);
-    border: 0.0625rem solid var(--border);
-    border-radius: 0.375rem;
-    font: inherit;
-    font-size: 0.75rem;
-    padding: 0.3125rem 0.5rem;
-  }
-  .node-search ul {
-    list-style: none;
-    margin: 0.25rem 0 0;
-    padding: 0.25rem;
-    background: var(--panel);
-    border: 0.0625rem solid var(--border);
-    border-radius: 0.5rem;
-    box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.4);
-  }
-  .node-search li {
-    padding: 0.3125rem 0.5rem;
-    border-radius: 0.375rem;
-    font-size: 0.75rem;
-    cursor: pointer;
-  }
-  .node-search li:hover {
-    background: var(--panel-2);
-    color: var(--accent);
-  }
-
   /* ── onboarding & discoverability (group E) ─────────────────────────────── */
   /* .empty-state + legend are Tailwind now. */
 

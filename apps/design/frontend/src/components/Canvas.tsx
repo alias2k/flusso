@@ -23,7 +23,7 @@ import { edgeColor } from "../theme";
 import { Button } from "@/components/ui/button";
 import { DocNodeView } from "./DocNodeView";
 import { Hint } from "./Hint";
-import { Text } from "./widgets";
+import { Combobox } from "./widgets";
 import { Icon } from "./Icon";
 
 const nodeTypes = { doc: DocNodeView };
@@ -222,48 +222,35 @@ function RestoreViewport({ index }: { index: string }) {
   return null;
 }
 
-/// Type-ahead jump: filter nodes by name/table, click to centre on one and
-/// select it. Lives inside <ReactFlow> so it can use the flow instance.
+/// Jump to a node: a searchable [`Combobox`] of every node (by name/table,
+/// coloured by kind); picking one centres the canvas on it and selects it.
+/// Lives inside <ReactFlow> so it can use the flow instance.
 function NodeSearch() {
   const { getNodes, setCenter } = useReactFlow();
   const { select } = useDesign();
   const { t } = useT();
-  const [q, setQ] = useState("");
 
-  const label = (n: Node) => {
+  const options = getNodes().map((n) => {
     const dn = (n.data as { node: DocNode }).node;
-    return dn.name ?? dn.table;
-  };
-  const results = q
-    ? getNodes()
-        .filter((n) =>
-          `${label(n)} ${(n.data as { node: DocNode }).node.table}`.toLowerCase().includes(q.toLowerCase()),
-        )
-        .slice(0, 8)
-    : [];
+    const name = dn.name ?? dn.table;
+    return {
+      value: dn.id,
+      label: name,
+      description: dn.name && dn.name !== dn.table ? dn.table : undefined,
+      className: `k-${dn.kind}`,
+      keywords: [name, dn.table],
+    };
+  });
 
-  const jump = (n: Node) => {
+  const jump = (id: string) => {
+    const n = getNodes().find((x) => x.id === id);
+    if (!n) return;
     const w = n.measured?.width ?? 145;
     const h = n.measured?.height ?? 80;
     void setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: 1, duration: 300 });
     const dn = (n.data as { node: DocNode }).node;
     select(dn.path.length ? { kind: "node", path: dn.path } : { kind: "root" });
-    setQ("");
   };
 
-  return (
-    <div className="node-search">
-      <Text value={q} onChange={setQ} placeholder={t("canvas.jumpToNode")} />
-      {results.length > 0 && (
-        <ul>
-          {results.map((n) => (
-            <li key={n.id} onClick={() => jump(n)}>
-              {label(n)}
-              <span className="muted"> · {(n.data as { node: DocNode }).node.table}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
+  return <Combobox value="" options={options} onChange={jump} placeholder={t("canvas.jumpToNode")} className="w-52" />;
 }
