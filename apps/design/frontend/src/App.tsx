@@ -85,13 +85,17 @@ const typeDesc = (t: Translate, varKey: string): string => {
 };
 
 function LegendRow({ color, label, desc }: { color: string; label: string; desc: string }) {
+  // Full-width row carries the hover background; the Hint wraps only the
+  // content-width swatch+label so the right-anchored tooltip sits by the text.
   return (
-    <Hint label={desc} side="right" className="max-w-52 leading-snug">
-      <div className="legend-row flex cursor-help items-center gap-2 rounded-md px-1.5 py-1 text-2xs text-muted-foreground select-none hover:bg-secondary hover:text-foreground">
-        <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
-        {label}
-      </div>
-    </Hint>
+    <div className="legend-row rounded-md px-1.5 py-1 hover:bg-secondary">
+      <Hint label={desc} side="right" className="max-w-52 leading-snug">
+        <div className="flex items-center gap-2 text-2xs text-muted-foreground select-none">
+          <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
+          {label}
+        </div>
+      </Hint>
+    </div>
   );
 }
 
@@ -547,13 +551,13 @@ export default function App() {
               </summary>
               <div className="max-h-[45vh] overflow-y-auto ps-2">
                 <div className={NAV_HEADING}>{t("sidebar.kinds")}</div>
-                <div className="flex flex-col items-start">
+                <div className="flex flex-col">
                   {KIND_ROWS.map((k) => (
                     <LegendRow key={k} color={`var(--k-${k})`} label={k} desc={kindDesc(t, k)} />
                   ))}
                 </div>
                 <div className={NAV_HEADING}>{t("sidebar.types")}</div>
-                <div className="flex flex-col items-start">
+                <div className="flex flex-col">
                   {TYPE_FAMILIES.map((f) => (
                     <LegendRow
                       key={f.varKey}
