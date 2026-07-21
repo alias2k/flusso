@@ -1,7 +1,11 @@
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, RefreshCw } from "lucide-react";
 import { Fragment, type ReactNode, useState } from "react";
 import { useT } from "../i18n";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+
+/// Shared style for the small corner action buttons over a code block.
+const CORNER =
+  "grid size-7 cursor-pointer place-items-center rounded-md border border-border bg-secondary/80 text-muted-foreground backdrop-blur transition-colors hover:text-foreground disabled:opacity-50";
 
 // A tiny, dependency-free syntax highlighter for the preview's YAML and JSON,
 // themed to the flusso palette (keys cyan; strings amber, numbers blue, bools
@@ -75,10 +79,20 @@ function jsonLine(line: string): ReactNode {
   return out.map((t, i) => <Fragment key={i}>{t}</Fragment>);
 }
 
-/// A highlighted code block reusing the `pre.yaml` surface, with a copy button
-/// pinned to its top-right corner. Lines are joined by newlines (preserved by
-/// `white-space: pre`), so blank lines survive.
-export function CodeBlock({ text, lang }: { text: string; lang: "yaml" | "json" }) {
+/// A highlighted code block reusing the `pre.yaml` surface, with copy (and an
+/// optional refresh) pinned to its top-right corner. Lines are joined by
+/// newlines (preserved by `white-space: pre`), so blank lines survive.
+export function CodeBlock({
+  text,
+  lang,
+  onRefresh,
+  refreshing,
+}: {
+  text: string;
+  lang: "yaml" | "json";
+  onRefresh?: () => void;
+  refreshing?: boolean;
+}) {
   const { t } = useT();
   const [copied, setCopied] = useState(false);
   const render = lang === "yaml" ? yamlLine : jsonLine;
@@ -94,19 +108,32 @@ export function CodeBlock({ text, lang }: { text: string; lang: "yaml" | "json" 
     );
   return (
     <div className="relative">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label={t("preview.copy")}
-            onClick={() => void copy()}
-            className="absolute top-2 right-2 z-10 grid size-7 cursor-pointer place-items-center rounded-md border border-border bg-secondary/80 text-muted-foreground backdrop-blur transition-colors hover:text-foreground"
-          >
-            {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="left">{copied ? t("preview.copied") : t("preview.copy")}</TooltipContent>
-      </Tooltip>
+      <div className="absolute top-2 right-2 z-10 flex items-center gap-1.5">
+        {onRefresh && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={t("preview.refresh")}
+                onClick={onRefresh}
+                disabled={refreshing}
+                className={CORNER}
+              >
+                {refreshing ? <span className="spinner" /> : <RefreshCw className="size-3.5" />}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{t("preview.refresh")}</TooltipContent>
+          </Tooltip>
+        )}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button type="button" aria-label={t("preview.copy")} onClick={() => void copy()} className={CORNER}>
+              {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">{copied ? t("preview.copied") : t("preview.copy")}</TooltipContent>
+        </Tooltip>
+      </div>
       <pre className="yaml">
         {text.split("\n").map((line, i) => (
           <Fragment key={i}>

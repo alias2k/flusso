@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, Database, Play, RefreshCw } from "lucide-react";
+import { ChevronDown, Database, Play } from "lucide-react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
@@ -169,19 +169,19 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
   const doc = result?.document;
   const errorText = error ?? (result && !result.db_reachable ? result.error : null);
 
-  // Loaded: the built document, with a refresh + the example marker.
+  // Loaded: the built document, with refresh in the code corner and, when the
+  // sample is synthetic or carries a note, a small caption above it.
   if (doc !== undefined && doc !== null && result?.db_reachable !== false) {
+    const caption = Boolean(result?.synthetic) || Boolean(result?.note);
     return (
       <div>
-        <div className="mb-2 flex items-center gap-2">
-          {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
-          {result?.note && <span className="text-2xs text-muted-foreground">{result.note}</span>}
-          <Button variant="secondary" size="sm" className="ml-auto gap-1.5" onClick={fetchSample} disabled={loading}>
-            {loading ? <span className="spinner" /> : <RefreshCw className="size-3.5" />}
-            {t("preview.refresh")}
-          </Button>
-        </div>
-        <CodeBlock text={JSON.stringify(doc, null, 2)} lang="json" />
+        {caption && (
+          <div className="mb-2 flex items-center gap-2 text-2xs text-muted-foreground">
+            {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
+            {result?.note && <span>{result.note}</span>}
+          </div>
+        )}
+        <CodeBlock text={JSON.stringify(doc, null, 2)} lang="json" onRefresh={fetchSample} refreshing={loading} />
       </div>
     );
   }
