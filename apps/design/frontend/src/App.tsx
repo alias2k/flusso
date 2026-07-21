@@ -103,7 +103,7 @@ function LegendRow({ color, label, desc }: { color: string; label: string; desc:
             {label}
           </div>
         </TooltipTrigger>
-        <TooltipContent side="right" className="max-w-52 leading-snug">
+        <TooltipContent side="right" sideOffset={6} className="pointer-events-none max-w-52 leading-snug">
           {desc}
         </TooltipContent>
       </Tooltip>
