@@ -246,6 +246,9 @@ export const en: Record<string, string> = {
   "filters.loHi": "lo, hi",
   "filters.abc": "a, b, c",
   "filters.filter": "filter",
+  "filters.kindRaw": "Raw SQL",
+  "filters.kindNullCheck": "Null check",
+  "filters.kindValueOp": "Comparison",
   "filters.help":
     "Restrict which rows feed this field — a raw SQL condition, a null check, or a column/operator/value test. All must hold.",
 

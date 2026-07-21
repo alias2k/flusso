@@ -251,6 +251,9 @@ export const it: Record<string, string> = {
   "filters.loHi": "min, max",
   "filters.abc": "a, b, c",
   "filters.filter": "filtro",
+  "filters.kindRaw": "SQL grezzo",
+  "filters.kindNullCheck": "Controllo null",
+  "filters.kindValueOp": "Confronto",
   "filters.help":
     "Limita quali righe alimentano questo campo — una condizione SQL grezza, un controllo null, o un test colonna/operatore/valore. Devono valere tutte.",
 

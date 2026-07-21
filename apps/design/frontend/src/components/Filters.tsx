@@ -65,6 +65,11 @@ export function Filters({
     onChange(next.length ? next : undefined);
   };
   const cols = columns ?? [];
+  const kindOptions = [
+    { value: "raw" as const, label: t("filters.kindRaw") },
+    { value: "null_check" as const, label: t("filters.kindNullCheck") },
+    { value: "value_op" as const, label: t("filters.kindValueOp") },
+  ];
 
   return (
     <div className="filters">
@@ -77,7 +82,7 @@ export function Filters({
               <Select<FilterKind>
                 value={kind}
                 onChange={(k) => set(i, blank(k))}
-                options={["raw", "null_check", "value_op"]}
+                options={kindOptions}
                 className="flex-1"
               />
               <RemoveButton label={t("common.remove")} onClick={() => remove(i)} />
