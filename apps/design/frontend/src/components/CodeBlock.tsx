@@ -1,7 +1,7 @@
 import { Check, Copy } from "lucide-react";
 import { Fragment, type ReactNode, useState } from "react";
 import { useT } from "../i18n";
-import { Hint } from "./Hint";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 // A tiny, dependency-free syntax highlighter for the preview's YAML and JSON,
 // themed to the flusso palette (keys cyan; strings amber, numbers blue, bools
@@ -94,16 +94,19 @@ export function CodeBlock({ text, lang }: { text: string; lang: "yaml" | "json" 
     );
   return (
     <div className="relative">
-      <Hint label={copied ? t("preview.copied") : t("preview.copy")} side="left">
-        <button
-          type="button"
-          aria-label={t("preview.copy")}
-          onClick={() => void copy()}
-          className="absolute top-2 right-2 z-10 grid size-7 cursor-pointer place-items-center rounded-md border border-border bg-secondary/80 text-muted-foreground backdrop-blur transition-colors hover:text-foreground"
-        >
-          {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
-        </button>
-      </Hint>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={t("preview.copy")}
+            onClick={() => void copy()}
+            className="absolute top-2 right-2 z-10 grid size-7 cursor-pointer place-items-center rounded-md border border-border bg-secondary/80 text-muted-foreground backdrop-blur transition-colors hover:text-foreground"
+          >
+            {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="left">{copied ? t("preview.copied") : t("preview.copy")}</TooltipContent>
+      </Tooltip>
       <pre className="yaml">
         {text.split("\n").map((line, i) => (
           <Fragment key={i}>
