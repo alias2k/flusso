@@ -1,49 +1,47 @@
-import type { Filter } from "../api";
+import type { ColumnShape, Filter, FilterOp, FilterValue } from "../api";
 import { useT } from "../i18n";
-import { AddButton, Combobox, RemoveButton, Select, Text } from "./widgets";
+import { AddButton, ColumnPicker, RemoveButton, Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
 
-const VALUE_OPS = ["eq", "neq", "lt", "lte", "gt", "gte", "in", "not_in", "like", "ilike", "between"] as const;
+const VALUE_OPS: FilterOp[] = ["eq", "neq", "lt", "lte", "gt", "gte", "in", "not_in", "like", "ilike", "between"];
 
 function kindOf(f: Filter): FilterKind {
   if ("raw" in f) return "raw";
-  if ("op" in f && (f.op === "is_null" || f.op === "is_not_null")) return "null_check";
+  if ("null_check" in f) return "null_check";
   return "value_op";
 }
 
 function blank(kind: FilterKind): Filter {
-  if (kind === "raw") return { raw: "" };
-  if (kind === "null_check") return { column: "", op: "is_null" };
-  return { column: "", op: "eq", value: "" };
+  if (kind === "raw") return { raw: { raw: "" } };
+  if (kind === "null_check") return { null_check: { column: "", op: "is_null" } };
+  return { value_op: { column: "", op: "eq", value: { single: "" } } };
 }
 
-/// Interpret the free-text value box per operator: `in`/`not_in` split on
-/// commas into an array, `between` into a two-element range, others stay scalar.
-function coerceValue(op: string, text: string): unknown {
+/// Interpret the free-text value box per operator into a tagged `FilterValue`:
+/// `in`/`not_in` split on commas → `list`, `between` → a two-element `range`,
+/// everything else → a scalar `single`.
+function coerceValue(op: FilterOp, text: string): FilterValue {
   if (op === "in" || op === "not_in") {
-    return text
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    return {
+      list: text
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    };
   }
   if (op === "between") {
     const parts = text.split(",").map((s) => s.trim());
-    return [parts[0] ?? "", parts[1] ?? ""];
+    return { range: [parts[0] ?? "", parts[1] ?? ""] };
   }
-  return text;
+  return { single: text };
 }
 
-function valueText(f: Filter): string {
-  if ("value" in f) {
-    const v = (f as { value: unknown }).value;
-    if (Array.isArray(v)) return v.join(", ");
-    if (v == null) return "";
-    if (typeof v === "string") return v;
-    if (typeof v === "number" || typeof v === "bigint" || typeof v === "boolean") return String(v);
-    return JSON.stringify(v) ?? "";
-  }
-  return "";
+/// The value box's text for a `FilterValue` — the inverse of [`coerceValue`].
+function valueText(v: FilterValue): string {
+  if ("single" in v) return v.single;
+  if ("list" in v) return v.list.join(", ");
+  return v.range.join(", ");
 }
 
 export function Filters({
@@ -53,7 +51,7 @@ export function Filters({
 }: {
   value: Filter[];
   onChange: (v: Filter[] | undefined) => void;
-  columns?: string[];
+  columns?: ColumnShape[];
 }) {
   const { t } = useT();
   const set = (i: number, f: Filter) => {
@@ -66,7 +64,7 @@ export function Filters({
     next.splice(i, 1);
     onChange(next.length ? next : undefined);
   };
-  const colOpts = (columns ?? []).map((c) => ({ value: c, label: c }));
+  const cols = columns ?? [];
 
   return (
     <div className="filters">
@@ -84,52 +82,54 @@ export function Filters({
               />
               <RemoveButton label={t("common.remove")} onClick={() => remove(i)} />
             </div>
-            {kind === "raw" && (
-              <Text
-                value={"raw" in f ? f.raw : ""}
-                onChange={(raw) => set(i, { raw })}
-                placeholder="status <> 'archived'"
-              />
+            {"raw" in f && (
+              <Text value={f.raw.raw} onChange={(raw) => set(i, { raw: { raw } })} placeholder="status <> 'archived'" />
             )}
-            {kind === "null_check" && "op" in f && (
+            {"null_check" in f && (
               <div className="flex items-center gap-1.5">
-                <Combobox
-                  value={"column" in f ? f.column : ""}
-                  options={colOpts}
-                  allowCustom
-                  onChange={(column) => set(i, { ...f, column })}
+                <ColumnPicker
+                  value={f.null_check.column}
+                  columns={cols}
+                  onChange={(column) => set(i, { null_check: { ...f.null_check, column } })}
                   placeholder={t("common.column")}
                   className="min-w-0 flex-1"
                 />
                 <Select
-                  value={f.op as "is_null" | "is_not_null"}
-                  onChange={(op) => set(i, { ...f, op })}
+                  value={f.null_check.op}
+                  onChange={(op) => set(i, { null_check: { ...f.null_check, op } })}
                   options={["is_null", "is_not_null"]}
                   className="flex-1"
                 />
               </div>
             )}
-            {kind === "value_op" && "value" in f && (
+            {"value_op" in f && (
               <>
-                <Combobox
-                  value={"column" in f ? f.column : ""}
-                  options={colOpts}
-                  allowCustom
-                  onChange={(column) => set(i, { ...f, column })}
+                <ColumnPicker
+                  value={f.value_op.column}
+                  columns={cols}
+                  onChange={(column) => set(i, { value_op: { ...f.value_op, column } })}
                   placeholder={t("common.column")}
                 />
                 <div className="flex items-center gap-1.5">
                   <Select
-                    value={f.op as (typeof VALUE_OPS)[number]}
-                    onChange={(op) => set(i, { ...f, op, value: coerceValue(op, valueText(f)) })}
+                    value={f.value_op.op}
+                    onChange={(op) =>
+                      set(i, { value_op: { ...f.value_op, op, value: coerceValue(op, valueText(f.value_op.value)) } })
+                    }
                     options={VALUE_OPS}
                     className="w-28 shrink-0"
                   />
                   <Text
-                    value={valueText(f)}
-                    onChange={(text) => set(i, { ...f, value: coerceValue(f.op, text) })}
+                    value={valueText(f.value_op.value)}
+                    onChange={(text) =>
+                      set(i, { value_op: { ...f.value_op, value: coerceValue(f.value_op.op, text) } })
+                    }
                     placeholder={
-                      f.op === "between" ? t("filters.loHi") : f.op === "in" ? t("filters.abc") : t("filters.value")
+                      f.value_op.op === "between"
+                        ? t("filters.loHi")
+                        : f.value_op.op === "in"
+                          ? t("filters.abc")
+                          : t("filters.value")
                     }
                     className="flex-1"
                   />

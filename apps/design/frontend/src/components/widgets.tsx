@@ -1,6 +1,8 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { CheckIcon, ChevronDownIcon, ChevronRight, Plus, X } from "lucide-react";
+import type { ColumnShape } from "../api";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
+import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -375,5 +377,40 @@ export function Combobox({
         </Command>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/// The canonical column picker — a searchable [`Combobox`] over the given
+/// catalog columns, each coloured by its type family (via `typeClass`) with the
+/// SQL type as a trailing detail. `allowCustom`, so an offline / hand-typed name
+/// still works. Use this everywhere a column is chosen, so they all look alike.
+export function ColumnPicker({
+  value,
+  columns,
+  onChange,
+  placeholder,
+  className,
+}: {
+  value: string;
+  columns: ColumnShape[];
+  onChange: (v: string) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const options = columns.map((c) => ({
+    value: c.name,
+    label: c.name,
+    description: c.sql_type,
+    className: typeClass((c.suggested_type ?? c.sql_type) as string),
+  }));
+  return (
+    <Combobox
+      value={value}
+      options={options}
+      allowCustom
+      onChange={onChange}
+      placeholder={placeholder}
+      className={className}
+    />
   );
 }

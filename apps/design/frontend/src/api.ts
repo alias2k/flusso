@@ -117,8 +117,16 @@ export interface Field {
   source: FieldSource;
 }
 
+// Mirrors schema-core's serde exactly: `Filter` is an externally-tagged enum
+// (`raw`/`null_check`/`value_op`) wrapping a struct, and `FilterValue` is itself
+// tagged (`single`/`list`/`range`). The wire shape must match or the strict
+// backend rejects it.
+export type FilterOp = "eq" | "neq" | "lt" | "lte" | "gt" | "gte" | "in" | "not_in" | "like" | "ilike" | "between";
+export type FilterValue = { single: string } | { list: string[] } | { range: [string, string] };
 export type Filter =
-  { raw: string } | { column: string; op: "is_null" | "is_not_null" } | { column: string; op: string; value: unknown };
+  | { raw: { raw: string } }
+  | { null_check: { column: string; op: "is_null" | "is_not_null" } }
+  | { value_op: { column: string; op: FilterOp; value: FilterValue } };
 
 // Externally-tagged enum over struct payloads (matches schema-core's serde):
 // `{ field: { field, when? } }` or `{ column: { column, when? } }`.

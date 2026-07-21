@@ -8,7 +8,8 @@
 import type { Field, Filter, IndexSchema, SoftDelete } from "../api";
 import { aggregateIncomplete, joinIncomplete } from "./complete";
 
-const filterOk = (f: Filter): boolean => ("raw" in f ? !!f.raw : !!f.column);
+const filterOk = (f: Filter): boolean =>
+  "raw" in f ? !!f.raw.raw : "null_check" in f ? !!f.null_check.column : !!f.value_op.column;
 
 function prunedField(field: Field): Field | null {
   const s = field.source;

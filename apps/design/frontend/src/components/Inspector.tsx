@@ -123,7 +123,7 @@ import {
   Block,
   Bridge,
   Check,
-  Combobox,
+  ColumnPicker,
   Drawer,
   Field as Row,
   GenericInput,
@@ -220,7 +220,8 @@ function RootInspector() {
   const { schema, apply, catalog } = useDesign();
   const { t } = useT();
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
-  const cols = catalog?.catalog.tables.find((tbl) => tbl.name === schema.table)?.columns.map((c) => c.name) ?? [];
+  const colShapes = catalog?.catalog.tables.find((tbl) => tbl.name === schema.table)?.columns ?? [];
+  const cols = colShapes.map((c) => c.name);
   return (
     <div className="inspector">
       <SectionTitle className="mt-0">{t("inspector.indexRoot")}</SectionTitle>
@@ -252,7 +253,7 @@ function RootInspector() {
         <Filters
           value={schema.filters ?? []}
           onChange={(filters) => apply((s) => ({ ...s, filters }))}
-          columns={cols}
+          columns={colShapes}
         />
       </Drawer>
     </div>
@@ -378,7 +379,11 @@ function NodeInspector({ path }: { path: number[] }) {
         )}
       </Block>
       <Drawer title={t("inspector.filters")} count={(join.filters ?? []).length}>
-        <Filters value={join.filters ?? []} columns={relCols} onChange={(filters) => setJoin({ ...join, filters })} />
+        <Filters
+          value={join.filters ?? []}
+          columns={relColShapes}
+          onChange={(filters) => setJoin({ ...join, filters })}
+        />
       </Drawer>
     </div>
   );
@@ -932,7 +937,11 @@ function AggregateBody({
         {!hasMappingType && <p className="hint">{t("inspector.countResult")}</p>}
       </Block>
       <Drawer title={t("inspector.filters")} count={(agg.filters ?? []).length}>
-        <Filters value={agg.filters ?? []} onChange={(filters) => setAgg({ ...agg, filters })} />
+        <Filters
+          value={agg.filters ?? []}
+          columns={columnsFor(agg.table)}
+          onChange={(filters) => setAgg({ ...agg, filters })}
+        />
       </Drawer>
     </>
   );
@@ -1026,22 +1035,14 @@ function OrderByEditor({
     next[i] = ob;
     onChange(next);
   };
-  // Column choices, coloured by type family with the SQL type as the detail.
-  const colOpts = columns.map((c) => ({
-    value: c.name,
-    label: c.name,
-    description: c.sql_type,
-    className: typeClass((c.suggested_type ?? c.sql_type) as string),
-  }));
   return (
     <div className="my-1.5">
       <div className="mb-1 text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">order_by</div>
       {value.map((ob, i) => (
         <div className="my-1 flex items-center gap-1.5" key={i}>
-          <Combobox
+          <ColumnPicker
             value={ob.column}
-            options={colOpts}
-            allowCustom
+            columns={columns}
             onChange={(column) => set(i, { ...ob, column })}
             placeholder={t("common.column")}
             className="min-w-0 flex-1"
