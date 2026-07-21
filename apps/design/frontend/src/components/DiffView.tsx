@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronsUpDown } from "lucide-react";
+import { ChevronDown, ChevronsUpDown } from "lucide-react";
 import { useT } from "../i18n";
 import { cn } from "@/lib/utils";
 
@@ -122,6 +122,7 @@ function DiffRow({ row }: { row: Row }) {
 
 export function DiffView({ path, current, next }: { path: string; current: string; next: string }) {
   const { t } = useT();
+  const [open, setOpen] = useState(true);
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const rows = diffLines(current, next);
   const segments = segment(rows);
@@ -129,36 +130,49 @@ export function DiffView({ path, current, next }: { path: string; current: strin
   const dels = rows.filter((r) => r.type === "del").length;
 
   return (
-    <div className="diff-file mb-3.5 overflow-hidden rounded-md border border-border">
-      <div className="flex items-center gap-2 border-b border-border bg-secondary px-3 py-1.5">
-        <span className="truncate font-mono text-xs text-foreground">{path}</span>
+    <div className="diff-file mb-4 overflow-hidden rounded-lg border border-border shadow-sm last:mb-0">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className={cn(
+          "flex w-full items-center gap-2 bg-secondary px-3 py-2 text-left transition-colors hover:bg-accent",
+          open && "border-b border-border",
+        )}
+      >
+        <ChevronDown
+          className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", !open && "-rotate-90")}
+        />
+        <span className="truncate font-mono text-xs font-medium text-foreground">{path}</span>
         {current === "" && <span className="badge object">{t("diff.newFile")}</span>}
         <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-2xs tabular-nums">
           <span className="text-primary">+{adds}</span>
           <span className="text-destructive">-{dels}</span>
         </span>
-      </div>
-      <div className="overflow-x-auto">
-        <div className="w-max min-w-full font-mono text-xs leading-relaxed">
-          {segments.map((seg) => {
-            if (seg.kind === "rows")
-              return seg.rows.map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
-            if (expanded.has(seg.id))
-              return seg.rows.map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
-            return (
-              <button
-                key={seg.id}
-                type="button"
-                onClick={() => setExpanded((s) => new Set(s).add(seg.id))}
-                className="flex w-full items-center gap-2 bg-accent/40 px-3 py-1 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              >
-                <ChevronsUpDown className="size-3 shrink-0" />
-                {t("diff.unchanged", { n: seg.rows.length })}
-              </button>
-            );
-          })}
+      </button>
+      {open && (
+        <div className="overflow-x-auto">
+          <div className="w-max min-w-full font-mono text-xs leading-relaxed">
+            {segments.map((seg) => {
+              if (seg.kind === "rows")
+                return seg.rows.map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
+              if (expanded.has(seg.id))
+                return seg.rows.map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
+              return (
+                <button
+                  key={seg.id}
+                  type="button"
+                  onClick={() => setExpanded((s) => new Set(s).add(seg.id))}
+                  className="flex w-full items-center gap-2 bg-accent/40 px-3 py-1 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <ChevronsUpDown className="size-3 shrink-0" />
+                  {t("diff.unchanged", { n: seg.rows.length })}
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
