@@ -643,8 +643,8 @@ export default function App() {
               {schema.primary_key ? ` · ${t("node.pk")}: ${schema.primary_key}` : ""}
             </span>
             <span className="flex-1" />
-            <Button variant="secondary" size="sm" onClick={toggleDrawer}>
-              <Eye /> {drawer ? t("topbar.hide") : t("topbar.yaml")}
+            <Button variant="secondary" size="sm" onClick={() => setDrawer(true)}>
+              <Eye /> {t("topbar.yaml")}
             </Button>
             <Button variant="ghost" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
               <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}

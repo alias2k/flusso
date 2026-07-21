@@ -14,7 +14,6 @@ export const en: Record<string, string> = {
   "topbar.dbConnected": "DB connected",
   "topbar.dbOffline": "DB offline",
   "topbar.offlineBanner": "Database not reachable — offline authoring only.",
-  "topbar.hide": "Hide",
   "topbar.yaml": "Preview",
   "topbar.validate": "Validate",
   "topbar.save": "Save",
