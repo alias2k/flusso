@@ -306,6 +306,8 @@ export const en: Record<string, string> = {
   "search.navigate": "navigate",
   "search.selectHint": "select",
   "search.closeHint": "close",
+  "search.complete": "complete",
+  "search.recent": "Recent",
   "search.onScreenFirst": "on-screen results rank first",
   "search.runAction": "Run action",
   "search.openIndex": "Open index",

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { Boxes, CornerDownLeft, Settings2, Table2, Zap } from "lucide-react";
+import { useEffect, useMemo, useState, type ComponentType, type KeyboardEvent } from "react";
+import { Boxes, Clock, CornerDownLeft, Settings2, Table2, Zap } from "lucide-react";
 import type { CatalogResponse } from "../api";
 import { useT } from "../i18n";
 import { frecencyScores, recordPick } from "../model/frecency";
 import { createSearch, type Ranked, runSearch } from "../model/rank";
+import { recentSearches, recordSearch } from "../model/recent";
 import {
   buildSearchRecords,
   type SearchCategory,
@@ -201,6 +202,23 @@ export function CommandPalette({
     return runSearch(search, needle, byId, weight);
   }, [needle, search, records, byId, active, frecency]);
 
+  // Inline autocomplete: the top completion whose prefix is what you've typed,
+  // shown as ghost text and accepted with Tab.
+  const completion = useMemo(() => {
+    if (!needle) return "";
+    const s = search.autoSuggest(needle, { prefix: true, fuzzy: 0.2, boost: { title: 3 } })[0]?.suggestion ?? "";
+    return s.toLowerCase().startsWith(q.toLowerCase()) && s.length > q.length ? s.slice(q.length) : "";
+  }, [needle, q, search]);
+
+  const recent = useMemo(() => (open && !needle ? recentSearches() : []), [open, needle]);
+
+  const onInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Tab" && completion) {
+      e.preventDefault();
+      setQ(q + completion);
+    }
+  };
+
   // The highlighted record drives the preview; fall back to the top result when
   // cmdk's controlled value is empty or points at a now-filtered-out row (and
   // tolerate cmdk normalising the value's case).
@@ -236,6 +254,7 @@ export function CommandPalette({
 
   const onSelect = (r: SearchRecord) => {
     recordPick(r.id);
+    if (needle) recordSearch(needle);
     onOpenChange(false);
     if (r.run) r.run();
     else if (r.target) navigate(r.target);
@@ -262,7 +281,16 @@ export function CommandPalette({
           <CommandInput
             value={q}
             onValueChange={setQ}
+            onKeyDown={onInputKeyDown}
             placeholder={t("search.placeholder")}
+            ghost={
+              completion ? (
+                <>
+                  <span className="invisible">{q}</span>
+                  <span className="text-muted-foreground/40">{completion}</span>
+                </>
+              ) : undefined
+            }
             leading={
               <span
                 className="size-2.5 shrink-0 rounded-full"
@@ -283,6 +311,34 @@ export function CommandPalette({
           <div className="grid sm:grid-cols-[1.55fr_1fr]">
             <CommandList className="max-h-96 p-2 sm:border-r sm:border-border">
               <CommandEmpty>{t("search.empty")}</CommandEmpty>
+              {recent.length > 0 && (
+                <CommandGroup
+                  heading={
+                    <span className="flex w-full items-center gap-2">
+                      <span>{t("search.recent")}</span>
+                      <span className="h-px flex-1 bg-border" />
+                    </span>
+                  }
+                >
+                  {recent.map((query) => (
+                    <CommandItem
+                      key={`recent:${query}`}
+                      value={`recent:${query}`}
+                      onSelect={() => setQ(query)}
+                      className="group relative gap-2.5 py-2 data-[selected=true]:bg-primary/10 data-[selected=true]:text-foreground"
+                    >
+                      <span
+                        aria-hidden
+                        className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary opacity-0 group-data-[selected=true]:opacity-100"
+                      />
+                      <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-accent text-muted-foreground">
+                        <Clock className="size-3.5" />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{query}</span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              )}
               {groups.map((cat) => {
                 const all = ranked.filter((x) => x.record.category === cat);
                 if (!all.length) return null;
@@ -357,6 +413,12 @@ export function CommandPalette({
               <kbd className="rounded border border-border bg-accent px-1 py-0.5">esc</kbd>
               {t("search.closeHint")}
             </span>
+            {completion && (
+              <span className="flex items-center gap-1 text-primary">
+                <kbd className="rounded border border-primary/40 bg-accent px-1 py-0.5">⇥</kbd>
+                {t("search.complete")}
+              </span>
+            )}
             <span className="ml-auto text-muted-foreground">{t("search.onScreenFirst")}</span>
           </div>
         </Command>

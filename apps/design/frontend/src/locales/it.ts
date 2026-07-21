@@ -311,6 +311,8 @@ export const it: Record<string, string> = {
   "search.navigate": "naviga",
   "search.selectHint": "seleziona",
   "search.closeHint": "chiudi",
+  "search.complete": "completa",
+  "search.recent": "Recenti",
   "search.onScreenFirst": "i risultati a schermo hanno priorità",
   "search.runAction": "Esegui azione",
   "search.openIndex": "Apri indice",

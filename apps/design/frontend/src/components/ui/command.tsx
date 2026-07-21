@@ -23,22 +23,30 @@ function CommandInput({
   className,
   leading,
   trailing,
+  ghost,
   ...props
 }: React.ComponentProps<typeof CommandPrimitive.Input> & {
   leading?: React.ReactNode;
   trailing?: React.ReactNode;
+  /// An overlay aligned to the input text — used for inline autocomplete.
+  ghost?: React.ReactNode;
 }) {
   return (
     <div data-slot="command-input-wrapper" className="flex items-center gap-2.5 border-b border-border px-3.5">
       {leading ?? <SearchIcon className="size-4 shrink-0 opacity-50" />}
-      <CommandPrimitive.Input
-        data-slot="command-input"
-        className={cn(
-          "flex h-11 w-full bg-transparent py-3 text-sm outline-hidden placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
-          className,
+      <div className="relative flex min-w-0 flex-1 items-center">
+        {ghost && (
+          <div className="pointer-events-none absolute inset-0 flex items-center text-sm whitespace-pre">{ghost}</div>
         )}
-        {...props}
-      />
+        <CommandPrimitive.Input
+          data-slot="command-input"
+          className={cn(
+            "h-11 w-full bg-transparent py-3 text-sm outline-hidden placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
+            className,
+          )}
+          {...props}
+        />
+      </div>
       {trailing}
     </div>
   );

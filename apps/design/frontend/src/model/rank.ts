@@ -59,21 +59,32 @@ function titlePositions(query: string, title: string): number[] {
   return [...pos].sort((a, b) => a - b);
 }
 
+/// Extra multiplier so an exact / prefix title match clearly wins over a buried
+/// one ("save" → the Save action, not a field whose keywords mention saving).
+function titleBonus(queryLower: string, title: string): number {
+  const t = title.toLowerCase();
+  if (t === queryLower) return 1.6;
+  if (t.startsWith(queryLower)) return 1.3;
+  return 1;
+}
+
 /// Rank records for `query`, dropping non-matches. `weight` scales each score
-/// (on-screen boost × frecency), then results re-sort by the weighted score.
+/// (on-screen boost × frecency); an exact/prefix title match is boosted too,
+/// then results re-sort by the final weighted score.
 export function runSearch(
   ms: MiniSearch<SearchRecord>,
   query: string,
   byId: Map<string, SearchRecord>,
   weight: (r: SearchRecord) => number,
 ): Ranked[] {
+  const queryLower = query.trim().toLowerCase();
   return ms
     .search(query)
     .map((res) => {
       const record = byId.get(String(res.id));
-      return record
-        ? { record, positions: titlePositions(query, record.title), score: res.score * weight(record) }
-        : null;
+      if (!record) return null;
+      const score = res.score * weight(record) * titleBonus(queryLower, record.title);
+      return { record, positions: titlePositions(query, record.title), score };
     })
     .filter((x): x is { record: SearchRecord; positions: number[]; score: number } => x !== null)
     .sort((a, b) => b.score - a.score)
