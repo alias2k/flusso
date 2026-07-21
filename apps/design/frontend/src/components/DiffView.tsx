@@ -8,11 +8,19 @@ import { cn } from "@/lib/utils";
 /// and four layouts: unified (both sides), split (old left / new right), or a
 /// single side (old / new) — so a save review reads like a code review.
 
+// A stretch of a line, flagged as changed or not by the intra-line word diff.
+interface Seg {
+  text: string;
+  changed: boolean;
+}
+
 interface Row {
   type: "eq" | "add" | "del";
   text: string;
   oldNo?: number;
   newNo?: number;
+  // Attached for a paired add/del so the exact changed tokens are highlighted.
+  seg?: Seg[];
 }
 
 /// Which layout to render, chosen from the review's view toggle.
@@ -110,6 +118,73 @@ function buildPairs(rows: Row[]): Pair[] {
   return pairs;
 }
 
+// Word-ish tokens: whitespace runs, identifier runs, punctuation runs — enough
+// granularity to highlight the exact bit of a line that changed.
+function tokenize(s: string): string[] {
+  return s.match(/\s+|[A-Za-z0-9_]+|[^\sA-Za-z0-9_]+/g) ?? [];
+}
+
+/// Token-level LCS diff of two lines. Returns the segments for each side, or
+/// null when the lines share nothing (a full rewrite — highlight the whole row
+/// instead of a noisy every-token flag).
+function wordDiff(oldText: string, newText: string): { left: Seg[]; right: Seg[] } | null {
+  const a = tokenize(oldText);
+  const b = tokenize(newText);
+  const n = a.length;
+  const m = b.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  if (dp[0][0] === 0) return null;
+  const left: Seg[] = [];
+  const right: Seg[] = [];
+  const push = (arr: Seg[], text: string, changed: boolean) => {
+    const last = arr[arr.length - 1];
+    if (last?.changed === changed) last.text += text;
+    else arr.push({ text, changed });
+  };
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      push(left, a[i], false);
+      push(right, b[j], false);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      push(left, a[i], true);
+      i++;
+    } else {
+      push(right, b[j], true);
+      j++;
+    }
+  }
+  while (i < n) {
+    push(left, a[i], true);
+    i++;
+  }
+  while (j < m) {
+    push(right, b[j], true);
+    j++;
+  }
+  return { left, right };
+}
+
+// For each paired modification, attach the intra-line word diff to both rows
+// (mutating the shared Row objects, so the unified view highlights them too).
+function attachWordDiff(pairs: Pair[]): void {
+  for (const p of pairs) {
+    if (!p.changed || !p.left || !p.right) continue;
+    const wd = wordDiff(p.left.text, p.right.text);
+    if (!wd) continue;
+    p.left.seg = wd.left;
+    p.right.seg = wd.right;
+  }
+}
+
 interface Block<T> {
   kind: "rows" | "gap";
   id: number;
@@ -136,6 +211,26 @@ function collapse<T>(items: T[], isChange: (t: T) => boolean): Block<T>[] {
 }
 
 const GUTTER = "shrink-0 select-none px-2 text-right text-2xs tabular-nums";
+
+/// A line's text, with the word-diff's changed tokens given a stronger tint
+/// (`strong`) over the row's base colour. Falls back to plain text when the row
+/// carries no word diff (unpaired change or full rewrite).
+function LineText({ row, strong }: { row: Row; strong?: string }) {
+  if (!row.seg) return <>{row.text || " "}</>;
+  return (
+    <>
+      {row.seg.map((s, k) =>
+        s.changed && strong ? (
+          <span key={k} className={cn("rounded-xs", strong)}>
+            {s.text}
+          </span>
+        ) : (
+          <span key={k}>{s.text}</span>
+        ),
+      )}
+    </>
+  );
+}
 
 /// One line in the unified view: two gutters (old + new), a +/- sign, the text.
 function DiffRow({ row }: { row: Row }) {
@@ -166,7 +261,7 @@ function DiffRow({ row }: { row: Row }) {
         {add ? "+" : del ? "-" : " "}
       </span>
       <span className={cn("grow whitespace-pre pr-3", row.type === "eq" ? "text-muted-foreground" : "text-foreground")}>
-        {row.text || " "}
+        <LineText row={row} strong={add ? "bg-primary/30" : del ? "bg-destructive/30" : undefined} />
       </span>
     </div>
   );
@@ -247,6 +342,8 @@ export function DiffView({
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const expand = (id: number) => setExpanded((s) => new Set(s).add(id));
   const rows = diffLines(current, next);
+  const pairs = buildPairs(rows);
+  attachWordDiff(pairs);
   const adds = rows.filter((r) => r.type === "add").length;
   const dels = rows.filter((r) => r.type === "del").length;
 
@@ -262,7 +359,7 @@ export function DiffView({
   // Split: two independently-scrolling columns fed the SAME block sequence, so
   // matching row heights keep old (left) and new (right) aligned.
   const splitColumn = (side: "old" | "new") =>
-    collapse(buildPairs(rows), (p) => p.changed).map((block) => {
+    collapse(pairs, (p) => p.changed).map((block) => {
       if (block.kind === "gap" && !expanded.has(block.id))
         return (
           <GapBar key={block.id} count={block.items.length} label={side === "old"} onExpand={() => expand(block.id)} />

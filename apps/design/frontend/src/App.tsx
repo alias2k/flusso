@@ -841,8 +841,8 @@ function DiffModal({
   const [mode, setMode] = useState<DiffMode>("split");
   const changed = diffs.filter((d) => d.changed);
   const modes: { id: DiffMode; label: string; Icon: typeof Columns2 }[] = [
-    { id: "unified", label: t("diff.viewUnified"), Icon: AlignJustify },
     { id: "split", label: t("diff.viewSplit"), Icon: Columns2 },
+    { id: "unified", label: t("diff.viewUnified"), Icon: AlignJustify },
     { id: "old", label: t("diff.viewOld"), Icon: Minus },
     { id: "new", label: t("diff.viewNew"), Icon: Plus },
   ];
