@@ -77,7 +77,7 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
-        className="flex w-[min(58rem,94vw)] max-w-none flex-col gap-0 overflow-hidden p-0 max-h-[85vh]"
+        className="flex w-[min(58rem,94vw)] max-w-none flex-col gap-0 overflow-hidden p-0 max-h-[85vh] sm:max-w-none"
         aria-label={t("catalog.aria")}
       >
         <DialogHeader className="px-4 pt-4 pb-2">

@@ -807,7 +807,10 @@ function DiffModal({
   const changed = diffs.filter((d) => d.changed);
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
-      <DialogContent className="flex flex-col w-[min(56rem,92vw)] max-w-none max-h-[85vh]" aria-label={t("diff.aria")}>
+      <DialogContent
+        className="flex w-[min(56rem,92vw)] max-w-none flex-col max-h-[85vh] sm:max-w-none"
+        aria-label={t("diff.aria")}
+      >
         <DialogHeader>
           <DialogTitle>{t("diff.title", { n: changed.length })}</DialogTitle>
         </DialogHeader>
