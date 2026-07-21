@@ -1,6 +1,6 @@
 import type { Filter } from "../api";
 import { useT } from "../i18n";
-import { AddButton, RemoveButton, Select, Text } from "./widgets";
+import { AddButton, Combobox, RemoveButton, Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
 
@@ -66,6 +66,7 @@ export function Filters({
     next.splice(i, 1);
     onChange(next.length ? next : undefined);
   };
+  const colOpts = (columns ?? []).map((c) => ({ value: c, label: c }));
 
   return (
     <div className="filters">
@@ -92,12 +93,13 @@ export function Filters({
             )}
             {kind === "null_check" && "op" in f && (
               <div className="flex items-center gap-1.5">
-                <Text
+                <Combobox
                   value={"column" in f ? f.column : ""}
+                  options={colOpts}
+                  allowCustom
                   onChange={(column) => set(i, { ...f, column })}
-                  list={columns}
                   placeholder={t("common.column")}
-                  className="flex-1"
+                  className="min-w-0 flex-1"
                 />
                 <Select
                   value={f.op as "is_null" | "is_not_null"}
@@ -109,10 +111,11 @@ export function Filters({
             )}
             {kind === "value_op" && "value" in f && (
               <>
-                <Text
+                <Combobox
                   value={"column" in f ? f.column : ""}
+                  options={colOpts}
+                  allowCustom
                   onChange={(column) => set(i, { ...f, column })}
-                  list={columns}
                   placeholder={t("common.column")}
                 />
                 <div className="flex items-center gap-1.5">
