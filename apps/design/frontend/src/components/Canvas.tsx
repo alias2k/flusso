@@ -11,8 +11,8 @@ import {
 } from "@xyflow/react";
 // React Flow's stylesheet is imported (layered) from index.css, not here — a JS
 // import is unlayered and would beat our `@layer components` handle overrides.
-import { useEffect, useRef, useState } from "react";
-import { Lock, Maximize2, Unlock, ZoomIn, ZoomOut } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Lock, Maximize2, Search, Unlock, X, ZoomIn, ZoomOut } from "lucide-react";
 import { SCALAR_TYPES } from "../api";
 import { autoLayout, clearOverrides, loadOverrides, loadViewport, saveOverride, saveViewport } from "../model/layout";
 import { suggestRelations } from "../model/relations";
@@ -21,9 +21,10 @@ import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { edgeColor } from "../theme";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 import { DocNodeView } from "./DocNodeView";
 import { Hint } from "./Hint";
-import { Combobox } from "./widgets";
 import { Icon } from "./Icon";
 
 const nodeTypes = { doc: DocNodeView };
@@ -222,35 +223,113 @@ function RestoreViewport({ index }: { index: string }) {
   return null;
 }
 
-/// Jump to a node: a searchable [`Combobox`] of every node (by name/table,
-/// coloured by kind); picking one centres the canvas on it and selects it.
-/// Lives inside <ReactFlow> so it can use the flow instance.
+/// Jump to a node: an inline search over every node (by name/table), with a
+/// kind-coloured results list, keyboard nav (↑/↓/↵/Esc), and click. Picking one
+/// fits it in view, expands it if collapsed, and selects it. Lives inside
+/// <ReactFlow> for the flow instance.
 function NodeSearch() {
-  const { getNodes, setCenter } = useReactFlow();
-  const { select } = useDesign();
+  const { getNodes, fitView } = useReactFlow();
+  const { select, collapsed, toggleCollapsed } = useDesign();
   const { t } = useT();
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
 
-  const options = getNodes().map((n) => {
-    const dn = (n.data as { node: DocNode }).node;
-    const name = dn.name ?? dn.table;
-    return {
-      value: dn.id,
-      label: name,
-      description: dn.name && dn.name !== dn.table ? dn.table : undefined,
-      className: `k-${dn.kind}`,
-      keywords: [name, dn.table],
-    };
-  });
+  const needle = q.trim().toLowerCase();
+  const results = needle
+    ? getNodes()
+        .map((n) => (n.data as { node: DocNode }).node)
+        .filter((dn) => `${dn.name ?? ""} ${dn.table}`.toLowerCase().includes(needle))
+    : [];
 
-  const jump = (id: string) => {
-    const n = getNodes().find((x) => x.id === id);
-    if (!n) return;
-    const w = n.measured?.width ?? 145;
-    const h = n.measured?.height ?? 80;
-    void setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: 1, duration: 300 });
-    const dn = (n.data as { node: DocNode }).node;
+  useEffect(() => setActive(0), [q]);
+
+  const jump = (dn: DocNode) => {
+    void fitView({ nodes: [{ id: dn.id }], duration: 300, maxZoom: 1 });
+    if (collapsed.has(dn.id)) toggleCollapsed(dn.id);
     select(dn.path.length ? { kind: "node", path: dn.path } : { kind: "root" });
+    setQ("");
+    setOpen(false);
   };
 
-  return <Combobox value="" options={options} onChange={jump} placeholder={t("canvas.jumpToNode")} className="w-52" />;
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setOpen(true);
+      setActive((a) => Math.min(a + 1, results.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((a) => Math.max(a - 1, 0));
+    } else if (e.key === "Enter") {
+      const hit = results[active];
+      if (hit) jump(hit);
+    } else if (e.key === "Escape") {
+      setQ("");
+      setOpen(false);
+      e.currentTarget.blur();
+    }
+  };
+
+  return (
+    <div className="relative w-56">
+      <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        value={q}
+        onChange={(e) => {
+          setQ(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={onKeyDown}
+        placeholder={t("canvas.jumpToNode")}
+        className="h-8 px-7 text-xs"
+        spellCheck={false}
+      />
+      {q && (
+        <button
+          type="button"
+          aria-label={t("common.clear")}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            setQ("");
+          }}
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+        >
+          <X className="size-3.5" />
+        </button>
+      )}
+      {open && needle && (
+        <ul className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
+          {results.length === 0 ? (
+            <li className="px-2 py-1.5 text-2xs text-muted-foreground">{t("canvas.noMatches")}</li>
+          ) : (
+            results.map((dn, i) => (
+              <li
+                key={dn.id}
+                onMouseEnter={() => setActive(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  jump(dn);
+                }}
+                className={cn(
+                  "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs",
+                  i === active && "bg-accent",
+                )}
+              >
+                <span
+                  className="inline-block size-2.5 shrink-0 rounded-full"
+                  style={{ background: `var(--k-${dn.kind})` }}
+                />
+                <span className="truncate">{dn.name ?? dn.table}</span>
+                {dn.name && dn.name !== dn.table && (
+                  <span className="ml-auto truncate pl-2 text-2xs text-muted-foreground">{dn.table}</span>
+                )}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  );
 }

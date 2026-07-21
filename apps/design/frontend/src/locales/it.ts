@@ -84,6 +84,7 @@ export const it: Record<string, string> = {
   // shared
   "common.cancel": "Annulla",
   "common.remove": "rimuovi",
+  "common.clear": "Cancella",
   "common.close": "Chiudi",
   "common.column": "colonna",
 
@@ -296,4 +297,5 @@ export const it: Record<string, string> = {
   "canvas.showMinimap": "Mostra minimappa",
   "canvas.hideMinimap": "Nascondi minimappa",
   "canvas.jumpToNode": "vai al nodo…",
+  "canvas.noMatches": "Nessun nodo corrispondente",
 };
