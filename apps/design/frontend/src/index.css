@@ -332,20 +332,20 @@
     font-size: 0.75rem;
     box-shadow: 0 0.125rem 0.625rem rgba(0, 0, 0, 0.25);
   }
-  /* Sit the dots on the node edge (poking slightly out). `.flow-node` is static,
-   so its `overflow: hidden` doesn't clip these absolutely-positioned handles
-   (their containing block is React Flow's positioned wrapper). Drop the default
-   translateX so the box sits where `left`/`right` put it; the edge anchor tracks
-   the measured box and meets the dot at its outer edge, vertical-centred. */
+  /* Dots straddle the node edge at its vertical centre. Handles are direct
+   children of the static `.flow-node`, so their containing block is React Flow's
+   positioned wrapper and `.flow-node`'s `overflow: hidden` can't clip them.
+   `translateY(-50%)` centres on `top: 50%`; no translateX, so the box sits where
+   `left`/`right` put it. */
   .react-flow__handle-left {
+    top: 50%;
     left: -0.125rem;
-    margin-top: -0.35rem;
     transform: translateY(-50%);
   }
   .react-flow__handle-right {
+    top: 50%;
     right: -0.25rem;
     left: auto;
-    margin-top: -0.25rem;
     transform: translateY(-50%);
   }
   .flow-node.selected {
