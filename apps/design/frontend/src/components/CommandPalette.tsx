@@ -142,8 +142,8 @@ function DetailPane({ record }: { record: SearchRecord | null }) {
 
 /// The global search — a Cmd+K command palette over the whole project: run a UI
 /// action, or jump to any index, field, setting, or database table/column. It
-/// fuzzy-ranks with Fuse, boosts whatever's currently on screen, previews the
-/// highlighted result on the right, and navigates by dispatching store calls
+/// fuzzy-ranks with MiniSearch, boosts whatever's currently on screen, previews
+/// the highlighted result on the right, and navigates by dispatching store calls
 /// (panning the canvas via a focus request for a field/node).
 export function CommandPalette({
   open,

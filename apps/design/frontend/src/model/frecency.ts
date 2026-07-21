@@ -1,8 +1,7 @@
-// Frecency: rank search results by how *often* and how *recently* you pick them,
-// so the palette learns your habits. A pick bumps a per-record counter + a
-// timestamp in localStorage; the score is frequency weighted by a recency decay.
-// This is what makes the empty palette open on your top items and floats a
-// familiar result above an equally-fuzzy stranger.
+// Frecency: rank search results by how *often* and how *recently* you pick them.
+// A pick bumps a per-record counter + a timestamp in localStorage; the score is
+// frequency weighted by a recency decay. Callers use it to order the empty
+// palette and to break ties between equally-fuzzy matches.
 //
 // The clock is read here (not passed in) so the React-side callers stay pure.
 
