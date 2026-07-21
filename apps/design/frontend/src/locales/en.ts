@@ -15,7 +15,7 @@ export const en: Record<string, string> = {
   "topbar.dbOffline": "DB offline",
   "topbar.offlineBanner": "Database not reachable — offline authoring only.",
   "topbar.hide": "Hide",
-  "topbar.yaml": "YAML",
+  "topbar.yaml": "Preview",
   "topbar.validate": "Validate",
   "topbar.save": "Save",
   "topbar.reset": "Reset",
@@ -29,7 +29,7 @@ export const en: Record<string, string> = {
   "diag.typeMismatch": 'type "{ty}" is a sharp change from source column "{col}" ({src}) — values may fail to index',
   "topbar.upToDate": "Up to date",
   "topbar.language": "Language",
-  "topbar.more": "More",
+  "topbar.settings": "Settings",
 
   // toasts / status
   "toast.saved": "{n, plural, one {Saved # file} other {Saved # files}}",

@@ -15,7 +15,7 @@ export const it: Record<string, string> = {
   "topbar.dbOffline": "DB offline",
   "topbar.offlineBanner": "Database non raggiungibile — solo modifica offline.",
   "topbar.hide": "Nascondi",
-  "topbar.yaml": "YAML",
+  "topbar.yaml": "Anteprima",
   "topbar.validate": "Convalida",
   "topbar.save": "Salva",
   "topbar.reset": "Ripristina",
@@ -30,7 +30,7 @@ export const it: Record<string, string> = {
     'il tipo "{ty}" è un cambiamento netto rispetto alla colonna sorgente "{col}" ({src}) — i valori potrebbero non indicizzarsi',
   "topbar.upToDate": "Aggiornato",
   "topbar.language": "Lingua",
-  "topbar.more": "Altro",
+  "topbar.settings": "Impostazioni",
 
   // toasts / status
   "toast.saved": "{n, plural, one {Salvato # file} other {Salvati # file}}",

@@ -126,8 +126,7 @@ test("save shows a diff before writing", async ({ page }) => {
 });
 
 test("raw YAML mode opens an editor", async ({ page }) => {
-  await page.getByRole("button", { name: "More" }).click();
-  await page.getByRole("menuitem", { name: "Raw YAML" }).click();
+  await page.getByRole("button", { name: "Raw YAML" }).click();
   await expect(page.locator(".raw-editor")).toBeVisible();
 });
 
@@ -157,13 +156,13 @@ test("the DB chip re-tests the connection", async ({ page }) => {
 });
 
 test("preview drawer shows the OpenSearch mapping", async ({ page }) => {
-  await page.getByRole("button", { name: "YAML", exact: true }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await page.getByRole("button", { name: "Mapping", exact: true }).click();
   await expect(page.locator("pre.yaml")).toBeVisible();
 });
 
 test("sample document builds a real row from the database", async ({ page }) => {
-  await page.getByRole("button", { name: "YAML", exact: true }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await page.getByRole("button", { name: "Sample", exact: true }).click();
   await page.getByRole("button", { name: /build sample/i }).click();
   // DB is seeded → a JSON document is rendered (a note/banner would mean empty).
@@ -185,8 +184,7 @@ test("duplicating an index adds a sidebar entry", async ({ page }) => {
 });
 
 test("catalog browser lists the database tables", async ({ page }) => {
-  await page.getByRole("button", { name: "More" }).click();
-  await page.getByRole("menuitem", { name: "Tables" }).click();
+  await page.getByRole("button", { name: "Tables" }).click();
   await expect(page.locator(".catalog-table")).not.toHaveCount(0);
 });
 
@@ -274,19 +272,19 @@ test("validate surfaces a result toast", async ({ page }) => {
 
 test("switches the UI language", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
-  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("menuitemradio", { name: "Italiano" }).click();
   // labels switch to Italian…
   await expect(page.getByRole("button", { name: "Salva" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Convalida" })).toBeVisible();
-  // …and back to English (the menu trigger is now "Altro").
-  await page.getByRole("button", { name: "Altro" }).click();
+  // …and back to English (the menu trigger is now "Impostazioni").
+  await page.getByRole("button", { name: "Impostazioni" }).click();
   await page.getByRole("menuitemradio", { name: "English" }).click();
   await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
 });
 
 test("toggles the light/dark theme", async ({ page }) => {
-  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("menuitem", { name: "Toggle theme" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });

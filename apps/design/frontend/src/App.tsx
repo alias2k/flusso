@@ -7,9 +7,9 @@ import {
   Eye,
   FileCode2,
   Moon,
-  MoreHorizontal,
   RotateCcw,
   Save,
+  Settings,
   Sun,
   Table2,
   X,
@@ -542,7 +542,7 @@ export default function App() {
           <Kbd className="ml-auto">⌘K</Kbd>
         </button>
 
-        {/* history */}
+        {/* global: edit history */}
         <Hint label={t("topbar.undo")}>
           <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
             <Icon name="undo" />
@@ -554,33 +554,18 @@ export default function App() {
           </Button>
         </Hint>
 
-        <div className="mx-1 h-5 w-px bg-border" />
-
-        {/* preview */}
-        <Button variant="secondary" size="sm" onClick={toggleDrawer}>
-          <Eye /> {drawer ? t("topbar.hide") : t("topbar.yaml")}
-        </Button>
-
-        {/* view + appearance, grouped in a menu */}
+        {/* global: app settings (theme + language) — a labelled gear, not a mystery menu */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.more")}>
-              <MoreHorizontal />
+            <Button variant="ghost" size="sm" aria-label={t("topbar.settings")}>
+              <Settings /> {t("topbar.settings")}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => setBrowseCatalog(true)}>
-              <Table2 /> {t("topbar.tables")}
-            </DropdownMenuItem>
-            {active !== "config" && (
-              <DropdownMenuItem onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
-                <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuSeparator />
             <DropdownMenuItem onClick={toggleTheme}>
               {theme === "dark" ? <Sun /> : <Moon />} {t("topbar.toggleTheme")}
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuLabel>{t("topbar.language")}</DropdownMenuLabel>
             <DropdownMenuRadioGroup value={lang} onValueChange={setLang}>
               {Object.entries(LANGS).map(([value, label]) => (
@@ -594,7 +579,7 @@ export default function App() {
 
         <div className="mx-1 h-5 w-px bg-border" />
 
-        {/* actions */}
+        {/* deployment actions — the whole config */}
         <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
           <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
           {t("topbar.validate")}
@@ -623,6 +608,35 @@ export default function App() {
           {t("topbar.save")}
         </Button>
       </header>
+
+      {/* Context bar: names the index you're editing and carries the tools that
+          act on it (preview, catalog, raw YAML) — kept apart from the global bar
+          above so index-scoped and deployment-scoped actions never blur together.
+          Absent on the Deployment screen, which has no single index in context. */}
+      {active !== "config" && schema && (
+        <div
+          className="flex items-center gap-2.5 border-b border-border px-4 py-1.5"
+          style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 42%), var(--panel-2)" }}
+        >
+          <span className="badge root">root</span>
+          <span className="text-sm font-medium text-foreground">{active}</span>
+          <span className="font-mono text-2xs text-muted-foreground">
+            {schema.db_schema && schema.db_schema !== "public" ? `${schema.db_schema}.` : ""}
+            {schema.table}
+            {schema.primary_key ? ` · ${t("node.pk")}: ${schema.primary_key}` : ""}
+          </span>
+          <span className="flex-1" />
+          <Button variant="ghost" size="sm" onClick={() => setBrowseCatalog(true)}>
+            <Table2 /> {t("topbar.tables")}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={toggleDrawer}>
+            <Eye /> {drawer ? t("topbar.hide") : t("topbar.yaml")}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
+            <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
+          </Button>
+        </div>
+      )}
 
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
       {catalog?.error && (
