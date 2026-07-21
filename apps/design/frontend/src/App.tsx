@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useDesignStore, useCanUndo, useCanRedo, undo, redo, emptySchema, type Doc } from "./store/design";
+import { useUiStore } from "./store/ui";
 import {
   ChevronRight,
   CircleCheck,
@@ -11,17 +13,7 @@ import {
   Sun,
   Table2,
 } from "lucide-react";
-import type {
-  CatalogResponse,
-  ColumnShape,
-  ConfigToml,
-  DiagnosticDto,
-  FileDiff,
-  IndexSchema,
-  PreviewResponse,
-  Project,
-  SaveSchemaInput,
-} from "./api";
+import type { ColumnShape, FileDiff, SaveSchemaInput } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -46,61 +38,69 @@ import { Hint } from "./components/Hint";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Select, Text } from "./components/widgets";
-import { useHistory } from "./history";
 import { LANGS, useT } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
-import { DesignProvider, type Selection } from "./state";
+import { DesignProvider } from "./state";
+import { BTN_ICON, NAV, NAV_ACTIVE, NAV_HEADING } from "./styles";
 import { TYPE_FAMILIES } from "./theme";
-
-// sidebar nav item classes (kept .nav/.active as hooks for e2e).
-const NAV =
-  "nav mb-0.5 block w-full cursor-pointer rounded-md border-0 bg-transparent px-2.5 py-2 text-left hover:bg-secondary";
-const NAV_ACTIVE = "active bg-secondary text-primary";
-const NAV_HEADING = "mx-1 mb-1 mt-3 text-2xs uppercase text-muted-foreground";
-
-/// The whole editable document: the deployment config + every index's schema.
-/// Held as one value so undo/redo and dirty-tracking cover it uniformly.
-interface Doc {
-  config: ConfigToml;
-  schemas: Record<string, IndexSchema>;
-}
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-const emptySchema = (table: string, pk?: string): IndexSchema => ({
-  version: 1,
-  table,
-  db_schema: "public",
-  primary_key: pk,
-  fields: [],
-});
-
 export default function App() {
   const { t, lang, setLang } = useT();
-  const [project, setProject] = useState<Project | null>(null);
-  const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
-  const { present: doc, set: setDoc, undo, redo, reset, canUndo, canRedo } = useHistory<Doc | null>(null);
-  const [saved, setSaved] = useState<string>(""); // JSON of the last loaded/saved doc
-  const [active, setActive] = useState<string>("config");
-  const [selection, setSelection] = useState<Selection>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [leftOpen, setLeftOpen] = useState(true);
-  const [preview, setPreview] = useState<PreviewResponse | null>(null);
-  const [diagnostics, setDiagnostics] = useState<DiagnosticDto[] | null>(null);
-  const [drawer, setDrawer] = useState(false);
-  const [error, setError] = useState("");
-  const [toast, setToast] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [validating, setValidating] = useState(false);
-  const [rawMode, setRawMode] = useState(false);
-  const [rawText, setRawText] = useState("");
-  const [diffs, setDiffs] = useState<FileDiff[] | null>(null);
-  const [browseCatalog, setBrowseCatalog] = useState(false);
-  const [theme, setTheme] = useState<"dark" | "light">(
-    () => (localStorage.getItem("flusso-design.theme") as "dark" | "light") || "dark",
-  );
+
+  const project = useDesignStore((s) => s.project);
+  const catalog = useDesignStore((s) => s.catalog);
+  const doc = useDesignStore((s) => s.doc);
+  const saved = useDesignStore((s) => s.saved);
+  const active = useDesignStore((s) => s.active);
+  const selection = useDesignStore((s) => s.selection);
+  const collapsed = useDesignStore((s) => s.collapsed);
+  const preview = useDesignStore((s) => s.preview);
+  const diagnostics = useDesignStore((s) => s.diagnostics);
+  const setCatalog = useDesignStore((s) => s.setCatalog);
+  const setSaved = useDesignStore((s) => s.setSaved);
+  const setActive = useDesignStore((s) => s.setActive);
+  const setSelection = useDesignStore((s) => s.setSelection);
+  const setPreview = useDesignStore((s) => s.setPreview);
+  const setDiagnostics = useDesignStore((s) => s.setDiagnostics);
+  const loadProject = useDesignStore((s) => s.loadProject);
+  const apply = useDesignStore((s) => s.apply);
+  const setConfig = useDesignStore((s) => s.setConfig);
+  const openIndex = useDesignStore((s) => s.openIndex);
+  const createIndex = useDesignStore((s) => s.createIndex);
+  const dupIndex = useDesignStore((s) => s.dupIndex);
+  const revertChanges = useDesignStore((s) => s.revertChanges);
+  const loadCollapsed = useDesignStore((s) => s.loadCollapsed);
+  const toggleCollapsed = useDesignStore((s) => s.toggleCollapsed);
+  const canUndo = useCanUndo();
+  const canRedo = useCanRedo();
+
+  const theme = useUiStore((s) => s.theme);
+  const leftOpen = useUiStore((s) => s.leftOpen);
+  const drawer = useUiStore((s) => s.drawer);
+  const error = useUiStore((s) => s.error);
+  const toast = useUiStore((s) => s.toast);
+  const saving = useUiStore((s) => s.saving);
+  const validating = useUiStore((s) => s.validating);
+  const rawMode = useUiStore((s) => s.rawMode);
+  const rawText = useUiStore((s) => s.rawText);
+  const diffs = useUiStore((s) => s.diffs);
+  const browseCatalog = useUiStore((s) => s.browseCatalog);
+  const toggleTheme = useUiStore((s) => s.toggleTheme);
+  const toggleLeft = useUiStore((s) => s.toggleLeft);
+  const setDrawer = useUiStore((s) => s.setDrawer);
+  const toggleDrawer = useUiStore((s) => s.toggleDrawer);
+  const setError = useUiStore((s) => s.setError);
+  const setToast = useUiStore((s) => s.setToast);
+  const setSaving = useUiStore((s) => s.setSaving);
+  const setValidating = useUiStore((s) => s.setValidating);
+  const setRawMode = useUiStore((s) => s.setRawMode);
+  const setRawText = useUiStore((s) => s.setRawText);
+  const setDiffs = useUiStore((s) => s.setDiffs);
+  const setBrowseCatalog = useUiStore((s) => s.setBrowseCatalog);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -116,26 +116,18 @@ export default function App() {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 3500);
     return () => clearTimeout(t);
-  }, [toast]);
+  }, [toast, setToast]);
 
   useEffect(() => {
     api
       .project()
-      .then((p) => {
-        setProject(p);
-        const schemas: Record<string, IndexSchema> = {};
-        for (const idx of p.indexes) if (idx.schema) schemas[idx.name] = idx.schema;
-        const initial: Doc = { config: p.config, schemas };
-        reset(initial);
-        setSaved(JSON.stringify(initial));
-        setActive(p.indexes[0]?.name ?? "config");
-      })
+      .then((p) => loadProject(p, true))
       .catch((e) => setError(String(e)));
     api
       .catalog()
       .then(setCatalog)
       .catch((e) => setError(String(e)));
-  }, [reset]);
+  }, [loadProject, setCatalog, setError]);
 
   // Test the *currently edited* connection (not the on-disk one).
   const refreshCatalog = () =>
@@ -153,14 +145,7 @@ export default function App() {
   const reloadProject = () =>
     api
       .project()
-      .then((p) => {
-        setProject(p);
-        const schemas: Record<string, IndexSchema> = {};
-        for (const idx of p.indexes) if (idx.schema) schemas[idx.name] = idx.schema;
-        const fresh: Doc = { config: p.config, schemas };
-        reset(fresh);
-        setSaved(JSON.stringify(fresh));
-      })
+      .then((p) => loadProject(p, false))
       .catch((e) => setToast({ kind: "error", text: errText(e) }));
 
   const columnsFor = useMemo(() => {
@@ -206,7 +191,7 @@ export default function App() {
         .catch((e) => setError(String(e)));
     }, 250);
     return () => clearTimeout(handle);
-  }, [active, schema]);
+  }, [active, schema, setPreview, setError]);
 
   // Warn before leaving with unsaved changes.
   useEffect(() => {
@@ -219,84 +204,14 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
 
-  const apply = (fn: (s: IndexSchema) => IndexSchema) => {
-    if (active === "config") return;
-    setDoc((d) => (d ? { ...d, schemas: { ...d.schemas, [active]: fn(d.schemas[active] ?? emptySchema("")) } } : d));
-  };
-  // Editing the index list can rename or remove indexes. Schemas are keyed by
-  // index name, so re-key renamed ones (matched by position) and drop removed
-  // ones — otherwise a renamed index's schema is silently lost on save.
-  const setConfig = (next: ConfigToml) => {
-    if (!doc) return;
-    const oldIdx = doc.config.index ?? [];
-    const newIdx = next.index ?? [];
-    const renames = new Map<string, string>();
-    for (let i = 0; i < Math.min(oldIdx.length, newIdx.length); i += 1) {
-      if (oldIdx[i].name !== newIdx[i].name) renames.set(oldIdx[i].name, newIdx[i].name);
-    }
-    const removed = oldIdx
-      .filter((o) => !newIdx.some((n) => n.name === o.name) && !renames.has(o.name))
-      .map((o) => o.name);
-
-    setDoc((d) => {
-      if (!d) return d;
-      const schemas = { ...d.schemas };
-      for (const [oldName, newName] of renames) {
-        if (oldName in schemas) {
-          schemas[newName] = schemas[oldName];
-          delete schemas[oldName];
-        }
-      }
-      for (const name of removed) delete schemas[name];
-      return { config: next, schemas };
-    });
-
-    if (renames.has(active)) setActive(renames.get(active)!);
-    else if (removed.includes(active)) setActive("config");
-  };
-
-  // Collapsed-node ids persist per index (like layout) so they survive reloads.
-  const collapseKey = (index: string) => `flusso-design.collapsed.${index}`;
   useEffect(() => {
-    if (active === "config") return;
-    try {
-      setCollapsed(new Set(JSON.parse(localStorage.getItem(collapseKey(active)) ?? "[]") as string[]));
-    } catch {
-      setCollapsed(new Set());
-    }
-  }, [active]);
-  const toggleCollapsed = (id: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      try {
-        localStorage.setItem(collapseKey(active), JSON.stringify([...next]));
-      } catch {
-        /* storage disabled — collapse just won't persist */
-      }
-      return next;
-    });
-  };
-
-  const openIndex = (name: string) => {
-    setActive(name);
-    setSelection({ kind: "root" });
-    setDiagnostics(null);
-  };
+    loadCollapsed(active);
+  }, [active, loadCollapsed]);
 
   const saveIndexes = (): SaveSchemaInput[] =>
     (doc?.config.index ?? [])
       .filter((e) => doc?.schemas[e.name])
       .map((e) => ({ schema_path: e.schema, schema: doc!.schemas[e.name] }));
-
-  // Discard every unsaved edit, reverting to the last loaded/saved state. Goes
-  // through setDoc (not history reset) so the revert itself is undoable.
-  const revertChanges = () => {
-    if (!saved) return;
-    setDoc(() => JSON.parse(saved) as Doc);
-    setSelection(null);
-  };
 
   // Save first shows a diff of what would change on disk; performSave writes it.
   const save = async () => {
@@ -382,48 +297,6 @@ export default function App() {
     }
   };
 
-  const dupIndex = (i: number) => {
-    if (!doc) return;
-    const entries = doc.config.index ?? [];
-    const src = entries[i];
-    if (!src) return;
-    let name = `${src.name}_copy`;
-    let n = 1;
-    while (entries.some((e) => e.name === name)) name = `${src.name}_copy${++n}`;
-    setDoc((d) =>
-      d
-        ? {
-            config: {
-              ...d.config,
-              index: [
-                ...entries.slice(0, i + 1),
-                { name, schema: `${name}.schema.yml`, enabled: src.enabled },
-                ...entries.slice(i + 1),
-              ],
-            },
-            schemas: d.schemas[src.name] ? { ...d.schemas, [name]: structuredClone(d.schemas[src.name]) } : d.schemas,
-          }
-        : d,
-    );
-    openIndex(name);
-  };
-
-  const createIndex = (name: string, table: string) => {
-    const pk = catalog?.catalog.tables.find((t) => t.name === table)?.primary_key[0];
-    setDoc((d) =>
-      d
-        ? {
-            config: {
-              ...d.config,
-              index: [...(d.config.index ?? []), { name, schema: `${name}.schema.yml`, enabled: true }],
-            },
-            schemas: { ...d.schemas, [name]: emptySchema(table, pk) },
-          }
-        : d,
-    );
-    openIndex(name);
-  };
-
   // Keyboard shortcuts. Held in a ref (updated in an effect, not during render)
   // so the listener subscribes once but always sees the latest state; undo/
   // delete are suppressed while typing so native text editing keeps working.
@@ -482,7 +355,7 @@ export default function App() {
             variant="ghost"
             size="icon-sm"
             aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
-            onClick={() => setLeftOpen((o) => !o)}
+            onClick={toggleLeft}
           >
             <Icon name="menu" />
           </Button>
@@ -522,7 +395,7 @@ export default function App() {
         <div className="mx-1 h-5 w-px bg-border" />
 
         {/* preview */}
-        <Button variant="secondary" size="sm" onClick={() => setDrawer((d) => !d)}>
+        <Button variant="secondary" size="sm" onClick={toggleDrawer}>
           <Eye /> {drawer ? t("topbar.hide") : t("topbar.yaml")}
         </Button>
 
@@ -543,7 +416,7 @@ export default function App() {
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}>
+            <DropdownMenuItem onClick={toggleTheme}>
               {theme === "dark" ? <Sun /> : <Moon />} {t("topbar.toggleTheme")}
             </DropdownMenuItem>
             <DropdownMenuLabel>{t("topbar.language")}</DropdownMenuLabel>
@@ -561,7 +434,8 @@ export default function App() {
 
         {/* actions */}
         <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
-          {validating ? <span className="spinner" /> : <CircleCheck />} {t("topbar.validate")}
+          <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
+          {t("topbar.validate")}
         </Button>
         <Button
           variant="secondary"
@@ -570,7 +444,10 @@ export default function App() {
           disabled={!dirty || saving}
           title={t("topbar.resetHint")}
         >
-          <RotateCcw /> {t("topbar.reset")}
+          <span className={BTN_ICON}>
+            <RotateCcw />
+          </span>
+          {t("topbar.reset")}
         </Button>
         <Button
           size="sm"
@@ -578,7 +455,9 @@ export default function App() {
           disabled={saving}
           title={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}
         >
-          {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
+          <span className={BTN_ICON}>
+            {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
+          </span>
           {t("topbar.save")}
         </Button>
       </header>

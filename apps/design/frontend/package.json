@@ -32,7 +32,9 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tailwind-merge": "^3.6.0",
-    "vaul": "^1.1.2"
+    "vaul": "^1.1.2",
+    "zundo": "^2.3.0",
+    "zustand": "^4.5.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
