@@ -77,7 +77,7 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
-        className="flex w-[min(46rem,92vw)] max-w-none flex-col gap-0 overflow-hidden p-0 max-h-[85vh]"
+        className="flex w-[min(58rem,94vw)] max-w-none flex-col gap-0 overflow-hidden p-0 max-h-[85vh]"
         aria-label={t("catalog.aria")}
       >
         <DialogHeader className="px-4 pt-4 pb-2">
@@ -121,7 +121,7 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
               )}
             </div>
 
-            <div className="grid min-h-0 flex-1 grid-cols-[14rem_1fr] border-t border-border">
+            <div className="grid min-h-0 flex-1 grid-cols-[16rem_1fr] border-t border-border">
               <div className="min-h-0 overflow-y-auto border-r border-border p-1.5">
                 {filtered.length === 0 ? (
                   <p className="p-3 text-2xs text-muted-foreground">{t("catalog.noMatch")}</p>
@@ -174,26 +174,28 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                       {selected.schema} · {t("catalog.cols", { n: selected.columns.length })}
                     </div>
 
-                    <div>
-                      {selected.columns.map((c) => {
+                    <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-stretch">
+                      {selected.columns.map((c, i) => {
                         const ref = fkTarget.get(selected.name)?.get(c.name);
                         const hit = !!needle && c.name.toLowerCase().includes(needle);
+                        const last = i === selected.columns.length - 1;
+                        const cell = cn(
+                          "flex items-center py-1.5",
+                          !last && "border-b border-border/50",
+                          hit && "bg-primary/10",
+                        );
                         return (
-                          <div
-                            key={c.name}
-                            className={cn(
-                              "flex items-center gap-2.5 border-b border-border/50 px-1.5 py-1.5 last:border-none",
-                              hit && "rounded bg-primary/10",
-                            )}
-                          >
-                            <span className="grid w-4 shrink-0 place-items-center">
+                          <div key={c.name} className="contents">
+                            <span className={cn(cell, "justify-center pr-2 pl-1.5", hit && "rounded-l")}>
                               {c.is_primary_key ? (
                                 <KeyRound className="size-3.5 text-kind-root" aria-label={t("catalog.pk")} />
                               ) : ref ? (
                                 <Link2 className="size-3.5 text-accent2" />
-                              ) : null}
+                              ) : (
+                                <span className="size-3.5" />
+                              )}
                             </span>
-                            <span className="flex min-w-0 items-baseline gap-2">
+                            <span className={cn(cell, "min-w-0 gap-2 pr-4")}>
                               <span className="truncate text-sm">
                                 <Mark text={c.name} q={needle} />
                               </span>
@@ -203,18 +205,20 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                                 </span>
                               )}
                               {ref && (
-                                <span className="shrink-0 truncate font-mono text-2xs text-accent2/85">
+                                <span className="min-w-0 truncate font-mono text-2xs text-accent2/85">
                                   <span className="text-muted-foreground/60">→</span> {ref}
                                 </span>
                               )}
                             </span>
-                            <span
-                              className={cn(
-                                "ml-auto shrink-0 rounded border border-current/30 px-1.5 py-0.5 font-mono text-2xs",
-                                typeClass(suggested(c)),
-                              )}
-                            >
-                              {c.sql_type}
+                            <span className={cn(cell, "justify-start pr-1.5", hit && "rounded-r")}>
+                              <span
+                                className={cn(
+                                  "rounded border border-current/30 px-1.5 py-0.5 font-mono text-2xs whitespace-nowrap",
+                                  typeClass(suggested(c)),
+                                )}
+                              >
+                                {c.sql_type}
+                              </span>
                             </span>
                           </div>
                         );
