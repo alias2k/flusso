@@ -136,10 +136,14 @@ function ValueOpEditor({
                 placeholder={t("filters.value")}
                 className="min-w-0 flex-1"
               />
-              <RemoveButton
-                label={t("common.remove")}
-                onClick={() => onChange({ ...filter, value: { list: value.list.filter((_, k) => k !== j) } })}
-              />
+              {j > 0 ? (
+                <RemoveButton
+                  label={t("common.remove")}
+                  onClick={() => onChange({ ...filter, value: { list: value.list.filter((_, k) => k !== j) } })}
+                />
+              ) : (
+                <div className="size-8 shrink-0" aria-hidden />
+              )}
             </div>
           ))}
           <AddButton
