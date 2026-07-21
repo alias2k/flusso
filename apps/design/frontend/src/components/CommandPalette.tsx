@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { Boxes, CornerDownLeft, Settings2, Table2, Zap } from "lucide-react";
 import type { CatalogResponse } from "../api";
 import { useT } from "../i18n";
-import { rankRecords } from "../model/rank";
+import { frecencyScores, recordPick } from "../model/frecency";
+import { createSearch, type Ranked, runSearch } from "../model/rank";
 import {
   buildSearchRecords,
   type SearchCategory,
@@ -48,6 +49,32 @@ function Glyph({ record }: { record: SearchRecord }) {
     >
       {Icon && <Icon className="size-3.5" />}
     </span>
+  );
+}
+
+/// Renders `text` with the matched character ranges emphasised.
+function Highlighted({ text, positions }: { text: string; positions: number[] }) {
+  if (!positions.length) return <>{text}</>;
+  const hit = new Set(positions);
+  const parts: { on: boolean; text: string }[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const on = hit.has(i);
+    const last = parts[parts.length - 1];
+    if (last?.on === on) last.text += text[i];
+    else parts.push({ on, text: text[i] ?? "" });
+  }
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.on ? (
+          <span key={i} className="font-semibold text-primary">
+            {p.text}
+          </span>
+        ) : (
+          <span key={i}>{p.text}</span>
+        ),
+      )}
+    </>
   );
 }
 
@@ -154,24 +181,34 @@ export function CommandPalette({
     () => (open ? [...commands, ...buildSearchRecords(doc, catalog, t)] : []),
     [open, commands, doc, catalog, t],
   );
-  const byId = useMemo(() => new Map(records.map((r) => [r.id.toLowerCase(), r])), [records]);
+  const byId = useMemo(() => new Map(records.map((r) => [r.id, r])), [records]);
+  const search = useMemo(() => createSearch(records), [records]);
+  // Frecency snapshot per open — picks made this session apply on the next open.
+  const frecency = useMemo(() => (open ? frecencyScores() : {}), [open]);
 
   const needle = q.trim();
-  const ranked = useMemo(() => {
-    // Empty query: show the actionable top level (commands, indexes, settings),
-    // not the whole field/column corpus.
+  const ranked: Ranked[] = useMemo(() => {
+    const onScreen = (r: SearchRecord) =>
+      (r.index !== undefined && r.index === active) || (active === "config" && r.category === "setting");
+    const weight = (r: SearchRecord) => (onScreen(r) ? 1.4 : 1) * (1 + Math.min(0.6, (frecency[r.id] ?? 0) * 0.12));
+    // Empty query: the actionable top level (commands, indexes, settings),
+    // ordered by frecency so your most-used surface first.
     if (!needle)
-      return records.filter((r) => r.category === "action" || r.category === "index" || r.category === "setting");
-    return rankRecords(
-      records,
-      needle,
-      (r) => (r.index !== undefined && r.index === active) || (active === "config" && r.category === "setting"),
-    );
-  }, [needle, records, active]);
+      return records
+        .filter((r) => r.category === "action" || r.category === "index" || r.category === "setting")
+        .sort((a, b) => weight(b) - weight(a))
+        .map((record) => ({ record, positions: [] }));
+    return runSearch(search, needle, byId, weight);
+  }, [needle, search, records, byId, active, frecency]);
 
   // The highlighted record drives the preview; fall back to the top result when
-  // cmdk's controlled value is empty or points at a now-filtered-out row.
-  const current = byId.get(value.toLowerCase()) ?? ranked[0] ?? null;
+  // cmdk's controlled value is empty or points at a now-filtered-out row (and
+  // tolerate cmdk normalising the value's case).
+  const current =
+    byId.get(value) ??
+    ranked.find((x) => x.record.id.toLowerCase() === value.toLowerCase())?.record ??
+    ranked[0]?.record ??
+    null;
 
   const navigate = (target: SearchTarget) => {
     switch (target.kind) {
@@ -198,6 +235,7 @@ export function CommandPalette({
   };
 
   const onSelect = (r: SearchRecord) => {
+    recordPick(r.id);
     onOpenChange(false);
     if (r.run) r.run();
     else if (r.target) navigate(r.target);
@@ -246,7 +284,7 @@ export function CommandPalette({
             <CommandList className="max-h-96 p-2 sm:border-r sm:border-border">
               <CommandEmpty>{t("search.empty")}</CommandEmpty>
               {groups.map((cat) => {
-                const all = ranked.filter((r) => r.category === cat);
+                const all = ranked.filter((x) => x.record.category === cat);
                 if (!all.length) return null;
                 const items = all.slice(0, 8);
                 return (
@@ -262,7 +300,7 @@ export function CommandPalette({
                       </span>
                     }
                   >
-                    {items.map((r) => (
+                    {items.map(({ record: r, positions }) => (
                       <CommandItem
                         key={r.id}
                         value={r.id}
@@ -274,7 +312,9 @@ export function CommandPalette({
                           className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary opacity-0 group-data-[selected=true]:opacity-100"
                         />
                         <Glyph record={r} />
-                        <span className="min-w-0 flex-1 truncate">{r.title}</span>
+                        <span className="min-w-0 flex-1 truncate">
+                          <Highlighted text={r.title} positions={positions} />
+                        </span>
                         <span className="flex shrink-0 items-center gap-2 pl-2">
                           {r.subtitle && (
                             <span className="hidden max-w-40 truncate text-2xs text-muted-foreground sm:inline">
