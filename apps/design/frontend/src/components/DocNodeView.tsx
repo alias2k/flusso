@@ -1,5 +1,4 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { CheckCheck, X } from "lucide-react";
 import { useState } from "react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
@@ -45,6 +44,10 @@ export function DocNodeView({ data, selected }: NodeProps) {
   for (const l of node.leaves) {
     if (l.column && (SCALAR_TYPES as string[]).includes(l.kind)) includedByCol.set(l.column, l);
   }
+  // How many catalog columns are currently included — drives the master
+  // (select-all) checkbox: all / none / indeterminate.
+  const includedCount = cols.filter((c) => includedByCol.has(c.name)).length;
+  const allIncluded = cols.length > 0 && includedCount === cols.length;
   // Leaves not represented by a catalog-column checkbox: special types, or a
   // scalar whose column isn't in the catalog (offline / typed by hand).
   const catalogCols = new Set(cols.map((c) => c.name));
@@ -136,37 +139,24 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   onChange={setFilter}
                   placeholder={t("node.filterCols")}
                 />
-                <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border bg-secondary">
-                  <Hint label={t("node.includeAll")} side="top">
-                    <button
-                      type="button"
-                      aria-label={t("node.includeAll")}
-                      className="flex cursor-pointer items-center px-2 py-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
-                      onClick={() =>
-                        apply((s) =>
-                          edit.includeColumns(
-                            s,
-                            node.path,
-                            cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
-                          ),
-                        )
-                      }
-                    >
-                      <CheckCheck className="size-3.5" />
-                    </button>
-                  </Hint>
-                  <span className="h-4 w-px bg-border" />
-                  <Hint label={t("node.clearAll")} side="top">
-                    <button
-                      type="button"
-                      aria-label={t("node.clearAll")}
-                      className="flex cursor-pointer items-center px-2 py-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                      onClick={() => apply((s) => edit.clearColumns(s, node.path))}
-                    >
-                      <X className="size-3.5" />
-                    </button>
-                  </Hint>
-                </div>
+                <Hint label={allIncluded ? t("node.clearAll") : t("node.includeAll")} side="top">
+                  <Checkbox
+                    className="size-4"
+                    aria-label={allIncluded ? t("node.clearAll") : t("node.includeAll")}
+                    checked={allIncluded ? true : includedCount === 0 ? false : "indeterminate"}
+                    onCheckedChange={() =>
+                      apply((s) =>
+                        allIncluded
+                          ? edit.clearColumns(s, node.path)
+                          : edit.includeColumns(
+                              s,
+                              node.path,
+                              cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
+                            ),
+                      )
+                    }
+                  />
+                </Hint>
               </div>
             )}
 
