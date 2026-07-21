@@ -81,6 +81,9 @@ export const en: Record<string, string> = {
   "diff.newFile": "new file",
   "diff.write": "{n, plural, one {Write # file} other {Write # files}}",
   "diff.unchanged": "{n, plural, one {# unchanged line} other {# unchanged lines}}",
+  "diff.viewUnified": "Unified",
+  "diff.viewOld": "Old",
+  "diff.viewNew": "New",
 
   // shared
   "common.cancel": "Cancel",

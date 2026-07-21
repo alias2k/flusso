@@ -120,7 +120,28 @@ function DiffRow({ row }: { row: Row }) {
   );
 }
 
-export function DiffView({ path, current, next }: { path: string; current: string; next: string }) {
+/// Which side of the change to show: `unified` keeps both, `old` hides
+/// additions (the file as it was), `new` hides removals (the file as it will
+/// be) — the surviving rows keep their add/remove colour either way.
+export type DiffMode = "unified" | "old" | "new";
+
+function rowVisible(type: Row["type"], mode: DiffMode): boolean {
+  if (mode === "old") return type !== "add";
+  if (mode === "new") return type !== "del";
+  return true;
+}
+
+export function DiffView({
+  path,
+  current,
+  next,
+  mode,
+}: {
+  path: string;
+  current: string;
+  next: string;
+  mode: DiffMode;
+}) {
   const { t } = useT();
   const [open, setOpen] = useState(true);
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
@@ -128,6 +149,8 @@ export function DiffView({ path, current, next }: { path: string; current: strin
   const segments = segment(rows);
   const adds = rows.filter((r) => r.type === "add").length;
   const dels = rows.filter((r) => r.type === "del").length;
+  const renderRows = (rs: Row[]) =>
+    rs.filter((r) => rowVisible(r.type, mode)).map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
 
   return (
     <div className="diff-file mb-4 overflow-hidden rounded-lg border border-border shadow-sm last:mb-0">
@@ -154,10 +177,8 @@ export function DiffView({ path, current, next }: { path: string; current: strin
         <div className="overflow-x-auto">
           <div className="w-max min-w-full font-mono text-xs leading-relaxed">
             {segments.map((seg) => {
-              if (seg.kind === "rows")
-                return seg.rows.map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
-              if (expanded.has(seg.id))
-                return seg.rows.map((r, k) => <DiffRow key={`${r.oldNo}-${r.newNo}-${k}`} row={r} />);
+              if (seg.kind === "rows") return renderRows(seg.rows);
+              if (expanded.has(seg.id)) return renderRows(seg.rows);
               return (
                 <button
                   key={seg.id}

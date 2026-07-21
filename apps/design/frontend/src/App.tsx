@@ -18,7 +18,7 @@ import type { ColumnShape, FileDiff, SaveSchemaInput } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
-import { DiffView } from "./components/DiffView";
+import { DiffView, type DiffMode } from "./components/DiffView";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
@@ -834,19 +834,42 @@ function DiffModal({
   onCancel: () => void;
 }) {
   const { t } = useT();
+  const [mode, setMode] = useState<DiffMode>("unified");
   const changed = diffs.filter((d) => d.changed);
+  const modes: { id: DiffMode; label: string }[] = [
+    { id: "unified", label: t("diff.viewUnified") },
+    { id: "old", label: t("diff.viewOld") },
+    { id: "new", label: t("diff.viewNew") },
+  ];
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent
         className="flex w-[min(56rem,92vw)] max-w-none flex-col max-h-[85vh] sm:max-w-none"
         aria-label={t("diff.aria")}
       >
-        <DialogHeader>
+        <DialogHeader className="flex-row items-center justify-between gap-3 pr-8">
           <DialogTitle>{t("diff.title", { n: changed.length })}</DialogTitle>
+          <div className="inline-flex shrink-0 rounded-md border border-border bg-secondary p-0.5 text-xs">
+            {modes.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => setMode(m.id)}
+                className={cn(
+                  "cursor-pointer rounded-sm px-2.5 py-1 transition-colors",
+                  mode === m.id
+                    ? "bg-background font-medium text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {changed.map((d) => (
-            <DiffView key={d.path} path={d.path} current={d.current} next={d.next} />
+            <DiffView key={d.path} path={d.path} current={d.current} next={d.next} mode={mode} />
           ))}
         </div>
         <DialogFooter>
