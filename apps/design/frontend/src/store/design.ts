@@ -32,6 +32,9 @@ interface DesignState {
   collapsed: Set<string>;
   preview: PreviewResponse | null;
   diagnostics: DiagnosticDto[] | null;
+  /// A pending "pan the canvas to this node" request (e.g. from global search),
+  /// consumed and cleared by the canvas once the node is on screen.
+  focus: { index: string; nodeId: string } | null;
 
   setCatalog: (catalog: CatalogResponse | null) => void;
   setSaved: (saved: string) => void;
@@ -50,6 +53,9 @@ interface DesignState {
 
   loadCollapsed: (index: string) => void;
   toggleCollapsed: (id: string) => void;
+
+  requestFocus: (index: string, nodeId: string) => void;
+  clearFocus: () => void;
 }
 
 export const useDesignStore = create<DesignState>()(
@@ -64,6 +70,7 @@ export const useDesignStore = create<DesignState>()(
       collapsed: new Set<string>(),
       preview: null,
       diagnostics: null,
+      focus: null,
 
       setCatalog: (catalog) => set({ catalog }),
       setSaved: (saved) => set({ saved }),
@@ -203,6 +210,9 @@ export const useDesignStore = create<DesignState>()(
         }
         set({ collapsed: next });
       },
+
+      requestFocus: (index, nodeId) => set({ focus: { index, nodeId } }),
+      clearFocus: () => set({ focus: null }),
     }),
     {
       // Track only `doc`; reference equality keeps no-op edits and selection/active changes off the stack.

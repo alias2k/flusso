@@ -83,7 +83,6 @@ export const en: Record<string, string> = {
   // shared
   "common.cancel": "Cancel",
   "common.remove": "remove",
-  "common.clear": "Clear",
   "common.close": "Close",
   "common.column": "column",
 
@@ -291,6 +290,15 @@ export const en: Record<string, string> = {
   "canvas.resetLayout": "Reset layout",
   "canvas.showMinimap": "Show minimap",
   "canvas.hideMinimap": "Hide minimap",
-  "canvas.jumpToNode": "jump to node…",
-  "canvas.noMatches": "No matching node",
+
+  // global search / command palette
+  "search.placeholder": "Search everything…",
+  "search.empty": "No results",
+  "search.title": "Global search",
+  "search.actions": "Actions",
+  "search.indexes": "Indexes",
+  "search.fields": "Fields",
+  "search.settings": "Settings",
+  "search.tables": "Tables & columns",
+  "search.serverAddresses": "Server addresses",
 };
