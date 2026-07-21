@@ -23,15 +23,16 @@ const CAT_ICON: Partial<Record<SearchCategory, ComponentType<{ className?: strin
   catalog: Table2,
 };
 
-const CAT_TINT: Partial<Record<SearchCategory, string>> = {
-  action: "text-warn",
-  index: "text-kind-root",
-  setting: "text-slate",
-  catalog: "text-accent2",
+const CAT_COLOR: Partial<Record<SearchCategory, string>> = {
+  action: "var(--warn)",
+  index: "var(--k-root)",
+  setting: "var(--slate)",
+  catalog: "var(--accent-2)",
 };
 
-/// A colour string like `var(--t-string)` → the same colour at 40% for a border.
+/// A palette colour string → the same colour softened for a border / a tile fill.
 const softBorder = (color: string) => `color-mix(in srgb, ${color} 40%, transparent)`;
+const softFill = (color: string) => `color-mix(in srgb, ${color} 16%, var(--panel-3))`;
 
 /// The tinted category glyph (actions/indexes/settings/tables) or the typed dot
 /// (fields). Shared by the row and the preview head.
@@ -39,9 +40,12 @@ function Glyph({ record }: { record: SearchRecord }) {
   if (record.color)
     return <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: record.color }} />;
   const Icon = CAT_ICON[record.category];
-  const tint = CAT_TINT[record.category] ?? "text-muted-foreground";
+  const color = CAT_COLOR[record.category] ?? "var(--muted)";
   return (
-    <span className={`grid size-6 shrink-0 place-items-center rounded-md border border-border bg-accent ${tint}`}>
+    <span
+      className="grid size-6 shrink-0 place-items-center rounded-md border"
+      style={{ background: softFill(color), borderColor: softBorder(color), color }}
+    >
       {Icon && <Icon className="size-3.5" />}
     </span>
   );
@@ -52,10 +56,10 @@ function Glyph({ record }: { record: SearchRecord }) {
 function DetailPane({ record }: { record: SearchRecord | null }) {
   const { t } = useT();
   if (!record)
-    return <div className="hidden p-4 text-2xs text-muted-foreground sm:block">{t("search.emptyDetail")}</div>;
+    return <div className="hidden p-5 text-2xs text-muted-foreground sm:block">{t("search.emptyDetail")}</div>;
   const d: SearchDetail = record.detail;
   return (
-    <div className="hidden min-w-0 flex-col gap-3 p-4 sm:flex">
+    <div className="hidden min-w-0 flex-col gap-4 p-5 sm:flex">
       {d.crumb && d.crumb.length > 0 && (
         <div className="flex flex-wrap items-center gap-1 text-2xs text-muted-foreground">
           {d.crumb.map((c, i) => (
@@ -71,6 +75,11 @@ function DetailPane({ record }: { record: SearchRecord | null }) {
         <Glyph record={record} />
         <span className="min-w-0 truncate">{record.title}</span>
         {d.headKind && <span className="shrink-0 text-xs font-normal text-muted-foreground">{d.headKind}</span>}
+        {record.shortcut && (
+          <kbd className="ml-auto shrink-0 rounded border border-border bg-accent px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
+            {record.shortcut}
+          </kbd>
+        )}
       </h3>
 
       {(d.source ?? d.target) && (
@@ -225,21 +234,62 @@ export function CommandPalette({
       <DialogContent
         showCloseButton={false}
         aria-describedby={undefined}
-        className="top-[12%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-2xl"
+        className="top-[11%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-3xl"
       >
         <DialogTitle className="sr-only">{t("search.title")}</DialogTitle>
         <Command shouldFilter={false} value={value} onValueChange={setValue}>
-          <CommandInput value={q} onValueChange={setQ} placeholder={t("search.placeholder")} />
+          <CommandInput
+            value={q}
+            onValueChange={setQ}
+            placeholder={t("search.placeholder")}
+            leading={
+              <span
+                className="size-2.5 shrink-0 rounded-full"
+                style={{
+                  background: "conic-gradient(from 90deg, var(--accent), var(--accent-2), var(--accent))",
+                  boxShadow: "0 0 0 3px var(--accent-soft)",
+                }}
+              />
+            }
+            trailing={
+              needle ? (
+                <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
+                  {t("search.resultCount", { n: ranked.length })}
+                </span>
+              ) : undefined
+            }
+          />
           <div className="grid sm:grid-cols-[1.55fr_1fr]">
-            <CommandList className="max-h-80 sm:border-r sm:border-border">
+            <CommandList className="max-h-96 p-2 sm:border-r sm:border-border">
               <CommandEmpty>{t("search.empty")}</CommandEmpty>
               {groups.map((cat) => {
-                const items = ranked.filter((r) => r.category === cat).slice(0, 8);
-                if (!items.length) return null;
+                const all = ranked.filter((r) => r.category === cat);
+                if (!all.length) return null;
+                const items = all.slice(0, 8);
                 return (
-                  <CommandGroup key={cat} heading={headings[cat]}>
+                  <CommandGroup
+                    key={cat}
+                    heading={
+                      <span className="flex w-full items-center gap-2">
+                        <span>{headings[cat]}</span>
+                        <span className="h-px flex-1 bg-border" />
+                        <span className="rounded-full bg-accent px-1.5 text-3xs font-medium tabular-nums text-muted-foreground">
+                          {all.length}
+                        </span>
+                      </span>
+                    }
+                  >
                     {items.map((r) => (
-                      <CommandItem key={r.id} value={r.id} onSelect={() => onSelect(r)}>
+                      <CommandItem
+                        key={r.id}
+                        value={r.id}
+                        onSelect={() => onSelect(r)}
+                        className="group relative gap-2.5 py-2 data-[selected=true]:bg-primary/10 data-[selected=true]:text-foreground"
+                      >
+                        <span
+                          aria-hidden
+                          className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary opacity-0 group-data-[selected=true]:opacity-100"
+                        />
                         <Glyph record={r} />
                         <span className="min-w-0 flex-1 truncate">{r.title}</span>
                         <span className="flex shrink-0 items-center gap-2 pl-2">

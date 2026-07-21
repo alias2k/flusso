@@ -300,6 +300,7 @@ export const it: Record<string, string> = {
   "search.placeholder": "Cerca ovunque…",
   "search.empty": "Nessun risultato",
   "search.emptyDetail": "Seleziona un risultato per l'anteprima.",
+  "search.resultCount": "{n, plural, one {# risultato} other {# risultati}}",
   "search.title": "Ricerca globale",
   "search.actions": "Azioni",
   "search.indexes": "Indici",

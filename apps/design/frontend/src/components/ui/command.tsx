@@ -19,18 +19,27 @@ function Command({ className, ...props }: React.ComponentProps<typeof CommandPri
   );
 }
 
-function CommandInput({ className, ...props }: React.ComponentProps<typeof CommandPrimitive.Input>) {
+function CommandInput({
+  className,
+  leading,
+  trailing,
+  ...props
+}: React.ComponentProps<typeof CommandPrimitive.Input> & {
+  leading?: React.ReactNode;
+  trailing?: React.ReactNode;
+}) {
   return (
-    <div data-slot="command-input-wrapper" className="flex items-center gap-2 border-b border-border px-2.5">
-      <SearchIcon className="size-3.5 shrink-0 opacity-50" />
+    <div data-slot="command-input-wrapper" className="flex items-center gap-2.5 border-b border-border px-3.5">
+      {leading ?? <SearchIcon className="size-4 shrink-0 opacity-50" />}
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(
-          "flex h-8 w-full bg-transparent py-2 text-sm outline-hidden placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
+          "flex h-11 w-full bg-transparent py-3 text-sm outline-hidden placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
           className,
         )}
         {...props}
       />
+      {trailing}
     </div>
   );
 }

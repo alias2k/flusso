@@ -530,7 +530,7 @@ export default function App() {
           style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 55%), var(--panel-2)" }}
         >
           <span
-            className="size-2 shrink-0 rounded-full"
+            className="size-2.5 shrink-0 rounded-full"
             style={{
               background: "conic-gradient(from 90deg, var(--accent), var(--accent-2), var(--accent))",
               boxShadow: "0 0 0 3px var(--accent-soft)",

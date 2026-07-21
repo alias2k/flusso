@@ -295,6 +295,7 @@ export const en: Record<string, string> = {
   "search.placeholder": "Search everything…",
   "search.empty": "No results",
   "search.emptyDetail": "Select a result to preview it.",
+  "search.resultCount": "{n, plural, one {# result} other {# results}}",
   "search.title": "Global search",
   "search.actions": "Actions",
   "search.indexes": "Indexes",
