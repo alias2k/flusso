@@ -9,10 +9,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 export function Hint({
   label,
   side = "bottom",
+  className,
   children,
 }: {
   label: string;
   side?: "top" | "bottom" | "left" | "right";
+  /// Forwarded to the tooltip content — e.g. a `max-w-*` so long text wraps.
+  className?: string;
   children: ReactNode;
 }) {
   return (
@@ -20,7 +23,9 @@ export function Hint({
       <TooltipTrigger asChild>
         <span className="inline-flex">{children}</span>
       </TooltipTrigger>
-      <TooltipContent side={side}>{label}</TooltipContent>
+      <TooltipContent side={side} className={className}>
+        {label}
+      </TooltipContent>
     </Tooltip>
   );
 }

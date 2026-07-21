@@ -84,18 +84,17 @@ const typeDesc = (t: Translate, varKey: string): string => {
   }
 };
 
-// One legend entry: the colour swatch + label, with its explanation on a muted
-// line underneath. Not interactive, so it takes the default cursor and doesn't
-// select as text.
+// One legend entry: the colour swatch + label, with its explanation shown as a
+// tooltip above the row on hover. Not interactive, so it takes the default
+// cursor and doesn't select as text.
 function LegendRow({ color, label, desc }: { color: string; label: string; desc: string }) {
   return (
-    <div className="flex cursor-default items-start gap-2 px-1.5 py-1 select-none">
-      <span className="mt-0.5 inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
-      <div className="min-w-0">
-        <div className="text-2xs text-foreground">{label}</div>
-        <div className="text-3xs leading-snug text-muted-foreground">{desc}</div>
+    <Hint label={desc} side="top" className="max-w-52 text-center leading-snug">
+      <div className="legend-row flex w-full cursor-default items-center gap-2 px-1.5 py-1 text-2xs text-muted-foreground select-none">
+        <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
+        {label}
       </div>
-    </div>
+    </Hint>
   );
 }
 
@@ -549,20 +548,24 @@ export default function App() {
                 <ChevronRight className="size-3 transition-transform group-open:rotate-90" aria-hidden="true" />
                 {t("sidebar.legend")}
               </summary>
-              <div className="max-h-[45vh] overflow-y-auto">
+              <div className="max-h-[45vh] overflow-y-auto ps-2">
                 <div className={NAV_HEADING}>{t("sidebar.kinds")}</div>
-                {KIND_ROWS.map((k) => (
-                  <LegendRow key={k} color={`var(--k-${k})`} label={k} desc={kindDesc(t, k)} />
-                ))}
+                <div className="flex flex-col">
+                  {KIND_ROWS.map((k) => (
+                    <LegendRow key={k} color={`var(--k-${k})`} label={k} desc={kindDesc(t, k)} />
+                  ))}
+                </div>
                 <div className={NAV_HEADING}>{t("sidebar.types")}</div>
-                {TYPE_FAMILIES.map((f) => (
-                  <LegendRow
-                    key={f.varKey}
-                    color={`var(--t-${f.varKey})`}
-                    label={f.label}
-                    desc={typeDesc(t, f.varKey)}
-                  />
-                ))}
+                <div className="flex flex-col">
+                  {TYPE_FAMILIES.map((f) => (
+                    <LegendRow
+                      key={f.varKey}
+                      color={`var(--t-${f.varKey})`}
+                      label={f.label}
+                      desc={typeDesc(t, f.varKey)}
+                    />
+                  ))}
+                </div>
               </div>
             </details>
           </nav>
