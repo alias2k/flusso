@@ -28,20 +28,26 @@ function Mark({ text, q }: { text: string; q: string }) {
 
 const suggested = (c: ColumnShape): string => (typeof c.suggested_type === "string" ? c.suggested_type : "other");
 
+/// A reference to another table, `table.column` — the navigable unit.
+interface Ref {
+  table: string;
+  column: string;
+}
+
 /// Derive, from the catalog's foreign keys: each column's outgoing target
 /// (`orders.id`) and, per table, the incoming references that point at it.
 function relations(tables: TableShape[]) {
-  const fkTarget = new Map<string, Map<string, string>>();
-  const incoming = new Map<string, string[]>();
+  const fkTarget = new Map<string, Map<string, Ref>>();
+  const incoming = new Map<string, Ref[]>();
   for (const tbl of tables) {
-    const cols = new Map<string, string>();
+    const cols = new Map<string, Ref>();
     for (const fk of tbl.foreign_keys) {
       fk.columns.forEach((c, i) =>
-        cols.set(c, `${fk.references_table}.${fk.references_columns[i] ?? fk.references_columns[0] ?? ""}`),
+        cols.set(c, { table: fk.references_table, column: fk.references_columns[i] ?? fk.references_columns[0] ?? "" }),
       );
       incoming.set(fk.references_table, [
         ...(incoming.get(fk.references_table) ?? []),
-        `${tbl.name}.${fk.columns.join(", ")}`,
+        { table: tbl.name, column: fk.columns.join(", ") },
       ]);
     }
     fkTarget.set(tbl.name, cols);
@@ -73,6 +79,12 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
   );
   // Keep the selection valid without a state write: fall back to the first match.
   const selected = filtered.find((tbl) => tbl.name === selectedName) ?? filtered[0] ?? null;
+
+  // Jump to a related table — clear the filter so the target is always selectable.
+  const goto = (table: string) => {
+    setQ("");
+    setSelectedName(table);
+  };
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -205,8 +217,15 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                                 </span>
                               )}
                               {ref && (
-                                <span className="min-w-0 truncate font-mono text-2xs text-accent2/85">
-                                  <span className="text-muted-foreground/60">→</span> {ref}
+                                <span className="min-w-0 truncate font-mono text-2xs">
+                                  <span className="text-muted-foreground/60">→</span>{" "}
+                                  <button
+                                    type="button"
+                                    onClick={() => goto(ref.table)}
+                                    className="cursor-pointer text-accent2/85 hover:text-accent2 hover:underline"
+                                  >
+                                    {ref.table}.{ref.column}
+                                  </button>
                                 </span>
                               )}
                             </span>
@@ -232,13 +251,15 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                         </div>
                         <div className="flex flex-wrap gap-1.5">
                           {incoming.get(selected.name)?.map((ref) => (
-                            <span
-                              key={ref}
-                              className="inline-flex items-center gap-1.5 rounded border border-border/60 bg-secondary px-2 py-1 font-mono text-2xs text-muted-foreground"
+                            <button
+                              key={`${ref.table}.${ref.column}`}
+                              type="button"
+                              onClick={() => goto(ref.table)}
+                              className="inline-flex cursor-pointer items-center gap-1.5 rounded border border-border/60 bg-secondary px-2 py-1 font-mono text-2xs text-muted-foreground hover:border-accent2/50 hover:text-foreground"
                             >
                               <Link2 className="size-3 shrink-0 -scale-x-100 text-accent2" />
-                              {ref}
-                            </span>
+                              {ref.table}.{ref.column}
+                            </button>
                           ))}
                         </div>
                       </div>
