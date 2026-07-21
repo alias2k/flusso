@@ -204,8 +204,9 @@ export const it: Record<string, string> = {
   "preview.example": "esempio",
   "preview.building": "costruzione…",
   "preview.refresh": "aggiorna",
-  "preview.fetch": "ottieni",
-  "preview.sampleHint": "Costruisci un documento da una riga reale del database.",
+  "preview.fetch": "Costruisci esempio",
+  "preview.sampleTitle": "Documento di esempio",
+  "preview.sampleHint": "Costruisci un documento da una riga reale del database — esattamente ciò che scrive il sink.",
 
   // catalog browser
   "catalog.aria": "Tabelle del database",

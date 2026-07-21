@@ -199,8 +199,9 @@ export const en: Record<string, string> = {
   "preview.example": "example",
   "preview.building": "building…",
   "preview.refresh": "refresh",
-  "preview.fetch": "fetch",
-  "preview.sampleHint": "Build a document from a live database row.",
+  "preview.fetch": "Build sample",
+  "preview.sampleTitle": "Sample document",
+  "preview.sampleHint": "Build a document from a live database row — exactly what the sink writes.",
 
   // catalog browser
   "catalog.aria": "Database tables",

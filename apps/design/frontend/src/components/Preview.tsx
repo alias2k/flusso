@@ -1,12 +1,11 @@
 import { useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Database, Play, RefreshCw } from "lucide-react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
-import { Icon } from "./Icon";
 
 type Tab = "document" | "yaml" | "mapping" | "sample";
 
@@ -167,23 +166,41 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
       .finally(() => setLoading(false));
   };
 
-  return (
-    <div>
-      <div className="mb-2 flex items-center gap-2">
-        {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
-        <Button variant="secondary" size="sm" className="ml-auto gap-1.5" onClick={fetchSample} disabled={loading}>
-          <Icon name="play" size={13} />{" "}
-          {loading ? t("preview.building") : result ? t("preview.refresh") : t("preview.fetch")}
-        </Button>
+  const doc = result?.document;
+  const errorText = error ?? (result && !result.db_reachable ? result.error : null);
+
+  // Loaded: the built document, with a refresh + the example marker.
+  if (doc !== undefined && doc !== null && result?.db_reachable !== false) {
+    return (
+      <div>
+        <div className="mb-2 flex items-center gap-2">
+          {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
+          {result?.note && <span className="text-2xs text-muted-foreground">{result.note}</span>}
+          <Button variant="secondary" size="sm" className="ml-auto gap-1.5" onClick={fetchSample} disabled={loading}>
+            {loading ? <span className="spinner" /> : <RefreshCw className="size-3.5" />}
+            {t("preview.refresh")}
+          </Button>
+        </div>
+        <CodeBlock text={JSON.stringify(doc, null, 2)} lang="json" />
       </div>
-      {error && <div className="banner error">{error}</div>}
-      {result && !result.db_reachable && <div className="banner error">{result.error}</div>}
-      {result?.note && <p className="hint">{result.note}</p>}
-      {result?.document !== undefined && result.document !== null ? (
-        <CodeBlock text={JSON.stringify(result.document, null, 2)} lang="json" />
-      ) : (
-        !loading && !error && <p className="text-sm text-muted-foreground">{t("preview.sampleHint")}</p>
-      )}
+    );
+  }
+
+  // Empty / error: a centred prompt with the primary "build" action.
+  return (
+    <div className="flex flex-col items-center gap-3 py-12 text-center">
+      <span className="grid size-12 place-items-center rounded-full border border-border bg-secondary text-accent2">
+        <Database className="size-5" />
+      </span>
+      <div>
+        <p className="text-sm font-medium text-foreground">{t("preview.sampleTitle")}</p>
+        <p className="mx-auto mt-1 max-w-xs text-xs text-muted-foreground">{t("preview.sampleHint")}</p>
+      </div>
+      {errorText && <p className="max-w-sm text-xs text-destructive">{errorText}</p>}
+      <Button size="sm" className="gap-1.5" onClick={fetchSample} disabled={loading}>
+        {loading ? <span className="spinner" /> : <Play className="size-3.5" />}
+        {loading ? t("preview.building") : t("preview.fetch")}
+      </Button>
     </div>
   );
 }

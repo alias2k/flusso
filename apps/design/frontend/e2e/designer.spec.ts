@@ -165,7 +165,7 @@ test("preview drawer shows the OpenSearch mapping", async ({ page }) => {
 test("sample document builds a real row from the database", async ({ page }) => {
   await page.getByRole("button", { name: "YAML", exact: true }).click();
   await page.getByRole("button", { name: "Sample", exact: true }).click();
-  await page.getByRole("button", { name: /fetch/ }).click();
+  await page.getByRole("button", { name: /build sample/i }).click();
   // DB is seeded → a JSON document is rendered (a note/banner would mean empty).
   await expect(page.locator("pre.yaml")).toBeVisible();
 });
