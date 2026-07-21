@@ -92,7 +92,7 @@ function LegendRow({ color, label, desc }: { color: string; label: string; desc:
   const [open, setOpen] = useState(false);
   return (
     <div
-      className="legend-row rounded-md px-1.5 py-1 hover:bg-secondary"
+      className={cn("legend-row rounded-md px-1.5 py-1", open && "bg-secondary")}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
     >
