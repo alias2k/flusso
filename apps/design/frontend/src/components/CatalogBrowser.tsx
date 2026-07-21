@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { KeyRound, Link2, Search, X } from "lucide-react";
 import type { CatalogResponse, ColumnShape, TableShape } from "../api";
 import { useT } from "../i18n";
@@ -80,11 +80,21 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
   // Keep the selection valid without a state write: fall back to the first match.
   const selected = filtered.find((tbl) => tbl.name === selectedName) ?? filtered[0] ?? null;
 
-  // Jump to a related table — clear the filter so the target is always selectable.
+  // Jump to a related table — clear the filter so the target is always selectable,
+  // and scroll its row into view once it re-renders.
+  const listRefs = useRef(new Map<string, HTMLButtonElement | null>());
+  const pendingScroll = useRef<string | null>(null);
   const goto = (table: string) => {
+    pendingScroll.current = table;
     setQ("");
     setSelectedName(table);
   };
+  useEffect(() => {
+    const target = pendingScroll.current;
+    if (!target) return;
+    pendingScroll.current = null;
+    listRefs.current.get(target)?.scrollIntoView({ block: "nearest" });
+  }, [selectedName]);
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -145,6 +155,9 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                       <button
                         key={tbl.name}
                         type="button"
+                        ref={(el) => {
+                          listRefs.current.set(tbl.name, el);
+                        }}
                         onClick={() => setSelectedName(tbl.name)}
                         className={cn(
                           "flex w-full items-center gap-2 rounded-md border-l-2 px-2.5 py-2 text-left",
