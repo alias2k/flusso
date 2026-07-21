@@ -10,7 +10,6 @@ import {
   MoreHorizontal,
   RotateCcw,
   Save,
-  Search,
   Sun,
   Table2,
 } from "lucide-react";
@@ -367,12 +366,14 @@ export default function App() {
   // The runnable actions the command palette exposes (its entity records are
   // derived from the document inside the palette). Literal `t(…)` keys so the
   // i18n checker sees them.
+  const runAction = t("search.runAction");
   const commands: SearchRecord[] = [
     {
       id: "cmd.validate",
       category: "action",
       title: t("topbar.validate"),
       keywords: "validate check database diagnostics",
+      detail: { body: t("search.descValidate"), enter: runAction },
       run: () => void validate(),
     },
     {
@@ -380,6 +381,8 @@ export default function App() {
       category: "action",
       title: t("topbar.save"),
       keywords: "save write disk files",
+      shortcut: "⌘S",
+      detail: { body: t("search.descSave"), enter: runAction },
       run: () => void save(),
     },
     {
@@ -387,6 +390,7 @@ export default function App() {
       category: "action",
       title: t("topbar.reset"),
       keywords: "reset discard revert unsaved changes",
+      detail: { body: t("search.descReset"), enter: runAction },
       run: revertChanges,
     },
     {
@@ -394,6 +398,7 @@ export default function App() {
       category: "action",
       title: t("sidebar.deployment"),
       keywords: "deployment settings config connection sinks",
+      detail: { body: t("search.descDeployment"), enter: runAction },
       run: () => setActive("config"),
     },
     {
@@ -401,6 +406,7 @@ export default function App() {
       category: "action",
       title: t("topbar.tables"),
       keywords: "tables database catalog browse columns",
+      detail: { body: t("search.descTables"), enter: runAction },
       run: () => setBrowseCatalog(true),
     },
     {
@@ -408,6 +414,7 @@ export default function App() {
       category: "action",
       title: t("topbar.yaml"),
       keywords: "yaml preview drawer mapping document",
+      detail: { body: t("search.descYaml"), enter: runAction },
       run: toggleDrawer,
     },
     {
@@ -415,6 +422,7 @@ export default function App() {
       category: "action",
       title: t("topbar.toggleTheme"),
       keywords: "theme dark light appearance",
+      detail: { body: t("search.descTheme"), enter: runAction },
       run: toggleTheme,
     },
     {
@@ -422,6 +430,7 @@ export default function App() {
       category: "action",
       title: leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar"),
       keywords: "sidebar toggle panel indexes",
+      detail: { body: t("search.descSidebar"), enter: runAction },
       run: toggleLeft,
     },
   ];
@@ -517,11 +526,18 @@ export default function App() {
         <button
           type="button"
           onClick={() => setPaletteOpen(true)}
-          className="absolute top-1/2 left-1/2 flex h-8 w-72 max-w-[32vw] -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-2 rounded-md border border-border bg-secondary/60 px-3 text-xs text-muted-foreground transition-colors hover:bg-secondary"
+          className="absolute top-1/2 left-1/2 flex h-8 w-72 max-w-[32vw] -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
+          style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 55%), var(--panel-2)" }}
         >
-          <Search className="size-3.5 shrink-0" />
+          <span
+            className="size-2 shrink-0 rounded-full"
+            style={{
+              background: "conic-gradient(from 90deg, var(--accent), var(--accent-2), var(--accent))",
+              boxShadow: "0 0 0 3px var(--accent-soft)",
+            }}
+          />
           <span className="truncate">{t("search.placeholder")}</span>
-          <kbd className="ml-auto rounded border border-border bg-background px-1.5 py-0.5 text-3xs font-medium">
+          <kbd className="ml-auto shrink-0 rounded-full border border-border bg-accent px-2 py-0.5 text-3xs font-medium text-muted-foreground">
             ⌘K
           </kbd>
         </button>

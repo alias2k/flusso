@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import Fuse from "fuse.js";
-import { Boxes, Settings2, Table2, Zap } from "lucide-react";
+import { Boxes, CornerDownLeft, Settings2, Table2, Zap } from "lucide-react";
 import type { CatalogResponse } from "../api";
 import { useT } from "../i18n";
-import { buildSearchRecords, type SearchCategory, type SearchRecord, type SearchTarget } from "../model/search";
+import {
+  buildSearchRecords,
+  type SearchCategory,
+  type SearchDetail,
+  type SearchRecord,
+  type SearchTarget,
+} from "../model/search";
 import { pathId } from "../model/tree";
 import { type Doc, useDesignStore } from "../store/design";
 import { useUiStore } from "../store/ui";
@@ -17,11 +23,94 @@ const CAT_ICON: Partial<Record<SearchCategory, ComponentType<{ className?: strin
   catalog: Table2,
 };
 
+const CAT_TINT: Partial<Record<SearchCategory, string>> = {
+  action: "text-warn",
+  index: "text-kind-root",
+  setting: "text-slate",
+  catalog: "text-accent2",
+};
+
+/// A colour string like `var(--t-string)` → the same colour at 40% for a border.
+const softBorder = (color: string) => `color-mix(in srgb, ${color} 40%, transparent)`;
+
+/// The tinted category glyph (actions/indexes/settings/tables) or the typed dot
+/// (fields). Shared by the row and the preview head.
+function Glyph({ record }: { record: SearchRecord }) {
+  if (record.color)
+    return <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: record.color }} />;
+  const Icon = CAT_ICON[record.category];
+  const tint = CAT_TINT[record.category] ?? "text-muted-foreground";
+  return (
+    <span className={`grid size-6 shrink-0 place-items-center rounded-md border border-border bg-accent ${tint}`}>
+      {Icon && <Icon className="size-3.5" />}
+    </span>
+  );
+}
+
+/// The right-hand preview: what the currently-highlighted record is, with a
+/// breadcrumb, a Postgres→OpenSearch type mapping, flags, and what Enter does.
+function DetailPane({ record }: { record: SearchRecord | null }) {
+  const { t } = useT();
+  if (!record)
+    return <div className="hidden p-4 text-2xs text-muted-foreground sm:block">{t("search.emptyDetail")}</div>;
+  const d: SearchDetail = record.detail;
+  return (
+    <div className="hidden min-w-0 flex-col gap-3 p-4 sm:flex">
+      {d.crumb && d.crumb.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 text-2xs text-muted-foreground">
+          {d.crumb.map((c, i) => (
+            <span key={i} className="flex items-center gap-1">
+              {i > 0 && <span className="text-muted-foreground/50">▸</span>}
+              {c}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <h3 className="flex items-center gap-2 text-base font-semibold">
+        <Glyph record={record} />
+        <span className="min-w-0 truncate">{record.title}</span>
+        {d.headKind && <span className="shrink-0 text-xs font-normal text-muted-foreground">{d.headKind}</span>}
+      </h3>
+
+      {(d.source ?? d.target) && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2.5 py-2 font-mono text-2xs">
+          {d.source && <span className="text-muted-foreground">{d.source}</span>}
+          {d.source && d.target && <span className="text-muted-foreground/60">→</span>}
+          {d.target && <span style={{ color: record.color }}>{d.target}</span>}
+        </div>
+      )}
+
+      {d.body && <p className="text-xs leading-relaxed text-muted-foreground">{d.body}</p>}
+
+      {d.meta && <p className="text-2xs text-muted-foreground">{d.meta}</p>}
+
+      {d.flags && d.flags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {d.flags.map((f, i) => (
+            <span
+              key={i}
+              className={`rounded border px-1.5 py-0.5 text-2xs ${f.ok ? "border-primary/40 text-primary" : "border-border text-muted-foreground"}`}
+            >
+              {f.text}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-auto flex items-center gap-2 border-t border-border pt-3 text-xs text-primary">
+        <CornerDownLeft className="size-3.5 shrink-0" />
+        <span className="truncate">{d.enter}</span>
+      </div>
+    </div>
+  );
+}
+
 /// The global search — a Cmd+K command palette over the whole project: run a UI
 /// action, or jump to any index, field, setting, or database table/column. It
-/// fuzzy-ranks with Fuse, boosts whatever's currently on screen, and navigates
-/// by dispatching store calls (panning the canvas via a focus request for a
-/// field/node, since it lives outside React Flow).
+/// fuzzy-ranks with Fuse, boosts whatever's currently on screen, previews the
+/// highlighted result on the right, and navigates by dispatching store calls
+/// (panning the canvas via a focus request for a field/node).
 export function CommandPalette({
   open,
   onOpenChange,
@@ -39,6 +128,7 @@ export function CommandPalette({
 }) {
   const { t } = useT();
   const [q, setQ] = useState("");
+  const [value, setValue] = useState("");
 
   const setActive = useDesignStore((s) => s.setActive);
   const setSelection = useDesignStore((s) => s.setSelection);
@@ -55,6 +145,7 @@ export function CommandPalette({
     () => (open ? [...commands, ...buildSearchRecords(doc, catalog, t)] : []),
     [open, commands, doc, catalog, t],
   );
+  const byId = useMemo(() => new Map(records.map((r) => [r.id.toLowerCase(), r])), [records]);
   const fuse = useMemo(
     () =>
       new Fuse(records, {
@@ -85,6 +176,10 @@ export function CommandPalette({
       .sort((a, b) => a.score - b.score)
       .map((h) => h.r);
   }, [needle, fuse, records, active]);
+
+  // The highlighted record drives the preview; fall back to the top result when
+  // cmdk's controlled value is empty or points at a now-filtered-out row.
+  const current = byId.get(value.toLowerCase()) ?? ranked[0] ?? null;
 
   const navigate = (target: SearchTarget) => {
     switch (target.kind) {
@@ -130,41 +225,67 @@ export function CommandPalette({
       <DialogContent
         showCloseButton={false}
         aria-describedby={undefined}
-        className="top-[12%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-xl"
+        className="top-[12%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-2xl"
       >
         <DialogTitle className="sr-only">{t("search.title")}</DialogTitle>
-        <Command shouldFilter={false}>
+        <Command shouldFilter={false} value={value} onValueChange={setValue}>
           <CommandInput value={q} onValueChange={setQ} placeholder={t("search.placeholder")} />
-          <CommandList className="max-h-80">
-            <CommandEmpty>{t("search.empty")}</CommandEmpty>
-            {groups.map((cat) => {
-              const items = ranked.filter((r) => r.category === cat).slice(0, 8);
-              if (!items.length) return null;
-              return (
-                <CommandGroup key={cat} heading={headings[cat]}>
-                  {items.map((r) => {
-                    const CatIcon = CAT_ICON[r.category];
-                    return (
+          <div className="grid sm:grid-cols-[1.55fr_1fr]">
+            <CommandList className="max-h-80 sm:border-r sm:border-border">
+              <CommandEmpty>{t("search.empty")}</CommandEmpty>
+              {groups.map((cat) => {
+                const items = ranked.filter((r) => r.category === cat).slice(0, 8);
+                if (!items.length) return null;
+                return (
+                  <CommandGroup key={cat} heading={headings[cat]}>
+                    {items.map((r) => (
                       <CommandItem key={r.id} value={r.id} onSelect={() => onSelect(r)}>
-                        {r.color ? (
-                          <span
-                            className="inline-block size-2.5 shrink-0 rounded-full"
-                            style={{ background: r.color }}
-                          />
-                        ) : CatIcon ? (
-                          <CatIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                        ) : null}
-                        <span className="truncate">{r.title}</span>
-                        {r.subtitle && (
-                          <span className="ml-auto truncate pl-3 text-2xs text-muted-foreground">{r.subtitle}</span>
-                        )}
+                        <Glyph record={r} />
+                        <span className="min-w-0 flex-1 truncate">{r.title}</span>
+                        <span className="flex shrink-0 items-center gap-2 pl-2">
+                          {r.subtitle && (
+                            <span className="hidden max-w-40 truncate text-2xs text-muted-foreground sm:inline">
+                              {r.subtitle}
+                            </span>
+                          )}
+                          {r.color && r.kind && (
+                            <span
+                              className="rounded border px-1.5 py-0.5 font-mono text-2xs"
+                              style={{ color: r.color, borderColor: softBorder(r.color) }}
+                            >
+                              {r.kind}
+                            </span>
+                          )}
+                          {r.shortcut && (
+                            <kbd className="rounded border border-border bg-accent px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
+                              {r.shortcut}
+                            </kbd>
+                          )}
+                        </span>
                       </CommandItem>
-                    );
-                  })}
-                </CommandGroup>
-              );
-            })}
-          </CommandList>
+                    ))}
+                  </CommandGroup>
+                );
+              })}
+            </CommandList>
+            <DetailPane record={current} />
+          </div>
+          <div className="flex items-center gap-4 border-t border-border bg-card px-3 py-2 text-3xs text-muted-foreground">
+            <span className="flex items-center gap-1">
+              <kbd className="rounded border border-border bg-accent px-1 py-0.5">↑</kbd>
+              <kbd className="rounded border border-border bg-accent px-1 py-0.5">↓</kbd>
+              {t("search.navigate")}
+            </span>
+            <span className="flex items-center gap-1">
+              <kbd className="rounded border border-border bg-accent px-1 py-0.5">↵</kbd>
+              {t("search.selectHint")}
+            </span>
+            <span className="flex items-center gap-1">
+              <kbd className="rounded border border-border bg-accent px-1 py-0.5">esc</kbd>
+              {t("search.closeHint")}
+            </span>
+            <span className="ml-auto text-muted-foreground">{t("search.onScreenFirst")}</span>
+          </div>
         </Command>
       </DialogContent>
     </Dialog>
