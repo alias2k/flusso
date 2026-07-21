@@ -17,6 +17,7 @@ import { type Doc, useDesignStore } from "../store/design";
 import { useUiStore } from "../store/ui";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Kbd } from "@/components/ui/kbd";
 
 const CAT_ICON: Partial<Record<SearchCategory, ComponentType<{ className?: string }>>> = {
   action: Zap,
@@ -103,11 +104,7 @@ function DetailPane({ record }: { record: SearchRecord | null }) {
         <Glyph record={record} />
         <span className="min-w-0 truncate">{record.title}</span>
         {d.headKind && <span className="shrink-0 text-xs font-normal text-muted-foreground">{d.headKind}</span>}
-        {record.shortcut && (
-          <kbd className="ml-auto shrink-0 rounded border border-border bg-accent px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
-            {record.shortcut}
-          </kbd>
-        )}
+        {record.shortcut && <Kbd className="ml-auto">{record.shortcut}</Kbd>}
       </h3>
 
       {(d.source ?? d.target) && (
@@ -385,11 +382,7 @@ export function CommandPalette({
                               {r.kind}
                             </span>
                           )}
-                          {r.shortcut && (
-                            <kbd className="rounded border border-border bg-accent px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
-                              {r.shortcut}
-                            </kbd>
-                          )}
+                          {r.shortcut && <Kbd>{r.shortcut}</Kbd>}
                         </span>
                       </CommandItem>
                     ))}
@@ -400,22 +393,22 @@ export function CommandPalette({
             <DetailPane record={current} />
           </div>
           <div className="flex items-center gap-4 border-t border-border bg-card px-3 py-2 text-3xs text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <kbd className="rounded border border-border bg-accent px-1 py-0.5">↑</kbd>
-              <kbd className="rounded border border-border bg-accent px-1 py-0.5">↓</kbd>
+            <span className="flex items-center gap-1.5">
+              <Kbd>↑</Kbd>
+              <Kbd>↓</Kbd>
               {t("search.navigate")}
             </span>
-            <span className="flex items-center gap-1">
-              <kbd className="rounded border border-border bg-accent px-1 py-0.5">↵</kbd>
+            <span className="flex items-center gap-1.5">
+              <Kbd>↵</Kbd>
               {t("search.selectHint")}
             </span>
-            <span className="flex items-center gap-1">
-              <kbd className="rounded border border-border bg-accent px-1 py-0.5">esc</kbd>
+            <span className="flex items-center gap-1.5">
+              <Kbd>esc</Kbd>
               {t("search.closeHint")}
             </span>
             {completion && (
-              <span className="flex items-center gap-1 text-primary">
-                <kbd className="rounded border border-primary/40 bg-accent px-1 py-0.5">⇥</kbd>
+              <span className="flex items-center gap-1.5 text-primary">
+                <Kbd className="text-primary">⇥</Kbd>
                 {t("search.complete")}
               </span>
             )}

@@ -35,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
+import { Kbd } from "@/components/ui/kbd";
 import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Textarea } from "@/components/ui/textarea";
@@ -537,9 +538,7 @@ export default function App() {
             }}
           />
           <span className="truncate">{t("search.placeholder")}</span>
-          <kbd className="ml-auto shrink-0 rounded-full border border-border bg-accent px-2 py-0.5 text-3xs font-medium text-muted-foreground">
-            ⌘K
-          </kbd>
+          <Kbd className="ml-auto">⌘K</Kbd>
         </button>
 
         {/* history */}
