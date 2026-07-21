@@ -59,10 +59,13 @@ function Node({ node }: { node: DocumentNode }) {
 /// the shaped Document tree, the `*.schema.yml` output, the OpenSearch mapping,
 /// and a Sample document built from a live row. Fills its container (the drawer).
 export function Preview({
+  index,
   preview,
   diagnostics,
   onSample,
 }: {
+  /// The active index name — keys the sample so it resets when the index changes.
+  index: string;
   preview: PreviewResponse | null;
   diagnostics: DiagnosticDto[] | null;
   onSample?: () => Promise<SampleResponse>;
@@ -143,7 +146,13 @@ export function Preview({
 
         {tab === "mapping" && <CodeBlock text={JSON.stringify(preview.preview.mapping, null, 2)} lang="json" />}
 
-        {tab === "sample" && onSample && <SampleDoc onSample={onSample} />}
+        {/* Kept mounted (hidden) so a fetched sample survives tab switches;
+            keyed by index so it resets when you switch indexes. */}
+        {onSample && (
+          <div className={cn(tab !== "sample" && "hidden")}>
+            <SampleDoc key={index} onSample={onSample} />
+          </div>
+        )}
       </div>
     </div>
   );

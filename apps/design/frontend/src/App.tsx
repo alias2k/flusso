@@ -758,6 +758,7 @@ export default function App() {
                   </DrawerClose>
                 </DrawerHeader>
                 <Preview
+                  index={active}
                   preview={preview}
                   diagnostics={allDiagnostics.filter((d) => d.index === active)}
                   onSample={
