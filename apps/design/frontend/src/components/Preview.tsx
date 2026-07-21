@@ -56,27 +56,6 @@ function Node({ node }: { node: DocumentNode }) {
   );
 }
 
-/// Copy-to-clipboard button that flips to a "copied" label for a moment.
-function CopyButton({ text }: { text: string }) {
-  const { t } = useT();
-  const [copied, setCopied] = useState(false);
-  const copy = () =>
-    navigator.clipboard?.writeText(text).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      },
-      () => {
-        /* ignore clipboard rejection */
-      },
-    );
-  return (
-    <Button variant="secondary" size="sm" className="gap-1.5" onClick={() => void copy()}>
-      <Icon name="copy" size={13} /> {copied ? t("preview.copied") : t("preview.copy")}
-    </Button>
-  );
-}
-
 /// The schema preview: what the current index compiles to, split into tabs —
 /// the shaped Document tree, the `*.schema.yml` output, the OpenSearch mapping,
 /// and a Sample document built from a live row. Fills its container (the drawer).
@@ -161,23 +140,9 @@ export function Preview({
           </>
         )}
 
-        {tab === "yaml" && (
-          <>
-            <div className="mb-2 flex justify-end">
-              <CopyButton text={preview.yaml} />
-            </div>
-            <CodeBlock text={preview.yaml} lang="yaml" />
-          </>
-        )}
+        {tab === "yaml" && <CodeBlock text={preview.yaml} lang="yaml" />}
 
-        {tab === "mapping" && (
-          <>
-            <div className="mb-2 flex justify-end">
-              <CopyButton text={JSON.stringify(preview.preview.mapping, null, 2)} />
-            </div>
-            <CodeBlock text={JSON.stringify(preview.preview.mapping, null, 2)} lang="json" />
-          </>
-        )}
+        {tab === "mapping" && <CodeBlock text={JSON.stringify(preview.preview.mapping, null, 2)} lang="json" />}
 
         {tab === "sample" && onSample && <SampleDoc onSample={onSample} />}
       </div>

@@ -1,4 +1,7 @@
-import { Fragment, type ReactNode } from "react";
+import { Check, Copy } from "lucide-react";
+import { Fragment, type ReactNode, useState } from "react";
+import { useT } from "../i18n";
+import { Hint } from "./Hint";
 
 // A tiny, dependency-free syntax highlighter for the preview's YAML and JSON,
 // themed to the flusso palette (keys cyan; strings amber, numbers blue, bools
@@ -72,18 +75,43 @@ function jsonLine(line: string): ReactNode {
   return out.map((t, i) => <Fragment key={i}>{t}</Fragment>);
 }
 
-/// A highlighted code block reusing the `pre.yaml` surface. Lines are joined by
-/// newlines (preserved by `white-space: pre`), so blank lines survive.
+/// A highlighted code block reusing the `pre.yaml` surface, with a copy button
+/// pinned to its top-right corner. Lines are joined by newlines (preserved by
+/// `white-space: pre`), so blank lines survive.
 export function CodeBlock({ text, lang }: { text: string; lang: "yaml" | "json" }) {
+  const { t } = useT();
+  const [copied, setCopied] = useState(false);
   const render = lang === "yaml" ? yamlLine : jsonLine;
+  const copy = () =>
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        /* ignore clipboard rejection */
+      },
+    );
   return (
-    <pre className="yaml">
-      {text.split("\n").map((line, i) => (
-        <Fragment key={i}>
-          {render(line)}
-          {"\n"}
-        </Fragment>
-      ))}
-    </pre>
+    <div className="relative">
+      <Hint label={copied ? t("preview.copied") : t("preview.copy")} side="left">
+        <button
+          type="button"
+          aria-label={t("preview.copy")}
+          onClick={() => void copy()}
+          className="absolute top-2 right-2 z-10 grid size-7 cursor-pointer place-items-center rounded-md border border-border bg-secondary/80 text-muted-foreground backdrop-blur transition-colors hover:text-foreground"
+        >
+          {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
+        </button>
+      </Hint>
+      <pre className="yaml">
+        {text.split("\n").map((line, i) => (
+          <Fragment key={i}>
+            {render(line)}
+            {"\n"}
+          </Fragment>
+        ))}
+      </pre>
+    </div>
   );
 }
