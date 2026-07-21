@@ -87,7 +87,7 @@ const typeDesc = (t: Translate, varKey: string): string => {
 function LegendRow({ color, label, desc }: { color: string; label: string; desc: string }) {
   return (
     <Hint label={desc} side="right" className="max-w-52 leading-snug">
-      <div className="legend-row flex w-full cursor-default items-center gap-2 px-1.5 py-1 text-2xs text-muted-foreground select-none">
+      <div className="legend-row flex cursor-default items-center gap-2 px-1.5 py-1 text-2xs text-muted-foreground select-none">
         <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
         {label}
       </div>
@@ -547,13 +547,13 @@ export default function App() {
               </summary>
               <div className="max-h-[45vh] overflow-y-auto ps-2">
                 <div className={NAV_HEADING}>{t("sidebar.kinds")}</div>
-                <div className="flex flex-col">
+                <div className="flex flex-col items-start">
                   {KIND_ROWS.map((k) => (
                     <LegendRow key={k} color={`var(--k-${k})`} label={k} desc={kindDesc(t, k)} />
                   ))}
                 </div>
                 <div className={NAV_HEADING}>{t("sidebar.types")}</div>
-                <div className="flex flex-col">
+                <div className="flex flex-col items-start">
                   {TYPE_FAMILIES.map((f) => (
                     <LegendRow
                       key={f.varKey}
