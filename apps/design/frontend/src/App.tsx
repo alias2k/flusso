@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Hint } from "./components/Hint";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Select, Text } from "./components/widgets";
@@ -85,16 +86,27 @@ const typeDesc = (t: Translate, varKey: string): string => {
 };
 
 function LegendRow({ color, label, desc }: { color: string; label: string; desc: string }) {
-  // Full-width row carries the hover background; the Hint wraps only the
-  // content-width swatch+label so the right-anchored tooltip sits by the text.
+  // Hovering anywhere on the full-width row opens the tooltip (controlled), but
+  // it anchors to the content-width text trigger, so it sits by the label rather
+  // than the row's far edge.
+  const [open, setOpen] = useState(false);
   return (
-    <div className="legend-row rounded-md px-1.5 py-1 hover:bg-secondary">
-      <Hint label={desc} side="right" className="max-w-52 leading-snug">
-        <div className="flex items-center gap-2 text-2xs text-muted-foreground select-none">
-          <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
-          {label}
-        </div>
-      </Hint>
+    <div
+      className="legend-row rounded-md px-1.5 py-1 hover:bg-secondary"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <Tooltip open={open}>
+        <TooltipTrigger asChild>
+          <div className="flex w-fit items-center gap-2 text-2xs text-muted-foreground select-none">
+            <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
+            {label}
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="max-w-52 leading-snug">
+          {desc}
+        </TooltipContent>
+      </Tooltip>
     </div>
   );
 }
