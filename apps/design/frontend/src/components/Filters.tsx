@@ -1,10 +1,44 @@
 import type { ColumnShape, Filter, FilterOp, FilterValue } from "../api";
-import { useT } from "../i18n";
+import { useT, type Translate } from "../i18n";
 import { AddButton, ColumnPicker, RemoveButton, Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
 
-const VALUE_OPS: FilterOp[] = ["eq", "neq", "lt", "lte", "gt", "gte", "in", "not_in", "like", "ilike", "between"];
+/// The three filter kinds, each with a dev-facing label plus a plain-English
+/// description shown under it. Literal `t("filters.*")` calls keep the i18n
+/// checker able to see every key.
+function kindOptions(t: Translate) {
+  return [
+    { value: "raw" as const, label: t("filters.kindRaw"), description: t("filters.kindRawDesc") },
+    { value: "null_check" as const, label: t("filters.kindNullCheck"), description: t("filters.kindNullCheckDesc") },
+    { value: "value_op" as const, label: t("filters.kindValueOp"), description: t("filters.kindValueOpDesc") },
+  ];
+}
+
+/// Value operators as their SQL tokens (the dev lingo), each with a plain
+/// description of what it means.
+function valueOpOptions(t: Translate) {
+  return [
+    { value: "eq" as const, label: "=", description: t("filters.opEq") },
+    { value: "neq" as const, label: "!=", description: t("filters.opNeq") },
+    { value: "lt" as const, label: "<", description: t("filters.opLt") },
+    { value: "lte" as const, label: "<=", description: t("filters.opLte") },
+    { value: "gt" as const, label: ">", description: t("filters.opGt") },
+    { value: "gte" as const, label: ">=", description: t("filters.opGte") },
+    { value: "in" as const, label: "IN", description: t("filters.opIn") },
+    { value: "not_in" as const, label: "NOT IN", description: t("filters.opNotIn") },
+    { value: "like" as const, label: "LIKE", description: t("filters.opLike") },
+    { value: "ilike" as const, label: "ILIKE", description: t("filters.opIlike") },
+    { value: "between" as const, label: "BETWEEN", description: t("filters.opBetween") },
+  ];
+}
+
+function nullOpOptions(t: Translate) {
+  return [
+    { value: "is_null" as const, label: "IS NULL", description: t("filters.opIsNull") },
+    { value: "is_not_null" as const, label: "IS NOT NULL", description: t("filters.opIsNotNull") },
+  ];
+}
 
 function kindOf(f: Filter): FilterKind {
   if ("raw" in f) return "raw";
@@ -65,11 +99,6 @@ export function Filters({
     onChange(next.length ? next : undefined);
   };
   const cols = columns ?? [];
-  const kindOptions = [
-    { value: "raw" as const, label: t("filters.kindRaw") },
-    { value: "null_check" as const, label: t("filters.kindNullCheck") },
-    { value: "value_op" as const, label: t("filters.kindValueOp") },
-  ];
 
   return (
     <div className="filters">
@@ -82,7 +111,7 @@ export function Filters({
               <Select<FilterKind>
                 value={kind}
                 onChange={(k) => set(i, blank(k))}
-                options={kindOptions}
+                options={kindOptions(t)}
                 className="flex-1"
               />
               <RemoveButton label={t("common.remove")} onClick={() => remove(i)} />
@@ -102,7 +131,7 @@ export function Filters({
                 <Select
                   value={f.null_check.op}
                   onChange={(op) => set(i, { null_check: { ...f.null_check, op } })}
-                  options={["is_null", "is_not_null"]}
+                  options={nullOpOptions(t)}
                   className="flex-1"
                 />
               </div>
@@ -121,7 +150,7 @@ export function Filters({
                     onChange={(op) =>
                       set(i, { value_op: { ...f.value_op, op, value: coerceValue(op, valueText(f.value_op.value)) } })
                     }
-                    options={VALUE_OPS}
+                    options={valueOpOptions(t)}
                     className="w-28 shrink-0"
                   />
                   <Text
