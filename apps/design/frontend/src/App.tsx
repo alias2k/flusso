@@ -542,6 +542,11 @@ export default function App() {
           <Kbd className="ml-auto">⌘K</Kbd>
         </button>
 
+        {/* global: browse the whole database catalog */}
+        <Button variant="ghost" size="sm" onClick={() => setBrowseCatalog(true)}>
+          <Table2 /> {t("topbar.tables")}
+        </Button>
+
         {/* global: edit history */}
         <Hint label={t("topbar.undo")}>
           <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
@@ -554,11 +559,11 @@ export default function App() {
           </Button>
         </Hint>
 
-        {/* global: app settings (theme + language) — a labelled gear, not a mystery menu */}
+        {/* global: app settings (theme + language) */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" aria-label={t("topbar.settings")}>
-              <Settings /> {t("topbar.settings")}
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.settings")} title={t("topbar.settings")}>
+              <Settings />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -609,35 +614,6 @@ export default function App() {
         </Button>
       </header>
 
-      {/* Context bar: names the index you're editing and carries the tools that
-          act on it (preview, catalog, raw YAML) — kept apart from the global bar
-          above so index-scoped and deployment-scoped actions never blur together.
-          Absent on the Deployment screen, which has no single index in context. */}
-      {active !== "config" && schema && (
-        <div
-          className="flex items-center gap-2.5 border-b border-border px-4 py-1.5"
-          style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 42%), var(--panel-2)" }}
-        >
-          <span className="badge root">root</span>
-          <span className="text-sm font-medium text-foreground">{active}</span>
-          <span className="font-mono text-2xs text-muted-foreground">
-            {schema.db_schema && schema.db_schema !== "public" ? `${schema.db_schema}.` : ""}
-            {schema.table}
-            {schema.primary_key ? ` · ${t("node.pk")}: ${schema.primary_key}` : ""}
-          </span>
-          <span className="flex-1" />
-          <Button variant="ghost" size="sm" onClick={() => setBrowseCatalog(true)}>
-            <Table2 /> {t("topbar.tables")}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={toggleDrawer}>
-            <Eye /> {drawer ? t("topbar.hide") : t("topbar.yaml")}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
-            <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
-          </Button>
-        </div>
-      )}
-
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
       {catalog?.error && (
         <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>
@@ -645,10 +621,39 @@ export default function App() {
 
       <div
         className="grid min-h-0 flex-1 transition-all duration-150"
-        style={{ gridTemplateColumns: `${leftOpen ? "13.125rem" : "0"} 1fr ${inspectorOpen ? "22.5rem" : "0"}` }}
+        style={{
+          gridTemplateColumns: `${leftOpen ? "13.125rem" : "0"} 1fr ${inspectorOpen ? "22.5rem" : "0"}`,
+          gridTemplateRows: "auto minmax(0, 1fr)",
+        }}
       >
+        {/* Context bar: a strip over the work area only (columns 2–3, right of the
+            sidebar) naming the index you're editing and carrying the tools that act
+            on it — kept apart from the global bar so index- and deployment-scoped
+            actions never blur together. Absent on the Deployment screen. */}
+        {active !== "config" && schema && (
+          <div
+            className="col-start-2 col-span-2 row-start-1 flex items-center gap-2.5 border-b border-border px-4 py-1.5"
+            style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 42%), var(--panel-2)" }}
+          >
+            <span className="badge root">root</span>
+            <span className="text-sm font-medium text-foreground">{active}</span>
+            <span className="font-mono text-2xs text-muted-foreground">
+              {schema.db_schema && schema.db_schema !== "public" ? `${schema.db_schema}.` : ""}
+              {schema.table}
+              {schema.primary_key ? ` · ${t("node.pk")}: ${schema.primary_key}` : ""}
+            </span>
+            <span className="flex-1" />
+            <Button variant="secondary" size="sm" onClick={toggleDrawer}>
+              <Eye /> {drawer ? t("topbar.hide") : t("topbar.yaml")}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
+              <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
+            </Button>
+          </div>
+        )}
+
         {leftOpen && (
-          <nav className="sidebar col-start-1 flex min-h-0 flex-col border-r border-border bg-card">
+          <nav className="sidebar col-start-1 row-start-1 row-span-2 flex min-h-0 flex-col border-r border-border bg-card">
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               <button className={cn(NAV, active === "config" && NAV_ACTIVE)} onClick={() => setActive("config")}>
                 ⚙ {t("sidebar.deployment")}
@@ -698,11 +703,11 @@ export default function App() {
         )}
 
         {active === "config" ? (
-          <main className="col-start-2 min-h-0 overflow-y-auto p-4">
+          <main className="col-start-2 row-start-2 min-h-0 overflow-y-auto p-4">
             <ConfigPanel config={config} onChange={setConfig} onDuplicate={dupIndex} />
           </main>
         ) : rawMode ? (
-          <main className="raw-pane col-start-2 flex min-h-0 flex-col">
+          <main className="raw-pane col-start-2 row-start-2 flex min-h-0 flex-col">
             <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">
               {t("raw.editingFor")} <strong>{active}</strong> — {t("raw.help")}
             </div>
@@ -736,7 +741,7 @@ export default function App() {
               toggleCollapsed,
             }}
           >
-            <main className="canvas-wrap col-start-2 relative h-full min-h-0">
+            <main className="canvas-wrap col-start-2 row-start-2 relative h-full min-h-0">
               <Canvas />
               {typeMismatches > 0 && !ignoreTypeWarn && (
                 <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-end px-4">
@@ -782,7 +787,7 @@ export default function App() {
               </DrawerContent>
             </Drawer>
             {inspectorOpen && (
-              <aside className="col-start-3 min-h-0 overflow-y-auto border-l border-border bg-card p-3.5">
+              <aside className="col-start-3 row-start-2 min-h-0 overflow-y-auto border-l border-border bg-card p-3.5">
                 <Inspector />
               </aside>
             )}
