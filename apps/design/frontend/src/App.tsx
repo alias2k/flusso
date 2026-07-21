@@ -18,6 +18,7 @@ import type { ColumnShape, FileDiff, SaveSchemaInput } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
+import { DiffView } from "./components/DiffView";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
@@ -845,13 +846,7 @@ function DiffModal({
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {changed.map((d) => (
-            <div className="diff-file mb-3.5" key={d.path}>
-              <div className="mb-1 font-mono text-xs text-muted-foreground">{d.path}</div>
-              <div className="grid grid-cols-2 gap-2">
-                <pre className="yaml border-l-2 border-l-destructive">{d.current || t("diff.newFile")}</pre>
-                <pre className="yaml border-l-2 border-l-primary">{d.next}</pre>
-              </div>
-            </div>
+            <DiffView key={d.path} path={d.path} current={d.current} next={d.next} />
           ))}
         </div>
         <DialogFooter>

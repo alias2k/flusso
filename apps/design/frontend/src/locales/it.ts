@@ -79,8 +79,9 @@ export const it: Record<string, string> = {
   // diff modal
   "diff.aria": "Rivedi le modifiche",
   "diff.title": "{n, plural, one {Rivedi le modifiche (# file)} other {Rivedi le modifiche (# file)}}",
-  "diff.newFile": "(nuovo file)",
+  "diff.newFile": "nuovo file",
   "diff.write": "{n, plural, one {Scrivi # file} other {Scrivi # file}}",
+  "diff.unchanged": "{n, plural, one {# riga invariata} other {# righe invariate}}",
 
   // shared
   "common.cancel": "Annulla",

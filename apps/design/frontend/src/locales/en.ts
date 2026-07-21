@@ -78,8 +78,9 @@ export const en: Record<string, string> = {
   // diff modal
   "diff.aria": "Review changes",
   "diff.title": "{n, plural, one {Review changes (# file)} other {Review changes (# files)}}",
-  "diff.newFile": "(new file)",
+  "diff.newFile": "new file",
   "diff.write": "{n, plural, one {Write # file} other {Write # files}}",
+  "diff.unchanged": "{n, plural, one {# unchanged line} other {# unchanged lines}}",
 
   // shared
   "common.cancel": "Cancel",
