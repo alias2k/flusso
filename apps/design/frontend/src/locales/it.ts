@@ -236,7 +236,6 @@ export const it: Record<string, string> = {
   "config.name": "nome",
   "config.enabled": "abilitato",
   "config.duplicate": "duplica",
-  "config.dup": "dup",
   "config.index": "indice",
   "config.removeIndex": 'Rimuovere l\'indice "{name}"? (il file schema resta su disco)',
   "config.connection": "connessione",

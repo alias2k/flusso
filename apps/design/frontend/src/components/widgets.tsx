@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, ChevronRight } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronRight, Plus, X } from "lucide-react";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
@@ -66,6 +67,35 @@ export function Block({ variant, title, children }: { variant: "src" | "doc"; ti
 /// The rule a source imposes on a choice, shown between a [`Block`] pair —
 /// e.g. "NOT NULL → required, locked". A cyan connector, cause above, effect
 /// below.
+/// The shared "+ add a row" affordance — a ghost button with a Plus icon in the
+/// brand accent. Used for every add-another action (a filter, an order_by, a
+/// sink, an index, an option) so they all read the same.
+export function AddButton({ label, disabled, onClick }: { label: string; disabled?: boolean; onClick: () => void }) {
+  return (
+    <Button variant="ghost" size="sm" className="text-primary" disabled={disabled} onClick={onClick}>
+      <Plus />
+      {label}
+    </Button>
+  );
+}
+
+/// The paired "remove this row" affordance — a ghost icon button that stays
+/// muted until hovered, then tints destructive. For the loud, primary delete of
+/// a whole node, use the inspector header action instead.
+export function RemoveButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+      aria-label={label}
+      onClick={onClick}
+    >
+      <X />
+    </Button>
+  );
+}
+
 export function Bridge({ children }: { children: ReactNode }) {
   return (
     <div className="bridge my-0.5 flex items-start gap-2 px-2.5 py-1.5 text-2xs leading-snug text-muted-foreground">

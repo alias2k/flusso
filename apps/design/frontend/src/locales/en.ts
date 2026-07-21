@@ -231,7 +231,6 @@ export const en: Record<string, string> = {
   "config.name": "name",
   "config.enabled": "enabled",
   "config.duplicate": "duplicate",
-  "config.dup": "dup",
   "config.index": "index",
   "config.removeIndex": 'Remove index "{name}"? (the schema file is left on disk)',
   "config.connection": "connection",

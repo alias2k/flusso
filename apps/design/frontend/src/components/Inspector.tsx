@@ -1,4 +1,4 @@
-import { Copy, Plus, Trash2, X } from "lucide-react";
+import { Copy, Trash2, X } from "lucide-react";
 import {
   SCALAR_TYPES,
   type Aggregate,
@@ -119,6 +119,7 @@ import { Button } from "@/components/ui/button";
 import { Hint } from "./Hint";
 import { Filters } from "./Filters";
 import {
+  AddButton,
   Block,
   Bridge,
   Check,
@@ -127,6 +128,7 @@ import {
   Field as Row,
   GenericInput,
   Num,
+  RemoveButton,
   SectionTitle,
   Select,
   Text,
@@ -703,23 +705,10 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
             onChange={(nv) => setOpt(k, nv ?? { String: "" })}
             placeholder={t("inspector.optValue")}
           />
-          <button
-            type="button"
-            className="cursor-pointer p-0 text-xs text-destructive"
-            onClick={() => removeOpt(k)}
-            aria-label={t("common.remove")}
-          >
-            ✕
-          </button>
+          <RemoveButton label={t("common.remove")} onClick={() => removeOpt(k)} />
         </div>
       ))}
-      <button
-        type="button"
-        className="addline cursor-pointer pt-0.5 text-xs text-primary"
-        onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })}
-      >
-        + {t("inspector.option")}
-      </button>
+      <AddButton label={t("inspector.option")} onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })} />
     </Drawer>
   );
 }
@@ -1063,28 +1052,19 @@ function OrderByEditor({
             onChange={(direction) => set(i, { ...ob, direction })}
             className="w-24"
           />
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-            aria-label={t("common.remove")}
+          <RemoveButton
+            label={t("common.remove")}
             onClick={() =>
               onChange(value.filter((_, j) => j !== i).length ? value.filter((_, j) => j !== i) : undefined)
             }
-          >
-            <X />
-          </Button>
+          />
         </div>
       ))}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="text-primary"
+      <AddButton
+        label="order_by"
         disabled={!columns.length}
         onClick={() => onChange([...value, { column: columns[0]?.name ?? "", direction: "asc" }])}
-      >
-        <Plus /> order_by
-      </Button>
+      />
     </div>
   );
 }

@@ -1,7 +1,8 @@
+import { Copy } from "lucide-react";
 import type { ConfigToml, IndexEntry } from "../api";
 import { useT } from "../i18n";
 import { Button } from "@/components/ui/button";
-import { Check, Field, Num, PanelTitle, SectionTitle, Select, Text } from "./widgets";
+import { AddButton, Check, Field, Num, PanelTitle, RemoveButton, SectionTitle, Select, Text } from "./widgets";
 
 type Sink = Record<string, unknown>;
 type Source = Record<string, unknown>;
@@ -81,15 +82,12 @@ export function ConfigPanel({
           onRemove={() => removeSink(name)}
         />
       ))}
-      <Button
-        variant="link"
-        size="sm"
+      <AddButton
+        label={t("config.sink")}
         onClick={() =>
           setSink(`sink${Object.keys(sinks).length + 1}`, { type: "opensearch", url: "http://127.0.0.1:9200" })
         }
-      >
-        + {t("config.sink")}
-      </Button>
+      />
 
       <SectionTitle>{t("sidebar.indexes")}</SectionTitle>
       {index.map((e, i) => (
@@ -102,34 +100,34 @@ export function ConfigPanel({
             options={["default", "stop", "skip"]}
             onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
           />
-          <Button variant="link" size="sm" title={t("config.duplicate")} onClick={() => onDuplicate(i)}>
-            {t("config.dup")}
-          </Button>
           <Button
-            variant="link"
-            size="sm"
-            className="text-destructive"
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0 text-muted-foreground hover:text-foreground"
+            title={t("config.duplicate")}
+            aria-label={t("config.duplicate")}
+            onClick={() => onDuplicate(i)}
+          >
+            <Copy />
+          </Button>
+          <RemoveButton
+            label={t("common.remove")}
             onClick={() => {
               if (confirm(t("config.removeIndex", { name: e.name })))
                 onChange({ ...config, index: index.filter((_, j) => j !== i) });
             }}
-          >
-            ✕
-          </Button>
+          />
         </div>
       ))}
-      <Button
-        variant="link"
-        size="sm"
+      <AddButton
+        label={t("config.index")}
         onClick={() =>
           onChange({
             ...config,
             index: [...index, { name: "new_index", schema: "new_index.schema.yml", enabled: true }],
           })
         }
-      >
-        + {t("config.index")}
-      </Button>
+      />
     </div>
   );
 }
@@ -228,9 +226,7 @@ function SinkEditor({
       <div className="sink-head mb-2 flex items-center gap-2.5">
         <strong>{name}</strong>
         <Select value={type} options={["opensearch", "stdout"]} onChange={(ty) => set("type", ty)} />
-        <Button variant="link" size="sm" className="text-destructive" onClick={onRemove}>
-          {t("common.remove")}
-        </Button>
+        <RemoveButton label={t("common.remove")} onClick={onRemove} />
       </div>
       {type === "opensearch" ? (
         <>

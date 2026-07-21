@@ -1,7 +1,6 @@
 import type { Filter } from "../api";
 import { useT } from "../i18n";
-import { Button } from "@/components/ui/button";
-import { Select, Text } from "./widgets";
+import { AddButton, RemoveButton, Select, Text } from "./widgets";
 
 type FilterKind = "raw" | "null_check" | "value_op";
 
@@ -131,15 +130,11 @@ export function Filters({
                 />
               </>
             )}
-            <Button variant="link" size="sm" className="text-destructive" onClick={() => remove(i)}>
-              {t("common.remove")}
-            </Button>
+            <RemoveButton label={t("common.remove")} onClick={() => remove(i)} />
           </div>
         );
       })}
-      <Button variant="link" size="sm" onClick={() => onChange([...value, blank("value_op")])}>
-        + {t("filters.filter")}
-      </Button>
+      <AddButton label={t("filters.filter")} onClick={() => onChange([...value, blank("value_op")])} />
     </div>
   );
 }
