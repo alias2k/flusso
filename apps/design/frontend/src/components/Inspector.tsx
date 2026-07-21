@@ -89,20 +89,20 @@ function HeaderActions() {
     <div className="-my-1 -mr-1.5 flex shrink-0 items-center gap-0.5">
       {canModify && (
         <>
-          <Hint label={t("inspector.duplicate")}>
-            <Button variant="ghost" size="icon-sm" aria-label={t("inspector.duplicate")} onClick={duplicate}>
-              <Copy />
-            </Button>
-          </Hint>
           <Hint label={t("inspector.delete")}>
             <Button
               variant="ghost"
               size="icon-sm"
-              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
               aria-label={t("inspector.delete")}
               onClick={remove}
             >
               <Trash2 />
+            </Button>
+          </Hint>
+          <Hint label={t("inspector.duplicate")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("inspector.duplicate")} onClick={duplicate}>
+              <Copy />
             </Button>
           </Hint>
         </>
