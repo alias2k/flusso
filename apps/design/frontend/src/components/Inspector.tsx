@@ -140,10 +140,11 @@ const pascal = (s: string) => {
   const c = camel(s);
   return c.charAt(0).toUpperCase() + c.slice(1);
 };
-/// Singularise a table name for a suggested element name (`orders → order`,
-/// `addresses → address`, `people → person`). Backed by `pluralize`, so
-/// irregulars and uncountables (`series`, `status`) are handled correctly.
+/// Singularise / pluralise a table name for a suggested element name
+/// (`orders → order`, `addresses → address`, `people → person`). Backed by
+/// `pluralize`, so irregulars and uncountables (`series`, `status`) are correct.
 const singular = (s: string) => pluralize.singular(s);
+const plural = (s: string) => pluralize.plural(s);
 
 /// One-click name suggestions for the document field, by what the field draws
 /// from: a column offers itself + its camelCase; a join its table singular; an
@@ -161,7 +162,10 @@ function nameSuggestions(field: Field): string[] {
       const tbl = s.relation.join.table;
       const k = s.relation.join.kind;
       const many = "has_many" in k || "many_to_many" in k;
-      return [tbl, many ? camel(tbl) : camel(singular(tbl)), singular(tbl)];
+      // A to-many field reads best plural; a to-one, singular. Guarantee the
+      // form even when the table itself is named the other way.
+      const base = many ? plural(tbl) : singular(tbl);
+      return [...new Set([camel(base), base, tbl])];
     }
     const agg = s.relation.aggregate;
     const op =
