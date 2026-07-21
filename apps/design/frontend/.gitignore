@@ -1,6 +1,0 @@
-node_modules/
-*.tsbuildinfo
-e2e/.project/
-test-results/
-playwright-report/
-.playwright/
