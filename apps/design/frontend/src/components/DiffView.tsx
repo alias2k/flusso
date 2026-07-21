@@ -144,16 +144,16 @@ function DiffRow({ row }: { row: Row }) {
   return (
     <div className={cn("flex w-full", add && "bg-primary/12", del && "bg-destructive/12")}>
       <span
-        className={cn(GUTTER, "w-11", add ? "text-primary/70" : del ? "text-transparent" : "text-muted-foreground/50")}
+        className={cn(
+          GUTTER,
+          "w-11",
+          add ? "text-transparent" : del ? "text-destructive/70" : "text-muted-foreground/50",
+        )}
       >
         {row.oldNo ?? ""}
       </span>
       <span
-        className={cn(
-          GUTTER,
-          "w-11",
-          del ? "text-destructive/70" : add ? "text-transparent" : "text-muted-foreground/50",
-        )}
+        className={cn(GUTTER, "w-11", del ? "text-transparent" : add ? "text-primary/70" : "text-muted-foreground/50")}
       >
         {row.newNo ?? ""}
       </span>

@@ -4,9 +4,13 @@ import { useUiStore } from "./store/ui";
 import {
   ChevronRight,
   CircleCheck,
+  AlignJustify,
+  Columns2,
   Eye,
   FileCode2,
+  Minus,
   Moon,
+  Plus,
   RotateCcw,
   Save,
   Settings,
@@ -834,13 +838,13 @@ function DiffModal({
   onCancel: () => void;
 }) {
   const { t } = useT();
-  const [mode, setMode] = useState<DiffMode>("unified");
+  const [mode, setMode] = useState<DiffMode>("split");
   const changed = diffs.filter((d) => d.changed);
-  const modes: { id: DiffMode; label: string }[] = [
-    { id: "unified", label: t("diff.viewUnified") },
-    { id: "split", label: t("diff.viewSplit") },
-    { id: "old", label: t("diff.viewOld") },
-    { id: "new", label: t("diff.viewNew") },
+  const modes: { id: DiffMode; label: string; Icon: typeof Columns2 }[] = [
+    { id: "unified", label: t("diff.viewUnified"), Icon: AlignJustify },
+    { id: "split", label: t("diff.viewSplit"), Icon: Columns2 },
+    { id: "old", label: t("diff.viewOld"), Icon: Minus },
+    { id: "new", label: t("diff.viewNew"), Icon: Plus },
   ];
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
@@ -857,12 +861,13 @@ function DiffModal({
                 type="button"
                 onClick={() => setMode(m.id)}
                 className={cn(
-                  "cursor-pointer rounded-sm px-2.5 py-1 transition-colors",
+                  "flex cursor-pointer items-center gap-1.5 rounded-sm px-2.5 py-1 transition-colors",
                   mode === m.id
                     ? "bg-background font-medium text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground",
                 )}
               >
+                <m.Icon className="size-3.5" />
                 {m.label}
               </button>
             ))}
