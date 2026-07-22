@@ -238,13 +238,23 @@ export function DiffView({
       </div>
       {/* Each scroller owns both axes, so its horizontal scrollbar is pinned to
           the pane's bottom edge (visible without scrolling to the end of the
-          file). Split is two fixed 50% halves with synced vertical scroll. */}
+          file). Split is two fixed 50% halves with synced vertical scroll; both
+          force `overflow-x: scroll` so the bottom bar reserves equal height on
+          each side and the two halves stay aligned even when only one overflows. */}
       {mode === "split" ? (
         <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-border overflow-hidden font-mono text-xs leading-relaxed">
-          <div ref={leftRef} onScroll={(e) => syncScroll(e.currentTarget, rightRef.current)} className="overflow-auto">
+          <div
+            ref={leftRef}
+            onScroll={(e) => syncScroll(e.currentTarget, rightRef.current)}
+            className="overflow-x-scroll overflow-y-auto"
+          >
             <div className="w-max min-w-full">{splitColumn("old")}</div>
           </div>
-          <div ref={rightRef} onScroll={(e) => syncScroll(e.currentTarget, leftRef.current)} className="overflow-auto">
+          <div
+            ref={rightRef}
+            onScroll={(e) => syncScroll(e.currentTarget, leftRef.current)}
+            className="overflow-x-scroll overflow-y-auto"
+          >
             <div className="w-max min-w-full">{splitColumn("new")}</div>
           </div>
         </div>
