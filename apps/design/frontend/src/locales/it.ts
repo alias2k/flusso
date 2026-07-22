@@ -80,6 +80,8 @@ export const it: Record<string, string> = {
   "diff.aria": "Rivedi le modifiche",
   "diff.reviewTitle": "Rivedi le modifiche",
   "diff.selected": "{n} di {m} selezionati",
+  "diff.filterFiles": "Filtra file…",
+  "diff.noFiles": "Nessun file corrispondente",
   "diff.newFile": "nuovo file",
   "diff.write": "{n, plural, one {Scrivi # file} other {Scrivi # file}}",
   "diff.unchanged": "{n, plural, one {# riga invariata} other {# righe invariate}}",

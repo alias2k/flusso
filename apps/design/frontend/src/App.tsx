@@ -14,6 +14,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Search,
   Settings,
   Sun,
   Table2,
@@ -948,6 +949,9 @@ function DiffModal({
   // Which files to actually write (default all); the user can uncheck any to
   // save a subset.
   const [include, setInclude] = useState<ReadonlySet<string>>(() => new Set(changed.map((d) => d.path)));
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const shown = changed.filter((d) => !needle || d.path.toLowerCase().includes(needle));
   const toggle = (path: string) =>
     setInclude((s) => {
       const next = new Set(s);
@@ -955,8 +959,18 @@ function DiffModal({
       else next.add(path);
       return next;
     });
-  const allIncluded = changed.length > 0 && include.size === changed.length;
-  const toggleAll = () => setInclude(allIncluded ? new Set() : new Set(changed.map((d) => d.path)));
+  // The select-all box acts on the currently-shown (filtered) files.
+  const shownIncluded = shown.filter((d) => include.has(d.path)).length;
+  const allShown = shown.length > 0 && shownIncluded === shown.length;
+  const toggleAll = () =>
+    setInclude((s) => {
+      const next = new Set(s);
+      for (const d of shown) {
+        if (allShown) next.delete(d.path);
+        else next.add(d.path);
+      }
+      return next;
+    });
 
   // Run a quick validation against the database when the review opens, so a save
   // surfaces schema/DB problems (or an all-clear) before writing anything.
@@ -1008,16 +1022,44 @@ function DiffModal({
         <ValidationDetail check={check} />
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border">
           <div className="flex w-60 shrink-0 flex-col border-r border-border bg-secondary/40">
+            {changed.length > 3 && (
+              <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3 focus-within:border-b-primary">
+                <Search className="size-3.5 shrink-0 text-muted-foreground" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={t("diff.filterFiles")}
+                  className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-form-type="other"
+                />
+                {query && (
+                  <button
+                    type="button"
+                    onClick={() => setQuery("")}
+                    aria-label={t("common.clear")}
+                    className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
             <label className="flex shrink-0 cursor-pointer items-center gap-2 border-b border-border px-3 py-2 text-2xs font-medium text-muted-foreground">
               <Checkbox
                 className="size-4"
-                checked={allIncluded ? true : include.size === 0 ? false : "indeterminate"}
+                checked={allShown ? true : shownIncluded === 0 ? false : "indeterminate"}
                 onCheckedChange={toggleAll}
               />
               {t("diff.selected", { n: include.size, m: changed.length })}
             </label>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              {changed.map((d, i) => {
+              {shown.map((d) => {
+                const i = changed.indexOf(d);
                 const s = diffStats(d.current, d.next);
                 const short = shortenPath(d.path);
                 const base = short.slice(short.lastIndexOf("/") + 1);
@@ -1059,6 +1101,9 @@ function DiffModal({
                   </div>
                 );
               })}
+              {shown.length === 0 && (
+                <p className="px-3 py-4 text-center text-2xs text-muted-foreground">{t("diff.noFiles")}</p>
+              )}
             </div>
           </div>
           <div className="min-h-0 flex-1">
