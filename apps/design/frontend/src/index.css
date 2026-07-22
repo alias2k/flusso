@@ -835,11 +835,26 @@
     --diff-del-strong: #fecaca; /* red-200 */
     --diff-del-fg: #b91c1c; /* red-700 */
     --diff-del-num: #dc2626; /* red-600 */
+
+    /* field-type hues — the dark-mode pastels wash out on white, so drop to the
+       600/700 rows (same families) for readable type labels in light mode. */
+    --t-string: #b45309; /* amber-700 */
+    --t-number: #2563eb; /* blue-600 */
+    --t-temporal: #9333ea; /* purple-600 */
+    --t-bool: #0f766e; /* teal-700 */
+    --t-uuid: #be185d; /* pink-700 */
+    --t-geo: #e11d48; /* rose-600 */
+    --t-other: #475569; /* slate-600 */
   }
   :root[data-theme="light"] .flow-node {
     box-shadow:
       inset 0.1875rem 0 0 var(--kc),
       0 0.25rem 0.875rem rgba(20, 30, 50, 0.1);
+  }
+  /* The aggregate-op badge is amber-on-panel; that amber is tuned for dark and
+     is too faint on the light panel, so darken just this label in light mode. */
+  :root[data-theme="light"] .col-row .leaf-kind {
+    color: #b45309; /* amber-700 */
   }
 
   /* ── catalog browser (item 7) — layout is Tailwind now (CatalogBrowser.tsx) ── */

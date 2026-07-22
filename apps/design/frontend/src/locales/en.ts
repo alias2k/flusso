@@ -287,6 +287,7 @@ export const en: Record<string, string> = {
   "config.disabled": "disabled",
   "config.duplicate": "duplicate",
   "config.index": "index",
+  "config.removeIndexTitle": "Remove index?",
   "config.removeIndex": 'Remove index "{name}"? (the schema file is left on disk)',
   "config.connection": "connection",
   "config.envVar": "env var",

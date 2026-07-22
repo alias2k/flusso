@@ -255,7 +255,7 @@ export const it: Record<string, string> = {
   // canvas node (DocNodeView)
   "node.expand": "Espandi",
   "node.collapse": "Comprimi",
-  "node.pk": "cp",
+  "node.pk": "pk",
   "node.fields": "{n, plural, one {# campo} other {# campi}}",
   "node.diagCount":
     "{n, plural, one {# campo non concorda con il database} other {# campi non concordano con il database}}",
@@ -281,7 +281,7 @@ export const it: Record<string, string> = {
   "config.source": "Origine",
   "config.stageSourceHint": "Postgres",
   "config.stageIndexesHint": "documenti sincronizzati",
-  "config.stageSinksHint": "destinazioni",
+  "config.stageSinksHint": "dove scrivere i documenti",
   "config.sinks": "Destinazioni",
   "config.sink": "destinazione",
   "config.indexTuning": "ottimizzazione indice",
@@ -293,6 +293,7 @@ export const it: Record<string, string> = {
   "config.disabled": "disabilitato",
   "config.duplicate": "duplica",
   "config.index": "indice",
+  "config.removeIndexTitle": "Rimuovere l'indice?",
   "config.removeIndex": 'Rimuovere l\'indice "{name}"? (il file schema resta su disco)',
   "config.connection": "connessione",
   "config.envVar": "variabile env",

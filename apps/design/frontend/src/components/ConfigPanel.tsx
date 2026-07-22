@@ -213,7 +213,7 @@ export function ConfigPanel({
       <Dialog open={pendingRemove !== null} onOpenChange={(o) => !o && setPendingRemove(null)}>
         <DialogContent showCloseButton={false} className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{t("common.remove")}</DialogTitle>
+            <DialogTitle>{t("config.removeIndexTitle")}</DialogTitle>
             <DialogDescription>
               {pendingRemove !== null ? t("config.removeIndex", { name: index[pendingRemove]?.name ?? "" }) : ""}
             </DialogDescription>
