@@ -15,12 +15,6 @@ target/
 node_modules/
 *.tsbuildinfo
 
-# Playwright artifacts (apps/design/frontend)
-test-results/
-playwright-report/
-.playwright/
-/apps/design/frontend/e2e/.project/
-
 # cargo-fuzz workspace (libs/1-sources/1-postgres/fuzz): its own workspace, so its
 # generated Cargo.lock is not committed — the main workspace's Cargo.lock IS committed,
 # hence this rule is path-anchored rather than a global `Cargo.lock`.

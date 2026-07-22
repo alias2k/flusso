@@ -8,7 +8,7 @@ import tseslint from "typescript-eslint";
 import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
-  { ignores: ["dist", "node_modules", "playwright-report", "test-results"] },
+  { ignores: ["dist", "node_modules"] },
   // The SPA: type-aware ("production grade") lint — recommended + stylistic
   // type-checked sets, plus React hooks + Fast-Refresh. Type-checked rules need
   // the TS program, so point the parser at the project (src is in tsconfig).
@@ -62,10 +62,10 @@ export default tseslint.config(
       "jsx-a11y/no-noninteractive-element-interactions": "off",
     },
   },
-  // Node-side bits (e2e harness, build/config, the i18n checker) aren't in the
-  // TS project, so they get the non-type-checked recommended set + node globals.
+  // Node-side bits (build/config, the i18n checker) aren't in the TS project, so
+  // they get the non-type-checked recommended set + node globals.
   {
-    files: ["e2e/**/*.ts", "scripts/**/*.mjs", "*.config.{js,ts}"],
+    files: ["scripts/**/*.mjs", "*.config.{js,ts}"],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: { ecmaVersion: 2022, globals: globals.node },
   },

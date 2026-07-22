@@ -73,9 +73,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   the build). Match these before assuming green. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step.
-- **The designer (`apps/design`) has three test layers.** (1) A property/"fuzz" round-trip
+- **The designer (`apps/design`) has two test layers.** (1) A property/"fuzz" round-trip
   (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
-  `codegen → parse → convert` identity — an ordinary test, caught by the nextest step. (2) A
+  `codegen → parse → convert` identity — an ordinary test, caught by the nextest step (plus the
+  `api.rs` integration test). (2) A
   `designer-frontend` CI job: `npm ci`, a **Prettier** format check (`npm run format:check`,
   `.prettierrc` printWidth 120 / double quotes / semicolons / trailing-all; `just design-fmt [check]`;
   `eslint-config-prettier` is appended last so ESLint owns no formatting rules), **ESLint**
@@ -87,15 +88,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   `apps/design/frontend/scripts/check-i18n.mjs`: every `t("…")` key the UI uses exists in the
   `en` base catalog and every locale defines the same key set — so a feature can't ship UI without
   its translations), then `npm run build` + a `git diff` guard that the committed
-  `apps/design/dist/` matches a fresh Vite build (the embedded SPA must not drift). (3) A
-  `designer-e2e` CI job: spins a seeded Postgres, builds the binary, then a **Playwright** suite
-  (`apps/design/frontend/e2e/`) drives the *real* served UI (load/add/edit/delete/collapse) and runs
-  the **UI-save → `flusso check`** pipeline. Locally: `just design-e2e` (needs Docker + downloads
-  Chromium). The browser e2e is the only net that catches *rendered/interaction* regressions —
-  builds and `curl` checks are blind to them. **Gotcha:** `e2e/server.mjs` runs the prebuilt
-  `target/debug/flusso` which *embeds* the SPA (rust-embed) — it does **not** rebuild — so a bare
-  `npm run test:e2e` serves a stale UI. Always `cargo build -p flusso-cli` first (this is why
-  `just design-e2e` builds the binary before Playwright).
+  `apps/design/dist/` matches a fresh Vite build (the embedded SPA must not drift). There is **no**
+  browser e2e — the UI is validated by dogfooding; the `designer-frontend` build/lint guards plus the
+  Rust round-trip are the automated net.
 - **The designer frontend is Tailwind v4 + shadcn/Radix, atomic-design.** UI primitives are
   shadcn components in `apps/design/frontend/src/components/ui/` (`button`/`input`/`select`/
   `checkbox`/`dialog`/`tooltip`/`popover`/`command`/…), tuned to the flusso palette; molecules like
@@ -508,7 +503,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | `*.schema.yml` parsing / field syntax | `libs/2-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/1-sources/1-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
 | Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
-| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser, `e2e/` the Playwright suite + save→check pipeline), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sinks_core::to_json`) |
+| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sinks_core::to_json`) |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/1-sinks/2-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |

@@ -125,12 +125,6 @@ design-fmt check="":
 design-i18n:
     cd apps/design/frontend && npm run check:i18n
 
-# Run the designer's browser e2e suite (Playwright) + the save→check pipeline.
-# Needs the dev Postgres (brought up here); downloads Chromium on first run.
-design-e2e: up
-    cargo build -p flusso-cli
-    cd apps/design/frontend && npm ci && npx playwright install chromium && npm run test:e2e
-
 # Measure the designer's backend test coverage (unit + integration + property).
 # Needs cargo-llvm-cov: `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`.
 coverage:

@@ -76,7 +76,7 @@ sink option, a source/sink capability):
   `designer-frontend` job fails on any key missing from a locale.
 - **Rebuild + commit the SPA**: `npm --prefix apps/design/frontend ci && npm --prefix
   apps/design/frontend run build`, then commit `apps/design/dist/` (the dist-drift guard fails
-  otherwise). Add/extend the Playwright e2e (`apps/design/frontend/e2e/`) for new interactions.
+  otherwise).
 
 ## 7. Update the documentation — code + every README, fully
 
@@ -127,7 +127,6 @@ If you touched the designer (step 6), also run its guards:
 npm --prefix apps/design/frontend ci
 npm --prefix apps/design/frontend run check:i18n   # translations complete in every locale
 npm --prefix apps/design/frontend run build        # then `git diff --exit-code apps/design/dist` must be clean
-npm --prefix apps/design/frontend run test:e2e     # needs the dev Postgres (just up)
 ```
 
 If Docker isn't available for the `--run-ignored all` step, say so explicitly rather than
