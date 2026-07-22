@@ -22,7 +22,8 @@ import type { ColumnShape, FileDiff, SaveSchemaInput } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
-import { DiffView, type DiffMode } from "./components/DiffView";
+import { DiffView } from "./components/DiffView";
+import { diffStats, type DiffMode } from "./model/diff";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
@@ -826,6 +827,15 @@ export default function App() {
   );
 }
 
+// Middle-elide a long path to first segment + basename ("dev/…/users.schema.yml");
+// the full path is shown on hover via the row's title.
+function shortenPath(path: string, max = 30): string {
+  if (path.length <= max) return path;
+  const parts = path.split("/");
+  if (parts.length <= 2) return path;
+  return `${parts[0]}/…/${parts[parts.length - 1]}`;
+}
+
 function DiffModal({
   diffs,
   saving,
@@ -839,7 +849,9 @@ function DiffModal({
 }) {
   const { t } = useT();
   const [mode, setMode] = useState<DiffMode>("split");
+  const [selected, setSelected] = useState(0);
   const changed = diffs.filter((d) => d.changed);
+  const active = changed[selected] ?? changed[0];
   const modes: { id: DiffMode; label: string; Icon: typeof Columns2 }[] = [
     { id: "split", label: t("diff.viewSplit"), Icon: Columns2 },
     { id: "unified", label: t("diff.viewUnified"), Icon: AlignJustify },
@@ -848,10 +860,7 @@ function DiffModal({
   ];
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
-      <DialogContent
-        className="flex w-[min(64rem,94vw)] max-w-none flex-col max-h-[85vh] sm:max-w-none"
-        aria-label={t("diff.aria")}
-      >
+      <DialogContent className="flex h-[92vh] w-[96vw] max-w-none flex-col sm:max-w-none" aria-label={t("diff.aria")}>
         <DialogHeader className="flex-row items-center justify-between gap-3 pr-8">
           <DialogTitle>{t("diff.title", { n: changed.length })}</DialogTitle>
           <div className="inline-flex shrink-0 rounded-md border border-border bg-secondary p-0.5 text-xs">
@@ -873,10 +882,42 @@ function DiffModal({
             ))}
           </div>
         </DialogHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {changed.map((d) => (
-            <DiffView key={d.path} path={d.path} current={d.current} next={d.next} mode={mode} />
-          ))}
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border">
+          <div className="w-56 shrink-0 overflow-y-auto border-r border-border bg-secondary/40">
+            {changed.map((d, i) => {
+              const s = diffStats(d.current, d.next);
+              const short = shortenPath(d.path);
+              const base = short.slice(short.lastIndexOf("/") + 1);
+              const dir = short.slice(0, short.length - base.length);
+              return (
+                <button
+                  key={d.path}
+                  type="button"
+                  title={d.path}
+                  onClick={() => setSelected(i)}
+                  className={cn(
+                    "flex w-full flex-col gap-0.5 border-b border-border/60 border-l-2 px-3 py-2 text-left transition-colors",
+                    i === selected ? "border-l-primary bg-background" : "border-l-transparent hover:bg-accent/50",
+                  )}
+                >
+                  <span className="truncate font-mono text-xs">
+                    <span className="text-muted-foreground">{dir}</span>
+                    <span className="font-medium text-foreground">{base}</span>
+                  </span>
+                  <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
+                    {d.current === "" && <span className="badge object">{t("diff.newFile")}</span>}
+                    <span className="text-primary">+{s.adds}</span>
+                    <span className="text-destructive">-{s.dels}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="min-h-0 flex-1">
+            {active && (
+              <DiffView key={active.path} path={active.path} current={active.current} next={active.next} mode={mode} />
+            )}
+          </div>
         </div>
         <DialogFooter>
           <Button variant="secondary" size="sm" onClick={onCancel}>
