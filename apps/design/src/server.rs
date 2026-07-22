@@ -94,6 +94,7 @@ fn router(state: AppState) -> Router {
         .route("/api/project", get(project))
         .route("/api/catalog", get(catalog))
         .route("/api/test-connection", post(test_connection))
+        .route("/api/parse", post(parse))
         .route("/api/preview", post(preview))
         .route("/api/validate", post(validate))
         .route("/api/sample", post(sample))
@@ -114,6 +115,10 @@ async fn catalog(State(state): State<AppState>) -> Response {
 
 async fn test_connection(Json(config): Json<schema_config_toml::ConfigToml>) -> Response {
     Json(api::test_connection(config).await).into_response()
+}
+
+async fn parse(Json(request): Json<api::ParseRequest>) -> Response {
+    Json(api::parse_index(&request)).into_response()
 }
 
 async fn preview(Json(request): Json<api::PreviewRequest>) -> Result<Response, ApiError> {

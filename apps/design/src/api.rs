@@ -106,6 +106,108 @@ fn parse_schema_text(text: &str) -> Result<IndexSchema> {
     IndexSchema::try_from(entity).context("validating schema")
 }
 
+/// A raw `*.schema.yml` buffer to parse, sent by the editor's Code mode.
+#[derive(Debug, Deserialize)]
+pub struct ParseRequest {
+    /// The YAML text as typed.
+    pub yaml: String,
+}
+
+/// The 1-based position a parse error points at, when the parser's location is
+/// trustworthy (field-scoped errors deliberately carry none — see the parser).
+#[derive(Debug, Serialize)]
+pub struct ParseErrorLocation {
+    pub line: usize,
+    pub column: usize,
+}
+
+/// The parsed schema (the Code editor applies it to its in-memory document),
+/// or a structured error: the clean message (no baked-in snippet — the editor
+/// draws its own context), plus either a source `location` or the
+/// `field`/`type_tag` the error names, so the editor can anchor its squiggle
+/// without parsing the prose.
+#[derive(Debug, Serialize)]
+pub struct ParseResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<IndexSchema>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<ParseErrorLocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_tag: Option<String>,
+}
+
+impl ParseResponse {
+    fn ok(schema: IndexSchema) -> Self {
+        Self {
+            schema: Some(schema),
+            error: None,
+            location: None,
+            field: None,
+            type_tag: None,
+        }
+    }
+}
+
+/// Parse a schema buffer into the validated model — the Code editor's live
+/// YAML → document sync.
+pub fn parse_index(request: &ParseRequest) -> ParseResponse {
+    use schema_index_yaml::ParseError;
+
+    let entity = match SchemaYaml::try_parse(&request.yaml) {
+        Ok(entity) => entity,
+        Err(err) => {
+            // Field-scoped errors ship the detail alone — the `field`/`type_tag`
+            // carry the prefix's information structurally, and the editor's rail
+            // labels the row with the field itself.
+            let (type_tag, field, detail) = match err.field_scope() {
+                Some((tag, name, detail)) => (
+                    Some(tag.to_string()),
+                    Some(name.to_string()),
+                    Some(detail.to_string()),
+                ),
+                None => (None, None, None),
+            };
+            let (error, location) = match (&detail, &err) {
+                (Some(detail), _) => (detail.clone(), None),
+                (
+                    None,
+                    ParseError::Syntax {
+                        message, location, ..
+                    },
+                ) => (
+                    message.clone(),
+                    location.map(|at| ParseErrorLocation {
+                        line: at.line,
+                        column: at.column,
+                    }),
+                ),
+                (None, other) => (other.to_string(), None),
+            };
+            return ParseResponse {
+                schema: None,
+                error: Some(error),
+                location,
+                field,
+                type_tag,
+            };
+        }
+    };
+    match IndexSchema::try_from(entity) {
+        Ok(schema) => ParseResponse::ok(schema),
+        Err(err) => ParseResponse {
+            schema: None,
+            error: Some(err.to_string()),
+            location: None,
+            field: None,
+            type_tag: None,
+        },
+    }
+}
+
 /// A schema to preview, sent by the editor.
 #[derive(Debug, Deserialize)]
 pub struct PreviewRequest {

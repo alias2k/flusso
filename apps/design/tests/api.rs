@@ -121,3 +121,38 @@ fn project_previews_saves_and_reopens() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn parse_round_trips_generated_yaml_and_reports_errors() {
+    // A generated schema parses back to the same model (the Code editor's
+    // live sync relies on this identity)…
+    let yaml = include_str!("../../../dev/users.schema.yml");
+    let parsed = api::parse_index(&api::ParseRequest { yaml: yaml.into() });
+    let schema = parsed.schema.expect("dev schema parses");
+    assert!(parsed.error.is_none());
+    let regenerated = design::codegen::schema_to_yaml(&schema).unwrap();
+    let reparsed = api::parse_index(&api::ParseRequest { yaml: regenerated });
+    assert!(reparsed.error.is_none());
+    assert_eq!(
+        serde_json::to_value(&schema).unwrap(),
+        serde_json::to_value(reparsed.schema.expect("regenerated YAML parses")).unwrap(),
+    );
+
+    // …a top-level syntax error carries a trustworthy source location…
+    let bad = api::parse_index(&api::ParseRequest {
+        yaml: "fields:\n- integer: id\n   required: false".into(),
+    });
+    assert!(bad.schema.is_none());
+    assert!(bad.error.is_some());
+    assert!(bad.location.is_some(), "syntax errors report line/column");
+
+    // …and a field-scoped error names the field structurally instead (its
+    // reported position would be wrong — see the parser).
+    let field = api::parse_index(&api::ParseRequest {
+        yaml: "version: 1\ntable: t\nfields:\n- keyword: x\n  required: trues".into(),
+    });
+    assert!(field.schema.is_none());
+    assert!(field.location.is_none());
+    assert_eq!(field.type_tag.as_deref(), Some("keyword"));
+    assert_eq!(field.field.as_deref(), Some("x"));
+}
