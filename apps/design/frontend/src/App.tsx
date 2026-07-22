@@ -3,6 +3,7 @@ import { useDesignStore, useCanUndo, useCanRedo, undo, redo, emptySchema, type D
 import { useUiStore } from "./store/ui";
 import {
   ChevronRight,
+  CircleAlert,
   CircleCheck,
   AlignJustify,
   Columns2,
@@ -16,9 +17,10 @@ import {
   Settings,
   Sun,
   Table2,
+  TriangleAlert,
   X,
 } from "lucide-react";
-import type { ColumnShape, FileDiff, SaveSchemaInput } from "./api";
+import type { ColumnShape, FileDiff, SaveSchemaInput, ValidateResponse } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -805,7 +807,13 @@ export default function App() {
       </div>
 
       {diffs && (
-        <DiffModal diffs={diffs} saving={saving} onConfirm={() => void performSave()} onCancel={() => setDiffs(null)} />
+        <DiffModal
+          diffs={diffs}
+          doc={doc}
+          saving={saving}
+          onConfirm={() => void performSave()}
+          onCancel={() => setDiffs(null)}
+        />
       )}
       {browseCatalog && catalog && <CatalogBrowser catalog={catalog} onClose={() => setBrowseCatalog(false)} />}
 
@@ -836,13 +844,76 @@ function shortenPath(path: string, max = 30): string {
   return `${parts[0]}/…/${parts[parts.length - 1]}`;
 }
 
+// The quick-validation state the save review runs while it's open.
+type Check = { state: "loading" } | { state: "failed"; err: string } | { state: "done"; res: ValidateResponse };
+
+// A compact status chip for the review header: what the quick validation found.
+function ValidationChip({ check }: { check: Check }) {
+  const { t } = useT();
+  const chip = "inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium";
+  if (check.state === "loading")
+    return (
+      <span className={cn(chip, "border-border bg-secondary text-muted-foreground")}>
+        <span className="spinner" /> {t("diff.validating")}
+      </span>
+    );
+  const offline = check.state === "failed" || !check.res.db_reachable;
+  if (offline)
+    return (
+      <span className={cn(chip, "border-warn/40 bg-warn/10 text-warn")}>
+        <TriangleAlert className="size-3.5" /> {t("diff.dbOffline")}
+      </span>
+    );
+  const { error, diagnostics } = check.res;
+  if (error || diagnostics.length > 0)
+    return (
+      <span className={cn(chip, "border-destructive/40 bg-destructive/10 text-destructive")}>
+        <CircleAlert className="size-3.5" />{" "}
+        {error ? t("diff.validateFailed") : t("diff.issues", { n: diagnostics.length })}
+      </span>
+    );
+  return (
+    <span className={cn(chip, "border-primary/40 bg-primary/10 text-primary")}>
+      <CircleCheck className="size-3.5" /> {t("diff.allGood")}
+    </span>
+  );
+}
+
+// The detail panel shown under the header when validation surfaced something.
+function ValidationDetail({ check }: { check: Check }) {
+  const { t } = useT();
+  if (check.state === "loading") return null;
+  const err = check.state === "failed" ? check.err : check.res.db_reachable ? check.res.error : undefined;
+  const diagnostics = check.state === "done" && check.res.db_reachable && !check.res.error ? check.res.diagnostics : [];
+  if (!err && diagnostics.length === 0) return null;
+  return (
+    <div className="max-h-28 overflow-y-auto rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs">
+      {err && (
+        <div className="text-destructive">
+          {t("diff.validateFailed")}: {err}
+        </div>
+      )}
+      {diagnostics.map((d, i) => (
+        <div key={i} className={cn("py-0.5", d.severity === "warning" ? "text-warn" : "text-destructive")}>
+          <span className="font-mono text-muted-foreground">
+            {d.index}.{d.field}
+          </span>{" "}
+          {d.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function DiffModal({
   diffs,
+  doc,
   saving,
   onConfirm,
   onCancel,
 }: {
   diffs: FileDiff[];
+  doc: Doc;
   saving: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -850,8 +921,24 @@ function DiffModal({
   const { t } = useT();
   const [mode, setMode] = useState<DiffMode>("split");
   const [selected, setSelected] = useState(0);
+  const [check, setCheck] = useState<Check>({ state: "loading" });
   const changed = diffs.filter((d) => d.changed);
   const active = changed[selected] ?? changed[0];
+
+  // Run a quick validation against the database when the review opens, so a save
+  // surfaces schema/DB problems (or an all-clear) before writing anything.
+  useEffect(() => {
+    let alive = true;
+    setCheck({ state: "loading" });
+    const indexes = Object.entries(doc.schemas).map(([name, schema]) => ({ name, schema }));
+    api
+      .validate(doc.config, indexes)
+      .then((res) => alive && setCheck({ state: "done", res }))
+      .catch((e: unknown) => alive && setCheck({ state: "failed", err: errText(e) }));
+    return () => {
+      alive = false;
+    };
+  }, [doc]);
   const modes: { id: DiffMode; label: string; Icon: typeof Columns2 }[] = [
     { id: "split", label: t("diff.viewSplit"), Icon: Columns2 },
     { id: "unified", label: t("diff.viewUnified"), Icon: AlignJustify },
@@ -862,7 +949,10 @@ function DiffModal({
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent className="flex h-[92vh] w-[96vw] max-w-none flex-col sm:max-w-none" aria-label={t("diff.aria")}>
         <DialogHeader className="flex-row items-center justify-between gap-3 pr-8">
-          <DialogTitle>{t("diff.title", { n: changed.length })}</DialogTitle>
+          <div className="flex min-w-0 items-center gap-3">
+            <DialogTitle className="shrink-0">{t("diff.title", { n: changed.length })}</DialogTitle>
+            <ValidationChip check={check} />
+          </div>
           <div className="inline-flex shrink-0 rounded-md border border-border bg-secondary p-0.5 text-xs">
             {modes.map((m) => (
               <button
@@ -882,6 +972,7 @@ function DiffModal({
             ))}
           </div>
         </DialogHeader>
+        <ValidationDetail check={check} />
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border">
           <div className="w-56 shrink-0 overflow-y-auto border-r border-border bg-secondary/40">
             {changed.map((d, i) => {
