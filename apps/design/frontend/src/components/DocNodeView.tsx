@@ -274,12 +274,20 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   <AddMenu
                     label={t("node.addJoin")}
                     kinds={JOIN_KINDS}
-                    onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))}
+                    onPick={(k) => {
+                      // addSpecial appends, so the new field's index is the current count;
+                      // select it so the inspector opens on the (incomplete) new join.
+                      apply((s) => edit.addSpecial(s, node.path, k));
+                      select({ kind: "field", path: node.path, index: fields.length });
+                    }}
                   />
                   <AddMenu
                     label={t("node.addField")}
                     kinds={[...FIELD_KINDS, ...AGG_KINDS]}
-                    onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))}
+                    onPick={(k) => {
+                      apply((s) => edit.addSpecial(s, node.path, k));
+                      select({ kind: "field", path: node.path, index: fields.length });
+                    }}
                   />
                 </div>
               </footer>

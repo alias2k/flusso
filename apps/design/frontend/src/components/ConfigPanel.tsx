@@ -6,6 +6,14 @@ import { LABEL } from "../styles";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Check, Combobox, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 type Sink = Record<string, unknown>;
 type Source = Record<string, unknown>;
@@ -28,6 +36,7 @@ export function ConfigPanel({
   const { t } = useT();
   const index = config.index ?? [];
   const sinks = (config.sinks ?? {}) as Record<string, Sink>;
+  const [pendingRemove, setPendingRemove] = useState<number | null>(null);
 
   const setEntry = (i: number, e: IndexEntry) => {
     const next = index.slice();
@@ -165,13 +174,7 @@ export function ConfigPanel({
                 >
                   <Copy />
                 </Button>
-                <RemoveButton
-                  label={t("common.remove")}
-                  onClick={() => {
-                    if (confirm(t("config.removeIndex", { name: e.name })))
-                      onChange({ ...config, index: index.filter((_, j) => j !== i) });
-                  }}
-                />
+                <RemoveButton label={t("common.remove")} onClick={() => setPendingRemove(i)} />
               </div>
             );
           })}
@@ -206,6 +209,32 @@ export function ConfigPanel({
           }
         />
       </Stage>
+
+      <Dialog open={pendingRemove !== null} onOpenChange={(o) => !o && setPendingRemove(null)}>
+        <DialogContent showCloseButton={false} className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("common.remove")}</DialogTitle>
+            <DialogDescription>
+              {pendingRemove !== null ? t("config.removeIndex", { name: index[pendingRemove]?.name ?? "" }) : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setPendingRemove(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                onChange({ ...config, index: index.filter((_, j) => j !== pendingRemove) });
+                setPendingRemove(null);
+              }}
+            >
+              {t("common.remove")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -924,7 +924,11 @@ export default function App() {
                   {!e.enabled && <span className="text-muted-foreground"> {t("sidebar.off")}</span>}
                 </button>
               ))}
-              <NewIndex tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []} onCreate={createIndex} />
+              <NewIndex
+                tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
+                junctions={catalog?.junctions.map((j) => j.table.table) ?? []}
+                onCreate={createIndex}
+              />
             </div>
             {/* Colour key — open by default, but collapsible so a long index list
                 isn't crowded out. Pinned below the scrolling list. */}
@@ -1445,11 +1449,20 @@ function DiffModal({
   );
 }
 
-function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: string, table: string) => void }) {
+function NewIndex({
+  tables,
+  junctions,
+  onCreate,
+}: {
+  tables: string[];
+  junctions: string[];
+  onCreate: (name: string, table: string) => void;
+}) {
   const { t } = useT();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [table, setTable] = useState(tables[0] ?? "");
+  const junctionSet = new Set(junctions);
   if (!open) {
     return (
       <button
@@ -1469,7 +1482,15 @@ function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: str
     <div className="mt-1.5 flex flex-col gap-1.5 rounded-lg border border-border p-2">
       <Text value={name} onChange={setName} placeholder={t("sidebar.indexName")} />
       {tables.length ? (
-        <Select value={table} options={tables} onChange={setTable} />
+        <Select
+          value={table}
+          options={tables.map((tbl) => ({
+            label: tbl,
+            value: tbl,
+            description: junctionSet.has(tbl) ? t("catalog.junction") : undefined,
+          }))}
+          onChange={setTable}
+        />
       ) : (
         <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />
       )}
