@@ -228,21 +228,22 @@ export function DiffView({
           <span className="text-diff-del-num">-{dels}</span>
         </span>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      {/* Single scroll container for BOTH axes, so the horizontal scrollbar is
+          pinned to the pane's bottom edge (visible without scrolling to the end
+          of the file). Split columns fill when short but grow — and scroll the
+          whole pane — when a line is long (`minmax(max-content, 1fr)`). */}
+      <div className="min-h-0 flex-1 overflow-auto">
         {mode === "split" ? (
-          <div className="grid grid-cols-2 divide-x divide-border font-mono text-xs leading-relaxed">
-            <div className="overflow-x-auto">
-              <div className="w-max min-w-full">{splitColumn("old")}</div>
-            </div>
-            <div className="overflow-x-auto">
-              <div className="w-max min-w-full">{splitColumn("new")}</div>
-            </div>
+          <div
+            className="grid divide-x divide-border font-mono text-xs leading-relaxed"
+            style={{ gridTemplateColumns: "repeat(2, minmax(max-content, 1fr))" }}
+          >
+            <div>{splitColumn("old")}</div>
+            <div>{splitColumn("new")}</div>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <div className="w-max min-w-full font-mono text-xs leading-relaxed">
-              {mode === "unified" ? unifiedBody() : singleSide()}
-            </div>
+          <div className="w-max min-w-full font-mono text-xs leading-relaxed">
+            {mode === "unified" ? unifiedBody() : singleSide()}
           </div>
         )}
       </div>
