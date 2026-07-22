@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ChevronsUpDown } from "lucide-react";
 import { useT } from "../i18n";
 import {
@@ -176,6 +176,14 @@ export function DiffView({
   const { t } = useT();
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const expand = (id: number) => setExpanded((s) => new Set(s).add(id));
+  // Split view: the two halves are separate scrollers (each 50%, its own
+  // horizontal scrollbar pinned to the pane bottom); keep their vertical scroll
+  // in lock-step so rows stay aligned. Equal-value guard breaks the feedback loop.
+  const leftRef = useRef<HTMLDivElement>(null);
+  const rightRef = useRef<HTMLDivElement>(null);
+  const syncScroll = (from: HTMLDivElement, to: HTMLDivElement | null) => {
+    if (to && to.scrollTop !== from.scrollTop) to.scrollTop = from.scrollTop;
+  };
   const rows = diffLines(current, next);
   const pairs = buildPairs(rows);
   attachWordDiff(pairs);
@@ -228,25 +236,25 @@ export function DiffView({
           <span className="text-diff-del-num">-{dels}</span>
         </span>
       </div>
-      {/* Single scroll container for BOTH axes, so the horizontal scrollbar is
-          pinned to the pane's bottom edge (visible without scrolling to the end
-          of the file). Split columns fill when short but grow — and scroll the
-          whole pane — when a line is long (`minmax(max-content, 1fr)`). */}
-      <div className="min-h-0 flex-1 overflow-auto">
-        {mode === "split" ? (
-          <div
-            className="grid divide-x divide-border font-mono text-xs leading-relaxed"
-            style={{ gridTemplateColumns: "repeat(2, minmax(max-content, 1fr))" }}
-          >
-            <div>{splitColumn("old")}</div>
-            <div>{splitColumn("new")}</div>
+      {/* Each scroller owns both axes, so its horizontal scrollbar is pinned to
+          the pane's bottom edge (visible without scrolling to the end of the
+          file). Split is two fixed 50% halves with synced vertical scroll. */}
+      {mode === "split" ? (
+        <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-border overflow-hidden font-mono text-xs leading-relaxed">
+          <div ref={leftRef} onScroll={(e) => syncScroll(e.currentTarget, rightRef.current)} className="overflow-auto">
+            <div className="w-max min-w-full">{splitColumn("old")}</div>
           </div>
-        ) : (
+          <div ref={rightRef} onScroll={(e) => syncScroll(e.currentTarget, leftRef.current)} className="overflow-auto">
+            <div className="w-max min-w-full">{splitColumn("new")}</div>
+          </div>
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto">
           <div className="w-max min-w-full font-mono text-xs leading-relaxed">
             {mode === "unified" ? unifiedBody() : singleSide()}
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
