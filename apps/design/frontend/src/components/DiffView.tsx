@@ -14,6 +14,12 @@ interface Seg {
   changed: boolean;
 }
 
+// A stretch of the merged (inline) word diff: kept, removed, or added.
+interface MSeg {
+  text: string;
+  kind: "eq" | "del" | "add";
+}
+
 interface Row {
   type: "eq" | "add" | "del";
   text: string;
@@ -88,6 +94,8 @@ interface Pair {
   left?: Row;
   right?: Row;
   changed: boolean;
+  // The merged word diff of left↔right, for the unified inline row.
+  merged?: MSeg[];
 }
 
 function buildPairs(rows: Row[]): Pair[] {
@@ -124,10 +132,10 @@ function tokenize(s: string): string[] {
   return s.match(/\s+|[A-Za-z0-9_]+|[^\sA-Za-z0-9_]+/g) ?? [];
 }
 
-/// Token-level LCS diff of two lines. Returns the segments for each side, or
-/// null when the lines share nothing (a full rewrite — highlight the whole row
+/// Token-level LCS diff of two lines as one merged stream (eq/del/add), or null
+/// when the lines share no tokens (a full rewrite — highlight the whole row
 /// instead of a noisy every-token flag).
-function wordDiff(oldText: string, newText: string): { left: Seg[]; right: Seg[] } | null {
+function tokenDiff(oldText: string, newText: string): MSeg[] | null {
   const a = tokenize(oldText);
   const b = tokenize(newText);
   const n = a.length;
@@ -139,49 +147,76 @@ function wordDiff(oldText: string, newText: string): { left: Seg[]; right: Seg[]
     }
   }
   if (dp[0][0] === 0) return null;
-  const left: Seg[] = [];
-  const right: Seg[] = [];
-  const push = (arr: Seg[], text: string, changed: boolean) => {
-    const last = arr[arr.length - 1];
-    if (last?.changed === changed) last.text += text;
-    else arr.push({ text, changed });
+  const merged: MSeg[] = [];
+  const push = (text: string, kind: MSeg["kind"]) => {
+    const last = merged[merged.length - 1];
+    if (last?.kind === kind) last.text += text;
+    else merged.push({ text, kind });
   };
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
     if (a[i] === b[j]) {
-      push(left, a[i], false);
-      push(right, b[j], false);
+      push(a[i], "eq");
       i++;
       j++;
     } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      push(left, a[i], true);
+      push(a[i], "del");
       i++;
     } else {
-      push(right, b[j], true);
+      push(b[j], "add");
       j++;
     }
   }
   while (i < n) {
-    push(left, a[i], true);
+    push(a[i], "del");
     i++;
   }
   while (j < m) {
-    push(right, b[j], true);
+    push(b[j], "add");
     j++;
   }
-  return { left, right };
+  return merged;
 }
 
-// For each paired modification, attach the intra-line word diff to both rows
-// (mutating the shared Row objects, so the unified and split views both highlight).
+// One side of a merged diff: old keeps eq+del, new keeps eq+add.
+function sideSegs(merged: MSeg[], side: "old" | "new"): Seg[] {
+  const out: Seg[] = [];
+  const push = (text: string, changed: boolean) => {
+    const last = out[out.length - 1];
+    if (last?.changed === changed) last.text += text;
+    else out.push({ text, changed });
+  };
+  for (const s of merged) {
+    if (side === "old" && s.kind === "add") continue;
+    if (side === "new" && s.kind === "del") continue;
+    push(s.text, s.kind !== "eq");
+  }
+  return out;
+}
+
+// Small enough to merge into one inline row (git --word-diff style): at most a
+// couple of changed runs, changing a minority of the line — otherwise it stays
+// a -/+ pair, which reads clearer for large edits.
+function inlineable(merged: MSeg[]): boolean {
+  const changed = merged.filter((s) => s.kind !== "eq");
+  if (changed.length === 0 || changed.length > 2) return false;
+  const changedChars = changed.reduce((n, s) => n + s.text.length, 0);
+  const total = merged.reduce((n, s) => n + s.text.length, 0);
+  return changedChars * 3 < total;
+}
+
+// For each paired modification, attach the word diff: per-side segments (both
+// views highlight the changed tokens) plus the merged stream (for the unified
+// inline row). Mutates the shared Row objects.
 function attachWordDiff(pairs: Pair[]): void {
   for (const p of pairs) {
     if (!p.changed || !p.left || !p.right) continue;
-    const wd = wordDiff(p.left.text, p.right.text);
-    if (!wd) continue;
-    p.left.seg = wd.left;
-    p.right.seg = wd.right;
+    const merged = tokenDiff(p.left.text, p.right.text);
+    if (!merged) continue;
+    p.merged = merged;
+    p.left.seg = sideSegs(merged, "old");
+    p.right.seg = sideSegs(merged, "new");
   }
 }
 
@@ -206,6 +241,31 @@ function collapse<T>(items: T[], isChange: (t: T) => boolean): Block<T>[] {
     const visible = keep[idx];
     while (idx < items.length && keep[idx] === visible) idx++;
     out.push({ kind: visible ? "rows" : "gap", id: start, items: items.slice(start, idx) });
+  }
+  return out;
+}
+
+// A unified-view render unit: either a plain row, or a small modification merged
+// into a single inline row (git --word-diff style).
+interface URow {
+  change: boolean;
+  row?: Row;
+  merged?: MSeg[];
+  oldNo?: number;
+  newNo?: number;
+}
+
+function unifyPairs(pairs: Pair[]): URow[] {
+  const out: URow[] = [];
+  for (const p of pairs) {
+    if (!p.changed) {
+      if (p.left) out.push({ change: false, row: p.left });
+    } else if (p.left && p.right && p.merged && inlineable(p.merged)) {
+      out.push({ change: true, merged: p.merged, oldNo: p.left.oldNo, newNo: p.right.newNo });
+    } else {
+      if (p.left) out.push({ change: true, row: p.left });
+      if (p.right) out.push({ change: true, row: p.right });
+    }
   }
   return out;
 }
@@ -262,6 +322,33 @@ function DiffRow({ row }: { row: Row }) {
       </span>
       <span className={cn("grow whitespace-pre pr-3", row.type === "eq" ? "text-muted-foreground" : "text-foreground")}>
         <LineText row={row} strong={add ? "bg-primary/30" : del ? "bg-destructive/30" : undefined} />
+      </span>
+    </div>
+  );
+}
+
+/// A small modification merged onto one line: kept text plain, removed tokens
+/// red, added tokens green. Both line numbers shown, marked with `~`.
+function InlineRow({ merged, oldNo, newNo }: { merged: MSeg[]; oldNo?: number; newNo?: number }) {
+  return (
+    <div className="flex w-full">
+      <span className={cn(GUTTER, "w-11 text-muted-foreground/50")}>{oldNo ?? ""}</span>
+      <span className={cn(GUTTER, "w-11 text-muted-foreground/50")}>{newNo ?? ""}</span>
+      <span className="w-4 shrink-0 select-none text-center text-muted-foreground">~</span>
+      <span className="grow whitespace-pre pr-3 text-foreground">
+        {merged.map((s, k) =>
+          s.kind === "eq" ? (
+            <span key={k}>{s.text}</span>
+          ) : s.kind === "del" ? (
+            <span key={k} className="rounded-xs bg-destructive/25 text-destructive">
+              {s.text}
+            </span>
+          ) : (
+            <span key={k} className="rounded-xs bg-primary/25 text-primary">
+              {s.text}
+            </span>
+          ),
+        )}
       </span>
     </div>
   );
@@ -347,7 +434,23 @@ export function DiffView({
   const adds = rows.filter((r) => r.type === "add").length;
   const dels = rows.filter((r) => r.type === "del").length;
 
+  // Unified: small 1:1 edits merge into one inline row; everything else stays a
+  // -/+ pair. (Only in "unified" mode — see singleSide for old/new.)
   const unifiedBody = () =>
+    collapse(unifyPairs(pairs), (u) => u.change).map((block) => {
+      if (block.kind === "gap" && !expanded.has(block.id))
+        return <GapBar key={block.id} count={block.items.length} label onExpand={() => expand(block.id)} />;
+      return block.items.map((u, k) =>
+        u.merged ? (
+          <InlineRow key={`${block.id}-${k}`} merged={u.merged} oldNo={u.oldNo} newNo={u.newNo} />
+        ) : u.row ? (
+          <DiffRow key={`${block.id}-${k}`} row={u.row} />
+        ) : null,
+      );
+    });
+
+  // Old / New: one side, no inline merge — each surviving row keeps its colour.
+  const singleSide = () =>
     collapse(rows, (r) => r.type !== "eq").map((block) => {
       if (block.kind === "gap" && !expanded.has(block.id))
         return <GapBar key={block.id} count={block.items.length} label onExpand={() => expand(block.id)} />;
@@ -402,7 +505,9 @@ export function DiffView({
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <div className="w-max min-w-full font-mono text-xs leading-relaxed">{unifiedBody()}</div>
+            <div className="w-max min-w-full font-mono text-xs leading-relaxed">
+              {mode === "unified" ? unifiedBody() : singleSide()}
+            </div>
           </div>
         ))}
     </div>
