@@ -896,7 +896,7 @@ function DiffModal({
                   title={d.path}
                   onClick={() => setSelected(i)}
                   className={cn(
-                    "flex w-full flex-col gap-0.5 border-b border-border/60 border-l-2 px-3 py-2 text-left transition-colors",
+                    "flex w-full cursor-pointer flex-col gap-0.5 border-b border-border/60 border-l-2 px-3 py-2 text-left transition-colors",
                     i === selected ? "border-l-primary bg-background" : "border-l-transparent hover:bg-accent/50",
                   )}
                 >
