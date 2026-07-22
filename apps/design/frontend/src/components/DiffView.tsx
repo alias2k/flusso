@@ -195,6 +195,18 @@ function sideSegs(merged: MSeg[], side: "old" | "new"): Seg[] {
   return out;
 }
 
+// Two lines are a modification (worth token-highlighting) only when they share a
+// real majority — otherwise it's a block replacement, shown as solid rows.
+function similar(merged: MSeg[]): boolean {
+  let eq = 0;
+  let total = 0;
+  for (const s of merged) {
+    total += s.text.length;
+    if (s.kind === "eq") eq += s.text.length;
+  }
+  return total > 0 && eq * 2 >= total;
+}
+
 // Small enough to merge into one inline row (git --word-diff style): at most a
 // couple of changed runs, changing a minority of the line — otherwise it stays
 // a -/+ pair, which reads clearer for large edits.
@@ -206,14 +218,15 @@ function inlineable(merged: MSeg[]): boolean {
   return changedChars * 3 < total;
 }
 
-// For each paired modification, attach the word diff: per-side segments (both
-// views highlight the changed tokens) plus the merged stream (for the unified
-// inline row). Mutates the shared Row objects.
+// For each paired modification of SIMILAR lines, attach the word diff: per-side
+// segments (both views highlight the changed tokens) plus the merged stream (for
+// the unified inline row). Dissimilar pairs (block replacements) get nothing, so
+// they render as solid add/remove rows. Mutates the shared Row objects.
 function attachWordDiff(pairs: Pair[]): void {
   for (const p of pairs) {
     if (!p.changed || !p.left || !p.right) continue;
     const merged = tokenDiff(p.left.text, p.right.text);
-    if (!merged) continue;
+    if (!merged || !similar(merged)) continue;
     p.merged = merged;
     p.left.seg = sideSegs(merged, "old");
     p.right.seg = sideSegs(merged, "new");
@@ -255,17 +268,32 @@ interface URow {
   newNo?: number;
 }
 
-function unifyPairs(pairs: Pair[]): URow[] {
+// Walk rows in diff order (so a changed block stays all-removes-then-all-adds,
+// like git). A run that is exactly one remove + one add and a small tweak merges
+// into a single inline row; everything else keeps its -/+ rows.
+function unifyRows(rows: Row[]): URow[] {
   const out: URow[] = [];
-  for (const p of pairs) {
-    if (!p.changed) {
-      if (p.left) out.push({ change: false, row: p.left });
-    } else if (p.left && p.right && p.merged && inlineable(p.merged)) {
-      out.push({ change: true, merged: p.merged, oldNo: p.left.oldNo, newNo: p.right.newNo });
-    } else {
-      if (p.left) out.push({ change: true, row: p.left });
-      if (p.right) out.push({ change: true, row: p.right });
+  let k = 0;
+  while (k < rows.length) {
+    if (rows[k].type === "eq") {
+      out.push({ change: false, row: rows[k] });
+      k++;
+      continue;
     }
+    const dels: Row[] = [];
+    const adds: Row[] = [];
+    while (k < rows.length && rows[k].type !== "eq") {
+      if (rows[k].type === "del") dels.push(rows[k]);
+      else adds.push(rows[k]);
+      k++;
+    }
+    const lone = dels.length === 1 && adds.length === 1 ? tokenDiff(dels[0].text, adds[0].text) : null;
+    if (lone && inlineable(lone)) {
+      out.push({ change: true, merged: lone, oldNo: dels[0].oldNo, newNo: adds[0].newNo });
+      continue;
+    }
+    for (const d of dels) out.push({ change: true, row: d });
+    for (const a of adds) out.push({ change: true, row: a });
   }
   return out;
 }
@@ -437,7 +465,7 @@ export function DiffView({
   // Unified: small 1:1 edits merge into one inline row; everything else stays a
   // -/+ pair. (Only in "unified" mode — see singleSide for old/new.)
   const unifiedBody = () =>
-    collapse(unifyPairs(pairs), (u) => u.change).map((block) => {
+    collapse(unifyRows(rows), (u) => u.change).map((block) => {
       if (block.kind === "gap" && !expanded.has(block.id))
         return <GapBar key={block.id} count={block.items.length} label onExpand={() => expand(block.id)} />;
       return block.items.map((u, k) =>
