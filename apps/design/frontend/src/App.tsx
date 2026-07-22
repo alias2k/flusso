@@ -308,6 +308,10 @@ export default function App() {
     if (!doc || !savedDoc) return false;
     return JSON.stringify(doc.schemas[name]) !== JSON.stringify(savedDoc.schemas[name]);
   };
+  const configDirty = useMemo(
+    () => !!doc && (!savedDoc || JSON.stringify(doc.config) !== JSON.stringify(savedDoc.config)),
+    [doc, savedDoc],
+  );
 
   const config = doc?.config;
   const schema = doc && active !== "config" ? doc.schemas[active] : undefined;
@@ -438,23 +442,31 @@ export default function App() {
     loadCollapsed(active);
   }, [active, loadCollapsed]);
 
-  // The index files a save considers, in the order the diff endpoint returns
-  // them (config first, then these), so a FileDiff at position i+1 is entry i.
-  const saveEntries = (): { name: string; schema_path: string; schema: SaveSchemaInput["schema"] }[] =>
+  // The index files a save touches: only those whose parsed model actually
+  // changed, so editing one field never proposes rewriting untouched schemas
+  // (codegen would reflow them, stripping comments). They're sent in this order,
+  // and the diff endpoint returns the config first then these — so a FileDiff at
+  // position i+1 is entry i.
+  const changedEntries = (): { name: string; schema_path: string; schema: SaveSchemaInput["schema"] }[] =>
     (doc?.config.index ?? [])
-      .filter((e) => doc?.schemas[e.name])
+      .filter((e) => doc?.schemas[e.name] && indexDirty(e.name))
       .map((e) => ({ name: e.name, schema_path: e.schema, schema: doc!.schemas[e.name] }));
 
-  const saveIndexes = (): SaveSchemaInput[] =>
-    saveEntries().map((e) => ({ schema_path: e.schema_path, schema: e.schema }));
-
   // Save first shows a diff of what would change on disk; performSave writes it.
+  // When the config model is unchanged we hide its diff (a formatting/comment-only
+  // reflow the user didn't ask for) so an untouched flusso.toml is neither shown
+  // nor rewritten.
   const save = async () => {
     if (!doc || saving) return;
     setSaving(true);
     try {
-      const result = await api.diff(doc.config, saveIndexes());
-      if (result.some((d) => d.changed)) setDiffs(result);
+      const entries = changedEntries();
+      const result = await api.diff(
+        doc.config,
+        entries.map((e) => ({ schema_path: e.schema_path, schema: e.schema })),
+      );
+      const shown = configDirty || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
+      if (shown.some((d) => d.changed)) setDiffs(shown);
       else setToast({ kind: "ok", text: t("toast.alreadyUpToDate") });
     } catch (e) {
       setToast({ kind: "error", text: t("toast.diffFailed", { err: errText(e) }) });
@@ -463,25 +475,33 @@ export default function App() {
     }
   };
 
-  // Save the whole project but skip the files the user unchecked in the review
-  // (`ignore` = their FileDiff paths). The diff list (config first, then
-  // saveEntries in order) maps each ignored path back to the config or an index,
-  // so the saved snapshot only marks the actually-written files clean.
+  // Write the changed files, skipping the ones the user unchecked in the review
+  // (`ignore` = their FileDiff paths) plus the config whenever its model didn't
+  // change (so an untouched flusso.toml keeps its comments). The diff list is
+  // config-first then changedEntries in order, so a FileDiff at position i+1 is
+  // entry i. The saved snapshot advances only for the files actually written, so
+  // Reset targets the true on-disk state.
   const performSave = async (ignore: string[]) => {
     if (!doc || !diffs) return;
-    const ignored = new Set(ignore);
-    const entries = saveEntries();
+    const entries = changedEntries();
     const configPath = diffs[0]?.path;
+    const ignored = new Set(ignore);
+    if (!configDirty && configPath) ignored.add(configPath);
     setSaving(true);
     try {
-      const res = await api.save(doc.config, saveIndexes(), ignore);
+      const res = await api.save(
+        doc.config,
+        entries.map((e) => ({ schema_path: e.schema_path, schema: e.schema })),
+        [...ignored],
+      );
       const prev = saved ? (JSON.parse(saved) as Doc) : doc;
       const nextSchemas = { ...prev.schemas };
       entries.forEach((e, i) => {
         const path = diffs[i + 1]?.path;
         if (!path || !ignored.has(path)) nextSchemas[e.name] = doc.schemas[e.name];
       });
-      const nextConfig = configPath && ignored.has(configPath) ? prev.config : doc.config;
+      const configWritten = configPath ? !ignored.has(configPath) : configDirty;
+      const nextConfig = configWritten ? doc.config : prev.config;
       setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
       setDiffs(null);
       setToast({ kind: "ok", text: t("toast.saved", { n: res.written.length }) });
@@ -490,6 +510,15 @@ export default function App() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // Reset the edited document to the last-saved snapshot. In Code mode the YAML
+  // buffer is a separate editor state, so revert alone would leave it showing the
+  // discarded edits (and the debounced parser would re-apply them); clearing
+  // `rawFor` re-seeds the buffer from the reverted schema, like an index switch.
+  const reset = () => {
+    revertChanges();
+    if (rawMode) setRawFor("");
   };
 
   // Code mode: the buffer is just another editor of the in-memory document —
@@ -559,7 +588,7 @@ export default function App() {
       title: t("topbar.reset"),
       keywords: "reset discard revert unsaved changes",
       detail: { body: t("search.descReset"), enter: runAction },
-      run: revertChanges,
+      run: reset,
     },
     {
       id: "cmd.deployment",
@@ -785,7 +814,7 @@ export default function App() {
           </Button>
         </Hint>
         <Hint label={t("topbar.resetHint")}>
-          <Button variant="secondary" size="sm" onClick={revertChanges} disabled={!dirty || saving}>
+          <Button variant="secondary" size="sm" onClick={reset} disabled={!dirty || saving}>
             <span className={BTN_ICON}>
               <RotateCcw />
             </span>
