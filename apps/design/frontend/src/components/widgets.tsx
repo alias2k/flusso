@@ -1,7 +1,9 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { CheckIcon, ChevronDownIcon, ChevronRight, Plus, X } from "lucide-react";
 import type { ColumnShape } from "../api";
+import { useT } from "../i18n";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
+import { LABEL, NO_PW_MANAGER } from "../styles";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,11 +31,23 @@ export function SectionTitle({ children, className }: { children: ReactNode; cla
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="field mb-2 flex flex-col gap-1">
-      <span className="field-label text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">
-        {label}
-      </span>
+      <span className={cn("field-label", LABEL)}>{label}</span>
       {children}
     </div>
+  );
+}
+
+/// The brand "flow dot": a conic emerald→cyan gradient with a soft glow, used
+/// wherever the UI points at the global search (topbar pill, palette input).
+export function GlowDot({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn("inline-block size-2.5 shrink-0 rounded-full", className)}
+      style={{
+        background: "conic-gradient(from 90deg, var(--accent), var(--accent-2), var(--accent))",
+        boxShadow: "0 0 0 0.1875rem var(--accent-soft)",
+      }}
+    />
   );
 }
 
@@ -54,7 +68,7 @@ export function Block({ variant, title, children }: { variant: "src" | "doc"; ti
     >
       <div
         className={cn(
-          "blk-h mb-2 text-3xs font-bold uppercase tracking-[0.08em]",
+          "blk-h mb-2 text-3xs font-bold uppercase tracking-caps-wide",
           src ? "text-string" : "text-primary",
         )}
       >
@@ -125,7 +139,7 @@ export function Drawer({
     >
       <summary className="drawer-h flex cursor-pointer list-none items-center gap-2 bg-secondary px-3 py-2 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-3 text-slate transition-transform group-open:rotate-90" aria-hidden="true" />
-        <span className="text-2xs font-bold uppercase tracking-[0.07em] text-slate">{title}</span>
+        <span className="text-2xs font-bold uppercase tracking-caps-wide text-slate">{title}</span>
         {count !== undefined && <span className="count ml-auto font-mono text-2xs text-muted-foreground">{count}</span>}
       </summary>
       <div className="border-t border-border bg-slate/5 p-3">{children}</div>
@@ -145,6 +159,7 @@ export function Text({
   invalid,
   className,
   onKeyDown,
+  onBlur,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -153,6 +168,7 @@ export function Text({
   invalid?: boolean;
   className?: string;
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
+  onBlur?: () => void;
 }) {
   // A *stable* id (not the per-render counter) — otherwise every keystroke
   // re-renders with a new id, orphaning the open datalist so picks do nothing.
@@ -169,16 +185,8 @@ export function Text({
         list={id}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKeyDown}
-        // Not login fields — the data-*ignore attrs opt out of password managers
-        // (1Password/LastPass/Bitwarden/Dashlane) so no overlay covers the input.
-        autoComplete="off"
-        autoCorrect="off"
-        autoCapitalize="off"
-        spellCheck={false}
-        data-1p-ignore="true"
-        data-lpignore="true"
-        data-bwignore="true"
-        data-form-type="other"
+        onBlur={onBlur}
+        {...NO_PW_MANAGER}
       />
       {list && (
         <datalist id={id}>
@@ -331,6 +339,7 @@ export function Combobox({
   allowCustom?: boolean;
   className?: string;
 }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const selected = options.find((o) => o.value === value);
@@ -360,10 +369,10 @@ export function Combobox({
         <Command>
           <CommandInput value={query} onValueChange={setQuery} placeholder={placeholder} />
           <CommandList>
-            <CommandEmpty>{allowCustom ? "" : "No match"}</CommandEmpty>
+            <CommandEmpty>{allowCustom ? "" : t("common.noMatch")}</CommandEmpty>
             {allowCustom && query && !options.some((o) => o.value === query) && (
               <CommandItem value={query} onSelect={() => pick(query)}>
-                Use “{query}”
+                {t("common.useValue", { v: query })}
               </CommandItem>
             )}
             {options.map((o) => (

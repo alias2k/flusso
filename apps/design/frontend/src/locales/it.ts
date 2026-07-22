@@ -31,7 +31,6 @@ export const it: Record<string, string> = {
     'il tipo "{ty}" è un cambiamento netto rispetto alla colonna sorgente "{col}" ({src}) — i valori potrebbero non indicizzarsi',
   "topbar.upToDate": "Aggiornato",
   "topbar.language": "Lingua",
-  "topbar.settings": "Impostazioni",
 
   // toasts / status
   "toast.saved": "{n, plural, one {Salvato # file} other {Salvati # file}}",
@@ -106,6 +105,9 @@ export const it: Record<string, string> = {
   "common.clear": "Cancella",
   "common.close": "Chiudi",
   "common.column": "colonna",
+  "common.noMatch": "Nessun risultato",
+  "common.useValue": 'Usa "{v}"',
+  "common.loading": "Caricamento del progetto…",
 
   // inspector
   "inspector.selectPrompt": "Seleziona un nodo o un campo per modificarne i dettagli.",
@@ -138,6 +140,7 @@ export const it: Record<string, string> = {
   "inspector.trim": "ritaglia",
   "inspector.defaultRequired": "valore predefinito (obbligatorio)",
   "inspector.defaultOptional": "valore predefinito (facoltativo, JSON)",
+  "inspector.defaultPlaceholder": 'es. 0 o "n/a"',
   "inspector.colNotNull": "NOT NULL",
   "inspector.colNullable": "ammette null",
   "inspector.suggested": "suggerito",
@@ -219,6 +222,7 @@ export const it: Record<string, string> = {
   "preview.tabMapping": "Mappatura",
   "preview.tabSample": "Esempio",
   "preview.copy": "copia",
+  "preview.selectAll": "seleziona tutto",
   "preview.copied": "copiato",
   "preview.example": "esempio",
   "preview.building": "costruzione…",
@@ -265,10 +269,19 @@ export const it: Record<string, string> = {
   // config panel
   "config.indexPrefix": "prefisso indice",
   "config.none": "(nessuno)",
+  "config.source": "Origine",
+  "config.stageSourceHint": "Postgres",
+  "config.stageIndexesHint": "documenti sincronizzati",
+  "config.stageSinksHint": "destinazioni",
   "config.sinks": "Destinazioni",
   "config.sink": "destinazione",
+  "config.indexTuning": "ottimizzazione indice",
   "config.name": "nome",
+  "config.schemaFile": "file schema",
+  "config.onError": "in caso di errore",
+  "config.state": "stato",
   "config.enabled": "abilitato",
+  "config.disabled": "disabilitato",
   "config.duplicate": "duplica",
   "config.index": "indice",
   "config.removeIndex": 'Rimuovere l\'indice "{name}"? (il file schema resta su disco)',
@@ -305,6 +318,7 @@ export const it: Record<string, string> = {
   "filters.opBetween": "in un intervallo",
   "filters.opIsNull": "nessun valore",
   "filters.opIsNotNull": "ha un valore",
+  "filters.rawPlaceholder": "es. status <> 'archived'",
   "filters.help":
     "Limita quali righe alimentano questo campo — una condizione SQL grezza, un controllo null, o un test colonna/operatore/valore. Devono valere tutte.",
 

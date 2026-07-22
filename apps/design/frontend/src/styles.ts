@@ -10,3 +10,21 @@ export const NAV_HEADING = "mx-1 mb-1 mt-3 text-2xs uppercase text-muted-foregro
 // never resizes the button, and nesting the svg stops the `has-[>svg]` padding
 // rule from toggling mid-swap.
 export const BTN_ICON = "inline-flex size-4 shrink-0 items-center justify-center [&>*]:me-0";
+
+// The uppercase micro-label over a field / table column (inspector field names,
+// config table headers). One string so the treatment can't drift per-panel.
+export const LABEL = "text-3xs font-semibold uppercase tracking-caps text-muted-foreground";
+
+// Password-manager opt-out + browser-assist suppression for non-login inputs
+// (1Password/LastPass/Bitwarden/Dashlane overlays cover dense UI otherwise).
+// Spread onto any raw `<input>` that doesn't go through the `Text` widget.
+export const NO_PW_MANAGER = {
+  autoComplete: "off",
+  autoCorrect: "off",
+  autoCapitalize: "off",
+  spellCheck: false,
+  "data-1p-ignore": "true",
+  "data-lpignore": "true",
+  "data-bwignore": "true",
+  "data-form-type": "other",
+} as const;

@@ -30,7 +30,6 @@ export const en: Record<string, string> = {
   "diag.typeMismatch": 'type "{ty}" is a sharp change from source column "{col}" ({src}) — values may fail to index',
   "topbar.upToDate": "Up to date",
   "topbar.language": "Language",
-  "topbar.settings": "Settings",
 
   // toasts / status
   "toast.saved": "{n, plural, one {Saved # file} other {Saved # files}}",
@@ -105,6 +104,9 @@ export const en: Record<string, string> = {
   "common.clear": "Clear",
   "common.close": "Close",
   "common.column": "column",
+  "common.noMatch": "No match",
+  "common.useValue": 'Use "{v}"',
+  "common.loading": "Loading project…",
 
   // inspector
   "inspector.selectPrompt": "Select a node or field to edit its details.",
@@ -136,6 +138,7 @@ export const en: Record<string, string> = {
   "inspector.trim": "trim",
   "inspector.defaultRequired": "default (required)",
   "inspector.defaultOptional": "default (optional, JSON)",
+  "inspector.defaultPlaceholder": 'e.g. 0 or "n/a"',
   "inspector.colNotNull": "NOT NULL",
   "inspector.colNullable": "nullable",
   "inspector.suggested": "suggested",
@@ -214,6 +217,7 @@ export const en: Record<string, string> = {
   "preview.tabMapping": "Mapping",
   "preview.tabSample": "Sample",
   "preview.copy": "copy",
+  "preview.selectAll": "select all",
   "preview.copied": "copied",
   "preview.example": "example",
   "preview.building": "building…",
@@ -260,10 +264,19 @@ export const en: Record<string, string> = {
   // config panel
   "config.indexPrefix": "index prefix",
   "config.none": "(none)",
+  "config.source": "Source",
+  "config.stageSourceHint": "Postgres",
+  "config.stageIndexesHint": "synced documents",
+  "config.stageSinksHint": "destinations",
   "config.sinks": "Sinks",
   "config.sink": "sink",
+  "config.indexTuning": "index tuning",
   "config.name": "name",
+  "config.schemaFile": "schema file",
+  "config.onError": "on error",
+  "config.state": "state",
   "config.enabled": "enabled",
+  "config.disabled": "disabled",
   "config.duplicate": "duplicate",
   "config.index": "index",
   "config.removeIndex": 'Remove index "{name}"? (the schema file is left on disk)',
@@ -300,6 +313,7 @@ export const en: Record<string, string> = {
   "filters.opBetween": "within a range",
   "filters.opIsNull": "no value",
   "filters.opIsNotNull": "has a value",
+  "filters.rawPlaceholder": "e.g. status <> 'archived'",
   "filters.help":
     "Restrict which rows feed this field — a raw SQL condition, a null check, or a column/operator/value test. All must hold.",
 

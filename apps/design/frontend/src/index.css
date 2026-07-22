@@ -34,6 +34,14 @@
 *::-webkit-scrollbar-thumb:hover {
   background-color: var(--slate);
 }
+
+/* App-wide text selection: a brand-emerald wash (follows --primary), so
+   selecting anywhere reads as flusso green instead of the dim browser default.
+   Background only — syntax colours in code blocks stay legible under the tint.
+   Unlayered, so it wins over library defaults. */
+::selection {
+  background-color: var(--selection);
+}
 @import "tw-animate-css";
 @import "@xyflow/react/dist/style.css" layer(reactflow);
 
@@ -114,6 +122,11 @@
   --text-2xs: 0.6875rem;
   --text-3xs: 0.625rem;
 
+  /* uppercase-label letterspacing: `caps` for small field/table labels,
+     `caps-wide` for section/block headings */
+  --tracking-caps: 0.05em;
+  --tracking-caps-wide: 0.08em;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -126,6 +139,16 @@
    Lives in the components layer, so Tailwind utilities still win over it.
    ───────────────────────────────────────────────────────────────────────── */
 @layer components {
+  /* the topbar wordmark: emerald→cyan gradient text */
+  .brand {
+    font-size: 0.9375rem;
+    letter-spacing: 0.0125rem;
+    color: transparent;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+  }
+
   /* Sizing is in `rem`, never `px` — so the whole UI scales with the browser
    font-size / zoom. 1rem = the root 16px default, so a value in rem is its old
    px ÷ 16 (e.g. 0.5rem = 8px). Keep new sizes in rem; reach for px only for a
@@ -141,6 +164,7 @@
     --accent: #10b981; /* emerald */
     --accent-2: #06b6d4; /* cyan — the "flow" partner */
     --accent-soft: rgba(16, 185, 129, 0.14);
+    --selection: rgba(16, 185, 129, 0.35); /* brand-emerald text-selection wash */
     --slate: #94a3b8;
     --error: #f87171;
     --warn: #e0b341;
@@ -725,13 +749,27 @@
   }
 
   /* ── node column ergonomics (group C) ───────────────────────────────────── */
+  /* A 1.5rem square hit target (the icon alone was too small to click);
+     negative margins absorb the extra size so the header layout doesn't shift. */
   .flow-node header .chevron {
+    display: inline-grid;
+    place-items: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    margin: -0.375rem 0 -0.375rem -0.25rem;
+    vertical-align: middle;
+    border-radius: 0.375rem;
     background: none;
     border: none;
-    padding: 0 0.25rem 0 0;
+    padding: 0;
     color: var(--muted);
-    transition: transform 0.12s ease;
+    transition:
+      transform 0.12s ease,
+      color 0.12s ease;
     cursor: pointer;
+  }
+  .flow-node header .chevron:hover {
+    color: var(--fg);
   }
   .flow-node header .chevron.collapsed {
     transform: rotate(-90deg);
@@ -785,6 +823,7 @@
     --text: #1b2230;
     --muted: #5c6573;
     --accent-soft: rgba(16, 185, 129, 0.16);
+    --selection: rgba(16, 185, 129, 0.28);
 
     /* diff shades — light theme. Tailwind green/red scale (a 100 row wash, a 200
        word-level highlight, a 600/700 foreground). */
