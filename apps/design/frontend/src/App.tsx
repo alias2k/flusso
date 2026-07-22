@@ -822,7 +822,7 @@ export default function App() {
           </Button>
         </Hint>
         <Hint label={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
-          <Button size="sm" onClick={() => void save()} disabled={saving}>
+          <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
             <span className={BTN_ICON}>
               {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
             </span>
