@@ -906,8 +906,8 @@ function DiffModal({
                   </span>
                   <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
                     {d.current === "" && <span className="badge object">{t("diff.newFile")}</span>}
-                    <span className="text-primary">+{s.adds}</span>
-                    <span className="text-destructive">-{s.dels}</span>
+                    <span className="text-diff-add-num">+{s.adds}</span>
+                    <span className="text-diff-del-num">-{s.dels}</span>
                   </span>
                 </button>
               );

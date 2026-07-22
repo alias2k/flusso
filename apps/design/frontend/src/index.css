@@ -99,6 +99,17 @@
   --color-kind-has_many: var(--k-has_many);
   --color-kind-many_to_many: var(--k-many_to_many);
 
+  /* diff (save review) shades — solid colours, not opacity blends: row bg, the
+     stronger word-level bg, the sign/inline text, and the line-number gutter. */
+  --color-diff-add-bg: var(--diff-add-bg);
+  --color-diff-add-strong: var(--diff-add-strong);
+  --color-diff-add-fg: var(--diff-add-fg);
+  --color-diff-add-num: var(--diff-add-num);
+  --color-diff-del-bg: var(--diff-del-bg);
+  --color-diff-del-strong: var(--diff-del-strong);
+  --color-diff-del-fg: var(--diff-del-fg);
+  --color-diff-del-num: var(--diff-del-num);
+
   /* the bespoke small sizes the dense UI uses (10px / 11px at the 16px root) */
   --text-2xs: 0.6875rem;
   --text-3xs: 0.625rem;
@@ -134,6 +145,18 @@
     --error: #f87171;
     --warn: #e0b341;
     --ok: #34d399;
+
+    /* diff shades — dark theme. Tailwind green/red scale (a dark 950 row wash,
+       an 800 word-level highlight, a 400/500 foreground) — real shades, not
+       opacity blends of the accents. */
+    --diff-add-bg: #052e16; /* green-950 */
+    --diff-add-strong: #166534; /* green-800 */
+    --diff-add-fg: #4ade80; /* green-400 */
+    --diff-add-num: #22c55e; /* green-500 */
+    --diff-del-bg: #450a0a; /* red-950 */
+    --diff-del-strong: #991b1b; /* red-800 */
+    --diff-del-fg: #f87171; /* red-400 */
+    --diff-del-num: #ef4444; /* red-500 */
 
     /* relation-kind hues — one per kind (match theme.ts edgeColor).
      root: its own warm hue. object: neutral slate — not a relation.
@@ -762,6 +785,17 @@
     --text: #1b2230;
     --muted: #5c6573;
     --accent-soft: rgba(16, 185, 129, 0.16);
+
+    /* diff shades — light theme. Tailwind green/red scale (a 100 row wash, a 200
+       word-level highlight, a 600/700 foreground). */
+    --diff-add-bg: #dcfce7; /* green-100 */
+    --diff-add-strong: #bbf7d0; /* green-200 */
+    --diff-add-fg: #15803d; /* green-700 */
+    --diff-add-num: #16a34a; /* green-600 */
+    --diff-del-bg: #fee2e2; /* red-100 */
+    --diff-del-strong: #fecaca; /* red-200 */
+    --diff-del-fg: #b91c1c; /* red-700 */
+    --diff-del-num: #dc2626; /* red-600 */
   }
   :root[data-theme="light"] .flow-node {
     box-shadow:

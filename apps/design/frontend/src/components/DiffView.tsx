@@ -46,31 +46,35 @@ function DiffRow({ row }: { row: Row }) {
   const add = row.type === "add";
   const del = row.type === "del";
   return (
-    <div className={cn("flex w-full", add && "bg-primary/12", del && "bg-destructive/12")}>
+    <div className={cn("flex w-full", add && "bg-diff-add-bg", del && "bg-diff-del-bg")}>
       <span
         className={cn(
           GUTTER,
           "w-11",
-          add ? "text-transparent" : del ? "text-destructive/70" : "text-muted-foreground/50",
+          add ? "text-transparent" : del ? "text-diff-del-num" : "text-muted-foreground/50",
         )}
       >
         {row.oldNo ?? ""}
       </span>
       <span
-        className={cn(GUTTER, "w-11", del ? "text-transparent" : add ? "text-primary/70" : "text-muted-foreground/50")}
+        className={cn(
+          GUTTER,
+          "w-11",
+          del ? "text-transparent" : add ? "text-diff-add-num" : "text-muted-foreground/50",
+        )}
       >
         {row.newNo ?? ""}
       </span>
       <span
         className={cn(
           "w-4 shrink-0 select-none text-center",
-          add ? "text-primary" : del ? "text-destructive" : "text-transparent",
+          add ? "text-diff-add-fg" : del ? "text-diff-del-fg" : "text-transparent",
         )}
       >
         {add ? "+" : del ? "-" : " "}
       </span>
       <span className={cn("grow whitespace-pre pr-3", row.type === "eq" ? "text-muted-foreground" : "text-foreground")}>
-        <LineText row={row} strong={add ? "bg-primary/30" : del ? "bg-destructive/30" : undefined} />
+        <LineText row={row} strong={add ? "bg-diff-add-strong" : del ? "bg-diff-del-strong" : undefined} />
       </span>
     </div>
   );
@@ -89,11 +93,11 @@ function InlineRow({ merged, oldNo, newNo }: { merged: MSeg[]; oldNo?: number; n
           s.kind === "eq" ? (
             <span key={k}>{s.text}</span>
           ) : s.kind === "del" ? (
-            <span key={k} className="rounded-xs bg-destructive/25 text-destructive">
+            <span key={k} className="rounded-xs bg-diff-del-strong text-diff-del-fg">
               {s.text}
             </span>
           ) : (
-            <span key={k} className="rounded-xs bg-primary/25 text-primary">
+            <span key={k} className="rounded-xs bg-diff-add-strong text-diff-add-fg">
               {s.text}
             </span>
           ),
@@ -111,16 +115,13 @@ function SideCell({ row, side }: { row?: Row; side: "old" | "new" }) {
   const no = side === "old" ? row.oldNo : row.newNo;
   return (
     <div
-      className={cn(
-        "flex h-6 w-full items-center",
-        changed && (side === "old" ? "bg-destructive/12" : "bg-primary/12"),
-      )}
+      className={cn("flex h-6 w-full items-center", changed && (side === "old" ? "bg-diff-del-bg" : "bg-diff-add-bg"))}
     >
       <span
         className={cn(
           GUTTER,
           "w-11",
-          changed ? (side === "old" ? "text-destructive/70" : "text-primary/70") : "text-muted-foreground/50",
+          changed ? (side === "old" ? "text-diff-del-num" : "text-diff-add-num") : "text-muted-foreground/50",
         )}
       >
         {no ?? ""}
@@ -128,13 +129,16 @@ function SideCell({ row, side }: { row?: Row; side: "old" | "new" }) {
       <span
         className={cn(
           "w-4 shrink-0 select-none text-center",
-          changed ? (side === "old" ? "text-destructive" : "text-primary") : "text-transparent",
+          changed ? (side === "old" ? "text-diff-del-fg" : "text-diff-add-fg") : "text-transparent",
         )}
       >
         {side === "old" ? "-" : "+"}
       </span>
       <span className={cn("grow whitespace-pre pr-3", changed ? "text-foreground" : "text-muted-foreground")}>
-        <LineText row={row} strong={changed ? (side === "old" ? "bg-destructive/30" : "bg-primary/30") : undefined} />
+        <LineText
+          row={row}
+          strong={changed ? (side === "old" ? "bg-diff-del-strong" : "bg-diff-add-strong") : undefined}
+        />
       </span>
     </div>
   );
@@ -142,16 +146,16 @@ function SideCell({ row, side }: { row?: Row; side: "old" | "new" }) {
 
 /// The collapsed-gap expander. Rendered once (unified) or in both split columns
 /// at the same position, so the two sides stay aligned; either click expands.
-function GapBar({ count, label, onExpand }: { count: number; label?: boolean; onExpand: () => void }) {
+function GapBar({ count, onExpand }: { count: number; onExpand: () => void }) {
   const { t } = useT();
   return (
     <button
       type="button"
       onClick={onExpand}
-      className="flex h-6 w-full items-center gap-2 bg-accent/40 px-3 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      className="flex h-6 w-full cursor-pointer items-center gap-2 bg-accent/40 px-3 text-2xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
     >
       <ChevronsUpDown className="size-3 shrink-0" />
-      {label && t("diff.unchanged", { n: count })}
+      {t("diff.unchanged", { n: count })}
     </button>
   );
 }
@@ -183,7 +187,7 @@ export function DiffView({
   const unifiedBody = () =>
     collapse(unifyRows(rows), (u) => u.change).map((block) => {
       if (block.kind === "gap" && !expanded.has(block.id))
-        return <GapBar key={block.id} count={block.items.length} label onExpand={() => expand(block.id)} />;
+        return <GapBar key={block.id} count={block.items.length} onExpand={() => expand(block.id)} />;
       return block.items.map((u, k) =>
         u.merged ? (
           <InlineRow key={`${block.id}-${k}`} merged={u.merged} oldNo={u.oldNo} newNo={u.newNo} />
@@ -197,7 +201,7 @@ export function DiffView({
   const singleSide = () =>
     collapse(rows, (r) => r.type !== "eq").map((block) => {
       if (block.kind === "gap" && !expanded.has(block.id))
-        return <GapBar key={block.id} count={block.items.length} label onExpand={() => expand(block.id)} />;
+        return <GapBar key={block.id} count={block.items.length} onExpand={() => expand(block.id)} />;
       return block.items
         .filter((r) => rowVisible(r.type, mode))
         .map((r, k) => <DiffRow key={`${block.id}-${k}`} row={r} />);
@@ -208,9 +212,7 @@ export function DiffView({
   const splitColumn = (side: "old" | "new") =>
     collapse(pairs, (p) => p.changed).map((block) => {
       if (block.kind === "gap" && !expanded.has(block.id))
-        return (
-          <GapBar key={block.id} count={block.items.length} label={side === "old"} onExpand={() => expand(block.id)} />
-        );
+        return <GapBar key={block.id} count={block.items.length} onExpand={() => expand(block.id)} />;
       return block.items.map((p, k) => (
         <SideCell key={`${block.id}-${k}`} row={side === "old" ? p.left : p.right} side={side} />
       ));
@@ -222,8 +224,8 @@ export function DiffView({
         <span className="truncate font-mono text-xs font-medium text-foreground">{path}</span>
         {current === "" && <span className="badge object">{t("diff.newFile")}</span>}
         <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-2xs tabular-nums">
-          <span className="text-primary">+{adds}</span>
-          <span className="text-destructive">-{dels}</span>
+          <span className="text-diff-add-num">+{adds}</span>
+          <span className="text-diff-del-num">-{dels}</span>
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
