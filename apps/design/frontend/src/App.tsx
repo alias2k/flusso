@@ -943,6 +943,7 @@ function DiffModal({
   const [mode, setMode] = useState<DiffMode>("split");
   const [selected, setSelected] = useState(0);
   const [check, setCheck] = useState<Check>({ state: "loading" });
+  const searchRef = useRef<HTMLInputElement>(null);
   const changed = diffs.filter((d) => d.changed);
   const active = changed[selected] ?? changed[0];
 
@@ -1023,6 +1024,14 @@ function DiffModal({
           e.preventDefault();
           if (query) setQuery("");
         }}
+        onOpenAutoFocus={(e) => {
+          // Land in the file filter when it's present, instead of Radix's default
+          // (the first focusable — a view-toggle button).
+          if (searchRef.current) {
+            e.preventDefault();
+            searchRef.current.focus();
+          }
+        }}
       >
         <DialogHeader className="flex-row items-center justify-between gap-3 pr-8">
           <div className="flex min-w-0 items-center gap-3">
@@ -1055,6 +1064,7 @@ function DiffModal({
               <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3 focus-within:border-b-primary">
                 <Search className="size-3.5 shrink-0 text-muted-foreground" />
                 <input
+                  ref={searchRef}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={onSearchKey}
