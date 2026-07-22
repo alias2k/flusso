@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useDesignStore, useCanUndo, useCanRedo, undo, redo, emptySchema, type Doc } from "./store/design";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useDesignStore, useCanUndo, useCanRedo, undo, redo, type Doc } from "./store/design";
 import { useUiStore } from "./store/ui";
 import {
   ChevronRight,
@@ -8,7 +8,6 @@ import {
   AlignJustify,
   Columns2,
   Eye,
-  FileCode2,
   Languages,
   Minus,
   Moon,
@@ -16,12 +15,13 @@ import {
   RotateCcw,
   Save,
   Search,
+  Settings,
   Sun,
   Table2,
   TriangleAlert,
   X,
 } from "lucide-react";
-import type { ColumnShape, FileDiff, SaveSchemaInput, ValidateResponse } from "./api";
+import type { ColumnShape, DiagnosticDto, FileDiff, SaveSchemaInput, ValidateResponse } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -32,6 +32,11 @@ import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
 import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
+import { Switch } from "@/components/ui/switch";
+
+// CodeMirror (+ the vim extension) is a chunk of its own — loaded only when
+// Code mode actually opens, so the canvas app doesn't pay for it.
+const CodeView = lazy(() => import("./components/CodeView").then((m) => ({ default: m.CodeView })));
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -44,13 +49,17 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Drawer, DrawerClose, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
+import { Label } from "@/components/ui/label";
 import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { GlowDot, Select, Text } from "./components/widgets";
 import { LANGS, useT, type Translate } from "./i18n";
+// Type-only: erased at compile time, so it doesn't pull the yaml package into
+// the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
+import type { ParseErrorInfo } from "./model/anchors";
 import { removeAt, removeNode } from "./model/edit";
+import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
 import type { SearchRecord } from "./model/search";
@@ -169,6 +178,10 @@ export default function App() {
   const validating = useUiStore((s) => s.validating);
   const rawMode = useUiStore((s) => s.rawMode);
   const rawText = useUiStore((s) => s.rawText);
+  const vimMode = useUiStore((s) => s.vimMode);
+  const toggleVim = useUiStore((s) => s.toggleVim);
+  const autoFormat = useUiStore((s) => s.autoFormat);
+  const toggleAutoFormat = useUiStore((s) => s.toggleAutoFormat);
   const diffs = useUiStore((s) => s.diffs);
   const browseCatalog = useUiStore((s) => s.browseCatalog);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
@@ -200,10 +213,69 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast, setToast]);
 
+  // ── routing: the hash mirrors what the main area shows (see router.ts) ────
+
+  // URL → state. Behind a ref so the one hashchange listener always sees the
+  // latest handlers; validated against the loaded project so a stale deep link
+  // can't select a nonexistent index.
+  const applyRoute = (route: Route) => {
+    if (route.view === "tables") {
+      setBrowseCatalog(true);
+      return;
+    }
+    setBrowseCatalog(false);
+    if (route.view === "deployment") {
+      setRawMode(false);
+      setActive("config");
+      return;
+    }
+    const known = useDesignStore.getState().doc?.config.index?.some((e) => e.name === route.name);
+    if (!known) return;
+    if (useDesignStore.getState().active !== route.name) openIndex(route.name);
+    // Entering Code via URL: the buffer re-seeds itself (the rawFor effect)
+    // once rawMode is on, so no openRaw here.
+    setRawMode(route.code);
+  };
+  const applyRouteRef = useRef(applyRoute);
+  useEffect(() => {
+    applyRouteRef.current = applyRoute;
+  });
+  useEffect(() => {
+    const onHash = () => {
+      const route = parseRoute(window.location.hash);
+      if (route) applyRouteRef.current(route);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  // State → URL. pushState doesn't fire hashchange, so this can't loop; the
+  // very first write replaces instead, keeping the entry the user landed on.
+  const routeHash = formatRoute(
+    browseCatalog
+      ? { view: "tables" }
+      : active === "config"
+        ? { view: "deployment" }
+        : { view: "index", name: active, code: rawMode },
+  );
+  const routedOnce = useRef(false);
+  useEffect(() => {
+    if (!doc) return;
+    if (window.location.hash === routeHash) return;
+    window.history[routedOnce.current ? "pushState" : "replaceState"](null, "", routeHash);
+    routedOnce.current = true;
+  }, [doc, routeHash]);
+
   useEffect(() => {
     api
       .project()
-      .then((p) => loadProject(p, true))
+      .then((p) => {
+        loadProject(p, true);
+        // A deep link wins over the default first index — applied after the
+        // project loads so the index-name validation can see it.
+        const route = parseRoute(window.location.hash);
+        if (route) applyRouteRef.current(route);
+      })
       .catch((e) => setError(String(e)));
     api
       .catalog()
@@ -223,13 +295,6 @@ export default function App() {
       })
       .catch((e) => setToast({ kind: "error", text: errText(e) }));
 
-  // Re-read everything from disk (after a raw save), keeping the active index.
-  const reloadProject = () =>
-    api
-      .project()
-      .then((p) => loadProject(p, false))
-      .catch((e) => setToast({ kind: "error", text: errText(e) }));
-
   const columnsFor = useMemo(() => {
     const tables = catalog?.catalog.tables ?? [];
     return (table: string): ColumnShape[] => tables.find((t) => t.name === table)?.columns ?? [];
@@ -246,7 +311,10 @@ export default function App() {
 
   const config = doc?.config;
   const schema = doc && active !== "config" ? doc.schemas[active] : undefined;
-  const inspectorOpen = active !== "config" && !!schema && selection !== null;
+  // Never in Code mode: the inspector edits the canvas selection, and the raw
+  // pane doesn't render it — reserving its grid column would just squeeze the
+  // editor against dead space.
+  const inspectorOpen = active !== "config" && !rawMode && !!schema && selection !== null;
 
   // Database diagnostics (from Validate) plus always-on, catalog-only schema
   // checks (e.g. required-over-nullable needs a default) — same channel, so
@@ -276,6 +344,84 @@ export default function App() {
     }, 250);
     return () => clearTimeout(handle);
   }, [active, schema, setPreview, setError]);
+
+  // Code-mode live sync: the buffer parses server-side (the same strict parser
+  // that reads the file) and, when it converts, replaces the in-memory schema —
+  // so undo, the preview, and the one global Save all see YAML edits exactly
+  // like visual ones. The sequence guard drops out-of-order replies.
+  const parseSeq = useRef(0);
+  const [codeProblem, setCodeProblem] = useState<ParseErrorInfo | null>(null);
+  // Which index the Code buffer belongs to. Gating the sync on it is what
+  // keeps an index switch from parsing the *previous* index's YAML into the
+  // new one; the re-seed effect below moves the buffer over.
+  const [rawFor, setRawFor] = useState("");
+  useEffect(() => {
+    if (!rawMode || active === "config" || rawFor !== active) {
+      setCodeProblem(null);
+      return;
+    }
+    const seq = ++parseSeq.current;
+    const handle = setTimeout(() => {
+      api
+        .parse(rawText)
+        .then((res) => {
+          if (seq !== parseSeq.current || !useUiStore.getState().rawMode) return;
+          setCodeProblem(
+            res.error ? { message: res.error, location: res.location, field: res.field, typeTag: res.type_tag } : null,
+          );
+          const parsed = res.schema;
+          if (!parsed) return;
+          const current = useDesignStore.getState().doc?.schemas[active];
+          if (JSON.stringify(parsed) !== JSON.stringify(current)) apply(() => parsed);
+        })
+        .catch(() => setCodeProblem(null));
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [rawMode, rawText, active, rawFor, apply]);
+
+  // Switching index while Code mode is open: the buffer still shows the
+  // previous index, so regenerate it from the new index's schema (the same
+  // codegen the preview uses) before the sync above may run again.
+  useEffect(() => {
+    if (!rawMode || active === "config" || rawFor === active || !schema) return;
+    let alive = true;
+    api
+      .preview(active, prunedForPreview(schema))
+      .then((p) => {
+        if (!alive || !useUiStore.getState().rawMode) return;
+        setRawText(p.yaml);
+        setRawFor(active);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setRawText(project?.indexes.find((i) => i.name === active)?.raw ?? "");
+        setRawFor(active);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [rawMode, active, rawFor, schema, project, setRawText]);
+
+  // …and the applied schema gets the *real* validation (columns exist, types
+  // line up) against the database — it's fast, so problems surface in the rail
+  // as you type instead of waiting for a manual Validate.
+  const [liveDiags, setLiveDiags] = useState<DiagnosticDto[]>([]);
+  useEffect(() => {
+    if (!rawMode || !schema || !doc || active === "config" || catalog?.error) {
+      setLiveDiags([]);
+      return;
+    }
+    const handle = setTimeout(() => {
+      api
+        .validate(doc.config, [{ name: active, schema }])
+        .then((res) => {
+          if (!useUiStore.getState().rawMode) return;
+          setLiveDiags(res.db_reachable && !res.error ? res.diagnostics : []);
+        })
+        .catch(() => setLiveDiags([]));
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [rawMode, schema, doc, active, catalog]);
 
   // Warn before leaving with unsaved changes.
   useEffect(() => {
@@ -346,29 +492,14 @@ export default function App() {
     }
   };
 
-  // Raw-YAML escape hatch: write the active index's file verbatim, then reload.
+  // Code mode: the buffer is just another editor of the in-memory document —
+  // it seeds from the current schema's YAML and syncs back through /api/parse
+  // as you type. The one global Save then writes files, same as visual edits.
   const openRaw = () => {
     const onDisk = project?.indexes.find((i) => i.name === active)?.raw;
     setRawText(preview?.yaml ?? onDisk ?? "");
+    setRawFor(active);
     setRawMode(true);
-  };
-  const saveRaw = async () => {
-    if (!doc || active === "config" || saving) return;
-    const entry = doc.config.index?.find((e) => e.name === active);
-    if (!entry) return;
-    setSaving(true);
-    try {
-      await api.save(doc.config, [
-        { schema_path: entry.schema, schema: doc.schemas[active] ?? emptySchema(""), raw: rawText },
-      ]);
-      setRawMode(false);
-      await reloadProject();
-      setToast({ kind: "ok", text: t("toast.savedRaw") });
-    } catch (e) {
-      setToast({ kind: "error", text: t("toast.saveFailed", { err: errText(e) }) });
-    } finally {
-      setSaving(false);
-    }
   };
 
   const validate = async () => {
@@ -571,13 +702,6 @@ export default function App() {
           <Kbd className="ml-auto">⌘K</Kbd>
         </button>
 
-        {/* global: browse the whole database catalog */}
-        <Hint label={t("search.descTables")}>
-          <Button variant="ghost" size="sm" onClick={() => setBrowseCatalog(true)}>
-            <Table2 /> {t("topbar.tables")}
-          </Button>
-        </Hint>
-
         {/* global: edit history */}
         <Hint label={t("topbar.undo")}>
           <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
@@ -614,6 +738,42 @@ export default function App() {
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        <div className="mx-1 h-5 w-px bg-border" />
+
+        {/* Visual ⟷ Code: swaps the whole body between the canvas and the YAML
+            editor. Global because the mode survives index switches; inert on
+            the Deployment screen, which has no code representation. */}
+        <Hint label={t("topbar.modeHint")}>
+          <span className="flex items-center gap-2">
+            <Label
+              htmlFor="mode-toggle"
+              className={cn(
+                "cursor-pointer text-xs",
+                rawMode ? "text-muted-foreground" : "font-medium",
+                active === "config" && "opacity-50",
+              )}
+            >
+              {t("topbar.visual")}
+            </Label>
+            <Switch
+              id="mode-toggle"
+              checked={rawMode}
+              disabled={active === "config"}
+              onCheckedChange={(on) => (on ? openRaw() : setRawMode(false))}
+            />
+            <Label
+              htmlFor="mode-toggle"
+              className={cn(
+                "cursor-pointer text-xs",
+                rawMode ? "font-medium" : "text-muted-foreground",
+                active === "config" && "opacity-50",
+              )}
+            >
+              {t("topbar.code")}
+            </Label>
+          </span>
+        </Hint>
 
         <div className="mx-1 h-5 w-px bg-border" />
 
@@ -658,7 +818,7 @@ export default function App() {
             sidebar) naming the index you're editing and carrying the tools that act
             on it — kept apart from the global bar so index- and deployment-scoped
             actions never blur together. Absent on the Deployment screen. */}
-        {active !== "config" && schema && (
+        {active !== "config" && schema && !browseCatalog && (
           <div
             className="col-start-2 col-span-2 row-start-1 flex items-center gap-2.5 border-b border-border px-4 py-1.5"
             style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 42%), var(--panel-2)" }}
@@ -671,14 +831,32 @@ export default function App() {
               {schema.primary_key ? ` · ${t("node.pk")}: ${schema.primary_key}` : ""}
             </span>
             <span className="flex-1" />
+            {/* Mode-scoped editor preferences — only meaningful while Code
+                mode is showing, so they live on the index bar, not globally. */}
+            {rawMode && (
+              <>
+                <Hint label={t("code.autoFormatHint")}>
+                  <span className="flex items-center gap-1.5">
+                    <Switch id="autoformat-toggle" checked={autoFormat} onCheckedChange={toggleAutoFormat} />
+                    <Label htmlFor="autoformat-toggle" className="cursor-pointer text-xs text-muted-foreground">
+                      {t("code.autoFormat")}
+                    </Label>
+                  </span>
+                </Hint>
+                <Hint label={t("raw.vimHint")}>
+                  <span className="flex items-center gap-1.5">
+                    <Switch id="vim-toggle" checked={vimMode} onCheckedChange={toggleVim} />
+                    <Label htmlFor="vim-toggle" className="cursor-pointer font-mono text-2xs text-muted-foreground">
+                      VIM
+                    </Label>
+                  </span>
+                </Hint>
+                <div className="mx-1 h-5 w-px bg-border" />
+              </>
+            )}
             <Hint label={t("search.descYaml")}>
               <Button variant="secondary" size="sm" onClick={() => setDrawer(true)}>
                 <Eye /> {t("topbar.yaml")}
-              </Button>
-            </Hint>
-            <Hint label={rawMode ? t("topbar.visualHint") : t("topbar.rawHint")}>
-              <Button variant="ghost" size="sm" onClick={() => (rawMode ? setRawMode(false) : openRaw())}>
-                <FileCode2 /> {rawMode ? t("topbar.visual") : t("topbar.rawYaml")}
               </Button>
             </Hint>
           </div>
@@ -687,15 +865,30 @@ export default function App() {
         {leftOpen && (
           <nav className="sidebar col-start-1 row-start-1 row-span-2 flex min-h-0 flex-col border-r border-border bg-card">
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              <button className={cn(NAV, active === "config" && NAV_ACTIVE)} onClick={() => setActive("config")}>
-                ⚙ {t("sidebar.deployment")}
+              <button
+                className={cn(NAV, "flex items-center gap-1.5", active === "config" && !browseCatalog && NAV_ACTIVE)}
+                onClick={() => {
+                  setBrowseCatalog(false);
+                  setActive("config");
+                }}
+              >
+                <Settings className="size-3.5 shrink-0" /> {t("sidebar.deployment")}
+              </button>
+              <button
+                className={cn(NAV, "flex items-center gap-1.5", browseCatalog && NAV_ACTIVE)}
+                onClick={() => setBrowseCatalog(true)}
+              >
+                <Table2 className="size-3.5 shrink-0" /> {t("topbar.tables")}
               </button>
               <div className={NAV_HEADING}>{t("sidebar.indexes")}</div>
               {(config.index ?? []).map((e) => (
                 <button
                   key={e.name}
-                  className={cn(NAV, active === e.name && NAV_ACTIVE)}
-                  onClick={() => openIndex(e.name)}
+                  className={cn(NAV, active === e.name && !browseCatalog && NAV_ACTIVE)}
+                  onClick={() => {
+                    setBrowseCatalog(false);
+                    openIndex(e.name);
+                  }}
                 >
                   {indexDirty(e.name) && <span className="dirty-dot" />}
                   {e.name}
@@ -734,29 +927,41 @@ export default function App() {
           </nav>
         )}
 
-        {active === "config" ? (
+        {browseCatalog ? (
+          <main className="col-start-2 row-start-2 flex min-h-0 flex-col">
+            {catalog ? (
+              <CatalogBrowser catalog={catalog} />
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <span className="spinner" />
+              </div>
+            )}
+          </main>
+        ) : active === "config" ? (
           <main className="col-start-2 row-start-2 min-h-0 overflow-y-auto p-4">
             <ConfigPanel config={config} onChange={setConfig} onDuplicate={dupIndex} />
           </main>
         ) : rawMode ? (
           <main className="raw-pane col-start-2 row-start-2 flex min-h-0 flex-col">
-            <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">
-              {t("raw.editingFor")} <strong>{active}</strong> — {t("raw.help")}
-            </div>
-            <Textarea
-              className="raw-editor m-2.5 min-h-0 flex-1 resize-none font-mono text-xs leading-relaxed"
-              value={rawText}
-              onChange={(e) => setRawText(e.target.value)}
-              spellCheck={false}
-            />
-            <div className="raw-actions flex gap-2 px-2.5 pb-2.5">
-              <Button size="sm" onClick={() => void saveRaw()} disabled={saving}>
-                {t("raw.save")}
-              </Button>
-              <Button variant="secondary" size="sm" onClick={() => setRawMode(false)}>
-                {t("common.cancel")}
-              </Button>
-            </div>
+            <Suspense
+              fallback={
+                <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-muted-foreground">
+                  <span className="spinner" />
+                </div>
+              }
+            >
+              <CodeView
+                value={rawText}
+                onChange={setRawText}
+                fileName={config.index?.find((e) => e.name === active)?.schema ?? `${active}.schema.yml`}
+                dirty={indexDirty(active)}
+                vim={vimMode}
+                autoFormat={autoFormat}
+                onSave={() => void save()}
+                parseError={codeProblem}
+                diagnostics={liveDiags}
+              />
+            </Suspense>
           </main>
         ) : schema ? (
           <DesignProvider
@@ -836,7 +1041,6 @@ export default function App() {
           onCancel={() => setDiffs(null)}
         />
       )}
-      {browseCatalog && catalog && <CatalogBrowser catalog={catalog} onClose={() => setBrowseCatalog(false)} />}
 
       <CommandPalette
         open={paletteOpen}

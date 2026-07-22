@@ -134,7 +134,7 @@ export const useDesignStore = create<DesignState>()(
         set({ doc: { config: next, schemas }, active: active2 });
       },
 
-      openIndex: (name) => set({ active: name, selection: { kind: "root" }, diagnostics: null }),
+      openIndex: (name) => set({ active: name, selection: null, diagnostics: null }),
 
       createIndex: (name, table) => {
         const { doc, catalog } = get();
