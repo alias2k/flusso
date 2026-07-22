@@ -9,8 +9,13 @@ export interface Toast {
   text: string;
 }
 
-const initialTheme = (): "dark" | "light" =>
-  (localStorage.getItem("flusso-design.theme") as "dark" | "light") || "dark";
+const initialTheme = (): "dark" | "light" => {
+  try {
+    return (localStorage.getItem("flusso-design.theme") as "dark" | "light") || "dark";
+  } catch {
+    return "dark";
+  }
+};
 
 interface UiState {
   theme: "dark" | "light";
@@ -25,7 +30,6 @@ interface UiState {
   diffs: FileDiff[] | null;
   browseCatalog: boolean;
 
-  setTheme: (theme: "dark" | "light") => void;
   toggleTheme: () => void;
   toggleLeft: () => void;
   setDrawer: (open: boolean) => void;
@@ -53,7 +57,6 @@ export const useUiStore = create<UiState>()((set) => ({
   diffs: null,
   browseCatalog: false,
 
-  setTheme: (theme) => set({ theme }),
   toggleTheme: () => set((s) => ({ theme: s.theme === "dark" ? "light" : "dark" })),
   toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen })),
   setDrawer: (drawer) => set({ drawer }),

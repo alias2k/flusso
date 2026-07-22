@@ -4,6 +4,7 @@ import {
   SCALAR_TYPES,
   type Aggregate,
   type AggregateKey,
+  type AggregateOp,
   type Column,
   type ColumnShape,
   type Field,
@@ -18,7 +19,45 @@ import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
+import { LABEL } from "../styles";
 import { drasticTypeChange, typeClass } from "../theme";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { Hint } from "./Hint";
+import { Filters } from "./Filters";
+import {
+  AddButton,
+  Block,
+  Bridge,
+  Check,
+  ColumnPicker,
+  Drawer,
+  Field as Row,
+  GenericInput,
+  Num,
+  RemoveButton,
+  SectionTitle,
+  Select,
+  Text,
+} from "./widgets";
+
+/// The verb-agnostic view of an [`AggregateOp`]: which op it is, and the column
+/// it reads (null for `count`/`ids`, which read no column).
+function aggOpKind(op: AggregateOp): "count" | "sum" | "avg" | "min" | "max" | "ids" {
+  if (typeof op === "string") return "count";
+  if ("sum" in op) return "sum";
+  if ("avg" in op) return "avg";
+  if ("min" in op) return "min";
+  if ("max" in op) return "max";
+  return "ids";
+}
+function aggOpColumn(op: AggregateOp): string | null {
+  if (typeof op === "string" || "ids" in op) return null;
+  if ("sum" in op) return op.sum;
+  if ("avg" in op) return op.avg;
+  if ("min" in op) return op.min;
+  return op.max;
+}
 
 /// Scalar-type options for the field TYPE dropdown: each carries its colour
 /// family (so the list is colour-coded like the canvas) and a one-line
@@ -114,25 +153,6 @@ function HeaderActions() {
     </div>
   );
 }
-import { Button } from "@/components/ui/button";
-import { Hint } from "./Hint";
-import { Filters } from "./Filters";
-import {
-  AddButton,
-  Block,
-  Bridge,
-  Check,
-  ColumnPicker,
-  Drawer,
-  Field as Row,
-  GenericInput,
-  Num,
-  RemoveButton,
-  SectionTitle,
-  Select,
-  Text,
-} from "./widgets";
-
 /// snake_case / "spaced" → camelCase, the usual document-field convention.
 const camel = (s: string) =>
   s.replace(/[_\s]+(.)/g, (_m, c: string) => c.toUpperCase()).replace(/^(.)/, (_m, c: string) => c.toLowerCase());
@@ -168,30 +188,8 @@ function nameSuggestions(field: Field): string[] {
       return [...new Set([camel(base), base, tbl])];
     }
     const agg = s.relation.aggregate;
-    const op =
-      typeof agg.op === "string"
-        ? "count"
-        : "sum" in agg.op
-          ? "sum"
-          : "avg" in agg.op
-            ? "avg"
-            : "min" in agg.op
-              ? "min"
-              : "max" in agg.op
-                ? "max"
-                : "ids";
-    const col =
-      typeof agg.op === "string"
-        ? ""
-        : "sum" in agg.op
-          ? agg.op.sum
-          : "avg" in agg.op
-            ? agg.op.avg
-            : "min" in agg.op
-              ? agg.op.min
-              : "max" in agg.op
-                ? agg.op.max
-                : "";
+    const op = aggOpKind(agg.op);
+    const col = aggOpColumn(agg.op) ?? "";
     if (op === "count") return [`${camel(singular(agg.table))}Count`, `${camel(agg.table)}Count`];
     if (op === "ids") return [`${camel(singular(agg.table))}Ids`];
     return col ? [camel(col), `${camel(col)}${pascal(op)}`] : [];
@@ -221,10 +219,10 @@ export function Inspector() {
 }
 
 function RootInspector() {
-  const { schema, apply, catalog } = useDesign();
+  const { schema, apply, catalog, columnsFor } = useDesign();
   const { t } = useT();
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
-  const colShapes = catalog?.catalog.tables.find((tbl) => tbl.name === schema.table)?.columns ?? [];
+  const colShapes = columnsFor(schema.table);
   const cols = colShapes.map((c) => c.name);
   return (
     <div className="inspector">
@@ -265,7 +263,7 @@ function RootInspector() {
 }
 
 function NodeInspector({ path }: { path: number[] }) {
-  const { schema, apply, catalog } = useDesign();
+  const { schema, apply, catalog, columnsFor } = useDesign();
   const { t } = useT();
   const field = fieldAtPath(schema, path);
   if (!field) return null;
@@ -287,7 +285,7 @@ function NodeInspector({ path }: { path: number[] }) {
   if (!join) return null;
   const verb = joinVerb(join.kind);
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
-  const relColShapes = catalog?.catalog.tables.find((tbl) => tbl.name === join.table)?.columns ?? [];
+  const relColShapes = columnsFor(join.table);
   const relCols = relColShapes.map((c) => c.name);
   const setJoin = (j: Join) => setField({ ...field, source: { relation: { join: j } } });
   const toMany = verb === "has_many" || verb === "many_to_many";
@@ -298,10 +296,7 @@ function NodeInspector({ path }: { path: number[] }) {
   // the catalog (offline, or hand-typed).
   const btColumn = "belongs_to" in join.kind ? join.kind.belongs_to.column : undefined;
   const parentTable = effectiveTable(schema, path.slice(0, -1));
-  const fkNullable = btColumn
-    ? catalog?.catalog.tables.find((tbl) => tbl.name === parentTable)?.columns.find((c) => c.name === btColumn)
-        ?.nullable
-    : undefined;
+  const fkNullable = btColumn ? columnsFor(parentTable).find((c) => c.name === btColumn)?.nullable : undefined;
 
   return (
     <div className="inspector">
@@ -394,12 +389,12 @@ function NodeInspector({ path }: { path: number[] }) {
 }
 
 function FieldInspector({ path, index }: { path: number[]; index: number }) {
-  const { schema, apply, catalog } = useDesign();
+  const { schema, apply, catalog, columnsFor } = useDesign();
   const { t } = useT();
   const field = nodeFields(schema, path)[index];
   if (!field) return null;
   const table = effectiveTable(schema, path);
-  const cols = catalog?.catalog.tables.find((tbl) => tbl.name === table)?.columns.map((c) => c.name) ?? [];
+  const cols = columnsFor(table).map((c) => c.name);
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
   const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
   const s = field.source;
@@ -408,9 +403,7 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   // default rule (its nullability) and the type suggestion. Undefined when the
   // column isn't in the catalog (offline, or a hand-typed name).
   const boundColumn = "column" in s ? s.column.column : undefined;
-  const srcCol = boundColumn
-    ? catalog?.catalog.tables.find((tbl) => tbl.name === table)?.columns.find((c) => c.name === boundColumn)
-    : undefined;
+  const srcCol = boundColumn ? columnsFor(table).find((c) => c.name === boundColumn) : undefined;
   const srcNullable = srcCol?.nullable;
 
   const helpKind = fieldHelpKind(s);
@@ -458,13 +451,11 @@ function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
     .slice(0, 3);
   return (
     <div className="field mb-2 flex flex-col gap-1">
-      <span className="field-label text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">
-        {t("inspector.fieldName")}
-      </span>
+      <span className={cn("field-label", LABEL)}>{t("inspector.fieldName")}</span>
       <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
       {chips.length > 0 && (
         <div className="rename-chips mt-1.5 flex flex-wrap items-center gap-1.5">
-          <span className="text-3xs uppercase tracking-[0.05em] text-muted-foreground">{t("inspector.renameTo")}</span>
+          <span className="text-3xs uppercase tracking-caps text-muted-foreground">{t("inspector.renameTo")}</span>
           {chips.map((n) => (
             <button
               type="button"
@@ -642,7 +633,7 @@ function RequiredDefault({
               invalid={defaultMissing}
               value={column.default}
               onChange={(def) => setCol({ ...column, default: def })}
-              placeholder='e.g. 0 or "n/a"'
+              placeholder={t("inspector.defaultPlaceholder")}
             />
           </Row>
           {mustDefault && (
@@ -879,30 +870,8 @@ function AggregateBody({
   const { t } = useT();
   const setAgg = (a: Aggregate) => set({ ...field, source: { relation: { aggregate: a } } });
   const op = agg.op;
-  const opCol =
-    typeof op === "string"
-      ? null
-      : "sum" in op
-        ? op.sum
-        : "avg" in op
-          ? op.avg
-          : "min" in op
-            ? op.min
-            : "max" in op
-              ? op.max
-              : null;
-  const kind =
-    typeof op === "string"
-      ? "count"
-      : "sum" in op
-        ? "sum"
-        : "avg" in op
-          ? "avg"
-          : "min" in op
-            ? "min"
-            : "max" in op
-              ? "max"
-              : "ids";
+  const opCol = aggOpColumn(op);
+  const kind = aggOpKind(op);
   const aggCols = columnsFor(agg.table).map((c) => c.name);
   const hasMappingType = kind === "sum" || kind === "min" || kind === "max" || kind === "ids";
   return (
@@ -1041,7 +1010,7 @@ function OrderByEditor({
   };
   return (
     <div className="my-1.5">
-      <div className="mb-1 text-3xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">order_by</div>
+      <div className={cn("mb-1", LABEL)}>order_by</div>
       {value.map((ob, i) => (
         <div className="my-1 flex items-center gap-1.5" key={i}>
           <ColumnPicker
@@ -1059,9 +1028,10 @@ function OrderByEditor({
           />
           <RemoveButton
             label={t("common.remove")}
-            onClick={() =>
-              onChange(value.filter((_, j) => j !== i).length ? value.filter((_, j) => j !== i) : undefined)
-            }
+            onClick={() => {
+              const next = value.filter((_, j) => j !== i);
+              onChange(next.length ? next : undefined);
+            }}
           />
         </div>
       ))}
@@ -1127,11 +1097,7 @@ function fieldHelpKind(s: FieldSource): string {
   if ("geo" in s) return "geo";
   if ("constant" in s) return "constant";
   if ("column" in s && typeof s.column.ty !== "string") return "map" in s.column.ty ? "map" : "custom";
-  if ("relation" in s && "aggregate" in s.relation) {
-    const op = s.relation.aggregate.op;
-    if (typeof op === "string") return "count";
-    return "sum" in op ? "sum" : "avg" in op ? "avg" : "min" in op ? "min" : "max" in op ? "max" : "ids";
-  }
+  if ("relation" in s && "aggregate" in s.relation) return aggOpKind(s.relation.aggregate.op);
   return "";
 }
 

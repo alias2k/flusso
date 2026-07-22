@@ -113,8 +113,12 @@ interface I18n {
 const I18nContext = createContext<I18n | null>(null);
 
 function initialLang(): Lang {
-  const saved = localStorage.getItem(STORE_KEY);
-  return saved && saved in LANGS ? saved : "en";
+  try {
+    const saved = localStorage.getItem(STORE_KEY);
+    return saved && saved in LANGS ? saved : "en";
+  } catch {
+    return "en";
+  }
 }
 
 export function I18nProvider({ children }: { children: ReactNode }) {

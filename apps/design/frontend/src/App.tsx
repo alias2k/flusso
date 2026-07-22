@@ -9,13 +9,13 @@ import {
   Columns2,
   Eye,
   FileCode2,
+  Languages,
   Minus,
   Moon,
   Plus,
   RotateCcw,
   Save,
   Search,
-  Settings,
   Sun,
   Table2,
   TriangleAlert,
@@ -38,11 +38,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Drawer, DrawerClose, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
@@ -51,14 +48,14 @@ import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { Select, Text } from "./components/widgets";
+import { GlowDot, Select, Text } from "./components/widgets";
 import { LANGS, useT, type Translate } from "./i18n";
 import { removeAt, removeNode } from "./model/edit";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
 import type { SearchRecord } from "./model/search";
 import { DesignProvider } from "./state";
-import { BTN_ICON, NAV, NAV_ACTIVE, NAV_HEADING } from "./styles";
+import { BTN_ICON, NAV, NAV_ACTIVE, NAV_HEADING, NO_PW_MANAGER } from "./styles";
 import { TYPE_FAMILIES } from "./theme";
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -112,10 +109,17 @@ function LegendRow({ color, label, desc }: { color: string; label: string; desc:
     >
       <Tooltip open={open}>
         <TooltipTrigger asChild>
-          <div className="flex w-fit items-center gap-2 text-2xs text-muted-foreground select-none">
+          {/* A real button so keyboard users can Tab to it — focus reveals the
+              same description the row shows on hover. */}
+          <button
+            type="button"
+            onFocus={() => setOpen(true)}
+            onBlur={() => setOpen(false)}
+            className="flex w-fit cursor-default items-center gap-2 rounded-sm text-2xs text-muted-foreground select-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:outline-none"
+          >
             <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
             {label}
-          </div>
+          </button>
         </TooltipTrigger>
         <TooltipContent side="right" sideOffset={6} className="pointer-events-none max-w-52 leading-snug">
           {desc}
@@ -231,10 +235,12 @@ export default function App() {
     return (table: string): ColumnShape[] => tables.find((t) => t.name === table)?.columns ?? [];
   }, [catalog]);
 
-  const dirty = !!doc && JSON.stringify(doc) !== saved;
+  // Parsed once per snapshot — `indexDirty` runs per sidebar row per render, so
+  // it must not re-parse the whole saved doc each call.
+  const savedDoc = useMemo(() => (saved ? (JSON.parse(saved) as Doc) : null), [saved]);
+  const dirty = useMemo(() => !!doc && JSON.stringify(doc) !== saved, [doc, saved]);
   const indexDirty = (name: string): boolean => {
-    if (!doc || !saved) return false;
-    const savedDoc = JSON.parse(saved) as Doc;
+    if (!doc || !savedDoc) return false;
     return JSON.stringify(doc.schemas[name]) !== JSON.stringify(savedDoc.schemas[name]);
   };
 
@@ -519,7 +525,7 @@ export default function App() {
   }, []);
 
   if (!project || !doc || !config)
-    return <div className="p-10 text-muted-foreground">{error || "Loading project…"}</div>;
+    return <div className="p-10 text-muted-foreground">{error || t("common.loading")}</div>;
 
   return (
     <div className="flex h-screen flex-col">
@@ -534,7 +540,7 @@ export default function App() {
             <Icon name="menu" />
           </Button>
         </Hint>
-        <span className="brand inline-flex items-center gap-2 bg-[linear-gradient(90deg,var(--accent),var(--accent-2))] bg-clip-text text-[0.9375rem] font-bold tracking-[0.0125rem] text-transparent">
+        <span className="brand inline-flex items-center gap-2 font-bold">
           <span className="inline-flex text-primary">
             <Icon name="flow" size={18} />
           </span>
@@ -560,13 +566,7 @@ export default function App() {
           className="absolute top-1/2 left-1/2 flex h-8 w-72 max-w-[32vw] -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
           style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 55%), var(--panel-2)" }}
         >
-          <span
-            className="size-2.5 shrink-0 rounded-full"
-            style={{
-              background: "conic-gradient(from 90deg, var(--accent), var(--accent-2), var(--accent))",
-              boxShadow: "0 0 0 3px var(--accent-soft)",
-            }}
-          />
+          <GlowDot />
           <span className="truncate">{t("search.placeholder")}</span>
           <Kbd className="ml-auto">⌘K</Kbd>
         </button>
@@ -590,21 +590,21 @@ export default function App() {
           </Button>
         </Hint>
 
-        {/* global: app settings (theme + language) */}
+        {/* global: theme toggle + language picker */}
+        <Hint label={t("topbar.toggleTheme")}>
+          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.toggleTheme")} onClick={toggleTheme}>
+            {theme === "dark" ? <Sun /> : <Moon />}
+          </Button>
+        </Hint>
         <DropdownMenu>
-          <Hint label={t("topbar.settings")}>
+          <Hint label={t("topbar.language")}>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label={t("topbar.settings")}>
-                <Settings />
+              <Button variant="ghost" size="icon-sm" aria-label={t("topbar.language")}>
+                <Languages />
               </Button>
             </DropdownMenuTrigger>
           </Hint>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={toggleTheme}>
-              {theme === "dark" ? <Sun /> : <Moon />} {t("topbar.toggleTheme")}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>{t("topbar.language")}</DropdownMenuLabel>
             <DropdownMenuRadioGroup value={lang} onValueChange={setLang}>
               {Object.entries(LANGS).map(([value, label]) => (
                 <DropdownMenuRadioItem key={value} value={value}>
@@ -707,7 +707,7 @@ export default function App() {
             {/* Colour key — open by default, but collapsible so a long index list
                 isn't crowded out. Pinned below the scrolling list. */}
             <details className="legend group shrink-0 border-t border-border py-2" open>
-              <summary className="flex cursor-pointer list-none items-center gap-1.5 px-1.5 py-1 text-2xs font-semibold uppercase tracking-[0.06em] text-muted-foreground [&::-webkit-details-marker]:hidden">
+              <summary className="flex cursor-pointer list-none items-center gap-1.5 px-1.5 py-1 text-2xs font-semibold uppercase tracking-caps text-muted-foreground [&::-webkit-details-marker]:hidden">
                 <ChevronRight className="size-3 transition-transform group-open:rotate-90" aria-hidden="true" />
                 {t("sidebar.legend")}
               </summary>
@@ -797,7 +797,7 @@ export default function App() {
             {/* A modal right drawer: the dim backdrop closes it on click (plus Esc / ✕). */}
             <Drawer open={drawer} onOpenChange={setDrawer} direction="right">
               <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(46rem,92vw)] data-[vaul-drawer-direction=right]:sm:max-w-none">
-                <DrawerHeader className="flex-row items-center gap-2 border-b border-border p-3">
+                <DrawerHeader className="flex-row items-center gap-2 border-b border-border p-3" data-vaul-no-drag>
                   <DrawerTitle className="text-sm font-semibold">
                     {t("preview.title")} <span className="font-normal text-muted-foreground">· {active}</span>
                   </DrawerTitle>
@@ -1084,12 +1084,7 @@ function DiffModal({
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder={t("diff.filterFiles")}
                   className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  data-1p-ignore="true"
-                  data-lpignore="true"
-                  data-form-type="other"
+                  {...NO_PW_MANAGER}
                 />
                 {query && (
                   <button
@@ -1222,7 +1217,12 @@ function NewIndex({ tables, onCreate }: { tables: string[]; onCreate: (name: str
     return (
       <button
         className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          // The initial `table` state captured the catalog before it loaded —
+          // default it now, from the tables that actually exist.
+          if (!table && tables[0]) setTable(tables[0]);
+          setOpen(true);
+        }}
       >
         + {t("sidebar.newIndex")}
       </button>

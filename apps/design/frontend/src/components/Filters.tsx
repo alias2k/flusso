@@ -186,7 +186,11 @@ export function Filters({
               <RemoveButton label={t("common.remove")} onClick={() => remove(i)} />
             </div>
             {"raw" in f && (
-              <Text value={f.raw.raw} onChange={(raw) => set(i, { raw: { raw } })} placeholder="status <> 'archived'" />
+              <Text
+                value={f.raw.raw}
+                onChange={(raw) => set(i, { raw: { raw } })}
+                placeholder={t("filters.rawPlaceholder")}
+              />
             )}
             {"null_check" in f && (
               <div className="flex items-center gap-1.5">

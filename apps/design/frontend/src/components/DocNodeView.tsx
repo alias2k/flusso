@@ -13,6 +13,7 @@ import { Hint } from "./Hint";
 import { Icon } from "./Icon";
 import { Select, Text } from "./widgets";
 import { Checkbox } from "@/components/ui/checkbox";
+import { cn } from "@/lib/utils";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant"] as const;
 const AGG_KINDS = ["count", "sum", "avg", "min", "max", "ids"] as const;
@@ -129,149 +130,162 @@ export function DocNodeView({ data, selected }: NodeProps) {
           )}
         </div>
       ) : (
-        !isCollapsed && (
-          <>
-            {cols.length > 0 && (
-              <div className="col-tools flex items-center gap-1.5 px-2 pt-2" onClick={(e) => e.stopPropagation()}>
-                <Text
-                  className="col-filter flex-1"
-                  value={filter}
-                  onChange={setFilter}
-                  placeholder={t("node.filterCols")}
-                />
-                <Hint label={allIncluded ? t("node.clearAll") : t("node.includeAll")} side="top">
-                  <Checkbox
-                    className="size-4"
-                    aria-label={allIncluded ? t("node.clearAll") : t("node.includeAll")}
-                    checked={allIncluded ? true : includedCount === 0 ? false : "indeterminate"}
-                    onCheckedChange={() =>
-                      apply((s) =>
-                        allIncluded
-                          ? edit.clearColumns(s, node.path)
-                          : edit.includeColumns(
-                              s,
-                              node.path,
-                              cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
-                            ),
-                      )
-                    }
+        // Collapse animates height-to-auto via the 0fr ⇄ 1fr grid-row trick (same
+        // as the preview's document tree); the body stays mounted, `inert` while
+        // collapsed so the clipped inputs can't be tabbed into.
+        <div
+          className={cn(
+            "grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none",
+            isCollapsed ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
+          )}
+        >
+          <div className="min-h-0 overflow-hidden" inert={isCollapsed}>
+            <>
+              {cols.length > 0 && (
+                <div className="col-tools flex items-center gap-1.5 px-2 pt-2" onClick={(e) => e.stopPropagation()}>
+                  <Text
+                    className="col-filter flex-1"
+                    value={filter}
+                    onChange={setFilter}
+                    placeholder={t("node.filterCols")}
                   />
-                </Hint>
-              </div>
-            )}
-
-            <div className="node-cols px-2 py-1.5">
-              {cols
-                .filter((c) => matches(c.name))
-                .map((c) => {
-                  const inc = includedByCol.get(c.name);
-                  const renamed = inc && inc.name !== c.name;
-                  const diag = inc ? diagByField.get(inc.name) : undefined;
-                  // Required/default state, relative to the source column, so it
-                  // reads at a glance: a dot = required (muted when it just mirrors a
-                  // NOT NULL column, accent when it overrides a nullable one), and an
-                  // `=` when a default fills the gap. No dot = optional.
-                  const field = inc ? fields[inc.index] : undefined;
-                  const col = field && "column" in field.source ? field.source.column : undefined;
-                  const required = !!col && !col.nullable;
-                  const override = required && c.nullable;
-                  const hasDefault = col?.default !== undefined;
-                  return (
-                    <div
-                      className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
-                      key={c.name}
-                      title={diag?.message}
-                      onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
-                    >
-                      <Checkbox
-                        checked={!!inc}
-                        onClick={(e) => e.stopPropagation()}
-                        onCheckedChange={(ch) => (ch === true ? includeColumn(c) : inc && excludeColumn(c, inc))}
-                      />
-                      <span className="col-name" title={renamed ? t("node.columnOf", { name: c.name }) : undefined}>
-                        {inc ? inc.name : c.name}
-                        {renamed ? <span className="col-from"> ← {c.name}</span> : null}
-                      </span>
-                      {required && (
-                        <span
-                          className={`col-req${override ? " override" : ""}`}
-                          title={override ? t("node.reqOverride") : t("node.reqAligned")}
-                        >
-                          *
-                        </span>
-                      )}
-                      {hasDefault && (
-                        <span className="col-default" title={t("node.colDefault")}>
-                          =
-                        </span>
-                      )}
-                      {(() => {
-                        const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
-                        return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
-                      })()}
-                    </div>
-                  );
-                })}
-
-              {extraLeaves
-                .filter((l) => matches(l.name))
-                .map((l) => {
-                  const diag = diagByField.get(l.name);
-                  const incomplete = aggregateIncomplete(fields[l.index]);
-                  return (
-                    <div
-                      className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${incomplete ? " diag-warning" : ""}`}
-                      key={`x${l.index}`}
-                      title={diag?.message ?? (incomplete ? t("node.incomplete") : undefined)}
-                      onClick={() => select({ kind: "field", path: node.path, index: l.index })}
-                    >
-                      <span className="leaf-kind">{l.kind}</span>
-                      <span className="col-name">{l.name}</span>
-                      <button
-                        className="x"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          apply((s) => edit.removeAt(s, node.path, l.index));
-                        }}
-                      >
-                        <Icon name="close" size={13} />
-                      </button>
-                    </div>
-                  );
-                })}
-
-              {cols.length === 0 && (
-                <ManualColumn onAdd={(name) => apply((s) => edit.toggleColumn(s, node.path, name, true))} />
+                  <Hint label={allIncluded ? t("node.clearAll") : t("node.includeAll")} side="top">
+                    <Checkbox
+                      className="size-4"
+                      aria-label={allIncluded ? t("node.clearAll") : t("node.includeAll")}
+                      checked={allIncluded ? true : includedCount === 0 ? false : "indeterminate"}
+                      onCheckedChange={() =>
+                        apply((s) =>
+                          allIncluded
+                            ? edit.clearColumns(s, node.path)
+                            : edit.includeColumns(
+                                s,
+                                node.path,
+                                cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
+                              ),
+                        )
+                      }
+                    />
+                  </Hint>
+                </div>
               )}
-            </div>
 
-            <footer className="node-add flex flex-col gap-1.5 border-t border-border p-2">
-              {catalog &&
-                suggestRelations(catalog, node.table).map((sg) => (
-                  <button
-                    key={sg.key}
-                    className="suggest"
-                    title={sg.detail}
-                    onClick={() => apply((s) => edit.addField(s, node.path, sg.build()))}
-                  >
-                    + {sg.label}
-                  </button>
-                ))}
-              <div className="add-menus flex gap-1.5">
-                <AddMenu
-                  label={t("node.addJoin")}
-                  kinds={JOIN_KINDS}
-                  onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))}
-                />
-                <AddMenu
-                  label={t("node.addField")}
-                  kinds={[...FIELD_KINDS, ...AGG_KINDS]}
-                  onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))}
-                />
+              <div className="node-cols px-2 py-1.5">
+                {cols
+                  .filter((c) => matches(c.name))
+                  .map((c) => {
+                    const inc = includedByCol.get(c.name);
+                    const renamed = inc && inc.name !== c.name;
+                    const diag = inc ? diagByField.get(inc.name) : undefined;
+                    // Required/default state, relative to the source column, so it
+                    // reads at a glance: a dot = required (muted when it just mirrors a
+                    // NOT NULL column, accent when it overrides a nullable one), and an
+                    // `=` when a default fills the gap. No dot = optional.
+                    const field = inc ? fields[inc.index] : undefined;
+                    const col = field && "column" in field.source ? field.source.column : undefined;
+                    const required = !!col && !col.nullable;
+                    const override = required && c.nullable;
+                    const hasDefault = col?.default !== undefined;
+                    return (
+                      <div
+                        className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
+                        key={c.name}
+                        title={diag?.message}
+                        onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
+                      >
+                        <Checkbox
+                          checked={!!inc}
+                          aria-label={c.name}
+                          onClick={(e) => e.stopPropagation()}
+                          onCheckedChange={(ch) => (ch === true ? includeColumn(c) : inc && excludeColumn(c, inc))}
+                        />
+                        <span className="col-name" title={renamed ? t("node.columnOf", { name: c.name }) : undefined}>
+                          {inc ? inc.name : c.name}
+                          {renamed ? <span className="col-from"> ← {c.name}</span> : null}
+                        </span>
+                        {required && (
+                          <span
+                            className={`col-req${override ? " override" : ""}`}
+                            title={override ? t("node.reqOverride") : t("node.reqAligned")}
+                          >
+                            *
+                          </span>
+                        )}
+                        {hasDefault && (
+                          <span className="col-default" title={t("node.colDefault")}>
+                            =
+                          </span>
+                        )}
+                        {(() => {
+                          const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
+                          return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
+                        })()}
+                      </div>
+                    );
+                  })}
+
+                {extraLeaves
+                  .filter((l) => matches(l.name))
+                  .map((l) => {
+                    const diag = diagByField.get(l.name);
+                    const incomplete = aggregateIncomplete(fields[l.index]);
+                    return (
+                      <div
+                        className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${incomplete ? " diag-warning" : ""}`}
+                        key={`x${l.index}`}
+                        title={diag?.message ?? (incomplete ? t("node.incomplete") : undefined)}
+                        onClick={() => select({ kind: "field", path: node.path, index: l.index })}
+                      >
+                        <span className="leaf-kind">{l.kind}</span>
+                        <span className="col-name">{l.name}</span>
+                        <button
+                          className="x"
+                          title={t("common.remove")}
+                          aria-label={t("common.remove")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            apply((s) => edit.removeAt(s, node.path, l.index));
+                          }}
+                        >
+                          <Icon name="close" size={13} />
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                {cols.length === 0 && (
+                  <ManualColumn onAdd={(name) => apply((s) => edit.toggleColumn(s, node.path, name, true))} />
+                )}
               </div>
-            </footer>
-          </>
-        )
+
+              <footer className="node-add flex flex-col gap-1.5 border-t border-border p-2">
+                {catalog &&
+                  suggestRelations(catalog, node.table).map((sg) => (
+                    <button
+                      key={sg.key}
+                      className="suggest"
+                      title={sg.detail}
+                      onClick={() => apply((s) => edit.addField(s, node.path, sg.build()))}
+                    >
+                      + {sg.label}
+                    </button>
+                  ))}
+                <div className="add-menus flex gap-1.5">
+                  <AddMenu
+                    label={t("node.addJoin")}
+                    kinds={JOIN_KINDS}
+                    onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))}
+                  />
+                  <AddMenu
+                    label={t("node.addField")}
+                    kinds={[...FIELD_KINDS, ...AGG_KINDS]}
+                    onPick={(k) => apply((s) => edit.addSpecial(s, node.path, k))}
+                  />
+                </div>
+              </footer>
+            </>
+          </div>
+        </div>
       )}
 
       <Handle type="source" position={Position.Right} />

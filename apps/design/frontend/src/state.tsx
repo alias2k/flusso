@@ -31,13 +31,3 @@ export function useDesign(): DesignCtx {
   if (!ctx) throw new Error("useDesign outside a DesignProvider");
   return ctx;
 }
-
-export function sameSelection(a: Selection, b: Selection): boolean {
-  if (a === null || b === null) return a === b;
-  if (a.kind !== b.kind) return false;
-  if (a.kind === "root") return true;
-  const bp = b as Extract<Selection, { path: number[] }>;
-  if (a.path.join(".") !== bp.path.join(".")) return false;
-  if (a.kind === "field" && b.kind === "field") return a.index === b.index;
-  return true;
-}

@@ -3,6 +3,7 @@ import { KeyRound, Link2, Search, X } from "lucide-react";
 import type { CatalogResponse, ColumnShape, TableShape } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
+import { NO_PW_MANAGER } from "../styles";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
@@ -117,14 +118,7 @@ export function CatalogBrowser({ catalog, onClose }: { catalog: CatalogResponse;
                 onChange={(e) => setQ(e.target.value)}
                 placeholder={t("catalog.filter")}
                 className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                data-1p-ignore="true"
-                data-lpignore="true"
-                data-bwignore="true"
-                data-form-type="other"
+                {...NO_PW_MANAGER}
               />
               {needle && (
                 <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">

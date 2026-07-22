@@ -15,6 +15,7 @@ import {
 import { pathId } from "../model/tree";
 import { type Doc, useDesignStore } from "../store/design";
 import { useUiStore } from "../store/ui";
+import { GlowDot } from "./widgets";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
@@ -288,15 +289,7 @@ export function CommandPalette({
                 </>
               ) : undefined
             }
-            leading={
-              <span
-                className="size-2.5 shrink-0 rounded-full"
-                style={{
-                  background: "conic-gradient(from 90deg, var(--accent), var(--accent-2), var(--accent))",
-                  boxShadow: "0 0 0 3px var(--accent-soft)",
-                }}
-              />
-            }
+            leading={<GlowDot />}
             trailing={
               needle ? (
                 <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
