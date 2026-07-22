@@ -83,6 +83,7 @@ export const en: Record<string, string> = {
   "diff.noFiles": "No matching files",
   "diff.kbdNavigate": "Navigate",
   "diff.kbdToggle": "Toggle file",
+  "diff.kbdToggleAll": "Toggle all",
   "diff.kbdSave": "Save",
   "diff.kbdClear": "Clear filter",
   "diff.newFile": "new file",

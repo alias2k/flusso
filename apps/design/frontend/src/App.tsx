@@ -977,6 +977,12 @@ function DiffModal({
       if (include.size > 0 && !saving) onConfirm(ignoreList());
       return;
     }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
+      // Repurpose ⌘/Ctrl+A (would select the filter text) as toggle-all-shown.
+      e.preventDefault();
+      toggleAll();
+      return;
+    }
     if (shown.length === 0) return;
     const pos = shown.findIndex((d) => changed.indexOf(d) === selected);
     if (e.key === "ArrowDown") {
@@ -1172,6 +1178,13 @@ function DiffModal({
             <span className="flex items-center gap-1.5">
               <Kbd>↵</Kbd>
               {t("diff.kbdToggle")}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <KbdGroup>
+                <Kbd>⌘</Kbd>
+                <Kbd>A</Kbd>
+              </KbdGroup>
+              {t("diff.kbdToggleAll")}
             </span>
             <span className="flex items-center gap-1.5">
               <KbdGroup>

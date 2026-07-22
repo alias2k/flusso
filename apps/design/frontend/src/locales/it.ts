@@ -84,6 +84,7 @@ export const it: Record<string, string> = {
   "diff.noFiles": "Nessun file corrispondente",
   "diff.kbdNavigate": "Naviga",
   "diff.kbdToggle": "Attiva/disattiva file",
+  "diff.kbdToggleAll": "Attiva/disattiva tutti",
   "diff.kbdSave": "Salva",
   "diff.kbdClear": "Cancella filtro",
   "diff.newFile": "nuovo file",
