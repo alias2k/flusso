@@ -1028,30 +1028,6 @@ export default function App() {
                 </div>
               )}
             </main>
-            {/* A modal right drawer: the dim backdrop closes it on click (plus Esc / ✕). */}
-            <Drawer open={drawer} onOpenChange={setDrawer} direction="right">
-              <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(46rem,92vw)] data-[vaul-drawer-direction=right]:sm:max-w-none">
-                <DrawerHeader className="flex-row items-center gap-2 border-b border-border p-3" data-vaul-no-drag>
-                  <DrawerTitle className="text-sm font-semibold">
-                    {t("preview.title")} <span className="font-normal text-muted-foreground">· {active}</span>
-                  </DrawerTitle>
-                  <span className="flex-1" />
-                  <DrawerClose asChild>
-                    <Button variant="ghost" size="icon-sm" aria-label={t("common.close")}>
-                      <X />
-                    </Button>
-                  </DrawerClose>
-                </DrawerHeader>
-                <Preview
-                  index={active}
-                  preview={preview}
-                  diagnostics={allDiagnostics.filter((d) => d.index === active)}
-                  onSample={
-                    doc && schema && active !== "config" ? () => api.sample(doc.config, active, schema) : undefined
-                  }
-                />
-              </DrawerContent>
-            </Drawer>
             {inspectorOpen && (
               <aside className="col-start-3 row-start-2 min-h-0 overflow-y-auto border-l border-border bg-card p-3.5">
                 <Inspector />
@@ -1059,6 +1035,34 @@ export default function App() {
             )}
           </DesignProvider>
         ) : null}
+
+        {/* The preview drawer works in both Visual and Code mode (hence outside
+            the canvas branch); its dim backdrop closes it on click (plus Esc / ✕). */}
+        {schema && (
+          <Drawer open={drawer} onOpenChange={setDrawer} direction="right">
+            <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(46rem,92vw)] data-[vaul-drawer-direction=right]:sm:max-w-none">
+              <DrawerHeader className="flex-row items-center gap-2 border-b border-border p-3" data-vaul-no-drag>
+                <DrawerTitle className="text-sm font-semibold">
+                  {t("preview.title")} <span className="font-normal text-muted-foreground">· {active}</span>
+                </DrawerTitle>
+                <span className="flex-1" />
+                <DrawerClose asChild>
+                  <Button variant="ghost" size="icon-sm" aria-label={t("common.close")}>
+                    <X />
+                  </Button>
+                </DrawerClose>
+              </DrawerHeader>
+              <Preview
+                index={active}
+                preview={preview}
+                diagnostics={allDiagnostics.filter((d) => d.index === active)}
+                onSample={
+                  doc && schema && active !== "config" ? () => api.sample(doc.config, active, schema) : undefined
+                }
+              />
+            </DrawerContent>
+          </Drawer>
+        )}
       </div>
 
       {diffs && (

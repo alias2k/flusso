@@ -130,8 +130,18 @@ export const useDesignStore = create<DesignState>()(
         }
         for (const name of removed) delete schemas[name];
 
+        // A renamed index whose file still tracks the default name follows the
+        // rename (Create/Duplicate both derive `<name>.schema.yml`); a custom
+        // schema path is left untouched.
+        const index = newIdx.map((entry, i) => {
+          const old = oldIdx[i];
+          return old && renames.get(old.name) === entry.name && entry.schema === `${old.name}.schema.yml`
+            ? { ...entry, schema: `${entry.name}.schema.yml` }
+            : entry;
+        });
+
         const active2 = renames.has(active) ? renames.get(active)! : removed.includes(active) ? "config" : active;
-        set({ doc: { config: next, schemas }, active: active2 });
+        set({ doc: { config: { ...next, index }, schemas }, active: active2 });
       },
 
       openIndex: (name) => set({ active: name, selection: null, diagnostics: null }),
@@ -184,9 +194,16 @@ export const useDesignStore = create<DesignState>()(
       },
 
       revertChanges: () => {
-        const { saved } = get();
+        const { saved, active } = get();
         if (!saved) return;
-        set({ doc: JSON.parse(saved) as Doc, selection: null });
+        const doc = JSON.parse(saved) as Doc;
+        // A reverted just-created index no longer exists; don't strand `active`
+        // on it (that renders a blank canvas) — fall back to a real index/config.
+        const active2 =
+          active === "config" || doc.config.index?.some((e) => e.name === active)
+            ? active
+            : (doc.config.index?.[0]?.name ?? "config");
+        set({ doc, selection: null, active: active2 });
       },
 
       loadCollapsed: (index) => {
