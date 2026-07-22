@@ -25,11 +25,10 @@ use schema_core::common;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigToml {
+    // Field order is the `flusso.toml` serialization order: the `toml` writer
+    // floats the scalar globals (prefix, on_error) to the top, then emits tables
+    // in declaration order — source, server, sinks, indexes.
     pub source: Source,
-    #[serde(default)]
-    pub sinks: BTreeMap<common::SinkName, Sink>,
-    #[serde(default)]
-    pub index: Vec<IndexEntry>,
     /// Literal prefix prepended to every index name flusso owns, so several
     /// deployments can share one OpenSearch cluster without colliding. The
     /// `--index-prefix` flag / `FLUSSO_INDEX_PREFIX` env var override it at
@@ -45,6 +44,11 @@ pub struct ConfigToml {
     /// Bind addresses for the operational HTTP surfaces. The binary layers
     /// `FLUSSO_*` env vars and CLI flags on top (which win); see the
     /// [configuration guide](https://alias2k.github.io/flusso/guides/configuration.html).
-    #[serde(default)]
+    /// Omitted from serialized output when no address is set.
+    #[serde(default, skip_serializing_if = "Server::is_empty")]
     pub server: Server,
+    #[serde(default)]
+    pub sinks: BTreeMap<common::SinkName, Sink>,
+    #[serde(default)]
+    pub index: Vec<IndexEntry>,
 }
