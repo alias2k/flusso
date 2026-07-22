@@ -8,7 +8,7 @@
 //! layer's own. The handlers in [`crate::server`] are thin wrappers over these
 //! functions; the logic lives here so it stays testable without a server.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -157,6 +157,11 @@ pub struct SaveRequest {
     pub config: ConfigToml,
     /// Each index schema and the path to write it to (relative to the config).
     pub indexes: Vec<SaveSchema>,
+    /// Absolute paths to skip writing — the review's unchecked files. A save
+    /// still carries the whole project; matching paths (the config or any index)
+    /// are left untouched. Empty by default (write everything).
+    #[serde(default)]
+    pub ignore: Vec<String>,
 }
 
 /// One schema file to write.
@@ -184,19 +189,25 @@ pub struct SaveResponse {
 /// reflow files the user didn't touch). Canonical regeneration — see [`codegen`].
 pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResponse> {
     let base_dir = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let ignore: HashSet<&str> = request.ignore.iter().map(String::as_str).collect();
     let mut written = Vec::with_capacity(request.indexes.len() + 1);
 
-    let toml = codegen::config_to_toml(&request.config)?;
-    if write_if_changed(config_path, &toml)? {
-        written.push(config_path.display().to_string());
+    if !ignore.contains(config_path.display().to_string().as_str()) {
+        let toml = codegen::config_to_toml(&request.config)?;
+        if write_if_changed(config_path, &toml)? {
+            written.push(config_path.display().to_string());
+        }
     }
 
     for index in &request.indexes {
+        let resolved = resolve(&base_dir, &index.schema_path);
+        if ignore.contains(resolved.display().to_string().as_str()) {
+            continue;
+        }
         let yaml = match &index.raw {
             Some(raw) => raw.clone(),
             None => codegen::schema_to_yaml(&index.schema)?,
         };
-        let resolved = resolve(&base_dir, &index.schema_path);
         if let Some(parent) = resolved.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;

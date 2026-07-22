@@ -75,6 +75,7 @@ fn project_previews_saves_and_reopens() {
                 raw: None,
             })
             .collect(),
+        ignore: Vec::new(),
     };
     let written = api::save_project(&config_path, save).unwrap();
     assert_eq!(written.written.len(), 4, "config + three schemas");
@@ -109,6 +110,7 @@ fn project_previews_saves_and_reopens() {
                 })
             })
             .collect(),
+        ignore: Vec::new(),
     };
     let again = api::save_project(&config_path, resave).unwrap();
     assert!(

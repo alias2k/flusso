@@ -320,10 +320,10 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ config, indexes }),
     }).then((r) => json<FileDiff[]>(r)),
-  save: (config: ConfigToml, indexes: SaveSchemaInput[]) =>
+  save: (config: ConfigToml, indexes: SaveSchemaInput[], ignore: string[] = []) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config, indexes }),
+      body: JSON.stringify({ config, indexes, ignore }),
     }).then((r) => json<{ written: string[] }>(r)),
 };

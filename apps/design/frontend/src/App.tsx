@@ -32,6 +32,7 @@ import { Icon } from "./components/Icon";
 import { Inspector } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   DropdownMenu,
@@ -284,10 +285,15 @@ export default function App() {
     loadCollapsed(active);
   }, [active, loadCollapsed]);
 
-  const saveIndexes = (): SaveSchemaInput[] =>
+  // The index files a save considers, in the order the diff endpoint returns
+  // them (config first, then these), so a FileDiff at position i+1 is entry i.
+  const saveEntries = (): { name: string; schema_path: string; schema: SaveSchemaInput["schema"] }[] =>
     (doc?.config.index ?? [])
       .filter((e) => doc?.schemas[e.name])
-      .map((e) => ({ schema_path: e.schema, schema: doc!.schemas[e.name] }));
+      .map((e) => ({ name: e.name, schema_path: e.schema, schema: doc!.schemas[e.name] }));
+
+  const saveIndexes = (): SaveSchemaInput[] =>
+    saveEntries().map((e) => ({ schema_path: e.schema_path, schema: e.schema }));
 
   // Save first shows a diff of what would change on disk; performSave writes it.
   const save = async () => {
@@ -304,12 +310,26 @@ export default function App() {
     }
   };
 
-  const performSave = async () => {
-    if (!doc) return;
+  // Save the whole project but skip the files the user unchecked in the review
+  // (`ignore` = their FileDiff paths). The diff list (config first, then
+  // saveEntries in order) maps each ignored path back to the config or an index,
+  // so the saved snapshot only marks the actually-written files clean.
+  const performSave = async (ignore: string[]) => {
+    if (!doc || !diffs) return;
+    const ignored = new Set(ignore);
+    const entries = saveEntries();
+    const configPath = diffs[0]?.path;
     setSaving(true);
     try {
-      const res = await api.save(doc.config, saveIndexes());
-      setSaved(JSON.stringify(doc));
+      const res = await api.save(doc.config, saveIndexes(), ignore);
+      const prev = saved ? (JSON.parse(saved) as Doc) : doc;
+      const nextSchemas = { ...prev.schemas };
+      entries.forEach((e, i) => {
+        const path = diffs[i + 1]?.path;
+        if (!path || !ignored.has(path)) nextSchemas[e.name] = doc.schemas[e.name];
+      });
+      const nextConfig = configPath && ignored.has(configPath) ? prev.config : doc.config;
+      setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
       setDiffs(null);
       setToast({ kind: "ok", text: t("toast.saved", { n: res.written.length }) });
     } catch (e) {
@@ -811,7 +831,7 @@ export default function App() {
           diffs={diffs}
           doc={doc}
           saving={saving}
-          onConfirm={() => void performSave()}
+          onConfirm={(ignore) => void performSave(ignore)}
           onCancel={() => setDiffs(null)}
         />
       )}
@@ -915,7 +935,7 @@ function DiffModal({
   diffs: FileDiff[];
   doc: Doc;
   saving: boolean;
-  onConfirm: () => void;
+  onConfirm: (paths: string[]) => void;
   onCancel: () => void;
 }) {
   const { t } = useT();
@@ -924,6 +944,19 @@ function DiffModal({
   const [check, setCheck] = useState<Check>({ state: "loading" });
   const changed = diffs.filter((d) => d.changed);
   const active = changed[selected] ?? changed[0];
+
+  // Which files to actually write (default all); the user can uncheck any to
+  // save a subset.
+  const [include, setInclude] = useState<ReadonlySet<string>>(() => new Set(changed.map((d) => d.path)));
+  const toggle = (path: string) =>
+    setInclude((s) => {
+      const next = new Set(s);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  const allIncluded = changed.length > 0 && include.size === changed.length;
+  const toggleAll = () => setInclude(allIncluded ? new Set() : new Set(changed.map((d) => d.path)));
 
   // Run a quick validation against the database when the review opens, so a save
   // surfaces schema/DB problems (or an all-clear) before writing anything.
@@ -950,7 +983,7 @@ function DiffModal({
       <DialogContent className="flex h-[92vh] w-[96vw] max-w-none flex-col sm:max-w-none" aria-label={t("diff.aria")}>
         <DialogHeader className="flex-row items-center justify-between gap-3 pr-8">
           <div className="flex min-w-0 items-center gap-3">
-            <DialogTitle className="shrink-0">{t("diff.title", { n: changed.length })}</DialogTitle>
+            <DialogTitle className="shrink-0">{t("diff.reviewTitle")}</DialogTitle>
             <ValidationChip check={check} />
           </div>
           <div className="inline-flex shrink-0 rounded-md border border-border bg-secondary p-0.5 text-xs">
@@ -974,35 +1007,59 @@ function DiffModal({
         </DialogHeader>
         <ValidationDetail check={check} />
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border">
-          <div className="w-56 shrink-0 overflow-y-auto border-r border-border bg-secondary/40">
-            {changed.map((d, i) => {
-              const s = diffStats(d.current, d.next);
-              const short = shortenPath(d.path);
-              const base = short.slice(short.lastIndexOf("/") + 1);
-              const dir = short.slice(0, short.length - base.length);
-              return (
-                <button
-                  key={d.path}
-                  type="button"
-                  title={d.path}
-                  onClick={() => setSelected(i)}
-                  className={cn(
-                    "flex w-full cursor-pointer flex-col gap-0.5 border-b border-border/60 border-l-2 px-3 py-2 text-left transition-colors",
-                    i === selected ? "border-l-primary bg-background" : "border-l-transparent hover:bg-accent/50",
-                  )}
-                >
-                  <span className="truncate font-mono text-xs">
-                    <span className="text-muted-foreground">{dir}</span>
-                    <span className="font-medium text-foreground">{base}</span>
-                  </span>
-                  <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
-                    {d.current === "" && <span className="badge object">{t("diff.newFile")}</span>}
-                    <span className="text-diff-add-num">+{s.adds}</span>
-                    <span className="text-diff-del-num">-{s.dels}</span>
-                  </span>
-                </button>
-              );
-            })}
+          <div className="flex w-60 shrink-0 flex-col border-r border-border bg-secondary/40">
+            <label className="flex shrink-0 cursor-pointer items-center gap-2 border-b border-border px-3 py-2 text-2xs font-medium text-muted-foreground">
+              <Checkbox
+                className="size-4"
+                checked={allIncluded ? true : include.size === 0 ? false : "indeterminate"}
+                onCheckedChange={toggleAll}
+              />
+              {t("diff.selected", { n: include.size, m: changed.length })}
+            </label>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {changed.map((d, i) => {
+                const s = diffStats(d.current, d.next);
+                const short = shortenPath(d.path);
+                const base = short.slice(short.lastIndexOf("/") + 1);
+                const dir = short.slice(0, short.length - base.length);
+                const on = include.has(d.path);
+                return (
+                  <div
+                    key={d.path}
+                    className={cn(
+                      "flex items-center gap-2 border-b border-border/60 border-l-2 pr-2 pl-3 transition-colors",
+                      i === selected ? "border-l-primary bg-background" : "border-l-transparent hover:bg-accent/50",
+                    )}
+                  >
+                    <Checkbox
+                      className="size-4 shrink-0"
+                      checked={on}
+                      onCheckedChange={() => toggle(d.path)}
+                      aria-label={d.path}
+                    />
+                    <button
+                      type="button"
+                      title={d.path}
+                      onClick={() => setSelected(i)}
+                      className={cn(
+                        "flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-2 text-left",
+                        !on && "opacity-45",
+                      )}
+                    >
+                      <span className="truncate font-mono text-xs">
+                        <span className="text-muted-foreground">{dir}</span>
+                        <span className="font-medium text-foreground">{base}</span>
+                      </span>
+                      <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
+                        {d.current === "" && <span className="badge object">{t("diff.newFile")}</span>}
+                        <span className="text-diff-add-num">+{s.adds}</span>
+                        <span className="text-diff-del-num">-{s.dels}</span>
+                      </span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
           <div className="min-h-0 flex-1">
             {active && (
@@ -1014,9 +1071,13 @@ function DiffModal({
           <Button variant="secondary" size="sm" onClick={onCancel}>
             {t("common.cancel")}
           </Button>
-          <Button size="sm" onClick={onConfirm} disabled={saving}>
+          <Button
+            size="sm"
+            onClick={() => onConfirm(changed.filter((d) => !include.has(d.path)).map((d) => d.path))}
+            disabled={saving || include.size === 0}
+          >
             {saving && <span className="spinner" />}
-            {t("diff.write", { n: changed.length })}
+            {t("diff.write", { n: include.size })}
           </Button>
         </DialogFooter>
       </DialogContent>
