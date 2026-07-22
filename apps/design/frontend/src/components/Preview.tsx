@@ -9,47 +9,81 @@ import { CodeBlock } from "./CodeBlock";
 
 type Tab = "document" | "yaml" | "mapping" | "sample";
 
-/// A dotted leader that fills the gap between a field name and its type, so the
-/// two read together across a wide panel.
-const Leader = () => <span className="h-0 flex-1 self-center border-b border-dotted border-border/60" />;
+/// Row grid for the document tree: the name column flexes to its content (11rem
+/// floor), so the type sits in a shared column right after the longest name in
+/// its group instead of being pushed to the drawer's far edge.
+const ROW = "grid grid-cols-[minmax(11rem,max-content)_1fr] items-center gap-x-5 rounded-md px-2 py-1";
 
-/// One document field: a leaf renders a coloured type chip; a container (object /
-/// nested) renders a group header (chevron + muted type tag) with its children
-/// indented under a nesting guide line.
+/// One document field: a leaf renders its name with an adjacent coloured type
+/// chip; a container (object / nested) renders a card — header band + children
+/// inside the body — with a kind-coloured stripe down its full height: has_many
+/// teal for `nested`, object slate for `object`, the same hues as the canvas
+/// edges. Containment, not indentation, is what shows the nesting.
 function Node({ node }: { node: DocumentNode }) {
   const suffix = `${node.array ? "[]" : ""}${node.nullable ? "?" : ""}`;
+  const [open, setOpen] = useState(true);
   if (node.children) {
+    const nested = node.type.startsWith("nested");
     return (
-      <div>
-        <div className="flex items-center gap-2 rounded-md px-2 py-1 hover:bg-accent">
-          <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
-          <span className="font-medium whitespace-nowrap text-foreground">{node.name}</span>
-          <Leader />
-          <span className="shrink-0 rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-2xs text-muted-foreground">
-            {node.type}
-            {suffix}
+      <div
+        className={cn(
+          "my-1.5 overflow-hidden rounded-md border border-border border-l-2 bg-secondary/30",
+          nested ? "border-l-kind-has_many" : "border-l-kind-object",
+        )}
+      >
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          className={cn(ROW, "w-full cursor-pointer rounded-none bg-secondary py-1.5 text-left hover:bg-accent")}
+        >
+          <span className="flex items-center gap-2 whitespace-nowrap">
+            <ChevronDown
+              className={cn("size-3 shrink-0 text-muted-foreground transition-transform", !open && "-rotate-90")}
+            />
+            <span className="font-semibold text-foreground">{node.name}</span>
           </span>
-        </div>
-        <div className="ml-2.5 border-l border-border/50 pl-2.5">
-          {node.children.map((c, i) => (
-            <Node key={i} node={c} />
-          ))}
+          <span className="justify-self-start font-mono text-2xs whitespace-nowrap text-muted-foreground">
+            {node.type}
+            {suffix} · {node.children.length}
+          </span>
+        </button>
+        {/* height-to-auto animation: the grid row interpolates 0fr ⇄ 1fr; the
+            min-h-0 child is what lets the track actually clamp the content.
+            The header/body divider rides inside the clipped content (border-t
+            on the padded div, not border-b on the button) so it slides away
+            with the body instead of popping. */}
+        <div
+          className={cn(
+            "grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none",
+            open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+          )}
+        >
+          <div className="min-h-0 overflow-hidden">
+            <div className="border-t border-border p-1">
+              {node.children.map((c, i) => (
+                <Node key={i} node={c} />
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     );
   }
   return (
-    <div className="flex items-center gap-3 rounded-md px-2 py-1 hover:bg-accent">
-      <span className="whitespace-nowrap text-foreground">{node.name}</span>
-      <Leader />
+    <div className={cn(ROW, "hover:bg-accent")}>
+      <span className="flex items-center gap-2 whitespace-nowrap">
+        <span className="w-3 shrink-0" />
+        <span className="text-foreground">{node.name}</span>
+      </span>
       <span
         className={cn(
-          "shrink-0 rounded border border-current/30 px-1.5 py-0.5 font-mono text-2xs",
+          "justify-self-start rounded border border-current/30 bg-current/5 px-1.5 py-0.5 font-mono text-2xs whitespace-nowrap",
           typeClass(node.type),
         )}
       >
         {node.type}
-        {suffix}
+        {suffix && <span className="opacity-60">{suffix}</span>}
       </span>
     </div>
   );
@@ -83,7 +117,12 @@ export function Preview({
   ];
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    // `data-vaul-no-drag` + `select-text`: the preview is mostly text the user
+    // wants to select, so opt the whole panel out of Vaul's pointer-drag (a
+    // right-drawer drag is horizontal — indistinguishable from a text
+    // selection, so it was dismissing the drawer) and re-enable selection,
+    // which Vaul otherwise suppresses with `user-select: none`.
+    <div className="flex min-h-0 flex-1 flex-col select-text" data-vaul-no-drag>
       {!preview.parse_ok && (
         <div className="banner error mx-3 mt-3">
           <strong>{t("preview.parseError")}</strong> {preview.parse_error}

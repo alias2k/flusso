@@ -1,5 +1,5 @@
-import { Check, Copy, RefreshCw } from "lucide-react";
-import { Fragment, type ReactNode, useState } from "react";
+import { Check, Copy, RefreshCw, TextSelect } from "lucide-react";
+import { Fragment, type ReactNode, useRef, useState } from "react";
 import { useT } from "../i18n";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -95,7 +95,17 @@ export function CodeBlock({
 }) {
   const { t } = useT();
   const [copied, setCopied] = useState(false);
+  const preRef = useRef<HTMLPreElement>(null);
   const render = lang === "yaml" ? yamlLine : jsonLine;
+  const selectAll = () => {
+    const el = preRef.current;
+    const sel = window.getSelection();
+    if (!el || !sel) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  };
   const copy = () =>
     navigator.clipboard?.writeText(text).then(
       () => {
@@ -127,6 +137,14 @@ export function CodeBlock({
         )}
         <Tooltip>
           <TooltipTrigger asChild>
+            <button type="button" aria-label={t("preview.selectAll")} onClick={selectAll} className={CORNER}>
+              <TextSelect className="size-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">{t("preview.selectAll")}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
             <button type="button" aria-label={t("preview.copy")} onClick={() => void copy()} className={CORNER}>
               {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
             </button>
@@ -134,7 +152,7 @@ export function CodeBlock({
           <TooltipContent side="top">{copied ? t("preview.copied") : t("preview.copy")}</TooltipContent>
         </Tooltip>
       </div>
-      <pre className="yaml">
+      <pre ref={preRef} className="yaml cursor-text">
         {text.split("\n").map((line, i) => (
           <Fragment key={i}>
             {render(line)}
