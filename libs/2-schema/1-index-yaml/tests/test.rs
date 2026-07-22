@@ -494,7 +494,7 @@ fn filter_value(filter: &schema_core::Filter) -> Option<&FilterValue> {
 #[test]
 fn missing_type_tag_is_an_error() {
     let err = parse("version: 1\ntable: t\nfields:\n  - required: true").unwrap_err();
-    assert!(matches!(err, ParseError::Syntax(_)));
+    assert!(matches!(err, ParseError::Syntax { .. }));
 }
 
 #[test]
@@ -502,7 +502,7 @@ fn unknown_sibling_is_rejected() {
     let err =
         parse("version: 1\ntable: t\nfields:\n  - keyword: x\n    required: true\n    bogus: 1")
             .unwrap_err();
-    assert!(matches!(err, ParseError::Syntax(_)));
+    assert!(matches!(err, ParseError::Syntax { .. }));
 }
 
 #[test]
@@ -620,6 +620,8 @@ fn unknown_sibling_message_names_the_field_and_hides_internal_key() {
     // Names the field by tag and document key, in our phrasing…
     assert!(msg.contains("`keyword` field `email`"), "{msg}");
     assert!(msg.contains("unknown key `requierd`"), "{msg}");
+    // …suggests the near-miss the typo probably meant…
+    assert!(msg.contains("did you mean `required`?"), "{msg}");
     // …never leaks the internal `field` key we inject while parsing…
     assert!(!msg.contains("`field`"), "internal key leaked: {msg}");
     // …and omits the snippet, whose location would point at the wrong field.

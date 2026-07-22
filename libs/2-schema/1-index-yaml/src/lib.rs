@@ -5,7 +5,7 @@ mod entities;
 mod parser;
 
 pub use entities::*;
-pub use parser::ParseError;
+pub use parser::{ErrorLocation, ParseError};
 
 use serde::Deserialize;
 
