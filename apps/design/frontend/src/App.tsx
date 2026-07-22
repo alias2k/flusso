@@ -963,16 +963,11 @@ function DiffModal({
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
   const allShown = shown.length > 0 && shownIncluded === shown.length;
 
-  // Search-box keybindings: Esc clears the query (instead of closing the whole
-  // dialog — Radix's default); Enter opens the top match; arrows move through the
-  // filtered list. Position is tracked in `shown` and mapped back to `changed`.
+  // Search-box keybindings: Enter opens the top match; arrows move through the
+  // filtered list. (Esc is handled dialog-wide in onEscapeKeyDown, since Radix
+  // listens for it at the document level.) Position is tracked in `shown` and
+  // mapped back to `changed`.
   const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Escape" && query) {
-      e.preventDefault();
-      e.stopPropagation();
-      setQuery("");
-      return;
-    }
     if (shown.length === 0) return;
     const pos = shown.findIndex((d) => changed.indexOf(d) === selected);
     if (e.key === "Enter") {
@@ -1018,7 +1013,17 @@ function DiffModal({
   ];
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
-      <DialogContent className="flex h-[92vh] w-[96vw] max-w-none flex-col sm:max-w-none" aria-label={t("diff.aria")}>
+      <DialogContent
+        className="flex h-[92vh] w-[96vw] max-w-none flex-col sm:max-w-none"
+        aria-label={t("diff.aria")}
+        onEscapeKeyDown={(e) => {
+          // Esc never closes this review by accident. If a file filter is
+          // active, the first Esc just clears it; otherwise Esc is a no-op —
+          // close via Cancel / ✕ / backdrop.
+          e.preventDefault();
+          if (query) setQuery("");
+        }}
+      >
         <DialogHeader className="flex-row items-center justify-between gap-3 pr-8">
           <div className="flex min-w-0 items-center gap-3">
             <DialogTitle className="shrink-0">{t("diff.reviewTitle")}</DialogTitle>
