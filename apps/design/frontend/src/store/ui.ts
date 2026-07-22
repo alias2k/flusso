@@ -17,6 +17,22 @@ const initialTheme = (): "dark" | "light" => {
   }
 };
 
+const initialVim = (): boolean => {
+  try {
+    return localStorage.getItem("flusso-design.vim") === "1";
+  } catch {
+    return false;
+  }
+};
+
+const initialAutoFormat = (): boolean => {
+  try {
+    return localStorage.getItem("flusso-design.autoformat") === "1";
+  } catch {
+    return false;
+  }
+};
+
 interface UiState {
   theme: "dark" | "light";
   leftOpen: boolean;
@@ -27,6 +43,10 @@ interface UiState {
   validating: boolean;
   rawMode: boolean;
   rawText: string;
+  /// VIM keybindings in the raw-YAML editor (persisted preference).
+  vimMode: boolean;
+  /// Auto-format the Code buffer on focus loss (persisted preference, off by default).
+  autoFormat: boolean;
   diffs: FileDiff[] | null;
   browseCatalog: boolean;
 
@@ -40,6 +60,8 @@ interface UiState {
   setValidating: (validating: boolean) => void;
   setRawMode: (rawMode: boolean) => void;
   setRawText: (rawText: string) => void;
+  toggleVim: () => void;
+  toggleAutoFormat: () => void;
   setDiffs: (diffs: FileDiff[] | null) => void;
   setBrowseCatalog: (open: boolean) => void;
 }
@@ -54,6 +76,8 @@ export const useUiStore = create<UiState>()((set) => ({
   validating: false,
   rawMode: false,
   rawText: "",
+  vimMode: initialVim(),
+  autoFormat: initialAutoFormat(),
   diffs: null,
   browseCatalog: false,
 
@@ -67,6 +91,26 @@ export const useUiStore = create<UiState>()((set) => ({
   setValidating: (validating) => set({ validating }),
   setRawMode: (rawMode) => set({ rawMode }),
   setRawText: (rawText) => set({ rawText }),
+  toggleVim: () =>
+    set((s) => {
+      const vimMode = !s.vimMode;
+      try {
+        localStorage.setItem("flusso-design.vim", vimMode ? "1" : "0");
+      } catch {
+        /* storage disabled — the preference just won't persist */
+      }
+      return { vimMode };
+    }),
+  toggleAutoFormat: () =>
+    set((s) => {
+      const autoFormat = !s.autoFormat;
+      try {
+        localStorage.setItem("flusso-design.autoformat", autoFormat ? "1" : "0");
+      } catch {
+        /* storage disabled — the preference just won't persist */
+      }
+      return { autoFormat };
+    }),
   setDiffs: (diffs) => set({ diffs }),
   setBrowseCatalog: (browseCatalog) => set({ browseCatalog }),
 }));

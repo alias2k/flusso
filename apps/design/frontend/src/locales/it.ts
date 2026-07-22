@@ -6,9 +6,8 @@ export const it: Record<string, string> = {
   "topbar.showSidebar": "Mostra pannello",
   "topbar.tables": "Tabelle",
   "topbar.visual": "Visuale",
-  "topbar.rawYaml": "YAML grezzo",
-  "topbar.rawHint": "Modifica il file YAML grezzo dello schema",
-  "topbar.visualHint": "Torna all'editor visivo",
+  "topbar.code": "Codice",
+  "topbar.modeHint": "Passa dal canvas visivo all'editor YAML e viceversa",
   "topbar.undo": "Annulla (⌘Z)",
   "topbar.redo": "Ripeti (⇧⌘Z)",
   "topbar.toggleTheme": "Cambia tema",
@@ -35,7 +34,6 @@ export const it: Record<string, string> = {
   // toasts / status
   "toast.saved": "{n, plural, one {Salvato # file} other {Salvati # file}}",
   "toast.saveFailed": "Salvataggio non riuscito: {err}",
-  "toast.savedRaw": "YAML grezzo salvato",
   "toast.validateFailed": "Convalida non riuscita: {err}",
   "toast.issues":
     "{n, plural, one {# problema — vedi il campo evidenziato} other {# problemi — vedi i campi evidenziati}}",
@@ -70,10 +68,22 @@ export const it: Record<string, string> = {
   "sidebar.rootTable": "tabella radice",
   "sidebar.create": "Crea",
 
-  // raw-YAML mode
-  "raw.editingFor": "Modifica YAML grezzo di",
-  "raw.help": "Salva grezzo scrive questo file così com'è e ricarica.",
-  "raw.save": "Salva grezzo",
+  // Code mode
+  "raw.help":
+    "Le modifiche si sincronizzano nel progetto mentre scrivi — Salva (in alto a destra) rivede e scrive i file.",
+  "raw.editorAria": "Editor YAML grezzo",
+  "raw.format": "Formatta",
+  "raw.vimHint": "Comandi VIM",
+  "code.problems": "Problemi",
+  "code.problemsN": "{n, plural, one {# problema} other {# problemi}}",
+  "code.noProblems": "YAML valido",
+  "code.validYaml": "YAML valido",
+  "code.shortcuts": "Scorciatoie",
+  "code.search": "Cerca",
+  "code.fold": "Comprimi blocco",
+  "code.cursor": "Riga {l}, Col {c}",
+  "code.autoFormat": "Formattazione automatica",
+  "code.autoFormatHint": "Formatta il buffer quando perde il focus, se lo YAML è valido",
 
   // diff modal
   "diff.aria": "Rivedi le modifiche",
@@ -232,7 +242,6 @@ export const it: Record<string, string> = {
   "preview.sampleHint": "Costruisci un documento da una riga reale del database — esattamente ciò che scrive il sink.",
 
   // catalog browser
-  "catalog.aria": "Tabelle del database",
   "catalog.title": "{n, plural, one {Database (# tabella)} other {Database (# tabelle)}}",
   "catalog.dbError": "Database non raggiungibile — {err}",
   "catalog.filter": "Filtra tabelle e colonne…",

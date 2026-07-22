@@ -287,8 +287,25 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface ParseResponse {
+  schema?: IndexSchema;
+  error?: string;
+  /// 1-based position, present when the parser's location is trustworthy.
+  location?: { line: number; column: number };
+  /// The document field a field-scoped error names, with its type tag.
+  field?: string;
+  type_tag?: string;
+}
+
 export const api = {
   project: () => fetch("/api/project").then((r) => json<Project>(r)),
+  /// Parse a raw schema buffer into the validated model (Code mode's live sync).
+  parse: (yaml: string) =>
+    fetch("/api/parse", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ yaml }),
+    }).then((r) => json<ParseResponse>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
   testConnection: (config: ConfigToml) =>
     fetch("/api/test-connection", {

@@ -6,9 +6,8 @@ export const en: Record<string, string> = {
   "topbar.showSidebar": "Show sidebar",
   "topbar.tables": "Tables",
   "topbar.visual": "Visual",
-  "topbar.rawYaml": "Raw YAML",
-  "topbar.rawHint": "Edit the raw schema YAML file",
-  "topbar.visualHint": "Return to the visual editor",
+  "topbar.code": "Code",
+  "topbar.modeHint": "Switch between the visual canvas and the YAML editor",
   "topbar.undo": "Undo (⌘Z)",
   "topbar.redo": "Redo (⇧⌘Z)",
   "topbar.toggleTheme": "Toggle theme",
@@ -34,7 +33,6 @@ export const en: Record<string, string> = {
   // toasts / status
   "toast.saved": "{n, plural, one {Saved # file} other {Saved # files}}",
   "toast.saveFailed": "Save failed: {err}",
-  "toast.savedRaw": "Saved raw YAML",
   "toast.validateFailed": "Validate failed: {err}",
   "toast.issues":
     "{n, plural, one {# issue — see the highlighted field} other {# issues — see the highlighted fields}}",
@@ -69,10 +67,21 @@ export const en: Record<string, string> = {
   "sidebar.rootTable": "root table",
   "sidebar.create": "Create",
 
-  // raw-YAML mode
-  "raw.editingFor": "Editing raw YAML for",
-  "raw.help": "Save raw writes this file verbatim, then reloads.",
-  "raw.save": "Save raw",
+  // Code mode
+  "raw.help": "Edits sync into the project as you type — Save (top right) reviews and writes the files.",
+  "raw.editorAria": "Raw YAML editor",
+  "raw.format": "Format",
+  "raw.vimHint": "VIM keybindings",
+  "code.problems": "Problems",
+  "code.problemsN": "{n, plural, one {# problem} other {# problems}}",
+  "code.noProblems": "valid YAML",
+  "code.validYaml": "valid YAML",
+  "code.shortcuts": "Shortcuts",
+  "code.search": "Search",
+  "code.fold": "Fold block",
+  "code.cursor": "Ln {l}, Col {c}",
+  "code.autoFormat": "Auto-format",
+  "code.autoFormatHint": "Format the buffer on focus loss whenever the YAML is valid",
 
   // diff modal
   "diff.aria": "Review changes",
@@ -227,7 +236,6 @@ export const en: Record<string, string> = {
   "preview.sampleHint": "Build a document from a live database row — exactly what the sink writes.",
 
   // catalog browser
-  "catalog.aria": "Database tables",
   "catalog.title": "{n, plural, one {Database (# table)} other {Database (# tables)}}",
   "catalog.dbError": "Database not reachable — {err}",
   "catalog.filter": "Filter tables & columns…",

@@ -10,6 +10,19 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    // CodeMirror breaks on duplicate instances (its extensions fail instanceof
+    // checks), and Vite's dev-dep optimizer can split these across pre-bundles.
+    dedupe: [
+      "@codemirror/state",
+      "@codemirror/view",
+      "@codemirror/language",
+      "@codemirror/commands",
+      "@codemirror/autocomplete",
+      "@codemirror/search",
+      "@codemirror/lint",
+      "@lezer/common",
+      "@lezer/highlight",
+    ],
   },
   build: {
     outDir: "../dist",
