@@ -174,7 +174,7 @@ function wordDiff(oldText: string, newText: string): { left: Seg[]; right: Seg[]
 }
 
 // For each paired modification, attach the intra-line word diff to both rows
-// (mutating the shared Row objects, so the unified view highlights them too).
+// (mutating the shared Row objects, so the unified and split views both highlight).
 function attachWordDiff(pairs: Pair[]): void {
   for (const p of pairs) {
     if (!p.changed || !p.left || !p.right) continue;
@@ -298,7 +298,7 @@ function SideCell({ row, side }: { row?: Row; side: "old" | "new" }) {
         {side === "old" ? "-" : "+"}
       </span>
       <span className={cn("grow whitespace-pre pr-3", changed ? "text-foreground" : "text-muted-foreground")}>
-        {row.text || " "}
+        <LineText row={row} strong={changed ? (side === "old" ? "bg-destructive/30" : "bg-primary/30") : undefined} />
       </span>
     </div>
   );
