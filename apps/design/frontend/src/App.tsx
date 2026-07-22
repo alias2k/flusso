@@ -962,6 +962,30 @@ function DiffModal({
   // The select-all box acts on the currently-shown (filtered) files.
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
   const allShown = shown.length > 0 && shownIncluded === shown.length;
+
+  // Search-box keybindings: Esc clears the query (instead of closing the whole
+  // dialog — Radix's default); Enter opens the top match; arrows move through the
+  // filtered list. Position is tracked in `shown` and mapped back to `changed`.
+  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape" && query) {
+      e.preventDefault();
+      e.stopPropagation();
+      setQuery("");
+      return;
+    }
+    if (shown.length === 0) return;
+    const pos = shown.findIndex((d) => changed.indexOf(d) === selected);
+    if (e.key === "Enter") {
+      e.preventDefault();
+      setSelected(changed.indexOf(shown[Math.max(0, pos)]));
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelected(changed.indexOf(shown[Math.min(shown.length - 1, pos + 1)]));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelected(changed.indexOf(shown[Math.max(0, pos <= 0 ? 0 : pos - 1)]));
+    }
+  };
   const toggleAll = () =>
     setInclude((s) => {
       const next = new Set(s);
@@ -1028,6 +1052,7 @@ function DiffModal({
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={onSearchKey}
                   placeholder={t("diff.filterFiles")}
                   className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
                   autoComplete="off"
