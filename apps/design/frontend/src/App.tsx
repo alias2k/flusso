@@ -46,7 +46,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Drawer, DrawerClose, DrawerContent, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
-import { Kbd } from "@/components/ui/kbd";
+import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Textarea } from "@/components/ui/textarea";
@@ -964,22 +964,30 @@ function DiffModal({
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
   const allShown = shown.length > 0 && shownIncluded === shown.length;
 
-  // Search-box keybindings: Enter opens the top match; arrows move through the
-  // filtered list. (Esc is handled dialog-wide in onEscapeKeyDown, since Radix
-  // listens for it at the document level.) Position is tracked in `shown` and
-  // mapped back to `changed`.
-  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const ignoreList = () => changed.filter((d) => !include.has(d.path)).map((d) => d.path);
+
+  // Dialog-wide keybindings, so the whole review is keyboard-drivable from the
+  // (auto-focused) filter: ↑/↓ move through the shown files, Enter toggles the
+  // selected file's inclusion, ⌘/Ctrl+Enter writes. Letters/space fall through
+  // to the filter; Esc is handled in onEscapeKeyDown. Position is tracked in
+  // `shown` and mapped back to `changed`.
+  const onDialogKey = (e: React.KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      if (include.size > 0 && !saving) onConfirm(ignoreList());
+      return;
+    }
     if (shown.length === 0) return;
     const pos = shown.findIndex((d) => changed.indexOf(d) === selected);
-    if (e.key === "Enter") {
-      e.preventDefault();
-      setSelected(changed.indexOf(shown[Math.max(0, pos)]));
-    } else if (e.key === "ArrowDown") {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
       setSelected(changed.indexOf(shown[Math.min(shown.length - 1, pos + 1)]));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setSelected(changed.indexOf(shown[Math.max(0, pos <= 0 ? 0 : pos - 1)]));
+      setSelected(changed.indexOf(shown[pos <= 0 ? 0 : pos - 1]));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      toggle(shown[pos < 0 ? 0 : pos].path);
     }
   };
   const toggleAll = () =>
@@ -1017,6 +1025,7 @@ function DiffModal({
       <DialogContent
         className="flex h-[92vh] w-[96vw] max-w-none flex-col sm:max-w-none"
         aria-label={t("diff.aria")}
+        onKeyDown={onDialogKey}
         onEscapeKeyDown={(e) => {
           // Esc never closes this review by accident. If a file filter is
           // active, the first Esc just clears it; otherwise Esc is a no-op —
@@ -1067,7 +1076,6 @@ function DiffModal({
                   ref={searchRef}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={onSearchKey}
                   placeholder={t("diff.filterFiles")}
                   className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
                   autoComplete="off"
@@ -1152,18 +1160,40 @@ function DiffModal({
             )}
           </div>
         </div>
-        <DialogFooter>
-          <Button variant="secondary" size="sm" onClick={onCancel}>
-            {t("common.cancel")}
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => onConfirm(changed.filter((d) => !include.has(d.path)).map((d) => d.path))}
-            disabled={saving || include.size === 0}
-          >
-            {saving && <span className="spinner" />}
-            {t("diff.write", { n: include.size })}
-          </Button>
+        <DialogFooter className="sm:items-center sm:justify-between">
+          <div className="hidden flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-foreground sm:flex">
+            <span className="flex items-center gap-1.5">
+              <KbdGroup>
+                <Kbd>↑</Kbd>
+                <Kbd>↓</Kbd>
+              </KbdGroup>
+              {t("diff.kbdNavigate")}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <Kbd>↵</Kbd>
+              {t("diff.kbdToggle")}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <KbdGroup>
+                <Kbd>⌘</Kbd>
+                <Kbd>↵</Kbd>
+              </KbdGroup>
+              {t("diff.kbdSave")}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <Kbd>Esc</Kbd>
+              {t("diff.kbdClear")}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" onClick={onCancel}>
+              {t("common.cancel")}
+            </Button>
+            <Button size="sm" onClick={() => onConfirm(ignoreList())} disabled={saving || include.size === 0}>
+              {saving && <span className="spinner" />}
+              {t("diff.write", { n: include.size })}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
