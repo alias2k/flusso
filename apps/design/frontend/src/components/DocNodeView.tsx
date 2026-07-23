@@ -95,46 +95,40 @@ export function DocNodeView({ data, selected }: NodeProps) {
     apply((s) => edit.toggleColumn(s, node.path, c.name, false));
   };
 
-  // Multi-select on the column checkboxes, like a file list:
-  //  · plain click — toggle the column, set it as the anchor
-  //  · Shift-click  — set every row between the anchor and this one to this
-  //    box's new state, in a single edit (the anchor stays, so it can extend)
-  //  · Ctrl/Cmd-click — toggle just this row without moving the anchor
-  // Modifiers are captured on pointerdown (before the toggle fires) and cleared
-  // after use, so a keyboard toggle (no pointer event) reads no modifier.
   const visibleCols = cols.filter((c) => matches(c.name));
+
+  // Multi-select column rows, file-list style:
+  //  · plain click — select this column (an included one opens the Inspector; an
+  //    excluded one starts a single-column selection). Sets the anchor.
+  //  · Shift-click  — select the whole range between the anchor and this row.
+  //  · Ctrl/Cmd-click — add/remove this row from the current selection.
+  // A multi-selection drives the Inspector's bulk include/exclude panel. The
+  // node's checkboxes still toggle one column each.
   const anchorCol = useRef<string | null>(null);
-  const mods = useRef({ shift: false, ctrl: false });
-  const toggleColumnAt = (c: ColumnShape, target: boolean) => {
-    const { shift, ctrl } = mods.current;
-    mods.current = { shift: false, ctrl: false };
-    const anchor = anchorCol.current;
-    if (shift && anchor && anchor !== c.name) {
-      const names = visibleCols.map((x) => x.name);
-      const a = names.indexOf(anchor);
+  const columnsSelected =
+    selection?.kind === "columns" && selection.path.join(".") === node.path.join(".") ? selection.names : [];
+  const selectColumn = (c: ColumnShape, e: React.MouseEvent) => {
+    const names = visibleCols.map((x) => x.name);
+    if (e.shiftKey && anchorCol.current) {
+      const a = names.indexOf(anchorCol.current);
       const b = names.indexOf(c.name);
       if (a >= 0 && b >= 0) {
-        const range = visibleCols.slice(Math.min(a, b), Math.max(a, b) + 1);
-        apply((s) =>
-          target
-            ? edit.includeColumns(
-                s,
-                node.path,
-                range.map((x) => ({ name: x.name, ty: x.suggested_type, nullable: x.nullable })),
-              )
-            : edit.excludeColumns(
-                s,
-                node.path,
-                range.map((x) => x.name),
-              ),
-        );
-        return; // keep the anchor so the range can be extended
+        select({ kind: "columns", path: node.path, names: names.slice(Math.min(a, b), Math.max(a, b) + 1) });
+        return; // anchor stays so the range can extend
       }
     }
+    if (e.ctrlKey || e.metaKey) {
+      const set = new Set(columnsSelected.length ? columnsSelected : anchorCol.current ? [anchorCol.current] : []);
+      if (set.has(c.name)) set.delete(c.name);
+      else set.add(c.name);
+      select({ kind: "columns", path: node.path, names: [...set] });
+      anchorCol.current = c.name;
+      return;
+    }
+    anchorCol.current = c.name;
     const inc = includedByCol.get(c.name);
-    if (target) includeColumn(c);
-    else if (inc) excludeColumn(c, inc);
-    if (!ctrl) anchorCol.current = c.name; // Ctrl/Cmd toggles without re-anchoring
+    if (inc) select({ kind: "field", path: node.path, index: inc.index });
+    else select({ kind: "columns", path: node.path, names: [c.name] });
   };
 
   return (
@@ -287,24 +281,26 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   const required = !!col && !col.nullable;
                   const override = required && c.nullable;
                   const hasDefault = col?.default !== undefined;
+                  const rowSelected =
+                    columnsSelected.includes(c.name) || (inc !== undefined && fieldSelected(inc.index));
                   return (
                     <div
-                      className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
+                      className={`col-row${inc ? " on" : ""}${rowSelected ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
                       key={c.name}
                       title={diag?.message}
-                      onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
+                      // Modified clicks must reach this row, not React Flow's node
+                      // multi-selection — stop the pointerdown from bubbling.
+                      onPointerDown={(e) => {
+                        if (e.shiftKey || e.ctrlKey || e.metaKey) e.stopPropagation();
+                      }}
+                      onClick={(e) => selectColumn(c, e)}
                     >
                       <Checkbox
                         checked={!!inc}
                         aria-label={c.name}
-                        onPointerDown={(e) => {
-                          // Stop React Flow from claiming Shift/Cmd+pointerdown for
-                          // its node multi-selection — the checkbox must get the click.
-                          e.stopPropagation();
-                          mods.current = { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey };
-                        }}
+                        onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => e.stopPropagation()}
-                        onCheckedChange={(ch) => toggleColumnAt(c, ch === true)}
+                        onCheckedChange={(ch) => (ch === true ? includeColumn(c) : inc && excludeColumn(c, inc))}
                       />
                       <span className="col-name" title={renamed ? t("node.columnOf", { name: c.name }) : undefined}>
                         {inc ? inc.name : c.name}

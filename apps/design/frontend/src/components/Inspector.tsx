@@ -93,12 +93,11 @@ function Breadcrumb() {
   if (!selection) return null;
   const root = schema.table || "(root)";
   let crumbs: string[];
-  if (selection.kind === "root") crumbs = [root];
-  else if (selection.kind === "node") crumbs = [root, ...pathLabels(schema, selection.path)];
-  else {
+  if (selection.kind === "field") {
     const field = nodeFields(schema, selection.path)[selection.index];
     crumbs = [root, ...pathLabels(schema, selection.path), field?.field ?? "?"];
-  }
+  } else if (selection.kind === "node") crumbs = [root, ...pathLabels(schema, selection.path)];
+  else crumbs = [root];
   return <div className="crumbs min-w-0 break-words text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
 }
 
@@ -201,6 +200,7 @@ export function Inspector() {
   const { selection } = useDesign();
   const { t } = useT();
   if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
+  if (selection.kind === "columns") return <ColumnsInspector path={selection.path} names={selection.names} />;
   return (
     <>
       <div className="mb-2.5 flex items-center justify-between gap-2">
@@ -215,6 +215,63 @@ export function Inspector() {
         <FieldInspector path={selection.path} index={selection.index} />
       )}
     </>
+  );
+}
+
+/// The bulk panel shown when several catalog columns are multi-selected on a
+/// node: include the not-yet-included ones, or remove (exclude) the included
+/// ones — in a single edit each.
+function ColumnsInspector({ path, names }: { path: number[]; names: string[] }) {
+  const { schema, apply, columnsFor, select } = useDesign();
+  const { t } = useT();
+  const table = effectiveTable(schema, path);
+  const shape = new Map(columnsFor(table).map((c) => [c.name, c]));
+  const included = new Set(
+    nodeFields(schema, path)
+      .filter((f) => "column" in f.source && typeof f.source.column.ty === "string")
+      .map((f) => ("column" in f.source ? f.source.column.column : "")),
+  );
+  const toInclude = names.filter((n) => !included.has(n));
+  const toRemove = names.filter((n) => included.has(n));
+  const includeAll = () =>
+    apply((s) =>
+      edit.includeColumns(
+        s,
+        path,
+        toInclude.map((n) => ({ name: n, ty: shape.get(n)?.suggested_type, nullable: shape.get(n)?.nullable })),
+      ),
+    );
+  const removeAll = () => apply((s) => edit.excludeColumns(s, path, names));
+  return (
+    <div className="inspector">
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold">{t("inspector.columnsSelected", { n: names.length })}</span>
+        <Button variant="ghost" size="icon-sm" aria-label={t("inspector.close")} onClick={() => select(null)}>
+          <X />
+        </Button>
+      </div>
+      <div className="mb-3 flex flex-wrap gap-1">
+        {names.map((n) => (
+          <span
+            key={n}
+            className={cn(
+              "rounded border px-1.5 py-0.5 font-mono text-2xs",
+              included.has(n) ? "border-primary/40 text-primary" : "border-border text-muted-foreground",
+            )}
+          >
+            {n}
+          </span>
+        ))}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Button size="sm" disabled={!toInclude.length} onClick={includeAll}>
+          {t("inspector.includeSelected", { n: toInclude.length })}
+        </Button>
+        <Button size="sm" variant="secondary" disabled={!toRemove.length} onClick={removeAll}>
+          {t("inspector.removeSelected", { n: toRemove.length })}
+        </Button>
+      </div>
+    </div>
   );
 }
 
