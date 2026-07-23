@@ -23,6 +23,7 @@ import { useDesign } from "../state";
 import { useDesignStore } from "../store/design";
 import { edgeColor } from "../theme";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { DocNodeView } from "./DocNodeView";
 import { Hint } from "./Hint";
 import { Icon } from "./Icon";
@@ -30,8 +31,7 @@ import { Icon } from "./Icon";
 const nodeTypes = { doc: DocNodeView };
 
 export function Canvas() {
-  const { schema, indexName, select, catalog } = useDesign();
-  const { t } = useT();
+  const { schema, indexName, select, catalog, collapsed } = useDesign();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [showMap, setShowMap] = useState(false);
@@ -142,67 +142,60 @@ export function Canvas() {
       nodesDraggable={!locked}
     >
       <Background />
-      <FlowControls locked={locked} onToggle={() => setLocked((l) => !l)} />
-      {showMap && <MiniMap pannable zoomable style={{ marginBottom: "2.5rem" }} />}
+      <NodeControls
+        allCollapsed={nodes.length > 0 && collapsed.size >= nodes.length}
+        locked={locked}
+        onToggleLock={() => setLocked((l) => !l)}
+        onReset={resetLayout}
+      />
+      <ViewControls />
+      <MinimapToggle showMap={showMap} onToggle={() => setShowMap((m) => !m)} />
+      {showMap && <MiniMap pannable zoomable position="top-right" />}
       <RestoreViewport index={indexName} />
       <FocusOnRequest />
-      <Panel position="bottom-right">
-        <div className="flex gap-1.5">
-          <Hint label={t("canvas.resetLayout")} side="left">
-            <Button variant="secondary" size="icon-sm" aria-label={t("canvas.resetLayout")} onClick={resetLayout}>
-              <Icon name="tidy" />
-            </Button>
-          </Hint>
-          <Hint label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")} side="left">
-            <Button
-              variant="secondary"
-              size="icon-sm"
-              aria-label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
-              onClick={() => setShowMap((m) => !m)}
-            >
-              <Icon name="map" />
-            </Button>
-          </Hint>
-        </div>
-      </Panel>
     </ReactFlow>
   );
 }
 
-/// Canvas controls (zoom / fit / lock) as our shadcn icon buttons, replacing
-/// React Flow's built-in `<Controls>`. Lives inside `<ReactFlow>` for the zoom
-/// hooks; `locked` (lifted to Canvas) freezes node dragging.
-function FlowControls({ locked, onToggle }: { locked: boolean; onToggle: () => void }) {
+// Active-toggle styling: a pressed toggle (lock, minimap) reads clearly as "on".
+const TOGGLE_ON = "border-primary bg-primary/15 text-primary hover:bg-primary/20";
+
+/// Layout & node controls, bottom-left: one collapse⟷expand-all toggle (colours
+/// when the whole graph is collapsed), re-tidy the layout, and lock node
+/// dragging (also a toggle). `allCollapsed` drives what the toggle does next.
+function NodeControls({
+  allCollapsed,
+  locked,
+  onToggleLock,
+  onReset,
+}: {
+  allCollapsed: boolean;
+  locked: boolean;
+  onToggleLock: () => void;
+  onReset: () => void;
+}) {
   const { t } = useT();
-  const { zoomIn, zoomOut, fitView } = useReactFlow();
   const collapseAll = useDesignStore((s) => s.collapseAll);
   const expandAll = useDesignStore((s) => s.expandAll);
+  const label = allCollapsed ? t("canvas.expandAll") : t("canvas.collapseAll");
   return (
     <Panel position="bottom-left">
       <div className="flex flex-col gap-1.5">
-        <Hint label={t("canvas.collapseAll")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.collapseAll")} onClick={() => collapseAll()}>
-            <ChevronsDownUp />
+        <Hint label={label} side="right">
+          <Button
+            variant="secondary"
+            size="icon-sm"
+            aria-label={label}
+            aria-pressed={allCollapsed}
+            className={cn(allCollapsed && TOGGLE_ON)}
+            onClick={() => (allCollapsed ? expandAll() : collapseAll())}
+          >
+            {allCollapsed ? <ChevronsUpDown /> : <ChevronsDownUp />}
           </Button>
         </Hint>
-        <Hint label={t("canvas.expandAll")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.expandAll")} onClick={() => expandAll()}>
-            <ChevronsUpDown />
-          </Button>
-        </Hint>
-        <Hint label={t("canvas.zoomIn")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomIn")} onClick={() => void zoomIn()}>
-            <ZoomIn />
-          </Button>
-        </Hint>
-        <Hint label={t("canvas.zoomOut")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomOut")} onClick={() => void zoomOut()}>
-            <ZoomOut />
-          </Button>
-        </Hint>
-        <Hint label={t("canvas.fitView")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.fitView")} onClick={() => void fitView()}>
-            <Maximize2 />
+        <Hint label={t("canvas.resetLayout")} side="right">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.resetLayout")} onClick={onReset}>
+            <Icon name="tidy" />
           </Button>
         </Hint>
         <Hint label={locked ? t("canvas.unlock") : t("canvas.lock")} side="right">
@@ -210,12 +203,65 @@ function FlowControls({ locked, onToggle }: { locked: boolean; onToggle: () => v
             variant="secondary"
             size="icon-sm"
             aria-label={locked ? t("canvas.unlock") : t("canvas.lock")}
-            onClick={onToggle}
+            aria-pressed={locked}
+            className={cn(locked && TOGGLE_ON)}
+            onClick={onToggleLock}
           >
             {locked ? <Lock /> : <Unlock />}
           </Button>
         </Hint>
       </div>
+    </Panel>
+  );
+}
+
+/// Viewport controls, bottom-right: zoom and fit. Lives inside `<ReactFlow>` for
+/// the zoom hooks.
+function ViewControls() {
+  const { t } = useT();
+  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  return (
+    <Panel position="bottom-right">
+      <div className="flex flex-col gap-1.5">
+        <Hint label={t("canvas.zoomIn")} side="left">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomIn")} onClick={() => void zoomIn()}>
+            <ZoomIn />
+          </Button>
+        </Hint>
+        <Hint label={t("canvas.zoomOut")} side="left">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomOut")} onClick={() => void zoomOut()}>
+            <ZoomOut />
+          </Button>
+        </Hint>
+        <Hint label={t("canvas.fitView")} side="left">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.fitView")} onClick={() => void fitView()}>
+            <Maximize2 />
+          </Button>
+        </Hint>
+      </div>
+    </Panel>
+  );
+}
+
+/// The minimap toggle, top-left on its own: it reveals an overview rather than
+/// controlling the viewport, so it sits apart from the zoom/fit cluster.
+/// Colours when the minimap is shown.
+function MinimapToggle({ showMap, onToggle }: { showMap: boolean; onToggle: () => void }) {
+  const { t } = useT();
+  return (
+    <Panel position="top-left">
+      <Hint label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")} side="right">
+        <Button
+          variant="secondary"
+          size="icon-sm"
+          aria-label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
+          aria-pressed={showMap}
+          className={cn(showMap && TOGGLE_ON)}
+          onClick={onToggle}
+        >
+          <Icon name="map" />
+        </Button>
+      </Hint>
     </Panel>
   );
 }
