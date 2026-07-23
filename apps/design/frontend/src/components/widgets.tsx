@@ -351,7 +351,9 @@ export function Combobox({
     setQuery("");
   };
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    // `modal` so the list scrolls even inside a Dialog — a non-modal popover is
+    // portalled outside the Dialog's scroll-lock, which would eat its wheel.
+    <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger asChild>
         <button
           type="button"

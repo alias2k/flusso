@@ -241,7 +241,9 @@ function ViewControls() {
   const { t } = useT();
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   return (
-    <Panel position="bottom-right">
+    // Lifted above React Flow's bottom-right attribution link so its lowest
+    // button never overlaps it (accidental clicks).
+    <Panel position="bottom-right" style={{ marginBottom: "1.75rem" }}>
       <div className="flex flex-col gap-1.5">
         <Hint label={t("canvas.zoomIn")} side="left">
           <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomIn")} onClick={() => void zoomIn()}>
