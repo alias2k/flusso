@@ -230,3 +230,25 @@ fn parse_round_trips_generated_yaml_and_reports_errors() {
     assert_eq!(field.type_tag.as_deref(), Some("keyword"));
     assert_eq!(field.field.as_deref(), Some("x"));
 }
+
+/// `list_dirs` enumerates subfolders (forward-slash, recursive) and skips hidden
+/// dirs and the usual build/vendor noise — it backs the schema-folder picker.
+#[test]
+fn list_dirs_walks_subfolders_and_skips_noise() {
+    let dir = fixture();
+    std::fs::create_dir_all(dir.join("schemas/nested")).unwrap();
+    std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+    std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+
+    let dirs = api::list_dirs(&dir.join("flusso.toml"));
+    assert!(dirs.contains(&"schemas".to_string()));
+    assert!(dirs.contains(&"schemas/nested".to_string()));
+    assert!(
+        !dirs
+            .iter()
+            .any(|d| d.starts_with(".hidden") || d.starts_with("node_modules")),
+        "hidden and vendor dirs are skipped: {dirs:?}",
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

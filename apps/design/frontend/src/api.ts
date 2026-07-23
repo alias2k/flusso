@@ -346,6 +346,8 @@ export const api = {
       body: JSON.stringify({ yaml }),
     }).then((r) => json<ParseResponse>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
+  /// Relative subdirectories under the config dir, for the schema-folder picker.
+  dirs: () => fetch("/api/dirs").then((r) => json<string[]>(r)),
   testConnection: (config: ConfigToml) =>
     fetch("/api/test-connection", {
       method: "POST",

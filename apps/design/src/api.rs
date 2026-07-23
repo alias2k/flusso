@@ -465,6 +465,50 @@ pub fn diff_project(config_path: &Path, request: SaveRequest) -> Result<Vec<OpDi
     plan(config_path, &request)
 }
 
+/// Every subdirectory under the config directory (relative, forward-slash
+/// paths), for the designer's schema-directory picker. Hidden directories and
+/// the usual build/vendor noise are skipped, and the walk is depth-bounded so a
+/// huge tree can't stall the request. Sorted; the config directory itself is ""
+/// (not listed — the picker offers root separately).
+pub fn list_dirs(config_path: &Path) -> Vec<String> {
+    let base = config_path.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    collect_dirs(base, base, 0, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_dirs(base: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
+    const SKIP: [&str; 5] = ["node_modules", "target", "dist", "vendor", ".git"];
+    if depth >= 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || SKIP.contains(&name.as_ref()) {
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(base) {
+            // Forward slashes so the path reads the same everywhere.
+            out.push(
+                rel.components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+        collect_dirs(base, &path, depth + 1, out);
+    }
+}
+
 /// Apply the request's ops **atomically and in order**: render + stage every
 /// write to a sibling temp file first (so a codegen error changes nothing on
 /// disk), then commit the renames, then remove deletes and move-sources, then

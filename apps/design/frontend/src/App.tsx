@@ -12,6 +12,7 @@ import {
   Languages,
   Minus,
   Moon,
+  Pencil,
   Plus,
   RotateCcw,
   Save,
@@ -1665,33 +1666,60 @@ function NewIndex({
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [table, setTable] = useState(tables[0] ?? "");
-  // The schema file path, prefilled from the name. It tracks the name until the
-  // user edits it by hand (subfolders allowed), after which it's left alone.
-  const [path, setPath] = useState("");
-  const [pathEdited, setPathEdited] = useState(false);
-  const effectivePath = pathEdited ? path : name ? `${name}.schema.yml` : "";
+  // Where the schema file lands: a picked directory ("" = the config-dir root)
+  // plus a filename. The `.schema.yml` suffix is locked (you type just the base,
+  // tracking the index name) unless you override it for a non-standard name.
+  const [dir, setDir] = useState("");
+  const [base, setBase] = useState("");
+  const [baseEdited, setBaseEdited] = useState(false);
+  const [override, setOverride] = useState(false);
+  const [overrideName, setOverrideName] = useState("");
+  const [dirs, setDirs] = useState<string[]>([]);
+  const SUFFIX = ".schema.yml";
+  const effectiveBase = (baseEdited ? base : name).trim();
+  const effectiveFile = override ? overrideName.trim() : effectiveBase ? `${effectiveBase}${SUFFIX}` : "";
+  const cleanDir = dir.replace(/^\/+|\/+$/g, "");
+  const effectivePath = cleanDir && effectiveFile ? `${cleanDir}/${effectiveFile}` : effectiveFile;
   const junctionSet = new Set(junctions);
+
+  // Load the real subfolders under flusso.toml whenever the dialog opens.
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    api
+      .dirs()
+      .then((d) => alive && setDirs(d))
+      .catch(() => {
+        /* offline / unreadable — the picker just offers root + custom entry */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
 
   const reset = () => {
     onOpenChange(false);
     setStep(0);
     setName("");
     setTable(tables[0] ?? "");
-    setPath("");
-    setPathEdited(false);
-  };
-  const setNameTracking = (v: string) => {
-    setName(v);
-    if (!pathEdited) setPath(v ? `${v}.schema.yml` : "");
+    setDir("");
+    setBase("");
+    setBaseEdited(false);
+    setOverride(false);
+    setOverrideName("");
   };
   const detailsOk = !!name && !!table;
   const create = () => {
-    if (!detailsOk || !effectivePath.trim()) return;
-    onCreate(name, table, effectivePath.trim());
+    if (!detailsOk || !effectivePath) return;
+    onCreate(name, table, effectivePath);
     reset();
   };
 
   const steps = [t("sidebar.stepDetails"), t("sidebar.stepFile")];
+  const dirOptions = [
+    { value: "", label: t("sidebar.rootDir") },
+    ...dirs.map((d) => ({ value: d, label: d, icon: <Folder className="size-3.5" /> })),
+  ];
 
   return (
     <>
@@ -1726,7 +1754,7 @@ function NewIndex({
           {step === 0 ? (
             <div className="flex flex-col gap-3">
               <Field label={t("sidebar.indexName")}>
-                <Text value={name} onChange={setNameTracking} placeholder={t("sidebar.indexName")} />
+                <Text value={name} onChange={setName} placeholder={t("sidebar.indexName")} />
               </Field>
               <Field label={t("sidebar.rootTable")}>
                 {tables.length ? (
@@ -1751,18 +1779,71 @@ function NewIndex({
               </Field>
             </div>
           ) : (
-            <div className="flex flex-col gap-1.5">
-              <Field label={t("sidebar.schemaFile")}>
-                <Text
-                  value={effectivePath}
-                  onChange={(v) => {
-                    setPathEdited(true);
-                    setPath(v);
-                  }}
-                  placeholder={name ? `${name}.schema.yml` : "x.schema.yml"}
+            <div className="flex flex-col gap-3">
+              <Field label={t("sidebar.schemaDir")}>
+                <Combobox
+                  value={dir}
+                  onChange={setDir}
+                  options={dirOptions}
+                  allowCustom
+                  placeholder={t("sidebar.rootDir")}
                 />
               </Field>
-              <p className="text-2xs text-muted-foreground">{t("sidebar.schemaFileHint")}</p>
+              <Field label={t("sidebar.schemaFile")}>
+                {override ? (
+                  <div className="flex items-center gap-1.5">
+                    <Text
+                      value={overrideName}
+                      onChange={setOverrideName}
+                      placeholder={name ? `${name}.schema.yml` : "x.schema.yml"}
+                      className="flex-1"
+                    />
+                    <Hint label={t("sidebar.lockSuffix")} side="left">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={t("sidebar.lockSuffix")}
+                        onClick={() => setOverride(false)}
+                      >
+                        <RotateCcw />
+                      </Button>
+                    </Hint>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    {/* Type just the base name; the `.schema.yml` suffix is a locked adornment. */}
+                    <div className="flex h-8 flex-1 items-center rounded-md border border-border bg-secondary pr-2 text-sm transition-colors focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
+                      <input
+                        value={baseEdited ? base : name}
+                        onChange={(e) => {
+                          setBaseEdited(true);
+                          setBase(e.target.value);
+                        }}
+                        placeholder={name || "name"}
+                        className="min-w-0 flex-1 bg-transparent px-2.5 py-1 outline-none"
+                        {...NO_PW_MANAGER}
+                      />
+                      <span className="shrink-0 font-mono text-muted-foreground">{SUFFIX}</span>
+                    </div>
+                    <Hint label={t("sidebar.overrideName")} side="left">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={t("sidebar.overrideName")}
+                        onClick={() => {
+                          setOverrideName(effectiveFile);
+                          setOverride(true);
+                        }}
+                      >
+                        <Pencil />
+                      </Button>
+                    </Hint>
+                  </div>
+                )}
+              </Field>
+              <p className="truncate font-mono text-2xs text-muted-foreground" title={effectivePath}>
+                {effectivePath || t("sidebar.schemaFileHint")}
+              </p>
             </div>
           )}
 
@@ -1775,7 +1856,7 @@ function NewIndex({
                 {t("common.next")}
               </Button>
             ) : (
-              <Button size="sm" disabled={!effectivePath.trim()} onClick={create}>
+              <Button size="sm" disabled={!effectivePath} onClick={create}>
                 {t("sidebar.create")}
               </Button>
             )}
