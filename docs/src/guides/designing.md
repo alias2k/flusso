@@ -81,8 +81,15 @@ inspector shows the suggestion — with a one-click *use* — only when your pic
 
 ### Saving, validating, and escape hatches
 
-- **Diff before save**: *Save* shows exactly what would change on disk per file; it writes
-  only on confirm.
+- **Diff before save**: *Save* shows exactly what would change on disk, grouped into a
+  folder tree — each entry tagged as a write, a **move** (rename or relocate), a **delete**
+  (an index you removed), or a new file, with a warning on any path that lands outside the
+  config directory. Uncheck any entry (or a whole folder) to leave it alone; it writes only
+  on confirm.
+- **File moves are real**: change an index's schema-file path (or rename the index) and the
+  file is moved on save — the old file is cleaned up and emptied folders are pruned, not left
+  orphaned. Saving is **atomic**: everything is staged first, so a failure mid-save leaves
+  the files untouched.
 - **Validate against the DB** highlights the offending fields right on the canvas (with the
   message on hover), not just a list.
 - **Editable `flusso.toml`**: the source connection, index entries, and **sinks** (the
