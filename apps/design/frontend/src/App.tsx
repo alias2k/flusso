@@ -20,6 +20,7 @@ import {
   Sun,
   Table2,
   TriangleAlert,
+  Waypoints,
   X,
 } from "lucide-react";
 import type { ColumnShape, DiagnosticDto, FileOp, OpDiff, ValidateResponse } from "./api";
@@ -61,7 +62,7 @@ import { Label } from "@/components/ui/label";
 import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { Field, GlowDot, Select, Text } from "./components/widgets";
+import { Combobox, Field, GlowDot, Text } from "./components/widgets";
 import { LANGS, useT, type Translate } from "./i18n";
 // Type-only: erased at compile time, so it doesn't pull the yaml package into
 // the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
@@ -1729,14 +1730,20 @@ function NewIndex({
               </Field>
               <Field label={t("sidebar.rootTable")}>
                 {tables.length ? (
-                  <Select
+                  <Combobox
                     value={table}
+                    onChange={setTable}
+                    placeholder={t("sidebar.rootTable")}
                     options={tables.map((tbl) => ({
                       label: tbl,
                       value: tbl,
                       description: junctionSet.has(tbl) ? t("catalog.junction") : undefined,
+                      icon: junctionSet.has(tbl) ? (
+                        <Waypoints className="size-3.5 text-accent2" />
+                      ) : (
+                        <Table2 className="size-3.5" />
+                      ),
                     }))}
-                    onChange={setTable}
                   />
                 ) : (
                   <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />

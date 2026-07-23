@@ -285,6 +285,8 @@ interface Opt<T extends string> {
   value: T;
   description?: string;
   className?: string;
+  /// A leading glyph for the row (e.g. a junction marker in a table picker).
+  icon?: ReactNode;
 }
 
 export function Select<T extends string>({
@@ -377,6 +379,7 @@ export function Combobox({
             )}
             {options.map((o) => (
               <CommandItem key={o.value} value={o.value} onSelect={() => pick(o.value)}>
+                {o.icon && <span className="shrink-0 text-muted-foreground">{o.icon}</span>}
                 <span className={cn("font-mono", o.className)}>{o.label}</span>
                 {o.description && (
                   <span className="pl-2 font-mono text-2xs whitespace-nowrap text-muted-foreground">
