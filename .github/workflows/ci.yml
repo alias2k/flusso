@@ -49,6 +49,11 @@ jobs:
       - name: Check all targets (benches, examples)
         run: cargo check --workspace --all-targets
 
+      # The Docker runtime image builds the CLI without the designer; make sure
+      # that server-only configuration keeps compiling.
+      - name: Check server-only build (no designer)
+        run: cargo check -p flusso-cli --no-default-features
+
       # `--run-ignored all` includes the `#[ignore]`d container-backed e2e
       # tests; the `ci` profile gives them retries and a longer timeout. The
       # `query.rs` proptests are ordinary `#[test]`s, so they run here too.
@@ -117,3 +122,51 @@ jobs:
           name: fuzz-artifacts
           path: libs/1-sources/1-postgres/fuzz/artifacts/
           if-no-files-found: ignore
+
+  designer-frontend:
+    name: designer SPA (build + no drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/design/frontend/package-lock.json
+
+      - name: Install deps
+        working-directory: apps/design/frontend
+        run: npm ci
+
+      - name: Format check
+        working-directory: apps/design/frontend
+        run: npm run format:check
+
+      - name: Lint
+        working-directory: apps/design/frontend
+        run: npm run lint -- --max-warnings 0
+
+      # Every `t("…")` string the UI uses must have a key in the English base
+      # catalog, and every locale must define the same key set — so a new feature
+      # can't ship UI without its translations. See scripts/check-i18n.mjs.
+      - name: Check translations are complete
+        working-directory: apps/design/frontend
+        run: npm run check:i18n
+
+      # The built SPA is committed to `apps/design/dist/` so the Rust crate
+      # (rust-embed) builds with no Node toolchain. Rebuild it from source and
+      # fail if it drifts from what's committed — a reproducible `npm ci` + Vite
+      # build yields identical (content-hashed) output for the same source.
+      - name: Build the SPA
+        working-directory: apps/design/frontend
+        run: npm run build
+
+      - name: Check the committed dist is up to date
+        run: |
+          if ! git diff --quiet -- apps/design/dist; then
+            echo "::error::apps/design/dist is stale — run 'npm --prefix apps/design/frontend ci && npm --prefix apps/design/frontend run build' and commit the result."
+            git --no-pager diff --stat -- apps/design/dist
+            exit 1
+          fi

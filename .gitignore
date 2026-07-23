@@ -1,5 +1,24 @@
-/target
-**/*.tmp
+# Rust / Cargo build output (workspace + the separate fuzz workspace)
+target/
+
+# Temp files
+*.tmp
+
+# OS + coverage artifacts
+.DS_Store
+*.profraw
 
 # mdBook build output (the docs site is built fresh in CI)
 /docs/book
+
+# Node / Vite frontend (apps/design/frontend)
+node_modules/
+*.tsbuildinfo
+
+# cargo-fuzz workspace (libs/1-sources/1-postgres/fuzz): its own workspace, so its
+# generated Cargo.lock is not committed — the main workspace's Cargo.lock IS committed,
+# hence this rule is path-anchored rather than a global `Cargo.lock`.
+/libs/1-sources/1-postgres/fuzz/corpus/
+/libs/1-sources/1-postgres/fuzz/artifacts/
+/libs/1-sources/1-postgres/fuzz/coverage/
+/libs/1-sources/1-postgres/fuzz/Cargo.lock

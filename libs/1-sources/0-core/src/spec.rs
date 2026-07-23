@@ -24,7 +24,7 @@ use schema_core::{
 /// A schema-qualified table, the unit a source needs to reason about coverage
 /// (which tables it must be able to stream). Ordered by `(schema, table)` so a
 /// [`BTreeSet`] of them is deterministic.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct QualifiedTable {
     pub schema: DatabaseSchema,
     pub table: TableName,

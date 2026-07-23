@@ -57,9 +57,28 @@ Keep them in lockstep with the parser entities. `libs/2-schema/tests/schema_drif
 **enumerable** sets (type tags, field siblings, enum tokens, sink fields) and runs in verify — but
 it does **not** check descriptions, defaults, the permissive `field` union, or identifier
 `pattern`s, so align those by hand. Don't forget the matching docs in `guides/configuration.md` /
-`guides/schema-authoring.md` (next step).
+`guides/schema-authoring.md` (the documentation step) — and a format change is exactly what the
+designer must also support (next step).
 
-## 6. Update the documentation — code + every README, fully
+## 6. Align the visual designer + translations (if it touched the authored surface)
+
+The designer (`apps/design`) is part of the product surface — a feature isn't done until the
+designer can author it and its UI is fully translated. If the change added/altered anything a
+user authors (a `*.schema.yml`/`flusso.toml` key, a field type tag/sibling, an enum token, a
+sink option, a source/sink capability):
+
+- **Support it in the designer**: the model/codegen/preview (`apps/design/src/`) and the
+  canvas/inspector controls (`apps/design/frontend/`); wire the introspection/source-steer if
+  the source informs the choice (nullability, suggested type, FK optionality).
+- **Translate every new UI string**: route it through `t("ns.key")` and add the key to **every**
+  locale catalog in `apps/design/frontend/src/locales/` (`en.ts` is the base; translate the rest).
+  Run `just design-i18n` (or `npm --prefix apps/design/frontend run check:i18n`) — CI's
+  `designer-frontend` job fails on any key missing from a locale.
+- **Rebuild + commit the SPA**: `npm --prefix apps/design/frontend ci && npm --prefix
+  apps/design/frontend run build`, then commit `apps/design/dist/` (the dist-drift guard fails
+  otherwise).
+
+## 7. Update the documentation — code + every README, fully
 
 Bring **all** docs up to date so nothing lags the change. Do this **before** the plugin — docs are
 the source of truth the plugin's skills teach from.
@@ -77,7 +96,7 @@ the source of truth the plugin's skills teach from.
 - Don't forget `CLAUDE.md` itself (its "Keeping this file current" rule) if layout/commands/
   invariants/format changed.
 
-## 7. Update the flusso Claude plugin
+## 8. Update the flusso Claude plugin
 
 With the docs settled, bring the repo's own Claude plugin under `plugin/` in lockstep:
 
@@ -89,7 +108,7 @@ With the docs settled, bring the repo's own Claude plugin under `plugin/` in loc
   anything a skill teaches, update the affected skill/agent/example so the plugin can't teach
   something now wrong. New capability worth surfacing → add/extend a skill.
 
-## 8. Verify — full CI parity before opening the PR
+## 9. Verify — full CI parity before opening the PR
 
 Run, in order, and fix anything that fails before proceeding:
 
@@ -102,10 +121,18 @@ cargo test --doc
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
+If you touched the designer (step 6), also run its guards:
+
+```sh
+npm --prefix apps/design/frontend ci
+npm --prefix apps/design/frontend run check:i18n   # translations complete in every locale
+npm --prefix apps/design/frontend run build        # then `git diff --exit-code apps/design/dist` must be clean
+```
+
 If Docker isn't available for the `--run-ignored all` step, say so explicitly rather than
 silently skipping it.
 
-## 9. Open the PR
+## 10. Open the PR
 
 - Push the branch: `git push -u origin <branch>`.
 - Open the PR directly (no confirmation step needed):

@@ -73,6 +73,43 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   the build). Match these before assuming green. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step.
+- **The designer (`apps/design`) has two test layers.** (1) A property/"fuzz" round-trip
+  (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
+  `codegen → parse → convert` identity — an ordinary test, caught by the nextest step (plus the
+  `api.rs` integration test). (2) A
+  `designer-frontend` CI job: `npm ci`, a **Prettier** format check (`npm run format:check`,
+  `.prettierrc` printWidth 120 / double quotes / semicolons / trailing-all; `just design-fmt [check]`;
+  `eslint-config-prettier` is appended last so ESLint owns no formatting rules), **ESLint**
+  (`npm run lint`, flat config, **type-aware** —
+  typescript-eslint recommended+stylistic *type-checked* sets, plus react / react-hooks / jsx-a11y /
+  react-refresh, all as errors; CI runs it `--max-warnings 0`; `just design-lint [fix]`. Pinned to
+  ESLint 9 because eslint-plugin-react/jsx-a11y don't support 10 yet; the canvas's pointer-driven
+  rows scope off the jsx-a11y interaction rules), an **i18n completeness check** (`npm run check:i18n` →
+  `apps/design/frontend/scripts/check-i18n.mjs`: every `t("…")` key the UI uses exists in the
+  `en` base catalog and every locale defines the same key set — so a feature can't ship UI without
+  its translations), then `npm run build` + a `git diff` guard that the committed
+  `apps/design/dist/` matches a fresh Vite build (the embedded SPA must not drift). There is **no**
+  browser e2e — the UI is validated by dogfooding; the `designer-frontend` build/lint guards plus the
+  Rust round-trip are the automated net.
+- **The designer frontend is Tailwind v4 + shadcn/Radix, atomic-design.** UI primitives are
+  shadcn components in `apps/design/frontend/src/components/ui/` (`button`/`input`/`select`/
+  `checkbox`/`dialog`/`tooltip`/`popover`/`command`/…), tuned to the flusso palette; molecules like
+  `Hint`, `Field`, `Block`/`Bridge`/`Drawer`, the `Select`/`Combobox` pickers (the `Combobox` is a
+  searchable Popover+cmdk list with optional free entry, used where a column is chosen) — all in
+  `widgets.tsx` — compose them. There is **one** stylesheet,
+  `src/index.css` (the Tailwind entry) — no `styles.css`. It maps shadcn's tokens onto the flusso
+  palette via `@theme inline` (so `--primary` = brand emerald, `--accent` = the panel-3 hover
+  surface — the flusso `--accent`/`--border`/`--muted` vars are never shadowed), binds `dark:` to
+  `html[data-theme=dark]` (the app's dark-first signal), exposes the rest of the flusso palette as
+  `@theme` tokens (`string`/`accent2`/`slate`/`warn`/`kind-*`) plus bespoke sizes (`text-2xs`/
+  `text-3xs`), and holds the remaining bespoke component + React Flow `--xy-*` theming under
+  `@layer components` (utilities still win). **React Flow's own `style.css` is `@import`ed into a
+  dedicated `reactflow` layer** (ordered `theme, base, reactflow, components, utilities`) from
+  `index.css` — *not* JS-imported in `Canvas.tsx`, because a JS import is unlayered and would beat
+  the `@layer components` overrides (e.g. the connection-handle dots would fall back to RF's gray
+  border-centred defaults). Keep new UI on shadcn atoms + Tailwind utilities, in
+  **rem not px**, and **custom values — especially colours — as `@theme` tokens, never arbitrary
+  `[var(--x)]`/`[0.6875rem]`** (`text-string`, not `text-[var(--string)]`).
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
   `flusso-query-derive`'s trybuild UI tests (`apps/query-derive/tests/ui/*.stderr`) compare
@@ -95,9 +132,12 @@ Prometheus config and Grafana provisioning live under `dev/prometheus/` and `dev
 
 The `Dockerfile` is a **registry-ready, config-less** image (its default `runtime` target
 bakes no config and no secrets; you mount a `flusso.toml`/`flusso.lock` and pass `--config`,
-or bake a lock into a child image). It also defines a `demo` target that extends that runtime
-with the repo's dev config compiled into `/app/flusso.lock` — that target is what the demo
-compose builds.
+or bake a lock into a child image). It builds the CLI with `-p flusso-cli
+--no-default-features`, which **drops the visual designer** (`flusso design`) — the `design`
+Cargo feature (default-on for a host install) pulls in the `flusso-design` crate + embedded
+SPA, none of which a server image needs. It also defines a `demo` target that extends that
+runtime with the repo's dev config compiled into `/app/flusso.lock` — that target is what the
+demo compose builds.
 
 For a **self-contained demo** that runs flusso *in* the cluster too (no host toolchain),
 layer the demo override on the base the Docker way:
@@ -225,7 +265,14 @@ and, when allowed, provisions the gap. Postgres backs it with a **publication**
 WalChangeCapture`): `run` auto-creates/extends it on `live` (after `ensure_slot`) when the role
 is privileged enough and `manage_publication` isn't opted out, else warns with the exact SQL;
 `check` inspects read-only and prints the same. The trait/report never name "publication", so
-the daemon/CLI/printer stay backend-neutral. The daemon
+the daemon/CLI/printer stay backend-neutral. A third source-neutral capability is
+`SchemaIntrospection` (`libs/1-sources/0-core/src/introspection.rs`): where `Catalog` answers
+"the type of *this* column" and `CaptureProvisioning` answers "is this table set coverable",
+`introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
+columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven tooling can pick
+from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m
+junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual designer
+(`apps/design`) is its first consumer. The daemon
 wires a `StatusObserver` (`observer.rs`) that updates a
 shared `Status` (`status.rs`), runs the engine, and polls source capture lag out-of-band
 (`lag.rs` over `ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
@@ -426,6 +473,21 @@ command or test workflow that changes, a new engine invariant or guard test, a l
 change, or a config/schema format change. Don't let it drift; don't pad it with detail that
 belongs in the linked docs.
 
+## Keeping the designer current (every feature aligns it)
+
+The visual designer (`apps/design`) is part of the product surface, not an optional extra:
+a feature isn't done until the designer can author it **and** its UI is fully translated.
+When a change adds or alters something a user authors — a `*.schema.yml`/`flusso.toml` key,
+a field type tag/sibling, an enum token, a sink option, a source/sink capability — align the
+designer in the **same** change: model/codegen/preview (`apps/design/`), the canvas/inspector
+controls (`apps/design/frontend/`), and the introspection/source-steer if the source informs it.
+And any user-facing string goes through `t("ns.key")` with the key added to **every** locale
+catalog in `apps/design/frontend/src/locales/` (English `en.ts` is the base; translate the rest).
+Two CI guards in the `designer-frontend` job enforce this and will fail the build otherwise: the
+**i18n check** (`npm run check:i18n`, key parity across locales) and the **dist-drift** guard
+(committed `apps/design/dist/` must match a fresh build — so rebuild + commit the SPA). Locally:
+`just design-i18n`, then rebuild the SPA. The `/implement` flow has an explicit step for this.
+
 ## Where things live (jump here first)
 
 | To work on… | Go to |
@@ -440,7 +502,8 @@ belongs in the linked docs.
 | `flusso.toml` parsing (entities only; conversion is in the `schema` loader) | `libs/2-schema/1-config-toml/src/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/2-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/1-sources/1-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
-| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for the last two) |
+| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
+| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sinks_core::to_json`) |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/1-sinks/2-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Queue abstraction / in-process channel | `libs/1-queue/0-core/src/`, `libs/1-queue/1-channel/src/lib.rs` |
@@ -504,7 +567,8 @@ belongs in the linked docs.
   (license, repo, authors, keywords, readme) lives in `[workspace.package]`; crates inherit it
   with `.workspace = true`, and set their own `description` + `categories`. **Publish order is
   bottom-up** (a dep must be on crates.io before its dependents): `flusso-schema-core` → parsers →
-  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-query-derive` →
+  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-design`
+  (depends on `flusso-schema` + `flusso-sources-postgres`) → `flusso-query-derive` →
   `flusso-query` → `flusso-cli`.
 - `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
   completion live **inside the parser crate that owns each** (so they ship in the published

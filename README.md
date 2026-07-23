@@ -154,7 +154,7 @@ OpenSearch out. The seams are there for when it isn't.)
 
 ## The CLI
 
-Three subcommands, and **every flag also reads a `FLUSSO_*` env var** (the flag
+The core subcommands, and **every flag also reads a `FLUSSO_*` env var** (the flag
 wins when both are set) — handy for containers.
 
 - **`flusso build`** — compile a config and its schemas into one portable
@@ -170,12 +170,17 @@ wins when both are set) — handy for containers.
 - **`flusso check`** — validate the config and print the fully-typed mapping, with
   no database. Drop `--offline` and it also confirms the declared types match the
   live database and reports any that don't.
+- **`flusso design`** — open a local, database-aware web UI that authors the
+  `*.schema.yml` + `flusso.toml` files for you: pick tables and columns from the
+  live database, preview the document and mapping, and save the files in place. See
+  [Designing schemas visually](https://alias2k.github.io/flusso/guides/designing.html).
 
 ```sh
 flusso --help
 flusso build  --config flusso.toml -o flusso.lock   # build the portable artifact
 flusso check  --config flusso.toml                  # validate (+ check vs database)
 flusso check  --config flusso.toml --offline        # validate without a database
+flusso design --config flusso.toml                  # author the files in a local web UI
 flusso run                                          # run the compiled flusso.lock
 flusso run    --config flusso.toml                  # compile from source and run
 flusso run    --skip-backfill                       # resume live capture only
@@ -309,6 +314,7 @@ README (its crates.io / docs.rs landing page);
 | `engine` | `libs/2-engine` | The sync engine — capture → queue → build → sink, batched, at-least-once. |
 | `daemon` | `libs/3-daemon` | Wires a `Config` into a running pipeline and exposes live `Status`. |
 | `flusso-cli` | `apps/cli` | The `flusso` binary: transport, telemetry, signals. |
+| `flusso-design` | `apps/design` | The `flusso design` visual schema designer: introspect → edit → preview → write files. |
 
 Each config-format crate works in two stages — **parse** (serde → permissive
 entity types, unknown fields rejected) then **convert** (lift into `schema-core`,

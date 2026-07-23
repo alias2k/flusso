@@ -2,6 +2,8 @@
 
 One `*.schema.yml` file describes one search document — its root table, its fields, and how related tables fold in. This guide is the full reference for that format. For the deployment side (`flusso.toml`), see [Configuration](configuration.md).
 
+> ℹ️ **Prefer not to hand-write it?** `flusso design` opens a visual, database-aware editor that authors this format for you — pick tables and columns from the live database and preview the document as you go. See [Designing schemas visually](designing.md).
+
 ## Quick reference
 
 Fields are written **type-first**: `- <type>: <name>`, with siblings the type allows.

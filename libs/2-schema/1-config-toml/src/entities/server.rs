@@ -21,3 +21,11 @@ pub struct Server {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_address: Option<SocketAddr>,
 }
+
+impl Server {
+    /// True when no address is set, so serialization can omit the whole
+    /// `[server]` table rather than emit an empty one.
+    pub fn is_empty(&self) -> bool {
+        self.public_address.is_none() && self.private_address.is_none()
+    }
+}
