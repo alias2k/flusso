@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/alias2k/flusso/compare/flusso-sources-postgres-v0.10.1...flusso-sources-postgres-v0.11.0) - 2026-07-23
+
+### Added
+
+- *(design)* sample-document preview from a live row
+- *(sources-postgres)* implement SchemaIntrospection over pg_catalog
+
+### Fixed
+
+- *(design)* unknown column is a diagnostic, not 'database not reachable' + theme the search bar
+
+### Other
+
+- consolidate per-project .gitignore into a single root file
+- document the visual schema designer
+
 ## [0.10.1](https://github.com/alias2k/flusso/compare/flusso-sources-postgres-v0.10.0...flusso-sources-postgres-v0.10.1) - 2026-06-26
 
 ### Other
