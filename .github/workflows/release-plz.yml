@@ -4,17 +4,19 @@ name: release-plz
 # gated behind the `release` environment:
 #   * release-pr — opens/updates the "release" PR (version bumps + CHANGELOG) on
 #     every push to main. Ungated; no registry token needed.
-#   * release    — on push to main, publishes any crate whose version isn't yet
-#     on crates.io (i.e. right after the release PR merges), then pushes
-#     per-crate tags incl. `flusso-cli-v<version>`. Runs in the `release`
-#     environment, so its `CARGO_REGISTRY_TOKEN` lives there and any environment
-#     protection rules (e.g. required reviewers) gate the publish.
+#   * release    — on push to main, publishes the crates carried by a merged
+#     release PR, then pushes per-crate tags incl. `flusso-cli-v<version>`. Runs
+#     in the `release` environment, so its `CARGO_REGISTRY_TOKEN` lives there and
+#     any environment protection rules (e.g. required reviewers) gate the publish.
 #
-# Skipping a publish: the `release` job is skipped when the head commit message
-# contains `[skip release]`, so you can push ordinary changes to main without
-# publishing. (release-plz only publishes crates whose version isn't already on
-# crates.io, so a push without a version bump publishes nothing regardless — the
-# marker is the explicit, belt-and-braces opt-out.)
+# Publishing is gated on the release-PR merge, not on every push:
+# `release_always = false` in release-plz.toml makes the `release` command a
+# no-op unless the head commit is a merged `release-plz-*` PR. So ordinary
+# feature pushes publish nothing, and — crucially — a brand-new crate can't be
+# published on its feature merge ahead of the version bump + CHANGELOG the
+# release PR carries (the #77 race: a new crate's version is unpublished by
+# definition, so the old "no bump -> publishes nothing" assumption didn't hold
+# for it). The version bump therefore always lands before any publish.
 #
 # Both jobs authenticate as a GitHub App (via actions/create-github-app-token)
 # rather than the default GITHUB_TOKEN. This is required so that the commits/tags
@@ -68,8 +70,8 @@ jobs:
   release:
     name: release
     runs-on: ubuntu-latest
-    # Skip publishing when the head commit opts out with `[skip release]`.
-    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    # No push-level guard: `release_always = false` (release-plz.toml) already
+    # makes this a no-op on anything but a merged `release-plz-*` release PR.
     # Gate the crates.io publish behind the release environment (this is where
     # CARGO_REGISTRY_TOKEN lives, and where approval/branch rules apply).
     environment: release
