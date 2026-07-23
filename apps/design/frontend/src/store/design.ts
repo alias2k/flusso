@@ -21,6 +21,10 @@ export const emptySchema = (table: string, pk?: string): IndexSchema => ({
 
 const HISTORY_LIMIT = 200;
 
+// A session-local, stable id for an index entry — correlates it across renames
+// and path changes when building the save op set. Never written to disk.
+const newId = () => crypto.randomUUID();
+
 const collapseKey = (index: string) => `flusso-design.collapsed.${index}`;
 
 const persistCollapsed = (index: string, ids: Set<string>) => {
@@ -94,7 +98,13 @@ export const useDesignStore = create<DesignState>()(
       loadProject: (project, resetActive) => {
         const schemas: Record<string, IndexSchema> = {};
         for (const idx of project.indexes) if (idx.schema) schemas[idx.name] = idx.schema;
-        const doc: Doc = { config: project.config, schemas };
+        // Stamp each entry with a stable id so the save op set can correlate it
+        // across later renames / path moves.
+        const config = {
+          ...project.config,
+          index: (project.config.index ?? []).map((e) => ({ ...e, id: newId() })),
+        };
+        const doc: Doc = { config, schemas };
         set({
           project,
           doc,
@@ -147,9 +157,12 @@ export const useDesignStore = create<DesignState>()(
         // schema path is left untouched.
         const index = newIdx.map((entry, i) => {
           const old = oldIdx[i];
-          return old && renames.get(old.name) === entry.name && entry.schema === `${old.name}.schema.yml`
-            ? { ...entry, schema: `${entry.name}.schema.yml` }
-            : entry;
+          // Backfill an id for a row added in the Config panel, so every entry
+          // carries one for op-set correlation.
+          const withId = entry.id ? entry : { ...entry, id: newId() };
+          return old && renames.get(old.name) === withId.name && withId.schema === `${old.name}.schema.yml`
+            ? { ...withId, schema: `${withId.name}.schema.yml` }
+            : withId;
         });
 
         const active2 = renames.has(active) ? renames.get(active)! : removed.includes(active) ? "config" : active;
@@ -167,7 +180,7 @@ export const useDesignStore = create<DesignState>()(
           doc: {
             config: {
               ...doc.config,
-              index: [...(doc.config.index ?? []), { name, schema, enabled: true }],
+              index: [...(doc.config.index ?? []), { name, schema, enabled: true, id: newId() }],
             },
             schemas: { ...doc.schemas, [name]: emptySchema(table, pk) },
           },
@@ -192,7 +205,7 @@ export const useDesignStore = create<DesignState>()(
               ...doc.config,
               index: [
                 ...entries.slice(0, i + 1),
-                { name, schema: `${name}.schema.yml`, enabled: src.enabled },
+                { name, schema: `${name}.schema.yml`, enabled: src.enabled, id: newId() },
                 ...entries.slice(i + 1),
               ],
             },

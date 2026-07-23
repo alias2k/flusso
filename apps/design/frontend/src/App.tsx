@@ -8,6 +8,7 @@ import {
   AlignJustify,
   Columns2,
   Eye,
+  Folder,
   Languages,
   Minus,
   Moon,
@@ -21,7 +22,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import type { ColumnShape, DiagnosticDto, FileDiff, SaveSchemaInput, ValidateResponse } from "./api";
+import type { ColumnShape, DiagnosticDto, FileOp, OpDiff, ValidateResponse } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -449,17 +450,49 @@ export default function App() {
     loadCollapsed(active);
   }, [active, loadCollapsed]);
 
-  // The index files a save touches: only those whose parsed model actually
-  // changed, so editing one field never proposes rewriting untouched schemas
-  // (codegen would reflow them, stripping comments). They're sent in this order,
-  // and the diff endpoint returns the config first then these — so a FileDiff at
-  // position i+1 is entry i.
-  const changedEntries = (): { name: string; schema_path: string; schema: SaveSchemaInput["schema"] }[] =>
-    (doc?.config.index ?? [])
-      .filter((e) => doc?.schemas[e.name] && indexDirty(e.name))
-      .map((e) => ({ name: e.name, schema_path: e.schema, schema: doc!.schemas[e.name] }));
+  // The schema-file ops a save applies, derived from the saved snapshot → the
+  // current doc, correlated by the stable per-index id (so a rename or a path
+  // change reads as a Move, not a delete + create). `name` is kept alongside so
+  // the snapshot can advance per index after the save.
+  const buildOps = (): { op: FileOp; name: string; removed: boolean }[] => {
+    if (!doc) return [];
+    const prev = savedDoc?.config.index ?? [];
+    const prevById = new Map(prev.filter((e) => e.id).map((e) => [e.id, e]));
+    const cur = doc.config.index ?? [];
+    const seen = new Set<string>();
+    const planned: { op: FileOp; name: string; removed: boolean }[] = [];
+    for (const e of cur) {
+      if (e.id) seen.add(e.id);
+      const schema = doc.schemas[e.name];
+      if (!schema) continue; // no model to write (failed load) — leave the file alone
+      const was = e.id ? prevById.get(e.id) : undefined;
+      if (!was) planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
+      else if (was.schema !== e.schema)
+        planned.push({ op: { kind: "move", from: was.schema, path: e.schema, schema }, name: e.name, removed: false });
+      else if (indexDirty(e.name))
+        planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
+    }
+    // Indexes dropped from the config → delete their previous files.
+    for (const p of prev)
+      if (p.id && !seen.has(p.id))
+        planned.push({ op: { kind: "delete", path: p.schema }, name: p.name, removed: true });
+    return planned;
+  };
 
-  // Save first shows a diff of what would change on disk; performSave writes it.
+  // Match a planned op to its resolved diff entry: the server returns absolute
+  // paths, the op carries the config-relative one, so compare by suffix (a move
+  // may degrade to a plain write when its source is already gone).
+  const suffixOf = (abs: string, rel: string) => abs === rel || abs.endsWith(`/${rel}`);
+  const diffFor = (list: OpDiff[], p: { op: FileOp }): OpDiff | undefined =>
+    list.find((d) =>
+      p.op.kind === "delete"
+        ? d.op === "delete" && suffixOf(d.path, p.op.path)
+        : d.op === "delete"
+          ? false
+          : suffixOf(d.path, p.op.path),
+    );
+
+  // Save first shows a diff of what would change on disk; performSave applies it.
   // When the config model is unchanged we hide its diff (a formatting/comment-only
   // reflow the user didn't ask for) so an untouched flusso.toml is neither shown
   // nor rewritten.
@@ -467,10 +500,9 @@ export default function App() {
     if (!doc || saving) return;
     setSaving(true);
     try {
-      const entries = changedEntries();
       const result = await api.diff(
         doc.config,
-        entries.map((e) => ({ schema_path: e.schema_path, schema: e.schema })),
+        buildOps().map((p) => p.op),
       );
       const shown = configDirty || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
       if (shown.some((d) => d.changed)) setDiffs(shown);
@@ -482,36 +514,54 @@ export default function App() {
     }
   };
 
-  // Write the changed files, skipping the ones the user unchecked in the review
-  // (`ignore` = their FileDiff paths) plus the config whenever its model didn't
-  // change (so an untouched flusso.toml keeps its comments). The diff list is
-  // config-first then changedEntries in order, so a FileDiff at position i+1 is
-  // entry i. The saved snapshot advances only for the files actually written, so
-  // Reset targets the true on-disk state.
-  const performSave = async (ignore: string[]) => {
+  // Apply the op set, skipping the entries the user unchecked in the review
+  // (plus the config whenever its model didn't change, so an untouched
+  // flusso.toml keeps its comments). The saved snapshot advances per index for
+  // exactly the ops that were applied, so Reset targets the true on-disk state.
+  const performSave = async (skipPaths: string[]) => {
     if (!doc || !diffs) return;
-    const entries = changedEntries();
+    const planned = buildOps();
     const configPath = diffs[0]?.path;
-    const ignored = new Set(ignore);
-    if (!configDirty && configPath) ignored.add(configPath);
+    const skip = new Set(skipPaths);
+    if (!configDirty && configPath) skip.add(configPath);
     setSaving(true);
     try {
       const res = await api.save(
         doc.config,
-        entries.map((e) => ({ schema_path: e.schema_path, schema: e.schema })),
-        [...ignored],
+        planned.map((p) => p.op),
+        [...skip],
       );
-      const prev = saved ? (JSON.parse(saved) as Doc) : doc;
-      const nextSchemas = { ...prev.schemas };
-      entries.forEach((e, i) => {
-        const path = diffs[i + 1]?.path;
-        if (!path || !ignored.has(path)) nextSchemas[e.name] = doc.schemas[e.name];
-      });
-      const configWritten = configPath ? !ignored.has(configPath) : configDirty;
-      const nextConfig = configWritten ? doc.config : prev.config;
-      setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
+      // Advance the saved snapshot to the new on-disk state. When everything was
+      // applied (the common case) the doc *is* the disk, so snapshot it directly
+      // — exact, no key-order drift. When the user skipped some entries, fold
+      // only the applied ops onto the previous snapshot so the skipped ones stay
+      // dirty.
+      const configSkipped = configDirty && !!configPath && skip.has(configPath);
+      const anySkipped =
+        configSkipped ||
+        planned.some((p) => {
+          const d = diffFor(diffs, p);
+          return !!d && d.changed && skip.has(d.path);
+        });
+      if (!anySkipped) {
+        setSaved(JSON.stringify(doc));
+      } else {
+        const prev = savedDoc ?? doc;
+        const nextSchemas = { ...prev.schemas };
+        for (const p of planned) {
+          const d = diffFor(diffs, p);
+          if (!d || !d.changed || skip.has(d.path)) continue; // not applied
+          if (p.removed) delete nextSchemas[p.name];
+          else nextSchemas[p.name] = doc.schemas[p.name];
+        }
+        const nextConfig = configSkipped ? prev.config : doc.config;
+        const live = new Set((nextConfig.index ?? []).map((e) => e.name));
+        for (const name of Object.keys(nextSchemas)) if (!live.has(name)) delete nextSchemas[name];
+        setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
+      }
       setDiffs(null);
-      setToast({ kind: "ok", text: t("toast.saved", { n: res.written.length }) });
+      const n = res.written.length + res.moved.length + res.deleted.length;
+      setToast({ kind: "ok", text: t("toast.saved", { n }) });
     } catch (e) {
       setToast({ kind: "error", text: t("toast.saveFailed", { err: errText(e) }) });
     } finally {
@@ -1174,6 +1224,19 @@ function ValidationDetail({ check }: { check: Check }) {
   );
 }
 
+/// The op tag on a review row: move / delete / new (a plain modify has none, its
+/// +/- counts carry it). Tones match the canvas language (warn = move, destructive
+/// = delete, accent = new).
+function OpBadge({ d }: { d: OpDiff }) {
+  const { t } = useT();
+  const pill = "rounded px-1 py-px text-3xs font-bold uppercase tracking-caps";
+  if (d.op === "delete")
+    return <span className={cn(pill, "bg-destructive/10 text-destructive")}>{t("diff.opDelete")}</span>;
+  if (d.op === "move") return <span className={cn(pill, "bg-warn/10 text-warn")}>{t("diff.opMove")}</span>;
+  if (d.current === "") return <span className={cn(pill, "bg-accent2/10 text-accent2")}>{t("diff.newFile")}</span>;
+  return null;
+}
+
 function DiffModal({
   diffs,
   doc,
@@ -1181,7 +1244,7 @@ function DiffModal({
   onConfirm,
   onCancel,
 }: {
-  diffs: FileDiff[];
+  diffs: OpDiff[];
   doc: Doc;
   saving: boolean;
   onConfirm: (paths: string[]) => void;
@@ -1192,7 +1255,14 @@ function DiffModal({
   const [selected, setSelected] = useState(0);
   const [check, setCheck] = useState<Check>({ state: "loading" });
   const searchRef = useRef<HTMLInputElement>(null);
-  const changed = diffs.filter((d) => d.changed);
+  // Config (flusso.toml) first, then the schema files sorted by path so the same
+  // folder's files sit together — the list reads as a folder tree, and ↑/↓ nav
+  // walks it in the shown order.
+  const changed = useMemo(() => {
+    const list = diffs.filter((d) => d.changed);
+    const isConfig = (d: OpDiff) => d.path.endsWith("flusso.toml");
+    return [...list.filter(isConfig), ...list.filter((d) => !isConfig(d)).sort((a, b) => a.path.localeCompare(b.path))];
+  }, [diffs]);
   const active = changed[selected] ?? changed[0];
 
   // Which files to actually write (default all); the user can uncheck any to
@@ -1211,6 +1281,27 @@ function DiffModal({
   // The select-all box acts on the currently-shown (filtered) files.
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
   const allShown = shown.length > 0 && shownIncluded === shown.length;
+
+  // Group the shown files by folder (they're already path-sorted, so same-folder
+  // rows are adjacent) so the review reads as a tree; a folder header toggles its
+  // whole subtree.
+  const groups: { dir: string; files: OpDiff[] }[] = [];
+  for (const d of shown) {
+    const short = shortenPath(d.path);
+    const cut = short.lastIndexOf("/");
+    const dir = cut < 0 ? "" : short.slice(0, cut);
+    const last = groups[groups.length - 1];
+    if (last?.dir === dir) last.files.push(d);
+    else groups.push({ dir, files: [d] });
+  }
+  const toggleFolder = (files: OpDiff[], clear: boolean) =>
+    setInclude((s) => {
+      const next = new Set(s);
+      for (const f of files)
+        if (clear) next.delete(f.path);
+        else next.add(f.path);
+      return next;
+    });
 
   const ignoreList = () => changed.filter((d) => !include.has(d.path)).map((d) => d.path);
 
@@ -1355,46 +1446,75 @@ function DiffModal({
               {t("diff.selected", { n: include.size, m: changed.length })}
             </label>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              {shown.map((d) => {
-                const i = changed.indexOf(d);
-                const s = diffStats(d.current, d.next);
-                const short = shortenPath(d.path);
-                const base = short.slice(short.lastIndexOf("/") + 1);
-                const dir = short.slice(0, short.length - base.length);
-                const on = include.has(d.path);
+              {groups.map((g) => {
+                const folderOn = g.files.every((f) => include.has(f.path));
+                const folderNone = g.files.every((f) => !include.has(f.path));
                 return (
-                  <div
-                    key={d.path}
-                    className={cn(
-                      "flex items-center gap-2 border-b border-border/60 border-l-2 pr-2 pl-3 transition-colors",
-                      i === selected ? "border-l-primary bg-background" : "border-l-transparent hover:bg-accent/50",
+                  <div key={g.dir || "."}>
+                    {g.dir && (
+                      <label className="flex cursor-pointer items-center gap-2 border-b border-border/60 bg-secondary/40 px-3 py-1 text-2xs font-medium text-muted-foreground">
+                        <Checkbox
+                          className="size-3.5"
+                          checked={folderOn ? true : folderNone ? false : "indeterminate"}
+                          onCheckedChange={() => toggleFolder(g.files, folderOn)}
+                          aria-label={g.dir}
+                        />
+                        <Folder className="size-3.5 shrink-0" />
+                        <span className="truncate font-mono">{g.dir}</span>
+                      </label>
                     )}
-                  >
-                    <Checkbox
-                      className="size-4 shrink-0"
-                      checked={on}
-                      onCheckedChange={() => toggle(d.path)}
-                      aria-label={d.path}
-                    />
-                    <button
-                      type="button"
-                      title={d.path}
-                      onClick={() => setSelected(i)}
-                      className={cn(
-                        "flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-2 text-left",
-                        !on && "opacity-45",
-                      )}
-                    >
-                      <span className="truncate font-mono text-xs">
-                        <span className="text-muted-foreground">{dir}</span>
-                        <span className="font-medium text-foreground">{base}</span>
-                      </span>
-                      <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
-                        {d.current === "" && <span className="badge object">{t("diff.newFile")}</span>}
-                        <span className="text-diff-add-num">+{s.adds}</span>
-                        <span className="text-diff-del-num">-{s.dels}</span>
-                      </span>
-                    </button>
+                    {g.files.map((d) => {
+                      const i = changed.indexOf(d);
+                      const s = diffStats(d.current, d.next);
+                      const short = shortenPath(d.path);
+                      const base = short.slice(short.lastIndexOf("/") + 1);
+                      const on = include.has(d.path);
+                      return (
+                        <div
+                          key={d.path}
+                          className={cn(
+                            "flex items-center gap-2 border-b border-border/60 border-l-2 pr-2 transition-colors",
+                            g.dir ? "pl-6" : "pl-3",
+                            i === selected
+                              ? "border-l-primary bg-background"
+                              : "border-l-transparent hover:bg-accent/50",
+                          )}
+                        >
+                          <Checkbox
+                            className="size-4 shrink-0"
+                            checked={on}
+                            onCheckedChange={() => toggle(d.path)}
+                            aria-label={d.path}
+                          />
+                          <button
+                            type="button"
+                            title={d.from ? t("diff.movedFrom", { path: shortenPath(d.from) }) : d.path}
+                            onClick={() => setSelected(i)}
+                            className={cn(
+                              "flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-2 text-left",
+                              !on && "opacity-45",
+                            )}
+                          >
+                            <span className="flex items-center gap-1 truncate font-mono text-xs">
+                              <span className="truncate font-medium text-foreground">{base}</span>
+                              {d.warning === "outside_base" && (
+                                <TriangleAlert
+                                  className="size-3 shrink-0 text-warn"
+                                  aria-label={t("diff.warnOutside")}
+                                />
+                              )}
+                            </span>
+                            <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
+                              <OpBadge d={d} />
+                              {d.op !== "delete" && <span className="text-diff-add-num">+{s.adds}</span>}
+                              {d.op !== "write" || d.current !== "" ? (
+                                <span className="text-diff-del-num">-{s.dels}</span>
+                              ) : null}
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 );
               })}
