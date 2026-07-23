@@ -369,7 +369,7 @@ export function Combobox({
           <ChevronDownIcon className="size-3.5 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-auto max-w-[92vw] min-w-(--radix-popover-trigger-width) p-0">
+      <PopoverContent className="w-(--radix-popover-trigger-width) max-w-[92vw] p-0">
         <Command>
           <CommandInput value={query} onValueChange={setQuery} placeholder={placeholder} />
           <CommandList>
@@ -382,7 +382,7 @@ export function Combobox({
             {options.map((o) => (
               <CommandItem key={o.value} value={o.value} onSelect={() => pick(o.value)}>
                 {o.icon && <span className="shrink-0 text-muted-foreground">{o.icon}</span>}
-                <span className={cn("font-mono", o.className)}>{o.label}</span>
+                <span className={cn("min-w-0 flex-1 truncate font-mono", o.className)}>{o.label}</span>
                 {o.description && (
                   <span className="pl-2 font-mono text-2xs whitespace-nowrap text-muted-foreground">
                     {o.description}

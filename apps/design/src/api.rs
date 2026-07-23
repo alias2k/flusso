@@ -471,11 +471,21 @@ pub fn diff_project(config_path: &Path, request: SaveRequest) -> Result<Vec<OpDi
 /// huge tree can't stall the request. Sorted; the config directory itself is ""
 /// (not listed — the picker offers root separately).
 pub fn list_dirs(config_path: &Path) -> Vec<String> {
-    let base = config_path.parent().unwrap_or(Path::new("."));
+    let base = dirs_base(config_path);
     let mut out = Vec::new();
     collect_dirs(base, base, 0, &mut out);
     out.sort();
     out
+}
+
+/// The directory to walk for the picker. A relative config path like
+/// `flusso.toml` has an *empty* parent (not `None`), and `read_dir("")` fails —
+/// treat that as the current directory.
+fn dirs_base(config_path: &Path) -> &Path {
+    match config_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
 }
 
 fn collect_dirs(base: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {

@@ -1739,6 +1739,12 @@ function NewIndex({
           className="sm:max-w-md"
           onKeyDown={(e) => {
             if (e.key !== "Enter") return;
+            // React events bubble through the tree even from a portalled popover,
+            // so Enter inside the directory/table combobox (cmdk) would otherwise
+            // submit the wizard. Only submit from the plain text fields — skip
+            // cmdk and buttons (which handle Enter themselves).
+            const el = e.target as HTMLElement;
+            if (el.closest("[cmdk-root]") || el.tagName === "BUTTON") return;
             e.preventDefault();
             if (step === 0 && detailsOk) setStep(1);
             else if (step === 1) create();
