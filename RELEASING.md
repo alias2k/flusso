@@ -2,7 +2,7 @@
 
 flusso ships three ways from one release flow:
 
-- **crates.io** — all 16 publishable crates (`cargo install flusso-cli`, or depend on `flusso-query`)
+- **crates.io** — all 17 publishable crates (`cargo install flusso-cli`, or depend on `flusso-query`)
 - **prebuilt binaries** — GitHub Release assets + installers (via `dist`)
 - **Docker image** — `ghcr.io/alias2k/flusso` **and** `docker.io/alias2k/flusso` (via the `docker` workflow)
 
@@ -101,15 +101,17 @@ Then:
 4. Verify: crates on crates.io, the GitHub Release has binaries + installers, and `docker pull ghcr.io/alias2k/flusso:<version>` works.
 
 ### Pushing to main without publishing
-A push to main only publishes when a version bump has landed (release-plz publishes just the crates
-whose version isn't already on crates.io), so ordinary feature pushes publish nothing. To be explicit
-— or to suppress a publish even when a bump is present — include **`[skip release]`** in the head
-commit message; the `release` job is skipped entirely (and with it the downstream `docker`/`dist`
-tag builds, which only fire off tags the `release` job pushes).
+Publishing is gated on the **release-PR merge**, not on every push: `release_always = false`
+(`release-plz.toml`) makes the `release` job a no-op unless the head commit is a merged
+`release-plz-*` PR — the one that carries the version bump + CHANGELOG. So ordinary feature pushes
+publish nothing automatically; there's no marker to remember. This also closes the new-crate race
+(#77): a brand-new crate's version is unpublished by definition, and under the old "publish anything
+not yet on crates.io on every push" behavior it would have been published on its feature merge,
+ahead of its version bump + CHANGELOG. Now the bump always lands first.
 
 ## First release — read once
 
-- **Versions are permanent.** Once `0.1.0` is published it can be *yanked* but never reused. The first publish also **claims all 16 `flusso-*` names** for your account.
+- **Versions are permanent.** Once `0.1.0` is published it can be *yanked* but never reused. The first publish also **claims all 17 `flusso-*` names** for your account.
 - **Publish order is handled** by release-plz (bottom-up: `flusso-schema-core` → parsers → `flusso-schema` → engine/sinks/sources/queue → `flusso-daemon` → `flusso-query-derive` → `flusso-query` → `flusso-cli`).
 - **Prefer to do the very first publish by hand?** `cargo login`, then `cargo publish` each crate in the order above (`--dry-run` fully verifies only the leaf `flusso-schema-core`; each later crate can't dry-run until its deps are live). After that, let release-plz drive subsequent releases.
 - **CI on the release PR:** the PR is opened with `GITHUB_TOKEN`, so CI won't run on it by default. Use a fine-grained PAT or the release-plz GitHub App if you want it to. See <https://release-plz.dev/docs/github>.

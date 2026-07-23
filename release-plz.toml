@@ -2,7 +2,7 @@
 #
 # Defaults fit this workspace: every crate shares the version in
 # Cargo.toml [workspace.package], release-plz bumps it from conventional
-# commits, updates CHANGELOG.md, and publishes all 16 publishable crates to
+# commits, updates CHANGELOG.md, and publishes all 17 publishable crates to
 # crates.io in dependency order. `flusso-dev-search-api` is publish = false in
 # its manifest, so release-plz skips it automatically.
 
@@ -11,6 +11,17 @@
 semver_check = true
 # Maintain CHANGELOG.md from conventional commits.
 changelog_update = true
+# Publish ONLY when the release PR is merged, never on ordinary pushes to main.
+# release-plz recognizes the release-PR merge by its `release-plz-*` head branch.
+#
+# The default (release_always = true) publishes any crate whose version isn't
+# already on crates.io on EVERY push — a no-op for existing crates, but a
+# brand-new crate is unpublished by definition, so it would be published on the
+# feature merge itself, ahead of the version-bump + CHANGELOG the release PR
+# carries (stale-dep tarball verify + missing CHANGELOG failures — see #77).
+# Gating on the release-PR merge closes that race for new and existing crates
+# alike; publishing can never run ahead of the version bump.
+release_always = false
 # Create the GitHub Release (the dist + docker workflows attach their artifacts
 # to the tag it pushes). Set to false if you'd rather dist own the release.
 git_release_enable = true
