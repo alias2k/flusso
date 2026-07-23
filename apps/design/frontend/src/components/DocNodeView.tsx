@@ -446,7 +446,7 @@ function FieldMenu({ onPick }: { onPick: (k: string) => void }) {
       sections={[section(t("node.fieldGroup"), FIELD_KINDS), section(t("node.aggGroup"), AGG_KINDS)]}
       trigger={
         <button
-          className="add-menu flex h-8 flex-1 cursor-pointer items-center justify-between gap-2 rounded-md border border-border bg-secondary px-2.5 py-1 text-sm text-muted-foreground transition-colors hover:border-muted-foreground"
+          className="add-menu flex h-8 flex-1 cursor-pointer items-center justify-between gap-2 rounded-md border border-border bg-secondary px-2.5 py-1 text-sm whitespace-nowrap text-muted-foreground transition-colors outline-none hover:border-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           title={t("node.addField")}
         >
           {t("node.addField")}
