@@ -95,16 +95,21 @@ export function DocNodeView({ data, selected }: NodeProps) {
     apply((s) => edit.toggleColumn(s, node.path, c.name, false));
   };
 
-  // Shift-click range check/uncheck across the visible column rows: a Shift-click
-  // sets every row between the last plainly-clicked column (the anchor) and the
-  // clicked one to the clicked box's new state, in a single edit. `shiftHeld` is
-  // captured on the checkbox's click (which fires before onCheckedChange).
+  // Multi-select on the column checkboxes, like a file list:
+  //  · plain click — toggle the column, set it as the anchor
+  //  · Shift-click  — set every row between the anchor and this one to this
+  //    box's new state, in a single edit (the anchor stays, so it can extend)
+  //  · Ctrl/Cmd-click — toggle just this row without moving the anchor
+  // Modifiers are captured on pointerdown (before the toggle fires) and cleared
+  // after use, so a keyboard toggle (no pointer event) reads no modifier.
   const visibleCols = cols.filter((c) => matches(c.name));
   const anchorCol = useRef<string | null>(null);
-  const shiftHeld = useRef(false);
+  const mods = useRef({ shift: false, ctrl: false });
   const toggleColumnAt = (c: ColumnShape, target: boolean) => {
+    const { shift, ctrl } = mods.current;
+    mods.current = { shift: false, ctrl: false };
     const anchor = anchorCol.current;
-    if (shiftHeld.current && anchor && anchor !== c.name) {
+    if (shift && anchor && anchor !== c.name) {
       const names = visibleCols.map((x) => x.name);
       const a = names.indexOf(anchor);
       const b = names.indexOf(c.name);
@@ -126,10 +131,10 @@ export function DocNodeView({ data, selected }: NodeProps) {
         return; // keep the anchor so the range can be extended
       }
     }
-    anchorCol.current = c.name;
     const inc = includedByCol.get(c.name);
     if (target) includeColumn(c);
     else if (inc) excludeColumn(c, inc);
+    if (!ctrl) anchorCol.current = c.name; // Ctrl/Cmd toggles without re-anchoring
   };
 
   return (
@@ -292,10 +297,13 @@ export function DocNodeView({ data, selected }: NodeProps) {
                       <Checkbox
                         checked={!!inc}
                         aria-label={c.name}
-                        onClick={(e) => {
+                        onPointerDown={(e) => {
+                          // Stop React Flow from claiming Shift/Cmd+pointerdown for
+                          // its node multi-selection — the checkbox must get the click.
                           e.stopPropagation();
-                          shiftHeld.current = e.shiftKey;
+                          mods.current = { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey };
                         }}
+                        onClick={(e) => e.stopPropagation()}
                         onCheckedChange={(ch) => toggleColumnAt(c, ch === true)}
                       />
                       <span className="col-name" title={renamed ? t("node.columnOf", { name: c.name }) : undefined}>

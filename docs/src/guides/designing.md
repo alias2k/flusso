@@ -64,9 +64,9 @@ inspector shows the suggestion — with a one-click *use* — only when your pic
 - **Undo/redo** (`⌘/Ctrl+Z`, `⇧⌘Z`) over the whole document; an **unsaved-changes** dot
   per index, and a warning before you navigate away with edits.
 - **Per-node column tools**: include-all/clear, a filter for wide tables, **Shift-click** a
-  column checkbox to check/uncheck a whole range at once, and collapse a node to just its
-  header (**collapse-all / expand-all** buttons on the canvas toolbar do the whole graph at
-  once). Each included column shows its required state at a glance: a **muted `*`**
+  column checkbox to check/uncheck a whole range at once (**Ctrl/Cmd-click** toggles one
+  without moving the range anchor), and collapse a node to just its header (**collapse-all /
+  expand-all** buttons on the canvas toolbar do the whole graph at once). Each included column shows its required state at a glance: a **muted `*`**
   = required and aligned with a `NOT NULL` column, an **accent `*`** = required but overriding a
   nullable column, an **`=`** = a default is set, and **nothing** = optional.
 - **Inline rename**: double-click a node's header title to rename that field in place, without
