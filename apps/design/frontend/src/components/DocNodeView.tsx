@@ -35,6 +35,26 @@ export function DocNodeView({ data, selected }: NodeProps) {
   const [filter, setFilter] = useState("");
   const isCollapsed = collapsed.has(node.id);
   const matches = (name: string) => name.toLowerCase().includes(filter.toLowerCase());
+
+  // Inline rename of a nested node's field name (the root has no field, so it's
+  // not renamable here). Commits through the same path-addressed edit the
+  // Inspector uses; Escape cancels, empty/unchanged is a no-op.
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState("");
+  const canRename = node.path.length > 0;
+  const startRename = () => {
+    setDraft(node.name ?? "");
+    setRenaming(true);
+  };
+  const commitRename = () => {
+    setRenaming(false);
+    const name = draft.trim();
+    if (!name || name === node.name) return;
+    apply((s) => {
+      const f = fieldAtPath(s, node.path);
+      return f ? edit.setNode(s, node.path, { ...f, field: name }) : s;
+    });
+  };
   const pickRootTable = (t: string) => {
     if (!t) return;
     const pk = catalog?.catalog.tables.find((x) => x.name === t)?.primary_key[0];
@@ -90,7 +110,42 @@ export function DocNodeView({ data, selected }: NodeProps) {
           <Icon name="chevron" size={12} />
         </button>
         <span className={`badge ${node.kind}`}>{node.kind}</span>
-        <span className="node-title">{node.name ?? node.table}</span>
+        {renaming ? (
+          <input
+            className="node-title-edit"
+            ref={(el) => el?.focus()}
+            value={draft}
+            aria-label={t("node.renameField")}
+            onChange={(e) => setDraft(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <span
+            className="node-title"
+            title={canRename ? t("node.renameHint") : undefined}
+            onDoubleClick={
+              canRename
+                ? (e) => {
+                    e.stopPropagation();
+                    startRename();
+                  }
+                : undefined
+            }
+          >
+            {node.name ?? node.table}
+          </span>
+        )}
         {nodeIssues > 0 && (
           <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
             {nodeIssues}

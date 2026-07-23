@@ -64,8 +64,15 @@ export const it: Record<string, string> = {
   "legend.typeUuid": "Un identificatore UUID.",
   "legend.typeGeo": "Un punto geografico (latitudine / longitudine).",
   "sidebar.newIndex": "Nuovo indice",
+  "sidebar.newIndexTitle": "Nuovo indice",
+  "sidebar.newIndexDesc":
+    "Assegna un nome all'indice, scegli la tabella radice, poi scegli dove salvare il file schema.",
   "sidebar.indexName": "nome indice",
   "sidebar.rootTable": "tabella radice",
+  "sidebar.schemaFile": "File schema",
+  "sidebar.schemaFileHint": "Percorso relativo a flusso.toml. Le sottocartelle sono ammesse (create al salvataggio).",
+  "sidebar.stepDetails": "Dettagli",
+  "sidebar.stepFile": "File",
   "sidebar.create": "Crea",
 
   // Code mode
@@ -111,6 +118,8 @@ export const it: Record<string, string> = {
 
   // shared
   "common.cancel": "Annulla",
+  "common.next": "Avanti",
+  "common.back": "Indietro",
   "common.remove": "rimuovi",
   "common.clear": "Cancella",
   "common.close": "Chiudi",
@@ -255,6 +264,8 @@ export const it: Record<string, string> = {
   // canvas node (DocNodeView)
   "node.expand": "Espandi",
   "node.collapse": "Comprimi",
+  "node.renameHint": "Doppio clic per rinominare",
+  "node.renameField": "Nome campo",
   "node.pk": "pk",
   "node.fields": "{n, plural, one {# campo} other {# campi}}",
   "node.diagCount":
@@ -347,6 +358,8 @@ export const it: Record<string, string> = {
   "canvas.unlock": "Sblocca layout",
   "canvas.resetLayout": "Reimposta layout",
   "canvas.showMinimap": "Mostra minimappa",
+  "canvas.collapseAll": "Comprimi tutto",
+  "canvas.expandAll": "Espandi tutto",
   "canvas.hideMinimap": "Nascondi minimappa",
 
   // global search / command palette

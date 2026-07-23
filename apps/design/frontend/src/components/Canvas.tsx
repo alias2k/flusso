@@ -13,7 +13,7 @@ import {
 // React Flow's stylesheet is imported (layered) from index.css, not here — a JS
 // import is unlayered and would beat our `@layer components` handle overrides.
 import { useEffect, useRef, useState } from "react";
-import { Lock, Maximize2, Unlock, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronsDownUp, ChevronsUpDown, Lock, Maximize2, Unlock, ZoomIn, ZoomOut } from "lucide-react";
 import { SCALAR_TYPES } from "../api";
 import { autoLayout, clearOverrides, loadOverrides, loadViewport, saveOverride, saveViewport } from "../model/layout";
 import { suggestRelations } from "../model/relations";
@@ -60,8 +60,10 @@ export function Canvas() {
   // slot. So a field edit never moves anything, and this never clobbers the
   // measured layout (below) or a manual drag. Deliberately NOT keyed on
   // `catalog`: it arrives async, and re-running here would reset positions.
+  const pruneCollapsed = useDesignStore((s) => s.pruneCollapsed);
   useEffect(() => {
     const graph = projectGraph(schema);
+    pruneCollapsed(graph.nodes.map((n) => n.id));
     const auto = autoLayout(graph.nodes, estimateHeight);
     const overrides = loadOverrides(indexName);
     setNodes((prev) => {
@@ -173,9 +175,21 @@ export function Canvas() {
 function FlowControls({ locked, onToggle }: { locked: boolean; onToggle: () => void }) {
   const { t } = useT();
   const { zoomIn, zoomOut, fitView } = useReactFlow();
+  const collapseAll = useDesignStore((s) => s.collapseAll);
+  const expandAll = useDesignStore((s) => s.expandAll);
   return (
     <Panel position="bottom-left">
       <div className="flex flex-col gap-1.5">
+        <Hint label={t("canvas.collapseAll")} side="right">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.collapseAll")} onClick={() => collapseAll()}>
+            <ChevronsDownUp />
+          </Button>
+        </Hint>
+        <Hint label={t("canvas.expandAll")} side="right">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.expandAll")} onClick={() => expandAll()}>
+            <ChevronsUpDown />
+          </Button>
+        </Hint>
         <Hint label={t("canvas.zoomIn")} side="right">
           <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomIn")} onClick={() => void zoomIn()}>
             <ZoomIn />

@@ -63,8 +63,14 @@ export const en: Record<string, string> = {
   "legend.typeUuid": "A UUID identifier.",
   "legend.typeGeo": "A geographic point (latitude / longitude).",
   "sidebar.newIndex": "New index",
+  "sidebar.newIndexTitle": "New index",
+  "sidebar.newIndexDesc": "Name the index, pick its root table, then choose where its schema file lands.",
   "sidebar.indexName": "index name",
   "sidebar.rootTable": "root table",
+  "sidebar.schemaFile": "Schema file",
+  "sidebar.schemaFileHint": "Path relative to flusso.toml. Subfolders are allowed (created on save).",
+  "sidebar.stepDetails": "Details",
+  "sidebar.stepFile": "File",
   "sidebar.create": "Create",
 
   // Code mode
@@ -109,6 +115,8 @@ export const en: Record<string, string> = {
 
   // shared
   "common.cancel": "Cancel",
+  "common.next": "Next",
+  "common.back": "Back",
   "common.remove": "remove",
   "common.clear": "Clear",
   "common.close": "Close",
@@ -249,6 +257,8 @@ export const en: Record<string, string> = {
   // canvas node (DocNodeView)
   "node.expand": "Expand",
   "node.collapse": "Collapse",
+  "node.renameHint": "Double-click to rename",
+  "node.renameField": "Field name",
   "node.pk": "pk",
   "node.fields": "{n, plural, one {# field} other {# fields}}",
   "node.diagCount":
@@ -341,6 +351,8 @@ export const en: Record<string, string> = {
   "canvas.resetLayout": "Reset layout",
   "canvas.showMinimap": "Show minimap",
   "canvas.hideMinimap": "Hide minimap",
+  "canvas.collapseAll": "Collapse all",
+  "canvas.expandAll": "Expand all",
 
   // global search / command palette
   "search.placeholder": "Search everything…",

@@ -39,7 +39,14 @@ import { Switch } from "@/components/ui/switch";
 const CodeView = lazy(() => import("./components/CodeView").then((m) => ({ default: m.CodeView })));
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,7 +60,7 @@ import { Label } from "@/components/ui/label";
 import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { GlowDot, Select, Text } from "./components/widgets";
+import { Field, GlowDot, Select, Text } from "./components/widgets";
 import { LANGS, useT, type Translate } from "./i18n";
 // Type-only: erased at compile time, so it doesn't pull the yaml package into
 // the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
@@ -1449,6 +1456,8 @@ function DiffModal({
   );
 }
 
+// A two-step "New index" wizard: (1) details — name + root table, (2) file —
+// where the schema file lands. Opened from the sidebar as a modal.
 function NewIndex({
   tables,
   junctions,
@@ -1456,15 +1465,43 @@ function NewIndex({
 }: {
   tables: string[];
   junctions: string[];
-  onCreate: (name: string, table: string) => void;
+  onCreate: (name: string, table: string, schemaPath: string) => void;
 }) {
   const { t } = useT();
   const [open, setOpen] = useState(false);
+  const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [table, setTable] = useState(tables[0] ?? "");
+  // The schema file path, prefilled from the name. It tracks the name until the
+  // user edits it by hand (subfolders allowed), after which it's left alone.
+  const [path, setPath] = useState("");
+  const [pathEdited, setPathEdited] = useState(false);
+  const effectivePath = pathEdited ? path : name ? `${name}.schema.yml` : "";
   const junctionSet = new Set(junctions);
-  if (!open) {
-    return (
+
+  const reset = () => {
+    setOpen(false);
+    setStep(0);
+    setName("");
+    setTable(tables[0] ?? "");
+    setPath("");
+    setPathEdited(false);
+  };
+  const setNameTracking = (v: string) => {
+    setName(v);
+    if (!pathEdited) setPath(v ? `${v}.schema.yml` : "");
+  };
+  const detailsOk = !!name && !!table;
+  const create = () => {
+    if (!detailsOk || !effectivePath.trim()) return;
+    onCreate(name, table, effectivePath.trim());
+    reset();
+  };
+
+  const steps = [t("sidebar.stepDetails"), t("sidebar.stepFile")];
+
+  return (
+    <>
       <button
         className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")}
         onClick={() => {
@@ -1476,40 +1513,101 @@ function NewIndex({
       >
         + {t("sidebar.newIndex")}
       </button>
-    );
-  }
-  return (
-    <div className="mt-1.5 flex flex-col gap-1.5 rounded-lg border border-border p-2">
-      <Text value={name} onChange={setName} placeholder={t("sidebar.indexName")} />
-      {tables.length ? (
-        <Select
-          value={table}
-          options={tables.map((tbl) => ({
-            label: tbl,
-            value: tbl,
-            description: junctionSet.has(tbl) ? t("catalog.junction") : undefined,
-          }))}
-          onChange={setTable}
-        />
-      ) : (
-        <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />
-      )}
-      <div className="row flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          disabled={!name || !table}
-          onClick={() => {
-            onCreate(name, table);
-            setOpen(false);
-            setName("");
+      <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : reset())}>
+        <DialogContent
+          className="sm:max-w-md"
+          onKeyDown={(e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            if (step === 0 && detailsOk) setStep(1);
+            else if (step === 1) create();
           }}
         >
-          {t("sidebar.create")}
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setOpen(false)}>
-          {t("common.cancel")}
-        </Button>
-      </div>
+          <DialogHeader>
+            <DialogTitle>{t("sidebar.newIndexTitle")}</DialogTitle>
+            <DialogDescription>{t("sidebar.newIndexDesc")}</DialogDescription>
+          </DialogHeader>
+
+          <WizardSteps steps={steps} current={step} />
+
+          {step === 0 ? (
+            <div className="flex flex-col gap-3">
+              <Field label={t("sidebar.indexName")}>
+                <Text value={name} onChange={setNameTracking} placeholder={t("sidebar.indexName")} />
+              </Field>
+              <Field label={t("sidebar.rootTable")}>
+                {tables.length ? (
+                  <Select
+                    value={table}
+                    options={tables.map((tbl) => ({
+                      label: tbl,
+                      value: tbl,
+                      description: junctionSet.has(tbl) ? t("catalog.junction") : undefined,
+                    }))}
+                    onChange={setTable}
+                  />
+                ) : (
+                  <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />
+                )}
+              </Field>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <Field label={t("sidebar.schemaFile")}>
+                <Text
+                  value={effectivePath}
+                  onChange={(v) => {
+                    setPathEdited(true);
+                    setPath(v);
+                  }}
+                  placeholder={name ? `${name}.schema.yml` : "x.schema.yml"}
+                />
+              </Field>
+              <p className="text-2xs text-muted-foreground">{t("sidebar.schemaFileHint")}</p>
+            </div>
+          )}
+
+          <DialogFooter className="sm:justify-between">
+            <Button variant="ghost" size="sm" onClick={() => (step === 0 ? reset() : setStep(0))}>
+              {step === 0 ? t("common.cancel") : t("common.back")}
+            </Button>
+            {step === 0 ? (
+              <Button size="sm" disabled={!detailsOk} onClick={() => setStep(1)}>
+                {t("common.next")}
+              </Button>
+            ) : (
+              <Button size="sm" disabled={!effectivePath.trim()} onClick={create}>
+                {t("sidebar.create")}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/// A compact step rail for the New-index wizard: a numbered dot per step, the
+/// current one filled, with the step labels beneath.
+function WizardSteps({ steps, current }: { steps: string[]; current: number }) {
+  return (
+    <div className="flex items-center gap-2">
+      {steps.map((label, i) => (
+        <div key={label} className="flex flex-1 items-center gap-2">
+          <span
+            className={cn(
+              "grid size-5 shrink-0 place-items-center rounded-full text-2xs font-bold transition-colors",
+              i <= current ? "bg-primary text-background" : "bg-secondary text-muted-foreground",
+            )}
+          >
+            {i + 1}
+          </span>
+          <span className={cn("text-xs", i === current ? "font-medium text-foreground" : "text-muted-foreground")}>
+            {label}
+          </span>
+          {i < steps.length - 1 && <span className="h-px flex-1 bg-border" />}
+        </div>
+      ))}
     </div>
   );
 }
