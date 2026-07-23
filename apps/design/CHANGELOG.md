@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/alias2k/flusso/compare/flusso-design-v0.11.0...flusso-design-v0.11.1) - 2026-07-23
+
+### Fixed
+
+- *(design)* drop dead RelationSuggestion.label and fix node height estimate
+- *(design)* restore the focus ring on the + field trigger
+- *(design)* bound FK suggestions behind a searchable, grouped picker
+- *(design)* theme popover and select dropdown borders
+
+### Other
+
+- Merge branch 'main' into fix/designer-relation-suggestions-overflow
+
 ## [0.11.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.10.1...flusso-design-v0.11.0) - 2026-07-23
 
 ### Added
