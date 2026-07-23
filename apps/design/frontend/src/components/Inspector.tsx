@@ -218,21 +218,25 @@ export function Inspector() {
   );
 }
 
-/// The bulk panel shown when several catalog columns are multi-selected on a
-/// node: include the not-yet-included ones, or remove (exclude) the included
-/// ones — in a single edit each.
+/// The bulk panel shown when several rows are multi-selected on a node. Rows can
+/// be catalog columns (which can be included/removed) or special fields
+/// (aggregates/geo/map/custom…, which can only be removed). "Include" adds the
+/// selected catalog columns that aren't in yet; "Remove" drops every selected
+/// row that's present — one edit each.
 function ColumnsInspector({ path, names }: { path: number[]; names: string[] }) {
   const { schema, apply, columnsFor, select } = useDesign();
   const { t } = useT();
   const table = effectiveTable(schema, path);
   const shape = new Map(columnsFor(table).map((c) => [c.name, c]));
-  const included = new Set(
-    nodeFields(schema, path)
-      .filter((f) => "column" in f.source && typeof f.source.column.ty === "string")
-      .map((f) => ("column" in f.source ? f.source.column.column : "")),
+  // Row identities currently present: an included catalog column by its source
+  // column name, and every other field by its field name.
+  const present = new Set(
+    nodeFields(schema, path).map((f) =>
+      "column" in f.source && typeof f.source.column.ty === "string" ? f.source.column.column : f.field,
+    ),
   );
-  const toInclude = names.filter((n) => !included.has(n));
-  const toRemove = names.filter((n) => included.has(n));
+  const toInclude = names.filter((n) => shape.has(n) && !present.has(n));
+  const toRemove = names.filter((n) => present.has(n));
   const includeAll = () =>
     apply((s) =>
       edit.includeColumns(
@@ -241,7 +245,10 @@ function ColumnsInspector({ path, names }: { path: number[]; names: string[] }) 
         toInclude.map((n) => ({ name: n, ty: shape.get(n)?.suggested_type, nullable: shape.get(n)?.nullable })),
       ),
     );
-  const removeAll = () => apply((s) => edit.excludeColumns(s, path, names));
+  const removeAll = () => {
+    apply((s) => edit.removeFields(s, path, names));
+    select(null);
+  };
   return (
     <div className="inspector">
       <div className="mb-2.5 flex items-center justify-between gap-2">
@@ -256,7 +263,7 @@ function ColumnsInspector({ path, names }: { path: number[]; names: string[] }) 
             key={n}
             className={cn(
               "rounded border px-1.5 py-0.5 font-mono text-2xs",
-              included.has(n) ? "border-primary/40 text-primary" : "border-border text-muted-foreground",
+              present.has(n) ? "border-primary/40 text-primary" : "border-border text-muted-foreground",
             )}
           >
             {n}

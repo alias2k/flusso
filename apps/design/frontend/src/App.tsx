@@ -68,7 +68,7 @@ import { LANGS, useT, type Translate } from "./i18n";
 // Type-only: erased at compile time, so it doesn't pull the yaml package into
 // the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
 import type { ParseErrorInfo } from "./model/anchors";
-import { excludeColumns, removeAt, removeNode } from "./model/edit";
+import { removeAt, removeFields, removeNode } from "./model/edit";
 import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
@@ -800,7 +800,7 @@ export default function App() {
         setSelection(null);
       } else if (selection.kind === "columns") {
         const { path, names } = selection;
-        apply((s) => excludeColumns(s, path, names));
+        apply((s) => removeFields(s, path, names));
         setSelection(null);
       }
     }

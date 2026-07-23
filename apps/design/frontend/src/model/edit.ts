@@ -51,16 +51,19 @@ export function includeColumns(
   return withNodeFields(schema, path, [...fields, ...added]);
 }
 
-/// Drop the given catalog-backed scalar columns from the node in one pass (the
-/// batch counterpart to `includeColumns` — used by Shift-click range unchecking).
-export function excludeColumns(schema: IndexSchema, path: number[], columns: string[]): IndexSchema {
-  const drop = new Set(columns);
+/// Remove the given rows from the node in one pass — matches a catalog-backed
+/// scalar column by its source column name, and any other field (special leaves:
+/// aggregates/geo/map/custom/…) by its field name. The batch counterpart used by
+/// the bulk "remove selected" action, so it spans both row kinds.
+export function removeFields(schema: IndexSchema, path: number[], names: string[]): IndexSchema {
+  const drop = new Set(names);
   return withNodeFields(
     schema,
     path,
-    nodeFields(schema, path).filter(
-      (f) => !("column" in f.source && typeof f.source.column.ty === "string" && drop.has(f.source.column.column)),
-    ),
+    nodeFields(schema, path).filter((f) => {
+      const col = "column" in f.source && typeof f.source.column.ty === "string" ? f.source.column.column : undefined;
+      return !(col !== undefined && drop.has(col)) && !drop.has(f.field);
+    }),
   );
 }
 

@@ -96,39 +96,44 @@ export function DocNodeView({ data, selected }: NodeProps) {
   };
 
   const visibleCols = cols.filter((c) => matches(c.name));
+  const visibleLeaves = extraLeaves.filter((l) => matches(l.name));
 
-  // Multi-select column rows, file-list style:
-  //  · plain click — select this column (an included one opens the Inspector; an
-  //    excluded one starts a single-column selection). Sets the anchor.
+  // Multi-select rows (catalog columns *and* special/custom fields alike),
+  // file-list style, keyed by name:
+  //  · plain click — select this row (an existing field opens the Inspector; an
+  //    excluded column starts a single-row selection). Sets the anchor.
   //  · Shift-click  — select the whole range between the anchor and this row.
   //  · Ctrl/Cmd-click — add/remove this row from the current selection.
-  // A multi-selection drives the Inspector's bulk include/exclude panel. The
-  // node's checkboxes still toggle one column each.
-  const anchorCol = useRef<string | null>(null);
-  const columnsSelected =
+  // A multi-selection drives the Inspector's bulk include/remove panel. `rowOrder`
+  // is the on-screen order (columns then special leaves) so a range spans both.
+  const rowOrder = [...visibleCols.map((c) => c.name), ...visibleLeaves.map((l) => l.name)];
+  const anchorRow = useRef<string | null>(null);
+  const rowsSelected =
     selection?.kind === "columns" && selection.path.join(".") === node.path.join(".") ? selection.names : [];
-  const selectColumn = (c: ColumnShape, e: React.MouseEvent) => {
-    const names = visibleCols.map((x) => x.name);
-    if (e.shiftKey && anchorCol.current) {
-      const a = names.indexOf(anchorCol.current);
-      const b = names.indexOf(c.name);
+  const selectRow = (name: string, e: React.MouseEvent, fieldIndex?: number) => {
+    if (e.shiftKey && anchorRow.current) {
+      const a = rowOrder.indexOf(anchorRow.current);
+      const b = rowOrder.indexOf(name);
       if (a >= 0 && b >= 0) {
-        select({ kind: "columns", path: node.path, names: names.slice(Math.min(a, b), Math.max(a, b) + 1) });
+        select({ kind: "columns", path: node.path, names: rowOrder.slice(Math.min(a, b), Math.max(a, b) + 1) });
         return; // anchor stays so the range can extend
       }
     }
     if (e.ctrlKey || e.metaKey) {
-      const set = new Set(columnsSelected.length ? columnsSelected : anchorCol.current ? [anchorCol.current] : []);
-      if (set.has(c.name)) set.delete(c.name);
-      else set.add(c.name);
+      const set = new Set(rowsSelected.length ? rowsSelected : anchorRow.current ? [anchorRow.current] : []);
+      if (set.has(name)) set.delete(name);
+      else set.add(name);
       select({ kind: "columns", path: node.path, names: [...set] });
-      anchorCol.current = c.name;
+      anchorRow.current = name;
       return;
     }
-    anchorCol.current = c.name;
-    const inc = includedByCol.get(c.name);
-    if (inc) select({ kind: "field", path: node.path, index: inc.index });
-    else select({ kind: "columns", path: node.path, names: [c.name] });
+    anchorRow.current = name;
+    if (fieldIndex !== undefined) select({ kind: "field", path: node.path, index: fieldIndex });
+    else select({ kind: "columns", path: node.path, names: [name] });
+  };
+  // Modified clicks must reach the row, not React Flow's node multi-selection.
+  const rowPointerDown = (e: React.PointerEvent) => {
+    if (e.shiftKey || e.ctrlKey || e.metaKey) e.stopPropagation();
   };
 
   return (
@@ -281,19 +286,14 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   const required = !!col && !col.nullable;
                   const override = required && c.nullable;
                   const hasDefault = col?.default !== undefined;
-                  const rowSelected =
-                    columnsSelected.includes(c.name) || (inc !== undefined && fieldSelected(inc.index));
+                  const rowSelected = rowsSelected.includes(c.name) || (inc !== undefined && fieldSelected(inc.index));
                   return (
                     <div
                       className={`col-row${inc ? " on" : ""}${rowSelected ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
                       key={c.name}
                       title={diag?.message}
-                      // Modified clicks must reach this row, not React Flow's node
-                      // multi-selection — stop the pointerdown from bubbling.
-                      onPointerDown={(e) => {
-                        if (e.shiftKey || e.ctrlKey || e.metaKey) e.stopPropagation();
-                      }}
-                      onClick={(e) => selectColumn(c, e)}
+                      onPointerDown={rowPointerDown}
+                      onClick={(e) => selectRow(c.name, e, inc?.index)}
                     >
                       <Checkbox
                         checked={!!inc}
@@ -327,34 +327,34 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   );
                 })}
 
-                {extraLeaves
-                  .filter((l) => matches(l.name))
-                  .map((l) => {
-                    const diag = diagByField.get(l.name);
-                    const incomplete = aggregateIncomplete(fields[l.index]);
-                    return (
-                      <div
-                        className={`col-row special${fieldSelected(l.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${incomplete ? " diag-warning" : ""}`}
-                        key={`x${l.index}`}
-                        title={diag?.message ?? (incomplete ? t("node.incomplete") : undefined)}
-                        onClick={() => select({ kind: "field", path: node.path, index: l.index })}
+                {visibleLeaves.map((l) => {
+                  const diag = diagByField.get(l.name);
+                  const incomplete = aggregateIncomplete(fields[l.index]);
+                  const leafSelected = rowsSelected.includes(l.name) || fieldSelected(l.index);
+                  return (
+                    <div
+                      className={`col-row special${leafSelected ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${incomplete ? " diag-warning" : ""}`}
+                      key={`x${l.index}`}
+                      title={diag?.message ?? (incomplete ? t("node.incomplete") : undefined)}
+                      onPointerDown={rowPointerDown}
+                      onClick={(e) => selectRow(l.name, e, l.index)}
+                    >
+                      <span className="leaf-kind">{l.kind}</span>
+                      <span className="col-name">{l.name}</span>
+                      <button
+                        className="x"
+                        title={t("common.remove")}
+                        aria-label={t("common.remove")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          apply((s) => edit.removeAt(s, node.path, l.index));
+                        }}
                       >
-                        <span className="leaf-kind">{l.kind}</span>
-                        <span className="col-name">{l.name}</span>
-                        <button
-                          className="x"
-                          title={t("common.remove")}
-                          aria-label={t("common.remove")}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            apply((s) => edit.removeAt(s, node.path, l.index));
-                          }}
-                        >
-                          <Icon name="close" size={13} />
-                        </button>
-                      </div>
-                    );
-                  })}
+                        <Icon name="close" size={13} />
+                      </button>
+                    </div>
+                  );
+                })}
 
                 {cols.length === 0 && (
                   <ManualColumn onAdd={(name) => apply((s) => edit.toggleColumn(s, node.path, name, true))} />
