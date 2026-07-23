@@ -51,6 +51,19 @@ export function includeColumns(
   return withNodeFields(schema, path, [...fields, ...added]);
 }
 
+/// Drop the given catalog-backed scalar columns from the node in one pass (the
+/// batch counterpart to `includeColumns` — used by Shift-click range unchecking).
+export function excludeColumns(schema: IndexSchema, path: number[], columns: string[]): IndexSchema {
+  const drop = new Set(columns);
+  return withNodeFields(
+    schema,
+    path,
+    nodeFields(schema, path).filter(
+      (f) => !("column" in f.source && typeof f.source.column.ty === "string" && drop.has(f.source.column.column)),
+    ),
+  );
+}
+
 /// Drop every plain scalar-column field on the node (keeps geo/map/custom/
 /// aggregate/object — only the checkbox-driven columns clear).
 export function clearColumns(schema: IndexSchema, path: number[]): IndexSchema {

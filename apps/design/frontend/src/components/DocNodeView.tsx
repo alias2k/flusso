@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
@@ -93,6 +93,43 @@ export function DocNodeView({ data, selected }: NodeProps) {
   const excludeColumn = (c: ColumnShape, inc: LeafField) => {
     if (fieldSelected(inc.index)) select(null);
     apply((s) => edit.toggleColumn(s, node.path, c.name, false));
+  };
+
+  // Shift-click range check/uncheck across the visible column rows: a Shift-click
+  // sets every row between the last plainly-clicked column (the anchor) and the
+  // clicked one to the clicked box's new state, in a single edit. `shiftHeld` is
+  // captured on the checkbox's click (which fires before onCheckedChange).
+  const visibleCols = cols.filter((c) => matches(c.name));
+  const anchorCol = useRef<string | null>(null);
+  const shiftHeld = useRef(false);
+  const toggleColumnAt = (c: ColumnShape, target: boolean) => {
+    const anchor = anchorCol.current;
+    if (shiftHeld.current && anchor && anchor !== c.name) {
+      const names = visibleCols.map((x) => x.name);
+      const a = names.indexOf(anchor);
+      const b = names.indexOf(c.name);
+      if (a >= 0 && b >= 0) {
+        const range = visibleCols.slice(Math.min(a, b), Math.max(a, b) + 1);
+        apply((s) =>
+          target
+            ? edit.includeColumns(
+                s,
+                node.path,
+                range.map((x) => ({ name: x.name, ty: x.suggested_type, nullable: x.nullable })),
+              )
+            : edit.excludeColumns(
+                s,
+                node.path,
+                range.map((x) => x.name),
+              ),
+        );
+        return; // keep the anchor so the range can be extended
+      }
+    }
+    anchorCol.current = c.name;
+    const inc = includedByCol.get(c.name);
+    if (target) includeColumn(c);
+    else if (inc) excludeColumn(c, inc);
   };
 
   return (
@@ -232,58 +269,59 @@ export function DocNodeView({ data, selected }: NodeProps) {
               )}
 
               <div className="node-cols px-2 py-1.5">
-                {cols
-                  .filter((c) => matches(c.name))
-                  .map((c) => {
-                    const inc = includedByCol.get(c.name);
-                    const renamed = inc && inc.name !== c.name;
-                    const diag = inc ? diagByField.get(inc.name) : undefined;
-                    // Required/default state, relative to the source column, so it
-                    // reads at a glance: a dot = required (muted when it just mirrors a
-                    // NOT NULL column, accent when it overrides a nullable one), and an
-                    // `=` when a default fills the gap. No dot = optional.
-                    const field = inc ? fields[inc.index] : undefined;
-                    const col = field && "column" in field.source ? field.source.column : undefined;
-                    const required = !!col && !col.nullable;
-                    const override = required && c.nullable;
-                    const hasDefault = col?.default !== undefined;
-                    return (
-                      <div
-                        className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
-                        key={c.name}
-                        title={diag?.message}
-                        onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
-                      >
-                        <Checkbox
-                          checked={!!inc}
-                          aria-label={c.name}
-                          onClick={(e) => e.stopPropagation()}
-                          onCheckedChange={(ch) => (ch === true ? includeColumn(c) : inc && excludeColumn(c, inc))}
-                        />
-                        <span className="col-name" title={renamed ? t("node.columnOf", { name: c.name }) : undefined}>
-                          {inc ? inc.name : c.name}
-                          {renamed ? <span className="col-from"> ← {c.name}</span> : null}
+                {visibleCols.map((c) => {
+                  const inc = includedByCol.get(c.name);
+                  const renamed = inc && inc.name !== c.name;
+                  const diag = inc ? diagByField.get(inc.name) : undefined;
+                  // Required/default state, relative to the source column, so it
+                  // reads at a glance: a dot = required (muted when it just mirrors a
+                  // NOT NULL column, accent when it overrides a nullable one), and an
+                  // `=` when a default fills the gap. No dot = optional.
+                  const field = inc ? fields[inc.index] : undefined;
+                  const col = field && "column" in field.source ? field.source.column : undefined;
+                  const required = !!col && !col.nullable;
+                  const override = required && c.nullable;
+                  const hasDefault = col?.default !== undefined;
+                  return (
+                    <div
+                      className={`col-row${inc ? " on" : ""}${inc && fieldSelected(inc.index) ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
+                      key={c.name}
+                      title={diag?.message}
+                      onClick={() => inc && select({ kind: "field", path: node.path, index: inc.index })}
+                    >
+                      <Checkbox
+                        checked={!!inc}
+                        aria-label={c.name}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          shiftHeld.current = e.shiftKey;
+                        }}
+                        onCheckedChange={(ch) => toggleColumnAt(c, ch === true)}
+                      />
+                      <span className="col-name" title={renamed ? t("node.columnOf", { name: c.name }) : undefined}>
+                        {inc ? inc.name : c.name}
+                        {renamed ? <span className="col-from"> ← {c.name}</span> : null}
+                      </span>
+                      {required && (
+                        <span
+                          className={`col-req${override ? " override" : ""}`}
+                          title={override ? t("node.reqOverride") : t("node.reqAligned")}
+                        >
+                          *
                         </span>
-                        {required && (
-                          <span
-                            className={`col-req${override ? " override" : ""}`}
-                            title={override ? t("node.reqOverride") : t("node.reqAligned")}
-                          >
-                            *
-                          </span>
-                        )}
-                        {hasDefault && (
-                          <span className="col-default" title={t("node.colDefault")}>
-                            =
-                          </span>
-                        )}
-                        {(() => {
-                          const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
-                          return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
-                        })()}
-                      </div>
-                    );
-                  })}
+                      )}
+                      {hasDefault && (
+                        <span className="col-default" title={t("node.colDefault")}>
+                          =
+                        </span>
+                      )}
+                      {(() => {
+                        const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
+                        return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
+                      })()}
+                    </div>
+                  );
+                })}
 
                 {extraLeaves
                   .filter((l) => matches(l.name))
