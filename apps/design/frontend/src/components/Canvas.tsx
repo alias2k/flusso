@@ -7,6 +7,7 @@ import {
   ReactFlow,
   useEdgesState,
   useNodes,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
 } from "@xyflow/react";
@@ -156,7 +157,6 @@ export function Canvas() {
           select(dn.path.length ? { kind: "node", path: dn.path } : { kind: "root" });
         }
       }}
-      fitView
       minZoom={0.2}
       nodesDraggable={!locked}
     >
@@ -288,20 +288,22 @@ function MinimapToggle({ showMap, onToggle }: { showMap: boolean; onToggle: () =
   );
 }
 
-/// Restore each index's pan/zoom on switch (the initial fit is handled by the
-/// `fitView` prop, so this skips the first run); edits don't refit.
+/// Restore each index's saved pan/zoom — on first load *and* on index switch, so
+/// a reload doesn't reset it. Gated on `useNodesInitialized`: applied once the
+/// nodes are measured, which is why it replaces the `fitView` prop (that prop
+/// fits after measurement and would clobber a restore done any earlier). With
+/// nothing saved it fits instead. Runs once per index (edits don't refit).
 function RestoreViewport({ index }: { index: string }) {
   const { setViewport, fitView } = useReactFlow();
-  const first = useRef(true);
+  const ready = useNodesInitialized();
+  const appliedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
+    if (!ready || appliedFor.current === index) return;
+    appliedFor.current = index;
     const vp = loadViewport(index);
     if (vp) void setViewport(vp);
     else void fitView({ duration: 300 });
-  }, [index, setViewport, fitView]);
+  }, [ready, index, setViewport, fitView]);
   return null;
 }
 
