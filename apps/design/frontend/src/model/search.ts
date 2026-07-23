@@ -12,7 +12,7 @@ import type { Doc } from "../store/design";
 import { typeClass } from "../theme";
 import { pathId, pathLabels, projectGraph } from "./tree";
 
-export type SearchCategory = "action" | "index" | "field" | "setting" | "catalog";
+export type SearchCategory = "action" | "index" | "field" | "setting" | "catalog" | "legendKind" | "legendType";
 
 export type SearchTarget =
   | { kind: "index"; name: string }
@@ -51,6 +51,9 @@ export interface SearchRecord {
   subtitle?: string;
   /// Extra text folded into the fuzzy match (kind, column, table names).
   keywords: string;
+  /// The record's group label, folded into the match so searching a group name
+  /// (e.g. "actions") surfaces the whole group. Set by the palette.
+  group?: string;
   /// The index a record belongs to, so on-screen results can rank higher.
   index?: string;
   /// A CSS colour for the row's leading dot (fields, by type/relation family).

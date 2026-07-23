@@ -176,6 +176,7 @@ export default function App() {
   const canUndo = useCanUndo();
   const canRedo = useCanRedo();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [newIndexOpen, setNewIndexOpen] = useState(false);
 
   const theme = useUiStore((s) => s.theme);
   const leftOpen = useUiStore((s) => s.leftOpen);
@@ -223,7 +224,7 @@ export default function App() {
 
   // ── routing: the hash mirrors what the main area shows (see router.ts) ────
 
-  // URL → state. Behind a ref so the one hashchange listener always sees the
+  // URL → state. Behind a ref so the one popstate listener always sees the
   // latest handlers; validated against the loaded project so a stale deep link
   // can't select a nonexistent index.
   const applyRoute = (route: Route) => {
@@ -249,17 +250,17 @@ export default function App() {
     applyRouteRef.current = applyRoute;
   });
   useEffect(() => {
-    const onHash = () => {
-      const route = parseRoute(window.location.hash);
+    const onPop = () => {
+      const route = parseRoute(window.location.pathname);
       if (route) applyRouteRef.current(route);
     };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // State → URL. pushState doesn't fire hashchange, so this can't loop; the
-  // very first write replaces instead, keeping the entry the user landed on.
-  const routeHash = formatRoute(
+  // State → URL. pushState doesn't fire popstate, so this can't loop; the very
+  // first write replaces instead, keeping the entry the user landed on.
+  const routePath = formatRoute(
     browseCatalog
       ? { view: "tables" }
       : active === "config"
@@ -269,10 +270,10 @@ export default function App() {
   const routedOnce = useRef(false);
   useEffect(() => {
     if (!doc) return;
-    if (window.location.hash === routeHash) return;
-    window.history[routedOnce.current ? "pushState" : "replaceState"](null, "", routeHash);
+    if (window.location.pathname === routePath) return;
+    window.history[routedOnce.current ? "pushState" : "replaceState"](null, "", routePath);
     routedOnce.current = true;
-  }, [doc, routeHash]);
+  }, [doc, routePath]);
 
   useEffect(() => {
     api
@@ -281,7 +282,7 @@ export default function App() {
         loadProject(p, true);
         // A deep link wins over the default first index — applied after the
         // project loads so the index-name validation can see it.
-        const route = parseRoute(window.location.hash);
+        const route = parseRoute(window.location.pathname);
         if (route) applyRouteRef.current(route);
       })
       .catch((e) => setError(String(e)));
@@ -653,7 +654,10 @@ export default function App() {
       title: t("sidebar.deployment"),
       keywords: "deployment settings config connection sinks",
       detail: { body: t("search.descDeployment"), enter: runAction },
-      run: () => setActive("config"),
+      run: () => {
+        setBrowseCatalog(false);
+        setActive("config");
+      },
     },
     {
       id: "cmd.tables",
@@ -687,7 +691,70 @@ export default function App() {
       detail: { body: t("search.descSidebar"), enter: runAction },
       run: toggleLeft,
     },
+    {
+      id: "cmd.newIndex",
+      category: "action",
+      title: t("sidebar.newIndex"),
+      keywords: "new index create add schema file",
+      detail: { body: t("search.descNewIndex"), enter: runAction },
+      run: () => setNewIndexOpen(true),
+    },
+    {
+      id: "cmd.undo",
+      category: "action",
+      title: t("search.undo"),
+      keywords: "undo revert step back history",
+      shortcut: "⌘Z",
+      detail: { body: t("search.descUndo"), enter: runAction },
+      run: () => {
+        if (canUndo) undo();
+      },
+    },
+    {
+      id: "cmd.redo",
+      category: "action",
+      title: t("search.redo"),
+      keywords: "redo forward step history",
+      shortcut: "⇧⌘Z",
+      detail: { body: t("search.descRedo"), enter: runAction },
+      run: () => {
+        if (canRedo) redo();
+      },
+    },
   ];
+  // Visual⟷Code only applies to an index (Deployment has no code form).
+  if (active !== "config")
+    commands.push({
+      id: "cmd.mode",
+      category: "action",
+      title: rawMode ? t("search.toVisual") : t("search.toCode"),
+      keywords: "visual code yaml editor canvas switch mode toggle raw",
+      detail: { body: t("search.descMode"), enter: runAction },
+      run: () => {
+        if (rawMode) setRawMode(false);
+        else openRaw();
+      },
+    });
+  // Legend as searchable reference — every node kind and field type with its
+  // one-line meaning (shown in the preview pane; informational, no navigation).
+  for (const k of KIND_ROWS)
+    commands.push({
+      id: `legend.kind.${k}`,
+      category: "legendKind",
+      title: k,
+      keywords: `legend node kind relation ${k}`,
+      color: `var(--k-${k})`,
+      detail: { body: kindDesc(t, k), enter: t("search.reference") },
+    });
+  for (const f of TYPE_FAMILIES)
+    commands.push({
+      id: `legend.type.${f.varKey}`,
+      category: "legendType",
+      title: f.label,
+      keywords: `legend field type ${f.label} ${f.varKey}`,
+      color: `var(--t-${f.varKey})`,
+      detail: { body: typeDesc(t, f.varKey), enter: t("search.reference") },
+    });
 
   // Keyboard shortcuts. Held in a ref (updated in an effect, not during render)
   // so the listener subscribes once but always sees the latest state; undo/
@@ -985,6 +1052,8 @@ export default function App() {
                 tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
                 junctions={catalog?.junctions.map((j) => j.table.table) ?? []}
                 onCreate={createIndex}
+                open={newIndexOpen}
+                onOpenChange={setNewIndexOpen}
               />
             </div>
             {/* Colour key — open by default, but collapsible so a long index list
@@ -1582,13 +1651,16 @@ function NewIndex({
   tables,
   junctions,
   onCreate,
+  open,
+  onOpenChange,
 }: {
   tables: string[];
   junctions: string[];
   onCreate: (name: string, table: string, schemaPath: string) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useT();
-  const [open, setOpen] = useState(false);
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [table, setTable] = useState(tables[0] ?? "");
@@ -1600,7 +1672,7 @@ function NewIndex({
   const junctionSet = new Set(junctions);
 
   const reset = () => {
-    setOpen(false);
+    onOpenChange(false);
     setStep(0);
     setName("");
     setTable(tables[0] ?? "");
@@ -1628,12 +1700,12 @@ function NewIndex({
           // The initial `table` state captured the catalog before it loaded —
           // default it now, from the tables that actually exist.
           if (!table && tables[0]) setTable(tables[0]);
-          setOpen(true);
+          onOpenChange(true);
         }}
       >
         + {t("sidebar.newIndex")}
       </button>
-      <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : reset())}>
+      <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : reset())}>
         <DialogContent
           className="sm:max-w-md"
           onKeyDown={(e) => {
