@@ -1,10 +1,11 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { ChevronDownIcon } from "lucide-react";
 import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
 import { aggregateIncomplete, joinIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
-import { suggestRelations } from "../model/relations";
+import { suggestRelations, type RelationSuggestion } from "../model/relations";
 import { fieldAtPath, nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useT } from "../i18n";
 import { useDesign } from "../state";
@@ -13,11 +14,16 @@ import { Hint } from "./Hint";
 import { Icon } from "./Icon";
 import { Select, Text } from "./widgets";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant"] as const;
 const AGG_KINDS = ["count", "sum", "avg", "min", "max", "ids"] as const;
 const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as const;
+// Order the FK-suggestion groups by how the document usually reads: the tables
+// this one points at first, then its back-references, then the m2m sets.
+const REL_VERB_ORDER = ["belongs_to", "has_many", "many_to_many"] as const;
 
 export function DocNodeView({ data, selected }: NodeProps) {
   const node = (data as { node: DocNode }).node;
@@ -259,17 +265,12 @@ export function DocNodeView({ data, selected }: NodeProps) {
               </div>
 
               <footer className="node-add flex flex-col gap-1.5 border-t border-border p-2">
-                {catalog &&
-                  suggestRelations(catalog, node.table).map((sg) => (
-                    <button
-                      key={sg.key}
-                      className="suggest"
-                      title={sg.detail}
-                      onClick={() => apply((s) => edit.addField(s, node.path, sg.build()))}
-                    >
-                      + {sg.label}
-                    </button>
-                  ))}
+                {catalog && (
+                  <RelationPicker
+                    suggestions={suggestRelations(catalog, node.table)}
+                    onPick={(sg) => apply((s) => edit.addField(s, node.path, sg.build()))}
+                  />
+                )}
                 <div className="add-menus flex gap-1.5">
                   <AddMenu
                     label={t("node.addJoin")}
@@ -281,9 +282,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                       select({ kind: "field", path: node.path, index: fields.length });
                     }}
                   />
-                  <AddMenu
-                    label={t("node.addField")}
-                    kinds={[...FIELD_KINDS, ...AGG_KINDS]}
+                  <FieldMenu
                     onPick={(k) => {
                       apply((s) => edit.addSpecial(s, node.path, k));
                       select({ kind: "field", path: node.path, index: fields.length });
@@ -306,9 +305,10 @@ function typeLabel(ty?: FlussoType): string {
   return typeof ty === "string" ? ty : "object" in ty ? "?" : "map" in ty ? "map" : "custom";
 }
 
+/// A flat action menu (value stays `""`, each pick fires `onPick`). Used for
+/// `+ join`, whose four relation kinds need no grouping or search.
 function AddMenu({ label, kinds, onPick }: { label: string; kinds: readonly string[]; onPick: (k: string) => void }) {
   const { t } = useT();
-  // An action menu: value stays "" (placeholder = label), each pick fires onPick.
   // Each kind carries its hue (relation kinds + geo) and a one-line description.
   const opts = kinds.map((k) => ({
     label: k,
@@ -317,6 +317,144 @@ function AddMenu({ label, kinds, onPick }: { label: string; kinds: readonly stri
     className: kindColorClass(k),
   }));
   return <Select<string> value="" placeholder={label} options={opts} onChange={onPick} className="add-menu flex-1" />;
+}
+
+interface MenuEntry {
+  /// Unique within the menu; combined with the label as the cmdk search text.
+  key: string;
+  label: string;
+  detail?: string;
+  className?: string;
+  onSelect: () => void;
+}
+
+interface MenuSection {
+  heading: string;
+  entries: MenuEntry[];
+}
+
+/// A searchable, grouped popover menu — the shared shell behind the footer's
+/// suggestion pickers. The cmdk list is bounded and scrolls on its own, and the
+/// Popover is `modal` + portalled: without `modal` the enclosing React Flow node
+/// swallows the outside pointer-down before Radix's dismiss layer sees it (so it
+/// wouldn't close on an outside click), and the portal keeps the wheel away from
+/// React Flow's zoom.
+function SearchMenu({
+  trigger,
+  placeholder,
+  sections,
+}: {
+  trigger: ReactNode;
+  placeholder: string;
+  sections: MenuSection[];
+}) {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const dismiss = (fn: () => void) => {
+    fn();
+    setOpen(false);
+    setQuery("");
+  };
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal>
+      <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+      <PopoverContent
+        className="w-auto max-w-[92vw] min-w-(--radix-popover-trigger-width) p-0"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Command>
+          <CommandInput value={query} onValueChange={setQuery} placeholder={placeholder} />
+          <CommandList className="max-h-80">
+            <CommandEmpty>{t("common.noMatch")}</CommandEmpty>
+            {sections.map((s) => (
+              <CommandGroup key={s.heading} heading={s.heading}>
+                {s.entries.map((e) => (
+                  <CommandItem key={e.key} value={`${e.label} ${e.key}`} onSelect={() => dismiss(e.onSelect)}>
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      <span className={cn("truncate font-mono", e.className)}>{e.label}</span>
+                      {e.detail && <span className="text-2xs text-muted-foreground">{e.detail}</span>}
+                    </div>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            ))}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/// The FK-relationship picker: a searchable, verb-grouped popover over every
+/// suggested relation (`belongs_to`/`has_many`/`many_to_many`). Collapsing them
+/// behind one trigger is what keeps a hub table's node from running off the
+/// canvas.
+function RelationPicker({
+  suggestions,
+  onPick,
+}: {
+  suggestions: RelationSuggestion[];
+  onPick: (sg: RelationSuggestion) => void;
+}) {
+  const { t } = useT();
+  if (suggestions.length === 0) return null;
+  const sections = REL_VERB_ORDER.map((verb) => ({
+    heading: verb,
+    entries: suggestions
+      .filter((s) => s.verb === verb)
+      .map((sg) => ({
+        key: sg.key,
+        label: sg.target,
+        detail: sg.detail,
+        className: kindColorClass(sg.verb),
+        onSelect: () => onPick(sg),
+      })),
+  })).filter((s) => s.entries.length > 0);
+  return (
+    <SearchMenu
+      placeholder={t("node.searchRelations")}
+      sections={sections}
+      trigger={
+        <button className="suggest flex w-full items-center gap-1.5" title={t("node.addRelationHint")}>
+          <Icon name="plus" size={12} />
+          {t("node.addRelation", { n: suggestions.length })}
+        </button>
+      }
+    />
+  );
+}
+
+/// The `+ field` picker: the special field + aggregate kinds, grouped and
+/// searchable (same shell as the relation picker). Its trigger mirrors the
+/// neutral `+ join` menu button beside it.
+function FieldMenu({ onPick }: { onPick: (k: string) => void }) {
+  const { t } = useT();
+  const section = (heading: string, kinds: readonly string[]): MenuSection => ({
+    heading,
+    entries: kinds.map((k) => ({
+      key: k,
+      label: k,
+      detail: KIND_HELP[k] ? t(KIND_HELP[k]) : undefined,
+      className: kindColorClass(k),
+      onSelect: () => onPick(k),
+    })),
+  });
+  return (
+    <SearchMenu
+      placeholder={t("node.searchFields")}
+      sections={[section(t("node.fieldGroup"), FIELD_KINDS), section(t("node.aggGroup"), AGG_KINDS)]}
+      trigger={
+        <button
+          className="add-menu flex h-8 flex-1 cursor-pointer items-center justify-between gap-2 rounded-md border border-border bg-secondary px-2.5 py-1 text-sm text-muted-foreground transition-colors hover:border-muted-foreground"
+          title={t("node.addField")}
+        >
+          {t("node.addField")}
+          <ChevronDownIcon className="size-4 shrink-0 opacity-50" />
+        </button>
+      }
+    />
+  );
 }
 
 /// Type a column name the catalog doesn't list (offline, or a view) and Enter to

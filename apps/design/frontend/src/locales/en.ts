@@ -268,6 +268,12 @@ export const en: Record<string, string> = {
   "node.addJoin": "+ join",
   "node.addField": "+ field",
   "node.addColumn": "+ column name, Enter",
+  "node.fieldGroup": "fields",
+  "node.aggGroup": "aggregates",
+  "node.addRelation": "{n, plural, one {# suggested relation} other {# suggested relations}}",
+  "node.addRelationHint": "Pull in a related table as a join — search the foreign keys pointing to and from this table",
+  "node.searchRelations": "search relations…",
+  "node.searchFields": "search fields…",
 
   // config panel
   "config.indexPrefix": "index prefix",
