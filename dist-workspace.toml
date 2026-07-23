@@ -20,7 +20,7 @@ install-updater = false
 # it must not try to create it, or it conflicts with release-plz on the same tag.
 create-release = false
 # Don't manage/verify the CI workflow. release-plz pushes a per-crate tag for all
-# 16 crates in lockstep, but flusso-cli is the only dist-able package; dist's
+# 17 crates in lockstep, but flusso-cli is the only dist-able package; dist's
 # default trigger glob would fire the Release workflow on every library tag too
 # (building nothing, then failing the empty upload). We hand-narrow the trigger in
 # release.yml to the flusso-cli tag, so dist must skip its "release.yml is out of

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.10.1...flusso-cli-v0.11.0) - 2026-07-23
+
+### Added
+
+- *(design)* install stderr logging so the listening URL prints
+- *(design)* open the designer in a browser on start
+- *(design)* React SPA + flusso design CLI subcommand
+
+### Other
+
+- *(cli)* put the designer behind a default-on feature; Docker omits it
+- document the visual schema designer
+
 ## [0.10.1](https://github.com/alias2k/flusso/compare/flusso-cli-v0.10.0...flusso-cli-v0.10.1) - 2026-06-26
 
 ### Other

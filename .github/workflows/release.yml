@@ -44,7 +44,7 @@ on:
     tags:
       # Hand-narrowed from dist's default '**[0-9]+.[0-9]+.[0-9]+*'. flusso-cli is
       # the only dist-able package, but release-plz pushes a per-crate tag for all
-      # 16 crates in lockstep; the broad glob fires this workflow on every library
+      # 17 crates in lockstep; the broad glob fires this workflow on every library
       # tag (which builds nothing, then fails the empty upload). Restricting to the
       # cli tag fires dist exactly once, on the release the binaries belong to.
       # Allowed by `allow-dirty = ["ci"]` in dist-workspace.toml (dist skips its
