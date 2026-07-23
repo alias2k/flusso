@@ -15,7 +15,16 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { ChevronsDownUp, ChevronsUpDown, Lock, Maximize2, Unlock, ZoomIn, ZoomOut } from "lucide-react";
 import { SCALAR_TYPES } from "../api";
-import { autoLayout, clearOverrides, loadOverrides, loadViewport, saveOverride, saveViewport } from "../model/layout";
+import {
+  autoLayout,
+  clearOverrides,
+  loadMinimap,
+  loadOverrides,
+  loadViewport,
+  saveMinimap,
+  saveOverride,
+  saveViewport,
+} from "../model/layout";
 import { suggestRelations } from "../model/relations";
 import { type DocNode, projectGraph } from "../model/tree";
 import { useT } from "../i18n";
@@ -34,8 +43,18 @@ export function Canvas() {
   const { schema, indexName, select, catalog, collapsed } = useDesign();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [showMap, setShowMap] = useState(false);
+  // The minimap's shown state is remembered per index. Toggling persists it, and
+  // switching index re-loads that index's preference.
+  const [showMap, setShowMap] = useState(() => loadMinimap(indexName));
   const [locked, setLocked] = useState(false);
+  useEffect(() => {
+    setShowMap(loadMinimap(indexName));
+  }, [indexName]);
+  const toggleMap = () =>
+    setShowMap((m) => {
+      saveMinimap(indexName, !m);
+      return !m;
+    });
 
   // Estimate a node's rendered height so the auto-layout reserves the right
   // vertical band (header + column rows, capped by the scroll area, + footer).
@@ -149,7 +168,7 @@ export function Canvas() {
         onReset={resetLayout}
       />
       <ViewControls />
-      <MinimapToggle showMap={showMap} onToggle={() => setShowMap((m) => !m)} />
+      <MinimapToggle showMap={showMap} onToggle={toggleMap} />
       {/* Sits under its top-left toggle (offset clears the button). */}
       {showMap && <MiniMap pannable zoomable position="top-left" style={{ marginTop: "3rem" }} />}
       <RestoreViewport index={indexName} />
