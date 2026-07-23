@@ -150,7 +150,8 @@ export function Canvas() {
       />
       <ViewControls />
       <MinimapToggle showMap={showMap} onToggle={() => setShowMap((m) => !m)} />
-      {showMap && <MiniMap pannable zoomable position="top-right" />}
+      {/* Sits under its top-left toggle (offset clears the button). */}
+      {showMap && <MiniMap pannable zoomable position="top-left" style={{ marginTop: "3rem" }} />}
       <RestoreViewport index={indexName} />
       <FocusOnRequest />
     </ReactFlow>
