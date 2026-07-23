@@ -274,6 +274,13 @@ export const it: Record<string, string> = {
   "node.addJoin": "+ relazione",
   "node.addField": "+ campo",
   "node.addColumn": "+ nome colonna, Invio",
+  "node.fieldGroup": "campi",
+  "node.aggGroup": "aggregati",
+  "node.addRelation": "{n, plural, one {# relazione suggerita} other {# relazioni suggerite}}",
+  "node.addRelationHint":
+    "Aggiungi una tabella correlata come join — cerca tra le chiavi esterne da e verso questa tabella",
+  "node.searchRelations": "cerca relazioni…",
+  "node.searchFields": "cerca campi…",
 
   // config panel
   "config.indexPrefix": "prefisso indice",

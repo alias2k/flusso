@@ -9,7 +9,9 @@ import type { CatalogResponse, Field, TableShape } from "../api";
 
 export interface RelationSuggestion {
   key: string;
-  label: string;
+  /// The related table this suggestion pulls in — shown on its own under the
+  /// verb group heading.
+  target: string;
   /// Human explanation of the FK this suggestion uses (shown as a tooltip).
   detail: string;
   verb: "belongs_to" | "has_one" | "has_many" | "many_to_many";
@@ -38,7 +40,7 @@ export function suggestRelations(catalog: CatalogResponse, fromTable: string): R
     const nullable = self?.columns.find((c) => c.name === fk.columns[0])?.nullable ?? false;
     out.push({
       key: `bt:${target}:${fk.columns[0]}`,
-      label: `${target} · belongs_to`,
+      target,
       detail: `this table's ${fk.columns[0]} → ${target}.${fk.references_columns[0] ?? "id"} (single nested object${nullable ? ", optional" : ""})`,
       verb: "belongs_to",
       build: () =>
@@ -62,7 +64,7 @@ export function suggestRelations(catalog: CatalogResponse, fromTable: string): R
       if (fk.references_table !== fromTable) continue;
       out.push({
         key: `hm:${t.name}:${fk.columns[0]}`,
-        label: `${t.name} · has_many`,
+        target: t.name,
         detail: `${t.name}.${fk.columns[0]} points back here (array of objects)`,
         verb: "has_many",
         build: () =>
@@ -89,7 +91,7 @@ export function suggestRelations(catalog: CatalogResponse, fromTable: string): R
     if (!ours || !other) continue;
     out.push({
       key: `mm:${j.table.table}:${other.references_table}`,
-      label: `${other.references_table} · many_to_many`,
+      target: other.references_table,
       detail: `through the ${j.table.table} junction (array of objects)`,
       verb: "many_to_many",
       build: () =>

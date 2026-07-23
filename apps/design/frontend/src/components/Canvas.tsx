@@ -38,8 +38,10 @@ export function Canvas() {
   const [locked, setLocked] = useState(false);
 
   // Estimate a node's rendered height so the auto-layout reserves the right
-  // vertical band (header + column rows, capped by the scroll area, + footer
-  // whose size tracks the FK suggestion count).
+  // vertical band (header + column rows, capped by the scroll area, + footer).
+  // The footer is a fixed height: the add-menu row, plus one row for the
+  // suggestion picker when the table has any FK suggestions (they collapse into
+  // a single trigger, so its size no longer tracks the suggestion count).
   const estimateHeight = (n: DocNode): number => {
     const tableCols = catalog?.catalog.tables.find((t) => t.name === n.table)?.columns ?? [];
     const catalogNames = new Set(tableCols.map((c) => c.name));
@@ -48,8 +50,8 @@ export function Canvas() {
     ).length;
     const rows = (tableCols.length || n.leaves.length) + special;
     const colsH = Math.min(rows * 36 + 12, 280);
-    const suggestions = catalog ? suggestRelations(catalog, n.table).length : 0;
-    const footerH = 76 + suggestions * 34;
+    const hasSuggestions = catalog ? suggestRelations(catalog, n.table).length > 0 : false;
+    const footerH = 76 + (hasSuggestions ? 34 : 0);
     return 64 + colsH + footerH;
   };
 
@@ -86,7 +88,7 @@ export function Canvas() {
 
   // Estimates can't know real heights, so re-run the tidy layout keyed on the
   // *measured* heights themselves: whenever a node's real height changes — the
-  // catalog loading (FK suggestions grow the footer), adding/removing a field,
+  // catalog loading (its columns fill in the rows), adding/removing a field,
   // switching index — re-tidy with the true heights. Renames/type changes don't
   // change height, so they don't reshuffle. Position-only updates don't change
   // the signature, so this never loops. Manual drags (overrides) still win.
