@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/alias2k/flusso/compare/flusso-schema-v0.12.0...flusso-schema-v0.13.0) - 2026-07-24
+
+### Added
+
+- *(schema)* parse an optional `variants` order on the enum tag
+
+### Other
+
+- document declared enum ordering
+
 ## [0.11.0](https://github.com/alias2k/flusso/compare/flusso-schema-v0.10.1...flusso-schema-v0.11.0) - 2026-07-23
 
 ### Added
