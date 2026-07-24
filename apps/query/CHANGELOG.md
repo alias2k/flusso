@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/alias2k/flusso/compare/flusso-query-v0.11.1...flusso-query-v0.12.1) - 2026-07-24
+
+### Other
+
+- release v0.11.2
+
 ## [0.11.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.10.1...flusso-query-v0.11.0) - 2026-07-23
 
 ### Other
