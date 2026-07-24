@@ -104,18 +104,18 @@ pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
     Binary, Bool, BoostMode, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
-    DisMaxQuery, Distance, DistanceFeatureQuery, DistanceType, DistanceUnit, EqQuery, FlussoMap,
-    FlussoValue, FunctionScoreQuery, Fuzziness, FuzzyQuery, Geo, GeoDistanceQuery, GeoPoint,
-    IdsQuery, Json, Keyword, KeywordMap, MapKey, MapKeySort, MapSearch, MatchQuery, MaybeOrderBy,
-    MinimumShouldMatch, Missing, MoreLikeThisQuery, MultiMatchQuery, MultiMatchType, Nested,
-    NestedProjection, NestedQuery, NestedScoreMode, NoSubfields, Number, NumberMap, NumericType,
-    Object, Operator, OrderBy, PrefixQuery, QueryStringQuery, RangeQuery, RangeRelation,
-    RankFeatureQuery, RegexpQuery, ScoreMode, ScriptQuery, ScriptScoreQuery, ScriptSortType,
-    SimpleQueryStringQuery, Sort, SortBuilder, SortMode, SortOrder, Sortable, TermQuery,
-    TermsQuery, Text, TextMap, ValidationMethod, WildcardQuery, WithSubfields, ZeroTermsQuery,
-    boosting, combined_fields, constant_score, dis_max, distance_feature, function_score, ids,
-    kind, more_like_this, multi_match, query_string, rank_feature, script, script_score,
-    simple_query_string,
+    DisMaxQuery, Distance, DistanceFeatureQuery, DistanceType, DistanceUnit, Enum, EqQuery,
+    FlussoMap, FlussoValue, FunctionScoreQuery, Fuzziness, FuzzyQuery, Geo, GeoDistanceQuery,
+    GeoPoint, IdsQuery, Json, Keyword, KeywordMap, MapKey, MapKeySort, MapSearch, MatchQuery,
+    MaybeOrderBy, MinimumShouldMatch, Missing, MoreLikeThisQuery, MultiMatchQuery, MultiMatchType,
+    Nested, NestedProjection, NestedQuery, NestedScoreMode, NoSubfields, Number, NumberMap,
+    NumericType, Object, Operator, OrderBy, PrefixQuery, QueryStringQuery, RangeQuery,
+    RangeRelation, RankFeatureQuery, RegexpQuery, ScoreMode, ScriptQuery, ScriptScoreQuery,
+    ScriptSortType, SimpleQueryStringQuery, Sort, SortBuilder, SortMode, SortOrder, Sortable,
+    TermQuery, TermsQuery, Text, TextMap, ValidationMethod, WildcardQuery, WithSubfields,
+    ZeroTermsQuery, boosting, combined_fields, constant_score, dis_max, distance_feature,
+    function_score, ids, kind, more_like_this, multi_match, query_string, rank_feature, script,
+    script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};

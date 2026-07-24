@@ -60,7 +60,7 @@ pub use sort::{
     MapKeySort, MaybeOrderBy, Missing, OrderBy, Sort, SortBuilder, SortMode, SortOrder, Sortable,
 };
 pub use string::{
-    FuzzyQuery, Keyword, MapKey, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery,
+    Enum, FuzzyQuery, Keyword, MapKey, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery,
     RegexpQuery, TermQuery, Text, WildcardQuery, WithSubfields, multi_match,
 };
 
