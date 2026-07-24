@@ -96,6 +96,13 @@ pub enum ConversionError {
          is not supported"
     )]
     NonScalarDefault { got: &'static str },
+    #[error("an `enum` field lists the variant `{variant}` more than once")]
+    DuplicateEnumVariant { variant: String },
+    #[error(
+        "the `enum` variant `{variant}` is not allowed — a variant must be non-blank and free of \
+         `=>` and newlines (it becomes an OpenSearch mapping char-filter rule)"
+    )]
+    InvalidEnumVariant { variant: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]

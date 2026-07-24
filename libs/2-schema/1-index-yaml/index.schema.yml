@@ -151,6 +151,16 @@ definitions:
       # date); an array/object/binary default is rejected at conversion.
       default:
         type: [string, number, boolean, "null"]
+      # enum (optional declared variant order — drives order-correct sort):
+      variants:
+        type: array
+        items:
+          type: string
+        description: >-
+          For an `enum` field, its variants in rank order. Optional: when given,
+          the field sorts by this order instead of alphabetically (the rank is
+          prebaked into the OpenSearch mapping). A stored value not in the list
+          sorts after the declared ones. Omit for a plain keyword.
       # custom:
       postgres:
         type: array
