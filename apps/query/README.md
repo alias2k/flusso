@@ -183,6 +183,7 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | Handle          | Operators                                                                 |
 | --------------- | ------------------------------------------------------------------------- |
 | `Keyword`       | `eq`, `any_of`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `exists`         |
+| `Enum`          | An ordered-enum keyword (a field with a declared `variants` order): `eq`, `any_of`, `exists`, `keyword()` (the full `Keyword` surface), plus `asc`/`desc` that sort by the **declared order** (not alphabetically) via the prebaked `.sort` subfield. A bare enum with no declared order is a plain `Keyword`. |
 | `Text`          | `matches`, `match_phrase`, `match_phrase_prefix`, `matches_fuzzy`, `any_of` (exact, via `.keyword`), `exists` — *no* exact `eq` (it's analyzed) |
 | `Bool`          | `eq`, `exists`, `asc`/`desc`                                              |
 | `Number`        | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
@@ -392,7 +393,9 @@ free functions: `constant_score(filter)`, `dis_max([..]).tie_breaker(..)`,
 `Text` operator (search-as-you-type).
 
 **Sort.** `.asc()`/`.desc()` on a sortable handle (number, date, keyword, bool,
-or `text` — the last routing through `.keyword_lowercase`) return a `Sort`
+`text` — the last routing through `.keyword_lowercase` — or an ordered `enum`,
+which sorts by its declared `variants` order via the prebaked `.sort` subfield)
+return a `Sort`
 builder: chain `.missing_first()`/`.missing_last()`/`.missing(v)`,
 `.mode(SortMode::..)`, `.unmapped_type(..)`/`.numeric_type(..)`/`.format(..)`, or
 `.nested(path)`/`.nested_filtered(path, q)`. Also `Sort::score()` (by `_score`),
@@ -798,7 +801,7 @@ else and it won't compile (modulo the leaf-identifier rule above).
 | `text`            | `text`     | `String`                         | `Text`          |
 | `identifier`      | `text`     | `String`                         | `Text`          |
 | `keyword`         | `keyword`  | `String` (or a `FlussoValue` newtype) | `Keyword`  |
-| `enum`            | `keyword`  | `String` or a `#[derive(FlussoValue)]` enum | `Keyword` |
+| `enum`            | `keyword`  | `String` or a `#[derive(FlussoValue)]` enum | `Enum` if it declares a `variants` order (order-correct sort), else `Keyword` |
 | `uuid`            | `keyword`  | `String`, or `uuid::Uuid` (`uuid` feature) | `Keyword` |
 | `boolean`         | `boolean`  | `bool`                           | `Bool`          |
 | `short`           | `short`    | `i16`                            | `Number<kind::Short>`   |

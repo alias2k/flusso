@@ -88,7 +88,7 @@ If you use any join or aggregate, you **must** set `primary_key` — reverse res
 | Exact match / sort / aggregation | `keyword` |
 | Natural-language search (bios, descriptions) | `text` |
 | Codes / SKUs / statuses, searchable by parts (`C-01234` ↔ `01234`) | `identifier` |
-| Closed string set | `enum` |
+| Closed string set (optionally order-sorted) | `enum` |
 | Numbers | `short` `integer` `long` `float` `double` `decimal` |
 | Time | `date` `timestamp` |
 | Other | `boolean` `uuid` `binary` `json` |
@@ -97,6 +97,8 @@ If you use any join or aggregate, you **must** set `primary_key` — reverse res
 `decimal` → OpenSearch `double` is **lossy**; when exactness matters use a `custom` `scaled_float` (see `examples/aggregate.schema.yml`). A bare column with no type defaults to `keyword`.
 
 Scalar/`geo` siblings: `required`, `column` (source column, defaults to the document key), `transforms` (`lowercase`, `trim`), `default`, `options` (extra OpenSearch mapping props).
+
+An `enum` takes an optional `variants:` list — its values in rank order (`variants: [low, medium, high]`). Given it, the field sorts by that order instead of alphabetically (the rank is prebaked into the index; the query side's `Enum` handle `.asc()`/`.desc()` uses it automatically). Omit it for a plain keyword-like enum. Variants must be unique and free of `=>`/newlines; a stored value not in the list sorts after the declared ones. Changing the list rotates the index like any schema change.
 
 ## Joins — fold a related table in. The verb names where the key lives.
 

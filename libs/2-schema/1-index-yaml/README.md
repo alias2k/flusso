@@ -28,6 +28,8 @@ validating identifiers and the arity rules YAML alone can't express:
 - `sum`/`min`/`max` aggregates need a `column` and a `value_type`
 - a `between` filter takes exactly two values
 - a `geo` field needs either `lat`+`lon` or a single `column`
+- an `enum`'s optional `variants` (its declared rank order) are unique and free
+  of `=>` / newlines
 
 > ℹ️ **Info** — the relationship verb names where the key lives: `belongs_to`
 > means this table holds the pointing column; `has_one`/`has_many` means the

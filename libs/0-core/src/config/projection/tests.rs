@@ -88,6 +88,7 @@ fn column_schema(name: &str, ty: FlussoType) -> IndexSchema {
                 nullable: false,
                 transforms: vec![],
                 default: None,
+                enum_order: Vec::new(),
             }),
         }],
     }
@@ -107,6 +108,43 @@ fn decimal_maps_to_double_but_flags_decimal() {
     let field = &m.fields[0];
     assert_eq!(field.mapping.mapping_type, MappingType::Double);
     assert!(!field.mapping.decimal, "a `double` column is not a decimal");
+}
+
+fn enum_schema(name: &str, order: Vec<String>) -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: TableName::try_new("accounts").unwrap(),
+        db_schema: DatabaseSchema::default(),
+        primary_key: None,
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![Field {
+            field: FieldName::try_new(name).unwrap(),
+            options: Default::default(),
+            source: FieldSource::Column(crate::config::Column {
+                column: ColumnName::try_new(name).unwrap(),
+                ty: FlussoType::Enum,
+                nullable: false,
+                transforms: vec![],
+                default: None,
+                enum_order: order,
+            }),
+        }],
+    }
+}
+
+#[test]
+fn enum_order_projects_onto_the_mapping_but_type_stays_keyword() {
+    let order = vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()];
+    let m = enum_schema("status", order.clone()).resolve(IndexName::try_new("accounts").unwrap());
+    let field = &m.fields[0];
+    assert_eq!(field.mapping.mapping_type, MappingType::Keyword);
+    assert_eq!(field.mapping.enum_order.as_deref(), Some(order.as_slice()));
+
+    // A bare enum (no declared order) carries no metadata — a plain keyword.
+    let m = enum_schema("kind", Vec::new()).resolve(IndexName::try_new("accounts").unwrap());
+    assert_eq!(m.fields[0].mapping.enum_order, None);
 }
 
 #[test]

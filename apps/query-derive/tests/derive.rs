@@ -130,6 +130,23 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     Ok(())
 }
 
+// A declared-order `enum` (`status` has `variants: [pending, paid, shipped,
+// delivered]`) gets the order-aware `Enum` handle: value ops still target the
+// bare keyword, but `.asc()`/`.desc()` sort on the prebaked `.sort` subfield —
+// nesting-aware, since `status` lives under the nested `orders` array.
+#[test]
+fn ordered_enum_sorts_by_declared_order_on_the_sort_subfield() -> Result {
+    let body = TypedUser::query().sort(TypedOrder::status().asc()).body();
+
+    let json = body.to_string();
+    assert!(json.contains(r#""orders.status.sort""#), "{json}");
+    assert!(
+        json.contains(r#""nested""#) && json.contains(r#""path":"orders""#),
+        "{json}"
+    );
+    Ok(())
+}
+
 // A `decimal` field's handle (`Number<kind::Decimal>`) accepts any value of that
 // kind — a `Decimal`, a losslessly-widening integer, or a `Decimal`-wrapping
 // newtype — with no cast. A float would be a compile error (lossy), which is the

@@ -150,6 +150,7 @@ that type:
 | `options` | types with a mapping | Extra OpenSearch mapping properties merged beside the derived type (e.g. `analyzer`, `format`, `scaling_factor`). |
 | `transforms` | scalar | Value transforms to apply. See [Transforms](#transforms). |
 | `default` | scalar | Value to coalesce a `null` column to. Must be a scalar (string, number, bool, or date) — an array/object/binary default is a hard error. |
+| `variants` | `enum` | Optional ordered list of the enum's values. When given, the field sorts by this rank instead of alphabetically; omit it for a plain keyword-like enum. See [Enums](#enums). |
 | `postgres` / `opensearch` | `custom` | The Postgres types accepted and the OpenSearch type emitted. |
 | `lat` / `lon` | `geo` | The two coordinate columns (two-column form). |
 | `values` | `map` | **Mandatory** — the leaf type shared by every value (a leaf kind: text/keyword/number/date). See [Maps](#maps). |
@@ -230,7 +231,7 @@ a database. Shorthand fields and columns with no `type` default to `keyword`.
 | `text` | `text`, `varchar` | `text` | Analyzed natural-language full text (descriptions, bios) — the default analyzed type. Plain tokenize + accent/case fold. |
 | `identifier` | `text`, `varchar` | `text` | Analyzed identifier-like short text (names, SKUs, codes, statuses) — splits on punctuation/case so `C-01234` is found by `C01234`, `c-01234`, or `01234`. |
 | `keyword` | `text`, `varchar` | `keyword` | Exact, aggregatable. |
-| `enum` | `text`, `varchar`, PG enum | `keyword` | A closed string set stored as text, indexed exactly. |
+| `enum` | `text`, `varchar`, PG enum | `keyword` | A closed string set stored as text, indexed exactly. Add `variants` for order-correct sort — see [Enums](#enums). |
 | `uuid` | `uuid` | `keyword` | |
 | `boolean` | `boolean` | `boolean` | |
 | `short` | `smallint` / `int2` | `short` | |
@@ -293,6 +294,33 @@ search.) Both apply only to scalar column fields, and an explicit `analyzer` in
 `options` always wins over the type's default. The analyzers themselves are
 documented in
 [Index analysis & subfields](configuration.md#index-analysis--subfields).
+
+#### Enums
+
+An `enum` is a `keyword` for a closed set of string values. On its own it sorts
+alphabetically — but a status/severity/tier enum usually has a **semantic order**
+that isn't alphabetical (`low < medium < high`, not `high < low < medium`). Give
+it a `variants` list, in rank order, and the field sorts by that order instead:
+
+```yaml
+- enum: severity
+  required: true
+  variants: [low, medium, high, critical]   # low sorts first, critical last
+```
+
+- **Optional and backward-compatible.** Omit `variants` and the field is a plain
+  `keyword` — unchanged. Add it and sorting becomes order-correct.
+- **How it works.** The rank is prebaked into the OpenSearch index: the field
+  gains a `.sort` subfield whose value is each variant's rank, so sorting is a
+  plain, fast field sort — no runtime script. Filtering (`eq`, `any_of`, …) still
+  targets the value itself.
+- **Values outside the list** sort *after* every declared variant (lexicographically
+  among themselves). Declared values always sort exactly by rank.
+- **Changing the order** rewrites the index mapping, so — like any schema change —
+  it rotates the index generation and re-seeds on the next run.
+- **Sorting from the query side** is automatic: the typed `Enum` handle's
+  `.asc()`/`.desc()` already targets the `.sort` subfield. See
+  [Querying](querying.md).
 
 ### Geo points
 

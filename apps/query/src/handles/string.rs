@@ -460,6 +460,95 @@ macro_rules! keyword_sortable {
 keyword_sortable!(WithSubfields);
 keyword_sortable!(NoSubfields);
 
+/// An `enum` field with a declared variant order (`- enum: status` +
+/// `variants: [...]`). It is a `keyword` in every respect — the value ops and
+/// (via [`keyword`](Self::keyword)) the full keyword surface all apply — but its
+/// `.asc()` / `.desc()` sort by the **declared order**, not alphabetically.
+///
+/// The order is prebaked into the index: the field carries a `.sort` subfield
+/// whose normalizer maps each variant to its rank, so a bare
+/// `Ticket::status().asc()` is order-correct with no script. A value not in the
+/// declared set sorts after the known variants.
+///
+/// A bare `enum` with no declared `variants` is a plain [`Keyword`] instead
+/// (the derive only emits `Enum` when an order is declared).
+#[derive(Debug, Clone)]
+pub struct Enum<S = Root, Sub = WithSubfields> {
+    path: String,
+    _marker: PhantomData<fn() -> (S, Sub)>,
+}
+
+impl<S, Sub> Enum<S, Sub> {
+    fn handle(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// The underlying [`Keyword`] handle — the full exact-string surface
+    /// (`eq`/`any_of`/`prefix`/`wildcard`/`regexp`/`fuzzy`/`exists`, plus the
+    /// subfield accessors when `Sub = WithSubfields`). The enum adds only the
+    /// order-aware sort on top.
+    pub fn keyword(&self) -> Keyword<S, Sub> {
+        Keyword::handle(self.path.clone())
+    }
+
+    /// Exact match. Accepts a `String`/`&str` or a `#[derive(FlussoValue)]`
+    /// keyword enum/newtype — matched against its serde string form.
+    pub fn eq(&self, value: impl FlussoValue<kind::Keyword>) -> TermQuery<S> {
+        self.keyword().eq(value)
+    }
+
+    /// Match any of the given values.
+    pub fn any_of(
+        &self,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword>>,
+    ) -> TermsQuery<S> {
+        self.keyword().any_of(values)
+    }
+
+    /// The field has a non-null value.
+    pub fn exists(&self) -> Query<S> {
+        self.keyword().exists()
+    }
+}
+
+impl<S> Enum<S, WithSubfields> {
+    /// A handle for an enum whose keyword carries flusso's auto subfields.
+    pub fn at(path: impl Into<String>) -> Self {
+        Self::handle(path)
+    }
+}
+
+impl<S> Enum<S, NoSubfields> {
+    /// A handle for an enum whose keyword has no auto subfields.
+    pub fn leaf(path: impl Into<String>) -> Self {
+        Self::handle(path)
+    }
+}
+
+/// The declared order sorts on the prebaked `.sort` subfield (a rank-mapped
+/// keyword), nesting-aware like any field sort.
+impl<S: FlussoDocument, Sub> Sortable for Enum<S, Sub> {
+    fn asc(&self) -> Sort {
+        Sort::field::<S>(
+            &format!("{}.{ENUM_SORT_SUBFIELD}", self.path),
+            SortOrder::Asc,
+        )
+    }
+    fn desc(&self) -> Sort {
+        Sort::field::<S>(
+            &format!("{}.{ENUM_SORT_SUBFIELD}", self.path),
+            SortOrder::Desc,
+        )
+    }
+}
+
+/// The subfield the OpenSearch sink prebakes an ordered enum's rank into; sorting
+/// an [`Enum`] targets it (kept in sync with the sink's `ENUM_SORT_SUBFIELD`).
+const ENUM_SORT_SUBFIELD: &str = "sort";
+
 impl<S> Keyword<S, MapKey> {
     /// A handle for one key of a dynamic-key `map` (see [`MapKey`]). The value
     /// ops apply; the subfield accessors and direct sort do not.

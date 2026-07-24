@@ -14,8 +14,11 @@ fields:
   - integer: userId
     column: user_id
     required: true
+  # A declared variant order: the order lifecycle, so sorting by `status` runs
+  # pending → paid → shipped → delivered → cancelled, not alphabetically.
   - enum: status
     required: true
+    variants: [pending, paid, shipped, delivered, cancelled]
   - decimal: total
     required: true
 

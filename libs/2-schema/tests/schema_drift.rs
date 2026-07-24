@@ -205,6 +205,7 @@ fn scalar_type_tokens() -> BTreeSet<String> {
 fn body_sibling_keys() -> BTreeSet<String> {
     fn _guards(
         s: schema_index_yaml::ScalarBody,
+        e: schema_index_yaml::EnumBody,
         c: schema_index_yaml::CustomBody,
         g: schema_index_yaml::GeoBody,
         o: schema_index_yaml::ObjectBody,
@@ -222,6 +223,15 @@ fn body_sibling_keys() -> BTreeSet<String> {
             transforms: _,
             default: _,
         } = s;
+        let schema_index_yaml::EnumBody {
+            field: _,
+            variants: _,
+            column: _,
+            required: _,
+            options: _,
+            transforms: _,
+            default: _,
+        } = e;
         let schema_index_yaml::CustomBody {
             field: _,
             postgres: _,
@@ -283,7 +293,8 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "required",
         "options",
         "transforms",
-        "default", // scalar
+        "default",  // scalar
+        "variants", // enum (declared order)
         "postgres",
         "opensearch", // custom
         "lat",

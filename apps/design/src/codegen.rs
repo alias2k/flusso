@@ -116,6 +116,13 @@ fn column_field(name: &str, column: &Column, body: &mut Mapping) -> Result<&'sta
         body.insert(Value::from("column"), Value::from(column.column.as_ref()));
     }
     body.insert(Value::from("required"), Value::from(!column.nullable));
+    // An enum's declared variant order (empty for a bare enum / non-enum column).
+    if !column.enum_order.is_empty() {
+        body.insert(
+            Value::from("variants"),
+            serde_yaml::to_value(&column.enum_order)?,
+        );
+    }
     if !column.transforms.is_empty() {
         body.insert(
             Value::from("transforms"),

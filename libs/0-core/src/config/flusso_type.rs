@@ -25,7 +25,9 @@ pub enum FlussoType {
     /// Exact, aggregatable token. PG `text` / `varchar` → OS `keyword`.
     Keyword,
     /// A closed set of string values — stored as text in Postgres (a `varchar`
-    /// or a PG `enum`), indexed exactly as a `keyword`.
+    /// or a PG `enum`), indexed exactly as a `keyword`. An optional declared
+    /// variant order (on the field's [`Column`](super::Column), not here) makes
+    /// it sort by that order rather than alphabetically.
     Enum,
     /// PG `uuid` → OS `keyword`.
     Uuid,

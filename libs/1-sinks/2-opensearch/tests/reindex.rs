@@ -105,6 +105,7 @@ fn mapping() -> IndexMapping {
             extra: BTreeMap::new(),
             map_values: None,
             decimal: false,
+            enum_order: None,
         },
         nullable: true,
         array: false,

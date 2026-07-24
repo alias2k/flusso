@@ -352,7 +352,14 @@ flags it). A `map:` field (`values:` = the shared leaf type) is a dynamic-key ob
 injected into options (so runtime keys stay searchable); the resolved `Mapping.map_values`
 carries the value kind, which is the only thing distinguishing a `map` from a plain
 `object`/`json`. `values` must be a leaf kind (text/keyword/number/date); the conversion
-rejects others. Parsing lives in
+rejects others. An `enum:` field takes an optional `variants:` list (its own
+`EnumBody`/`Field::Enum` entity) — the variants in rank order; empty/omitted = a
+plain keyword. It lands on `Column.enum_order` (**not** on `FlussoType::Enum`,
+which stays a unit variant so `value_type: enum` keeps working and the lock
+round-trips), projected to `Mapping.enum_order`. The OpenSearch sink prebakes the
+rank into a `.sort` keyword subfield via a per-field `mapping` char-filter
+normalizer (variant → zero-padded rank), so an ordered enum sorts by declared
+order with no script; out-of-set values sort after. Parsing lives in
 `libs/2-schema/1-index-yaml/src/entities/field.rs`; the core model is `schema_core::FieldSource`
 (`Join.kind: JoinKind`, with reverse resolution per kind in
 `libs/1-sources/1-postgres/src/document/resolve.rs`).
@@ -380,6 +387,13 @@ map arm hard-checks a `HashMap` value type and defers a `FlussoMap<kind>` bound 
 `handle_fn` dispatches on `Mapping.map_values` (`Text`→`TextMap`, `Keyword`→`KeywordMap`,
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (`dynamic_templates` per-key
 analyzers for per-language stemming) is deferred.
+
+**Ordered enums (issue #87).** A keyword mapping with `Mapping.enum_order` set gets the
+`Enum<S, Sub>` handle (`handles/string.rs`) instead of `Keyword`: same value ops (delegated;
+`.keyword()` exposes the full keyword surface), but `.asc()`/`.desc()` sort on the prebaked
+`{field}.sort` subfield — a plain, nesting-aware field sort, **no script** — so the enum
+sorts by declared order. `handle_fn` branches the `Keyword` arm on `enum_order.is_some()`;
+`check_type` is unchanged (still keyword-kind). A bare enum stays `Keyword`.
 
 **Sorting a `map` by key, with language fallback (issue #58).** `Type::field().sort_key("it").or("en")`
 reads as "sort by `it`, else `en`" and returns a `MapKeySort` (`handles/sort.rs`) that implements

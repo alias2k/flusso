@@ -15,6 +15,7 @@ use crate::entities;
 pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError> {
     match f {
         entities::Field::Scalar(ty, body) => convert_scalar(ty, body),
+        entities::Field::Enum(body) => convert_enum(body),
         entities::Field::Geo(body) => convert_geo(body),
         entities::Field::Object(body) => {
             let fields = body
@@ -60,6 +61,7 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             nullable: !body.required,
             transforms,
             default: convert_default(body.default)?,
+            enum_order: Vec::new(),
         }),
     })
 }
@@ -109,8 +111,58 @@ fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
             nullable: !body.required,
             transforms: Vec::new(),
             default: None,
+            enum_order: Vec::new(),
         }),
     })
+}
+
+/// An `enum:` scalar. Its declared `variants` order (empty for a plain keyword
+/// alias) is validated and lands on the column as `enum_order`; everything else
+/// is a normal scalar leaf.
+fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
+    validate_enum_order(&body.variants)?;
+    let column = match body.column {
+        Some(column) => column,
+        None => default_column(&body.field)?,
+    };
+    let (ty, options) = resolve_column_type(FlussoType::Enum, convert_options(body.options));
+    let transforms = body
+        .transforms
+        .map(|ts| ts.into_iter().map(convert_transform).collect())
+        .unwrap_or_default();
+    Ok(Field {
+        field: body.field,
+        options,
+        source: FieldSource::Column(Column {
+            column,
+            ty,
+            nullable: !body.required,
+            transforms,
+            default: convert_default(body.default)?,
+            enum_order: body.variants,
+        }),
+    })
+}
+
+/// Validate a declared `enum` order. Empty means "no declared order" (a plain
+/// keyword) and is fine. Otherwise every variant must be non-blank and free of
+/// `=>` / newlines — it becomes a rule in the OpenSearch `mapping` char filter
+/// that prebakes the sort rank — and no variant may repeat.
+fn validate_enum_order(order: &[String]) -> Result<(), ConversionError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for variant in order {
+        if variant.trim().is_empty() || variant.contains("=>") || variant.contains('\n') {
+            return Err(ConversionError::InvalidEnumVariant {
+                variant: variant.clone(),
+            });
+        }
+        if !seen.insert(variant.as_str()) {
+            return Err(ConversionError::DuplicateEnumVariant {
+                variant: variant.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A `map`'s `values` must be a leaf kind that has a typed query surface —
@@ -162,6 +214,7 @@ fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
                 nullable: !body.required,
                 transforms: Vec::new(),
                 default: None,
+                enum_order: Vec::new(),
             })
         }
         _ => return Err(ConversionError::InvalidGeoSource),

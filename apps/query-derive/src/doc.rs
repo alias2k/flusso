@@ -587,6 +587,9 @@ fn handle_fn(
     };
 
     let (ret, ctor) = match &resolved.mapping.mapping_type {
+        // A keyword with a declared enum order gets the order-aware `Enum` handle
+        // (sorts on the prebaked `.sort` subfield); a bare keyword stays `Keyword`.
+        MappingType::Keyword if resolved.mapping.enum_order.is_some() => string_handle("Enum"),
         MappingType::Keyword => string_handle("Keyword"),
         MappingType::Text => string_handle("Text"),
         MappingType::Boolean => simple("Bool"),

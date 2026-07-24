@@ -505,6 +505,7 @@ async fn transforms_and_defaults_apply() {
             nullable: true,
             transforms: vec![Transform::Trim, Transform::Lowercase],
             default: None,
+            enum_order: Vec::new(),
         }),
         ..base("email")
     };
@@ -515,6 +516,7 @@ async fn transforms_and_defaults_apply() {
             nullable: true,
             transforms: Vec::new(),
             default: Some(GenericValue::String("(no bio)".into())),
+            enum_order: Vec::new(),
         }),
         ..base("bio")
     };
@@ -968,6 +970,7 @@ fn col(name: &str, source_column: &str) -> Field {
             nullable: true,
             transforms: Vec::new(),
             default: None,
+            enum_order: Vec::new(),
         }),
         ..base(name)
     }

@@ -41,7 +41,7 @@ only narrow. (`orders` has no `text` field, so no `q`.)
 | `GET /users/{id}` | — (fetch one) |
 | `GET /products` | `q` (full-text over `name` + `description`), `sku`, `name` (full-text), `in_stock`, `min_reviews`, `min_rating`, `limit` |
 | `GET /products/{id}` | — (fetch one) |
-| `GET /orders` | `user_id`, `status`, `min_total`, `min_items`, `limit` |
+| `GET /orders` | `user_id`, `status`, `min_total`, `min_items`, `sort` (`status` → the declared enum lifecycle `pending → paid → shipped → delivered → cancelled`; else biggest `total` first), `limit` |
 | `GET /orders/{id}` | — (fetch one) |
 | `GET /health` | — |
 
@@ -55,6 +55,10 @@ curl 'localhost:8080/users?q=ada&min_orders=5&tier=pro&city=London&recent_orders
 curl 'localhost:8080/users?sort_spend=desc&sort_recent_order=desc'
 curl 'localhost:8080/products?q=keyboard&in_stock=true&min_rating=4'
 curl 'localhost:8080/orders?status=delivered&min_total=100'
+
+# Sort by the declared enum order (pending → paid → shipped → delivered →
+# cancelled), not alphabetically — an ordered `enum`, so `.asc()` uses the rank:
+curl 'localhost:8080/orders?sort=status'
 
 # Fetch one document by id (404 if absent):
 curl 'localhost:8080/users/1'

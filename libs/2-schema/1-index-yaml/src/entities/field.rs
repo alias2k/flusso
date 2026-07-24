@@ -26,6 +26,8 @@ use super::{AggregateOp, Filter, JoinVerb, OrderBy, Through, Transform};
 pub enum Field {
     /// A scalar leaf reading a column, with its declared [`FlussoType`].
     Scalar(FlussoType, ScalarBody),
+    /// An `enum:` scalar with an optional declared variant order.
+    Enum(EnumBody),
     /// A geographic point (`geo:`).
     Geo(GeoBody),
     /// A same-row sub-object (`object:`).
@@ -46,6 +48,28 @@ pub enum Field {
 #[serde(deny_unknown_fields)]
 pub struct ScalarBody {
     pub field: common::FieldName,
+    #[serde(default)]
+    pub column: Option<common::ColumnName>,
+    pub required: bool,
+    #[serde(default)]
+    pub options: BTreeMap<String, serde_yaml::Value>,
+    #[serde(default)]
+    pub transforms: Option<Vec<Transform>>,
+    #[serde(default)]
+    pub default: Option<serde_yaml::Value>,
+}
+
+/// An `enum:` scalar — a closed set of string values with an optional declared
+/// `variants` order. Converted into a [`Field::Scalar`] with a
+/// [`FlussoType::Enum`]; an empty `variants` is a plain keyword alias.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnumBody {
+    pub field: common::FieldName,
+    /// The variants in rank order. Optional: when given, the field sorts by this
+    /// order instead of alphabetically; omitted, the enum is a plain keyword.
+    #[serde(default)]
+    pub variants: Vec<String>,
     #[serde(default)]
     pub column: Option<common::ColumnName>,
     pub required: bool,
@@ -184,6 +208,7 @@ pub struct ConstantBody {
 /// Which kind of field a type tag denotes.
 enum TagKind {
     Scalar(FlussoType),
+    Enum,
     Custom,
     Geo,
     Object,
@@ -199,6 +224,7 @@ fn classify(key: &str) -> Option<TagKind> {
         return Some(TagKind::Scalar(ty));
     }
     Some(match key {
+        "enum" => TagKind::Enum,
         "custom" => TagKind::Custom,
         "geo" => TagKind::Geo,
         "object" => TagKind::Object,
@@ -225,7 +251,6 @@ fn scalar_type(key: &str) -> Option<FlussoType> {
         "text" => FlussoType::Text,
         "identifier" => FlussoType::Identifier,
         "keyword" => FlussoType::Keyword,
-        "enum" => FlussoType::Enum,
         "uuid" => FlussoType::Uuid,
         "boolean" => FlussoType::Boolean,
         "short" => FlussoType::Short,
@@ -324,6 +349,7 @@ impl<'de> Deserialize<'de> for Field {
 
         Ok(match kind {
             TagKind::Scalar(ty) => Field::Scalar(ty, body_from(body, tag, &name_str)?),
+            TagKind::Enum => Field::Enum(body_from(body, tag, &name_str)?),
             TagKind::Custom => {
                 let c: CustomBody = body_from(body, tag, &name_str)?;
                 Field::Scalar(

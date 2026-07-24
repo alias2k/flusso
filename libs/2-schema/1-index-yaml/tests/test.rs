@@ -65,6 +65,60 @@ fn minimal_schema() {
     ));
 }
 
+// ── enum declared order ──────────────────────────────────────────────────────
+
+#[test]
+fn enum_variants_land_on_the_column_in_order() {
+    let schema = convert(
+        "version: 1\ntable: t\nfields:\n  - enum: status\n    required: true\n    variants: [low, medium, high]",
+    )
+    .unwrap();
+    match &field(&schema, "status").source {
+        FieldSource::Column(Column { ty, enum_order, .. }) => {
+            assert_eq!(*ty, FlussoType::Enum);
+            assert_eq!(enum_order, &["low", "medium", "high"]);
+        }
+        other => panic!("expected a column, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_enum_has_no_declared_order() {
+    let schema =
+        convert("version: 1\ntable: t\nfields:\n  - enum: status\n    required: true").unwrap();
+    match &field(&schema, "status").source {
+        FieldSource::Column(Column { ty, enum_order, .. }) => {
+            assert_eq!(*ty, FlussoType::Enum);
+            assert!(enum_order.is_empty(), "a bare enum declares no order");
+        }
+        other => panic!("expected a column, got {other:?}"),
+    }
+}
+
+#[test]
+fn enum_rejects_duplicate_variants() {
+    let err = convert(
+        "version: 1\ntable: t\nfields:\n  - enum: status\n    required: true\n    variants: [low, low]",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ConversionError::DuplicateEnumVariant { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn enum_rejects_variant_with_mapping_arrow() {
+    let err = convert(
+        "version: 1\ntable: t\nfields:\n  - enum: status\n    required: true\n    variants: [\"a => b\"]",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ConversionError::InvalidEnumVariant { .. }),
+        "got {err:?}"
+    );
+}
+
 // ── each field kind converts to the right source ─────────────────────────────
 
 #[test]
