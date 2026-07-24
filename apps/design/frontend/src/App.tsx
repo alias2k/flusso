@@ -819,8 +819,8 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col">
-      <header className="topbar grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-b border-border bg-card px-4 py-2.5">
-        <div className="flex min-w-0 items-center gap-3">
+      <header className="topbar flex items-center gap-3 border-b border-border bg-card px-4 py-2.5">
+        <div className="flex flex-1 items-center gap-3">
           <Hint label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}>
             <Button
               variant="ghost"
@@ -854,7 +854,7 @@ export default function App() {
         <button
           type="button"
           onClick={() => setPaletteOpen(true)}
-          className="flex h-8 w-72 max-w-[32vw] min-w-0 shrink cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
+          className="flex h-8 w-72 min-w-0 shrink cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
           style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 55%), var(--panel-2)" }}
         >
           <GlowDot />
@@ -862,7 +862,7 @@ export default function App() {
           <Kbd className="ml-auto">⌘K</Kbd>
         </button>
 
-        <div className="flex min-w-0 items-center justify-end gap-3">
+        <div className="flex flex-1 items-center justify-end gap-3">
           {/* global: edit history */}
           <Hint label={t("topbar.undo")}>
             <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
