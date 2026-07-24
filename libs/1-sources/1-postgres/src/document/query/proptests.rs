@@ -226,6 +226,7 @@ fn field_source() -> impl Strategy<Value = FieldSource> {
                 nullable: true,
                 transforms,
                 default,
+                enum_order: Vec::new(),
             })),
         (column(), column()).prop_map(|(lat, lon)| FieldSource::Geo(Geo {
             lat,

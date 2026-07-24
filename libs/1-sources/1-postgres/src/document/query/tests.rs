@@ -32,6 +32,7 @@ fn col_field(name: &str, column: &str) -> Field {
             nullable: true,
             transforms: Vec::new(),
             default: None,
+            enum_order: Vec::new(),
         }),
     }
 }

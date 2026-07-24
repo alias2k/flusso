@@ -60,6 +60,13 @@ pub struct Column {
     pub transforms: Vec<Transform>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<common::GenericValue>,
+    /// For an [`Enum`](FlussoType::Enum) column, its variants in rank order;
+    /// empty for a bare enum or any non-enum column. When non-empty the field
+    /// sorts by this order instead of alphabetically — the OpenSearch sink
+    /// prebakes the rank into a `.sort` subfield. Belongs on the column, not the
+    /// [`FlussoType`], because it is a property of this specific field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_order: Vec<String>,
 }
 
 /// A geographic point built from two same-row columns. Resolves to an
@@ -191,6 +198,14 @@ pub struct Mapping {
     ///
     /// [`FlussoType::Decimal`]: super::FlussoType::Decimal
     pub decimal: bool,
+    /// For an [`Enum`](super::FlussoType::Enum) field with a declared order, its
+    /// variants in rank order; `None` for a bare enum or any other field. The
+    /// OpenSearch sink turns it into a `.sort` subfield (a per-field normalizer
+    /// remapping each variant to a zero-padded rank) so the field sorts by
+    /// declared order rather than alphabetically; a consumer building typed
+    /// bindings uses it to offer an order-aware sort handle. Internal metadata —
+    /// the enum itself is still serialized as a plain `keyword`.
+    pub enum_order: Option<Vec<String>>,
 }
 
 /// Serializes the way OpenSearch expects a field mapping — `{ "type": …, …extra }`

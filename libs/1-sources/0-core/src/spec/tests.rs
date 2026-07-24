@@ -21,6 +21,7 @@ fn column_field(name: &str) -> Field {
             nullable: false,
             transforms: Vec::new(),
             default: None,
+            enum_order: Vec::new(),
         }),
     }
 }
@@ -44,6 +45,7 @@ fn schema(table: &str) -> IndexSchema {
                 nullable: false,
                 transforms: Vec::new(),
                 default: None,
+                enum_order: Vec::new(),
             }),
         }],
     }

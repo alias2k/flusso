@@ -91,6 +91,7 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
                 nullable,
                 transforms,
                 default: None,
+                enum_order: Vec::new(),
             })
         })
         .boxed()
@@ -111,6 +112,7 @@ fn map_source() -> BoxedStrategy<FieldSource> {
                 nullable,
                 transforms: Vec::new(),
                 default: None,
+                enum_order: Vec::new(),
             })
         })
         .boxed()
@@ -132,6 +134,7 @@ fn custom_source() -> BoxedStrategy<FieldSource> {
                 nullable,
                 transforms: Vec::new(),
                 default: None,
+                enum_order: Vec::new(),
             })
         })
         .boxed()

@@ -57,6 +57,7 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
         extra: field.options.clone(),
         map_values: map_value_type(field),
         decimal: is_decimal(field),
+        enum_order: enum_order(field),
     };
 
     ResolvedField {
@@ -77,6 +78,20 @@ fn map_value_type(field: &Field) -> Option<MappingType> {
             ty: FlussoType::Map { values },
             ..
         }) => Some(values.opensearch()),
+        _ => None,
+    }
+}
+
+/// The declared variant order of an [`Enum`](FlussoType::Enum) column field, or
+/// `None` for a bare enum (empty order) or any other field. Drives the
+/// order-aware `.sort` subfield the OpenSearch sink emits.
+fn enum_order(field: &Field) -> Option<Vec<String>> {
+    match &field.source {
+        FieldSource::Column(Column {
+            ty: FlussoType::Enum,
+            enum_order,
+            ..
+        }) if !enum_order.is_empty() => Some(enum_order.clone()),
         _ => None,
     }
 }

@@ -711,6 +711,7 @@ fn col_full(
             nullable: true,
             transforms,
             default,
+            enum_order: Vec::new(),
         }),
     }
 }
