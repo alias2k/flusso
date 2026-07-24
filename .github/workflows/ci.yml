@@ -88,8 +88,16 @@ jobs:
       # cargo-fuzz needs nightly (sanitizer/coverage instrumentation). The
       # repo's rust-toolchain.toml pins stable; the explicit `+nightly` below
       # overrides it just for the fuzz invocation.
+      #
+      # Pinned to a dated nightly, not floating `@nightly`: the 2026-07-23
+      # nightly ICEs in codegen when building tokio under ASan
+      # (rustc_codegen_ssa operand.rs "not immediate"), which broke this job on
+      # every run with no code change. Bump this date once a later nightly is
+      # confirmed to compile the fuzz target again.
       - name: Install Rust (nightly)
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-22
 
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@v2
@@ -113,7 +121,7 @@ jobs:
       # the fuzzer needs ("sanitizer is incompatible with statically linked libc").
       - name: Fuzz pgoutput decoder (60s)
         working-directory: libs/1-sources/1-postgres
-        run: cargo +nightly fuzz run pgoutput_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60
+        run: cargo +nightly-2026-07-22 fuzz run pgoutput_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60
 
       - name: Upload crash artifacts
         if: failure()
