@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, ChevronRight, Plus, X } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronRight, Link2, Plus, X } from "lucide-react";
 import type { ColumnShape } from "../api";
 import { useT } from "../i18n";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
@@ -423,6 +423,43 @@ export function ColumnPicker({
     label: c.name,
     description: c.sql_type,
     className: typeClass((c.suggested_type ?? c.sql_type) as string),
+  }));
+  return (
+    <Combobox
+      value={value}
+      options={options}
+      allowCustom
+      onChange={onChange}
+      placeholder={placeholder}
+      className={className}
+    />
+  );
+}
+
+/// The shared table picker: a [`Combobox`] over catalog table names, marking
+/// junction tables with a link glyph so many-to-many `through` picks are
+/// obvious. `allowCustom` for offline / hand-typed names.
+export function TablePicker({
+  value,
+  tables,
+  junctions,
+  onChange,
+  placeholder,
+  className,
+}: {
+  value: string;
+  tables: string[];
+  junctions?: ReadonlySet<string>;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const { t } = useT();
+  const options = tables.map((name) => ({
+    value: name,
+    label: name,
+    icon: junctions?.has(name) ? <Link2 className="size-3.5" /> : undefined,
+    description: junctions?.has(name) ? t("catalog.junction") : undefined,
   }));
   return (
     <Combobox
