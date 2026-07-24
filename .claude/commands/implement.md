@@ -1,8 +1,13 @@
 ---
-description: Implement a GitHub issue end-to-end — branch, logical commits, CI checks, open PR
+description: Implement a GitHub issue end-to-end — grill, open a draft plan PR with a live checklist, tick it off as you go, ready when green
 ---
 
 Implement GitHub issue **#$ARGUMENTS** from start to finish.
+
+The shape of this flow: **open a draft PR up front** whose body is a short description plus a
+**checklist** of the work, then **tick each box as it lands** (committing and pushing per unit) so
+the PR is a live progress tracker — not a big reveal at the end. Mark it **ready for review** once
+every box is checked and CI-parity is green.
 
 ## 1. Read the issue
 
@@ -24,6 +29,8 @@ to pin down the solution. This is the most important step — be relentless, not
   hidden assumptions and force a decision on each. Prefer `AskUserQuestion` for crisp forks.
 - Do NOT stop grilling until the solution is fully specified and unambiguous — you should be able
   to state exactly what you'll build, where, and why, with no open "it depends". Only then move on.
+- If the user asks to review the plan first, it's fine to open the draft PR (step 4) with the plan
+  **before** writing any code, and wait for their go-ahead.
 
 ## 3. Branch
 
@@ -32,9 +39,37 @@ to pin down the solution. This is the most important step — be relentless, not
   derived from the issue (e.g. `fix/query-log-search-body`).
 - `git checkout -b <type>/<slug>`.
 
-## 4. Implement with logical commits
+## 4. Open the plan PR up front — draft, short body, checklist
 
-- Do the work in meaningful chunks; commit each coherent unit as you go (not one giant commit).
+Open the PR **now**, before (or alongside) the first commit, as the living tracker:
+
+- Push the branch (an empty commit is fine to get it started): `git push -u origin <branch>`.
+- `gh pr create --draft --title "<title>" --body "<body>"`.
+- **Keep the body short** — a plain description plus a checklist, no wall of jargon:
+  - A few lines: what the change does and the settled approach (the decisions from step 2).
+  - `Closes #$ARGUMENTS`.
+  - A `## To implement` **checklist** (`- [ ]` per line) covering the areas the change touches —
+    typically one box per layer/step below that actually applies (core → parse/convert → sink →
+    query/derive → editor JSON schema → designer + i18n → docs → plugin → tests + CI). Only list
+    what applies.
+  - A `## Follow-ups (out of scope)` list for anything deferred (file the issues and link them).
+  - End with:
+    ```
+    🤖 Generated with [Claude Code](https://claude.com/claude-code)
+    ```
+- Report the PR URL back.
+
+The checklist lives in the **PR body** (not an issue comment). If you verified a key assumption
+(e.g. a probe against a live service), a one-line note in the body earns trust — keep it terse.
+
+## 5. Implement, ticking the checklist as you go
+
+Work the checklist top-down. For each item:
+
+- Do the work in a meaningful, self-contained chunk; **commit it** (not one giant end commit) and
+  **push**.
+- **Tick its box on the PR** (`- [ ]` → `- [x]`, via `gh pr edit --body-file …`) as soon as it
+  lands, so the PR reflects real progress.
 - **Run `cargo fmt --all` before *every* commit** and stage the result, so no commit lands
   unformatted (the verify step's `cargo fmt --all --check` then has nothing to flag).
 - **Conventional Commits** style, matching this repo's history: `fix(query): …`, `feat(engine): …`,
@@ -43,7 +78,9 @@ to pin down the solution. This is the most important step — be relentless, not
 - Keep `CLAUDE.md` current in the *same* change if you alter crate layout, commands, engine
   invariants, lint policy, or config/schema format (per its "Keeping this file current" rule).
 
-## 5. Align the editor LSP schemas (if the format changed)
+Steps 6–9 below describe what specific checklist items entail; tick each as it completes.
+
+## 6. Align the editor LSP schemas (if the format changed)
 
 If the change touched `flusso.toml` or `*.schema.yml` format — a new key, field type tag, field
 sibling, enum token, sink field, default, or description — update the hand-curated JSON Schemas
@@ -60,7 +97,7 @@ it does **not** check descriptions, defaults, the permissive `field` union, or i
 `guides/schema-authoring.md` (the documentation step) — and a format change is exactly what the
 designer must also support (next step).
 
-## 6. Align the visual designer + translations (if it touched the authored surface)
+## 7. Align the visual designer + translations (if it touched the authored surface)
 
 The designer (`apps/design`) is part of the product surface — a feature isn't done until the
 designer can author it and its UI is fully translated. If the change added/altered anything a
@@ -78,7 +115,7 @@ sink option, a source/sink capability):
   apps/design/frontend run build`, then commit `apps/design/dist/` (the dist-drift guard fails
   otherwise).
 
-## 7. Update the documentation — code + every README, fully
+## 8. Update the documentation — code + every README, fully
 
 Bring **all** docs up to date so nothing lags the change. Do this **before** the plugin — docs are
 the source of truth the plugin's skills teach from.
@@ -96,7 +133,7 @@ the source of truth the plugin's skills teach from.
 - Don't forget `CLAUDE.md` itself (its "Keeping this file current" rule) if layout/commands/
   invariants/format changed.
 
-## 8. Update the flusso Claude plugin
+## 9. Update the flusso Claude plugin
 
 With the docs settled, bring the repo's own Claude plugin under `plugin/` in lockstep:
 
@@ -108,20 +145,21 @@ With the docs settled, bring the repo's own Claude plugin under `plugin/` in loc
   anything a skill teaches, update the affected skill/agent/example so the plugin can't teach
   something now wrong. New capability worth surfacing → add/extend a skill.
 
-## 9. Verify — full CI parity before opening the PR
+## 10. Verify — full CI parity
 
-Run, in order, and fix anything that fails before proceeding:
+Run, in order, and fix anything that fails before marking the PR ready:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace
 cargo check --workspace --all-targets
-cargo nextest run --run-ignored all   # needs a running Docker daemon for the e2e tests
-cargo test --doc
+cargo nextest run --workspace --run-ignored all   # needs a running Docker daemon for the e2e tests
+cargo test --doc --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-If you touched the designer (step 6), also run its guards:
+Note: `--workspace` matters — `default-members = ["apps/cli"]`, so a bare `cargo nextest run` /
+`cargo test --doc` only touches the CLI. If you touched the designer (step 7), also run its guards:
 
 ```sh
 npm --prefix apps/design/frontend ci
@@ -132,19 +170,9 @@ npm --prefix apps/design/frontend run build        # then `git diff --exit-code 
 If Docker isn't available for the `--run-ignored all` step, say so explicitly rather than
 silently skipping it.
 
-## 10. Open the PR
+## 11. Mark the PR ready for review
 
-- Push the branch: `git push -u origin <branch>`.
-- Open the PR directly (no confirmation step needed):
-  ```sh
-  gh pr create --title "<title>" --body "<body>"
-  ```
-- PR body must:
-  - **Describe the solution** — what changed and why, the approach taken, anything reviewers
-    should know (trade-offs, follow-ups).
-  - Link and close the issue: include `Closes #$ARGUMENTS`.
-  - End with:
-    ```
-    🤖 Generated with [Claude Code](https://claude.com/claude-code)
-    ```
-- Report the PR URL back.
+- Tick the final checklist box (tests + CI parity).
+- `gh pr ready $ARGUMENTS`'s PR (or `gh pr ready <number>`) to flip it out of draft.
+- Confirm the body's `Closes #$ARGUMENTS` and any follow-up links are present, and report the final
+  PR URL.
