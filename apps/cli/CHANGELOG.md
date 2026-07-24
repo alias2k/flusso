@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/alias2k/flusso/compare/flusso-cli-v0.12.0...flusso-cli-v0.12.1) - 2026-07-24
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.11.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.10.1...flusso-cli-v0.11.0) - 2026-07-23
 
 ### Added
