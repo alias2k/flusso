@@ -4,10 +4,15 @@ description: Implement a GitHub issue end-to-end — grill, open a draft plan PR
 
 Implement GitHub issue **#$ARGUMENTS** from start to finish.
 
-The shape of this flow: **open a draft PR up front** whose body is a short description plus a
-**checklist** of the work, then **tick each box as it lands** (committing and pushing per unit) so
-the PR is a live progress tracker — not a big reveal at the end. Mark it **ready for review** once
-every box is checked and CI-parity is green.
+The shape of this flow: **open a draft PR up front** whose body is a self-contained implementation
+spec plus a **detailed checklist** of the work, then **tick each box as it lands** (committing and
+pushing per unit) so the PR is a live progress tracker — not a big reveal at the end. Mark it
+**ready for review** once every box is checked and CI-parity is green.
+
+**The PR must be resumable.** Write it so that if this session is interrupted and a *fresh* agent
+(or you, cold) picks it up with no memory of the discussion, the PR alone is enough to continue:
+the approach is described, and each unchecked box says specifically what to do and where. Detail
+that serves resumption is the goal — not a marketing blurb, and not a terse list nobody can act on.
 
 ## 1. Read the issue
 
@@ -39,19 +44,28 @@ to pin down the solution. This is the most important step — be relentless, not
   derived from the issue (e.g. `fix/query-log-search-body`).
 - `git checkout -b <type>/<slug>`.
 
-## 4. Open the plan PR up front — draft, short body, checklist
+## 4. Open the plan PR up front — draft, resumable spec + detailed checklist
 
-Open the PR **now**, before (or alongside) the first commit, as the living tracker:
+Open the PR **now**, before (or alongside) the first commit, as the living tracker **and** the
+hand-off document. Write it so a cold reader could finish the work from the PR alone (see the
+"resumable" rule above).
 
 - Push the branch (an empty commit is fine to get it started): `git push -u origin <branch>`.
 - `gh pr create --draft --title "<title>" --body "<body>"`.
-- **Keep the body short** — a plain description plus a checklist, no wall of jargon:
-  - A few lines: what the change does and the settled approach (the decisions from step 2).
+- The body has these parts, in order:
+  - **A description of the implementation** — not a blurb. State the settled decisions from step 2
+    and *how* the change works: the mechanism, the key types/files/functions it adds or touches,
+    the data flow, and any non-obvious choice (and why). Enough that someone resuming knows the
+    approach without re-deriving it. Keep it scannable (short paragraphs / bullets), but do not
+    sacrifice the detail needed to resume — clarity, not brevity, is the bar here.
   - `Closes #$ARGUMENTS`.
-  - A `## To implement` **checklist** (`- [ ]` per line) covering the areas the change touches —
-    typically one box per layer/step below that actually applies (core → parse/convert → sink →
-    query/derive → editor JSON schema → designer + i18n → docs → plugin → tests + CI). Only list
-    what applies.
+  - A `## To implement` **checklist** (`- [ ]` per line). Each box must be **specific enough to act
+    on cold**: name the concrete change *and where it lands* — the crate/file (and function/type
+    when it helps) — e.g. `- [ ] Core: add \`Column.enum_order\` + project to \`Mapping.enum_order\`
+    (libs/0-core)`, not `- [ ] core changes`. Order them so ticking top-to-bottom is a valid build
+    order (typically core → parse/convert → sink → query/derive → editor JSON schema → designer +
+    i18n → docs → plugin → tests + CI). Only list what applies. This list is the resume point: an
+    interrupted run continues from the first unchecked box.
   - A `## Follow-ups (out of scope)` list for anything deferred (file the issues and link them).
   - End with:
     ```
@@ -59,8 +73,12 @@ Open the PR **now**, before (or alongside) the first commit, as the living track
     ```
 - Report the PR URL back.
 
-The checklist lives in the **PR body** (not an issue comment). If you verified a key assumption
-(e.g. a probe against a live service), a one-line note in the body earns trust — keep it terse.
+The spec + checklist live in the **PR body** (not an issue comment). If you verified a key
+assumption (e.g. a probe against a live service), record the result in the body — a resuming
+reader shouldn't have to re-verify it.
+
+Keep the body current as you learn: if the approach shifts mid-implementation, update the
+description and checklist so the PR never lies about the plan.
 
 ## 5. Implement, ticking the checklist as you go
 
