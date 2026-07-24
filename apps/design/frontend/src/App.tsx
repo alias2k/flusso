@@ -819,36 +819,37 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col">
-      <header className="topbar relative flex items-center gap-3 border-b border-border bg-card px-4 py-2.5">
-        <Hint label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
-            onClick={toggleLeft}
-          >
-            <Icon name="menu" />
-          </Button>
-        </Hint>
-        <span className="brand inline-flex items-center gap-2 font-bold">
-          <span className="inline-flex text-primary">
-            <Icon name="flow" size={18} />
+      <header className="topbar grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-b border-border bg-card px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-3">
+          <Hint label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
+              onClick={toggleLeft}
+            >
+              <Icon name="menu" />
+            </Button>
+          </Hint>
+          <span className="brand inline-flex items-center gap-2 font-bold">
+            <span className="inline-flex text-primary">
+              <Icon name="flow" size={18} />
+            </span>
+            flusso
           </span>
-          flusso
-        </span>
-        <span className="path text-xs text-muted-foreground">{project.config_path}</span>
-        <Hint label={t("topbar.retestDb")}>
-          <button
-            className={cn(
-              "db-chip cursor-pointer rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
-              catalog && !catalog.error ? "ok border-primary text-primary" : "off border-warn text-warn",
-            )}
-            onClick={() => void refreshCatalog()}
-          >
-            {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
-          </button>
-        </Hint>
-        <span className="spacer flex-1" />
+          <span className="path text-xs text-muted-foreground">{project.config_path}</span>
+          <Hint label={t("topbar.retestDb")}>
+            <button
+              className={cn(
+                "db-chip cursor-pointer rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
+                catalog && !catalog.error ? "ok border-primary text-primary" : "off border-warn text-warn",
+              )}
+              onClick={() => void refreshCatalog()}
+            >
+              {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
+            </button>
+          </Hint>
+        </div>
 
         <button
           type="button"
@@ -861,104 +862,106 @@ export default function App() {
           <Kbd className="ml-auto">⌘K</Kbd>
         </button>
 
-        {/* global: edit history */}
-        <Hint label={t("topbar.undo")}>
-          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
-            <Icon name="undo" />
-          </Button>
-        </Hint>
-        <Hint label={t("topbar.redo")}>
-          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
-            <Icon name="redo" />
-          </Button>
-        </Hint>
-
-        {/* global: theme toggle + language picker */}
-        <Hint label={t("topbar.toggleTheme")}>
-          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.toggleTheme")} onClick={toggleTheme}>
-            {theme === "dark" ? <Sun /> : <Moon />}
-          </Button>
-        </Hint>
-        <DropdownMenu>
-          <Hint label={t("topbar.language")}>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label={t("topbar.language")}>
-                <Languages />
-              </Button>
-            </DropdownMenuTrigger>
+        <div className="flex min-w-0 items-center justify-end gap-3">
+          {/* global: edit history */}
+          <Hint label={t("topbar.undo")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
+              <Icon name="undo" />
+            </Button>
           </Hint>
-          <DropdownMenuContent align="end">
-            <DropdownMenuRadioGroup value={lang} onValueChange={setLang}>
-              {Object.entries(LANGS).map(([value, label]) => (
-                <DropdownMenuRadioItem key={value} value={value}>
-                  {label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+          <Hint label={t("topbar.redo")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
+              <Icon name="redo" />
+            </Button>
+          </Hint>
 
-        <div className="mx-1 h-5 w-px bg-border" />
+          {/* global: theme toggle + language picker */}
+          <Hint label={t("topbar.toggleTheme")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.toggleTheme")} onClick={toggleTheme}>
+              {theme === "dark" ? <Sun /> : <Moon />}
+            </Button>
+          </Hint>
+          <DropdownMenu>
+            <Hint label={t("topbar.language")}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label={t("topbar.language")}>
+                  <Languages />
+                </Button>
+              </DropdownMenuTrigger>
+            </Hint>
+            <DropdownMenuContent align="end">
+              <DropdownMenuRadioGroup value={lang} onValueChange={setLang}>
+                {Object.entries(LANGS).map(([value, label]) => (
+                  <DropdownMenuRadioItem key={value} value={value}>
+                    {label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
-        {/* Visual ⟷ Code: swaps the whole body between the canvas and the YAML
+          <div className="mx-1 h-5 w-px bg-border" />
+
+          {/* Visual ⟷ Code: swaps the whole body between the canvas and the YAML
             editor. Global because the mode survives index switches; inert on
             the Deployment screen, which has no code representation. */}
-        <Hint label={t("topbar.modeHint")}>
-          <span className="flex items-center gap-2">
-            <Label
-              htmlFor="mode-toggle"
-              className={cn(
-                "cursor-pointer text-xs",
-                rawMode ? "text-muted-foreground" : "font-medium",
-                active === "config" && "opacity-50",
-              )}
-            >
-              {t("topbar.visual")}
-            </Label>
-            <Switch
-              id="mode-toggle"
-              checked={rawMode}
-              disabled={active === "config"}
-              onCheckedChange={(on) => (on ? openRaw() : setRawMode(false))}
-            />
-            <Label
-              htmlFor="mode-toggle"
-              className={cn(
-                "cursor-pointer text-xs",
-                rawMode ? "font-medium" : "text-muted-foreground",
-                active === "config" && "opacity-50",
-              )}
-            >
-              {t("topbar.code")}
-            </Label>
-          </span>
-        </Hint>
-
-        <div className="mx-1 h-5 w-px bg-border" />
-
-        {/* deployment actions — the whole config */}
-        <Hint label={t("search.descValidate")}>
-          <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
-            <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
-            {t("topbar.validate")}
-          </Button>
-        </Hint>
-        <Hint label={t("topbar.resetHint")}>
-          <Button variant="secondary" size="sm" onClick={reset} disabled={!dirty || saving}>
-            <span className={BTN_ICON}>
-              <RotateCcw />
+          <Hint label={t("topbar.modeHint")}>
+            <span className="flex items-center gap-2">
+              <Label
+                htmlFor="mode-toggle"
+                className={cn(
+                  "cursor-pointer text-xs",
+                  rawMode ? "text-muted-foreground" : "font-medium",
+                  active === "config" && "opacity-50",
+                )}
+              >
+                {t("topbar.visual")}
+              </Label>
+              <Switch
+                id="mode-toggle"
+                checked={rawMode}
+                disabled={active === "config"}
+                onCheckedChange={(on) => (on ? openRaw() : setRawMode(false))}
+              />
+              <Label
+                htmlFor="mode-toggle"
+                className={cn(
+                  "cursor-pointer text-xs",
+                  rawMode ? "font-medium" : "text-muted-foreground",
+                  active === "config" && "opacity-50",
+                )}
+              >
+                {t("topbar.code")}
+              </Label>
             </span>
-            {t("topbar.reset")}
-          </Button>
-        </Hint>
-        <Hint label={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
-          <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
-            <span className={BTN_ICON}>
-              {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
-            </span>
-            {t("topbar.save")}
-          </Button>
-        </Hint>
+          </Hint>
+
+          <div className="mx-1 h-5 w-px bg-border" />
+
+          {/* deployment actions — the whole config */}
+          <Hint label={t("search.descValidate")}>
+            <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
+              <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
+              {t("topbar.validate")}
+            </Button>
+          </Hint>
+          <Hint label={t("topbar.resetHint")}>
+            <Button variant="secondary" size="sm" onClick={reset} disabled={!dirty || saving}>
+              <span className={BTN_ICON}>
+                <RotateCcw />
+              </span>
+              {t("topbar.reset")}
+            </Button>
+          </Hint>
+          <Hint label={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
+            <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
+              <span className={BTN_ICON}>
+                {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
+              </span>
+              {t("topbar.save")}
+            </Button>
+          </Hint>
+        </div>
       </header>
 
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
