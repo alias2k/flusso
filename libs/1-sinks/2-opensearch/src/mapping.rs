@@ -39,11 +39,69 @@ const LOWERCASE_NORMALIZER: &str = "flusso_lowercase";
 /// Strings longer than this are not indexed in a `keyword` subfield (they are
 /// still stored). Matches OpenSearch's own dynamic-mapping default.
 const KEYWORD_IGNORE_ABOVE: u32 = 256;
+/// The subfield key holding an ordered enum's prebaked rank, for order-correct
+/// sort. A `mapping` char-filter normalizer rewrites each declared variant to a
+/// zero-padded rank, so a plain `keyword` sort on this subfield sorts by
+/// declared order; out-of-set values pass through and sort after (by value).
+const ENUM_SORT_SUBFIELD: &str = "sort";
+/// Prefix for the per-field char-filter + normalizer names that back the enum
+/// sort subfield.
+const ENUM_SORT_PREFIX: &str = "flusso_enumsort";
+
+/// The shared char-filter/normalizer name for an ordered enum at `path` — one
+/// per field, keyed by its (sanitized) dotted path so several enums coexist.
+fn enum_sort_name(path: &str) -> String {
+    let sane: String = path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{ENUM_SORT_PREFIX}__{sane}")
+}
+
+/// The `mapping` char-filter rules for a variant list: `variant => zero-padded
+/// rank`. Padding to a fixed width keeps the lexicographic keyword sort equal to
+/// the numeric rank order even past ten variants.
+fn enum_sort_mappings(variants: &[String]) -> Vec<String> {
+    let width = variants.len().saturating_sub(1).to_string().len();
+    variants
+        .iter()
+        .enumerate()
+        .map(|(rank, variant)| format!("{variant} => {rank:0width$}"))
+        .collect()
+}
+
+/// Collect every ordered-enum field as `(dotted_path, variants)`, recursing into
+/// object/nested children — the inputs to the per-field sort char-filters and
+/// normalizers.
+fn collect_enum_sorts<'a>(
+    fields: &'a [ResolvedField],
+    prefix: &str,
+    out: &mut Vec<(String, &'a [String])>,
+) {
+    for field in fields {
+        let path = field_path(prefix, field);
+        if let Some(order) = &field.mapping.enum_order {
+            out.push((path.clone(), order));
+        }
+        collect_enum_sorts(&field.children, &path, out);
+    }
+}
+
+/// A field's dotted path from the index root.
+fn field_path(prefix: &str, field: &ResolvedField) -> String {
+    if prefix.is_empty() {
+        field.name.as_ref().to_owned()
+    } else {
+        format!("{prefix}.{}", field.name.as_ref())
+    }
+}
 
 /// Build the `PUT /{index}` request body: a `dynamic: strict` mapping with one
 /// typed property per field, the shard counts, `refresh_interval: -1` for bulk
 /// seeding, and the `flusso_*` analysis definitions the field shapes reference.
 pub(crate) fn build_index_body(fields: &[ResolvedField], options: &IndexOptions) -> Value {
+    let mut enum_sorts = Vec::new();
+    collect_enum_sorts(fields, "", &mut enum_sorts);
     json!({
         "settings": {
             "index": {
@@ -53,11 +111,11 @@ pub(crate) fn build_index_body(fields: &[ResolvedField], options: &IndexOptions)
             },
             // Always emitted so an explicit `analyzer: flusso_text` works even
             // when `auto_subfields` is off; an unused analyzer is harmless.
-            "analysis": build_analysis(options.text_analysis),
+            "analysis": build_analysis(options.text_analysis, &enum_sorts),
         },
         "mappings": {
             "dynamic": "strict",
-            "properties": build_properties(fields, options),
+            "properties": build_properties(fields, options, ""),
         },
     })
 }
@@ -65,7 +123,7 @@ pub(crate) fn build_index_body(fields: &[ResolvedField], options: &IndexOptions)
 /// The `analysis` block defining the `flusso_*` analyzers, the code-splitting
 /// token filter, and the lowercase normalizer. The folding components swap
 /// between built-in (`asciifolding`) and ICU (`icu_folding`) per `mode`.
-fn build_analysis(mode: TextAnalysis) -> Value {
+fn build_analysis(mode: TextAnalysis, enum_sorts: &[(String, &[String])]) -> Value {
     // `flusso_code`: split on punctuation / case / letter-digit boundaries
     // (so `C-01234` → `c`, `01234`, `c01234`, `c-01234`), then lowercase + fold.
     // `flatten_graph` is required after `word_delimiter_graph` at index time.
@@ -110,25 +168,47 @@ fn build_analysis(mode: TextAnalysis) -> Value {
         json!({ "type": "custom", "filter": normalizer_filters }),
     );
 
-    json!({
-        "filter": {
+    // One `mapping` char filter + custom normalizer per ordered enum: the char
+    // filter rewrites each declared variant to its zero-padded rank, so the
+    // enum's `.sort` subfield holds a rank-ordered keyword.
+    let mut char_filters = Map::new();
+    for (path, variants) in enum_sorts {
+        let name = enum_sort_name(path);
+        char_filters.insert(
+            name.clone(),
+            json!({ "type": "mapping", "mappings": enum_sort_mappings(variants) }),
+        );
+        normalizers.insert(
+            name.clone(),
+            json!({ "type": "custom", "char_filter": [name], "filter": [] }),
+        );
+    }
+
+    let mut analysis = Map::new();
+    analysis.insert(
+        "filter".to_owned(),
+        json!({
             "flusso_word_delimiter": {
                 "type": "word_delimiter_graph",
                 "catenate_all": true,
                 "preserve_original": true,
             },
-        },
-        "analyzer": Value::Object(analyzers),
-        "normalizer": Value::Object(normalizers),
-    })
+        }),
+    );
+    if !char_filters.is_empty() {
+        analysis.insert("char_filter".to_owned(), Value::Object(char_filters));
+    }
+    analysis.insert("analyzer".to_owned(), Value::Object(analyzers));
+    analysis.insert("normalizer".to_owned(), Value::Object(normalizers));
+    Value::Object(analysis)
 }
 
-fn build_properties(fields: &[ResolvedField], options: &IndexOptions) -> Value {
+fn build_properties(fields: &[ResolvedField], options: &IndexOptions, prefix: &str) -> Value {
     let mut props = Map::new();
     for field in fields {
         props.insert(
             field.name.as_ref().to_owned(),
-            build_property(field, options),
+            build_property(field, options, &field_path(prefix, field)),
         );
     }
     Value::Object(props)
@@ -141,7 +221,7 @@ fn build_properties(fields: &[ResolvedField], options: &IndexOptions) -> Value {
 /// searchable subfields — then overlays the field's own `extra` on top, so an
 /// explicit `analyzer`, `fields`, etc. always wins. `object`/`nested` recurse
 /// into their children; other types pass through with just their `extra`.
-fn build_property(field: &ResolvedField, options: &IndexOptions) -> Value {
+fn build_property(field: &ResolvedField, options: &IndexOptions, path: &str) -> Value {
     let mut prop = Map::new();
     prop.insert(
         "type".to_owned(),
@@ -161,6 +241,27 @@ fn build_property(field: &ResolvedField, options: &IndexOptions) -> Value {
         }
     }
 
+    // An ordered enum gets a `.sort` subfield regardless of `auto_subfields` —
+    // it is the ordering mechanism, not an optional enrichment. It sits beside
+    // any auto subfields; a custom `fields` in `extra` still overrides.
+    if field.mapping.enum_order.is_some() {
+        let sort = json!({
+            "type": "keyword",
+            "normalizer": enum_sort_name(path),
+            "ignore_above": KEYWORD_IGNORE_ABOVE,
+        });
+        match prop.get_mut("fields").and_then(Value::as_object_mut) {
+            Some(fields) => {
+                fields.insert(ENUM_SORT_SUBFIELD.to_owned(), sort);
+            }
+            None => {
+                let mut fields = Map::new();
+                fields.insert(ENUM_SORT_SUBFIELD.to_owned(), sort);
+                prop.insert("fields".to_owned(), Value::Object(fields));
+            }
+        }
+    }
+
     for (key, value) in &field.mapping.extra {
         prop.insert(key.clone(), to_json(value));
     }
@@ -168,7 +269,7 @@ fn build_property(field: &ResolvedField, options: &IndexOptions) -> Value {
     if !field.children.is_empty() {
         prop.insert(
             "properties".to_owned(),
-            build_properties(&field.children, options),
+            build_properties(&field.children, options, path),
         );
     }
     Value::Object(prop)

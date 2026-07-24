@@ -37,6 +37,62 @@ fn opts_no_subfields() -> IndexOptions {
     }
 }
 
+fn enum_field(name: &str, variants: &[&str]) -> ResolvedField {
+    let mut f = field(name, MappingType::Keyword, vec![]);
+    f.mapping.enum_order = Some(variants.iter().map(|v| (*v).to_owned()).collect());
+    f
+}
+
+#[test]
+fn ordered_enum_gets_a_sort_subfield_backed_by_a_rank_normalizer() {
+    let body = build_index_body(&[enum_field("status", &["low", "medium", "high"])], &opts());
+    // The field itself stays a plain keyword; the rank rides a `.sort` subfield.
+    assert_eq!(body["mappings"]["properties"]["status"]["type"], "keyword");
+    let sort = &body["mappings"]["properties"]["status"]["fields"]["sort"];
+    assert_eq!(sort["type"], "keyword");
+    let norm = sort["normalizer"].as_str().unwrap();
+    // Its normalizer runs a `mapping` char filter that remaps each variant to a
+    // zero-padded rank.
+    let cf = &body["settings"]["analysis"]["char_filter"][norm];
+    assert_eq!(cf["type"], "mapping");
+    assert_eq!(
+        cf["mappings"],
+        serde_json::json!(["low => 0", "medium => 1", "high => 2"])
+    );
+    assert_eq!(
+        body["settings"]["analysis"]["normalizer"][norm]["char_filter"][0],
+        norm
+    );
+}
+
+#[test]
+fn ordered_enum_sort_subfield_survives_without_auto_subfields() {
+    let body = build_index_body(&[enum_field("status", &["a", "b"])], &opts_no_subfields());
+    assert_eq!(
+        body["mappings"]["properties"]["status"]["fields"]["sort"]["type"],
+        "keyword"
+    );
+}
+
+#[test]
+fn bare_keyword_has_no_sort_subfield_or_char_filter() {
+    let body = build_index_body(&[field("kind", MappingType::Keyword, vec![])], &opts());
+    assert!(
+        body["mappings"]["properties"]["kind"]["fields"]
+            .get("sort")
+            .is_none()
+    );
+    assert!(body["settings"]["analysis"].get("char_filter").is_none());
+}
+
+#[test]
+fn enum_sort_ranks_are_zero_padded_to_a_fixed_width() {
+    let variants: Vec<String> = (0..12).map(|i| format!("v{i}")).collect();
+    let m = enum_sort_mappings(&variants);
+    assert_eq!(m[0], "v0 => 00");
+    assert_eq!(m[11], "v11 => 11");
+}
+
 #[test]
 fn index_body_is_dynamic_strict_with_disabled_refresh_and_shards() {
     let body = build_index_body(&[field("email", MappingType::Keyword, vec![])], &opts());
