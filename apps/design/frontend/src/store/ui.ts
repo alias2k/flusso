@@ -2,7 +2,7 @@
 // apart from the edited document (the design store) and out of undo/redo.
 
 import { create } from "zustand";
-import type { FileDiff } from "../api";
+import type { OpDiff } from "../api";
 
 export interface Toast {
   kind: "ok" | "error" | "info";
@@ -47,7 +47,7 @@ interface UiState {
   vimMode: boolean;
   /// Auto-format the Code buffer on focus loss (persisted preference, off by default).
   autoFormat: boolean;
-  diffs: FileDiff[] | null;
+  diffs: OpDiff[] | null;
   browseCatalog: boolean;
 
   toggleTheme: () => void;
@@ -62,7 +62,7 @@ interface UiState {
   setRawText: (rawText: string) => void;
   toggleVim: () => void;
   toggleAutoFormat: () => void;
-  setDiffs: (diffs: FileDiff[] | null) => void;
+  setDiffs: (diffs: OpDiff[] | null) => void;
   setBrowseCatalog: (open: boolean) => void;
 }
 

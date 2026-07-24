@@ -38,6 +38,7 @@ import {
   RemoveButton,
   SectionTitle,
   Select,
+  TablePicker,
   Text,
 } from "./widgets";
 
@@ -93,12 +94,11 @@ function Breadcrumb() {
   if (!selection) return null;
   const root = schema.table || "(root)";
   let crumbs: string[];
-  if (selection.kind === "root") crumbs = [root];
-  else if (selection.kind === "node") crumbs = [root, ...pathLabels(schema, selection.path)];
-  else {
+  if (selection.kind === "field") {
     const field = nodeFields(schema, selection.path)[selection.index];
     crumbs = [root, ...pathLabels(schema, selection.path), field?.field ?? "?"];
-  }
+  } else if (selection.kind === "node") crumbs = [root, ...pathLabels(schema, selection.path)];
+  else crumbs = [root];
   return <div className="crumbs min-w-0 break-words text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
 }
 
@@ -201,6 +201,7 @@ export function Inspector() {
   const { selection } = useDesign();
   const { t } = useT();
   if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
+  if (selection.kind === "columns") return <ColumnsInspector path={selection.path} names={selection.names} />;
   return (
     <>
       <div className="mb-2.5 flex items-center justify-between gap-2">
@@ -218,18 +219,87 @@ export function Inspector() {
   );
 }
 
+/// The bulk panel shown when several rows are multi-selected on a node. Rows can
+/// be catalog columns (which can be included/removed) or special fields
+/// (aggregates/geo/map/custom…, which can only be removed). "Include" adds the
+/// selected catalog columns that aren't in yet; "Remove" drops every selected
+/// row that's present — one edit each.
+function ColumnsInspector({ path, names }: { path: number[]; names: string[] }) {
+  const { schema, apply, columnsFor, select } = useDesign();
+  const { t } = useT();
+  const table = effectiveTable(schema, path);
+  const shape = new Map(columnsFor(table).map((c) => [c.name, c]));
+  // Row identities currently present: an included catalog column by its source
+  // column name, and every other field by its field name.
+  const present = new Set(
+    nodeFields(schema, path).map((f) =>
+      "column" in f.source && typeof f.source.column.ty === "string" ? f.source.column.column : f.field,
+    ),
+  );
+  const toInclude = names.filter((n) => shape.has(n) && !present.has(n));
+  const toRemove = names.filter((n) => present.has(n));
+  const includeAll = () =>
+    apply((s) =>
+      edit.includeColumns(
+        s,
+        path,
+        toInclude.map((n) => ({ name: n, ty: shape.get(n)?.suggested_type, nullable: shape.get(n)?.nullable })),
+      ),
+    );
+  const removeAll = () => {
+    apply((s) => edit.removeFields(s, path, names));
+    select(null);
+  };
+  return (
+    <div className="inspector">
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold">{t("inspector.columnsSelected", { n: names.length })}</span>
+        <Button variant="ghost" size="icon-sm" aria-label={t("inspector.close")} onClick={() => select(null)}>
+          <X />
+        </Button>
+      </div>
+      <div className="mb-3 flex flex-wrap gap-1">
+        {names.map((n) => (
+          <span
+            key={n}
+            className={cn(
+              "rounded border px-1.5 py-0.5 font-mono text-2xs",
+              present.has(n) ? "border-primary/40 text-primary" : "border-border text-muted-foreground",
+            )}
+          >
+            {n}
+          </span>
+        ))}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Button size="sm" disabled={!toInclude.length} onClick={includeAll}>
+          {t("inspector.includeSelected", { n: toInclude.length })}
+        </Button>
+        <Button size="sm" variant="secondary" disabled={!toRemove.length} onClick={removeAll}>
+          {t("inspector.removeSelected", { n: toRemove.length })}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function RootInspector() {
   const { schema, apply, catalog, columnsFor } = useDesign();
   const { t } = useT();
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
+  const junctions = new Set(catalog?.junctions.map((j) => j.table.table) ?? []);
   const colShapes = columnsFor(schema.table);
-  const cols = colShapes.map((c) => c.name);
   return (
     <div className="inspector">
       <SectionTitle className="mt-0">{t("inspector.indexRoot")}</SectionTitle>
       <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("inspector.rootTable")}>
-          <Text value={schema.table} list={tables} onChange={(table) => apply((s) => edit.setRootMeta(s, { table }))} />
+          <TablePicker
+            value={schema.table}
+            tables={tables}
+            junctions={junctions}
+            onChange={(table) => apply((s) => edit.setRootMeta(s, { table }))}
+          />
         </Row>
         <Row label={t("inspector.schema")}>
           <Text
@@ -239,9 +309,9 @@ function RootInspector() {
           />
         </Row>
         <Row label="primary_key">
-          <Text
+          <ColumnPicker
             value={schema.primary_key ?? ""}
-            list={cols}
+            columns={colShapes}
             onChange={(pk) => apply((s) => edit.setRootMeta(s, { primary_key: pk || undefined }))}
           />
         </Row>
@@ -249,7 +319,7 @@ function RootInspector() {
       <SoftDeleteEditor
         value={schema.soft_delete}
         onChange={(soft_delete) => apply((s) => ({ ...s, soft_delete }))}
-        cols={cols}
+        columns={colShapes}
       />
       <Drawer title={t("inspector.rootFilters")} count={(schema.filters ?? []).length}>
         <Filters
@@ -285,8 +355,8 @@ function NodeInspector({ path }: { path: number[] }) {
   if (!join) return null;
   const verb = joinVerb(join.kind);
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
+  const junctions = new Set(catalog?.junctions.map((j) => j.table.table) ?? []);
   const relColShapes = columnsFor(join.table);
-  const relCols = relColShapes.map((c) => c.name);
   const setJoin = (j: Join) => setField({ ...field, source: { relation: { join: j } } });
   const toMany = verb === "has_many" || verb === "many_to_many";
 
@@ -313,33 +383,43 @@ function NodeInspector({ path }: { path: number[] }) {
           />
         </Row>
         <Row label={t("inspector.table")}>
-          <Text value={join.table} list={tables} onChange={(table) => setJoin({ ...join, table })} />
+          <TablePicker
+            value={join.table}
+            tables={tables}
+            junctions={junctions}
+            onChange={(table) => setJoin({ ...join, table })}
+          />
         </Row>
         <Row label="primary_key">
-          <Text value={join.primary_key} list={relCols} onChange={(primary_key) => setJoin({ ...join, primary_key })} />
+          <ColumnPicker
+            value={join.primary_key}
+            columns={relColShapes}
+            onChange={(primary_key) => setJoin({ ...join, primary_key })}
+          />
         </Row>
         {"belongs_to" in join.kind && (
           <Row label={t("inspector.btColumn")}>
-            <Text
+            <ColumnPicker
               value={join.kind.belongs_to.column}
+              columns={columnsFor(parentTable)}
               onChange={(c) => setJoin({ ...join, kind: { belongs_to: { column: c } } })}
             />
           </Row>
         )}
         {"has_one" in join.kind && (
           <Row label={t("inspector.fkOnTarget")}>
-            <Text
+            <ColumnPicker
               value={join.kind.has_one.foreign_key}
-              list={relCols}
+              columns={relColShapes}
               onChange={(c) => setJoin({ ...join, kind: { has_one: { foreign_key: c } } })}
             />
           </Row>
         )}
         {"has_many" in join.kind && (
           <Row label={t("inspector.fkOnTarget")}>
-            <Text
+            <ColumnPicker
               value={join.kind.has_many.foreign_key}
-              list={relCols}
+              columns={relColShapes}
               onChange={(c) => setJoin({ ...join, kind: { has_many: { foreign_key: c } } })}
             />
           </Row>
@@ -348,6 +428,7 @@ function NodeInspector({ path }: { path: number[] }) {
           <ThroughEditor
             through={join.kind.many_to_many.through}
             tables={tables}
+            junctions={junctions}
             onChange={(through) => setJoin({ ...join, kind: { many_to_many: { through } } })}
           />
         )}
@@ -394,8 +475,9 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const field = nodeFields(schema, path)[index];
   if (!field) return null;
   const table = effectiveTable(schema, path);
-  const cols = columnsFor(table).map((c) => c.name);
+  const colShapes = columnsFor(table);
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
+  const junctions = new Set(catalog?.junctions.map((j) => j.table.table) ?? []);
   const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
   const s = field.source;
 
@@ -424,15 +506,15 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
         />
       )}
       {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && (
-        <MapBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />
+        <MapBody field={field} column={s.column} columns={colShapes} srcNullable={srcNullable} set={set} />
       )}
       {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && (
-        <CustomBody field={field} column={s.column} cols={cols} srcNullable={srcNullable} set={set} />
+        <CustomBody field={field} column={s.column} columns={colShapes} srcNullable={srcNullable} set={set} />
       )}
-      {"geo" in s && <GeoBody field={field} set={set} cols={cols} />}
+      {"geo" in s && <GeoBody field={field} set={set} columns={colShapes} />}
       {"constant" in s && <ConstantBody field={field} set={set} value={s.constant} />}
       {"relation" in s && "aggregate" in s.relation && (
-        <AggregateBody field={field} agg={s.relation.aggregate} tables={tables} set={set} />
+        <AggregateBody field={field} agg={s.relation.aggregate} tables={tables} junctions={junctions} set={set} />
       )}
 
       <OptionsEditor field={field} set={set} />
@@ -716,13 +798,13 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
 function MapBody({
   field,
   column,
-  cols,
+  columns,
   srcNullable,
   set,
 }: {
   field: Field;
   column: Column;
-  cols: string[];
+  columns: ColumnShape[];
   srcNullable?: boolean;
   set: (f: Field) => void;
 }) {
@@ -733,7 +815,7 @@ function MapBody({
     <>
       <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("inspector.columnJson")}>
-          <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
+          <ColumnPicker value={column.column} columns={columns} onChange={(c) => setCol({ ...column, column: c })} />
         </Row>
       </Block>
       <NullBridge srcNullable={srcNullable} />
@@ -755,13 +837,13 @@ function MapBody({
 function CustomBody({
   field,
   column,
-  cols,
+  columns,
   srcNullable,
   set,
 }: {
   field: Field;
   column: Column;
-  cols: string[];
+  columns: ColumnShape[];
   srcNullable?: boolean;
   set: (f: Field) => void;
 }) {
@@ -772,7 +854,7 @@ function CustomBody({
     <>
       <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("common.column")}>
-          <Text value={column.column} list={cols} onChange={(c) => setCol({ ...column, column: c })} />
+          <ColumnPicker value={column.column} columns={columns} onChange={(c) => setCol({ ...column, column: c })} />
         </Row>
         <Row label={t("inspector.pgTypes")}>
           <Text
@@ -828,7 +910,7 @@ function ConstantBody({ field, value, set }: { field: Field; value: unknown; set
   );
 }
 
-function GeoBody({ field, set, cols }: { field: Field; set: (f: Field) => void; cols: string[] }) {
+function GeoBody({ field, set, columns }: { field: Field; set: (f: Field) => void; columns: ColumnShape[] }) {
   const { t } = useT();
   if (!("geo" in field.source)) return null;
   const geo = field.source.geo;
@@ -836,10 +918,18 @@ function GeoBody({ field, set, cols }: { field: Field; set: (f: Field) => void; 
     <>
       <Block variant="src" title={t("inspector.fromDb")}>
         <Row label={t("inspector.latColumn")}>
-          <Text value={geo.lat} list={cols} onChange={(lat) => set({ ...field, source: { geo: { ...geo, lat } } })} />
+          <ColumnPicker
+            value={geo.lat}
+            columns={columns}
+            onChange={(lat) => set({ ...field, source: { geo: { ...geo, lat } } })}
+          />
         </Row>
         <Row label={t("inspector.lonColumn")}>
-          <Text value={geo.lon} list={cols} onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })} />
+          <ColumnPicker
+            value={geo.lon}
+            columns={columns}
+            onChange={(lon) => set({ ...field, source: { geo: { ...geo, lon } } })}
+          />
         </Row>
       </Block>
       <Bridge>{t("inspector.geoHint")}</Bridge>
@@ -859,11 +949,13 @@ function AggregateBody({
   field,
   agg,
   tables,
+  junctions,
   set,
 }: {
   field: Field;
   agg: Aggregate;
   tables: string[];
+  junctions?: ReadonlySet<string>;
   set: (f: Field) => void;
 }) {
   const { columnsFor } = useDesign();
@@ -872,20 +964,35 @@ function AggregateBody({
   const op = agg.op;
   const opCol = aggOpColumn(op);
   const kind = aggOpKind(op);
-  const aggCols = columnsFor(agg.table).map((c) => c.name);
+  const aggColShapes = columnsFor(agg.table);
   const hasMappingType = kind === "sum" || kind === "min" || kind === "max" || kind === "ids";
   return (
     <>
       <Block variant="src" title={t("inspector.aggFrom")}>
         <Row label={t("inspector.relatedTable")}>
-          <Text value={agg.table} list={tables} onChange={(table) => setAgg({ ...agg, table })} />
+          <TablePicker
+            value={agg.table}
+            tables={tables}
+            junctions={junctions}
+            onChange={(table) => setAgg({ ...agg, table })}
+          />
         </Row>
         {opCol !== null && (
           <Row label={t("inspector.aggColumn")}>
-            <Text value={opCol} list={aggCols} onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })} />
+            <ColumnPicker
+              value={opCol}
+              columns={aggColShapes}
+              onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })}
+            />
           </Row>
         )}
-        <AggregateKeyEditor value={agg.key} tables={tables} onChange={(key) => setAgg({ ...agg, key })} />
+        <AggregateKeyEditor
+          value={agg.key}
+          tables={tables}
+          junctions={junctions}
+          columns={aggColShapes}
+          onChange={(key) => setAgg({ ...agg, key })}
+        />
       </Block>
       <Block variant="doc" title={t("inspector.inDoc")}>
         <NameField field={field} set={set} />
@@ -938,10 +1045,14 @@ function withAggColumn(kind: string, col: string): Aggregate["op"] {
 function AggregateKeyEditor({
   value,
   tables,
+  junctions,
+  columns,
   onChange,
 }: {
   value: AggregateKey;
   tables: string[];
+  junctions?: ReadonlySet<string>;
+  columns: ColumnShape[];
   onChange: (k: AggregateKey) => void;
 }) {
   const { t } = useT();
@@ -957,12 +1068,17 @@ function AggregateKeyEditor({
           }
         />
       </Row>
-      {direct ? (
+      {"direct" in value ? (
         <Row label="foreign_key">
-          <Text value={value.direct} onChange={(c) => onChange({ direct: c })} />
+          <ColumnPicker value={value.direct} columns={columns} onChange={(c) => onChange({ direct: c })} />
         </Row>
       ) : (
-        <ThroughEditor through={value.through} tables={tables} onChange={(through) => onChange({ through })} />
+        <ThroughEditor
+          through={value.through}
+          tables={tables}
+          junctions={junctions}
+          onChange={(through) => onChange({ through })}
+        />
       )}
     </div>
   );
@@ -971,23 +1087,40 @@ function AggregateKeyEditor({
 function ThroughEditor({
   through,
   tables,
+  junctions,
   onChange,
 }: {
   through: { table: string; left_key: string; right_key: string };
   tables: string[];
+  junctions?: ReadonlySet<string>;
   onChange: (t: { table: string; left_key: string; right_key: string }) => void;
 }) {
   const { t } = useT();
+  const { columnsFor } = useDesign();
+  const junctionCols = columnsFor(through.table);
   return (
     <div className="my-1.5 flex flex-wrap items-end gap-2">
       <Row label={t("inspector.junctionTable")}>
-        <Text value={through.table} list={tables} onChange={(table) => onChange({ ...through, table })} />
+        <TablePicker
+          value={through.table}
+          tables={tables}
+          junctions={junctions}
+          onChange={(table) => onChange({ ...through, table })}
+        />
       </Row>
       <Row label="left_key">
-        <Text value={through.left_key} onChange={(left_key) => onChange({ ...through, left_key })} />
+        <ColumnPicker
+          value={through.left_key}
+          columns={junctionCols}
+          onChange={(left_key) => onChange({ ...through, left_key })}
+        />
       </Row>
       <Row label="right_key">
-        <Text value={through.right_key} onChange={(right_key) => onChange({ ...through, right_key })} />
+        <ColumnPicker
+          value={through.right_key}
+          columns={junctionCols}
+          onChange={(right_key) => onChange({ ...through, right_key })}
+        />
       </Row>
     </div>
   );
@@ -1047,11 +1180,11 @@ function OrderByEditor({
 function SoftDeleteEditor({
   value,
   onChange,
-  cols,
+  columns,
 }: {
   value: SoftDelete | undefined;
   onChange: (v: SoftDelete | undefined) => void;
-  cols: string[];
+  columns: ColumnShape[];
 }) {
   const { t } = useT();
   const kind = value === undefined ? "none" : "field" in value ? "field" : "column";
@@ -1074,9 +1207,9 @@ function SoftDeleteEditor({
         />
       )}
       {value && "column" in value && (
-        <Text
+        <ColumnPicker
           value={value.column.column}
-          list={cols}
+          columns={columns}
           onChange={(c) => onChange({ column: { ...value.column, column: c } })}
           placeholder={t("common.column")}
         />

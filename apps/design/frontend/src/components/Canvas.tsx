@@ -7,15 +7,25 @@ import {
   ReactFlow,
   useEdgesState,
   useNodes,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
 } from "@xyflow/react";
 // React Flow's stylesheet is imported (layered) from index.css, not here — a JS
 // import is unlayered and would beat our `@layer components` handle overrides.
 import { useEffect, useRef, useState } from "react";
-import { Lock, Maximize2, Unlock, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronsDownUp, ChevronsUpDown, Lock, Maximize2, Unlock, ZoomIn, ZoomOut } from "lucide-react";
 import { SCALAR_TYPES } from "../api";
-import { autoLayout, clearOverrides, loadOverrides, loadViewport, saveOverride, saveViewport } from "../model/layout";
+import {
+  autoLayout,
+  clearOverrides,
+  loadMinimap,
+  loadOverrides,
+  loadViewport,
+  saveMinimap,
+  saveOverride,
+  saveViewport,
+} from "../model/layout";
 import { suggestRelations } from "../model/relations";
 import { type DocNode, projectGraph } from "../model/tree";
 import { useT } from "../i18n";
@@ -23,6 +33,7 @@ import { useDesign } from "../state";
 import { useDesignStore } from "../store/design";
 import { edgeColor } from "../theme";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { DocNodeView } from "./DocNodeView";
 import { Hint } from "./Hint";
 import { Icon } from "./Icon";
@@ -30,12 +41,21 @@ import { Icon } from "./Icon";
 const nodeTypes = { doc: DocNodeView };
 
 export function Canvas() {
-  const { schema, indexName, select, catalog } = useDesign();
-  const { t } = useT();
+  const { schema, indexName, select, catalog, collapsed } = useDesign();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [showMap, setShowMap] = useState(false);
+  // The minimap's shown state is remembered per index. Toggling persists it, and
+  // switching index re-loads that index's preference.
+  const [showMap, setShowMap] = useState(() => loadMinimap(indexName));
   const [locked, setLocked] = useState(false);
+  useEffect(() => {
+    setShowMap(loadMinimap(indexName));
+  }, [indexName]);
+  const toggleMap = () =>
+    setShowMap((m) => {
+      saveMinimap(indexName, !m);
+      return !m;
+    });
 
   // Estimate a node's rendered height so the auto-layout reserves the right
   // vertical band (header + column rows, capped by the scroll area, + footer).
@@ -60,8 +80,10 @@ export function Canvas() {
   // slot. So a field edit never moves anything, and this never clobbers the
   // measured layout (below) or a manual drag. Deliberately NOT keyed on
   // `catalog`: it arrives async, and re-running here would reset positions.
+  const pruneCollapsed = useDesignStore((s) => s.pruneCollapsed);
   useEffect(() => {
     const graph = projectGraph(schema);
+    pruneCollapsed(graph.nodes.map((n) => n.id));
     const auto = autoLayout(graph.nodes, estimateHeight);
     const overrides = loadOverrides(indexName);
     setNodes((prev) => {
@@ -135,60 +157,65 @@ export function Canvas() {
           select(dn.path.length ? { kind: "node", path: dn.path } : { kind: "root" });
         }
       }}
-      fitView
       minZoom={0.2}
       nodesDraggable={!locked}
     >
       <Background />
-      <FlowControls locked={locked} onToggle={() => setLocked((l) => !l)} />
-      {showMap && <MiniMap pannable zoomable style={{ marginBottom: "2.5rem" }} />}
+      <NodeControls
+        allCollapsed={nodes.length > 0 && collapsed.size >= nodes.length}
+        locked={locked}
+        onToggleLock={() => setLocked((l) => !l)}
+        onReset={resetLayout}
+      />
+      <ViewControls />
+      <MinimapToggle showMap={showMap} onToggle={toggleMap} />
+      {/* Sits under its top-left toggle (offset clears the button). */}
+      {showMap && <MiniMap pannable zoomable position="top-left" style={{ marginTop: "3rem" }} />}
       <RestoreViewport index={indexName} />
       <FocusOnRequest />
-      <Panel position="bottom-right">
-        <div className="flex gap-1.5">
-          <Hint label={t("canvas.resetLayout")} side="left">
-            <Button variant="secondary" size="icon-sm" aria-label={t("canvas.resetLayout")} onClick={resetLayout}>
-              <Icon name="tidy" />
-            </Button>
-          </Hint>
-          <Hint label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")} side="left">
-            <Button
-              variant="secondary"
-              size="icon-sm"
-              aria-label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
-              onClick={() => setShowMap((m) => !m)}
-            >
-              <Icon name="map" />
-            </Button>
-          </Hint>
-        </div>
-      </Panel>
     </ReactFlow>
   );
 }
 
-/// Canvas controls (zoom / fit / lock) as our shadcn icon buttons, replacing
-/// React Flow's built-in `<Controls>`. Lives inside `<ReactFlow>` for the zoom
-/// hooks; `locked` (lifted to Canvas) freezes node dragging.
-function FlowControls({ locked, onToggle }: { locked: boolean; onToggle: () => void }) {
+// Active-toggle styling: a pressed toggle (lock, minimap) reads clearly as "on".
+const TOGGLE_ON = "border-primary bg-primary/15 text-primary hover:bg-primary/20";
+
+/// Layout & node controls, bottom-left: one collapse⟷expand-all toggle (colours
+/// when the whole graph is collapsed), re-tidy the layout, and lock node
+/// dragging (also a toggle). `allCollapsed` drives what the toggle does next.
+function NodeControls({
+  allCollapsed,
+  locked,
+  onToggleLock,
+  onReset,
+}: {
+  allCollapsed: boolean;
+  locked: boolean;
+  onToggleLock: () => void;
+  onReset: () => void;
+}) {
   const { t } = useT();
-  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  const collapseAll = useDesignStore((s) => s.collapseAll);
+  const expandAll = useDesignStore((s) => s.expandAll);
+  const label = allCollapsed ? t("canvas.expandAll") : t("canvas.collapseAll");
   return (
     <Panel position="bottom-left">
       <div className="flex flex-col gap-1.5">
-        <Hint label={t("canvas.zoomIn")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomIn")} onClick={() => void zoomIn()}>
-            <ZoomIn />
+        <Hint label={label} side="right">
+          <Button
+            variant="secondary"
+            size="icon-sm"
+            aria-label={label}
+            aria-pressed={allCollapsed}
+            className={cn(allCollapsed && TOGGLE_ON)}
+            onClick={() => (allCollapsed ? expandAll() : collapseAll())}
+          >
+            {allCollapsed ? <ChevronsUpDown /> : <ChevronsDownUp />}
           </Button>
         </Hint>
-        <Hint label={t("canvas.zoomOut")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomOut")} onClick={() => void zoomOut()}>
-            <ZoomOut />
-          </Button>
-        </Hint>
-        <Hint label={t("canvas.fitView")} side="right">
-          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.fitView")} onClick={() => void fitView()}>
-            <Maximize2 />
+        <Hint label={t("canvas.resetLayout")} side="right">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.resetLayout")} onClick={onReset}>
+            <Icon name="tidy" />
           </Button>
         </Hint>
         <Hint label={locked ? t("canvas.unlock") : t("canvas.lock")} side="right">
@@ -196,7 +223,9 @@ function FlowControls({ locked, onToggle }: { locked: boolean; onToggle: () => v
             variant="secondary"
             size="icon-sm"
             aria-label={locked ? t("canvas.unlock") : t("canvas.lock")}
-            onClick={onToggle}
+            aria-pressed={locked}
+            className={cn(locked && TOGGLE_ON)}
+            onClick={onToggleLock}
           >
             {locked ? <Lock /> : <Unlock />}
           </Button>
@@ -206,20 +235,75 @@ function FlowControls({ locked, onToggle }: { locked: boolean; onToggle: () => v
   );
 }
 
-/// Restore each index's pan/zoom on switch (the initial fit is handled by the
-/// `fitView` prop, so this skips the first run); edits don't refit.
+/// Viewport controls, bottom-right: zoom and fit. Lives inside `<ReactFlow>` for
+/// the zoom hooks.
+function ViewControls() {
+  const { t } = useT();
+  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  return (
+    // Lifted above React Flow's bottom-right attribution link so its lowest
+    // button never overlaps it (accidental clicks).
+    <Panel position="bottom-right" style={{ marginBottom: "1.75rem" }}>
+      <div className="flex flex-col gap-1.5">
+        <Hint label={t("canvas.zoomIn")} side="left">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomIn")} onClick={() => void zoomIn()}>
+            <ZoomIn />
+          </Button>
+        </Hint>
+        <Hint label={t("canvas.zoomOut")} side="left">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.zoomOut")} onClick={() => void zoomOut()}>
+            <ZoomOut />
+          </Button>
+        </Hint>
+        <Hint label={t("canvas.fitView")} side="left">
+          <Button variant="secondary" size="icon-sm" aria-label={t("canvas.fitView")} onClick={() => void fitView()}>
+            <Maximize2 />
+          </Button>
+        </Hint>
+      </div>
+    </Panel>
+  );
+}
+
+/// The minimap toggle, top-left on its own: it reveals an overview rather than
+/// controlling the viewport, so it sits apart from the zoom/fit cluster.
+/// Colours when the minimap is shown.
+function MinimapToggle({ showMap, onToggle }: { showMap: boolean; onToggle: () => void }) {
+  const { t } = useT();
+  return (
+    <Panel position="top-left">
+      <Hint label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")} side="right">
+        <Button
+          variant="secondary"
+          size="icon-sm"
+          aria-label={showMap ? t("canvas.hideMinimap") : t("canvas.showMinimap")}
+          aria-pressed={showMap}
+          className={cn(showMap && TOGGLE_ON)}
+          onClick={onToggle}
+        >
+          <Icon name="map" />
+        </Button>
+      </Hint>
+    </Panel>
+  );
+}
+
+/// Restore each index's saved pan/zoom — on first load *and* on index switch, so
+/// a reload doesn't reset it. Gated on `useNodesInitialized`: applied once the
+/// nodes are measured, which is why it replaces the `fitView` prop (that prop
+/// fits after measurement and would clobber a restore done any earlier). With
+/// nothing saved it fits instead. Runs once per index (edits don't refit).
 function RestoreViewport({ index }: { index: string }) {
   const { setViewport, fitView } = useReactFlow();
-  const first = useRef(true);
+  const ready = useNodesInitialized();
+  const appliedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
+    if (!ready || appliedFor.current === index) return;
+    appliedFor.current = index;
     const vp = loadViewport(index);
     if (vp) void setViewport(vp);
     else void fitView({ duration: 300 });
-  }, [index, setViewport, fitView]);
+  }, [ready, index, setViewport, fitView]);
   return null;
 }
 

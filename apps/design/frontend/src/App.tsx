@@ -8,9 +8,11 @@ import {
   AlignJustify,
   Columns2,
   Eye,
+  Folder,
   Languages,
   Minus,
   Moon,
+  Pencil,
   Plus,
   RotateCcw,
   Save,
@@ -19,9 +21,10 @@ import {
   Sun,
   Table2,
   TriangleAlert,
+  Waypoints,
   X,
 } from "lucide-react";
-import type { ColumnShape, DiagnosticDto, FileDiff, SaveSchemaInput, ValidateResponse } from "./api";
+import type { ColumnShape, DiagnosticDto, FileOp, OpDiff, ValidateResponse } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -39,7 +42,14 @@ import { Switch } from "@/components/ui/switch";
 const CodeView = lazy(() => import("./components/CodeView").then((m) => ({ default: m.CodeView })));
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,12 +63,12 @@ import { Label } from "@/components/ui/label";
 import { Hint } from "./components/Hint";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { GlowDot, Select, Text } from "./components/widgets";
+import { Combobox, Field, GlowDot, Text } from "./components/widgets";
 import { LANGS, useT, type Translate } from "./i18n";
 // Type-only: erased at compile time, so it doesn't pull the yaml package into
 // the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
 import type { ParseErrorInfo } from "./model/anchors";
-import { removeAt, removeNode } from "./model/edit";
+import { removeAt, removeFields, removeNode } from "./model/edit";
 import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
@@ -168,6 +178,7 @@ export default function App() {
   const canUndo = useCanUndo();
   const canRedo = useCanRedo();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [newIndexOpen, setNewIndexOpen] = useState(false);
 
   const theme = useUiStore((s) => s.theme);
   const leftOpen = useUiStore((s) => s.leftOpen);
@@ -215,7 +226,7 @@ export default function App() {
 
   // ── routing: the hash mirrors what the main area shows (see router.ts) ────
 
-  // URL → state. Behind a ref so the one hashchange listener always sees the
+  // URL → state. Behind a ref so the one popstate listener always sees the
   // latest handlers; validated against the loaded project so a stale deep link
   // can't select a nonexistent index.
   const applyRoute = (route: Route) => {
@@ -241,17 +252,17 @@ export default function App() {
     applyRouteRef.current = applyRoute;
   });
   useEffect(() => {
-    const onHash = () => {
-      const route = parseRoute(window.location.hash);
+    const onPop = () => {
+      const route = parseRoute(window.location.pathname);
       if (route) applyRouteRef.current(route);
     };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // State → URL. pushState doesn't fire hashchange, so this can't loop; the
-  // very first write replaces instead, keeping the entry the user landed on.
-  const routeHash = formatRoute(
+  // State → URL. pushState doesn't fire popstate, so this can't loop; the very
+  // first write replaces instead, keeping the entry the user landed on.
+  const routePath = formatRoute(
     browseCatalog
       ? { view: "tables" }
       : active === "config"
@@ -261,10 +272,10 @@ export default function App() {
   const routedOnce = useRef(false);
   useEffect(() => {
     if (!doc) return;
-    if (window.location.hash === routeHash) return;
-    window.history[routedOnce.current ? "pushState" : "replaceState"](null, "", routeHash);
+    if (window.location.pathname === routePath) return;
+    window.history[routedOnce.current ? "pushState" : "replaceState"](null, "", routePath);
     routedOnce.current = true;
-  }, [doc, routeHash]);
+  }, [doc, routePath]);
 
   useEffect(() => {
     api
@@ -273,7 +284,7 @@ export default function App() {
         loadProject(p, true);
         // A deep link wins over the default first index — applied after the
         // project loads so the index-name validation can see it.
-        const route = parseRoute(window.location.hash);
+        const route = parseRoute(window.location.pathname);
         if (route) applyRouteRef.current(route);
       })
       .catch((e) => setError(String(e)));
@@ -442,17 +453,49 @@ export default function App() {
     loadCollapsed(active);
   }, [active, loadCollapsed]);
 
-  // The index files a save touches: only those whose parsed model actually
-  // changed, so editing one field never proposes rewriting untouched schemas
-  // (codegen would reflow them, stripping comments). They're sent in this order,
-  // and the diff endpoint returns the config first then these — so a FileDiff at
-  // position i+1 is entry i.
-  const changedEntries = (): { name: string; schema_path: string; schema: SaveSchemaInput["schema"] }[] =>
-    (doc?.config.index ?? [])
-      .filter((e) => doc?.schemas[e.name] && indexDirty(e.name))
-      .map((e) => ({ name: e.name, schema_path: e.schema, schema: doc!.schemas[e.name] }));
+  // The schema-file ops a save applies, derived from the saved snapshot → the
+  // current doc, correlated by the stable per-index id (so a rename or a path
+  // change reads as a Move, not a delete + create). `name` is kept alongside so
+  // the snapshot can advance per index after the save.
+  const buildOps = (): { op: FileOp; name: string; removed: boolean }[] => {
+    if (!doc) return [];
+    const prev = savedDoc?.config.index ?? [];
+    const prevById = new Map(prev.filter((e) => e.id).map((e) => [e.id, e]));
+    const cur = doc.config.index ?? [];
+    const seen = new Set<string>();
+    const planned: { op: FileOp; name: string; removed: boolean }[] = [];
+    for (const e of cur) {
+      if (e.id) seen.add(e.id);
+      const schema = doc.schemas[e.name];
+      if (!schema) continue; // no model to write (failed load) — leave the file alone
+      const was = e.id ? prevById.get(e.id) : undefined;
+      if (!was) planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
+      else if (was.schema !== e.schema)
+        planned.push({ op: { kind: "move", from: was.schema, path: e.schema, schema }, name: e.name, removed: false });
+      else if (indexDirty(e.name))
+        planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
+    }
+    // Indexes dropped from the config → delete their previous files.
+    for (const p of prev)
+      if (p.id && !seen.has(p.id))
+        planned.push({ op: { kind: "delete", path: p.schema }, name: p.name, removed: true });
+    return planned;
+  };
 
-  // Save first shows a diff of what would change on disk; performSave writes it.
+  // Match a planned op to its resolved diff entry: the server returns absolute
+  // paths, the op carries the config-relative one, so compare by suffix (a move
+  // may degrade to a plain write when its source is already gone).
+  const suffixOf = (abs: string, rel: string) => abs === rel || abs.endsWith(`/${rel}`);
+  const diffFor = (list: OpDiff[], p: { op: FileOp }): OpDiff | undefined =>
+    list.find((d) =>
+      p.op.kind === "delete"
+        ? d.op === "delete" && suffixOf(d.path, p.op.path)
+        : d.op === "delete"
+          ? false
+          : suffixOf(d.path, p.op.path),
+    );
+
+  // Save first shows a diff of what would change on disk; performSave applies it.
   // When the config model is unchanged we hide its diff (a formatting/comment-only
   // reflow the user didn't ask for) so an untouched flusso.toml is neither shown
   // nor rewritten.
@@ -460,10 +503,9 @@ export default function App() {
     if (!doc || saving) return;
     setSaving(true);
     try {
-      const entries = changedEntries();
       const result = await api.diff(
         doc.config,
-        entries.map((e) => ({ schema_path: e.schema_path, schema: e.schema })),
+        buildOps().map((p) => p.op),
       );
       const shown = configDirty || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
       if (shown.some((d) => d.changed)) setDiffs(shown);
@@ -475,36 +517,54 @@ export default function App() {
     }
   };
 
-  // Write the changed files, skipping the ones the user unchecked in the review
-  // (`ignore` = their FileDiff paths) plus the config whenever its model didn't
-  // change (so an untouched flusso.toml keeps its comments). The diff list is
-  // config-first then changedEntries in order, so a FileDiff at position i+1 is
-  // entry i. The saved snapshot advances only for the files actually written, so
-  // Reset targets the true on-disk state.
-  const performSave = async (ignore: string[]) => {
+  // Apply the op set, skipping the entries the user unchecked in the review
+  // (plus the config whenever its model didn't change, so an untouched
+  // flusso.toml keeps its comments). The saved snapshot advances per index for
+  // exactly the ops that were applied, so Reset targets the true on-disk state.
+  const performSave = async (skipPaths: string[]) => {
     if (!doc || !diffs) return;
-    const entries = changedEntries();
+    const planned = buildOps();
     const configPath = diffs[0]?.path;
-    const ignored = new Set(ignore);
-    if (!configDirty && configPath) ignored.add(configPath);
+    const skip = new Set(skipPaths);
+    if (!configDirty && configPath) skip.add(configPath);
     setSaving(true);
     try {
       const res = await api.save(
         doc.config,
-        entries.map((e) => ({ schema_path: e.schema_path, schema: e.schema })),
-        [...ignored],
+        planned.map((p) => p.op),
+        [...skip],
       );
-      const prev = saved ? (JSON.parse(saved) as Doc) : doc;
-      const nextSchemas = { ...prev.schemas };
-      entries.forEach((e, i) => {
-        const path = diffs[i + 1]?.path;
-        if (!path || !ignored.has(path)) nextSchemas[e.name] = doc.schemas[e.name];
-      });
-      const configWritten = configPath ? !ignored.has(configPath) : configDirty;
-      const nextConfig = configWritten ? doc.config : prev.config;
-      setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
+      // Advance the saved snapshot to the new on-disk state. When everything was
+      // applied (the common case) the doc *is* the disk, so snapshot it directly
+      // — exact, no key-order drift. When the user skipped some entries, fold
+      // only the applied ops onto the previous snapshot so the skipped ones stay
+      // dirty.
+      const configSkipped = configDirty && !!configPath && skip.has(configPath);
+      const anySkipped =
+        configSkipped ||
+        planned.some((p) => {
+          const d = diffFor(diffs, p);
+          return !!d && d.changed && skip.has(d.path);
+        });
+      if (!anySkipped) {
+        setSaved(JSON.stringify(doc));
+      } else {
+        const prev = savedDoc ?? doc;
+        const nextSchemas = { ...prev.schemas };
+        for (const p of planned) {
+          const d = diffFor(diffs, p);
+          if (!d || !d.changed || skip.has(d.path)) continue; // not applied
+          if (p.removed) delete nextSchemas[p.name];
+          else nextSchemas[p.name] = doc.schemas[p.name];
+        }
+        const nextConfig = configSkipped ? prev.config : doc.config;
+        const live = new Set((nextConfig.index ?? []).map((e) => e.name));
+        for (const name of Object.keys(nextSchemas)) if (!live.has(name)) delete nextSchemas[name];
+        setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
+      }
       setDiffs(null);
-      setToast({ kind: "ok", text: t("toast.saved", { n: res.written.length }) });
+      const n = res.written.length + res.moved.length + res.deleted.length;
+      setToast({ kind: "ok", text: t("toast.saved", { n }) });
     } catch (e) {
       setToast({ kind: "error", text: t("toast.saveFailed", { err: errText(e) }) });
     } finally {
@@ -596,7 +656,10 @@ export default function App() {
       title: t("sidebar.deployment"),
       keywords: "deployment settings config connection sinks",
       detail: { body: t("search.descDeployment"), enter: runAction },
-      run: () => setActive("config"),
+      run: () => {
+        setBrowseCatalog(false);
+        setActive("config");
+      },
     },
     {
       id: "cmd.tables",
@@ -630,7 +693,70 @@ export default function App() {
       detail: { body: t("search.descSidebar"), enter: runAction },
       run: toggleLeft,
     },
+    {
+      id: "cmd.newIndex",
+      category: "action",
+      title: t("sidebar.newIndex"),
+      keywords: "new index create add schema file",
+      detail: { body: t("search.descNewIndex"), enter: runAction },
+      run: () => setNewIndexOpen(true),
+    },
+    {
+      id: "cmd.undo",
+      category: "action",
+      title: t("search.undo"),
+      keywords: "undo revert step back history",
+      shortcut: "⌘Z",
+      detail: { body: t("search.descUndo"), enter: runAction },
+      run: () => {
+        if (canUndo) undo();
+      },
+    },
+    {
+      id: "cmd.redo",
+      category: "action",
+      title: t("search.redo"),
+      keywords: "redo forward step history",
+      shortcut: "⇧⌘Z",
+      detail: { body: t("search.descRedo"), enter: runAction },
+      run: () => {
+        if (canRedo) redo();
+      },
+    },
   ];
+  // Visual⟷Code only applies to an index (Deployment has no code form).
+  if (active !== "config")
+    commands.push({
+      id: "cmd.mode",
+      category: "action",
+      title: rawMode ? t("search.toVisual") : t("search.toCode"),
+      keywords: "visual code yaml editor canvas switch mode toggle raw",
+      detail: { body: t("search.descMode"), enter: runAction },
+      run: () => {
+        if (rawMode) setRawMode(false);
+        else openRaw();
+      },
+    });
+  // Legend as searchable reference — every node kind and field type with its
+  // one-line meaning (shown in the preview pane; informational, no navigation).
+  for (const k of KIND_ROWS)
+    commands.push({
+      id: `legend.kind.${k}`,
+      category: "legendKind",
+      title: k,
+      keywords: `legend node kind relation ${k}`,
+      color: `var(--k-${k})`,
+      detail: { body: kindDesc(t, k), enter: t("search.reference") },
+    });
+  for (const f of TYPE_FAMILIES)
+    commands.push({
+      id: `legend.type.${f.varKey}`,
+      category: "legendType",
+      title: f.label,
+      keywords: `legend field type ${f.label} ${f.varKey}`,
+      color: `var(--t-${f.varKey})`,
+      detail: { body: typeDesc(t, f.varKey), enter: t("search.reference") },
+    });
 
   // Keyboard shortcuts. Held in a ref (updated in an effect, not during render)
   // so the listener subscribes once but always sees the latest state; undo/
@@ -672,6 +798,10 @@ export default function App() {
       } else if (selection.kind === "field") {
         apply((s) => removeAt(s, selection.path, selection.index));
         setSelection(null);
+      } else if (selection.kind === "columns") {
+        const { path, names } = selection;
+        apply((s) => removeFields(s, path, names));
+        setSelection(null);
       }
     }
   };
@@ -689,41 +819,42 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col">
-      <header className="topbar relative flex items-center gap-3 border-b border-border bg-card px-4 py-2.5">
-        <Hint label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
-            onClick={toggleLeft}
-          >
-            <Icon name="menu" />
-          </Button>
-        </Hint>
-        <span className="brand inline-flex items-center gap-2 font-bold">
-          <span className="inline-flex text-primary">
-            <Icon name="flow" size={18} />
+      <header className="topbar flex items-center gap-3 border-b border-border bg-card px-4 py-2.5">
+        <div className="flex flex-1 items-center gap-3">
+          <Hint label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={leftOpen ? t("topbar.hideSidebar") : t("topbar.showSidebar")}
+              onClick={toggleLeft}
+            >
+              <Icon name="menu" />
+            </Button>
+          </Hint>
+          <span className="brand inline-flex items-center gap-2 font-bold">
+            <span className="inline-flex text-primary">
+              <Icon name="flow" size={18} />
+            </span>
+            flusso
           </span>
-          flusso
-        </span>
-        <span className="path text-xs text-muted-foreground">{project.config_path}</span>
-        <Hint label={t("topbar.retestDb")}>
-          <button
-            className={cn(
-              "db-chip cursor-pointer rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
-              catalog && !catalog.error ? "ok border-primary text-primary" : "off border-warn text-warn",
-            )}
-            onClick={() => void refreshCatalog()}
-          >
-            {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
-          </button>
-        </Hint>
-        <span className="spacer flex-1" />
+          <span className="path text-xs text-muted-foreground">{project.config_path}</span>
+          <Hint label={t("topbar.retestDb")}>
+            <button
+              className={cn(
+                "db-chip cursor-pointer rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs",
+                catalog && !catalog.error ? "ok border-primary text-primary" : "off border-warn text-warn",
+              )}
+              onClick={() => void refreshCatalog()}
+            >
+              {catalog && !catalog.error ? t("topbar.dbConnected") : t("topbar.dbOffline")}
+            </button>
+          </Hint>
+        </div>
 
         <button
           type="button"
           onClick={() => setPaletteOpen(true)}
-          className="absolute top-1/2 left-1/2 flex h-8 w-72 max-w-[32vw] -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
+          className="flex h-8 w-72 min-w-0 shrink cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
           style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 55%), var(--panel-2)" }}
         >
           <GlowDot />
@@ -731,104 +862,106 @@ export default function App() {
           <Kbd className="ml-auto">⌘K</Kbd>
         </button>
 
-        {/* global: edit history */}
-        <Hint label={t("topbar.undo")}>
-          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
-            <Icon name="undo" />
-          </Button>
-        </Hint>
-        <Hint label={t("topbar.redo")}>
-          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
-            <Icon name="redo" />
-          </Button>
-        </Hint>
-
-        {/* global: theme toggle + language picker */}
-        <Hint label={t("topbar.toggleTheme")}>
-          <Button variant="ghost" size="icon-sm" aria-label={t("topbar.toggleTheme")} onClick={toggleTheme}>
-            {theme === "dark" ? <Sun /> : <Moon />}
-          </Button>
-        </Hint>
-        <DropdownMenu>
-          <Hint label={t("topbar.language")}>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label={t("topbar.language")}>
-                <Languages />
-              </Button>
-            </DropdownMenuTrigger>
+        <div className="flex flex-1 items-center justify-end gap-3">
+          {/* global: edit history */}
+          <Hint label={t("topbar.undo")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
+              <Icon name="undo" />
+            </Button>
           </Hint>
-          <DropdownMenuContent align="end">
-            <DropdownMenuRadioGroup value={lang} onValueChange={setLang}>
-              {Object.entries(LANGS).map(([value, label]) => (
-                <DropdownMenuRadioItem key={value} value={value}>
-                  {label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+          <Hint label={t("topbar.redo")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
+              <Icon name="redo" />
+            </Button>
+          </Hint>
 
-        <div className="mx-1 h-5 w-px bg-border" />
+          {/* global: theme toggle + language picker */}
+          <Hint label={t("topbar.toggleTheme")}>
+            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.toggleTheme")} onClick={toggleTheme}>
+              {theme === "dark" ? <Sun /> : <Moon />}
+            </Button>
+          </Hint>
+          <DropdownMenu>
+            <Hint label={t("topbar.language")}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label={t("topbar.language")}>
+                  <Languages />
+                </Button>
+              </DropdownMenuTrigger>
+            </Hint>
+            <DropdownMenuContent align="end">
+              <DropdownMenuRadioGroup value={lang} onValueChange={setLang}>
+                {Object.entries(LANGS).map(([value, label]) => (
+                  <DropdownMenuRadioItem key={value} value={value}>
+                    {label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
-        {/* Visual ⟷ Code: swaps the whole body between the canvas and the YAML
+          <div className="mx-1 h-5 w-px bg-border" />
+
+          {/* Visual ⟷ Code: swaps the whole body between the canvas and the YAML
             editor. Global because the mode survives index switches; inert on
             the Deployment screen, which has no code representation. */}
-        <Hint label={t("topbar.modeHint")}>
-          <span className="flex items-center gap-2">
-            <Label
-              htmlFor="mode-toggle"
-              className={cn(
-                "cursor-pointer text-xs",
-                rawMode ? "text-muted-foreground" : "font-medium",
-                active === "config" && "opacity-50",
-              )}
-            >
-              {t("topbar.visual")}
-            </Label>
-            <Switch
-              id="mode-toggle"
-              checked={rawMode}
-              disabled={active === "config"}
-              onCheckedChange={(on) => (on ? openRaw() : setRawMode(false))}
-            />
-            <Label
-              htmlFor="mode-toggle"
-              className={cn(
-                "cursor-pointer text-xs",
-                rawMode ? "font-medium" : "text-muted-foreground",
-                active === "config" && "opacity-50",
-              )}
-            >
-              {t("topbar.code")}
-            </Label>
-          </span>
-        </Hint>
-
-        <div className="mx-1 h-5 w-px bg-border" />
-
-        {/* deployment actions — the whole config */}
-        <Hint label={t("search.descValidate")}>
-          <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
-            <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
-            {t("topbar.validate")}
-          </Button>
-        </Hint>
-        <Hint label={t("topbar.resetHint")}>
-          <Button variant="secondary" size="sm" onClick={reset} disabled={!dirty || saving}>
-            <span className={BTN_ICON}>
-              <RotateCcw />
+          <Hint label={t("topbar.modeHint")}>
+            <span className="flex items-center gap-2">
+              <Label
+                htmlFor="mode-toggle"
+                className={cn(
+                  "cursor-pointer text-xs",
+                  rawMode ? "text-muted-foreground" : "font-medium",
+                  active === "config" && "opacity-50",
+                )}
+              >
+                {t("topbar.visual")}
+              </Label>
+              <Switch
+                id="mode-toggle"
+                checked={rawMode}
+                disabled={active === "config"}
+                onCheckedChange={(on) => (on ? openRaw() : setRawMode(false))}
+              />
+              <Label
+                htmlFor="mode-toggle"
+                className={cn(
+                  "cursor-pointer text-xs",
+                  rawMode ? "font-medium" : "text-muted-foreground",
+                  active === "config" && "opacity-50",
+                )}
+              >
+                {t("topbar.code")}
+              </Label>
             </span>
-            {t("topbar.reset")}
-          </Button>
-        </Hint>
-        <Hint label={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
-          <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
-            <span className={BTN_ICON}>
-              {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
-            </span>
-            {t("topbar.save")}
-          </Button>
-        </Hint>
+          </Hint>
+
+          <div className="mx-1 h-5 w-px bg-border" />
+
+          {/* deployment actions — the whole config */}
+          <Hint label={t("search.descValidate")}>
+            <Button variant="secondary" size="sm" onClick={() => void validate()} disabled={validating}>
+              <span className={BTN_ICON}>{validating ? <span className="spinner" /> : <CircleCheck />}</span>
+              {t("topbar.validate")}
+            </Button>
+          </Hint>
+          <Hint label={t("topbar.resetHint")}>
+            <Button variant="secondary" size="sm" onClick={reset} disabled={!dirty || saving}>
+              <span className={BTN_ICON}>
+                <RotateCcw />
+              </span>
+              {t("topbar.reset")}
+            </Button>
+          </Hint>
+          <Hint label={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
+            <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
+              <span className={BTN_ICON}>
+                {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
+              </span>
+              {t("topbar.save")}
+            </Button>
+          </Hint>
+        </div>
       </header>
 
       {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
@@ -928,6 +1061,8 @@ export default function App() {
                 tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
                 junctions={catalog?.junctions.map((j) => j.table.table) ?? []}
                 onCreate={createIndex}
+                open={newIndexOpen}
+                onOpenChange={setNewIndexOpen}
               />
             </div>
             {/* Colour key — open by default, but collapsible so a long index list
@@ -1167,6 +1302,19 @@ function ValidationDetail({ check }: { check: Check }) {
   );
 }
 
+/// The op tag on a review row: move / delete / new (a plain modify has none, its
+/// +/- counts carry it). Tones match the canvas language (warn = move, destructive
+/// = delete, accent = new).
+function OpBadge({ d }: { d: OpDiff }) {
+  const { t } = useT();
+  const pill = "rounded px-1 py-px text-3xs font-bold uppercase tracking-caps";
+  if (d.op === "delete")
+    return <span className={cn(pill, "bg-destructive/10 text-destructive")}>{t("diff.opDelete")}</span>;
+  if (d.op === "move") return <span className={cn(pill, "bg-warn/10 text-warn")}>{t("diff.opMove")}</span>;
+  if (d.current === "") return <span className={cn(pill, "bg-accent2/10 text-accent2")}>{t("diff.newFile")}</span>;
+  return null;
+}
+
 function DiffModal({
   diffs,
   doc,
@@ -1174,7 +1322,7 @@ function DiffModal({
   onConfirm,
   onCancel,
 }: {
-  diffs: FileDiff[];
+  diffs: OpDiff[];
   doc: Doc;
   saving: boolean;
   onConfirm: (paths: string[]) => void;
@@ -1185,7 +1333,14 @@ function DiffModal({
   const [selected, setSelected] = useState(0);
   const [check, setCheck] = useState<Check>({ state: "loading" });
   const searchRef = useRef<HTMLInputElement>(null);
-  const changed = diffs.filter((d) => d.changed);
+  // Config (flusso.toml) first, then the schema files sorted by path so the same
+  // folder's files sit together — the list reads as a folder tree, and ↑/↓ nav
+  // walks it in the shown order.
+  const changed = useMemo(() => {
+    const list = diffs.filter((d) => d.changed);
+    const isConfig = (d: OpDiff) => d.path.endsWith("flusso.toml");
+    return [...list.filter(isConfig), ...list.filter((d) => !isConfig(d)).sort((a, b) => a.path.localeCompare(b.path))];
+  }, [diffs]);
   const active = changed[selected] ?? changed[0];
 
   // Which files to actually write (default all); the user can uncheck any to
@@ -1204,6 +1359,27 @@ function DiffModal({
   // The select-all box acts on the currently-shown (filtered) files.
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
   const allShown = shown.length > 0 && shownIncluded === shown.length;
+
+  // Group the shown files by folder (they're already path-sorted, so same-folder
+  // rows are adjacent) so the review reads as a tree; a folder header toggles its
+  // whole subtree.
+  const groups: { dir: string; files: OpDiff[] }[] = [];
+  for (const d of shown) {
+    const short = shortenPath(d.path);
+    const cut = short.lastIndexOf("/");
+    const dir = cut < 0 ? "" : short.slice(0, cut);
+    const last = groups[groups.length - 1];
+    if (last?.dir === dir) last.files.push(d);
+    else groups.push({ dir, files: [d] });
+  }
+  const toggleFolder = (files: OpDiff[], clear: boolean) =>
+    setInclude((s) => {
+      const next = new Set(s);
+      for (const f of files)
+        if (clear) next.delete(f.path);
+        else next.add(f.path);
+      return next;
+    });
 
   const ignoreList = () => changed.filter((d) => !include.has(d.path)).map((d) => d.path);
 
@@ -1348,46 +1524,75 @@ function DiffModal({
               {t("diff.selected", { n: include.size, m: changed.length })}
             </label>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              {shown.map((d) => {
-                const i = changed.indexOf(d);
-                const s = diffStats(d.current, d.next);
-                const short = shortenPath(d.path);
-                const base = short.slice(short.lastIndexOf("/") + 1);
-                const dir = short.slice(0, short.length - base.length);
-                const on = include.has(d.path);
+              {groups.map((g) => {
+                const folderOn = g.files.every((f) => include.has(f.path));
+                const folderNone = g.files.every((f) => !include.has(f.path));
                 return (
-                  <div
-                    key={d.path}
-                    className={cn(
-                      "flex items-center gap-2 border-b border-border/60 border-l-2 pr-2 pl-3 transition-colors",
-                      i === selected ? "border-l-primary bg-background" : "border-l-transparent hover:bg-accent/50",
+                  <div key={g.dir || "."}>
+                    {g.dir && (
+                      <label className="flex cursor-pointer items-center gap-2 border-b border-border/60 bg-secondary/40 px-3 py-1 text-2xs font-medium text-muted-foreground">
+                        <Checkbox
+                          className="size-3.5"
+                          checked={folderOn ? true : folderNone ? false : "indeterminate"}
+                          onCheckedChange={() => toggleFolder(g.files, folderOn)}
+                          aria-label={g.dir}
+                        />
+                        <Folder className="size-3.5 shrink-0" />
+                        <span className="truncate font-mono">{g.dir}</span>
+                      </label>
                     )}
-                  >
-                    <Checkbox
-                      className="size-4 shrink-0"
-                      checked={on}
-                      onCheckedChange={() => toggle(d.path)}
-                      aria-label={d.path}
-                    />
-                    <button
-                      type="button"
-                      title={d.path}
-                      onClick={() => setSelected(i)}
-                      className={cn(
-                        "flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-2 text-left",
-                        !on && "opacity-45",
-                      )}
-                    >
-                      <span className="truncate font-mono text-xs">
-                        <span className="text-muted-foreground">{dir}</span>
-                        <span className="font-medium text-foreground">{base}</span>
-                      </span>
-                      <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
-                        {d.current === "" && <span className="badge object">{t("diff.newFile")}</span>}
-                        <span className="text-diff-add-num">+{s.adds}</span>
-                        <span className="text-diff-del-num">-{s.dels}</span>
-                      </span>
-                    </button>
+                    {g.files.map((d) => {
+                      const i = changed.indexOf(d);
+                      const s = diffStats(d.current, d.next);
+                      const short = shortenPath(d.path);
+                      const base = short.slice(short.lastIndexOf("/") + 1);
+                      const on = include.has(d.path);
+                      return (
+                        <div
+                          key={d.path}
+                          className={cn(
+                            "flex items-center gap-2 border-b border-border/60 border-l-2 pr-2 transition-colors",
+                            g.dir ? "pl-6" : "pl-3",
+                            i === selected
+                              ? "border-l-primary bg-background"
+                              : "border-l-transparent hover:bg-accent/50",
+                          )}
+                        >
+                          <Checkbox
+                            className="size-4 shrink-0"
+                            checked={on}
+                            onCheckedChange={() => toggle(d.path)}
+                            aria-label={d.path}
+                          />
+                          <button
+                            type="button"
+                            title={d.from ? t("diff.movedFrom", { path: shortenPath(d.from) }) : d.path}
+                            onClick={() => setSelected(i)}
+                            className={cn(
+                              "flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-2 text-left",
+                              !on && "opacity-45",
+                            )}
+                          >
+                            <span className="flex items-center gap-1 truncate font-mono text-xs">
+                              <span className="truncate font-medium text-foreground">{base}</span>
+                              {d.warning === "outside_base" && (
+                                <TriangleAlert
+                                  className="size-3 shrink-0 text-warn"
+                                  aria-label={t("diff.warnOutside")}
+                                />
+                              )}
+                            </span>
+                            <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
+                              <OpBadge d={d} />
+                              {d.op !== "delete" && <span className="text-diff-add-num">+{s.adds}</span>}
+                              {d.op !== "write" || d.current !== "" ? (
+                                <span className="text-diff-del-num">-{s.dels}</span>
+                              ) : null}
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 );
               })}
@@ -1449,67 +1654,253 @@ function DiffModal({
   );
 }
 
+// A two-step "New index" wizard: (1) details — name + root table, (2) file —
+// where the schema file lands. Opened from the sidebar as a modal.
 function NewIndex({
   tables,
   junctions,
   onCreate,
+  open,
+  onOpenChange,
 }: {
   tables: string[];
   junctions: string[];
-  onCreate: (name: string, table: string) => void;
+  onCreate: (name: string, table: string, schemaPath: string) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useT();
-  const [open, setOpen] = useState(false);
+  const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [table, setTable] = useState(tables[0] ?? "");
+  // Where the schema file lands: a picked directory ("" = the config-dir root)
+  // plus a filename. The `.schema.yml` suffix is locked (you type just the base,
+  // tracking the index name) unless you override it for a non-standard name.
+  const [dir, setDir] = useState("");
+  const [base, setBase] = useState("");
+  const [baseEdited, setBaseEdited] = useState(false);
+  const [override, setOverride] = useState(false);
+  const [overrideName, setOverrideName] = useState("");
+  const [dirs, setDirs] = useState<string[]>([]);
+  const SUFFIX = ".schema.yml";
+  const effectiveBase = (baseEdited ? base : name).trim();
+  const effectiveFile = override ? overrideName.trim() : effectiveBase ? `${effectiveBase}${SUFFIX}` : "";
+  const cleanDir = dir.replace(/^\/+|\/+$/g, "");
+  const effectivePath = cleanDir && effectiveFile ? `${cleanDir}/${effectiveFile}` : effectiveFile;
   const junctionSet = new Set(junctions);
-  if (!open) {
-    return (
+
+  // Load the real subfolders under flusso.toml whenever the dialog opens.
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    api
+      .dirs()
+      .then((d) => alive && setDirs(d))
+      .catch(() => {
+        /* offline / unreadable — the picker just offers root + custom entry */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
+
+  const reset = () => {
+    onOpenChange(false);
+    setStep(0);
+    setName("");
+    setTable(tables[0] ?? "");
+    setDir("");
+    setBase("");
+    setBaseEdited(false);
+    setOverride(false);
+    setOverrideName("");
+  };
+  const detailsOk = !!name && !!table;
+  const create = () => {
+    if (!detailsOk || !effectivePath) return;
+    onCreate(name, table, effectivePath);
+    reset();
+  };
+
+  const steps = [t("sidebar.stepDetails"), t("sidebar.stepFile")];
+  const dirOptions = [
+    { value: "", label: t("sidebar.rootDir") },
+    ...dirs.map((d) => ({ value: d, label: d, icon: <Folder className="size-3.5" /> })),
+  ];
+
+  return (
+    <>
       <button
         className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")}
         onClick={() => {
           // The initial `table` state captured the catalog before it loaded —
           // default it now, from the tables that actually exist.
           if (!table && tables[0]) setTable(tables[0]);
-          setOpen(true);
+          onOpenChange(true);
         }}
       >
         + {t("sidebar.newIndex")}
       </button>
-    );
-  }
-  return (
-    <div className="mt-1.5 flex flex-col gap-1.5 rounded-lg border border-border p-2">
-      <Text value={name} onChange={setName} placeholder={t("sidebar.indexName")} />
-      {tables.length ? (
-        <Select
-          value={table}
-          options={tables.map((tbl) => ({
-            label: tbl,
-            value: tbl,
-            description: junctionSet.has(tbl) ? t("catalog.junction") : undefined,
-          }))}
-          onChange={setTable}
-        />
-      ) : (
-        <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />
-      )}
-      <div className="row flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          disabled={!name || !table}
-          onClick={() => {
-            onCreate(name, table);
-            setOpen(false);
-            setName("");
+      <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : reset())}>
+        <DialogContent
+          className="sm:max-w-md"
+          onKeyDown={(e) => {
+            if (e.key !== "Enter") return;
+            // React events bubble through the tree even from a portalled popover,
+            // so Enter inside the directory/table combobox (cmdk) would otherwise
+            // submit the wizard. Only submit from the plain text fields — skip
+            // cmdk and buttons (which handle Enter themselves).
+            const el = e.target as HTMLElement;
+            if (el.closest("[cmdk-root]") || el.tagName === "BUTTON") return;
+            e.preventDefault();
+            if (step === 0 && detailsOk) setStep(1);
+            else if (step === 1) create();
           }}
         >
-          {t("sidebar.create")}
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setOpen(false)}>
-          {t("common.cancel")}
-        </Button>
-      </div>
+          <DialogHeader>
+            <DialogTitle>{t("sidebar.newIndexTitle")}</DialogTitle>
+            <DialogDescription>{t("sidebar.newIndexDesc")}</DialogDescription>
+          </DialogHeader>
+
+          <WizardSteps steps={steps} current={step} />
+
+          {step === 0 ? (
+            <div className="flex flex-col gap-3">
+              <Field label={t("sidebar.indexName")}>
+                <Text value={name} onChange={setName} placeholder={t("sidebar.indexName")} />
+              </Field>
+              <Field label={t("sidebar.rootTable")}>
+                {tables.length ? (
+                  <Combobox
+                    value={table}
+                    onChange={setTable}
+                    placeholder={t("sidebar.rootTable")}
+                    options={tables.map((tbl) => ({
+                      label: tbl,
+                      value: tbl,
+                      description: junctionSet.has(tbl) ? t("catalog.junction") : undefined,
+                      icon: junctionSet.has(tbl) ? (
+                        <Waypoints className="size-3.5 text-accent2" />
+                      ) : (
+                        <Table2 className="size-3.5" />
+                      ),
+                    }))}
+                  />
+                ) : (
+                  <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />
+                )}
+              </Field>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <Field label={t("sidebar.schemaDir")}>
+                <Combobox
+                  value={dir}
+                  onChange={setDir}
+                  options={dirOptions}
+                  allowCustom
+                  placeholder={t("sidebar.rootDir")}
+                />
+              </Field>
+              <Field label={t("sidebar.schemaFile")}>
+                {override ? (
+                  <div className="flex items-center gap-1.5">
+                    <Text
+                      value={overrideName}
+                      onChange={setOverrideName}
+                      placeholder={name ? `${name}.schema.yml` : "x.schema.yml"}
+                      className="flex-1"
+                    />
+                    <Hint label={t("sidebar.lockSuffix")} side="left">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={t("sidebar.lockSuffix")}
+                        onClick={() => setOverride(false)}
+                      >
+                        <RotateCcw />
+                      </Button>
+                    </Hint>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    {/* Type just the base name; the `.schema.yml` suffix is a locked adornment. */}
+                    <div className="flex h-8 flex-1 items-center rounded-md border border-border bg-secondary pr-2 text-sm transition-colors focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
+                      <input
+                        value={baseEdited ? base : name}
+                        onChange={(e) => {
+                          setBaseEdited(true);
+                          setBase(e.target.value);
+                        }}
+                        placeholder={name || "name"}
+                        className="min-w-0 flex-1 bg-transparent px-2.5 py-1 outline-none"
+                        {...NO_PW_MANAGER}
+                      />
+                      <span className="shrink-0 font-mono text-muted-foreground">{SUFFIX}</span>
+                    </div>
+                    <Hint label={t("sidebar.overrideName")} side="left">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={t("sidebar.overrideName")}
+                        onClick={() => {
+                          setOverrideName(effectiveFile);
+                          setOverride(true);
+                        }}
+                      >
+                        <Pencil />
+                      </Button>
+                    </Hint>
+                  </div>
+                )}
+              </Field>
+              <p className="truncate font-mono text-2xs text-muted-foreground" title={effectivePath}>
+                {effectivePath || t("sidebar.schemaFileHint")}
+              </p>
+            </div>
+          )}
+
+          <DialogFooter className="sm:justify-between">
+            <Button variant="ghost" size="sm" onClick={() => (step === 0 ? reset() : setStep(0))}>
+              {step === 0 ? t("common.cancel") : t("common.back")}
+            </Button>
+            {step === 0 ? (
+              <Button size="sm" disabled={!detailsOk} onClick={() => setStep(1)}>
+                {t("common.next")}
+              </Button>
+            ) : (
+              <Button size="sm" disabled={!effectivePath} onClick={create}>
+                {t("sidebar.create")}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/// A compact step rail for the New-index wizard: a numbered dot per step, the
+/// current one filled, with the step labels beneath.
+function WizardSteps({ steps, current }: { steps: string[]; current: number }) {
+  return (
+    <div className="flex items-center gap-2">
+      {steps.map((label, i) => (
+        <div key={label} className="flex flex-1 items-center gap-2">
+          <span
+            className={cn(
+              "grid size-5 shrink-0 place-items-center rounded-full text-2xs font-bold transition-colors",
+              i <= current ? "bg-primary text-background" : "bg-secondary text-muted-foreground",
+            )}
+          >
+            {i + 1}
+          </span>
+          <span className={cn("text-xs", i === current ? "font-medium text-foreground" : "text-muted-foreground")}>
+            {label}
+          </span>
+          {i < steps.length - 1 && <span className="h-px flex-1 bg-border" />}
+        </div>
+      ))}
     </div>
   );
 }

@@ -1,28 +1,45 @@
-// Recent searches: the last few *queries* you ran (distinct from frecency, which
-// tracks the *results* you pick). Shown on the empty palette so you can re-run a
-// search in one keystroke. A query is only remembered once it leads to a pick,
-// so idle typing doesn't pollute the list.
+// Recent picks: the last few records you actually ran/opened from the palette
+// (distinct from frecency, which tracks pick *counts* for ranking). Shown on the
+// empty palette so you can repeat a recent action in one keystroke — it stores
+// what you picked, not what you typed to find it.
 
 const KEY = "flusso-design.search.recent";
-const CAP = 6;
+const CAP = 3;
 
-export function recentSearches(): string[] {
+/// A remembered pick: the record's id (to re-run it) plus its title (to show
+/// even before the records are rebuilt).
+export interface RecentPick {
+  id: string;
+  title: string;
+}
+
+export function recentPicks(): RecentPick[] {
   try {
-    return JSON.parse(localStorage.getItem(KEY) ?? "[]") as string[];
+    const parsed = JSON.parse(localStorage.getItem(KEY) ?? "[]") as RecentPick[];
+    return parsed.filter((p) => p && typeof p.id === "string" && typeof p.title === "string").slice(0, CAP);
   } catch {
     return [];
   }
 }
 
-/// Push `query` to the front (deduped, case-insensitive), capped.
-export function recordSearch(query: string): void {
-  const q = query.trim();
-  if (!q) return;
-  const next = [q, ...recentSearches().filter((x) => x.toLowerCase() !== q.toLowerCase())].slice(0, CAP);
+/// Push a pick to the front (deduped by id), capped at the latest few.
+export function recordPickRecent(pick: RecentPick): void {
+  if (!pick.id) return;
+  const next = [pick, ...recentPicks().filter((x) => x.id !== pick.id)].slice(0, CAP);
   try {
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {
     /* storage disabled — recents just won't persist */
+  }
+}
+
+/// Drop one pick from the recents by id.
+export function removeRecent(id: string): void {
+  const next = recentPicks().filter((p) => p.id !== id);
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next));
+  } catch {
+    /* storage disabled */
   }
 }
 

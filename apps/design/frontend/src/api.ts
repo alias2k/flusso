@@ -195,6 +195,10 @@ export interface IndexEntry {
   schema: string;
   enabled: boolean;
   on_error?: unknown;
+  /// A session-local, stable id used to correlate an index across renames and
+  /// path changes when computing the save op set. Never written to disk —
+  /// stripped from the config before any backend call.
+  id?: string;
 }
 
 export interface ConfigToml {
@@ -215,17 +219,46 @@ export interface IndexFile {
   error?: string;
 }
 
-export interface FileDiff {
+/// A schema-file operation the client computed from saved -> current, sent to
+/// diff/save. The backend just applies it (stateless).
+export type OpKind = "upsert" | "move" | "delete";
+
+export interface FileOp {
+  kind: OpKind;
+  /// Destination (upsert/move) or target (delete), relative to flusso.toml.
   path: string;
+  /// Source path for a move, relative to flusso.toml.
+  from?: string;
+  /// Content for upsert/move (raw wins over schema).
+  schema?: IndexSchema;
+  raw?: string;
+}
+
+/// One op resolved against disk, for the review. `write` covers create + modify.
+export type DiffOp = "write" | "move" | "delete";
+
+export interface OpDiff {
+  op: DiffOp;
+  path: string;
+  from?: string;
   current: string;
   next: string;
   changed: boolean;
+  /// A stable warning code (e.g. "outside_base"); the UI translates it.
+  warning?: string;
 }
 
-export interface SaveSchemaInput {
-  schema_path: string;
-  schema: IndexSchema;
-  raw?: string;
+export interface MovedFile {
+  from: string;
+  to: string;
+}
+
+/// What a save did on disk.
+export interface SaveResult {
+  written: string[];
+  moved: MovedFile[];
+  deleted: string[];
+  pruned: string[];
 }
 
 export interface Project {
@@ -297,6 +330,12 @@ export interface ParseResponse {
   type_tag?: string;
 }
 
+/// Drop the session-local index ids before a config crosses to the backend —
+/// they're a client-only correlation handle and the strict parser rejects
+/// unknown fields. (`undefined` values are omitted by JSON.stringify.)
+const stripIds = (config: ConfigToml): ConfigToml =>
+  config.index ? { ...config, index: config.index.map((e) => ({ ...e, id: undefined })) } : config;
+
 export const api = {
   project: () => fetch("/api/project").then((r) => json<Project>(r)),
   /// Parse a raw schema buffer into the validated model (Code mode's live sync).
@@ -307,11 +346,13 @@ export const api = {
       body: JSON.stringify({ yaml }),
     }).then((r) => json<ParseResponse>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
+  /// Relative subdirectories under the config dir, for the schema-folder picker.
+  dirs: () => fetch("/api/dirs").then((r) => json<string[]>(r)),
   testConnection: (config: ConfigToml) =>
     fetch("/api/test-connection", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(config),
+      body: JSON.stringify(stripIds(config)),
     }).then((r) => json<CatalogResponse>(r)),
   preview: (index: string, schema: IndexSchema) =>
     fetch("/api/preview", {
@@ -323,24 +364,24 @@ export const api = {
     fetch("/api/validate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config, indexes }),
+      body: JSON.stringify({ config: stripIds(config), indexes }),
     }).then((r) => json<ValidateResponse>(r)),
   sample: (config: ConfigToml, name: string, schema: IndexSchema) =>
     fetch("/api/sample", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config, name, schema }),
+      body: JSON.stringify({ config: stripIds(config), name, schema }),
     }).then((r) => json<SampleResponse>(r)),
-  diff: (config: ConfigToml, indexes: SaveSchemaInput[]) =>
+  diff: (config: ConfigToml, ops: FileOp[]) =>
     fetch("/api/diff", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config, indexes }),
-    }).then((r) => json<FileDiff[]>(r)),
-  save: (config: ConfigToml, indexes: SaveSchemaInput[], ignore: string[] = []) =>
+      body: JSON.stringify({ config: stripIds(config), ops }),
+    }).then((r) => json<OpDiff[]>(r)),
+  save: (config: ConfigToml, ops: FileOp[], skip: string[] = []) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config, indexes, ignore }),
-    }).then((r) => json<{ written: string[] }>(r)),
+      body: JSON.stringify({ config: stripIds(config), ops, skip }),
+    }).then((r) => json<SaveResult>(r)),
 };

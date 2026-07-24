@@ -3,6 +3,7 @@
 import { create, useStore } from "zustand";
 import { temporal } from "zundo";
 import type { CatalogResponse, ConfigToml, DiagnosticDto, IndexSchema, PreviewResponse, Project } from "../api";
+import { projectGraph } from "../model/tree";
 import type { Selection } from "../state";
 
 export interface Doc {
@@ -20,7 +21,19 @@ export const emptySchema = (table: string, pk?: string): IndexSchema => ({
 
 const HISTORY_LIMIT = 200;
 
+// A session-local, stable id for an index entry — correlates it across renames
+// and path changes when building the save op set. Never written to disk.
+const newId = () => crypto.randomUUID();
+
 const collapseKey = (index: string) => `flusso-design.collapsed.${index}`;
+
+const persistCollapsed = (index: string, ids: Set<string>) => {
+  try {
+    localStorage.setItem(collapseKey(index), JSON.stringify([...ids]));
+  } catch {
+    /* storage disabled — collapse just won't persist */
+  }
+};
 
 interface DesignState {
   project: Project | null;
@@ -47,12 +60,15 @@ interface DesignState {
   apply: (fn: (s: IndexSchema) => IndexSchema) => void;
   setConfig: (next: ConfigToml) => void;
   openIndex: (name: string) => void;
-  createIndex: (name: string, table: string) => void;
+  createIndex: (name: string, table: string, schemaPath: string) => void;
   dupIndex: (i: number) => void;
   revertChanges: () => void;
 
   loadCollapsed: (index: string) => void;
   toggleCollapsed: (id: string) => void;
+  collapseAll: () => void;
+  expandAll: () => void;
+  pruneCollapsed: (liveIds: string[]) => void;
 
   requestFocus: (index: string, nodeId: string) => void;
   clearFocus: () => void;
@@ -82,7 +98,13 @@ export const useDesignStore = create<DesignState>()(
       loadProject: (project, resetActive) => {
         const schemas: Record<string, IndexSchema> = {};
         for (const idx of project.indexes) if (idx.schema) schemas[idx.name] = idx.schema;
-        const doc: Doc = { config: project.config, schemas };
+        // Stamp each entry with a stable id so the save op set can correlate it
+        // across later renames / path moves.
+        const config = {
+          ...project.config,
+          index: (project.config.index ?? []).map((e) => ({ ...e, id: newId() })),
+        };
+        const doc: Doc = { config, schemas };
         set({
           project,
           doc,
@@ -135,9 +157,12 @@ export const useDesignStore = create<DesignState>()(
         // schema path is left untouched.
         const index = newIdx.map((entry, i) => {
           const old = oldIdx[i];
-          return old && renames.get(old.name) === entry.name && entry.schema === `${old.name}.schema.yml`
-            ? { ...entry, schema: `${entry.name}.schema.yml` }
-            : entry;
+          // Backfill an id for a row added in the Config panel, so every entry
+          // carries one for op-set correlation.
+          const withId = entry.id ? entry : { ...entry, id: newId() };
+          return old && renames.get(old.name) === withId.name && withId.schema === `${old.name}.schema.yml`
+            ? { ...withId, schema: `${withId.name}.schema.yml` }
+            : withId;
         });
 
         const active2 = renames.has(active) ? renames.get(active)! : removed.includes(active) ? "config" : active;
@@ -146,15 +171,16 @@ export const useDesignStore = create<DesignState>()(
 
       openIndex: (name) => set({ active: name, selection: null, diagnostics: null }),
 
-      createIndex: (name, table) => {
+      createIndex: (name, table, schemaPath) => {
         const { doc, catalog } = get();
         if (!doc) return;
         const pk = catalog?.catalog.tables.find((t) => t.name === table)?.primary_key[0];
+        const schema = schemaPath.trim() || `${name}.schema.yml`;
         set({
           doc: {
             config: {
               ...doc.config,
-              index: [...(doc.config.index ?? []), { name, schema: `${name}.schema.yml`, enabled: true }],
+              index: [...(doc.config.index ?? []), { name, schema, enabled: true, id: newId() }],
             },
             schemas: { ...doc.schemas, [name]: emptySchema(table, pk) },
           },
@@ -179,7 +205,7 @@ export const useDesignStore = create<DesignState>()(
               ...doc.config,
               index: [
                 ...entries.slice(0, i + 1),
-                { name, schema: `${name}.schema.yml`, enabled: src.enabled },
+                { name, schema: `${name}.schema.yml`, enabled: src.enabled, id: newId() },
                 ...entries.slice(i + 1),
               ],
             },
@@ -208,11 +234,25 @@ export const useDesignStore = create<DesignState>()(
 
       loadCollapsed: (index) => {
         if (index === "config") return;
+        const { doc } = get();
+        let stored: string[];
         try {
-          set({ collapsed: new Set(JSON.parse(localStorage.getItem(collapseKey(index)) ?? "[]") as string[]) });
+          stored = JSON.parse(localStorage.getItem(collapseKey(index)) ?? "[]") as string[];
         } catch {
           set({ collapsed: new Set() });
+          return;
         }
+        // Reconcile against the live graph: drop ids for nodes that no longer
+        // exist so a deleted node's id can't linger in storage forever.
+        const schema = doc?.schemas[index];
+        if (!schema) {
+          set({ collapsed: new Set(stored) });
+          return;
+        }
+        const live = new Set(projectGraph(schema).nodes.map((n) => n.id));
+        const pruned = new Set(stored.filter((id) => live.has(id)));
+        if (pruned.size !== stored.length) persistCollapsed(index, pruned);
+        set({ collapsed: pruned });
       },
 
       toggleCollapsed: (id) => {
@@ -220,12 +260,37 @@ export const useDesignStore = create<DesignState>()(
         const next = new Set(collapsed);
         if (next.has(id)) next.delete(id);
         else next.add(id);
-        try {
-          localStorage.setItem(collapseKey(active), JSON.stringify([...next]));
-        } catch {
-          /* storage disabled — collapse just won't persist */
-        }
+        persistCollapsed(active, next);
         set({ collapsed: next });
+      },
+
+      collapseAll: () => {
+        const { active, doc } = get();
+        const schema = doc?.schemas[active];
+        if (!schema) return;
+        const next = new Set(projectGraph(schema).nodes.map((n) => n.id));
+        persistCollapsed(active, next);
+        set({ collapsed: next });
+      },
+
+      expandAll: () => {
+        const { active } = get();
+        const next = new Set<string>();
+        persistCollapsed(active, next);
+        set({ collapsed: next });
+      },
+
+      // Reconcile against the live graph after an edit that may have removed
+      // nodes; only writes when something actually dropped, so a no-op edit
+      // doesn't churn storage or state.
+      pruneCollapsed: (liveIds) => {
+        const { active, collapsed } = get();
+        if (active === "config") return;
+        const live = new Set(liveIds);
+        const pruned = new Set([...collapsed].filter((id) => live.has(id)));
+        if (pruned.size === collapsed.size) return;
+        persistCollapsed(active, pruned);
+        set({ collapsed: pruned });
       },
 
       requestFocus: (index, nodeId) => set({ focus: { index, nodeId } }),

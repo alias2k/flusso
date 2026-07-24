@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type ComponentType, type KeyboardEvent } from "react";
-import { Boxes, Clock, CornerDownLeft, Settings2, Table2, Zap } from "lucide-react";
+import { BookOpen, Boxes, Clock, CornerDownLeft, Settings2, Table2, X, Zap } from "lucide-react";
 import type { CatalogResponse } from "../api";
 import { useT } from "../i18n";
 import { frecencyScores, recordPick } from "../model/frecency";
 import { createSearch, type Ranked, runSearch } from "../model/rank";
-import { recentSearches, recordSearch } from "../model/recent";
+import { recentPicks, recordPickRecent, removeRecent } from "../model/recent";
 import {
   buildSearchRecords,
   type SearchCategory,
@@ -25,6 +25,8 @@ const CAT_ICON: Partial<Record<SearchCategory, ComponentType<{ className?: strin
   index: Boxes,
   setting: Settings2,
   catalog: Table2,
+  legendKind: BookOpen,
+  legendType: BookOpen,
 };
 
 const CAT_COLOR: Partial<Record<SearchCategory, string>> = {
@@ -32,6 +34,8 @@ const CAT_COLOR: Partial<Record<SearchCategory, string>> = {
   index: "var(--k-root)",
   setting: "var(--slate)",
   catalog: "var(--accent-2)",
+  legendKind: "var(--k-object)",
+  legendType: "var(--k-object)",
 };
 
 /// A palette colour string → the same colour softened for a border / a tile fill.
@@ -170,14 +174,34 @@ export function CommandPalette({
   const openIndex = useDesignStore((s) => s.openIndex);
   const requestFocus = useDesignStore((s) => s.requestFocus);
   const setBrowseCatalog = useUiStore((s) => s.setBrowseCatalog);
+  const setRawMode = useUiStore((s) => s.setRawMode);
 
   useEffect(() => {
     if (!open) setQ("");
   }, [open]);
 
-  // Building every field record is O(fields); only do it while the palette is open.
+  const headings: Record<SearchCategory, string> = {
+    action: t("search.actions"),
+    index: t("search.indexes"),
+    field: t("search.fields"),
+    setting: t("search.settings"),
+    catalog: t("search.tables"),
+    legendKind: t("search.legendKinds"),
+    legendType: t("search.legendTypes"),
+  };
+
+  // Building every field record is O(fields); only do it while the palette is
+  // open. Each record carries its group label (+ raw category token) so a group
+  // name like "actions" surfaces the whole group in search.
   const records = useMemo(
-    () => (open ? [...commands, ...buildSearchRecords(doc, catalog, t)] : []),
+    () =>
+      open
+        ? [...commands, ...buildSearchRecords(doc, catalog, t)].map((r) => ({
+            ...r,
+            group: `${headings[r.category]} ${r.category}`,
+          }))
+        : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [open, commands, doc, catalog, t],
   );
   const byId = useMemo(() => new Map(records.map((r) => [r.id, r])), [records]);
@@ -204,16 +228,38 @@ export function CommandPalette({
   // shown as ghost text and accepted with Tab.
   const completion = useMemo(() => {
     if (!needle) return "";
-    const s = search.autoSuggest(needle, { prefix: true, fuzzy: 0.2, boost: { title: 3 } })[0]?.suggestion ?? "";
+    // Suggest from titles only — the `keywords`/`group` fields would autosuggest
+    // multi-word completions (e.g. "action actions"), which read as broken ghost
+    // text against a single-token query.
+    const s =
+      search.autoSuggest(needle, { prefix: true, fuzzy: 0.2, boost: { title: 3 }, fields: ["title"] })[0]?.suggestion ??
+      "";
     return s.toLowerCase().startsWith(q.toLowerCase()) && s.length > q.length ? s.slice(q.length) : "";
   }, [needle, q, search]);
 
-  const recent = useMemo(() => (open && !needle ? recentSearches() : []), [open, needle]);
+  // Recent *picks* still present in the current project (stale ids drop out).
+  // `recentTick` forces a recompute after a manual removal.
+  const [recentTick, setRecentTick] = useState(0);
+  const recent = useMemo(
+    () => (open && !needle ? recentPicks().filter((p) => byId.has(p.id)) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [open, needle, byId, recentTick],
+  );
+  const removePick = (id: string) => {
+    removeRecent(id);
+    setRecentTick((n) => n + 1);
+  };
 
   const onInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Tab" && completion) {
       e.preventDefault();
       setQ(q + completion);
+      return;
+    }
+    // ⌘/Ctrl+⌫ removes the highlighted recent pick from history.
+    if ((e.metaKey || e.ctrlKey) && e.key === "Backspace" && value.startsWith("recent:")) {
+      e.preventDefault();
+      removePick(value.slice("recent:".length));
     }
   };
 
@@ -226,22 +272,33 @@ export function CommandPalette({
     ranked[0]?.record ??
     null;
 
+  // The main area is chosen by (browseCatalog, active, rawMode) together, so a
+  // jump must clear the sibling view flags or the target won't actually show
+  // (e.g. opening an index while the Tables browser is up). A field/node jump
+  // also leaves Code mode so the canvas focus is visible; a plain index open
+  // preserves Code mode (it survives index switches).
   const navigate = (target: SearchTarget) => {
     switch (target.kind) {
       case "index":
+        setBrowseCatalog(false);
         openIndex(target.name);
         break;
       case "field":
+        setBrowseCatalog(false);
+        setRawMode(false);
         setActive(target.index);
         setSelection({ kind: "field", path: target.path, index: target.leaf });
         requestFocus(target.index, pathId(target.path));
         break;
       case "node":
+        setBrowseCatalog(false);
+        setRawMode(false);
         setActive(target.index);
         setSelection(target.path.length ? { kind: "node", path: target.path } : { kind: "root" });
         requestFocus(target.index, pathId(target.path));
         break;
       case "config":
+        setBrowseCatalog(false);
         setActive("config");
         break;
       case "catalog":
@@ -252,20 +309,13 @@ export function CommandPalette({
 
   const onSelect = (r: SearchRecord) => {
     recordPick(r.id);
-    if (needle) recordSearch(needle);
+    recordPickRecent({ id: r.id, title: r.title });
     onOpenChange(false);
     if (r.run) r.run();
     else if (r.target) navigate(r.target);
   };
 
-  const headings: Record<SearchCategory, string> = {
-    action: t("search.actions"),
-    index: t("search.indexes"),
-    field: t("search.fields"),
-    setting: t("search.settings"),
-    catalog: t("search.tables"),
-  };
-  const groups: SearchCategory[] = ["action", "index", "field", "setting", "catalog"];
+  const groups: SearchCategory[] = ["action", "index", "field", "setting", "legendKind", "legendType", "catalog"];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -310,23 +360,40 @@ export function CommandPalette({
                     </span>
                   }
                 >
-                  {recent.map((query) => (
-                    <CommandItem
-                      key={`recent:${query}`}
-                      value={`recent:${query}`}
-                      onSelect={() => setQ(query)}
-                      className="group relative gap-2.5 py-2 data-[selected=true]:bg-primary/10 data-[selected=true]:text-foreground"
-                    >
-                      <span
-                        aria-hidden
-                        className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary opacity-0 group-data-[selected=true]:opacity-100"
-                      />
-                      <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-accent text-muted-foreground">
-                        <Clock className="size-3.5" />
-                      </span>
-                      <span className="min-w-0 flex-1 truncate">{query}</span>
-                    </CommandItem>
-                  ))}
+                  {recent.map((pick) => {
+                    const r = byId.get(pick.id);
+                    return (
+                      <CommandItem
+                        key={`recent:${pick.id}`}
+                        value={`recent:${pick.id}`}
+                        onSelect={() => r && onSelect(r)}
+                        className="group relative gap-2.5 py-2 data-[selected=true]:bg-primary/10 data-[selected=true]:text-foreground"
+                      >
+                        <span
+                          aria-hidden
+                          className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary opacity-0 group-data-[selected=true]:opacity-100"
+                        />
+                        <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-accent text-muted-foreground">
+                          <Clock className="size-3.5" />
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{pick.title}</span>
+                        <button
+                          type="button"
+                          aria-label={t("search.removeRecent")}
+                          title={t("search.removeRecent")}
+                          onPointerDown={(e) => {
+                            // Beat cmdk's onSelect (which fires on pointer-down).
+                            e.preventDefault();
+                            e.stopPropagation();
+                            removePick(pick.id);
+                          }}
+                          className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity group-data-[selected=true]:opacity-100 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none"
+                        >
+                          <X className="size-3.5" />
+                        </button>
+                      </CommandItem>
+                    );
+                  })}
                 </CommandGroup>
               )}
               {groups.map((cat) => {
@@ -403,6 +470,13 @@ export function CommandPalette({
               <span className="flex items-center gap-1.5 text-primary">
                 <Kbd className="text-primary">⇥</Kbd>
                 {t("search.complete")}
+              </span>
+            )}
+            {recent.length > 0 && value.startsWith("recent:") && (
+              <span className="flex items-center gap-1.5">
+                <Kbd>⌘</Kbd>
+                <Kbd>⌫</Kbd>
+                {t("search.removeRecent")}
               </span>
             )}
             <span className="ml-auto text-muted-foreground">{t("search.onScreenFirst")}</span>

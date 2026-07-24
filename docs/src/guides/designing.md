@@ -63,10 +63,14 @@ inspector shows the suggestion — with a one-click *use* — only when your pic
 
 - **Undo/redo** (`⌘/Ctrl+Z`, `⇧⌘Z`) over the whole document; an **unsaved-changes** dot
   per index, and a warning before you navigate away with edits.
-- **Per-node column tools**: include-all/clear, a filter for wide tables, and collapse a node
-  to just its header. Each included column shows its required state at a glance: a **muted `*`**
+- **Per-node column tools**: include-all/clear, a filter for wide tables, **Shift-click** a
+  column checkbox to check/uncheck a whole range at once (**Ctrl/Cmd-click** toggles one
+  without moving the range anchor), and collapse a node to just its header (**collapse-all /
+  expand-all** buttons on the canvas toolbar do the whole graph at once). Each included column shows its required state at a glance: a **muted `*`**
   = required and aligned with a `NOT NULL` column, an **accent `*`** = required but overriding a
   nullable column, an **`=`** = a default is set, and **nothing** = optional.
+- **Inline rename**: double-click a node's header title to rename that field in place, without
+  opening the inspector.
 - **Jump-to-node** search and shortcuts: `⌘/Ctrl+S` save, `Delete` remove the selected
   node/field, `Esc` deselect; click an edge to select its join.
 - **Guidance**: a kind-colour legend, FK tooltips, a one-line grammar hint per field kind,
@@ -78,13 +82,22 @@ inspector shows the suggestion — with a one-click *use* — only when your pic
 
 ### Saving, validating, and escape hatches
 
-- **Diff before save**: *Save* shows exactly what would change on disk per file; it writes
-  only on confirm.
+- **Diff before save**: *Save* shows exactly what would change on disk, grouped into a
+  folder tree — each entry tagged as a write, a **move** (rename or relocate), a **delete**
+  (an index you removed), or a new file, with a warning on any path that lands outside the
+  config directory. Uncheck any entry (or a whole folder) to leave it alone; it writes only
+  on confirm.
+- **File moves are real**: change an index's schema-file path (or rename the index) and the
+  file is moved on save — the old file is cleaned up and emptied folders are pruned, not left
+  orphaned. Saving is **atomic**: everything is staged first, so a failure mid-save leaves
+  the files untouched.
 - **Validate against the DB** highlights the offending fields right on the canvas (with the
   message on hover), not just a list.
 - **Editable `flusso.toml`**: the source connection, index entries, and **sinks** (the
   OpenSearch URL, shards, analyzers, …) are all editable; a DB-status chip re-tests the
-  connection.
+  connection. Creating an index is a short two-step dialog (name + root table, then where the
+  schema file lands); the per-index **schema file** path is an editable field — point it at a
+  subfolder to organize schemas, and the folders are created on save.
 - **Raw-YAML fallback**: when the visual editor can't represent something, switch an index
   to *Raw YAML*, edit the file text directly, and save it verbatim.
 

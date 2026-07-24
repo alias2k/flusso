@@ -79,6 +79,25 @@ export function loadViewport(index: string): Viewport | null {
   }
 }
 
+const mapKey = (index: string) => `flusso-design.minimap.${index}`;
+
+/// Whether the minimap is shown for `index` (defaults to hidden).
+export function loadMinimap(index: string): boolean {
+  try {
+    return localStorage.getItem(mapKey(index)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveMinimap(index: string, shown: boolean) {
+  try {
+    localStorage.setItem(mapKey(index), shown ? "1" : "0");
+  } catch {
+    /* storage disabled */
+  }
+}
+
 export function clearOverrides(index: string) {
   try {
     localStorage.removeItem(key(index));

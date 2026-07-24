@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, ChevronRight, Plus, X } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronRight, Link2, Plus, X } from "lucide-react";
 import type { ColumnShape } from "../api";
 import { useT } from "../i18n";
 import { fromGeneric, type Generic, toGeneric } from "../model/generic";
@@ -285,6 +285,8 @@ interface Opt<T extends string> {
   value: T;
   description?: string;
   className?: string;
+  /// A leading glyph for the row (e.g. a junction marker in a table picker).
+  icon?: ReactNode;
 }
 
 export function Select<T extends string>({
@@ -349,7 +351,9 @@ export function Combobox({
     setQuery("");
   };
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    // `modal` so the list scrolls even inside a Dialog — a non-modal popover is
+    // portalled outside the Dialog's scroll-lock, which would eat its wheel.
+    <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -365,7 +369,7 @@ export function Combobox({
           <ChevronDownIcon className="size-3.5 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-auto max-w-[92vw] min-w-(--radix-popover-trigger-width) p-0">
+      <PopoverContent className="w-(--radix-popover-trigger-width) max-w-[92vw] p-0">
         <Command>
           <CommandInput value={query} onValueChange={setQuery} placeholder={placeholder} />
           <CommandList>
@@ -377,7 +381,8 @@ export function Combobox({
             )}
             {options.map((o) => (
               <CommandItem key={o.value} value={o.value} onSelect={() => pick(o.value)}>
-                <span className={cn("font-mono", o.className)}>{o.label}</span>
+                {o.icon && <span className="shrink-0 text-muted-foreground">{o.icon}</span>}
+                <span className={cn("min-w-0 flex-1 truncate font-mono", o.className)}>{o.label}</span>
                 {o.description && (
                   <span className="pl-2 font-mono text-2xs whitespace-nowrap text-muted-foreground">
                     {o.description}
@@ -418,6 +423,43 @@ export function ColumnPicker({
     label: c.name,
     description: c.sql_type,
     className: typeClass((c.suggested_type ?? c.sql_type) as string),
+  }));
+  return (
+    <Combobox
+      value={value}
+      options={options}
+      allowCustom
+      onChange={onChange}
+      placeholder={placeholder}
+      className={className}
+    />
+  );
+}
+
+/// The shared table picker: a [`Combobox`] over catalog table names, marking
+/// junction tables with a link glyph so many-to-many `through` picks are
+/// obvious. `allowCustom` for offline / hand-typed names.
+export function TablePicker({
+  value,
+  tables,
+  junctions,
+  onChange,
+  placeholder,
+  className,
+}: {
+  value: string;
+  tables: string[];
+  junctions?: ReadonlySet<string>;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const { t } = useT();
+  const options = tables.map((name) => ({
+    value: name,
+    label: name,
+    icon: junctions?.has(name) ? <Link2 className="size-3.5" /> : undefined,
+    description: junctions?.has(name) ? t("catalog.junction") : undefined,
   }));
   return (
     <Combobox

@@ -33,10 +33,10 @@ function tokenize(text: string): string[] {
 export function createSearch(records: SearchRecord[]): MiniSearch<SearchRecord> {
   const ms = new MiniSearch<SearchRecord>({
     idField: "id",
-    fields: ["title", "subtitle", "keywords"],
+    fields: ["title", "subtitle", "keywords", "group"],
     tokenize,
     searchOptions: {
-      boost: { title: 3, subtitle: 1.4, keywords: 0.8 },
+      boost: { title: 3, subtitle: 1.4, keywords: 0.8, group: 0.5 },
       prefix: true,
       fuzzy: 0.2,
       combineWith: "AND",

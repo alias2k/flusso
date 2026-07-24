@@ -100,6 +100,7 @@ fn router(state: AppState) -> Router {
         .route("/api/sample", post(sample))
         .route("/api/diff", post(diff))
         .route("/api/save", post(save))
+        .route("/api/dirs", get(dirs))
         .with_state(state)
         .fallback(assets::serve)
 }
@@ -111,6 +112,10 @@ async fn project(State(state): State<AppState>) -> Result<Response, ApiError> {
 
 async fn catalog(State(state): State<AppState>) -> Response {
     Json(api::introspect(&state.config_path).await).into_response()
+}
+
+async fn dirs(State(state): State<AppState>) -> Response {
+    Json(api::list_dirs(&state.config_path)).into_response()
 }
 
 async fn test_connection(Json(config): Json<schema_config_toml::ConfigToml>) -> Response {

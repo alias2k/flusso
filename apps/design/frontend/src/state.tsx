@@ -5,7 +5,13 @@ import { createContext, useContext } from "react";
 import type { CatalogResponse, ColumnShape, DiagnosticDto, IndexSchema } from "./api";
 
 export type Selection =
-  { kind: "root" } | { kind: "node"; path: number[] } | { kind: "field"; path: number[]; index: number } | null;
+  | { kind: "root" }
+  | { kind: "node"; path: number[] }
+  | { kind: "field"; path: number[]; index: number }
+  /// Multiple catalog columns of the node at `path`, selected by name — drives
+  /// the Inspector's bulk include/exclude panel.
+  | { kind: "columns"; path: number[]; names: string[] }
+  | null;
 
 export interface DesignCtx {
   catalog: CatalogResponse | null;

@@ -5,7 +5,7 @@ import { useT } from "../i18n";
 import { LABEL } from "../styles";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Check, Combobox, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
+import { Check, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
 import {
   Dialog,
   DialogContent,
@@ -126,17 +126,16 @@ export function ConfigPanel({
           </div>
           {index.map((e, i) => {
             const suggestion = e.name ? `${e.name}.schema.yml` : "";
-            const schemaOpts = Array.from(new Set([suggestion, ...index.map((x) => x.schema)].filter(Boolean))).map(
-              (p) => ({ value: p, label: p }),
-            );
+            // Existing files + the name-derived suggestion, offered as datalist
+            // autocomplete on an editable path field (not a fixed picker).
+            const schemaList = Array.from(new Set([suggestion, ...index.map((x) => x.schema)].filter(Boolean)));
             return (
               <div key={i} className={cn(INDEX_COLS, "px-3 py-1.5")}>
                 <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder={t("config.name")} />
-                <Combobox
+                <Text
                   value={e.schema}
                   onChange={(schema) => setEntry(i, { ...e, schema })}
-                  options={schemaOpts}
-                  allowCustom
+                  list={schemaList}
                   placeholder={suggestion || "x.schema.yml"}
                 />
                 <Select

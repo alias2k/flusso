@@ -51,6 +51,22 @@ export function includeColumns(
   return withNodeFields(schema, path, [...fields, ...added]);
 }
 
+/// Remove the given rows from the node in one pass — matches a catalog-backed
+/// scalar column by its source column name, and any other field (special leaves:
+/// aggregates/geo/map/custom/…) by its field name. The batch counterpart used by
+/// the bulk "remove selected" action, so it spans both row kinds.
+export function removeFields(schema: IndexSchema, path: number[], names: string[]): IndexSchema {
+  const drop = new Set(names);
+  return withNodeFields(
+    schema,
+    path,
+    nodeFields(schema, path).filter((f) => {
+      const col = "column" in f.source && typeof f.source.column.ty === "string" ? f.source.column.column : undefined;
+      return !(col !== undefined && drop.has(col)) && !drop.has(f.field);
+    }),
+  );
+}
+
 /// Drop every plain scalar-column field on the node (keeps geo/map/custom/
 /// aggregate/object — only the checkbox-driven columns clear).
 export function clearColumns(schema: IndexSchema, path: number[]): IndexSchema {
