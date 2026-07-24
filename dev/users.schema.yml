@@ -80,8 +80,11 @@ fields:
     order_by:
       - { column: placed_at, direction: desc }
     fields:
+      # Same lifecycle order as the standalone `orders` index, so sorting a
+      # user's nested orders by `status` follows pending → … → cancelled.
       - enum: status
         required: true
+        variants: [pending, paid, shipped, delivered, cancelled]
       - decimal: total
         required: true
       - timestamp: placedAt
