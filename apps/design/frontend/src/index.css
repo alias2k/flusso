@@ -593,13 +593,12 @@
     --xy-attribution-background-color: var(--panel);
   }
 
-  /* node rows are now display-only: click to edit in the inspector */
-  .col-row.on,
-  .col-row.special {
+  /* every row is clickable — click selects it (Shift/Ctrl multi-select), so all
+   rows, included or not, get the pointer + hover affordance */
+  .col-row {
     cursor: pointer;
   }
-  .col-row.on:hover,
-  .col-row.special:hover {
+  .col-row:hover {
     background: var(--panel-2);
   }
   /* selection reads as elevation: a tinted pill lifted off the list with a ring
