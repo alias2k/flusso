@@ -166,6 +166,11 @@ fn type_label(mapping: &Mapping) -> String {
     if let Some(values) = &mapping.map_values {
         return format!("map<{}>", mapping_type_name(values));
     }
+    // A declared-order enum reads as `enum` (ordered), not the bare `keyword` it
+    // maps to; a bare enum is indistinguishable from keyword and stays `keyword`.
+    if mapping.enum_order.is_some() {
+        return "enum".to_owned();
+    }
     mapping_type_name(&mapping.mapping_type).to_owned()
 }
 

@@ -82,16 +82,40 @@ fn order_by_opt() -> impl Strategy<Value = Option<Vec<OrderBy>>> {
     prop_oneof![Just(None), prop::collection::vec(one, 1..=2).prop_map(Some)]
 }
 
+/// A declared enum order: sometimes empty (a bare enum), sometimes an ordered
+/// prefix of a fixed variant list (unique, valid tokens).
+fn enum_variants() -> impl Strategy<Value = Vec<String>> {
+    prop::sample::select(vec![
+        vec![],
+        vec!["low"],
+        vec!["low", "medium"],
+        vec!["low", "medium", "high"],
+    ])
+    .prop_map(|vs| vs.into_iter().map(String::from).collect())
+}
+
 fn scalar_source() -> BoxedStrategy<FieldSource> {
-    (scalar_type(), col(), any::<bool>(), transforms())
-        .prop_map(|(ty, column, nullable, transforms)| {
+    (
+        scalar_type(),
+        col(),
+        any::<bool>(),
+        transforms(),
+        enum_variants(),
+    )
+        .prop_map(|(ty, column, nullable, transforms, variants)| {
+            // A declared order only rides an `enum`; every other type has none.
+            let enum_order = if matches!(ty, FlussoType::Enum) {
+                variants
+            } else {
+                Vec::new()
+            };
             FieldSource::Column(Column {
                 column,
                 ty,
                 nullable,
                 transforms,
                 default: None,
-                enum_order: Vec::new(),
+                enum_order,
             })
         })
         .boxed()

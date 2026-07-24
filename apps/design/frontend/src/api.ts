@@ -52,6 +52,9 @@ export interface Column {
   nullable: boolean;
   transforms?: Transform[];
   default?: unknown;
+  // An enum's variants in rank order; omitted/empty for a bare enum or non-enum
+  // column. When set, the field sorts by this order instead of alphabetically.
+  enum_order?: string[];
 }
 
 export interface Geo {

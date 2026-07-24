@@ -1,5 +1,6 @@
-import { Copy, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Trash2, X } from "lucide-react";
 import pluralize from "pluralize";
+import { useState } from "react";
 import {
   SCALAR_TYPES,
   type Aggregate,
@@ -631,9 +632,89 @@ function ScalarBody({
           <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
           <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
         </div>
+        {column.ty === "enum" && <VariantsEditor column={column} setCol={setCol} />}
         <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
       </Block>
     </>
+  );
+}
+
+/// The ordered variant list for an `enum` field. Order is rank: the field sorts
+/// by this order instead of alphabetically. Empty (all removed) is a plain
+/// keyword-like enum. Add, remove, reorder (↑/↓), and rename inline; a stored
+/// value not in the list sorts after the declared ones.
+function VariantsEditor({ column, setCol }: { column: Column; setCol: (c: Column) => void }) {
+  const { t } = useT();
+  const [draft, setDraft] = useState("");
+  const variants = column.enum_order ?? [];
+
+  const commit = (next: string[]) => setCol({ ...column, enum_order: next.length ? next : undefined });
+  const add = () => {
+    const v = draft.trim();
+    if (!v || variants.includes(v)) return;
+    commit([...variants, v]);
+    setDraft("");
+  };
+  const rename = (i: number, v: string) => commit(variants.map((x, j) => (j === i ? v : x)));
+  const remove = (i: number) => commit(variants.filter((_, j) => j !== i));
+  const move = (i: number, delta: number) => {
+    const j = i + delta;
+    if (j < 0 || j >= variants.length) return;
+    const next = [...variants];
+    [next[i], next[j]] = [next[j], next[i]];
+    commit(next);
+  };
+
+  return (
+    <Row label={t("inspector.variants")}>
+      <p className="-mt-0.5 mb-1 text-2xs leading-snug text-muted-foreground">{t("inspector.variantsHint")}</p>
+      {variants.length > 0 && (
+        <ul className="mb-1 flex flex-col gap-1">
+          {variants.map((v, i) => (
+            <li key={i} className="flex items-center gap-1">
+              <span className="w-4 shrink-0 text-right font-mono text-2xs text-muted-foreground">{i}</span>
+              <Text value={v} onChange={(next) => rename(i, next)} className="font-mono" />
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0 text-muted-foreground"
+                aria-label={t("inspector.variantUp")}
+                disabled={i === 0}
+                onClick={() => move(i, -1)}
+              >
+                <ChevronUp />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0 text-muted-foreground"
+                aria-label={t("inspector.variantDown")}
+                disabled={i === variants.length - 1}
+                onClick={() => move(i, 1)}
+              >
+                <ChevronDown />
+              </Button>
+              <RemoveButton label={t("inspector.variantRemove")} onClick={() => remove(i)} />
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex items-center gap-1">
+        <Text
+          value={draft}
+          onChange={setDraft}
+          placeholder={t("inspector.variantsAdd")}
+          className="font-mono"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            }
+          }}
+        />
+        <AddButton label={t("inspector.add")} disabled={!draft.trim()} onClick={add} />
+      </div>
+    </Row>
   );
 }
 
