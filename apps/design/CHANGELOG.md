@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.11.1...flusso-design-v0.12.0) - 2026-07-24
+
+### Added
+
+- *(design)* reusable Table/Column pickers in the inspector
+- *(design)* multi-select column rows with a bulk include/remove panel
+- *(design)* Shift-click to check/uncheck a range of node columns
+- *(design)* directory picker for the New-index schema path
+- *(design)* searchable root-table picker with junction icons
+- *(design)* remember the minimap open state per index
+- *(design)* command-palette fixes + path-based routing
+- *(design)* reorganize canvas controls into view / node clusters
+- *(design)* client op set + folder-tree save review
+- *(design)* stateless op-based save (upsert/move/delete)
+- *(design)* card UX polish + schema file placement at creation
+
+### Fixed
+
+- *(design)* make the topbar search shrink instead of overflow
+- *(design)* center the topbar search, let the right cluster push it
+- *(design)* take the topbar search out of absolute centering
+- *(design)* hover + pointer on excluded column rows
+- *(design)* row multi-select now spans custom fields & excluded columns
+- *(design)* make column range-select actually work + add Ctrl/Cmd
+- *(design)* directory picker on a relative config path + picker polish
+- *(design)* restore the saved viewport on load, not just on index switch
+- *(design)* combobox scrolls inside dialogs; keep view controls off the RF attribution
+- *(design)* show the minimap top-left under its toggle, not top-right
+
+### Other
+
+- *(design)* rebuild embedded SPA
+- *(design)* rebuild embedded SPA
+- *(design)* rebuild embedded SPA
+- *(design)* rebuild embedded SPA
+- *(design)* rebuild embedded SPA
+
 ## [0.11.1](https://github.com/alias2k/flusso/compare/flusso-design-v0.11.0...flusso-design-v0.11.1) - 2026-07-23
 
 ### Fixed
