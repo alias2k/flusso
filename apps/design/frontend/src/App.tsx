@@ -853,7 +853,7 @@ export default function App() {
         <button
           type="button"
           onClick={() => setPaletteOpen(true)}
-          className="absolute top-1/2 left-1/2 flex h-8 w-72 max-w-[32vw] -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
+          className="flex h-8 w-72 max-w-[32vw] min-w-0 shrink cursor-pointer items-center gap-2.5 rounded-full border border-primary/25 px-3 pr-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50"
           style={{ background: "linear-gradient(90deg, var(--accent-soft), transparent 55%), var(--panel-2)" }}
         >
           <GlowDot />
