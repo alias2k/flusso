@@ -50,9 +50,11 @@ use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, Image
 
 const USERNAME: &str = "admin";
 
-/// The real-world special-character password from the issue-#93 report.
-/// Strong enough for OpenSearch 2.12+'s initial-admin password strength check.
-const PASSWORD: &str = "971b#o^1!*#7Hqf8K&!@";
+/// Deliberately hostile: every class of character the issue suspects — shell
+/// metacharacters, a `:` (the basic-auth userinfo separator), quotes, `%`,
+/// `&`, `+`, `=`, spaces. Strong enough for OpenSearch 2.12+'s initial-admin
+/// password strength check.
+const PASSWORD: &str = "Fl*sso p@$$:W0rd!\"93\"%&+=#~";
 
 #[derive(Debug, serde::Deserialize)]
 struct Account {
