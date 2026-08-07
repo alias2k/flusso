@@ -167,6 +167,17 @@ fn all_aggregate_ops() -> Vec<schema_index_yaml::AggregateOp> {
     vec![Count, Sum, Avg, Min, Max, Ids]
 }
 
+fn all_ssl_modes() -> Vec<schema::SslMode> {
+    use schema::SslMode::*;
+    fn _exhaustive(m: schema::SslMode) {
+        use schema::SslMode::*;
+        match m {
+            Disable | Prefer | Require | VerifyCa | VerifyFull => {}
+        }
+    }
+    vec![Disable, Prefer, Require, VerifyCa, VerifyFull]
+}
+
 fn all_text_analyses() -> Vec<schema::TextAnalysis> {
     use schema::TextAnalysis::*;
     fn _exhaustive(t: schema::TextAnalysis) {
@@ -443,6 +454,12 @@ fn populated_config_json() -> Value {
         [source]
         type = "postgres"
         connection_url = { host = "h", port = 5432, user = "u", password = { env = "P" }, database = "d" }
+        manage_publication = true
+        ssl_mode = "verify-full"
+        ssl_root_cert = "/ca.pem"
+        ssl_cert = "/client.pem"
+        ssl_key = "/client.key"
+        ssl_sni_hostname = "db.internal"
 
         [sinks.os]
         type = "opensearch"
@@ -545,6 +562,26 @@ fn config_source_parts_fields_match_parser() {
     );
 
     assert_eq!(schema_parts, rust_parts, "source connection parts drifted");
+}
+
+#[test]
+fn config_source_fields_match_parser() {
+    let cfg = populated_config_json();
+    let rust = object_keys(cfg.pointer("/source").expect("source"));
+    let schema = schema_keys(&config_schema(), "/properties/source/oneOf/0/properties");
+    assert_eq!(rust, schema, "source fields drifted");
+}
+
+#[test]
+fn config_ssl_mode_enum_matches_parser() {
+    assert_eq!(
+        schema_enum(
+            &config_schema(),
+            "/properties/source/oneOf/0/properties/ssl_mode/enum"
+        ),
+        tokens(&all_ssl_modes()),
+        "ssl_mode enum drifted",
+    );
 }
 
 #[test]
