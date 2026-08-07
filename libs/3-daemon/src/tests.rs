@@ -323,6 +323,7 @@ fn backendless_config() -> Config {
             source_type: SourceType::Postgres,
             connection: None,
             manage_publication: true,
+            tls: Default::default(),
         },
         sinks: BTreeMap::new(),
         indexes: BTreeMap::new(),
