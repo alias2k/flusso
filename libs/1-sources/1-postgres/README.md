@@ -13,6 +13,14 @@ The Postgres logical-replication **source** for flusso: capture row changes over
 **Re-exports** (so callers build a capture without depending on `pgwire-replication`
 directly): `Lsn`, `ReplicationConfig`, `SslMode`, `TlsConfig`.
 
+**Connection helpers**: `replication_config` translates a connection URL + the
+deployment's declared TLS settings (`schema_core::SourceTls`) into a
+`ReplicationConfig` — merging the config keys over the URL's libpq `ssl*`
+parameters (config wins; no mode anywhere means `prefer`) — and
+`sql_connection_url` projects the same decision onto the URL handed to the SQL
+pools, so the replication stream and the query connections can't disagree on
+TLS.
+
 > 💡 **Did you know** — flusso only reads the WAL; it never polls your tables, so
 > follow-mode load on Postgres stays flat regardless of table size.
 
