@@ -1,5 +1,5 @@
 use schema_core::{
-    ConnectionSpec, ConnectionUrl, ResolveError, SourceType, resolve_connection_url,
+    ConnectionSpec, ConnectionUrl, ResolveError, SourceTls, SourceType, resolve_connection_url,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,12 @@ pub struct Source {
     /// per run. See [`crate`] docs and the publication-management design.
     #[serde(default = "default_manage_publication")]
     pub manage_publication: bool,
+    /// Declared TLS settings (the flat `ssl_*` keys), merged by the source
+    /// backend over the connection URL's own `ssl*` query parameters — config
+    /// wins. The default (nothing set) keeps older compiled locks
+    /// deserializing and means "the URL decides, else `prefer`".
+    #[serde(default, skip_serializing_if = "SourceTls::is_unset")]
+    pub tls: SourceTls,
 }
 
 /// Publication management is on unless explicitly disabled — and a default keeps

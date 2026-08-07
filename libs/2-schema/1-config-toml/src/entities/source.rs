@@ -1,3 +1,4 @@
+use schema_core::SslMode;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,27 @@ pub struct PostgresSource {
     /// gaps and never issue publication DDL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manage_publication: Option<bool>,
+    /// TLS mode for the source connection. Overrides the URL's `sslmode`;
+    /// omitted defers to it, then to `prefer`. Note `require` encrypts but
+    /// verifies **nothing** — only the `verify-*` modes check the certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_mode: Option<SslMode>,
+    /// PEM file of trusted CA certificates for the `verify-*` modes.
+    /// Overrides the URL's `sslrootcert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_root_cert: Option<String>,
+    /// Client certificate chain PEM for mutual TLS; pairs with `ssl_key`.
+    /// Overrides the URL's `sslcert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_cert: Option<String>,
+    /// Client private key PEM for mutual TLS; pairs with `ssl_cert`.
+    /// Overrides the URL's `sslkey`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_key: Option<String>,
+    /// SNI hostname sent in the TLS handshake when it differs from the
+    /// connection host (IP connections, load balancers). Config-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_sni_hostname: Option<String>,
 }
 
 /// How the source database is reached: a full URL (literal or `{ env = "VAR" }`)
