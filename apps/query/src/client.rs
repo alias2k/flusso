@@ -19,7 +19,7 @@ pub struct Client {
     http: reqwest::Client,
     /// Base URL with any trailing slash trimmed.
     base: String,
-    auth: Option<(String, String)>,
+    pub(crate) auth: Option<(String, String)>,
     /// Literal prefix prepended to every index name a request addresses, so a
     /// consumer can read a prefixed deployment's indexes (`dev_users_<hash>`).
     /// Empty by default; set with [`Client::index_prefix`]. Must match the
@@ -47,10 +47,31 @@ impl Client {
     }
 
     /// Attach HTTP basic-auth credentials, applied to every request.
+    ///
+    /// Surrounding whitespace is trimmed from both values: credentials usually
+    /// arrive from an environment variable or CI secret, where a trailing
+    /// newline is silently picked up — it base64-encodes without error and
+    /// reaches the cluster as *different* credentials, failing every request
+    /// with an unexplainable 401.
     #[must_use]
     pub fn basic_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
-        self.auth = Some((username.into(), password.into()));
+        self.auth = Some((
+            username.into().trim().to_owned(),
+            password.into().trim().to_owned(),
+        ));
         self
+    }
+
+    /// Control TLS certificate verification (`true`, the default, verifies).
+    /// Pass `false` to accept invalid/self-signed certificates — matches the
+    /// sink's `tls_verify` config so a consumer can reach the same
+    /// self-signed `https` cluster the engine writes to. Errors if the HTTP
+    /// client cannot be rebuilt with the new setting.
+    pub fn tls_verify(mut self, verify: bool) -> Result<Self> {
+        self.http = reqwest::Client::builder()
+            .danger_accept_invalid_certs(!verify)
+            .build()?;
+        Ok(self)
     }
 
     /// Set the literal index prefix prepended to every index this client

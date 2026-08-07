@@ -1966,3 +1966,15 @@ fn sorts_plural_matches_repeated_sort() {
         .body();
     assert_eq!(plural, singular);
 }
+
+#[test]
+fn basic_auth_trims_surrounding_whitespace() {
+    let client = crate::Client::connect("http://localhost:9200")
+        .unwrap()
+        .basic_auth(" admin\t", "p@$$word!\n");
+    assert_eq!(
+        client.auth,
+        Some(("admin".to_owned(), "p@$$word!".to_owned())),
+        "a CI-injected newline or padding must not reach the Authorization header",
+    );
+}
