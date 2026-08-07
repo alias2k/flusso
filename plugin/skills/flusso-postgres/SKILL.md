@@ -69,6 +69,17 @@ Reverse resolution (a change to a *related* row → which root documents to rebu
 - **Stream + create the slot:** a role with `REPLICATION` + `SELECT` on the published tables. That's the floor.
 - **Also manage the publication:** the role must additionally **own** those tables and hold `CREATE` on the database (or be superuser). Short of that, flusso prints the SQL and you run it as someone who can.
 
+## TLS — managed Postgres, internal PKI, mTLS
+
+flusso's replication stream and its SQL connections negotiate TLS from **one merged decision**: the URL's libpq parameters (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`) plus the flat `[source]` keys (`ssl_mode`, `ssl_root_cert`, `ssl_cert`, `ssl_key`, `ssl_sni_hostname`) — **config keys win**. Default is `prefer` (try TLS, fall back to plaintext), so local plaintext keeps working and a managed provider's `DATABASE_URL=…?sslmode=require` works as pasted.
+
+- **`require` verifies nothing** (libpq semantics — any cert accepted); use `verify-full` in production, with `ssl_root_cert` for an internal CA / RDS bundle.
+- **mTLS** needs both `ssl_cert` and `ssl_key`; one without the other is a config error.
+- **`ssl_sni_hostname`** (config-only, replication-only): the handshake hostname when connecting by IP or through a load balancer — `verify-full` to an IP requires it.
+- `sslmode=allow` in a URL is treated as `prefer`.
+
+Full reference: the [configuration guide's TLS section](https://alias2k.github.io/flusso/guides/configuration.html#tls).
+
 ## Debugging checklist ("changes aren't showing up")
 
 1. `wal_level = logical`? (`SHOW wal_level;` — needs a restart if you just changed it.)

@@ -29,6 +29,10 @@ flusso reads env vars for three jobs: **filling in config values** (the [secrets
 | `type` | `[source]` | — | `postgres` |
 | `connection_url` | `[source]` | — | full URL or parts; `DATABASE_URL` overrides |
 | `manage_publication` | `[source]` | `true` | auto-create/extend the publication |
+| `ssl_mode` | `[source]` | `"prefer"` | TLS mode — `disable`/`prefer`/`require`/`verify-ca`/`verify-full` ([source TLS](#tls)) |
+| `ssl_root_cert` | `[source]` | — | CA bundle PEM for the `verify-*` modes |
+| `ssl_cert` / `ssl_key` | `[source]` | — | client certificate + key (mutual TLS) |
+| `ssl_sni_hostname` | `[source]` | — | SNI override (replication stream only) |
 | `type` | `[sinks.<name>]` | — | `opensearch` or `stdout` |
 | `url` | opensearch sink | — | cluster URL; `<NAME>_OPENSEARCH_URL` overrides |
 | `username` / `password` | opensearch sink | — | HTTP Basic auth |
@@ -184,6 +188,11 @@ tables to seed an index before following live changes.
 | --- | --- | --- | --- |
 | `connection_url` | URL / parts | — | see below |
 | `manage_publication` | bool | `true` | auto-create/extend the publication when privileged; see [capture](#how-it-captures-changes) |
+| `ssl_mode` | string | `"prefer"` | TLS mode, libpq semantics; see [TLS](#tls) |
+| `ssl_root_cert` | string | — | CA bundle PEM path for `verify-ca`/`verify-full` |
+| `ssl_cert` | string | — | client certificate PEM path (mTLS; pairs with `ssl_key`) |
+| `ssl_key` | string | — | client key PEM path (mTLS; pairs with `ssl_cert`) |
+| `ssl_sni_hostname` | string | — | SNI hostname override; replication stream only |
 
 #### Connection
 
@@ -220,6 +229,64 @@ Either shape can be overridden by a reserved deployment variable, so the same co
 travels across environments unedited — see
 [Secrets & connection values](#secrets--connection-values) for the override and precedence
 rules.
+
+#### TLS
+
+The source connection's TLS settings come from **two surfaces, merged**:
+
+- **URL query parameters** — the libpq/sqlx convention: `sslmode`, `sslrootcert`,
+  `sslcert`, `sslkey`. A managed provider's copy-paste
+  `DATABASE_URL=…?sslmode=require` just works.
+- **The flat `[source]` keys** — `ssl_mode`, `ssl_root_cert`, `ssl_cert`, `ssl_key`,
+  `ssl_sni_hostname`. **A config key overrides its URL parameter.** They also cover what a
+  URL can't express: the SNI override, and TLS for the parts-form `connection_url` (which
+  has no URL to carry parameters).
+
+When neither surface names a mode, the default is **`prefer`** — try TLS first, fall back
+to plaintext — so a local plaintext Postgres keeps working with no config, and a server
+that supports TLS gets it opportunistically.
+
+```toml
+[source]
+type = "postgres"
+connection_url = { env = "DATABASE_URL" }
+ssl_mode = "verify-full"
+ssl_root_cert = "/etc/ssl/rds-ca.pem"
+```
+
+The modes follow libpq semantics:
+
+| `ssl_mode` | Encrypted | Certificate checked | Hostname checked |
+| --- | --- | --- | --- |
+| `disable` | no | — | — |
+| `prefer` (default) | if the server supports it | no | no |
+| `require` | **yes** | **no** | **no** |
+| `verify-ca` | yes | yes | no |
+| `verify-full` | yes | yes | yes |
+
+> ⚠️ **Warning** — `require` encrypts but performs **no certificate verification at
+> all**: any certificate, self-signed included, is accepted. That is the standard libpq
+> meaning, and it is exactly the "just make it connect" mode — but it does not protect
+> against an active man-in-the-middle. Use `verify-full` in production, with
+> `ssl_root_cert` when the CA isn't in the bundled Mozilla roots (internal PKI, RDS).
+
+Details worth knowing:
+
+- **Both connection kinds obey the same decision.** flusso opens a logical-replication
+  stream *and* ordinary SQL connections from one `connection_url`; the merged TLS settings
+  drive both, so `verify-full` verifies everywhere and a config-set mode can't silently
+  apply to only half the traffic.
+- **`sslmode=allow`** (plaintext first, TLS on demand) isn't modeled by the replication
+  stack; flusso treats it as `prefer`.
+- **`ssl_root_cert`** falls back to the bundled Mozilla roots when unset. `verify-ca` /
+  `verify-full` with an internal CA need it pointed at the CA bundle PEM.
+- **Mutual TLS** needs both halves — `ssl_cert` and `ssl_key` (or `sslcert`/`sslkey` in
+  the URL); setting only one is a config error.
+- **`ssl_sni_hostname`** sets the hostname sent in the TLS handshake when it differs from
+  the connection host — connecting by IP, or through a load balancer, while the
+  certificate names the real host. It is config-only (no standard URL parameter) and
+  applies to the **replication stream only** (sqlx has no SNI override). Note
+  `verify-full` to an IP address requires it, so the certificate has a name to verify.
 
 #### How it captures changes
 
