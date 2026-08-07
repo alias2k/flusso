@@ -4,7 +4,7 @@
 
 use schema::{Config, Sink};
 use schema_config_toml::{ConfigToml, ParseError};
-use schema_core::{ConnectionSpec, ParseFrom, Secret, SinkName};
+use schema_core::{ConnectionSpec, ParseFrom, Secret, SinkName, SslMode};
 
 fn parse(toml: &str) -> Result<ConfigToml, ParseError> {
     ConfigToml::try_parse(toml)
@@ -173,6 +173,37 @@ fn parse_source_parts() {
     "#,
     )
     .unwrap();
+}
+
+#[test]
+fn parse_source_ssl_keys() {
+    parse(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = { env = "DATABASE_URL" }
+        ssl_mode = "verify-full"
+        ssl_root_cert = "/etc/ssl/ca.pem"
+        ssl_cert = "/etc/ssl/client.pem"
+        ssl_key = "/etc/ssl/client.key"
+        ssl_sni_hostname = "db.internal.example.com"
+    "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn parse_source_ssl_mode_all_tokens() {
+    for token in ["disable", "prefer", "require", "verify-ca", "verify-full"] {
+        parse(&format!(
+            r#"
+            [source]
+            type = "postgres"
+            ssl_mode = "{token}"
+        "#,
+        ))
+        .unwrap_or_else(|e| panic!("ssl_mode = {token:?} should parse: {e}"));
+    }
 }
 
 #[test]
@@ -431,6 +462,63 @@ fn convert_source_omitted_is_none() {
     "#,
     );
     assert!(config.source.connection.is_none());
+}
+
+#[test]
+fn parse_source_invalid_ssl_mode_lists_tokens() {
+    let err = parse(
+        r#"
+        [source]
+        type = "postgres"
+        ssl_mode = "sideways"
+    "#,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("verify-full"),
+        "error should list the accepted tokens, got: {msg}"
+    );
+}
+
+#[test]
+fn convert_source_ssl_keys_group_into_tls() {
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = { env = "DATABASE_URL" }
+        ssl_mode = "verify-ca"
+        ssl_root_cert = "/etc/ssl/ca.pem"
+        ssl_cert = "/etc/ssl/client.pem"
+        ssl_key = "/etc/ssl/client.key"
+        ssl_sni_hostname = "db.internal.example.com"
+    "#,
+    );
+    let tls = &config.source.tls;
+    assert_eq!(tls.mode, Some(SslMode::VerifyCa));
+    assert_eq!(tls.root_cert.as_deref(), Some("/etc/ssl/ca.pem".as_ref()));
+    assert_eq!(
+        tls.client_cert.as_deref(),
+        Some("/etc/ssl/client.pem".as_ref())
+    );
+    assert_eq!(
+        tls.client_key.as_deref(),
+        Some("/etc/ssl/client.key".as_ref())
+    );
+    assert_eq!(tls.sni_hostname.as_deref(), Some("db.internal.example.com"));
+}
+
+#[test]
+fn convert_source_without_ssl_keys_is_unset_tls() {
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+        connection_url = { env = "DATABASE_URL" }
+    "#,
+    );
+    assert!(config.source.tls.is_unset());
 }
 
 #[test]
