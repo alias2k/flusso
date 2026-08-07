@@ -150,6 +150,27 @@
               "default": true,
               "description": "Whether flusso may auto-create/extend the Postgres publication to cover every table the indexes read (when the source role is privileged enough). Set false to only report coverage gaps and never issue publication DDL."
             },
+            "ssl_mode": {
+              "type": "string",
+              "enum": ["disable", "prefer", "require", "verify-ca", "verify-full"],
+              "description": "TLS mode for the source connection (libpq semantics). Overrides the URL's sslmode parameter; omitted defers to it, then to 'prefer' (try TLS, fall back to plaintext). WARNING: 'require' encrypts but performs NO certificate verification at all — use 'verify-ca' or 'verify-full' (recommended for production) to actually check the server's certificate. Applies to both the replication stream and the SQL connections."
+            },
+            "ssl_root_cert": {
+              "type": "string",
+              "description": "Path to a PEM file of trusted CA certificates for the verify-* modes. Overrides the URL's sslrootcert parameter; omitted falls back to the bundled Mozilla roots."
+            },
+            "ssl_cert": {
+              "type": "string",
+              "description": "Path to the client certificate chain PEM for mutual TLS. Must be paired with ssl_key. Overrides the URL's sslcert parameter."
+            },
+            "ssl_key": {
+              "type": "string",
+              "description": "Path to the client private key PEM for mutual TLS. Must be paired with ssl_cert. Overrides the URL's sslkey parameter."
+            },
+            "ssl_sni_hostname": {
+              "type": "string",
+              "description": "SNI hostname sent during the TLS handshake when it differs from the connection host (connecting by IP, or through a load balancer, while the certificate names the real host). Config-only — no URL parameter — and applies to the replication stream only."
+            },
             "connection_url": {
               "description": "How to connect to the source database. Either a full URL or individual connection parts.",
               "oneOf": [
