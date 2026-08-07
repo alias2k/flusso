@@ -73,8 +73,11 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             .source
             .resolve_connection_url()
             .context("resolving the source connection URL")?;
+        let sql_url =
+            sources_postgres::sql_connection_url(connection_url.as_ref(), &config.source.tls)
+                .context("applying the source TLS settings to the connection URL")?;
         let spec = Arc::new(source_spec(&config));
-        let documents = PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec))
+        let documents = PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec))
             .await
             .context("connecting to the database")?;
         Some(

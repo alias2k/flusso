@@ -150,11 +150,15 @@ pub(crate) fn config(out: &mut impl Write, pen: Pen, config: &Config) -> Result<
     let source_kind = match config.source.source_type {
         schema::SourceType::Postgres => "postgres",
     };
+    let mut connection = describe_connection(config.source.connection.as_ref());
+    if let Some(tls) = describe_tls(&config.source.tls) {
+        connection = format!("{connection}  {tls}");
+    }
     writeln!(
         out,
         "  {}  {}",
         pen.magenta(source_kind),
-        pen.dim(&describe_connection(config.source.connection.as_ref())),
+        pen.dim(&connection),
     )?;
 
     section(out, pen, "Sinks")?;
@@ -382,6 +386,29 @@ fn describe_connection(spec: Option<&ConnectionSpec>) -> String {
             ..
         }) => format!("{user}@{host}:{port}/{database}"),
     }
+}
+
+/// The config-declared TLS settings, when any are set. URL-borne `ssl*`
+/// parameters are not shown — the connection may be an unresolved env
+/// reference here.
+fn describe_tls(tls: &schema::SourceTls) -> Option<String> {
+    if tls.is_unset() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if let Some(mode) = tls.mode {
+        parts.push(format!("ssl={mode}"));
+    }
+    if let Some(ca) = &tls.root_cert {
+        parts.push(format!("ca={}", ca.display()));
+    }
+    if tls.client_cert.is_some() || tls.client_key.is_some() {
+        parts.push("mtls".to_owned());
+    }
+    if let Some(sni) = &tls.sni_hostname {
+        parts.push(format!("sni={sni}"));
+    }
+    Some(parts.join(" "))
 }
 
 /// Describe a URL-bearing secret without leaking it: an env reference shows the

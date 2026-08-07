@@ -23,7 +23,9 @@ use sources_core::{
     Diagnostic, JunctionCandidate, RelationalCatalog, SchemaIntrospection, Severity, SourceSpec,
     junction_candidates, validate_indexes,
 };
-use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
+use sources_postgres::{
+    PgDocumentBuilder, WalChangeCapture, replication_config, sql_connection_url,
+};
 
 use crate::codegen;
 use crate::preview::{self, Preview};
@@ -711,6 +713,11 @@ pub async fn validate(request: ValidateRequest) -> ValidateResponse {
         Err(e) => return unreachable("resolving the source connection URL", e.to_string()),
     };
 
+    let sql_url = match source_sql_url(connection_url.as_ref(), &config) {
+        Ok(url) => url,
+        Err(e) => return unreachable("applying the source TLS settings", e.to_string()),
+    };
+
     let indexes: BTreeMap<IndexName, IndexSchema> = request
         .indexes
         .into_iter()
@@ -718,11 +725,10 @@ pub async fn validate(request: ValidateRequest) -> ValidateResponse {
         .collect();
     let spec = Arc::new(SourceSpec::new(indexes));
 
-    let documents =
-        match PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec)).await {
-            Ok(documents) => documents,
-            Err(e) => return unreachable("connecting to the database", e.to_string()),
-        };
+    let documents = match PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec)).await {
+        Ok(documents) => documents,
+        Err(e) => return unreachable("connecting to the database", e.to_string()),
+    };
 
     // Connected → the database is reachable; a failure here is about the schemas.
     match validate_indexes(&spec, &documents).await {
@@ -831,12 +837,14 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
         .resolve_connection_url()
         .context("resolving the source connection URL")?;
 
+    let sql_url = source_sql_url(connection_url.as_ref(), &config)?;
+
     let name = request.name.clone();
     let mut indexes: BTreeMap<IndexName, IndexSchema> = BTreeMap::new();
     indexes.insert(name.clone(), request.schema);
     let spec = Arc::new(SourceSpec::new(indexes));
 
-    let documents = PgDocumentBuilder::connect(connection_url.as_ref(), Arc::clone(&spec))
+    let documents = PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec))
         .await
         .context("connecting to the database")?;
     if let Some(body) = documents
@@ -876,32 +884,22 @@ fn build_capture(config: &Config) -> Result<WalChangeCapture> {
         .source
         .resolve_connection_url()
         .context("resolving the source connection URL")?;
-    let connection_url = connection_url.as_ref().to_owned();
-    let replication = replication_config(&connection_url)?;
-    Ok(WalChangeCapture::new(replication, connection_url))
-}
-
-fn replication_config(connection_url: &str) -> Result<ReplicationConfig> {
-    let url = url::Url::parse(connection_url).context("parsing connection URL")?;
-    let host = url
-        .host_str()
-        .context("connection URL has no host")?
-        .to_owned();
-    let port = url.port().unwrap_or(5432);
-    let user = url.username();
-    anyhow::ensure!(!user.is_empty(), "connection URL has no user");
-    let password = url.password().unwrap_or_default();
-    let database = url.path().trim_start_matches('/');
-    let database = if database.is_empty() { user } else { database };
-    Ok(ReplicationConfig::new(
-        host,
-        user,
-        password,
-        database,
+    let replication = replication_config(
+        connection_url.as_ref(),
+        &config.source.tls,
         "flusso_design",
         "flusso_design",
     )
-    .with_port(port))
+    .context("building the replication connection config")?;
+    let sql_url = source_sql_url(connection_url.as_ref(), config)?;
+    Ok(WalChangeCapture::new(replication, sql_url))
+}
+
+/// The SQL-side connection URL with the config's declared TLS settings applied
+/// — what every sqlx connection in the designer must use.
+fn source_sql_url(connection_url: &str, config: &Config) -> Result<String> {
+    sql_connection_url(connection_url, &config.source.tls)
+        .context("applying the source TLS settings to the connection URL")
 }
 
 /// Resolve a schema path against the config directory (absolute paths as-is).

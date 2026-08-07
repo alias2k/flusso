@@ -1045,7 +1045,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -1089,7 +1088,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -1299,6 +1297,7 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 

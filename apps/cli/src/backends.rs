@@ -21,8 +21,9 @@ use sinks_stdout::StdoutSink;
 use sources_core::cdc::ChangeCapture;
 use sources_core::document::DocumentBuilder;
 use sources_core::{CaptureProvisioning, SourceSpec};
-use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
-use url::Url;
+use sources_postgres::{
+    PgDocumentBuilder, WalChangeCapture, replication_config, sql_connection_url,
+};
 
 /// The composition root's backend assembler: a Postgres source plus the
 /// configured sinks.
@@ -42,17 +43,25 @@ impl Backends for FlussoBackends {
         );
 
         let connection_url = resolve_connection_url(&config)?;
-        let replication = replication_config(&connection_url, &options.slot, &options.publication)?;
+        let replication = replication_config(
+            &connection_url,
+            &config.source.tls,
+            &options.slot,
+            &options.publication,
+        )
+        .context("building the replication connection config")?;
+        let sql_url = sql_connection_url(&connection_url, &config.source.tls)
+            .context("applying the source TLS settings to the connection URL")?;
 
         // The capture provisions its own publication on `live`: it must cover
         // every table the enabled indexes read (root + join/aggregate sources).
         let capture: Arc<dyn ChangeCapture> = Arc::new(
-            WalChangeCapture::new(replication, connection_url.clone()).with_publication_management(
+            WalChangeCapture::new(replication, sql_url.clone()).with_publication_management(
                 source_spec(&config).all_tables(),
                 options.manage_publication,
             ),
         );
-        let documents = build_documents(&connection_url, &config).await?;
+        let documents = build_documents(&sql_url, &config).await?;
 
         Ok(SourceParts { capture, documents })
     }
@@ -76,8 +85,12 @@ pub(crate) fn build_provisioning(
     publication: &str,
 ) -> anyhow::Result<Arc<dyn CaptureProvisioning>> {
     let connection_url = resolve_connection_url(config)?;
-    let replication = replication_config(&connection_url, "flusso", publication)?;
-    let capture = WalChangeCapture::new(replication, connection_url);
+    let replication =
+        replication_config(&connection_url, &config.source.tls, "flusso", publication)
+            .context("building the replication connection config")?;
+    let sql_url = sql_connection_url(&connection_url, &config.source.tls)
+        .context("applying the source TLS settings to the connection URL")?;
+    let capture = WalChangeCapture::new(replication, sql_url);
     Ok(Arc::new(capture))
 }
 
@@ -89,27 +102,6 @@ fn resolve_connection_url(config: &Config) -> anyhow::Result<String> {
         .resolve_connection_url()
         .context("resolving the source connection URL")?;
     Ok(url.as_ref().to_owned())
-}
-
-fn replication_config(
-    connection_url: &str,
-    slot: &str,
-    publication: &str,
-) -> anyhow::Result<ReplicationConfig> {
-    let url = Url::parse(connection_url).context("parsing connection URL")?;
-    let host = url
-        .host_str()
-        .context("connection URL has no host")?
-        .to_owned();
-    let port = url.port().unwrap_or(5432);
-    let user = url.username();
-    ensure!(!user.is_empty(), "connection URL has no user");
-    let password = url.password().unwrap_or_default();
-    let database = url.path().trim_start_matches('/');
-    // Postgres defaults the database to the user when the URL omits it.
-    let database = if database.is_empty() { user } else { database };
-
-    Ok(ReplicationConfig::new(host, user, password, database, slot, publication).with_port(port))
 }
 
 /// Connect the Postgres document builder, translating the config into the
