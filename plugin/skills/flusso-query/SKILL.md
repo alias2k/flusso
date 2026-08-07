@@ -53,7 +53,8 @@ pub struct Order {
 
 ```rust
 let client = Client::connect("https://localhost:9200")?
-    .basic_auth("admin", std::env::var("OS_PASSWORD")?);
+    .basic_auth("admin", std::env::var("OS_PASSWORD")?); // values are whitespace-trimmed
+    // + .tls_verify(false)? for a self-signed dev cluster (mirrors the sink's tls_verify)
 
 let user: Option<User> = User::get(&client, 42).await?;     // by primary key
 

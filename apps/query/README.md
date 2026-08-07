@@ -953,6 +953,24 @@ request path. So **one compiled consumer binary serves every environment**: poin
 at dev or staging by setting `FLUSSO_INDEX_PREFIX`, no rebuild. It must match the
 writer's prefix exactly, or queries hit an empty (or wrong) index.
 
+### Auth and TLS
+
+`Client::basic_auth(user, pass)` attaches HTTP Basic auth to every request — the
+same mechanism the flusso engine uses on the write side, so the credentials that
+work in `flusso.toml` work here. Both values are **trimmed of surrounding
+whitespace**: credentials usually come from an environment variable or CI secret,
+and a silently-injected trailing newline would otherwise reach the cluster as
+*different* credentials — a 401 on every request with nothing to explain it.
+
+A cluster serving a self-signed certificate (a dev or internal deployment) needs
+verification off — the read-side mirror of the sink's `tls_verify` config:
+
+```rust
+let client = Client::connect("https://localhost:9200")?
+    .basic_auth("admin", std::env::var("OS_PASSWORD")?)
+    .tls_verify(false)?;   // self-signed dev cluster; keep the default (true) elsewhere
+```
+
 ---
 
 ## Out of scope for the first cut

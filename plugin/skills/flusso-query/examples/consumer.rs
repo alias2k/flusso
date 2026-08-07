@@ -87,7 +87,9 @@ fn search_users(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Reads go straight to OpenSearch, not to flusso.
+    // Reads go straight to OpenSearch, not to flusso. Credentials are trimmed
+    // of surrounding whitespace (a CI secret's trailing newline can't 401 you);
+    // add `.tls_verify(false)?` for a self-signed dev cluster.
     let client = Client::connect("https://localhost:9200")?
         .basic_auth("admin", std::env::var("OS_PASSWORD")?);
 
