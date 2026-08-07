@@ -36,6 +36,10 @@ For the field/schema syntax itself, lean on the **flusso-schema** skill. This sk
 [source]
 type = "postgres"
 connection_url = { env = "DATABASE_URL" }   # or a literal postgresql://… URL
+# TLS: ?sslmode=… in the URL is honored; flat keys override it (ssl_mode,
+# ssl_root_cert, ssl_cert, ssl_key, ssl_sni_hostname). Default: prefer.
+# Managed Postgres (RDS/Supabase/Neon): the provider URL works as pasted;
+# note `require` skips cert verification — production wants verify-full.
 
 [sinks.primary]
 type = "opensearch"
