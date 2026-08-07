@@ -325,6 +325,9 @@ export const en: Record<string, string> = {
   "config.removeIndexTitle": "Remove index?",
   "config.removeIndex": 'Remove index "{name}"? (the schema file is left on disk)',
   "config.connection": "connection",
+  "config.tls": "TLS",
+  "config.sslRequireWarn":
+    "require encrypts but does not verify the server certificate at all — use verify-full in production",
   "config.envVar": "env var",
   "config.host": "host",
   "config.port": "port",
