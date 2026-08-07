@@ -31,6 +31,7 @@ futures.workspace = true
 tracing.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+url.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 uuid.workspace = true
