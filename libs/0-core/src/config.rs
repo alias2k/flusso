@@ -10,6 +10,7 @@ mod schema;
 mod secret;
 mod sink;
 mod soft_delete;
+mod tls;
 mod transform;
 
 pub use aggregate::*;
@@ -23,6 +24,7 @@ pub use schema::*;
 pub use secret::*;
 pub use sink::*;
 pub use soft_delete::*;
+pub use tls::*;
 pub use transform::*;
 
 use serde::{Deserialize, Serialize};
