@@ -4,14 +4,10 @@
 //! Only the **root** level is resolved here. Every deeper level is reached by
 //! the recursive codegen walking `ResolvedField::children`, so there is no path
 //! to parse and no scope to infer.
-//!
-//! [`Resolved::fields_at`] is the exception: it walks a dotted path for the
-//! **deprecated** `#[flusso(path = "…")]` form, which still validates a struct
-//! against a level but generates nothing.
 
 use std::path::{Path, PathBuf};
 
-use schema::{IndexMapping, IndexName, ResolvedField, Sink};
+use schema::{IndexMapping, IndexName, Sink};
 
 /// One path level for codegen: the field name plus whether it's a `nested`
 /// boundary (vs a flattened object). Mirrors `flusso_query::Segment`.
@@ -32,45 +28,6 @@ pub(crate) struct Resolved {
     pub(crate) auto_subfields: bool,
     /// Absolute paths to fold in via `include_bytes!` so edits rebuild.
     pub(crate) tracked: Vec<PathBuf>,
-}
-
-impl Resolved {
-    /// The resolved fields at `path` (dotted, e.g. `orders.items`). `Err` names
-    /// where the walk broke.
-    ///
-    /// Only the deprecated `path = "…"` form needs this — the current model
-    /// reaches every level by recursion instead.
-    pub(crate) fn fields_at(&self, path: &str) -> Result<&[ResolvedField], String> {
-        let mut fields = self.mapping.fields.as_slice();
-        let mut walked = String::new();
-        for segment in path.split('.') {
-            match fields.iter().find(|f| f.name.as_ref() == segment) {
-                Some(field) if !field.children.is_empty() => {
-                    fields = &field.children;
-                    if !walked.is_empty() {
-                        walked.push('.');
-                    }
-                    walked.push_str(segment);
-                }
-                Some(_) => {
-                    return Err(format!(
-                        "`path = \"{path}\"`: `{segment}` is a leaf field with no nested fields"
-                    ));
-                }
-                None => {
-                    let scope = if walked.is_empty() {
-                        format!("index `{}`", self.mapping.index.as_ref())
-                    } else {
-                        format!("`{walked}`")
-                    };
-                    return Err(format!(
-                        "`path = \"{path}\"`: no field `{segment}` in {scope}"
-                    ));
-                }
-            }
-        }
-        Ok(fields)
-    }
 }
 
 /// Find `flusso.toml`, load + resolve it, and return the requested index.

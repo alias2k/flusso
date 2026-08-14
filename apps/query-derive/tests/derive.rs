@@ -565,31 +565,6 @@ fn a_flattened_group_is_checked_against_the_enclosing_level() -> Result {
     Ok(())
 }
 
-// The old derive name still expands, so an existing root compiles untouched —
-// with a deprecation warning pointing at `FlussoRoot`.
-#[allow(deprecated)]
-mod deprecated_alias {
-    use flusso_query::{FlussoDocument, FlussoRoot};
-
-    #[derive(serde::Deserialize, FlussoDocument)]
-    #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
-    pub(super) struct LegacyUser {
-        pub(super) id: i32,
-        pub(super) email: String,
-    }
-
-    #[test]
-    fn the_flusso_document_alias_still_expands_as_a_root() {
-        let body = LegacyUser::query()
-            .filter(LegacyUser::email().eq("ada@x.com"))
-            .body();
-        assert_eq!(
-            body["query"]["bool"]["filter"][0]["term"]["email"],
-            "ada@x.com"
-        );
-    }
-}
-
 // A `#[serde(transparent)]` newtype: same shape, new name. The wrapper gets the
 // full root surface, and the inner shape is checked against the root level.
 
@@ -689,34 +664,4 @@ fn a_field_can_rename_its_generated_namespace() -> Result {
     );
     assert_eq!(body["sort"][0]["orders.total"]["nested"]["path"], "orders");
     Ok(())
-}
-
-// The deprecated `path = "…"` form still compiles and still validates against
-// that level — it just generates nothing. Kept so existing declarations survive
-// the rename while their call sites move to the root's namespaces.
-#[allow(deprecated)]
-mod deprecated_path {
-    use flusso_query::FlussoRoot;
-
-    #[derive(serde::Deserialize, FlussoRoot)]
-    #[flusso(
-        index = "users",
-        path = "orders",
-        config = "tests/fixtures/flusso.toml"
-    )]
-    pub(super) struct LegacyOrder {
-        pub(super) status: String,
-        pub(super) total: f64,
-    }
-
-    #[test]
-    fn a_path_struct_still_validates_against_its_level() {
-        // It compiled, so `status`/`total` matched `users.orders`. It has no
-        // handles and no entry points — those live on the root now.
-        let order = LegacyOrder {
-            status: "paid".into(),
-            total: 1.0,
-        };
-        assert_eq!(order.status, "paid");
-    }
 }

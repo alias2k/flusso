@@ -38,6 +38,7 @@ Each schema/query skill ships worked `examples/` you can copy from.
 | `/flusso-new-index <name> [table]` | Scaffold a new index: a `*.schema.yml` + its `[[index]]` entry. |
 | `/flusso-check [path]` | Run `flusso check` and triage any validation errors. |
 | `/flusso-doc-struct <index> [Struct]` | Scaffold a typed `#[derive(FlussoRoot)]` query struct. |
+| `/flusso-migrate-query [path]` | Migrate read-side Rust off the removed `FlussoDocument` / `path = "…"` form onto `FlussoRoot` + `FlussoFragment`. |
 
 ### Agent
 

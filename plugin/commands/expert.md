@@ -40,6 +40,7 @@ The `flusso` **binary** is ground truth for syntax and validity — prefer `flus
 **After a schema lands (created or scaffolded + validated), offer the next step** — unless the user already asked for the whole chain. Ask one clear question, then act on the answer:
 
 - **Rust project** (a `Cargo.toml` is present)? → *"Want me to generate the Rust query side — the `#[derive(FlussoRoot)]` struct + typed queries for `<index>`?"* If yes: `/flusso-doc-struct` + **flusso-query**.
+- **Has flusso query code that no longer builds** (unresolved `FlussoDocument`/`FlussoIndex`, or `` `path` no longer exists ``)? → *"Want me to migrate the read side onto `FlussoRoot` + `FlussoFragment`?"* If yes: `/flusso-migrate-query`.
 - **A migration** (you're replacing an existing search/indexer)? → *"Want me to switch the current implementation over to this flusso-backed one?"* If yes: do the cutover.
 - Neither / non-Rust / unsure → state what's next in one line (`flusso check` → `flusso run`) and stop. Don't nag.
 

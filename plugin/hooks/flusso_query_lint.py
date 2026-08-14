@@ -24,8 +24,8 @@ import sys
 # `Keyword::at("…")`, `Text::<Root>::at("…")`. This is the escape hatch.
 HANDLE_AT = re.compile(r'\b(?:Keyword|Text)\s*(?:::<[^>;{}]*>)?\s*::\s*at\s*\(\s*"')
 
-# The file declares at least one root derive (`FlussoRoot`, or its deprecated
-# `FlussoDocument` alias).
+# The file declares a root derive. `FlussoDocument` is the removed old name,
+# still matched so an un-migrated file is linted too.
 HAS_DERIVE = re.compile(r"#\[derive\([^)]*\b(?:FlussoRoot|FlussoDocument)\b")
 
 

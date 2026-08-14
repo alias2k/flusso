@@ -14,7 +14,7 @@ The contract is the schema. `#[derive(FlussoRoot)]` reads the resolved schema **
 
 You write and own the struct (a **projection** — deserialize the subset you want). The query surface covers the **whole schema**, so you can filter/sort on fields the struct never deserializes.
 
-**Exactly one type names an index: the root.** Everything below it is a `#[derive(FlussoFragment)]` — a shape with no index and no path, validated by whichever root embeds it. One fragment can therefore serve several paths, several indexes, or a shared crate; embed it twice and it is checked twice. `path = "…"` and `FlussoDocument` are both **deprecated but still compiling** (they warn with the replacement); write new code with `FlussoRoot` + `FlussoFragment`. Namespace names are root-prefixed (`UserOrders`, `UserOrdersItems`); rename one with `#[flusso(scope = "Purchases")]` on the root field if it clashes with an existing type or reads too long.
+**Exactly one type names an index: the root.** Everything below it is a `#[derive(FlussoFragment)]` — a shape with no index and no path, validated by whichever root embeds it. One fragment can therefore serve several paths, several indexes, or a shared crate; embed it twice and it is checked twice. `path = "…"` and `FlussoDocument` were **removed** (see "Migrating off the removed form"); write everything with `FlussoRoot` + `FlussoFragment`. Namespace names are root-prefixed (`UserOrders`, `UserOrdersItems`); rename one with `#[flusso(scope = "Purchases")]` on the root field if it clashes with an existing type or reads too long.
 
 ## Crates and features
 
@@ -75,7 +75,9 @@ for hit in page.hits {                  // hit.id, hit.score from the envelope;
 
 See `examples/consumer.rs` for a fuller worked file.
 
-## Migrating an existing struct (don't redesign it)
+## Migrating an existing struct onto flusso (don't redesign it)
+
+*(Adopting flusso in a project that doesn't use it yet. To move code that already uses flusso off the removed derive form, see the next section.)*
 
 When the task is "migrate this to flusso" / "switch the existing implementation over," the existing document struct is the **spec**, not a starting suggestion:
 
@@ -83,6 +85,45 @@ When the task is "migrate this to flusso" / "switch the existing implementation 
 - **Preserve every field — especially the `id` / primary key.** A migration must produce the **exact** field set the project already has. Don't drop the `id`, don't drop fields you think are "redundant," don't rename. Match each existing field to a schema field; if the leaf Rust type or `Option` shape disagrees with the schema, fix the *schema* or surface the mismatch — never delete the field to make it compile.
 - If the existing primary-key field isn't in the schema yet, add it to the schema (`- <type>: id` + `primary_key: id`) rather than removing it from the struct.
 - Keep existing `#[serde(rename = …)]` and field ordering; the derive validates by leaf identifier + `Option` shape, so a faithful copy compiles, and a `cargo check` failure tells you exactly which field drifted.
+
+## Migrating off the removed form (`FlussoDocument` / `path = "…"`)
+
+Both were **removed** at the major bump, so nothing compiles until the migration is done — the compiler is the checklist. `/flusso-migrate-query` drives it. Find the work with `rg -t rust 'FlussoDocument|FlussoIndex|flusso\(.*\bpath\s*='`, then go in this order: steps 1–2 are find-and-replace and clear **every** warning, and only step 3 needs thought — by then `cargo check` lists each site.
+
+**1. Roots** — `#[flusso(index = "…")]`, no `path`:
+
+```rust
+-#[derive(serde::Deserialize, FlussoDocument)]        // and: use flusso_query::FlussoDocument
++#[derive(serde::Deserialize, FlussoRoot)]            //      use flusso_query::FlussoRoot
+ #[flusso(index = "users")]                           // attribute unchanged
+```
+
+The `FlussoIndex` **trait** import (for `.query()`/`.get()`) also becomes `FlussoRoot` — same name as the derive, so one import covers both.
+
+**2. Children** — `#[flusso(index = "…", path = "…")]`:
+
+```rust
+-#[derive(serde::Deserialize, FlussoDocument)]
+-#[flusso(index = "users", path = "orders")]          // delete the whole line
++#[derive(serde::Deserialize, FlussoFragment)]
+ pub struct Order { /* unchanged */ }
+```
+
+Two structs that differed only by path can now be **one** fragment embedded twice — collapse them.
+
+**3. Call sites** — the only hard error. Handles moved from the child struct to the root:
+
+| Old | New | Why |
+| --- | --- | --- |
+| `Account::tier()` | `User::account().tier()` | an object flattens → chains from its parent |
+| `Order::status()` | `UserOrders::status()` | a `nested` array → a named namespace |
+| `Item::quantity()` | `UserOrdersItems::quantity()` | same rule, one level deeper |
+
+**Namespace = root struct name + each path segment PascalCased**, generated beside the root, nothing to import. Scope types move too (`Query<Order>` → `Query<UserOrders>`). On a name collision, rename at the root field: `#[flusso(scope = "Purchases")] orders: Vec<Order>,`.
+
+**4. Newly-checked embeds.** Embedding is checked by default, so a plain un-derived struct in an `object`/`nested` field now errors with the fix in the note. Prefer `#[derive(FlussoFragment)]` (it gets validated) over `#[flusso(opaque)]` (which only silences the check) — and call out every `opaque` you add, since it marks a spot that is no longer verified.
+
+Verify with `cargo check --workspace --all-targets`: zero warnings, zero errors. Don't redesign en route — names, modules, visibility, field sets, and `#[serde(rename)]`s stay.
 
 ## How the derive binds to the schema (no DB, no codegen file)
 

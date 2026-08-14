@@ -150,12 +150,6 @@ pub use search::{FlussoRoot, FlussoScope, Highlight, Hit, Search, SearchResponse
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoRoot;
 
-/// Deprecated alias for [`macro@FlussoRoot`], kept so existing roots compile.
-/// Enabled by the `derive` feature.
-#[cfg(feature = "derive")]
-#[allow(deprecated)]
-pub use flusso_query_derive::FlussoDocument;
-
 /// `#[derive(FlussoFragment)]` — a **location-free** document shape.
 ///
 /// A fragment names no index and no path, so one declaration can be embedded at

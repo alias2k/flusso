@@ -376,13 +376,14 @@ are documented in the `flusso-query-derive` memory note; read that before changi
 derive.
 
 **Exactly one type references the schema: the root (issue #98).** `#[derive(FlussoRoot)]`
-(the renamed `FlussoDocument`, kept as a `#[deprecated]` alias) binds to an index and
+(which replaced `FlussoDocument` outright — no alias) binds to an index and
 generates the **whole** handle tree — `doc.rs::codegen` walks the resolved mapping and
 emits one namespace per container level, root-prefixed (`UserOrders`, `UserOrdersItems`).
 An **object** flattens into its enclosing scope so its namespace chains from the parent as
 `&self` methods (`User::account().tier()`); a **nested** array introduces its own scope so
 its namespace is a named type with associated fns (`UserOrders::total()`) implementing
-`FlussoScope` (the renamed `FlussoDocument` *trait*; `FlussoIndex` → `FlussoRoot`). This
+`FlussoScope` (the renamed `FlussoDocument` *trait*; `FlussoIndex` → `FlussoRoot`; both old
+names removed). This
 retired `path = "…"`, `resolve::Scope`/`scope_at`, and the "object under nested"
 restriction.
 Everything below the root is `#[derive(FlussoFragment)]`: **location-free**, so one

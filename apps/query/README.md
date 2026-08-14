@@ -772,23 +772,23 @@ cannot start a search — it has no index to search.
 
 ### Migrating from `path`
 
-Nothing is deleted: `#[flusso(path = "…")]` and `#[derive(FlussoDocument)]` are
-both **deprecated but still working**, so existing declarations keep compiling
-and warn with the replacement. A `path` struct still validates against its
-level — it just generates no handles and no `query`/`get`, since the surface
-lives on the root now. So the migration is mechanical, and the compiler walks
-you through it:
+`#[flusso(path = "…")]`, `#[derive(FlussoDocument)]`, and the `FlussoIndex` /
+`FlussoDocument` traits are **removed** — a clean break at the major bump rather
+than a deprecation tail. Nothing compiles until the migration is done, which is
+the point: the compiler finds every site for you. It is mechanical:
 
 | Before | After |
 | ------ | ----- |
 | `#[derive(FlussoDocument)] #[flusso(index = "users")]` on the root | `#[derive(FlussoRoot)] #[flusso(index = "users")]` |
+| `use flusso_query::FlussoIndex;` (the trait, for `query`/`get`) | `use flusso_query::FlussoRoot;` — one name now covers trait and derive |
+| `FlussoDocument` as a **trait** bound (the `PATH` carrier) | `FlussoScope` |
 | `#[derive(FlussoDocument)] #[flusso(index = "users", path = "orders")]` | `#[derive(FlussoFragment)]` — drop the whole attribute |
 | `Order::status()` (child struct's handle) | `UserOrders::status()` (root-generated namespace) |
 | `Account::tier()` (object child struct) | `User::account().tier()` (chains from the parent) |
 
-Both deprecations carry the replacement in their note, so `cargo build` names
-what to change and where. Only the call sites in the last two rows are a hard
-error; the struct declarations keep compiling until you get to them.
+The `path` attribute error names its replacement; the rest are unresolved
+imports and missing methods, each pointing at the line to change. Work the table
+top-down and `cargo check` between steps.
 
 ### What the derive expands to
 
