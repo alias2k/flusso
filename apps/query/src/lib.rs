@@ -102,7 +102,7 @@ mod search;
 mod tests;
 
 pub use check::{
-    FieldSpec, FlussoValueMeta, KindTag, array, children, exists, kind_is, nullable,
+    FieldSpec, FlussoValueMeta, KindTag, array, children, exists, kind_is, map_value_is, nullable,
     variants_covered,
 };
 pub use client::Client;
@@ -136,6 +136,16 @@ pub use search::{FlussoRoot, FlussoScope, Highlight, Hit, Search, SearchResponse
 /// Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoDocument;
+
+/// `#[derive(FlussoFragment)]` — a **location-free** document shape.
+///
+/// A fragment names no index and no path, so one declaration can be embedded at
+/// several paths (`billingAddress` *and* `shippingAddress`), across indexes, or
+/// from a shared crate. It never resolves a schema: each root that embeds it
+/// validates it against the mapping at *that* path, recursing into any fragment
+/// it contains. Enabled by the `derive` feature.
+#[cfg(feature = "derive")]
+pub use flusso_query_derive::FlussoFragment;
 
 /// `#[derive(FlussoValue)]` — implements [`trait@FlussoValue`] for an enum or newtype
 /// wrapper, so it may stand in for a field of the chosen kind (`#[flusso(keyword)]`

@@ -42,6 +42,7 @@
 //!     nullable: false,
 //!     array: false,
 //!     variants: &[],
+//!     map_values: None,
 //!     children: &[],
 //! }];
 //!
@@ -127,6 +128,9 @@ pub struct FieldSpec {
     /// A declared `enum` field's variants, in rank order; empty when the field
     /// is not an ordered enum.
     pub variants: &'static [&'static str],
+    /// A dynamic-key `map` field's value kind — the one thing that tells a `map`
+    /// apart from a plain `object`. `None` for anything that is not a map.
+    pub map_values: Option<KindTag>,
     /// The sub-level of an `object` / `nested` field; empty for a leaf.
     pub children: &'static [FieldSpec],
 }
@@ -203,6 +207,32 @@ pub const fn variants_covered(level: &[FieldSpec], name: &str, rust: &[&str]) ->
         i += 1;
     }
     true
+}
+
+/// Whether `name` is a dynamic-key `map` whose values are one of `accepted`.
+///
+/// A field that is not a map fails — so a `HashMap<String, _>` declared against
+/// a plain `object` is caught, not silently accepted.
+#[must_use]
+pub const fn map_value_is(level: &[FieldSpec], name: &str, accepted: &[KindTag]) -> bool {
+    let Some(field) = find(level, name) else {
+        return false;
+    };
+    let Some(values) = field.map_values else {
+        return false;
+    };
+    if accepted.is_empty() {
+        return true;
+    }
+    let mut i = 0;
+    while i < accepted.len() {
+        #[allow(clippy::indexing_slicing)]
+        if accepted[i].accepts(values) {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// The sub-level under `name`, or an empty level when absent or a leaf.
@@ -326,6 +356,7 @@ mod tests {
             nullable: false,
             array: false,
             variants: &[],
+            map_values: None,
             children: &[],
         },
         FieldSpec {
@@ -334,6 +365,7 @@ mod tests {
             nullable: true,
             array: false,
             variants: &[],
+            map_values: None,
             children: &[],
         },
         FieldSpec {
@@ -342,6 +374,7 @@ mod tests {
             nullable: false,
             array: true,
             variants: &[],
+            map_values: None,
             children: &[],
         },
         FieldSpec {
@@ -350,6 +383,7 @@ mod tests {
             nullable: false,
             array: false,
             variants: STATUS_VARIANTS,
+            map_values: None,
             children: &[],
         },
         FieldSpec {
@@ -358,12 +392,14 @@ mod tests {
             nullable: false,
             array: false,
             variants: &[],
+            map_values: None,
             children: &[FieldSpec {
                 name: "lat",
                 kind: KindTag::Double,
                 nullable: false,
                 array: false,
                 variants: &[],
+                map_values: None,
                 children: &[],
             }],
         },

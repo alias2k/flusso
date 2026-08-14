@@ -16,6 +16,13 @@ pub(crate) struct DocField<'a> {
     pub(crate) ty: &'a Type,
     pub(crate) doc_key: String,
     pub(crate) skip: bool,
+    /// `#[flusso(opaque)]` — this field's type is not a fragment, so don't check
+    /// it against the schema. The escape hatch for a plain hand-written struct.
+    pub(crate) opaque: bool,
+    /// `#[serde(flatten)]` — this field's *keys* live at the enclosing level, so
+    /// its type is checked against that level rather than a sub-level, and the
+    /// container name itself is never looked up.
+    pub(crate) flatten: bool,
 }
 
 /// Parse a struct's named fields, resolving each document key from serde's
@@ -40,12 +47,14 @@ pub(crate) fn parse_fields<'a>(
             .ident
             .as_ref()
             .ok_or_else(|| syn::Error::new(field.span(), "field must be named"))?;
-        let (skip, rename) = flusso_field_attr(field)?;
+        let (skip, opaque, rename) = flusso_field_attr(field)?;
         out.push(DocField {
             ident,
             ty: &field.ty,
             doc_key: doc_key(field, ident, rename, rename_all)?,
             skip,
+            opaque,
+            flatten: serde_flatten(field),
         });
     }
     Ok(out)
@@ -93,9 +102,10 @@ fn serde_rename(field: &Field) -> syn::Result<Option<String>> {
     Ok(renamed)
 }
 
-/// Read a field's `#[flusso(…)]` attributes: `skip` and/or `rename = "…"`.
-fn flusso_field_attr(field: &Field) -> syn::Result<(bool, Option<String>)> {
+/// Read a field's `#[flusso(…)]` attributes: `skip`, `opaque`, `rename = "…"`.
+fn flusso_field_attr(field: &Field) -> syn::Result<(bool, bool, Option<String>)> {
     let mut skip = false;
+    let mut opaque = false;
     let mut rename = None;
     for attr in &field.attrs {
         if attr.path().is_ident("flusso") {
@@ -103,17 +113,60 @@ fn flusso_field_attr(field: &Field) -> syn::Result<(bool, Option<String>)> {
                 if meta.path.is_ident("skip") {
                     skip = true;
                     Ok(())
+                } else if meta.path.is_ident("opaque") {
+                    opaque = true;
+                    Ok(())
                 } else if meta.path.is_ident("rename") {
                     rename = Some(meta.value()?.parse::<LitStr>()?.value());
                     Ok(())
                 } else {
-                    Err(meta
-                        .error("unknown `flusso` field attribute (expected `skip` or `rename`)"))
+                    Err(meta.error(
+                        "unknown `flusso` field attribute (expected `skip`, `opaque`, or `rename`)",
+                    ))
                 }
             })?;
         }
     }
-    Ok((skip, rename))
+    Ok((skip, opaque, rename))
+}
+
+/// The container `#[serde(rename_all = "…")]`, if any. Best-effort: every other
+/// serde container attribute is ignored.
+pub(crate) fn container_rename_all(input: &syn::DeriveInput) -> Option<String> {
+    let mut rename_all = None;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all")
+                && let Ok(value) = meta.value()
+                && let Ok(lit) = value.parse::<LitStr>()
+            {
+                rename_all = Some(lit.value());
+            }
+            Ok(())
+        });
+    }
+    rename_all
+}
+
+/// Whether the field carries `#[serde(flatten)]`.
+fn serde_flatten(field: &Field) -> bool {
+    let mut flatten = false;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        // Best-effort: `flatten` is a bare path among other serde attributes.
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("flatten") {
+                flatten = true;
+            }
+            Ok(())
+        });
+    }
+    flatten
 }
 
 /// Validate each declared field against the resolved fields at this level.

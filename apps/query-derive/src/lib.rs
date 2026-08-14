@@ -7,6 +7,7 @@ use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, LitStr, parse_macro_input};
 
 mod doc;
+mod fragment;
 mod map;
 mod multi;
 mod resolve;
@@ -38,6 +39,23 @@ pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
 /// #[flusso(keyword)]
 /// enum AccountTier { Pro, Enterprise, Free }
 /// ```
+/// Derive a **location-free** document shape — a fragment.
+///
+/// A fragment names no index and no path, so one declaration can be embedded at
+/// several paths (`billingAddress` and `shippingAddress`) or across indexes, and
+/// even live in a shared crate. Each root that embeds it validates it against
+/// the mapping at *that* path, recursively into any fragment it contains.
+///
+/// ```ignore
+/// #[derive(serde::Deserialize, FlussoFragment)]
+/// struct Address { city: String, zip: Option<String> }
+/// ```
+#[proc_macro_derive(FlussoFragment, attributes(flusso))]
+pub fn derive_flusso_fragment(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    fragment::expand(input).into()
+}
+
 #[proc_macro_derive(FlussoValue, attributes(flusso))]
 pub fn derive_flusso_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

@@ -1,0 +1,16 @@
+error[E0080]: evaluation panicked: fragment `Geo`: field `lat` has a Rust type that cannot hold the schema field at this path
+  --> tests/ui/fragment_deep_mismatch.rs:34:15
+   |
+34 | const _: () = Address::__flusso_check(LEVEL);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Address::__flusso_check`
+  --> tests/ui/fragment_deep_mismatch.rs:7:10
+   |
+ 7 |     geo: Geo,
+   |          ^^^
+note: inside `Geo::__flusso_check`
+  --> tests/ui/fragment_deep_mismatch.rs:12:10
+   |
+12 |     lat: f64,
+   |          ^^^ the failure occurred here

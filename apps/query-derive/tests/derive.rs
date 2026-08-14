@@ -476,6 +476,7 @@ fn value_metadata_is_readable_during_const_evaluation() {
         nullable: false,
         array: false,
         variants: &["paid", "pending", "cancelled"],
+        map_values: None,
         children: &[],
     }];
 

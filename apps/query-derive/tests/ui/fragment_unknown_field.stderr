@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Address`: field `town` does not exist at the path this struct is embedded at
+  --> tests/ui/fragment_unknown_field.rs:21:15
+   |
+21 | const _: () = Address::__flusso_check(LEVEL);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Address::__flusso_check`
+  --> tests/ui/fragment_unknown_field.rs:8:11
+   |
+ 8 |     town: String,
+   |           ^^^^^^ the failure occurred here

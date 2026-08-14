@@ -217,7 +217,7 @@ fn leaf_check(ident: &syn::Ident) -> TokenStream {
 /// This is what makes the schema's declared `variants:` comparable to the Rust
 /// enum — the schema lists document strings, not Rust identifiers.
 fn variant_keys(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<Vec<String>> {
-    let rename_all = container_rename_all(input);
+    let rename_all = crate::doc::container_rename_all(input);
     data.variants
         .iter()
         .map(|variant| {
@@ -231,26 +231,6 @@ fn variant_keys(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<Vec<St
             })
         })
         .collect()
-}
-
-fn container_rename_all(input: &DeriveInput) -> Option<String> {
-    let mut rename_all = None;
-    for attr in &input.attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
-        // Best-effort: pull `rename_all`, ignore every other serde attribute.
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename_all")
-                && let Ok(value) = meta.value()
-                && let Ok(lit) = value.parse::<syn::LitStr>()
-            {
-                rename_all = Some(lit.value());
-            }
-            Ok(())
-        });
-    }
-    rename_all
 }
 
 fn serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
