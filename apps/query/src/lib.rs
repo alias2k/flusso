@@ -31,28 +31,40 @@
 //!   each hit decoded into the variant matching its physical `_index`.
 //! - Typed [`SearchResponse`] / [`Hit`].
 //!
-//! Also covered: optional filters (`Option<Q>` is a [`Query`]); object/to-one-join
-//! handles ([`Object`]); shaping returned nested arrays ([`Search::filter_nested`]
-//! with [`Nested::matching`], via `inner_hits`); and scope-tagged queries —
-//! [`Query`]`<S>` carries the scope `S` it was built in ([`Root`] for the document
-//! root and flattened objects, the element type for a `nested` array), so a nested
-//! query must be lifted through [`Nested::any`]/[`Nested::all`] before it can join a
-//! root query; the compiler enforces it.
+//! Also covered: optional filters (`Option<Q>` is a [`Query`]); shaping returned
+//! nested arrays ([`Search::filter_nested`] with [`Nested::matching`], via
+//! `inner_hits`); and scope-tagged queries — [`Query`]`<S>` carries the scope `S`
+//! it was built in ([`Root`] for the document root and flattened objects, the
+//! generated element namespace for a `nested` array), so a nested query must be
+//! lifted through [`Nested::any`]/[`Nested::all`] before it can join a root
+//! query; the compiler enforces it.
+//!
+//! # Writing the document types
+//!
+//! Two derives, behind the `derive` feature:
+//!
+//! - [`macro@FlussoRoot`] binds a struct to an index. It is the only type that
+//!   reads the schema, and it generates the *whole* typed surface for that index —
+//!   a handle for every field at every level, through one generated namespace per
+//!   container (`User::account().tier()`, `UserOrders::total()`).
+//! - [`macro@FlussoFragment`] declares a shape with **no** index and no path, so
+//!   one declaration serves every place it appears. Each root that embeds it
+//!   validates it against the mapping at that path, recursively.
+//!
+//! Without them, document structs, handles, and union impls are written by hand —
+//! exactly the calls this crate exposes (see the integration tests).
 //!
 //! # Not yet built
 //!
-//! - The `#[derive(FlussoDocument)]` and `#[derive(FlussoMultiDocument)]`
-//!   proc-macros live in `flusso-query-derive` (the `derive` feature). Without
-//!   them, document structs + handles and union impls are written by hand —
-//!   exactly the calls this crate exposes (see the integration tests).
 //! - `filter_nested`'s `keep_source()` opt-out (it always replaces the array in
 //!   `source` today) and a typed `hit.nested(handle)` accessor.
 //!
-//! # Example (hand-written until the derive lands)
+//! # Example
 //!
 //! ```no_run
-//! use flusso_query::{Client, Keyword, Number, Nested, kind};
+//! use flusso_query::{Client, Keyword, Number, kind};
 //!
+//! // What `#[derive(FlussoRoot)]` generates for you, written out by hand.
 //! #[derive(serde::Deserialize)]
 //! struct User {
 //!     email: String,

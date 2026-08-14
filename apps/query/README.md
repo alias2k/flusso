@@ -8,7 +8,7 @@ side; `flusso-query` enforces it on the **read** side.
 
 `flusso-query` does **not** generate the document types for you. You write the
 document struct by hand and keep full control — its derives, field types, which
-fields it projects, how doc keys map to Rust names. `#[derive(FlussoDocument)]`
+fields it projects, how doc keys map to Rust names. `#[derive(FlussoRoot)]`
 then, at compile time and with no database, does two things against the resolved
 schema:
 
@@ -25,6 +25,33 @@ filter or sort on a field even if your struct doesn't deserialize it. When the
 schema changes and the index is rebuilt, anything that no longer fits stops
 compiling at `cargo build`.
 
+### One root, many fragments
+
+Exactly one type binds to an index: the **root**, `#[derive(FlussoRoot)]`. It is
+the only thing that reads `flusso.toml`, and it owns the *whole* typed surface for
+that index — a handle for every field at every level, not just its own.
+
+Every other shape is a **fragment**, `#[derive(FlussoFragment)]`: no index, no
+path, no schema of its own. It describes a shape and nothing more, so one
+declaration covers every place that shape appears — two paths in one index, two
+different indexes, or a shared crate other services depend on. Each root that
+embeds it validates it against the mapping *at that path*, recursively.
+
+```rust
+#[derive(serde::Deserialize, FlussoFragment)]         // no location at all
+struct Address { city: String, zip: Option<String> }
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct User {
+    billing_address:  Address,     // checked against users.billingAddress
+    shipping_address: Address,     // checked against users.shippingAddress
+}
+```
+
+Retype one of `Address`'s fields and you get **two** errors — one per embedding.
+That is the whole point: the shape is written once, and nothing can drift.
+
 ## Quick reference
 
 | Looking for… | Jump to |
@@ -38,6 +65,8 @@ compiling at `cargo build`.
 | One blended result list across indexes | [Combined search](#one-blended-result-list-combined-search) |
 | How the macro finds the schema; `path` for nested structs | [Binding to the schema](#binding-to-the-schema) |
 | flusso `type` → Rust type → handle | [flusso types → Rust types](#flusso-types--rust-types) |
+| Reusing a shape across paths or indexes | [Fragments](#fragments-a-shape-with-no-location) |
+| Coming from `path = "…"` | [Migrating from `path`](#migrating-from-path) |
 | Anything the typed builder can't express | [The escape hatch](#the-escape-hatch) |
 | Reading a prefixed deployment | [Resolving the index name](#resolving-the-index-name) |
 
@@ -46,20 +75,20 @@ compiling at `cargo build`.
 ## A query, from the caller's seat
 
 A service that searches the `users` index from the [schema guide](https://alias2k.github.io/flusso/guides/schema-authoring.html). You write
-the structs; `#[derive(FlussoDocument)]` validates them and generates the query
+the structs; `#[derive(FlussoRoot)]` validates them and generates the query
 surface. The only input is the **index name** — it finds `flusso.toml` itself (see
 [Binding to the schema](#binding-to-the-schema)).
 
 ### The document structs
 
 ```rust
-use flusso_query::{Client, FlussoDocument};
+use flusso_query::{Client, FlussoFragment, FlussoRoot};
 
 /// A `users` document — *you* write this. It's a **projection**: it deserializes
 /// the fields below and omits the rest of the index (addresses, profile,
 /// avgOrderValue, …), which the derive allows. The derive checks every field
 /// against the `users` schema and hangs the typed query surface off `User`.
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
+#[derive(Debug, Clone, serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]                     // ← the only input: which index
 pub struct User {
     pub id: i32,                                // primary key (integer) — never null
@@ -74,10 +103,9 @@ pub struct User {
     pub lifetime_value: Option<f64>,            // sum aggregate → nullable
 }
 
-/// The `account` object — a same-row sub-object. A nested/object struct validates
-/// against its `path` in the same index; it has no entry points of its own.
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "account")]
+/// The `account` object — a same-row sub-object. A fragment names no location:
+/// it is validated wherever `User` puts it, and has no entry points of its own.
+#[derive(Debug, Clone, serde::Deserialize, FlussoFragment)]
 pub struct Account {
     pub tier: String,                           // enum → keyword, required
     pub country: Option<String>,                // keyword, not required
@@ -85,8 +113,7 @@ pub struct Account {
     pub created_at: time::OffsetDateTime,       // timestamp, required
 }
 
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "orders")]
+#[derive(Debug, Clone, serde::Deserialize, FlussoFragment)]
 pub struct Order {
     pub status: String,                         // enum, required
     pub total: Decimal,                         // decimal column (`decimal` feature); or `f64`
@@ -95,8 +122,8 @@ pub struct Order {
     pub items: Vec<Item>,                       // a deeper has_many → nested
 }
 
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "orders.items")]
+/// Reached by recursion from `Order` — `Item` never names `orders.items` either.
+#[derive(Debug, Clone, serde::Deserialize, FlussoFragment)]
 pub struct Item {
     #[serde(rename = "productId")]
     pub product_id: i32,
@@ -129,8 +156,8 @@ async fn main() -> anyhow::Result<()> {
         .filter(User::order_count().gte(5))               // long → range
         .filter(User::account().tier().eq("gold"))        // into the object's handles
         .query(User::full_name().matches("ada lovelace")) // text → analyzed match
-        .filter(User::orders().any(Order::status().eq("delivered")))   // nested, via your Order struct
-        .filter(User::addresses().any(AddressFields::city().eq("Boston"))) // not projected — generated namespace
+        .filter(User::orders().any(UserOrders::status().eq("delivered")))  // nested, via the generated namespace
+        .filter(User::addresses().any(UserAddresses::city().eq("Boston"))) // never projected — still queryable
         .sort(User::order_count().desc())
         .from(0)
         .size(20)
@@ -188,7 +215,7 @@ mistake is a compile error rather than a 400 from OpenSearch.
 | `Bool`          | `eq`, `exists`, `asc`/`desc`                                              |
 | `Number`        | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
 | `Date`          | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between`, `exists`             |
-| `Object<S>`     | `exists` (a same-document sub-object — an `object` field or a to-one join (`belongs_to`/`has_one`); `S` is the enclosing scope). Its sub-fields are *flattened*, so query them via the child struct's dotted-path handles (`Account::tier()`), not through this handle |
+| object namespace | A same-document sub-object — an `object` field or a to-one join (`belongs_to`/`has_one`). Objects are *flattened*, so the namespace **chains** from its parent and its fields query in the enclosing scope: `User::account().tier()`, `User::account().exists()` |
 | `Nested<S, T>`  | `any(q)` / `all(q)` to match parents and **lift** the child query into scope `S` — `q` is a child query built from `T`'s handles ([merging](#building-a-child-filter-and-merging-it-into-the-parent)); `matching(q)` (with `.sort`/`.size`) to shape what's returned — see [Filtering nested collections](#filtering-nested-collections); plus `exists` |
 | `Geo`           | `within(Distance::km(12.0), center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` (nearest-first sugar) or `distance_sort(center, order, DistanceUnit)` |
 | `TextMap`       | `key(k)` → a `Text` leaf for one key; `search(q)` (cross-key, `.prefer(key, weight)` / `.only_preferred()`); `has_key(k)`, `exists` |
@@ -452,7 +479,7 @@ declare which document types blend by writing an enum with one variant per type:
 
 ```rust
 /// One item in the storefront's global search.
-#[derive(Debug, FlussoMultiDocument)]          // the `derive` feature, like FlussoDocument
+#[derive(Debug, FlussoMultiDocument)]          // the `derive` feature, like FlussoRoot
 enum StoreItem {
     User(User),
     Order(Order),
@@ -497,38 +524,38 @@ each variant's `(INDEX, SCHEMA_HASH)` and a `decode` that matches on
 ### Building a child filter and merging it into the parent
 
 Because the scope is part of the type, a query is a value you can build, name,
-store, and reuse. A **nested** child struct (one whose `path` ends in a `nested`
-array) carries its own field handles tagged with the child scope — so they produce
-`Query<Order>`, not `Query<Root>`:
+store, and reuse. A **nested** array introduces its own scope, and the root
+generates a namespace for it — `UserOrders` for `users.orders` — whose handles are
+tagged with that scope, so they produce `Query<UserOrders>`, not `Query<Root>`:
 
 ```rust
-// Built from Order's own handles. Reusable — a plain function returning a query:
-fn big_delivered() -> Query<Order> {
-    Order::status().eq("delivered")
-        .and(Order::total().gt(100.0))
+// Built from the generated namespace. Reusable — a plain function returning a query:
+fn big_delivered() -> Query<UserOrders> {
+    UserOrders::status().eq("delivered")
+        .and(UserOrders::total().gt(100.0))
 }
 ```
 
 To merge a child filter into a parent, **lift** it through the nesting that holds
-it: `User::orders().any(child)` (or `.all(child)`) takes a `Query<Order>` and
+it: `User::orders().any(child)` (or `.all(child)`) takes a `Query<UserOrders>` and
 returns a `Query<Root>` — a nested clause at the `orders` path — which composes
 with parent-scope queries like any other:
 
 ```rust
 let q = User::email().eq("ada@example.com")
-    .and(User::orders().any(big_delivered()));   // Query<Order> → lifted → Query<Root>
+    .and(User::orders().any(big_delivered()));   // Query<UserOrders> → lifted → Query<Root>
 
 User::query().filter(q).send(&client).await?;
 ```
 
-The scope tag keeps this honest: `User::email().and(Order::status().eq(…))` **does
-not compile** — you can't `and` a `Query<Root>` with a `Query<Order>`; the child
-query has to be lifted through `User::orders()` first. A child constraint can never
-be silently applied at the wrong level.
+The scope tag keeps this honest: `User::email().and(UserOrders::status().eq(…))`
+**does not compile** — you can't `and` a `Query<Root>` with a `Query<UserOrders>`;
+the child query has to be lifted through `User::orders()` first. A child constraint
+can never be silently applied at the wrong level.
 
-Lifting composes through depth: `Order::items().any(Item::quantity().gt(1))` is a
-`Query<Order>`, which `User::orders().any(…)` then lifts the rest of the way to
-`Query<Root>`.
+Lifting composes through depth: `UserOrders::items().any(UserOrdersItems::quantity().gt(1))`
+is a `Query<UserOrders>`, which `User::orders().any(…)` then lifts the rest of the
+way to `Query<Root>`.
 
 ### Optional filters
 
@@ -661,7 +688,7 @@ You never point the macro at a file. You name the **index**, and the macro finds
 the schema:
 
 ```rust
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 pub struct User { /* … */ }
 ```
@@ -688,77 +715,149 @@ physical index name, so binding and index are provably the same schema version.
 There is no `build.rs`, no generated `.rs` file to `include!`, and no committed
 mapping artifact to keep in sync — the struct is the only file you maintain.
 
-### A nested or object struct names its path
+### Fragments: a shape with no location
 
-A same-row `object`, a to-one join, or a `nested` join is its own struct, validated
-against a dotted **`path`** into the same index — `account`, `orders`,
-`orders.items`. It declares the same `index` so the macro resolves the same config,
-then walks to that path's `children`:
+Everything below the root is a **fragment**. It names no index and no path:
 
 ```rust
-#[flusso(index = "users", path = "orders.items")]
+#[derive(serde::Deserialize, FlussoFragment)]
 pub struct Item { /* … */ }
 ```
 
-These contribute field validation **and** their own field handles —
-`Order::status()`, `Order::total()`, … — producing `Query<Order>` values you can
-compose, store, and lift into a parent query (see [Building a child
-filter](#building-a-child-filter-and-merging-it-into-the-parent)). Only the
-**root** struct gets entry points (`get`/`query`) and `SCHEMA_HASH`.
+A fragment never resolves a schema. The root that embeds it hands it the resolved
+mapping level for the path it landed on, and it checks itself against that —
+recursively, so `User { orders: Vec<Order> }` and `Order { items: Vec<Item> }`
+validate `Item` against `users.orders.items` without either struct naming it.
+
+Because the location comes from the use site, **one fragment serves every place
+the shape appears**:
+
+```rust
+#[derive(serde::Deserialize, FlussoFragment)]
+pub struct LineItem { /* … */ }
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+pub struct User { orders: Vec<UserOrder> }   // → users.orders.items
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "orders")]
+pub struct Order { items: Vec<LineItem> }    // → orders.items
+```
+
+Both are checked. If the two schemas drift apart, whichever no longer fits fails
+the build, pointing at that embedding.
+
+**Embedding is checked by default.** A field whose type is a struct must be a
+fragment (or a value type). To embed a plain, un-derived struct deliberately, mark
+the field `#[flusso(opaque)]` — that skips the shape check, though the field must
+still exist in the mapping.
+
+**A flattened group** works the same way, against the enclosing level:
+
+```rust
+#[derive(serde::Deserialize, FlussoFragment)]
+struct Timestamps { created_at: String, updated_at: String }
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct User {
+    #[serde(flatten)]
+    ts: Timestamps,      // `createdAt`/`updatedAt` are checked at the ROOT level
+}
+```
+
+Only the root gets entry points (`get`/`query`) and `SCHEMA_HASH`. A fragment
+cannot start a search — it has no index to search.
+
+### Migrating from `path`
+
+`#[flusso(path = "…")]` is gone, and `#[derive(FlussoDocument)]` is a deprecated
+alias for `FlussoRoot`. Two mechanical changes:
+
+| Before | After |
+| ------ | ----- |
+| `#[derive(FlussoDocument)] #[flusso(index = "users")]` on the root | `#[derive(FlussoRoot)] #[flusso(index = "users")]` |
+| `#[derive(FlussoDocument)] #[flusso(index = "users", path = "orders")]` | `#[derive(FlussoFragment)]` — drop both attributes |
+| `Order::status()` (child struct's handle) | `UserOrders::status()` (root-generated namespace) |
+| `Account::tier()` (object child struct) | `User::account().tier()` (chains from the parent) |
+
+The attribute error names the replacement if you miss one.
 
 ### What the derive expands to
 
-`#[derive(FlussoDocument)]` on the root `User` emits (roughly):
+`#[derive(FlussoRoot)]` on `User` emits (roughly):
 
 ```rust
 impl User {
-    // Entry points.
+    // Entry points (from the `FlussoRoot` trait).
     pub fn get(client: &Client, id: i32) -> impl Future<Output = Result<Option<User>>>;
     pub fn query() -> Search<User>;   // client-free: a plain, reusable value
 
-    // Field handles — one per *schema* field, carrying its type. These are what
-    // the query builder consumes. They exist for every field in the mapping,
-    // whether or not `User` projects it.
+    // Field handles — one per *schema* field, carrying its type. These exist for
+    // every field in the mapping, whether or not `User` projects it.
     pub fn id() -> Number<kind::Integer> { /* … */ }
     pub fn email() -> Keyword { /* … */ }
     pub fn full_name() -> Text { /* … */ }
-    pub fn account() -> Object { /* … */ }                  // object/to-one join → `Object<Root>` (scope-only; `.exists()`)
-    pub fn addresses() -> Nested<Root, AddressFields> { /* … */ } // not projected — generated namespace
-    pub fn orders() -> Nested<Root, Order> { /* … */ }      // projected — `Nested<enclosing scope, your struct>`
+    pub fn account() -> UserAccount { /* … */ }             // object → its namespace, chained
+    pub fn addresses() -> Nested<Root, UserAddresses> { /* … */ }
+    pub fn orders() -> Nested<Root, UserOrders> { /* … */ }
     pub fn order_count() -> Number<kind::Long> { /* … */ }
-    pub fn lifetime_value() -> Number<kind::Double> { /* … */ }
-    pub fn avg_order_value() -> Number<kind::Double> { /* … */ } // not projected by `User`
-    pub fn last_order_at() -> Date { /* … */ }                // not projected by `User`
     // …one per schema field.
-
-    /// The physical index this binds to — `get`/`query` use it.
-    pub const INDEX: &str = "users_3f2a1b9c…";
-    /// The schema hash this binding was generated from (the `INDEX` suffix).
-    pub const SCHEMA_HASH: &str = "3f2a1b9c…";
 }
 
-// Each nested path has ONE handle namespace whose functions build a `Query` in
-// that path's scope. When you wrote a struct for the path, that struct IS the
-// namespace — its derive adds the handles, covering the full sub-schema (not just
-// the fields it deserializes), producing `Query<Order>`. A `nested` array
-// introduces its own scope: `Order`'s handles are tagged `<Order>` (the root and
-// flattened objects stay `<Root>`); they must be lifted before joining a root query.
-impl Order {
-    pub fn status() -> Keyword<Order> { /* … */ }
-    pub fn total() -> Number<kind::Decimal, Order> { /* … */ }
-    pub fn placed_at() -> Date<Order> { /* … */ }
-    pub fn items() -> Nested<Order, Item> { /* … */ }   // deeper nested: enclosing scope `Order`, child `Item`
-    // …one per field at the `orders` path.
+impl FlussoRoot for User {
+    const INDEX: &str = "users";
+    const SCHEMA_HASH: &str = "3f2a1b9c…";   // the physical index is INDEX_HASH
 }
+```
 
-// For a nested path you DIDN'T give a struct, the root derive generates a
-// handles-only namespace named `<Path>Fields`, so it's still queryable:
-pub struct AddressFields;
-impl AddressFields {
-    pub fn city() -> Keyword<AddressFields> { /* … */ }       // nested scope, like `Order`
-    pub fn postal_code() -> Keyword<AddressFields> { /* … */ }
-    // …one per field at the `addresses` path.
+Plus **one namespace per container level**, generated from the schema and named
+root-prefixed so two roots in the same module can't collide.
+
+An **object** flattens into its enclosing scope, so its namespace chains from the
+parent — its fields are `&self` methods returning handles in that same scope:
+
+```rust
+pub struct UserAccount;
+impl UserAccount {
+    pub fn exists(&self) -> Query<Root> { /* … */ }
+    pub fn tier(&self) -> Enum<Root> { /* … */ }        // at "account.tier"
+    pub fn country(&self) -> Keyword<Root> { /* … */ }
 }
+// → User::account().tier().eq("gold")
+```
+
+A **nested** array introduces its own scope, so its namespace is a named type with
+associated fns, and it carries the `PATH` a nesting-aware sort reads:
+
+```rust
+pub struct UserOrders;
+impl FlussoScope for UserOrders {
+    const PATH: &[Segment] = &[Segment { name: "orders", kind: SegmentKind::Nested }];
+}
+impl UserOrders {
+    pub fn status() -> Enum<UserOrders> { /* … */ }
+    pub fn total() -> Number<kind::Decimal, UserOrders> { /* … */ }
+    pub fn items() -> Nested<UserOrders, UserOrdersItems> { /* … */ }   // deeper nesting
+    pub fn shipping() -> UserOrdersShipping { /* … */ }                 // object inside nested
+}
+// → User::orders().any(UserOrders::total().gt(100))
+// → User::orders().any(UserOrders::shipping().carrier().eq("dhl"))
+```
+
+That last one — an object *inside* a nested array — works because the root knows
+the scope tag. A child struct never could, which is why it used to be rejected.
+
+Finally, the root bakes the resolved mapping into const data and drives the check
+into every shape it embeds:
+
+```rust
+const _: () = {
+    const __FLUSSO_LEVEL: &[FieldSpec] = &[ /* the whole resolved subtree */ ];
+    Account::__flusso_check(children(__FLUSSO_LEVEL, "account"));
+    UserOrder::__flusso_check(children(__FLUSSO_LEVEL, "orders"));
+};
 ```
 
 ### What the derive checks
@@ -783,12 +882,42 @@ The rules that make this **full control rather than a straitjacket**:
   arbitrary type aliases, so it compares the final path segment (`String`, `i32`,
   `f64`, `OffsetDateTime`, …) and the `Option<_>` wrapper against the [type
   table](#flusso-types--rust-types). For an `object` field it expects a struct,
-  for a `nested` field a `Vec<_>`, and defers the inner field checks to *that*
-  struct's own `FlussoDocument` derive.
+  for a `nested` field a `Vec<_>`, and hands the inner check to *that* fragment.
 - **Escape hatches.** A field typed `serde_json::Value` opts out of type checking.
   `#[flusso(skip)]` drops a field from validation entirely — for a computed or
   app-only field not backed by the index (pair it with `#[serde(skip)]` or
-  `#[serde(default)]`).
+  `#[serde(default)]`). `#[flusso(opaque)]` keeps the field checked against the
+  mapping but skips the *shape* check, for a plain un-derived struct.
+
+#### What a fragment adds
+
+A fragment has no schema of its own, so its checks run where it is **embedded**.
+The root bakes the resolved level into const data and hands it down; the fragment
+holds one assertion per declared field, with the message baked in at macro time.
+
+The error's primary span is the embedding, with a note chain down to the field —
+so you see both which use site broke and which field is wrong, however deep:
+
+```
+error[E0080]: evaluation panicked: fragment `Geo`: field `lat` has a Rust type
+              that cannot hold the schema field at this path
+   |
+27 |     billing_address: Address,
+   |                      ^^^^^^^ evaluation of `_` failed inside this call
+note: inside `Address::__flusso_check`
+ 7 |     geo: Geo,
+note: inside `Geo::__flusso_check`
+12 |     lat: f64,
+```
+
+On top of the three checks above, a fragment field also verifies **enum variants**:
+a `#[derive(FlussoValue)]` enum declaring a variant the schema's `variants:` never
+lists is a compile error, because it could never match a document. Covering only
+*some* of the schema's variants is fine — that's a partial projection.
+
+Two limits worth knowing, both from `panic!` in a const context taking a literal:
+messages can't interpolate the schema's own type name, and there are **no
+warnings** — a check either passes or fails the build.
 
 ### flusso types → Rust types
 
@@ -856,7 +985,7 @@ struct Money(Decimal);
 #[flusso(keyword)]
 enum Tier { Pro, Enterprise, Free }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "customers")]
 struct Customer { tier: Tier, balance: Money /* … */ }
 
@@ -975,8 +1104,8 @@ writer's prefix exactly, or queries hit an empty (or wrong) index.
 
 | Crate            | Role                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------- |
-| `flusso-query` | Runtime: the `Client` transport, the field-handle/`Query`/`Search` builder, `SearchResponse`. Generic over the developer's document types. Targets OpenSearch / Elasticsearch (shared DSL). Re-exports the derive behind a `derive` feature, so callers `use flusso_query::FlussoDocument`. |
-| `flusso-query-derive`  | The `#[derive(FlussoDocument)]` proc-macro crate. At compile time it discovers `flusso.toml`, resolves the named index's [`IndexMapping`](https://github.com/alias2k/flusso/blob/main/libs/0-core/src/config/index_mapping.rs) from the self-describing schema (no database), validates the annotated struct, and emits the field handles, entry points, and schema hash. Reuses `schema-config-toml`, `schema-index-yaml`, and `schema-core`. |
+| `flusso-query` | Runtime: the `Client` transport, the field-handle/`Query`/`Search` builder, `SearchResponse`. Generic over the developer's document types. Targets OpenSearch / Elasticsearch (shared DSL). Re-exports the derives behind a `derive` feature, so callers `use flusso_query::{FlussoRoot, FlussoFragment}`. |
+| `flusso-query-derive`  | The proc-macro crate. `#[derive(FlussoRoot)]` discovers `flusso.toml` at compile time, resolves the named index's [`IndexMapping`](https://github.com/alias2k/flusso/blob/main/libs/0-core/src/config/index_mapping.rs) from the self-describing schema (no database), validates the annotated struct, and emits the whole handle tree plus entry points and schema hash. `#[derive(FlussoFragment)]` emits a location-free shape check the root drives. Reuses `schema-config-toml`, `schema-index-yaml`, and `schema-core`. |
 
 Both crates sit above `schema-core` and depend only downward — no dependency on the
 engine, the sources, or the sinks. They share only the domain model, the one thing
