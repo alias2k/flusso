@@ -486,7 +486,7 @@ pub(crate) fn codegen(
         }
     });
     let doc_impl = quote! {
-        impl ::flusso_query::FlussoDocument for #ident {
+        impl ::flusso_query::FlussoScope for #ident {
             const PATH: &'static [::flusso_query::Segment] = &[ #(#path_segments),* ];
         }
     };
@@ -499,7 +499,7 @@ pub(crate) fn codegen(
     // `FlussoIndex`, so it cannot start a search.
     let index_impl = if is_root {
         quote! {
-            impl ::flusso_query::FlussoIndex for #ident {
+            impl ::flusso_query::FlussoRoot for #ident {
                 const INDEX: &'static str = #index;
                 const SCHEMA_HASH: &'static str = #hash;
             }

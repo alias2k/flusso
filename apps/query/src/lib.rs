@@ -126,12 +126,12 @@ pub use msearch::MsearchBundle;
 pub use multi::{FlussoMultiDocument, MultiSearch};
 pub use path::{Segment, SegmentKind, nested_boundaries};
 pub use query::{AsQuery, Query, Root};
-pub use search::{FlussoDocument, FlussoIndex, Highlight, Hit, Search, SearchResponse, ShardStats};
+pub use search::{FlussoRoot, FlussoScope, Highlight, Hit, Search, SearchResponse, ShardStats};
 
 /// `#[derive(FlussoDocument)]` — generates the typed query surface for a
 /// hand-written document struct (its field handles) and implements the
-/// [`FlussoDocument`](trait@FlussoDocument) trait (`INDEX`/`SCHEMA_HASH` +
-/// `search`/`get`). See the
+/// [`FlussoRoot`](trait@FlussoRoot) trait (`INDEX`/`SCHEMA_HASH` +
+/// `query`/`get`). See the
 /// [querying guide](https://alias2k.github.io/flusso/guides/querying.html).
 /// Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
@@ -140,14 +140,14 @@ pub use flusso_query_derive::FlussoDocument;
 /// `#[derive(FlussoValue)]` — implements [`trait@FlussoValue`] for an enum or newtype
 /// wrapper, so it may stand in for a field of the chosen kind (`#[flusso(keyword)]`
 /// — the default — `#[flusso(text)]`, `#[flusso(number)]`, or `#[flusso(date)]`)
-/// in a [`FlussoDocument`] struct. Enabled by the `derive` feature.
+/// in a [`FlussoRoot`] struct. Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoValue;
 
 /// `#[derive(FlussoMap)]` — implements [`trait@FlussoMap`] for a newtype wrapper
 /// over a `map` field, so it may stand in for a `map` of the chosen value kind
 /// (`#[flusso(keyword)]` — the default — `#[flusso(text)]`, `#[flusso(number)]`,
-/// or `#[flusso(date)]`) in a [`FlussoDocument`] struct. A bare
+/// or `#[flusso(date)]`) in a [`FlussoRoot`] struct. A bare
 /// `HashMap<String, V>` needs no derive. Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoMap;

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use flusso_query::{
-    AsQuery, Distance, FlussoDocument, FlussoIndex, FlussoMap, FlussoValue, Fuzziness, GeoPoint,
+    AsQuery, Distance, FlussoDocument, FlussoMap, FlussoRoot, FlussoValue, Fuzziness, GeoPoint,
     Sortable,
 };
 

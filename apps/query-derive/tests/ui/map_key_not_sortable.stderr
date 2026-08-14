@@ -9,8 +9,8 @@ error[E0277]: the trait bound `flusso_query::Text<Root, MapKey>: Sortable` is no
 help: the trait `Sortable` is implemented for `flusso_query::Text<S>`
   --> $WORKSPACE/apps/query/src/handles/string.rs
    |
-   | impl<S: FlussoDocument> Sortable for Text<S, WithSubfields> {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | impl<S: FlussoScope> Sortable for Text<S, WithSubfields> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `SortBuilder::by`
   --> $WORKSPACE/apps/query/src/handles/sort.rs
    |

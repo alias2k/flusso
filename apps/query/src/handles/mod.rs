@@ -219,7 +219,7 @@ pub mod kind {
 /// numeric primitives for number, …). Custom enums and newtype wrappers opt in
 /// with `#[derive(FlussoValue)]` (e.g. a `Pro`/`Enterprise`/`Free` tier enum →
 /// `Account::tier().eq(AccountTier::Pro)`, matched against its serde string).
-/// `FlussoDocument` emits a deferred bound on this trait for any non-primitive
+/// `FlussoScope` emits a deferred bound on this trait for any non-primitive
 /// field type, so a document only compiles when the type genuinely fits.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a valid value for a `{K}` field",

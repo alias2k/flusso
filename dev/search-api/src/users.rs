@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use flusso_query::{
-    Client, FlussoDocument, FlussoIndex, FlussoValue, OrderBy, SortBuilder, Sortable, multi_match,
+    Client, FlussoDocument, FlussoRoot, FlussoValue, OrderBy, SortBuilder, Sortable, multi_match,
 };
 use serde::{Deserialize, Serialize};
 

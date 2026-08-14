@@ -20,9 +20,9 @@ use crate::query::{AsQuery, BoolBuilder, Root};
 /// the right `nested` clause. The root's `PATH` is empty.
 ///
 /// The index-pointing operations (`query`/`get`, the index name + hash) live on
-/// the [`FlussoIndex`] supertrait, emitted **only** for the root — so a child
+/// the [`FlussoRoot`] supertrait, emitted **only** for the root — so a child
 /// projection cannot start a search.
-pub trait FlussoDocument {
+pub trait FlussoScope {
     /// This view's position from the index root, outermost first. Empty for the
     /// root and for any flattened-object scope (no `nested` boundary above it).
     const PATH: &'static [Segment];
@@ -36,7 +36,7 @@ pub trait FlussoDocument {
 /// (the physical index is `{INDEX}_{SCHEMA_HASH}`, exactly what the OpenSearch
 /// sink writes); [`query`](Self::query) and [`get`](Self::get) are provided.
 /// `DeserializeOwned` is required so search hits and fetched documents decode.
-pub trait FlussoIndex: FlussoDocument + DeserializeOwned {
+pub trait FlussoRoot: FlussoScope + DeserializeOwned {
     /// The logical index name this binding queries.
     const INDEX: &'static str;
 
@@ -71,7 +71,7 @@ pub trait FlussoIndex: FlussoDocument + DeserializeOwned {
 
 /// A typed query against one index — a plain, client-free value.
 ///
-/// Built from [`FlussoIndex::query`] (or `Search::new(index, hash)` by
+/// Built from [`FlussoRoot::query`] (or `Search::new(index, hash)` by
 /// hand). Clauses accumulate into a bool query: `query`/`should` score,
 /// `filter`/`must_not` don't. Because no client (and no lifetime) is
 /// involved, a `Search` can be named, stored, cloned, and reused; a [`Client`]
