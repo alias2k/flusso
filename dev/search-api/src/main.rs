@@ -38,6 +38,7 @@ mod global;
 mod orders;
 mod products;
 mod response;
+mod shared;
 mod users;
 
 #[tokio::main]

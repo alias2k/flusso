@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::response::Page;
+use crate::shared::{LineItem, OrderStatus};
 
 // `pub(crate)`: reused by the cross-index endpoints in `global`.
 #[derive(Debug, Serialize, Deserialize, FlussoRoot)]
@@ -19,12 +20,14 @@ use crate::response::Page;
 pub(crate) struct Order {
     id: i32,
     user_id: i32,
-    status: String,
+    status: OrderStatus,
     // A `decimal` column → a `Decimal` handle, queried with `Decimal` (no `f64`
     // cast). Needs the `decimal` feature on `flusso-query`.
     total: Decimal,
     item_count: i64,
     units_sold: Option<i32>,
+    // The *shared* fragment — the same one `users` embeds three levels deep.
+    items: Vec<LineItem>,
 }
 
 #[derive(Debug, Default, Deserialize)]

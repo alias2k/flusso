@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::response::Page;
+use crate::shared::{LineItem, OrderStatus};
 
 // `pub(crate)`: the cross-index endpoints in `global` reuse this document and
 // its generated handles (same for `Product` and `Order`). Handles for every
@@ -81,18 +82,11 @@ struct Address {
 #[derive(Debug, Serialize, Deserialize, FlussoFragment)]
 #[serde(rename_all = "camelCase")]
 struct UserOrder {
-    status: String,
+    status: OrderStatus,
     total: f64,
     placed_at: String,
-    items: Vec<OrderLine>,
-}
-
-#[derive(Debug, Serialize, Deserialize, FlussoFragment)]
-#[serde(rename_all = "camelCase")]
-struct OrderLine {
-    product_id: i32,
-    quantity: i32,
-    unit_price: f64,
+    // The *shared* fragment — the same one the `orders` index embeds.
+    items: Vec<LineItem>,
 }
 
 /// A sort direction from the request (`?sort_orders=desc`). The endpoint maps
