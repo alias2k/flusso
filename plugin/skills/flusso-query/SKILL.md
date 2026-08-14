@@ -14,7 +14,7 @@ The contract is the schema. `#[derive(FlussoRoot)]` reads the resolved schema **
 
 You write and own the struct (a **projection** — deserialize the subset you want). The query surface covers the **whole schema**, so you can filter/sort on fields the struct never deserializes.
 
-**Exactly one type names an index: the root.** Everything below it is a `#[derive(FlussoFragment)]` — a shape with no index and no path, validated by whichever root embeds it. One fragment can therefore serve several paths, several indexes, or a shared crate; embed it twice and it is checked twice. There is no `path = "…"` attribute (removed) and `FlussoDocument` is a deprecated alias for `FlussoRoot`.
+**Exactly one type names an index: the root.** Everything below it is a `#[derive(FlussoFragment)]` — a shape with no index and no path, validated by whichever root embeds it. One fragment can therefore serve several paths, several indexes, or a shared crate; embed it twice and it is checked twice. There is no `path = "…"` attribute (removed) and `FlussoDocument` is a deprecated alias for `FlussoRoot`. Namespace names are root-prefixed (`UserOrders`, `UserOrdersItems`); rename one with `#[flusso(scope = "Purchases")]` on the root field if it clashes with an existing type or reads too long.
 
 ## Crates and features
 

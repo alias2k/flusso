@@ -888,6 +888,10 @@ The rules that make this **full control rather than a straitjacket**:
   app-only field not backed by the index (pair it with `#[serde(skip)]` or
   `#[serde(default)]`). `#[flusso(opaque)]` keeps the field checked against the
   mapping but skips the *shape* check, for a plain un-derived struct.
+- **`#[flusso(scope = "…")]`** renames the namespace generated for a container
+  field, and everything under it. Only a root field can carry it — a level the
+  root doesn't project has nowhere to hang an attribute, and keeps the generated
+  name.
 
 #### What a fragment adds
 
