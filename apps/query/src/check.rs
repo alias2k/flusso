@@ -297,6 +297,11 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// Implemented by `#[derive(FlussoValue)]`. Reading
 /// `<Money as FlussoValueMeta>::KINDS` in a const fn needs no bound, because the
 /// type is concrete — which is what keeps recursion into sub-fragments working.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be used as a document field type",
+    label = "needs a flusso derive",
+    note = "add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it"
+)]
 pub trait FlussoValueMeta {
     /// The mapping kinds this type may stand in for. Empty means "no opinion".
     const KINDS: &'static [KindTag];

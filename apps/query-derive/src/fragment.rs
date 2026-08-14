@@ -23,7 +23,7 @@
 //! A fragment cannot tell a *value* type (`Money`) from a *sub-fragment*
 //! (`Address`) at macro time — both are path types. So it treats every custom
 //! type identically: read the acceptable kinds off
-//! [`FlussoValueMeta`](flusso_query::FlussoValueMeta), then recurse with
+//! `FlussoValueMeta`, then recurse with
 //! `T::__flusso_check(children(level, "…"))`. Both derives emit both items; a
 //! value type's sub-level is empty and its check is a no-op.
 //!
@@ -74,9 +74,37 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         Err(error) => return error.to_compile_error(),
     };
 
-    let ident = &input.ident;
-    let checks = fields.iter().map(|field| field_check(ident, field));
+    embeddable(&input.ident, &fields)
+}
 
+/// Make a **schema-bound** struct embeddable — a root, or a legacy `path =` child.
+///
+/// Its check is a no-op on purpose: it resolved the schema itself and its own
+/// derive already validated every field against that level, so re-running the
+/// checks when a parent embeds it would only duplicate work and pile a second,
+/// worse error onto any failure. A fragment is the opposite case — it has no
+/// schema of its own, so [`embeddable`] gives it real checks.
+pub(crate) fn embeddable_leaf(ident: &Ident) -> TokenStream {
+    quote! {
+        impl ::flusso_query::FlussoValueMeta for #ident {
+            const KINDS: &'static [::flusso_query::KindTag] = &[
+                ::flusso_query::KindTag::Object,
+                ::flusso_query::KindTag::Nested,
+            ];
+            const VARIANTS: &'static [&'static str] = &[];
+        }
+
+        impl #ident {
+            #[doc(hidden)]
+            pub const fn __flusso_check(_level: &[::flusso_query::FieldSpec]) {}
+        }
+    }
+}
+
+/// What makes a fragment embeddable: the metadata a parent reads to place it,
+/// and the check it runs against the level it is placed at.
+pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
+    let checks = fields.iter().map(|field| field_check(ident, field));
     quote! {
         impl ::flusso_query::FlussoValueMeta for #ident {
             const KINDS: &'static [::flusso_query::KindTag] = &[
@@ -91,7 +119,7 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
             /// that embeds it, once per embedding site.
             #[doc(hidden)]
             pub const fn __flusso_check(level: &[::flusso_query::FieldSpec]) {
-                // Silences the unused warning for a fragment with no checkable
+                // Silences the unused warning for a shape with no checkable
                 // field (every field skipped/opaque).
                 let _ = level;
                 #(#checks)*
@@ -113,6 +141,28 @@ fn reject_location(attr: &syn::Attribute) -> syn::Result<()> {
         }
         Err(meta.error("unknown `flusso` attribute on a fragment"))
     })
+}
+
+/// The type a parent must drive a check into for this field, if any.
+///
+/// `None` for anything the parent already validates by itself: a skipped or
+/// opaque field, a `serde_json::Value` escape hatch, a dynamic-key map, or a
+/// built-in leaf. What is left is a custom type — a sub-fragment *or* a value
+/// type, told apart only at const-evaluation time, where a value type's check
+/// turns out to be a no-op.
+pub(crate) fn embedded_type<'a>(field: &DocField<'a>) -> Option<&'a Type> {
+    if field.skip || field.opaque {
+        return None;
+    }
+    let inner = strip_option(field.ty);
+    if leaf_ident(inner).as_deref() == Some("Value") || hashmap_value(inner).is_some() {
+        return None;
+    }
+    let element = vec_inner(inner).unwrap_or(inner);
+    if primitive_kinds(element).is_some() {
+        return None;
+    }
+    Some(element)
 }
 
 /// The assertions for one field, with every message baked in at macro time.
@@ -263,7 +313,7 @@ fn message(fragment: &Ident, key: &str, problem: &str) -> String {
     format!("fragment `{fragment}`: field `{key}` {problem}")
 }
 
-/// The [`KindTag`](flusso_query::KindTag)s a built-in leaf type may stand in
+/// The `KindTag`s a built-in leaf type may stand in
 /// for — the reverse of the root's mapping-to-Rust table, so both directions
 /// agree on what fits. `None` means "not a built-in leaf": a custom type, whose
 /// kinds come from its own metadata instead.
@@ -277,6 +327,10 @@ fn primitive_kinds(ty: &Type) -> Option<Vec<TokenStream>> {
         "i64" => &["Long"],
         "f32" => &["Float"],
         "f64" => &["Double", "Decimal"],
+        // Foreign leaf types behind a feature: no derive of their own, so they
+        // are recognised here rather than via `FlussoValueMeta`.
+        "Decimal" => &["Decimal", "Double"],
+        "Uuid" => &["Keyword"],
         "NaiveDate" | "NaiveDateTime" | "DateTime" | "OffsetDateTime" | "PrimitiveDateTime"
         | "Date" => &["Date"],
         "GeoPoint" => &["GeoPoint"],

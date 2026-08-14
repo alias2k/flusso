@@ -11,6 +11,7 @@ mod fragment;
 mod map;
 mod multi;
 mod resolve;
+mod spec;
 mod value;
 
 use resolve::Scope;
@@ -28,17 +29,6 @@ pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
     expand(input).into()
 }
 
-/// Implement `flusso_query::FlussoValue<K>` for an enum or newtype wrapper, so
-/// it may stand in for a field of kind `K` in a `FlussoDocument` struct. The
-/// kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
-/// `#[flusso(number)]`, or `#[flusso(date)]`.
-///
-/// ```ignore
-/// #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
-/// #[serde(rename_all = "camelCase")]
-/// #[flusso(keyword)]
-/// enum AccountTier { Pro, Enterprise, Free }
-/// ```
 /// Derive a **location-free** document shape — a fragment.
 ///
 /// A fragment names no index and no path, so one declaration can be embedded at
@@ -56,6 +46,17 @@ pub fn derive_flusso_fragment(input: TokenStream) -> TokenStream {
     fragment::expand(input).into()
 }
 
+/// Implement `flusso_query::FlussoValue<K>` for an enum or newtype wrapper, so
+/// it may stand in for a field of kind `K` in a `FlussoDocument` struct. The
+/// kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
+/// `#[flusso(number)]`, or `#[flusso(date)]`.
+///
+/// ```ignore
+/// #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+/// #[serde(rename_all = "camelCase")]
+/// #[flusso(keyword)]
+/// enum AccountTier { Pro, Enterprise, Free }
+/// ```
 #[proc_macro_derive(FlussoValue, attributes(flusso))]
 pub fn derive_flusso_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -258,6 +259,15 @@ fn expand(input: DeriveInput) -> TokenStream2 {
     let mut out = items;
     let (errors, asserts) = doc::validate(level, &fields, &scope);
     out.extend(asserts);
+
+    // This struct is the only one here that resolves the schema, so it bakes the
+    // level and drives the check into every shape it embeds — recursively, and
+    // once per embedding site.
+    out.extend(doc::embed_checks(level, &fields, &scope));
+    // …and it is itself embeddable, though its check is a no-op: it already
+    // validated every field against this level as part of its own expansion.
+    out.extend(fragment::embeddable_leaf(&input.ident));
+
     for error in errors {
         out.extend(error.to_compile_error());
     }

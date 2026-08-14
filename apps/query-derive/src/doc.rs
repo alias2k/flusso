@@ -181,7 +181,10 @@ pub(crate) fn validate(
     let mut errors = Vec::new();
     let mut asserts = Vec::new();
     for field in fields {
-        if field.skip {
+        // A flattened group has no container field in the mapping — its keys
+        // live at *this* level, so its type is checked against this level
+        // instead (see `embed_checks`).
+        if field.skip || field.flatten {
             continue;
         }
         let Some(resolved) = level.iter().find(|r| r.name.as_ref() == field.doc_key) else {
@@ -797,5 +800,86 @@ fn capitalize(word: &str) -> String {
     match chars.next() {
         Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// Drive the fragment check into every embedded field.
+///
+/// The root is the only type that resolves the schema, so it bakes the whole
+/// resolved subtree once and hands slices of it down: `children(LEVEL, "…")` for
+/// a normal field, the level itself for a `#[serde(flatten)]` group whose keys
+/// live here. Each call is spanned on its own field, so a failure deep in a
+/// fragment reports the embedding that reached it.
+///
+/// Returns nothing when no field embeds a checkable type — a document of plain
+/// leaves bakes no constants at all.
+pub(crate) fn embed_checks(
+    level: &[ResolvedField],
+    fields: &[DocField],
+    scope: &str,
+) -> TokenStream {
+    let mut calls = TokenStream::new();
+    for field in fields {
+        let Some(element) = crate::fragment::embedded_type(field) else {
+            continue;
+        };
+        let span = field.ty.span();
+        if field.flatten {
+            calls.extend(quote::quote_spanned! {span=>
+                <#element>::__flusso_check(__FLUSSO_LEVEL);
+            });
+            continue;
+        }
+        let key = &field.doc_key;
+        let Some(resolved) = level.iter().find(|r| r.name.as_ref() == *key) else {
+            continue;
+        };
+        // Unlike a fragment, a root *has* the mapping — so it drives the check
+        // only where there is a real sub-shape to walk into. A custom scalar
+        // type (an enum at a keyword field) is already covered by the
+        // `FlussoValue<K>` bound `check_type` emits; adding a no-op check there
+        // would only pile a second, worse error onto a missing derive.
+        if matches!(
+            resolved.mapping.mapping_type,
+            MappingType::Object | MappingType::Nested
+        ) && resolved.mapping.map_values.is_none()
+        {
+            calls.extend(quote::quote_spanned! {span=>
+                <#element>::__flusso_check(::flusso_query::children(__FLUSSO_LEVEL, #key));
+            });
+        }
+        // Only an ordered enum has a variant set to disagree with. The message is
+        // baked here because this is the side that knows the schema's variants.
+        {
+            let order = match &resolved.mapping.enum_order {
+                Some(order) => order,
+                None => continue,
+            };
+            let message = format!(
+                "field `{key}` in {scope} declares variants [{}] — the Rust type declares one \
+                 that is not among them, so it could never match a document",
+                order.join(", "),
+            );
+            calls.extend(quote::quote_spanned! {span=>
+                assert!(
+                    ::flusso_query::variants_covered(
+                        __FLUSSO_LEVEL, #key,
+                        <#element as ::flusso_query::FlussoValueMeta>::VARIANTS,
+                    ),
+                    #message
+                );
+            });
+        }
+    }
+
+    if calls.is_empty() {
+        return TokenStream::new();
+    }
+    let baked = crate::spec::bake_level(level);
+    quote! {
+        const _: () = {
+            const __FLUSSO_LEVEL: &[::flusso_query::FieldSpec] = #baked;
+            #calls
+        };
     }
 }

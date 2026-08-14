@@ -46,6 +46,20 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     let marker = kind.marker();
     quote! {
         impl ::flusso_query::FlussoMap<#marker> for #ident {}
+
+        // A map wrapper is an `object` in the mapping, and a leaf as far as the
+        // embed check goes — its keys are dynamic, so there is no sub-level to
+        // walk. Both items exist so a parent can treat every custom type alike.
+        impl ::flusso_query::FlussoValueMeta for #ident {
+            const KINDS: &'static [::flusso_query::KindTag] =
+                &[::flusso_query::KindTag::Object];
+            const VARIANTS: &'static [&'static str] = &[];
+        }
+
+        impl #ident {
+            #[doc(hidden)]
+            pub const fn __flusso_check(_level: &[::flusso_query::FieldSpec]) {}
+        }
     }
 }
 

@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use flusso_query::{
-    AsQuery, Distance, FlussoDocument, FlussoMap, FlussoRoot, FlussoValue, Fuzziness, GeoPoint,
-    Sortable,
+    AsQuery, Distance, FlussoDocument, FlussoFragment, FlussoMap, FlussoRoot, FlussoValue,
+    Fuzziness, GeoPoint, Sortable,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -495,4 +495,45 @@ fn value_metadata_is_readable_during_const_evaluation() {
 
     // And the no-op leaf check that lets a fragment treat every custom type alike.
     const _: () = OrderStatus::__flusso_check(&[]);
+}
+
+// The root is the only type that resolves the schema, so it bakes the resolved
+// level and drives the check into every shape it embeds. These fragments carry
+// no location at all — they are validated purely by where `FragUser` puts them.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct FragOrder {
+    status: String,
+    // `decimal` in the schema — OpenSearch stores it as `double`, and the
+    // baked tag keeps the two apart.
+    total: f64,
+    // An object *inside* a nested array: the one shape the old `path =` model
+    // could not express at all, because such a struct could not name its scope.
+    // A `has_one` join is nullable, so the schema requires the `Option`.
+    shipping: Option<FragShipping>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct FragShipping {
+    carrier: String,
+}
+
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct FragUser {
+    id: i32,
+    // Checked against `users.orders`, and `FragShipping` against
+    // `users.orders.shipping` — reached by recursion, without either struct
+    // naming that path.
+    orders: Vec<FragOrder>,
+}
+
+#[test]
+fn a_root_validates_the_fragments_it_embeds_against_the_real_mapping() -> Result {
+    // Compiling at all means the baked level matched: `orders` resolved to a
+    // nested array, its `status`/`total` matched, and recursion reached
+    // `shipping.carrier` two levels down. The query surface works alongside it.
+    let body = FragUser::query().filter(FragUser::id().eq(1)).body();
+    assert_eq!(body["query"]["bool"]["filter"][0]["term"]["id"], 1);
+    Ok(())
 }

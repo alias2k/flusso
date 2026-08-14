@@ -29,7 +29,7 @@ fields:
     fields:
       - enum: status
         required: true
-        variants: [pending, paid, shipped, delivered]
+        variants: [pending, paid, shipped, delivered, cancelled]
       - decimal: total
         required: true
       # An object (has_one) *inside* a nested array — used to exercise the
