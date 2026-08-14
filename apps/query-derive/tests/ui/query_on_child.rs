@@ -1,13 +1,22 @@
-use flusso_query::FlussoDocument;
+// Only the root binds to an index. A fragment describes a shape with no
+// location, so it has no `query`/`get` entry point — it cannot start a search.
+use flusso_query::{FlussoDocument, FlussoFragment, FlussoRoot};
 
-// `orders` is a `nested` element: it implements `FlussoDocument` (for its PATH)
-// but not `FlussoIndex`, so it has no `query()` — only the root can start a search.
-#[derive(serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "orders")]
-struct UserOrder {
+#[derive(serde::Deserialize, FlussoFragment)]
+struct Order {
     status: String,
 }
 
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "users")]
+struct User {
+    id: i32,
+    orders: Vec<Order>,
+}
+
 fn main() {
-    let _ = UserOrder::query();
+    // The root can.
+    let _ = User::query();
+    // The fragment cannot: no index, so no entry point.
+    let _ = Order::query();
 }

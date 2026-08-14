@@ -5,7 +5,8 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use flusso_query::{
-    Client, FlussoDocument, FlussoRoot, FlussoValue, OrderBy, SortBuilder, Sortable, multi_match,
+    Client, FlussoDocument, FlussoFragment, FlussoRoot, FlussoValue, OrderBy, SortBuilder,
+    Sortable, multi_match,
 };
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +14,8 @@ use crate::error::ApiError;
 use crate::response::Page;
 
 // `pub(crate)`: the cross-index endpoints in `global` reuse this document and
-// its generated handles (same for `Profile`, `Product`, and `Order`).
+// its generated handles (same for `Product` and `Order`). Handles for every
+// level — `account`, `profile`, `orders`, … — hang off `User` itself now.
 #[derive(Debug, Serialize, Deserialize, FlussoDocument)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "users")]
@@ -36,9 +38,8 @@ pub(crate) struct User {
     delivered_orders: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoFragment)]
 #[serde(rename_all = "camelCase")]
-#[flusso(index = "users", path = "account")]
 struct Account {
     tier: AccountTier,
     country: Option<String>,
@@ -47,7 +48,7 @@ struct Account {
 
 // A string enum stands in for the `keyword` at `account.tier`. `FlussoValue`
 // with `#[flusso(keyword)]` implements `FlussoValue<kind::Keyword>` so
-// `FlussoDocument` accepts it as the field type *and* `Account::tier().eq(…)`
+// `FlussoDocument` accepts it as the field type *and* `User::account().tier().eq(…)`
 // accepts it as a query value; serde's `rename_all` controls the actual keyword
 // strings (`"pro"`, …).
 #[derive(Debug, Serialize, Deserialize, FlussoValue)]
@@ -59,18 +60,16 @@ enum AccountTier {
     Free,
 }
 
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoFragment)]
 #[serde(rename_all = "camelCase")]
-#[flusso(index = "users", path = "profile")]
 pub(crate) struct Profile {
     bio: Option<String>,
     avatar_url: Option<String>,
     birth_date: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoFragment)]
 #[serde(rename_all = "camelCase")]
-#[flusso(index = "users", path = "addresses")]
 struct Address {
     kind: String,
     line1: String,
@@ -80,9 +79,8 @@ struct Address {
 }
 
 /// A user's nested order (distinct from the top-level `orders` index document).
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoFragment)]
 #[serde(rename_all = "camelCase")]
-#[flusso(index = "users", path = "orders")]
 struct UserOrder {
     status: String,
     total: f64,
@@ -90,9 +88,8 @@ struct UserOrder {
     items: Vec<OrderLine>,
 }
 
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoFragment)]
 #[serde(rename_all = "camelCase")]
-#[flusso(index = "users", path = "orders.items")]
 struct OrderLine {
     product_id: i32,
     quantity: i32,
@@ -180,11 +177,11 @@ async fn list(
         .by(User::full_name(), filter.sort_name)
         .by(User::order_count(), filter.sort_orders)
         .by(User::lifetime_value(), filter.sort_spend)
-        .by(Account::created_at(), filter.sort_joined)
+        .by(User::account().created_at(), filter.sort_joined)
         // A field inside the `orders` nested array — the *same* one-line `.by`.
         // The nested clause (`mode: max` → the user's most recent order) is
         // derived from the handle's scope; no hand-written `nested` wrapper.
-        .by(UserOrder::placed_at(), filter.sort_recent_order)
+        .by(UserOrders::placed_at(), filter.sort_recent_order)
         // Stable final key so rows with equal leading values page deterministically.
         .tiebreak(User::id())
         // Used only when the request named no sort: busiest customers first.
@@ -200,17 +197,17 @@ async fn list(
         .query(
             filter
                 .q
-                .map(|q| multi_match(q, [User::full_name(), Profile::bio()])),
+                .map(|q| multi_match(q, [User::full_name(), User::profile().bio()])),
         )
         .filter(filter.email.map(|v| User::email().eq(v)))
         .filter(filter.email_prefix.map(|v| User::email().prefix(v)))
         .query(filter.name.map(|v| User::full_name().matches(v)))
         // Object (group) and one-to-one fields are flattened — queried by dotted
         // path, no wrapper — so the child struct's generated handles work directly
-        // in a filter: `Account::tier()` is a `keyword` at `account.tier`,
-        // `Profile::bio()` a `text` at `profile.bio`.
-        .filter(filter.tier.map(|v| Account::tier().eq(v)))
-        .query(filter.bio.map(|v| Profile::bio().matches(v)))
+        // in a filter: `User::account().tier()` is a `keyword` at `account.tier`,
+        // `User::profile().bio()` a `text` at `profile.bio`.
+        .filter(filter.tier.map(|v| User::account().tier().eq(v)))
+        .query(filter.bio.map(|v| User::profile().bio().matches(v)))
         // The object/one-to-one parent handle: existence of the whole sub-object
         // (here, whether the user has a profile at all).
         .filter(filter.has_profile.map(|has| {
@@ -221,12 +218,12 @@ async fn list(
         .filter(
             filter
                 .city
-                .map(|v| User::addresses().any(Address::city().eq(v))),
+                .map(|v| User::addresses().any(UserAddresses::city().eq(v))),
         )
         .filter(
             filter
                 .order_status
-                .map(|v| User::orders().any(UserOrder::status().eq(v))),
+                .map(|v| User::orders().any(UserOrders::status().eq(v))),
         )
         .filter(filter.min_orders.map(|v| User::order_count().gte(v)))
         .sorts(sorts)
@@ -238,7 +235,7 @@ async fn list(
         search = search.filter_nested(
             User::orders()
                 .project()
-                .sort(UserOrder::placed_at().desc())
+                .sort(UserOrders::placed_at().desc())
                 .size(recent),
         );
     }

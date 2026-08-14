@@ -16,7 +16,7 @@ use crate::error::ApiError;
 use crate::orders::Order;
 use crate::products::Product;
 use crate::response::Page;
-use crate::users::{Profile, User};
+use crate::users::User;
 
 /// One item in the blended `/search` result list — the union of the indexes a
 /// global search box should reach (`orders` stays out: it has no analyzed
@@ -78,7 +78,7 @@ async fn search(
             filter.q,
             [
                 User::full_name(),
-                Profile::bio(),
+                User::profile().bio(),
                 Product::name(),
                 Product::description(),
             ],
@@ -105,7 +105,7 @@ async fn overview(
             filter
                 .q
                 .clone()
-                .map(|q| multi_match(q, [User::full_name(), Profile::bio()])),
+                .map(|q| multi_match(q, [User::full_name(), User::profile().bio()])),
         )
         .sort(User::order_count().desc())
         .size(limit);

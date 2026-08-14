@@ -25,12 +25,7 @@ struct User {
     // partial projections are allowed, and their handles still generate.
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
-#[flusso(
-    index = "users",
-    path = "orders",
-    config = "tests/fixtures/flusso.toml"
-)]
+#[derive(serde::Deserialize, FlussoFragment)]
 struct Order {
     status: String,
     total: f64,
@@ -42,7 +37,7 @@ fn generated_surface_builds_queries() -> Result {
         .filter(User::email().eq("ada@example.com")) // keyword handle
         .filter(User::order_count().gte(5)) // count → Number
         .query(User::full_name().matches("ada")) // text (renamed fullName)
-        .filter(User::orders().any(Order::status().eq("paid"))) // nested + child handle
+        .filter(User::orders().any(UserOrders::status().eq("paid"))) // nested + child handle
         .filter(User::location().within(Distance::km(10.0), GeoPoint::new(52.37, 4.90))) // geo, not projected
         .body();
 
@@ -102,12 +97,7 @@ struct TypedUser {
     orders: Vec<TypedOrder>,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
-#[flusso(
-    index = "users",
-    path = "orders",
-    config = "tests/fixtures/flusso.toml"
-)]
+#[derive(serde::Deserialize, FlussoFragment)]
 struct TypedOrder {
     status: OrderStatus,
     total: Money,
@@ -120,7 +110,7 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     // the typed value directly, matched against its serde string form.
     let body = TypedUser::query()
         .filter(TypedUser::email().eq("ada@example.com")) // &str still works
-        .filter(TypedUser::orders().any(TypedOrder::status().eq(OrderStatus::Paid)))
+        .filter(TypedUser::orders().any(TypedUserOrders::status().eq(OrderStatus::Paid)))
         .body();
 
     let json = body.to_string();
@@ -136,7 +126,9 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
 // nesting-aware, since `status` lives under the nested `orders` array.
 #[test]
 fn ordered_enum_sorts_by_declared_order_on_the_sort_subfield() -> Result {
-    let body = TypedUser::query().sort(TypedOrder::status().asc()).body();
+    let body = TypedUser::query()
+        .sort(TypedUserOrders::status().asc())
+        .body();
 
     let json = body.to_string();
     assert!(json.contains(r#""orders.status.sort""#), "{json}");
@@ -157,11 +149,13 @@ fn number_handle_accepts_any_decimal_value_no_conversion() -> Result {
 
     let body = TypedUser::query()
         // `rust_decimal::Decimal` — the headline case, no `as f64`.
-        .filter(TypedUser::orders().any(TypedOrder::total().eq(Decimal::new(105_050, 2))))
+        .filter(TypedUser::orders().any(TypedUserOrders::total().eq(Decimal::new(105_050, 2))))
         // a bare integer literal widens losslessly into `decimal`.
-        .filter(TypedUser::orders().any(TypedOrder::total().gte(100)))
+        .filter(TypedUser::orders().any(TypedUserOrders::total().gte(100)))
         // and a custom newtype over `Decimal`, as a query value.
-        .filter(TypedUser::orders().any(TypedOrder::total().lt(Money(Decimal::new(500_000, 2)))))
+        .filter(
+            TypedUser::orders().any(TypedUserOrders::total().lt(Money(Decimal::new(500_000, 2)))),
+        )
         .body();
 
     let json = body.to_string();

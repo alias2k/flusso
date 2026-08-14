@@ -8,6 +8,7 @@ use syn::{Field, Fields, Ident, LitStr, Type};
 
 use schema::{MappingType, ResolvedField};
 
+use crate::resolve::PathSegment;
 use crate::value::Kind;
 
 /// One struct field, with its resolved document key.
@@ -501,70 +502,42 @@ fn is_primitive(ident: Option<&str>) -> bool {
     )
 }
 
-/// Generate the field-handle `impl` (a handle per schema field at this level),
-/// plus the `FlussoDocument` trait impl (the `PATH` metadata — for every struct),
-/// plus — at the root only — the `FlussoIndex` impl (`INDEX`/`SCHEMA_HASH`,
-/// inheriting `query`/`get`), plus rebuild tracking. `prefix` is the dotted path
-/// of this level (empty at the root); `segments` is that path's container chain.
-#[allow(clippy::too_many_arguments)]
+/// Generate the **whole** typed query surface for an index, from the root down.
+///
+/// The root is the only type bound to a schema, so it owns every handle in the
+/// index — not just its own level. Walking the resolved mapping emits, per
+/// container level, a namespace type carrying that level's handles:
+///
+/// - an **object** flattens into its enclosing scope, so its namespace chains
+///   from the parent as a `&self` method: `User::account().tier()`;
+/// - a **nested** array introduces its own scope, so its namespace is a named
+///   type with associated fns: `UserOrders::total()`, and it implements
+///   `FlussoScope` so a nesting-aware sort can read its `PATH`.
+///
+/// Namespaces are named root-prefixed (`UserOrders`, `UserOrdersItems`), which
+/// keeps two roots in one module from colliding. The root additionally
+/// implements `FlussoRoot` (`INDEX`/`SCHEMA_HASH`, inheriting `query`/`get`) —
+/// the entry points a child level must not have.
 pub(crate) fn codegen(
     ident: &Ident,
+    vis: &syn::Visibility,
     index: &str,
     hash: &str,
-    prefix: &str,
-    is_root: bool,
-    scope: &TokenStream,
-    segments: &[crate::resolve::PathSegment],
     level: &[ResolvedField],
-    fields: &[DocField],
     tracked: &[String],
     auto_subfields: bool,
 ) -> TokenStream {
-    let handles = level
-        .iter()
-        .filter_map(|resolved| handle_fn(resolved, prefix, scope, fields, auto_subfields));
-
-    // Every struct implements `FlussoDocument` carrying its path-from-root, so a
-    // nesting-aware sort can read the `nested` boundaries above any field. The
-    // root's `PATH` is empty; an object level adds to the path but isn't a
-    // boundary.
-    let path_segments = segments.iter().map(|segment| {
-        let name = LitStr::new(&segment.name, Span::call_site());
-        let kind = Ident::new(
-            if segment.nested { "Nested" } else { "Object" },
-            Span::call_site(),
-        );
-        quote! {
-            ::flusso_query::Segment {
-                name: #name,
-                kind: ::flusso_query::SegmentKind::#kind,
-            }
-        }
-    });
-    let doc_impl = quote! {
-        impl ::flusso_query::FlussoScope for #ident {
-            const PATH: &'static [::flusso_query::Segment] = &[ #(#path_segments),* ];
-        }
+    let mut ctx = Namespaces {
+        root: ident,
+        vis,
+        auto_subfields,
+        emitted: TokenStream::new(),
     };
 
-    // Only the root binding implements `FlussoIndex`: it supplies the physical
-    // index name = logical name + schema hash (exactly what the OpenSearch sink
-    // writes), and inherits `query`/`get`. The derive bakes the hash in (a
-    // structural schema change rotates it *and* forces a recompile), so it stays
-    // hidden from callers — `Type::query()` just works. A child projection has no
-    // `FlussoIndex`, so it cannot start a search.
-    let index_impl = if is_root {
-        quote! {
-            impl ::flusso_query::FlussoRoot for #ident {
-                const INDEX: &'static str = #index;
-                const SCHEMA_HASH: &'static str = #hash;
-            }
-        }
-    } else {
-        quote! {}
-    };
-    let entry = quote! { #doc_impl #index_impl };
+    let root_scope = quote! { ::flusso_query::Root };
+    let handles = ctx.emit_level(ident, &root_scope, "", &[], level, Receiver::Associated);
 
+    let namespaces = ctx.emitted;
     let tracked = tracked.iter().map(|path| {
         let lit = LitStr::new(path, Span::call_site());
         quote! { const _: &[u8] = include_bytes!(#lit); }
@@ -572,30 +545,196 @@ pub(crate) fn codegen(
 
     quote! {
         #(#tracked)*
-        #entry
-        impl #ident {
-            #(#handles)*
+
+        impl ::flusso_query::FlussoScope for #ident {
+            const PATH: &'static [::flusso_query::Segment] = &[];
         }
+        impl ::flusso_query::FlussoRoot for #ident {
+            const INDEX: &'static str = #index;
+            const SCHEMA_HASH: &'static str = #hash;
+        }
+        impl #ident {
+            #handles
+        }
+
+        #namespaces
     }
 }
 
-/// The handle fn for one schema field (every mapping kind has one now). `scope`
-/// is this level's query scope tag (`::flusso_query::Root` or `Self`), baked
-/// into every emitted handle so its queries land in the right scope.
-fn handle_fn(
-    resolved: &ResolvedField,
-    prefix: &str,
-    scope: &TokenStream,
-    fields: &[DocField],
-    auto_subfields: bool,
-) -> Option<TokenStream> {
-    let path = if prefix.is_empty() {
-        resolved.name.to_string()
-    } else {
-        format!("{prefix}.{}", resolved.name)
-    };
-    let name = Ident::new(&to_snake_case(resolved.name.as_ref()), Span::call_site());
+/// How a level's handles are reached.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Receiver {
+    /// `User::email()` / `UserOrders::total()` — the level *is* the namespace.
+    Associated,
+    /// `User::account().tier()` — an object namespace, reached from its parent.
+    Method,
+}
 
+/// Accumulates the namespace types emitted while walking the mapping.
+struct Namespaces<'a> {
+    root: &'a Ident,
+    vis: &'a syn::Visibility,
+    auto_subfields: bool,
+    emitted: TokenStream,
+}
+
+impl Namespaces<'_> {
+    /// The handle fns for one level, emitting any namespace types beneath it.
+    fn emit_level(
+        &mut self,
+        owner: &Ident,
+        scope: &TokenStream,
+        prefix: &str,
+        segments: &[PathSegment],
+        level: &[ResolvedField],
+        receiver: Receiver,
+    ) -> TokenStream {
+        let mut handles = TokenStream::new();
+        for resolved in level {
+            let path = if prefix.is_empty() {
+                resolved.name.to_string()
+            } else {
+                format!("{prefix}.{}", resolved.name)
+            };
+            let mut below = segments.to_vec();
+            below.push(PathSegment {
+                name: resolved.name.to_string(),
+                nested: matches!(resolved.mapping.mapping_type, MappingType::Nested),
+            });
+            let child = self.namespace_ident(&below);
+
+            let container = match &resolved.mapping.mapping_type {
+                // A `nested` array is its own scope: the child namespace tags
+                // the handles inside it, and carries the PATH a sort reads.
+                MappingType::Nested => {
+                    self.emit_nested(&child, &path, &below, &resolved.children);
+                    Some((
+                        quote! { ::flusso_query::Nested<#scope, #child> },
+                        quote! { ::flusso_query::Nested::<#scope, #child>::at(#path) },
+                    ))
+                }
+                // A group / to-one join flattens into the enclosing scope, so
+                // its namespace keeps `scope` and chains from here.
+                MappingType::Object
+                    if resolved.mapping.map_values.is_none() && !resolved.children.is_empty() =>
+                {
+                    self.emit_object(&child, scope, &path, &below, &resolved.children);
+                    Some((quote! { #child }, quote! { #child }))
+                }
+                _ => None,
+            };
+
+            let Some((ret, ctor)) =
+                container.or_else(|| leaf_handle(resolved, &path, scope, self.auto_subfields))
+            else {
+                continue;
+            };
+
+            let name = Ident::new(&to_snake_case(resolved.name.as_ref()), Span::call_site());
+            handles.extend(match receiver {
+                Receiver::Associated => quote! { pub fn #name() -> #ret { #ctor } },
+                Receiver::Method => quote! { pub fn #name(&self) -> #ret { #ctor } },
+            });
+        }
+        let _ = owner;
+        handles
+    }
+
+    /// A `nested` level: its own scope tag, its own `PATH`, associated fns.
+    fn emit_nested(
+        &mut self,
+        ident: &Ident,
+        path: &str,
+        segments: &[PathSegment],
+        level: &[ResolvedField],
+    ) {
+        let scope = quote! { #ident };
+        let handles = self.emit_level(ident, &scope, path, segments, level, Receiver::Associated);
+        let path_segments = path_segments(segments);
+        let vis = self.vis;
+        self.emitted.extend(quote! {
+            /// A `nested` array's element scope: its handles, and the path a
+            /// nesting-aware sort reads. Generated from the schema.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            #vis struct #ident;
+
+            impl ::flusso_query::FlussoScope for #ident {
+                const PATH: &'static [::flusso_query::Segment] = &[ #(#path_segments),* ];
+            }
+
+            impl #ident {
+                #handles
+            }
+        });
+    }
+
+    /// An `object` level: no scope of its own, reached by chaining.
+    fn emit_object(
+        &mut self,
+        ident: &Ident,
+        scope: &TokenStream,
+        path: &str,
+        segments: &[PathSegment],
+        level: &[ResolvedField],
+    ) {
+        let handles = self.emit_level(ident, scope, path, segments, level, Receiver::Method);
+        let vis = self.vis;
+        self.emitted.extend(quote! {
+            /// A sub-document's handles — an `object` group or a to-one join.
+            /// Flattened, so its fields query in the enclosing scope. Generated
+            /// from the schema.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            #vis struct #ident;
+
+            impl #ident {
+                /// The sub-document is present — most useful on a nullable
+                /// to-one join.
+                pub fn exists(&self) -> ::flusso_query::Query<#scope> {
+                    ::flusso_query::Object::<#scope>::at(#path).exists()
+                }
+                #handles
+            }
+        });
+    }
+
+    /// `User` + the path segments, PascalCased — `UserOrdersItems`. Root-prefixed
+    /// so two roots in one module can both have an `addresses` level.
+    fn namespace_ident(&self, segments: &[PathSegment]) -> Ident {
+        let mut name = self.root.to_string();
+        for segment in segments {
+            name.push_str(&to_pascal_case(&segment.name));
+        }
+        Ident::new(&name, Span::call_site())
+    }
+}
+
+fn path_segments(segments: &[PathSegment]) -> Vec<TokenStream> {
+    segments
+        .iter()
+        .map(|segment| {
+            let name = LitStr::new(&segment.name, Span::call_site());
+            let kind = Ident::new(
+                if segment.nested { "Nested" } else { "Object" },
+                Span::call_site(),
+            );
+            quote! {
+                ::flusso_query::Segment {
+                    name: #name,
+                    kind: ::flusso_query::SegmentKind::#kind,
+                }
+            }
+        })
+        .collect()
+}
+
+/// The handle type + constructor for a leaf field — everything that is not a
+/// container level with its own namespace. `scope` is the enclosing query scope.
+fn leaf_handle(
+    resolved: &ResolvedField,
+    path: &str,
+    scope: &TokenStream,
+    auto_subfields: bool,
+) -> Option<(TokenStream, TokenStream)> {
     let simple = |ty: &str| {
         let ty = Ident::new(ty, Span::call_site());
         Some((
@@ -642,7 +781,7 @@ fn handle_fn(
         })
     };
 
-    let (ret, ctor) = match &resolved.mapping.mapping_type {
+    match &resolved.mapping.mapping_type {
         // A keyword with a declared enum order gets the order-aware `Enum` handle
         // (sorts on the prebaked `.sort` subfield); a bare keyword stays `Keyword`.
         MappingType::Keyword if resolved.mapping.enum_order.is_some() => string_handle("Enum"),
@@ -665,9 +804,9 @@ fn handle_fn(
         MappingType::Date => simple("Date"),
         MappingType::Other(name) if name == "geo_point" => simple("Geo"),
         MappingType::Other(name) if name == "binary" => simple("Binary"),
-        // An `object` mapping is one of three things, told apart by `map_values`
-        // and children: a `map` (dynamic-key object → a kind-typed map handle),
-        // an opaque `json` (no children), or a group / to-one-join sub-object.
+        // An `object` reaching here is either a `map` (dynamic-key object → a
+        // kind-typed map handle) or an opaque `json` with no children; a group
+        // or to-one join was handled by its own namespace.
         MappingType::Object => match &resolved.mapping.map_values {
             Some(MappingType::Text) => simple("TextMap"),
             Some(MappingType::Keyword) => simple("KeywordMap"),
@@ -686,44 +825,29 @@ fn handle_fn(
             // rejects non-leaf map values, so this is defensive) — fall back to
             // the opaque object handle so the field is still addressable.
             Some(_) => simple("Json"),
-            // A group / to-one-join object → an `Object<S>` handle (for
-            // `.exists()`; sub-fields are queried via their own dotted-path child
-            // handles). `S` is the enclosing scope, same as the leaf handles here.
-            None if resolved.children.is_empty() => simple("Json"),
-            None => Some((
-                quote! { ::flusso_query::Object<#scope> },
-                quote! { ::flusso_query::Object::<#scope>::at(#path) },
-            )),
+            None => simple("Json"),
         },
-        // A `nested` array → `Nested<EnclosingScope, ChildScope>`: queries lift
-        // from the element scope up to this level. The child scope is the
-        // projected element struct (which derives its own `SelfTagged` handles),
-        // or the `Nested` default element type when un-projected.
-        MappingType::Nested => Some(match nested_element(resolved, fields) {
-            Some(elem) => (
-                quote! { ::flusso_query::Nested<#scope, #elem> },
-                quote! { ::flusso_query::Nested::<#scope, #elem>::at(#path) },
-            ),
-            None => (
-                quote! { ::flusso_query::Nested<#scope> },
-                quote! { ::flusso_query::Nested::<#scope>::at(#path) },
-            ),
-        }),
+        MappingType::Nested => None,
         MappingType::Other(_) => simple("Json"),
-    }?;
-
-    Some(quote! { pub fn #name() -> #ret { #ctor } })
+    }
 }
 
-/// The element type for a `Nested` handle: the struct's projected `Vec<Elem>`
-/// element when present, else `None` (use the `Nested` default type).
-fn nested_element(resolved: &ResolvedField, fields: &[DocField]) -> Option<TokenStream> {
-    let field = fields
-        .iter()
-        .find(|f| f.doc_key == resolved.name.as_ref())?;
-    let inner = option_inner(field.ty).unwrap_or(field.ty);
-    let elem = vec_inner(inner)?;
-    Some(quote! { #elem })
+/// A document key as a type-name fragment: `orders` → `Orders`,
+/// `billingAddress` → `BillingAddress`, `postal_code` → `PostalCode`.
+fn to_pascal_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut upper_next = true;
+    for ch in name.chars() {
+        if ch == '_' || ch == '-' {
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// The last path segment ident of a type, e.g. `Option<String>` → `Option`,
