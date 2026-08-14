@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.13.0...flusso-query-derive-v0.14.0) - 2026-08-14
+
+### Added
+
+- *(query-derive)* [**breaking**] remove the old form outright — no deprecation tail
+- *(query-derive)* [**breaking**] deprecate path= instead of deleting it
+- *(query-derive)* name the Rust type in fragment messages; rename a namespace
+- *(query-derive)* [**breaking**] rename the derive to FlussoRoot; accept transparent newtypes
+- *(query-derive)* [**breaking**] the root generates the whole handle tree; path= is gone
+- *(query-derive)* the root bakes the mapping and drives fragment checks
+- *(query-derive)* FlussoFragment — a location-free, reusable document shape
+- *(query-derive)* FlussoValue carries its kinds and variants as constants
+
+### Other
+
+- *(query)* the root/fragment model is the documented way
+- *(query-derive)* cover the reuse case the feature exists for
+- *(query-derive)* cover flattened field groups
+- *(query)* [**breaking**] rename FlussoIndex to FlussoRoot, FlussoDocument trait to FlussoScope
+
 ## [0.13.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.12.0...flusso-query-derive-v0.13.0) - 2026-07-24
 
 ### Added
