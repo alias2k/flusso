@@ -1,9 +1,9 @@
 ---
-description: Scaffold a typed Rust query struct (#[derive(FlussoDocument)]) for a flusso index.
+description: Scaffold a typed Rust query struct (#[derive(FlussoRoot)]) for a flusso index.
 argument-hint: <index-name> [StructName]
 ---
 
-Generate a hand-written `#[derive(FlussoDocument)]` projection struct for the flusso index `$1` (Rust type name `$2`, defaulting to a PascalCase form of `$1`). Follow the **flusso-query** skill.
+Generate a hand-written `#[derive(FlussoRoot)]` projection struct for the flusso index `$1` (Rust type name `$2`, defaulting to a PascalCase form of `$1`). Follow the **flusso-query** skill.
 
 1. Locate `flusso.toml` and the `[[index]]` named `$1`; open its `schema:` file to read the field list (ask if it can't be found).
 2. For each schema field, emit a struct field using the flusso-type → Rust-type table:
@@ -14,14 +14,14 @@ Generate a hand-written `#[derive(FlussoDocument)]` projection struct for the fl
 3. Emit a child struct with `#[flusso(index = "$1", path = "<dotted.path>")]` for every object/join, recursively.
 4. Remind the user this is a **projection** — they can omit fields they don't need; only declared fields are checked. It compiles against their `flusso.toml` (auto-discovered, or `FLUSSO_CONFIG`).
 
-**If an equivalent document struct already exists** (a migration — the project already has this type): edit that struct **in place** instead of scaffolding a new one. Add `FlussoDocument` to its derive list and `#[flusso(index = "$1")]`, and **preserve all its existing fields, including the `id` / primary key** — a migration reproduces the current document exactly, it does not trim it. Don't create a parallel `$2`-v2 type alongside the original.
+**If an equivalent document struct already exists** (a migration — the project already has this type): edit that struct **in place** instead of scaffolding a new one. Add `FlussoRoot` to its derive list and `#[flusso(index = "$1")]`, and **preserve all its existing fields, including the `id` / primary key** — a migration reproduces the current document exactly, it does not trim it. Don't create a parallel `$2`-v2 type alongside the original.
 
 Skeleton:
 
 ```rust
-use flusso_query::FlussoDocument;
+use flusso_query::FlussoRoot;
 
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
+#[derive(Debug, Clone, serde::Deserialize, FlussoRoot)]
 #[flusso(index = "$1")]
 pub struct $2 {
     // fields derived from the schema…

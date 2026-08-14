@@ -1,33 +1,35 @@
 ---
 name: flusso-query
-description: Query a flusso-maintained OpenSearch index from Rust with the `flusso-query` crate and `#[derive(FlussoDocument)]`. Use when writing or editing read-side code against a flusso index — typed document structs, the compile-time-checked query surface, nested filtering, custom value types, multi-index search. Trigger on flusso-query / FlussoDocument / FlussoValue / FlussoMultiDocument work.
+description: Query a flusso-maintained OpenSearch index from Rust with the `flusso-query` crate and `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]`. Use when writing or editing read-side code against a flusso index — typed document structs, the compile-time-checked query surface, nested filtering, custom value types, multi-index search. Trigger on flusso-query / FlussoRoot / FlussoFragment / FlussoValue / FlussoMultiDocument work.
 ---
 
 # Querying a flusso index (`flusso-query` + the derive)
 
 flusso owns the **write** side: it builds an OpenSearch index to match the schema. `flusso-query` is the **read** side — a typed OpenSearch/Elasticsearch query client. Reads go **straight to OpenSearch**, not through flusso (the engine is write-only).
 
-The contract is the schema. `#[derive(FlussoDocument)]` reads the resolved schema **at compile time, with no database**, and:
+The contract is the schema. `#[derive(FlussoRoot)]` reads the resolved schema **at compile time, with no database**, and:
 
 1. **Validates** your hand-written struct against the schema — field exists, leaf Rust type matches, nullability matches. A drifted struct **stops compiling**.
-2. **Generates the typed query surface** — one field handle per *schema* field (not just the ones you project), `get`/`query` entry points, and the schema hash that names the physical index.
+2. **Generates the typed query surface for the whole index** — a handle for every schema field at *every level*, through one generated namespace per container, plus `get`/`query` entry points and the schema hash that names the physical index.
 
 You write and own the struct (a **projection** — deserialize the subset you want). The query surface covers the **whole schema**, so you can filter/sort on fields the struct never deserializes.
 
+**Exactly one type names an index: the root.** Everything below it is a `#[derive(FlussoFragment)]` — a shape with no index and no path, validated by whichever root embeds it. One fragment can therefore serve several paths, several indexes, or a shared crate; embed it twice and it is checked twice. There is no `path = "…"` attribute (removed) and `FlussoDocument` is a deprecated alias for `FlussoRoot`.
+
 ## Crates and features
 
-- `flusso-query` — the runtime: `Client`, field handles, `Query`/`Search`, `SearchResponse`. Re-exports the derive behind the **`derive`** feature, so you `use flusso_query::FlussoDocument;`. Two trait imports are method-gated: `FlussoIndex` (needed to call `Type::query()` / `Type::get()` — it's a root-only supertrait of `FlussoDocument`, so a nested-element projection **can't** start a search) and `Sortable` (needed for `handle.asc()` / `.desc()`).
-- `flusso-query-derive` (`apps/query-derive`) — the proc-macros: `FlussoDocument`, `FlussoMultiDocument`, `FlussoValue`.
+- `flusso-query` — the runtime: `Client`, field handles, `Query`/`Search`, `SearchResponse`. Re-exports the derives behind the **`derive`** feature, so you `use flusso_query::{FlussoRoot, FlussoFragment};`. Two trait imports are method-gated: `FlussoRoot` (needed to call `Type::query()` / `Type::get()` — a root-only supertrait of `FlussoScope`, so a fragment **can't** start a search) and `Sortable` (needed for `handle.asc()` / `.desc()`). Note `FlussoRoot` is both a derive and a trait, imported by the same name.
+- `flusso-query-derive` (`apps/query-derive`) — the proc-macros: `FlussoRoot`, `FlussoFragment`, `FlussoMultiDocument`, `FlussoValue`, `FlussoMap`.
 - Optional features: **`derive`** (the macros), **`decimal`** (`rust_decimal::Decimal`), **`chrono`** / **`time`** (date leaf types — pick one, or use `String` for raw ISO-8601), **`uuid`** (`uuid::Uuid` as a `keyword` value — see below).
 
 ## The shape of a consumer
 
 ```rust
-use flusso_query::{Client, FlussoDocument};
+use flusso_query::{Client, FlussoFragment, FlussoRoot};
 
 // You write this. A projection of the `users` index. The derive checks every
-// field against the schema and hangs the query surface off `User`.
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
+// field against the schema and hangs the whole query surface off `User`.
+#[derive(Debug, Clone, serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]              // the only required input: which index
 pub struct User {
     pub id: i32,                        // primary key (integer) → never null
@@ -41,10 +43,10 @@ pub struct User {
     pub order_ids: Vec<i64>,            // ids aggregate → flat array of PKs, never null
 }
 
-// A nested/child struct names its dotted PATH in the same index. It contributes
-// field validation + handles, but no entry points of its own.
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "orders")]
+// A fragment names NO index and NO path. `User` validates it against
+// `users.orders`; the same struct could be embedded elsewhere and checked there
+// too. Handles for that level come from the root, as `UserOrders::…`.
+#[derive(Debug, Clone, serde::Deserialize, FlussoFragment)]
 pub struct Order {
     pub status: String,                 // enum → keyword
     pub total: Decimal,                 // decimal (or f64); query with Decimal/f64/newtype
@@ -61,7 +63,7 @@ let page = User::query()                                     // client-free valu
     .filter(User::email().eq("ada@example.com"))             // keyword → exact
     .filter(User::order_count().gte(5))                      // long → range
     .query(User::full_name().matches("ada lovelace"))        // text → analyzed
-    .filter(User::orders().any(Order::status().eq("delivered")))  // nested, lifted
+    .filter(User::orders().any(UserOrders::status().eq("delivered")))  // nested, lifted
     .sort(User::order_count().desc())
     .from(0).size(20)
     .send(&client).await?;
@@ -77,7 +79,7 @@ See `examples/consumer.rs` for a fuller worked file.
 
 When the task is "migrate this to flusso" / "switch the existing implementation over," the existing document struct is the **spec**, not a starting suggestion:
 
-- **Edit it in place.** Add `FlussoDocument` to the derive list and `#[flusso(index = "…")]` on the *existing* struct — keep its name, module, and visibility. Do **not** scaffold a new parallel struct alongside it; that leaves two document types and breaks every existing consumer.
+- **Edit it in place.** Add `FlussoRoot` to the derive list and `#[flusso(index = "…")]` on the *existing* struct (child structs get `FlussoFragment` and no attribute) — keep its name, module, and visibility. Do **not** scaffold a new parallel struct alongside it; that leaves two document types and breaks every existing consumer.
 - **Preserve every field — especially the `id` / primary key.** A migration must produce the **exact** field set the project already has. Don't drop the `id`, don't drop fields you think are "redundant," don't rename. Match each existing field to a schema field; if the leaf Rust type or `Option` shape disagrees with the schema, fix the *schema* or surface the mismatch — never delete the field to make it compile.
 - If the existing primary-key field isn't in the schema yet, add it to the schema (`- <type>: id` + `primary_key: id`) rather than removing it from the struct.
 - Keep existing `#[serde(rename = …)]` and field ordering; the derive validates by leaf identifier + `Option` shape, so a faithful copy compiles, and a `cargo check` failure tells you exactly which field drifted.
@@ -105,7 +107,7 @@ An operator that doesn't fit a field's type **doesn't exist** on its handle — 
 | `Bool` | `eq` `exists` `asc`/`desc` |
 | `Number<K>` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` (`K` per type — `Byte`…`Decimal`; values widen losslessly, so `eq(5)` works on `long`/`double`/`decimal`, a float on an int field is a compile error) |
 | `Date` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` `exists` `asc`/`desc` |
-| `Object<S>` | `exists` only (same-doc sub-object / to-one join). Query its sub-fields via the **child struct's** flattened handles (`Account::tier()`), not by chaining off this handle. |
+| object namespace | A same-doc sub-object / to-one join. Objects flatten, so the generated namespace **chains** from its parent: `User::account().tier()`, `User::account().exists()`. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort/.size/.from`) to shape the returned array; `exists` |
 | `Geo` | `within(Distance::km(12.0), center)` `within_box` `within_polygon` `exists`; `distance_from(center)` / `distance_sort(center, order, DistanceUnit)` (radius is a typed `Distance`, not a string) |
 | `TextMap`/`KeywordMap`/`NumberMap<K>`/`DateMap` | dynamic-key `map`. `key("it")` → a typed leaf for that key (query it like any field of the value kind); `has_key("it")` `exists`; `TextMap::search(q).prefer("it", w)` (cross-key full-text). **Sort by key with fallback:** `sort_key("it").or("en")` (see Sorting). `key(..)` itself is **not** sortable. |
@@ -170,7 +172,7 @@ Readability is the goal — **compact *and* clear, both at once.** Aim to keep a
   ```rust
   // the clause is hard to read inline — name it:
   let high_value_delivered = User::orders()
-      .any(Order::status().eq("delivered").and(Order::total().gte(100.0)));
+      .any(UserOrders::status().eq("delivered").and(UserOrders::total().gte(100.0)));
 
   let page = User::query()
       .filter(high_value_delivered)
@@ -183,7 +185,7 @@ Readability is the goal — **compact *and* clear, both at once.** Aim to keep a
 
 ## Composing — scope is in the type
 
-A handle's operator produces `Query<S>`, carrying the **scope** `S` it was built in. The root and any flattened `object`/to-one join share `Root` (`Query<Root>`); a **`nested` array introduces a fresh scope tagged with the element struct** (`Order::status()` → `Query<Order>`).
+A handle's operator produces `Query<S>`, carrying the **scope** `S` it was built in. The root and any flattened `object`/to-one join share `Root` (`Query<Root>`); a **`nested` array introduces a fresh scope, tagged with the namespace the root generated for it** (`UserOrders::status()` → `Query<UserOrders>`).
 
 ```rust
 // within a scope: and / or / not
@@ -194,11 +196,11 @@ User::query()
     .query(User::full_name().matches("ada"))    // scored
     .filter(User::order_count().gte(5))          // filtered, cached, no score
     .must_not(User::email().prefix("test-"))
-    .should(User::orders().any(Order::status().eq("delivered")))
+    .should(User::orders().any(UserOrders::status().eq("delivered")))
     .send(&client).await?;
 ```
 
-`User::email().and(Order::status().eq(…))` **does not compile** — you can't `and` a `Query<Root>` with a `Query<Order>`. Lift the child first: `User::orders().any(child)` takes a `Query<Order>` → returns `Query<Root>`. Lifting composes through depth: `Order::items().any(Item::quantity().gt(1))` is `Query<Order>`, which `User::orders().any(…)` lifts to `Query<Root>`.
+`User::email().and(UserOrders::status().eq(…))` **does not compile** — you can't `and` a `Query<Root>` with a `Query<UserOrders>`. Lift the child first: `User::orders().any(child)` takes a `Query<UserOrders>` → returns `Query<Root>`. Lifting composes through depth: `UserOrders::items().any(UserOrdersItems::quantity().gt(1))` is `Query<UserOrders>`, which `User::orders().any(…)` lifts to `Query<Root>`.
 
 **Queries are values, the client appears once.** `Type::query()` takes no client — `Search<T>` is a plain `Clone` value. Build it in a helper, store it, reuse it; hand `&Client` to a terminal when running:
 
@@ -252,9 +254,9 @@ Two independent things, deliberately separate:
 
 ```rust
 let page = User::query()
-    .filter(User::orders().any(Order::status().eq("delivered")))   // BY
+    .filter(User::orders().any(UserOrders::status().eq("delivered")))   // BY
     .filter_nested(                                                // OF
-        User::orders().matching(Order::status().eq("delivered"))
+        User::orders().matching(UserOrders::status().eq("delivered"))
             .sort(Order::placed_at().desc()).size(5),
     )
     .send(&client).await?;
@@ -273,7 +275,7 @@ A `map` is a `jsonb`-backed object whose **keys are runtime** but whose values a
 **Doc side** — the field type is `HashMap<String, V>` where `V` is a value of the declared kind (blanket impl, no derive): `HashMap<String, String>` for a text/keyword map, `HashMap<String, f64>` for a `double` map. A whole-map newtype opts in with `#[derive(FlussoMap)]` (`#[flusso(text)]`, etc.). Nullable map → `Option<HashMap<…>>`.
 
 ```rust
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products")]
 struct Product {
     sku: String,
@@ -307,7 +309,7 @@ Let a scalar field be your own enum/newtype instead of a bare leaf:
 enum AccountTier { Free, Pro, Enterprise }
 ```
 
-A **newtype inherits its inner type's kinds** automatically — `struct Money(Decimal)` is a `decimal` value, `struct Sku(String)` a keyword + text value — *no kind tag*, queryable and rejected exactly where the inner type would be (`Order::total().eq(Money(d))`, no cast). An **enum** has no inner type, so it needs an explicit string kind: `#[flusso(keyword)]` (default) or `#[flusso(text)]` — numeric/date tags don't exist (use a newtype). `FlussoValue<K>` has a `serde::Serialize` **supertrait**, so any `#[derive(FlussoValue)]` type derives `Serialize` too (even a doc-field-only one). A missing impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
+A **newtype inherits its inner type's kinds** automatically — `struct Money(Decimal)` is a `decimal` value, `struct Sku(String)` a keyword + text value — *no kind tag*, queryable and rejected exactly where the inner type would be (`UserOrders::total().eq(Money(d))`, no cast). An **enum** has no inner type, so it needs an explicit string kind: `#[flusso(keyword)]` (default) or `#[flusso(text)]` — numeric/date tags don't exist (use a newtype). `FlussoValue<K>` has a `serde::Serialize` **supertrait**, so any `#[derive(FlussoValue)]` type derives `Serialize` too (even a doc-field-only one). A missing impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
 
 **Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
 
@@ -357,4 +359,4 @@ Search aggregations/facets (use `raw`), writes (flusso owns the index — query-
 
 ## Working reference
 
-`dev/search-api` (crate `flusso-dev-search-api`, axum) derives `FlussoDocument` for users/products/orders, plus `FlussoMultiDocument` (`/search`) and `msearch` (`/overview`). Read it for a real consumer — but in an exported project, validate against your own `flusso.toml`, not `dev/`.
+`dev/search-api` (crate `flusso-dev-search-api`, axum) derives `FlussoRoot` for users/products/orders and `FlussoFragment` for every shape below them — `src/shared.rs` holds one `LineItem` embedded in **two** indexes — plus `FlussoMultiDocument` (`/search`) and `msearch` (`/overview`). Read it for a real consumer — but in an exported project, validate against your own `flusso.toml`, not `dev/`.
