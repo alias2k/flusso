@@ -849,6 +849,19 @@ impl UserOrders {
 That last one — an object *inside* a nested array — works because the root knows
 the scope tag. A child struct never could, which is why it used to be rejected.
 
+Namespace names are root-prefixed so two roots in one module can't collide. If a
+generated name still clashes with a type you already have — or a deep chain gets
+unwieldy — rename it on the field, and everything under it follows:
+
+```rust
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct User {
+    #[flusso(scope = "Purchases")]
+    orders: Vec<Order>,      // → `Purchases::total()`, `PurchasesItems::quantity()`
+}
+```
+
 Finally, the root bakes the resolved mapping into const data and drives the check
 into every shape it embeds:
 
