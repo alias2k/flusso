@@ -5,14 +5,14 @@ use std::collections::HashMap;
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, FlussoDocument, FlussoRoot, Sortable, multi_match};
+use flusso_query::{Client, FlussoRoot, Sortable, multi_match};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::response::Page;
 
 // `pub(crate)`: reused by the cross-index endpoints in `global`.
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoRoot)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "products")]
 pub(crate) struct Product {

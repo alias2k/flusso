@@ -128,13 +128,20 @@ pub use path::{Segment, SegmentKind, nested_boundaries};
 pub use query::{AsQuery, Query, Root};
 pub use search::{FlussoRoot, FlussoScope, Highlight, Hit, Search, SearchResponse, ShardStats};
 
-/// `#[derive(FlussoDocument)]` — generates the typed query surface for a
-/// hand-written document struct (its field handles) and implements the
-/// [`FlussoRoot`](trait@FlussoRoot) trait (`INDEX`/`SCHEMA_HASH` +
-/// `query`/`get`). See the
+/// `#[derive(FlussoRoot)]` — the index-bound **root**. Generates the typed query
+/// surface for the *whole* index (a handle for every field at every level,
+/// through a generated namespace per container) and implements
+/// [`FlussoRoot`](trait@FlussoRoot) (`INDEX`/`SCHEMA_HASH` + `query`/`get`).
+/// It also validates every shape it embeds. See the
 /// [querying guide](https://alias2k.github.io/flusso/guides/querying.html).
 /// Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
+pub use flusso_query_derive::FlussoRoot;
+
+/// Deprecated alias for [`macro@FlussoRoot`], kept so existing roots compile.
+/// Enabled by the `derive` feature.
+#[cfg(feature = "derive")]
+#[allow(deprecated)]
 pub use flusso_query_derive::FlussoDocument;
 
 /// `#[derive(FlussoFragment)]` — a **location-free** document shape.

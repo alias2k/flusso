@@ -1,9 +1,9 @@
-use flusso_query::FlussoDocument;
+use flusso_query::FlussoRoot;
 
 // Numeric query values are typed per kind, accepted only when lossless. These
 // must be compile errors — the safety guarantee of the per-type `Number<K>`
 // split. If a lossy `FlussoValue` impl ever leaks in, this snapshot breaks.
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
     #[flusso(rename = "orderCount")]

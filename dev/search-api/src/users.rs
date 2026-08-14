@@ -5,8 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use flusso_query::{
-    Client, FlussoDocument, FlussoFragment, FlussoRoot, FlussoValue, OrderBy, SortBuilder,
-    Sortable, multi_match,
+    Client, FlussoFragment, FlussoRoot, FlussoValue, OrderBy, SortBuilder, Sortable, multi_match,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +15,7 @@ use crate::response::Page;
 // `pub(crate)`: the cross-index endpoints in `global` reuse this document and
 // its generated handles (same for `Product` and `Order`). Handles for every
 // level — `account`, `profile`, `orders`, … — hang off `User` itself now.
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoRoot)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "users")]
 pub(crate) struct User {
@@ -48,7 +47,7 @@ struct Account {
 
 // A string enum stands in for the `keyword` at `account.tier`. `FlussoValue`
 // with `#[flusso(keyword)]` implements `FlussoValue<kind::Keyword>` so
-// `FlussoDocument` accepts it as the field type *and* `User::account().tier().eq(…)`
+// `FlussoRoot` accepts it as the field type *and* `User::account().tier().eq(…)`
 // accepts it as a query value; serde's `rename_all` controls the actual keyword
 // strings (`"pro"`, …).
 #[derive(Debug, Serialize, Deserialize, FlussoValue)]

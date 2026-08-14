@@ -1,13 +1,13 @@
 // Only the root binds to an index. A fragment describes a shape with no
 // location, so it has no `query`/`get` entry point — it cannot start a search.
-use flusso_query::{FlussoDocument, FlussoFragment, FlussoRoot};
+use flusso_query::{FlussoFragment, FlussoRoot};
 
 #[derive(serde::Deserialize, FlussoFragment)]
 struct Order {
     status: String,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
     id: i32,

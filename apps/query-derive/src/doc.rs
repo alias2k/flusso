@@ -13,7 +13,9 @@ use crate::value::Kind;
 
 /// One struct field, with its resolved document key.
 pub(crate) struct DocField<'a> {
-    pub(crate) ident: &'a Ident,
+    /// `None` for the single field of a `#[serde(transparent)]` newtype, which
+    /// has no name of its own.
+    pub(crate) ident: Option<&'a Ident>,
     pub(crate) ty: &'a Type,
     pub(crate) doc_key: String,
     pub(crate) skip: bool,
@@ -34,10 +36,28 @@ pub(crate) fn parse_fields<'a>(
 ) -> syn::Result<Vec<DocField<'a>>> {
     let named = match fields {
         Fields::Named(named) => &named.named,
+        // A `#[serde(transparent)]` newtype inherits the inner type's shape:
+        // there is no field of its own to name, so the inner type is checked
+        // against this very level (like a flattened group).
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            let mut out = Vec::with_capacity(1);
+            for field in &fields.unnamed {
+                out.push(DocField {
+                    ident: None,
+                    ty: &field.ty,
+                    doc_key: String::new(),
+                    skip: false,
+                    opaque: false,
+                    flatten: true,
+                });
+            }
+            return Ok(out);
+        }
         _ => {
             return Err(syn::Error::new(
                 fields.span(),
-                "FlussoDocument can only be derived for a struct with named fields",
+                "a flusso document is a struct with named fields, or a single-field \
+                 tuple struct (a `#[serde(transparent)]` newtype)",
             ));
         }
     };
@@ -50,7 +70,7 @@ pub(crate) fn parse_fields<'a>(
             .ok_or_else(|| syn::Error::new(field.span(), "field must be named"))?;
         let (skip, opaque, rename) = flusso_field_attr(field)?;
         out.push(DocField {
-            ident,
+            ident: Some(ident),
             ty: &field.ty,
             doc_key: doc_key(field, ident, rename, rename_all)?,
             skip,
@@ -208,7 +228,7 @@ fn unknown_field(field: &DocField, level: &[ResolvedField], scope: &str) -> syn:
     let mut known: Vec<&str> = level.iter().map(|r| r.name.as_ref()).collect();
     known.sort_unstable();
     syn::Error::new(
-        field.ident.span(),
+        field.ident.map_or_else(|| field.ty.span(), Ident::span),
         format!(
             "no field `{}` in {scope} — known fields: {}",
             field.doc_key,

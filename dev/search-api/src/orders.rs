@@ -6,14 +6,14 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, Decimal, FlussoDocument, FlussoRoot, Sortable};
+use flusso_query::{Client, Decimal, FlussoRoot, Sortable};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::response::Page;
 
 // `pub(crate)`: reused by the cross-index endpoints in `global`.
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoRoot)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "orders")]
 pub(crate) struct Order {

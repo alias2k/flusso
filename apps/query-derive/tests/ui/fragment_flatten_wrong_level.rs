@@ -1,7 +1,7 @@
 // A flattened group is checked against the ENCLOSING level. `orders` is a nested
 // array at the root of `users`, so a group claiming a field from inside it fails
 // here — proving the level handed down is the parent's, not a child's.
-use flusso_query::{FlussoDocument, FlussoFragment};
+use flusso_query::{FlussoRoot, FlussoFragment};
 
 #[derive(serde::Deserialize, FlussoFragment)]
 struct Wrong {
@@ -9,7 +9,7 @@ struct Wrong {
     status: String,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
     id: i32,

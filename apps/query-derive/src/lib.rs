@@ -13,13 +13,33 @@ mod resolve;
 mod spec;
 mod value;
 
-/// Derive the typed query surface for a flusso document struct.
+/// Derive the typed query surface for a flusso index — the **root**.
+///
+/// This is the only type bound to a schema, and it owns the *whole* surface: a
+/// handle for every field at every level, reached through a generated namespace
+/// per container (`User::account().tier()`, `UserOrders::total()`). It also
+/// drives validation into every shape it embeds.
 ///
 /// ```ignore
-/// #[derive(serde::Deserialize, FlussoDocument)]
+/// #[derive(serde::Deserialize, FlussoRoot)]
 /// #[flusso(index = "users")]
 /// struct User { id: i32, email: String }
 /// ```
+#[proc_macro_derive(FlussoRoot, attributes(flusso))]
+pub fn derive_flusso_root(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand(input).into()
+}
+
+/// Deprecated alias for [`macro@FlussoRoot`].
+///
+/// The derive was renamed when the root/fragment split landed: a root binds to
+/// an index, a [`macro@FlussoFragment`] describes a location-free shape. This
+/// alias expands identically to `FlussoRoot`.
+#[deprecated(
+    since = "0.14.0",
+    note = "renamed to `FlussoRoot`; a child shape now uses `#[derive(FlussoFragment)]` instead of `path = \"…\"`"
+)]
 #[proc_macro_derive(FlussoDocument, attributes(flusso))]
 pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

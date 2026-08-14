@@ -1,6 +1,6 @@
-use flusso_query::{FlussoDocument, SortBuilder, SortOrder};
+use flusso_query::{FlussoRoot, SortBuilder, SortOrder};
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
     id: i32,

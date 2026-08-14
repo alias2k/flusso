@@ -1,17 +1,17 @@
-//! End-to-end test of `#[derive(FlussoDocument)]`: a hand-written struct +
+//! End-to-end test of `#[derive(FlussoRoot)]`: a hand-written struct +
 //! `flusso.toml` fixture → a generated query surface that builds real requests.
 #![allow(dead_code, unused_crate_dependencies)]
 
 use std::collections::HashMap;
 
 use flusso_query::{
-    AsQuery, Distance, FlussoDocument, FlussoFragment, FlussoMap, FlussoRoot, FlussoValue,
-    Fuzziness, GeoPoint, Sortable,
+    AsQuery, Distance, FlussoFragment, FlussoMap, FlussoRoot, FlussoValue, Fuzziness, GeoPoint,
+    Sortable,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct User {
     id: i32,
@@ -58,7 +58,7 @@ fn generated_surface_builds_queries() -> Result {
 
 // `#[derive(FlussoValue)]` lets a field be a Rust enum or newtype wrapper
 // instead of a bare leaf type: the derive impls `FlussoValue<K>` for the chosen
-// kind, which `FlussoDocument` defers to. Works across kinds — `keyword` here,
+// kind, which `FlussoRoot` defers to. Works across kinds — `keyword` here,
 // plus a `number` newtype on the orders' decimal `total`.
 
 /// A newtype wrapper over the `email` keyword (kind defaults to `keyword`).
@@ -88,7 +88,7 @@ enum OrderStatus {
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, FlussoValue)]
 struct Money(flusso_query::Decimal);
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct TypedUser {
     email: Email,
@@ -179,7 +179,7 @@ enum CustomerTier {
     Free,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct Customer {
     email: String,
@@ -286,7 +286,7 @@ struct Translations(HashMap<String, String>);
 // Each of these compiling proves a `check_type` map arm: a bare `HashMap`
 // (hard-checked value kind), a `HashMap` of a custom `FlussoValue`, and a
 // whole-map `FlussoMap` wrapper. `codes` is nullable → `Option`.
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct MappedProduct {
     sku: String,
@@ -297,14 +297,14 @@ struct MappedProduct {
     release_dates: Option<HashMap<String, String>>,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct CustomValueProduct {
     sku: String,
     title: HashMap<String, Locale>,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct WrappedProduct {
     sku: String,
@@ -370,7 +370,7 @@ fn map_doc_types_accept_hashmap_custom_value_and_wrapper() -> Result {
 // document types from two indexes. Purely syntactic: the generated impl
 // references each payload's derive-baked `INDEX`/`SCHEMA_HASH`.
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct Product {
     sku: String,
@@ -512,7 +512,7 @@ struct FragShipping {
     carrier: String,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct FragUser {
     id: i32,
@@ -542,7 +542,7 @@ struct Common {
     email: String,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct FlatUser {
     #[serde(flatten)]
@@ -557,6 +557,60 @@ fn a_flattened_group_is_checked_against_the_enclosing_level() -> Result {
     // Compiling proves the group was checked here, not one level down.
     let body = FlatUser::query()
         .filter(FlatUser::email().eq("ada@x.com"))
+        .body();
+    assert_eq!(
+        body["query"]["bool"]["filter"][0]["term"]["email"],
+        "ada@x.com"
+    );
+    Ok(())
+}
+
+// The old derive name still expands, so an existing root compiles untouched —
+// with a deprecation warning pointing at `FlussoRoot`.
+#[allow(deprecated)]
+mod deprecated_alias {
+    use flusso_query::{FlussoDocument, FlussoRoot};
+
+    #[derive(serde::Deserialize, FlussoDocument)]
+    #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+    pub(super) struct LegacyUser {
+        pub(super) id: i32,
+        pub(super) email: String,
+    }
+
+    #[test]
+    fn the_flusso_document_alias_still_expands_as_a_root() {
+        let body = LegacyUser::query()
+            .filter(LegacyUser::email().eq("ada@x.com"))
+            .body();
+        assert_eq!(
+            body["query"]["bool"]["filter"][0]["term"]["email"],
+            "ada@x.com"
+        );
+    }
+}
+
+// A `#[serde(transparent)]` newtype: same shape, new name. The wrapper gets the
+// full root surface, and the inner shape is checked against the root level.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct UserFields {
+    id: i32,
+    email: String,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[serde(transparent)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct UserView(UserFields);
+
+#[test]
+fn a_transparent_newtype_inherits_the_whole_surface() -> Result {
+    // `UserView` has every handle the index has, and can start a search — while
+    // `UserFields` was validated against the root level through the wrapper.
+    let body = UserView::query()
+        .filter(UserView::email().eq("ada@x.com"))
+        .filter(UserView::orders().any(UserViewOrders::status().eq("paid")))
         .body();
     assert_eq!(
         body["query"]["bool"]["filter"][0]["term"]["email"],
