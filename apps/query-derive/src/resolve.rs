@@ -1,23 +1,13 @@
 //! Discovering `flusso.toml` at compile time and resolving the named index's
 //! mapping — no database, the same resolution `flusso build` performs.
+//!
+//! Only the **root** level is resolved here. Every deeper level is reached by
+//! the recursive codegen walking `ResolvedField::children`, so there is no path
+//! to parse and no scope to infer.
 
 use std::path::{Path, PathBuf};
 
-use schema::{IndexMapping, IndexName, MappingType, ResolvedField, Sink};
-
-/// The query **scope** a struct's handles live in (see `query::Root`).
-///
-/// `Root` for the document root and for any `object`/to-one join reached only
-/// through other objects (flattened, dotted, no wrapper). `SelfTagged` for a
-/// `nested` element: its handles carry the struct's own type as their scope, so
-/// they must be lifted with `Nested::any`/`all`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
-    /// The document root scope.
-    Root,
-    /// This struct's own type (a `nested` element introduces its own scope).
-    SelfTagged,
-}
+use schema::{IndexMapping, IndexName, Sink};
 
 /// One path level for codegen: the field name plus whether it's a `nested`
 /// boundary (vs a flattened object). Mirrors `flusso_query::Segment`.
@@ -38,107 +28,6 @@ pub(crate) struct Resolved {
     pub(crate) auto_subfields: bool,
     /// Absolute paths to fold in via `include_bytes!` so edits rebuild.
     pub(crate) tracked: Vec<PathBuf>,
-}
-
-impl Resolved {
-    /// The resolved fields at `path` (dotted, e.g. `orders.items`), or the root
-    /// fields when `path` is `None`. `Err` names where the walk broke.
-    pub(crate) fn fields_at(&self, path: Option<&str>) -> Result<&[ResolvedField], String> {
-        let Some(path) = path else {
-            return Ok(&self.mapping.fields);
-        };
-        let mut fields = self.mapping.fields.as_slice();
-        let mut walked = String::new();
-        for segment in path.split('.') {
-            let next = fields.iter().find(|f| f.name.as_ref() == segment);
-            match next {
-                Some(field) if !field.children.is_empty() => {
-                    fields = &field.children;
-                    if !walked.is_empty() {
-                        walked.push('.');
-                    }
-                    walked.push_str(segment);
-                }
-                Some(_) => {
-                    return Err(format!(
-                        "`path = \"{path}\"`: `{segment}` is a leaf field with no nested fields"
-                    ));
-                }
-                None => {
-                    let scope = if walked.is_empty() {
-                        format!("index `{}`", self.mapping.index.as_ref())
-                    } else {
-                        format!("`{walked}`")
-                    };
-                    return Err(format!(
-                        "`path = \"{path}\"`: no field `{segment}` in {scope}"
-                    ));
-                }
-            }
-        }
-        Ok(fields)
-    }
-
-    /// The container levels from the index root down to the struct bound at
-    /// `path`, each tagged `nested` or not — the data behind
-    /// `FlussoDocument::PATH`. Empty for the root. Assumes `path` already
-    /// validated via [`Resolved::fields_at`].
-    pub(crate) fn path_segments(&self, path: Option<&str>) -> Result<Vec<PathSegment>, String> {
-        let Some(path) = path else {
-            return Ok(Vec::new());
-        };
-        let mut fields = self.mapping.fields.as_slice();
-        let mut out = Vec::new();
-        for segment in path.split('.') {
-            let field = fields
-                .iter()
-                .find(|f| f.name.as_ref() == segment)
-                .ok_or_else(|| format!("`path = \"{path}\"`: no field `{segment}`"))?;
-            out.push(PathSegment {
-                name: segment.to_owned(),
-                nested: matches!(field.mapping.mapping_type, MappingType::Nested),
-            });
-            fields = &field.children;
-        }
-        Ok(out)
-    }
-
-    /// The query scope for the struct bound at `path` (see [`Scope`]).
-    ///
-    /// `None`/object-only path → [`Scope::Root`]; a path whose final segment is
-    /// a `nested` array → [`Scope::SelfTagged`]. An `object` *under* a `nested`
-    /// can't be expressed in the "objects-direct" scope model, so it's an error.
-    /// Assumes `path` has already validated via [`Resolved::fields_at`].
-    pub(crate) fn scope_at(&self, path: Option<&str>) -> Result<Scope, String> {
-        let Some(path) = path else {
-            return Ok(Scope::Root);
-        };
-        let segments: Vec<&str> = path.split('.').collect();
-        let mut fields = self.mapping.fields.as_slice();
-        let mut nested_ancestor = false;
-        for (i, segment) in segments.iter().enumerate() {
-            let Some(field) = fields.iter().find(|f| f.name.as_ref() == *segment) else {
-                return Err(format!("`path = \"{path}\"`: no field `{segment}`"));
-            };
-            let is_nested = matches!(field.mapping.mapping_type, MappingType::Nested);
-            let is_object = matches!(field.mapping.mapping_type, MappingType::Object);
-            if i + 1 == segments.len() {
-                if is_nested {
-                    return Ok(Scope::SelfTagged);
-                }
-                if is_object && nested_ancestor {
-                    return Err(format!(
-                        "`path = \"{path}\"`: `{segment}` is an object inside a `nested` array \
-                         — querying object sub-fields within a nested scope isn't supported yet"
-                    ));
-                }
-                return Ok(Scope::Root);
-            }
-            nested_ancestor |= is_nested;
-            fields = &field.children;
-        }
-        Ok(Scope::Root)
-    }
 }
 
 /// Find `flusso.toml`, load + resolve it, and return the requested index.

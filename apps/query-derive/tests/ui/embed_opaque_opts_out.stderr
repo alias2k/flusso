@@ -1,0 +1,5 @@
+error: no field `nonesuch` in index `users` — known fields: billingAddress, createdAt, email, fullName, id, location, orderCount, orders, ownerId, shippingAddress, tier
+  --> tests/ui/embed_opaque_opts_out.rs:16:5
+   |
+16 |     nonesuch: Vec<Plain>,
+   |     ^^^^^^^^

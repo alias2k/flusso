@@ -8,14 +8,28 @@ use syn::{Field, Fields, Ident, LitStr, Type};
 
 use schema::{MappingType, ResolvedField};
 
+use crate::resolve::PathSegment;
 use crate::value::Kind;
 
 /// One struct field, with its resolved document key.
 pub(crate) struct DocField<'a> {
-    pub(crate) ident: &'a Ident,
+    /// `None` for the single field of a `#[serde(transparent)]` newtype, which
+    /// has no name of its own.
+    pub(crate) ident: Option<&'a Ident>,
     pub(crate) ty: &'a Type,
     pub(crate) doc_key: String,
     pub(crate) skip: bool,
+    /// `#[flusso(opaque)]` — this field's type is not a fragment, so don't check
+    /// it against the schema. The escape hatch for a plain hand-written struct.
+    pub(crate) opaque: bool,
+    /// `#[serde(flatten)]` — this field's *keys* live at the enclosing level, so
+    /// its type is checked against that level rather than a sub-level, and the
+    /// container name itself is never looked up.
+    pub(crate) flatten: bool,
+    /// `#[flusso(scope = "Orders")]` — rename the namespace generated for this
+    /// container level, and everything under it. Escapes a collision with a type
+    /// the caller already has, and shortens a deep chain.
+    pub(crate) scope: Option<Ident>,
 }
 
 /// Parse a struct's named fields, resolving each document key from serde's
@@ -26,10 +40,29 @@ pub(crate) fn parse_fields<'a>(
 ) -> syn::Result<Vec<DocField<'a>>> {
     let named = match fields {
         Fields::Named(named) => &named.named,
+        // A `#[serde(transparent)]` newtype inherits the inner type's shape:
+        // there is no field of its own to name, so the inner type is checked
+        // against this very level (like a flattened group).
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            let mut out = Vec::with_capacity(1);
+            for field in &fields.unnamed {
+                out.push(DocField {
+                    ident: None,
+                    ty: &field.ty,
+                    doc_key: String::new(),
+                    skip: false,
+                    opaque: false,
+                    flatten: true,
+                    scope: None,
+                });
+            }
+            return Ok(out);
+        }
         _ => {
             return Err(syn::Error::new(
                 fields.span(),
-                "FlussoDocument can only be derived for a struct with named fields",
+                "a flusso document is a struct with named fields, or a single-field \
+                 tuple struct (a `#[serde(transparent)]` newtype)",
             ));
         }
     };
@@ -40,12 +73,15 @@ pub(crate) fn parse_fields<'a>(
             .ident
             .as_ref()
             .ok_or_else(|| syn::Error::new(field.span(), "field must be named"))?;
-        let (skip, rename) = flusso_field_attr(field)?;
+        let (skip, opaque, rename, scope) = flusso_field_attr(field)?;
         out.push(DocField {
-            ident,
+            ident: Some(ident),
             ty: &field.ty,
             doc_key: doc_key(field, ident, rename, rename_all)?,
             skip,
+            opaque,
+            flatten: serde_flatten(field),
+            scope,
         });
     }
     Ok(out)
@@ -93,27 +129,87 @@ fn serde_rename(field: &Field) -> syn::Result<Option<String>> {
     Ok(renamed)
 }
 
-/// Read a field's `#[flusso(…)]` attributes: `skip` and/or `rename = "…"`.
-fn flusso_field_attr(field: &Field) -> syn::Result<(bool, Option<String>)> {
+/// Read a field's `#[flusso(…)]` attributes: `skip`, `opaque`, `rename = "…"`,
+/// `scope = "…"`.
+type FieldAttrs = (bool, bool, Option<String>, Option<Ident>);
+
+fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
     let mut skip = false;
+    let mut opaque = false;
     let mut rename = None;
+    let mut scope = None;
     for attr in &field.attrs {
         if attr.path().is_ident("flusso") {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("skip") {
                     skip = true;
                     Ok(())
+                } else if meta.path.is_ident("opaque") {
+                    opaque = true;
+                    Ok(())
                 } else if meta.path.is_ident("rename") {
                     rename = Some(meta.value()?.parse::<LitStr>()?.value());
                     Ok(())
+                } else if meta.path.is_ident("scope") {
+                    let lit: LitStr = meta.value()?.parse()?;
+                    // It becomes a type name, so reject anything that isn't one
+                    // here rather than emitting code that won't parse.
+                    scope = Some(lit.parse::<Ident>().map_err(|_| {
+                        syn::Error::new(
+                            lit.span(),
+                            "`scope` must be a valid type name, e.g. `scope = \"Orders\"`",
+                        )
+                    })?);
+                    Ok(())
                 } else {
-                    Err(meta
-                        .error("unknown `flusso` field attribute (expected `skip` or `rename`)"))
+                    Err(meta.error(
+                        "unknown `flusso` field attribute (expected `skip`, `opaque`, \
+                         `rename`, or `scope`)",
+                    ))
                 }
             })?;
         }
     }
-    Ok((skip, rename))
+    Ok((skip, opaque, rename, scope))
+}
+
+/// The container `#[serde(rename_all = "…")]`, if any. Best-effort: every other
+/// serde container attribute is ignored.
+pub(crate) fn container_rename_all(input: &syn::DeriveInput) -> Option<String> {
+    let mut rename_all = None;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all")
+                && let Ok(value) = meta.value()
+                && let Ok(lit) = value.parse::<LitStr>()
+            {
+                rename_all = Some(lit.value());
+            }
+            Ok(())
+        });
+    }
+    rename_all
+}
+
+/// Whether the field carries `#[serde(flatten)]`.
+fn serde_flatten(field: &Field) -> bool {
+    let mut flatten = false;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        // Best-effort: `flatten` is a bare path among other serde attributes.
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("flatten") {
+                flatten = true;
+            }
+            Ok(())
+        });
+    }
+    flatten
 }
 
 /// Validate each declared field against the resolved fields at this level.
@@ -128,7 +224,10 @@ pub(crate) fn validate(
     let mut errors = Vec::new();
     let mut asserts = Vec::new();
     for field in fields {
-        if field.skip {
+        // A flattened group has no container field in the mapping — its keys
+        // live at *this* level, so its type is checked against this level
+        // instead (see `embed_checks`).
+        if field.skip || field.flatten {
             continue;
         }
         let Some(resolved) = level.iter().find(|r| r.name.as_ref() == field.doc_key) else {
@@ -151,7 +250,7 @@ fn unknown_field(field: &DocField, level: &[ResolvedField], scope: &str) -> syn:
     let mut known: Vec<&str> = level.iter().map(|r| r.name.as_ref()).collect();
     known.sort_unstable();
     syn::Error::new(
-        field.ident.span(),
+        field.ident.map_or_else(|| field.ty.span(), Ident::span),
         format!(
             "no field `{}` in {scope} — known fields: {}",
             field.doc_key,
@@ -445,70 +544,53 @@ fn is_primitive(ident: Option<&str>) -> bool {
     )
 }
 
-/// Generate the field-handle `impl` (a handle per schema field at this level),
-/// plus the `FlussoDocument` trait impl (the `PATH` metadata — for every struct),
-/// plus — at the root only — the `FlussoIndex` impl (`INDEX`/`SCHEMA_HASH`,
-/// inheriting `query`/`get`), plus rebuild tracking. `prefix` is the dotted path
-/// of this level (empty at the root); `segments` is that path's container chain.
+/// Generate the **whole** typed query surface for an index, from the root down.
+///
+/// The root is the only type bound to a schema, so it owns every handle in the
+/// index — not just its own level. Walking the resolved mapping emits, per
+/// container level, a namespace type carrying that level's handles:
+///
+/// - an **object** flattens into its enclosing scope, so its namespace chains
+///   from the parent as a `&self` method: `User::account().tier()`;
+/// - a **nested** array introduces its own scope, so its namespace is a named
+///   type with associated fns: `UserOrders::total()`, and it implements
+///   `FlussoScope` so a nesting-aware sort can read its `PATH`.
+///
+/// Namespaces are named root-prefixed (`UserOrders`, `UserOrdersItems`), which
+/// keeps two roots in one module from colliding. The root additionally
+/// implements `FlussoRoot` (`INDEX`/`SCHEMA_HASH`, inheriting `query`/`get`) —
+/// the entry points a child level must not have.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn codegen(
     ident: &Ident,
+    vis: &syn::Visibility,
     index: &str,
     hash: &str,
-    prefix: &str,
-    is_root: bool,
-    scope: &TokenStream,
-    segments: &[crate::resolve::PathSegment],
     level: &[ResolvedField],
     fields: &[DocField],
     tracked: &[String],
     auto_subfields: bool,
 ) -> TokenStream {
-    let handles = level
+    // A `#[flusso(scope = "…")]` on a root field renames that level's namespace
+    // (and everything under it). Only the root's own fields can carry it — a
+    // level the root doesn't project has nowhere to hang an attribute, so it
+    // keeps the generated name.
+    let renames = fields
         .iter()
-        .filter_map(|resolved| handle_fn(resolved, prefix, scope, fields, auto_subfields));
+        .filter_map(|field| Some((field.doc_key.clone(), field.scope.clone()?)))
+        .collect();
 
-    // Every struct implements `FlussoDocument` carrying its path-from-root, so a
-    // nesting-aware sort can read the `nested` boundaries above any field. The
-    // root's `PATH` is empty; an object level adds to the path but isn't a
-    // boundary.
-    let path_segments = segments.iter().map(|segment| {
-        let name = LitStr::new(&segment.name, Span::call_site());
-        let kind = Ident::new(
-            if segment.nested { "Nested" } else { "Object" },
-            Span::call_site(),
-        );
-        quote! {
-            ::flusso_query::Segment {
-                name: #name,
-                kind: ::flusso_query::SegmentKind::#kind,
-            }
-        }
-    });
-    let doc_impl = quote! {
-        impl ::flusso_query::FlussoDocument for #ident {
-            const PATH: &'static [::flusso_query::Segment] = &[ #(#path_segments),* ];
-        }
+    let mut ctx = Namespaces {
+        vis,
+        auto_subfields,
+        renames,
+        emitted: TokenStream::new(),
     };
 
-    // Only the root binding implements `FlussoIndex`: it supplies the physical
-    // index name = logical name + schema hash (exactly what the OpenSearch sink
-    // writes), and inherits `query`/`get`. The derive bakes the hash in (a
-    // structural schema change rotates it *and* forces a recompile), so it stays
-    // hidden from callers — `Type::query()` just works. A child projection has no
-    // `FlussoIndex`, so it cannot start a search.
-    let index_impl = if is_root {
-        quote! {
-            impl ::flusso_query::FlussoIndex for #ident {
-                const INDEX: &'static str = #index;
-                const SCHEMA_HASH: &'static str = #hash;
-            }
-        }
-    } else {
-        quote! {}
-    };
-    let entry = quote! { #doc_impl #index_impl };
+    let root_scope = quote! { ::flusso_query::Root };
+    let handles = ctx.emit_level(ident, &root_scope, "", &[], level, Receiver::Associated);
 
+    let namespaces = ctx.emitted;
     let tracked = tracked.iter().map(|path| {
         let lit = LitStr::new(path, Span::call_site());
         quote! { const _: &[u8] = include_bytes!(#lit); }
@@ -516,30 +598,207 @@ pub(crate) fn codegen(
 
     quote! {
         #(#tracked)*
-        #entry
-        impl #ident {
-            #(#handles)*
+
+        impl ::flusso_query::FlussoScope for #ident {
+            const PATH: &'static [::flusso_query::Segment] = &[];
         }
+        impl ::flusso_query::FlussoRoot for #ident {
+            const INDEX: &'static str = #index;
+            const SCHEMA_HASH: &'static str = #hash;
+        }
+        impl #ident {
+            #handles
+        }
+
+        #namespaces
     }
 }
 
-/// The handle fn for one schema field (every mapping kind has one now). `scope`
-/// is this level's query scope tag (`::flusso_query::Root` or `Self`), baked
-/// into every emitted handle so its queries land in the right scope.
-fn handle_fn(
-    resolved: &ResolvedField,
-    prefix: &str,
-    scope: &TokenStream,
-    fields: &[DocField],
-    auto_subfields: bool,
-) -> Option<TokenStream> {
-    let path = if prefix.is_empty() {
-        resolved.name.to_string()
-    } else {
-        format!("{prefix}.{}", resolved.name)
-    };
-    let name = Ident::new(&to_snake_case(resolved.name.as_ref()), Span::call_site());
+/// How a level's handles are reached.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Receiver {
+    /// `User::email()` / `UserOrders::total()` — the level *is* the namespace.
+    Associated,
+    /// `User::account().tier()` — an object namespace, reached from its parent.
+    Method,
+}
 
+/// Accumulates the namespace types emitted while walking the mapping.
+struct Namespaces<'a> {
+    vis: &'a syn::Visibility,
+    auto_subfields: bool,
+    /// Root-field scope renames, keyed by document key.
+    renames: std::collections::HashMap<String, Ident>,
+    emitted: TokenStream,
+}
+
+impl Namespaces<'_> {
+    /// The handle fns for one level, emitting any namespace types beneath it.
+    ///
+    /// `base` names this level's type; a child namespace is `base` + the field
+    /// name, so a rename at any level flows down to everything under it.
+    fn emit_level(
+        &mut self,
+        base: &Ident,
+        scope: &TokenStream,
+        prefix: &str,
+        segments: &[PathSegment],
+        level: &[ResolvedField],
+        receiver: Receiver,
+    ) -> TokenStream {
+        let mut handles = TokenStream::new();
+        for resolved in level {
+            let path = if prefix.is_empty() {
+                resolved.name.to_string()
+            } else {
+                format!("{prefix}.{}", resolved.name)
+            };
+            let mut below = segments.to_vec();
+            below.push(PathSegment {
+                name: resolved.name.to_string(),
+                nested: matches!(resolved.mapping.mapping_type, MappingType::Nested),
+            });
+            let child = self.child_ident(base, resolved.name.as_ref(), segments.is_empty());
+
+            let container = match &resolved.mapping.mapping_type {
+                // A `nested` array is its own scope: the child namespace tags
+                // the handles inside it, and carries the PATH a sort reads.
+                MappingType::Nested => {
+                    self.emit_nested(&child, &path, &below, &resolved.children);
+                    Some((
+                        quote! { ::flusso_query::Nested<#scope, #child> },
+                        quote! { ::flusso_query::Nested::<#scope, #child>::at(#path) },
+                    ))
+                }
+                // A group / to-one join flattens into the enclosing scope, so
+                // its namespace keeps `scope` and chains from here.
+                MappingType::Object
+                    if resolved.mapping.map_values.is_none() && !resolved.children.is_empty() =>
+                {
+                    self.emit_object(&child, scope, &path, &below, &resolved.children);
+                    Some((quote! { #child }, quote! { #child }))
+                }
+                _ => None,
+            };
+
+            let Some((ret, ctor)) =
+                container.or_else(|| leaf_handle(resolved, &path, scope, self.auto_subfields))
+            else {
+                continue;
+            };
+
+            let name = Ident::new(&to_snake_case(resolved.name.as_ref()), Span::call_site());
+            handles.extend(match receiver {
+                Receiver::Associated => quote! { pub fn #name() -> #ret { #ctor } },
+                Receiver::Method => quote! { pub fn #name(&self) -> #ret { #ctor } },
+            });
+        }
+        handles
+    }
+
+    /// A `nested` level: its own scope tag, its own `PATH`, associated fns.
+    fn emit_nested(
+        &mut self,
+        ident: &Ident,
+        path: &str,
+        segments: &[PathSegment],
+        level: &[ResolvedField],
+    ) {
+        let scope = quote! { #ident };
+        let handles = self.emit_level(ident, &scope, path, segments, level, Receiver::Associated);
+        let path_segments = path_segments(segments);
+        let vis = self.vis;
+        self.emitted.extend(quote! {
+            /// A `nested` array's element scope: its handles, and the path a
+            /// nesting-aware sort reads. Generated from the schema.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            #vis struct #ident;
+
+            impl ::flusso_query::FlussoScope for #ident {
+                const PATH: &'static [::flusso_query::Segment] = &[ #(#path_segments),* ];
+            }
+
+            impl #ident {
+                #handles
+            }
+        });
+    }
+
+    /// An `object` level: no scope of its own, reached by chaining.
+    fn emit_object(
+        &mut self,
+        ident: &Ident,
+        scope: &TokenStream,
+        path: &str,
+        segments: &[PathSegment],
+        level: &[ResolvedField],
+    ) {
+        let handles = self.emit_level(ident, scope, path, segments, level, Receiver::Method);
+        let vis = self.vis;
+        self.emitted.extend(quote! {
+            /// A sub-document's handles — an `object` group or a to-one join.
+            /// Flattened, so its fields query in the enclosing scope. Generated
+            /// from the schema.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            #vis struct #ident;
+
+            impl #ident {
+                /// The sub-document is present — most useful on a nullable
+                /// to-one join.
+                pub fn exists(&self) -> ::flusso_query::Query<#scope> {
+                    ::flusso_query::Object::<#scope>::at(#path).exists()
+                }
+                #handles
+            }
+        });
+    }
+
+    /// The namespace type for a child level: `base` + the field name,
+    /// PascalCased — `User` + `orders` → `UserOrders`, then `UserOrdersItems`.
+    /// Root-prefixed by construction, so two roots in one module can both have
+    /// an `addresses` level.
+    ///
+    /// At the root level a `#[flusso(scope = "…")]` replaces the name outright,
+    /// and since it becomes the `base` for the recursion, everything under it
+    /// follows.
+    fn child_ident(&self, base: &Ident, field: &str, at_root: bool) -> Ident {
+        if at_root && let Some(renamed) = self.renames.get(field) {
+            return renamed.clone();
+        }
+        Ident::new(
+            &format!("{base}{}", to_pascal_case(field)),
+            Span::call_site(),
+        )
+    }
+}
+
+fn path_segments(segments: &[PathSegment]) -> Vec<TokenStream> {
+    segments
+        .iter()
+        .map(|segment| {
+            let name = LitStr::new(&segment.name, Span::call_site());
+            let kind = Ident::new(
+                if segment.nested { "Nested" } else { "Object" },
+                Span::call_site(),
+            );
+            quote! {
+                ::flusso_query::Segment {
+                    name: #name,
+                    kind: ::flusso_query::SegmentKind::#kind,
+                }
+            }
+        })
+        .collect()
+}
+
+/// The handle type + constructor for a leaf field — everything that is not a
+/// container level with its own namespace. `scope` is the enclosing query scope.
+fn leaf_handle(
+    resolved: &ResolvedField,
+    path: &str,
+    scope: &TokenStream,
+    auto_subfields: bool,
+) -> Option<(TokenStream, TokenStream)> {
     let simple = |ty: &str| {
         let ty = Ident::new(ty, Span::call_site());
         Some((
@@ -586,7 +845,7 @@ fn handle_fn(
         })
     };
 
-    let (ret, ctor) = match &resolved.mapping.mapping_type {
+    match &resolved.mapping.mapping_type {
         // A keyword with a declared enum order gets the order-aware `Enum` handle
         // (sorts on the prebaked `.sort` subfield); a bare keyword stays `Keyword`.
         MappingType::Keyword if resolved.mapping.enum_order.is_some() => string_handle("Enum"),
@@ -609,9 +868,9 @@ fn handle_fn(
         MappingType::Date => simple("Date"),
         MappingType::Other(name) if name == "geo_point" => simple("Geo"),
         MappingType::Other(name) if name == "binary" => simple("Binary"),
-        // An `object` mapping is one of three things, told apart by `map_values`
-        // and children: a `map` (dynamic-key object → a kind-typed map handle),
-        // an opaque `json` (no children), or a group / to-one-join sub-object.
+        // An `object` reaching here is either a `map` (dynamic-key object → a
+        // kind-typed map handle) or an opaque `json` with no children; a group
+        // or to-one join was handled by its own namespace.
         MappingType::Object => match &resolved.mapping.map_values {
             Some(MappingType::Text) => simple("TextMap"),
             Some(MappingType::Keyword) => simple("KeywordMap"),
@@ -630,44 +889,29 @@ fn handle_fn(
             // rejects non-leaf map values, so this is defensive) — fall back to
             // the opaque object handle so the field is still addressable.
             Some(_) => simple("Json"),
-            // A group / to-one-join object → an `Object<S>` handle (for
-            // `.exists()`; sub-fields are queried via their own dotted-path child
-            // handles). `S` is the enclosing scope, same as the leaf handles here.
-            None if resolved.children.is_empty() => simple("Json"),
-            None => Some((
-                quote! { ::flusso_query::Object<#scope> },
-                quote! { ::flusso_query::Object::<#scope>::at(#path) },
-            )),
+            None => simple("Json"),
         },
-        // A `nested` array → `Nested<EnclosingScope, ChildScope>`: queries lift
-        // from the element scope up to this level. The child scope is the
-        // projected element struct (which derives its own `SelfTagged` handles),
-        // or the `Nested` default element type when un-projected.
-        MappingType::Nested => Some(match nested_element(resolved, fields) {
-            Some(elem) => (
-                quote! { ::flusso_query::Nested<#scope, #elem> },
-                quote! { ::flusso_query::Nested::<#scope, #elem>::at(#path) },
-            ),
-            None => (
-                quote! { ::flusso_query::Nested<#scope> },
-                quote! { ::flusso_query::Nested::<#scope>::at(#path) },
-            ),
-        }),
+        MappingType::Nested => None,
         MappingType::Other(_) => simple("Json"),
-    }?;
-
-    Some(quote! { pub fn #name() -> #ret { #ctor } })
+    }
 }
 
-/// The element type for a `Nested` handle: the struct's projected `Vec<Elem>`
-/// element when present, else `None` (use the `Nested` default type).
-fn nested_element(resolved: &ResolvedField, fields: &[DocField]) -> Option<TokenStream> {
-    let field = fields
-        .iter()
-        .find(|f| f.doc_key == resolved.name.as_ref())?;
-    let inner = option_inner(field.ty).unwrap_or(field.ty);
-    let elem = vec_inner(inner)?;
-    Some(quote! { #elem })
+/// A document key as a type-name fragment: `orders` → `Orders`,
+/// `billingAddress` → `BillingAddress`, `postal_code` → `PostalCode`.
+fn to_pascal_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut upper_next = true;
+    for ch in name.chars() {
+        if ch == '_' || ch == '-' {
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// The last path segment ident of a type, e.g. `Option<String>` → `Option`,
@@ -744,5 +988,93 @@ fn capitalize(word: &str) -> String {
     match chars.next() {
         Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// Drive the fragment check into every embedded field.
+///
+/// The root is the only type that resolves the schema, so it bakes the whole
+/// resolved subtree once and hands slices of it down: `children(LEVEL, "…")` for
+/// a normal field, the level itself for a `#[serde(flatten)]` group whose keys
+/// live here. Each call is spanned on its own field, so a failure deep in a
+/// fragment reports the embedding that reached it.
+///
+/// Returns nothing when no field embeds a checkable type — a document of plain
+/// leaves bakes no constants at all.
+pub(crate) fn embed_checks(
+    level: &[ResolvedField],
+    fields: &[DocField],
+    scope: &str,
+) -> TokenStream {
+    let mut calls = TokenStream::new();
+    for field in fields {
+        let Some(element) = crate::fragment::embedded_type(field) else {
+            continue;
+        };
+        let span = field.ty.span();
+        if field.flatten {
+            calls.extend(quote::quote_spanned! {span=>
+                <#element>::__flusso_check(__FLUSSO_LEVEL);
+            });
+            continue;
+        }
+        let key = &field.doc_key;
+        let Some(resolved) = level.iter().find(|r| r.name.as_ref() == *key) else {
+            continue;
+        };
+        // Unlike a fragment, a root *has* the mapping — so it drives the check
+        // only where there is a real sub-shape to walk into. A custom scalar
+        // type (an enum at a keyword field) is already covered by the
+        // `FlussoValue<K>` bound `check_type` emits; adding a no-op check there
+        // would only pile a second, worse error onto a missing derive.
+        if matches!(
+            resolved.mapping.mapping_type,
+            MappingType::Object | MappingType::Nested
+        ) && resolved.mapping.map_values.is_none()
+        {
+            // Assert embeddability first, so a plain un-derived struct gets
+            // `FlussoValueMeta`'s directed note ("add a derive, or mark the
+            // field opaque") rather than only a bare "no `__flusso_check`".
+            calls.extend(quote::quote_spanned! {span=>
+                const _: fn() = || {
+                    fn __assert_embeddable<__T: ::flusso_query::FlussoValueMeta>() {}
+                    __assert_embeddable::<#element>();
+                };
+                <#element>::__flusso_check(::flusso_query::children(__FLUSSO_LEVEL, #key));
+            });
+        }
+        // Only an ordered enum has a variant set to disagree with. The message is
+        // baked here because this is the side that knows the schema's variants.
+        {
+            let order = match &resolved.mapping.enum_order {
+                Some(order) => order,
+                None => continue,
+            };
+            let message = format!(
+                "field `{key}` in {scope} declares variants [{}] — the Rust type declares one \
+                 that is not among them, so it could never match a document",
+                order.join(", "),
+            );
+            calls.extend(quote::quote_spanned! {span=>
+                assert!(
+                    ::flusso_query::variants_covered(
+                        __FLUSSO_LEVEL, #key,
+                        <#element as ::flusso_query::FlussoValueMeta>::VARIANTS,
+                    ),
+                    #message
+                );
+            });
+        }
+    }
+
+    if calls.is_empty() {
+        return TokenStream::new();
+    }
+    let baked = crate::spec::bake_level(level);
+    quote! {
+        const _: () = {
+            const __FLUSSO_LEVEL: &[::flusso_query::FieldSpec] = #baked;
+            #calls
+        };
     }
 }

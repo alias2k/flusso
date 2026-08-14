@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use flusso_query::{Client, FlussoDocument, FlussoIndex, FlussoMultiDocument, Result, Segment};
+use flusso_query::{Client, FlussoMultiDocument, FlussoRoot, FlussoScope, Result, Segment};
 use schema_core::{
     ContentHash, FieldName, GenericValue, IndexMapping, IndexName, Mapping, MappingType,
     ResolvedField,
@@ -50,10 +50,10 @@ use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, Image
 struct User {
     email: String,
 }
-impl FlussoDocument for User {
+impl FlussoScope for User {
     const PATH: &'static [Segment] = &[];
 }
-impl FlussoIndex for User {
+impl FlussoRoot for User {
     const INDEX: &'static str = "users";
     const SCHEMA_HASH: &'static str = "00000001";
 }
@@ -63,10 +63,10 @@ impl FlussoIndex for User {
 struct Order {
     status: String,
 }
-impl FlussoDocument for Order {
+impl FlussoScope for Order {
     const PATH: &'static [Segment] = &[];
 }
-impl FlussoIndex for Order {
+impl FlussoRoot for Order {
     const INDEX: &'static str = "orders";
     const SCHEMA_HASH: &'static str = "00000002";
 }

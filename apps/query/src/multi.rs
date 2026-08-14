@@ -39,7 +39,7 @@ use crate::handles::Sort;
 use crate::query::{AsQuery, BoolBuilder, Root};
 use crate::search::{Hit, RawCount, SearchResponse};
 
-/// A union of [`FlussoDocument`](crate::FlussoDocument) types searched
+/// A union of [`FlussoScope`](crate::FlussoScope) types searched
 /// together — one query, one blended result list, each hit decoded into the
 /// variant matching its index.
 ///
@@ -48,17 +48,17 @@ use crate::search::{Hit, RawCount, SearchResponse};
 /// derive, the impl is written by hand — exactly what the derive generates:
 ///
 /// ```no_run
-/// use flusso_query::{FlussoDocument, FlussoIndex, FlussoMultiDocument, Error, Result, Segment};
+/// use flusso_query::{FlussoScope, FlussoRoot, FlussoMultiDocument, Error, Result, Segment};
 /// use serde_json::Value;
 /// # #[derive(serde::Deserialize)] struct User { email: String }
-/// # impl FlussoDocument for User { const PATH: &'static [Segment] = &[]; }
-/// # impl FlussoIndex for User {
+/// # impl FlussoScope for User { const PATH: &'static [Segment] = &[]; }
+/// # impl FlussoRoot for User {
 /// #     const INDEX: &'static str = "users";
 /// #     const SCHEMA_HASH: &'static str = "xxxxxx";
 /// # }
 /// # #[derive(serde::Deserialize)] struct Order { status: String }
-/// # impl FlussoDocument for Order { const PATH: &'static [Segment] = &[]; }
-/// # impl FlussoIndex for Order {
+/// # impl FlussoScope for Order { const PATH: &'static [Segment] = &[]; }
+/// # impl FlussoRoot for Order {
 /// #     const INDEX: &'static str = "orders";
 /// #     const SCHEMA_HASH: &'static str = "yyyyyy";
 /// # }
@@ -90,8 +90,8 @@ use crate::search::{Hit, RawCount, SearchResponse};
 pub trait FlussoMultiDocument: Sized {
     /// The `(logical index, schema hash)` pair of every document type in the
     /// union, in variant order — each is that type's
-    /// [`INDEX`](crate::FlussoIndex::INDEX) /
-    /// [`SCHEMA_HASH`](crate::FlussoIndex::SCHEMA_HASH).
+    /// [`INDEX`](crate::FlussoRoot::INDEX) /
+    /// [`SCHEMA_HASH`](crate::FlussoRoot::SCHEMA_HASH).
     const TARGETS: &'static [(&'static str, &'static str)];
 
     /// Decode one hit's `_source` into the right variant, dispatching on the
@@ -100,7 +100,7 @@ pub trait FlussoMultiDocument: Sized {
     fn decode(physical_index: &str, source: Value) -> Result<Self>;
 
     /// Start a typed query across all of this union's indexes. Like
-    /// [`FlussoIndex::query`](crate::FlussoIndex::query), the returned
+    /// [`FlussoRoot::query`](crate::FlussoRoot::query), the returned
     /// builder is a plain client-free value.
     fn query() -> MultiSearch<Self> {
         MultiSearch::new()

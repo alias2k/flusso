@@ -18,7 +18,12 @@ fields:
   # pending → paid → shipped → delivered → cancelled, not alphabetically.
   - enum: status
     required: true
-    variants: [pending, paid, shipped, delivered, cancelled]
+    variants:
+      - pending
+      - paid
+      - shipped
+      - delivered
+      - cancelled
   - decimal: total
     required: true
 

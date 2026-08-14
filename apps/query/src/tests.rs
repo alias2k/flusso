@@ -13,11 +13,10 @@ use serde_json::json;
 
 use crate::query::Root;
 use crate::{
-    AsQuery, BoostMode, Client, Date, DateMap, Distance, FlussoDocument, FlussoIndex,
-    FlussoMultiDocument, Fuzziness, Geo, GeoPoint, Keyword, KeywordMap, MsearchBundle,
-    MultiMatchType, Nested, NestedScoreMode, Number, NumberMap, Operator, OrderBy, Query, Search,
-    SearchResponse, Segment, SegmentKind, Sort, SortBuilder, SortOrder, Sortable, Text, TextMap,
-    multi_match,
+    AsQuery, BoostMode, Client, Date, DateMap, Distance, FlussoMultiDocument, FlussoRoot,
+    FlussoScope, Fuzziness, Geo, GeoPoint, Keyword, KeywordMap, MsearchBundle, MultiMatchType,
+    Nested, NestedScoreMode, Number, NumberMap, Operator, OrderBy, Query, Search, SearchResponse,
+    Segment, SegmentKind, Sort, SortBuilder, SortOrder, Sortable, Text, TextMap, multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -54,7 +53,7 @@ impl Order {
     }
 }
 
-impl FlussoDocument for Order {
+impl FlussoScope for Order {
     const PATH: &'static [Segment] = &[Segment {
         name: "orders",
         kind: SegmentKind::Nested,
@@ -71,7 +70,7 @@ impl Package {
     }
 }
 
-impl FlussoDocument for Package {
+impl FlussoScope for Package {
     const PATH: &'static [Segment] = &[
         Segment {
             name: "orders",
@@ -1248,18 +1247,18 @@ fn msearch_decodes_each_slot_with_its_own_type() -> Result {
     Ok(())
 }
 
-impl FlussoDocument for DecodedUser {
+impl FlussoScope for DecodedUser {
     const PATH: &'static [Segment] = &[];
 }
-impl FlussoIndex for DecodedUser {
+impl FlussoRoot for DecodedUser {
     const INDEX: &'static str = "users";
     const SCHEMA_HASH: &'static str = "xxxxxx";
 }
 
-impl FlussoDocument for DecodedOrder {
+impl FlussoScope for DecodedOrder {
     const PATH: &'static [Segment] = &[];
 }
-impl FlussoIndex for DecodedOrder {
+impl FlussoRoot for DecodedOrder {
     const INDEX: &'static str = "orders";
     const SCHEMA_HASH: &'static str = "yyyyyy";
 }
@@ -1297,10 +1296,10 @@ impl FlussoMultiDocument for StoreItem {
 struct NumericDoc {
     n: i64,
 }
-impl FlussoDocument for NumericDoc {
+impl FlussoScope for NumericDoc {
     const PATH: &'static [Segment] = &[];
 }
-impl FlussoIndex for NumericDoc {
+impl FlussoRoot for NumericDoc {
     const INDEX: &'static str = "numbers";
     const SCHEMA_HASH: &'static str = "12345678";
 }

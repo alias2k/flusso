@@ -70,4 +70,4 @@ Define multiple `[sinks.<name>]` and flusso **fans out** — every document land
 
 ## Querying — don't hand-roll it
 
-The typed, compile-time-checked way to query a flusso index is **flusso-query** + `#[derive(FlussoDocument)]` (see that skill). It addresses the physical index, picks the right subfield per operator, and fails to compile if your struct drifts from the mapping. Reach for the raw OpenSearch DSL only for what the typed surface defers (aggregations/facets, `knn`, `function_score`, `script`, `geo_shape`) — via the derive's `raw` escape hatch.
+The typed, compile-time-checked way to query a flusso index is **flusso-query** + `#[derive(FlussoRoot)]` (see that skill). It addresses the physical index, picks the right subfield per operator, and fails to compile if your struct drifts from the mapping. Reach for the raw OpenSearch DSL only for what the typed surface defers (aggregations/facets, `knn`, `function_score`, `script`, `geo_shape`) — via the derive's `raw` escape hatch.

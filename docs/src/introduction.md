@@ -20,7 +20,7 @@ Change a user *or one of their orders*, and flusso rebuilds the whole `users` do
 - **[Getting started](getting-started.md)** — run flusso in three commands, and what Postgres and OpenSearch need first.
 - **[Authoring schemas](guides/schema-authoring.md)** — the `*.schema.yml` format: field types, objects, maps, joins, aggregates, geo, filters, soft-delete, validation.
 - **[Configuring a deployment](guides/configuration.md)** — the `flusso.toml` format, every source and sink option, secrets and `{ env = "VAR" }` references, the `FLUSSO_*` flag overrides, the index prefix, and logging/telemetry.
-- **[Querying](guides/querying.md)** — the typed query-side client, `flusso-query`, and its `#[derive(FlussoDocument)]`.
+- **[Querying](guides/querying.md)** — the typed query-side client, `flusso-query`, and its `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]`.
 - **[Deploying](guides/deploying.md)** — Docker recipes: smallest image, baking or compiling a `flusso.lock`, scoped `.dockerignore`.
 
 The source, the contributor architecture tour, the Helm chart, and the runnable `dev/` example all live in the [repository on GitHub](https://github.com/alias2k/flusso).

@@ -2,33 +2,54 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::quote;
 use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, LitStr, parse_macro_input};
 
 mod doc;
+mod fragment;
 mod map;
 mod multi;
 mod resolve;
+mod spec;
 mod value;
 
-use resolve::Scope;
-
-/// Derive the typed query surface for a flusso document struct.
+/// Derive the typed query surface for a flusso index — the **root**.
+///
+/// This is the only type bound to a schema, and it owns the *whole* surface: a
+/// handle for every field at every level, reached through a generated namespace
+/// per container (`User::account().tier()`, `UserOrders::total()`). It also
+/// drives validation into every shape it embeds.
 ///
 /// ```ignore
-/// #[derive(serde::Deserialize, FlussoDocument)]
+/// #[derive(serde::Deserialize, FlussoRoot)]
 /// #[flusso(index = "users")]
 /// struct User { id: i32, email: String }
 /// ```
-#[proc_macro_derive(FlussoDocument, attributes(flusso))]
-pub fn derive_flusso_document(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(FlussoRoot, attributes(flusso))]
+pub fn derive_flusso_root(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(input).into()
 }
 
+/// Derive a **location-free** document shape — a fragment.
+///
+/// A fragment names no index and no path, so one declaration can be embedded at
+/// several paths (`billingAddress` and `shippingAddress`) or across indexes, and
+/// even live in a shared crate. Each root that embeds it validates it against
+/// the mapping at *that* path, recursively into any fragment it contains.
+///
+/// ```ignore
+/// #[derive(serde::Deserialize, FlussoFragment)]
+/// struct Address { city: String, zip: Option<String> }
+/// ```
+#[proc_macro_derive(FlussoFragment, attributes(flusso))]
+pub fn derive_flusso_fragment(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    fragment::expand(input).into()
+}
+
 /// Implement `flusso_query::FlussoValue<K>` for an enum or newtype wrapper, so
-/// it may stand in for a field of kind `K` in a `FlussoDocument` struct. The
+/// it may stand in for a field of kind `K` in a `FlussoRoot` struct. The
 /// kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
 /// `#[flusso(number)]`, or `#[flusso(date)]`.
 ///
@@ -86,9 +107,6 @@ struct Attrs {
     index: String,
     /// Span of the `index = "…"` value — where index-resolution errors point.
     index_span: Span,
-    path: Option<String>,
-    /// Span of the `path = "…"` value — where path-walk errors point.
-    path_span: Span,
     config: Option<String>,
     rename_all: Option<String>,
 }
@@ -97,8 +115,6 @@ impl Attrs {
     fn parse(input: &DeriveInput) -> syn::Result<Self> {
         let mut index: Option<String> = None;
         let mut index_span = input.ident.span();
-        let mut path: Option<String> = None;
-        let mut path_span = input.ident.span();
         let mut config: Option<String> = None;
         let mut rename_all: Option<String> = None;
 
@@ -110,15 +126,18 @@ impl Attrs {
                         index_span = lit.span();
                         index = Some(lit.value());
                     } else if meta.path.is_ident("path") {
-                        let lit: LitStr = meta.value()?.parse()?;
-                        path_span = lit.span();
-                        path = Some(lit.value());
+                        return Err(meta.error(
+                            "`path` no longer exists — the root generates handles for every \
+                             level of its index. Make this a `#[derive(FlussoFragment)]` shape \
+                             and embed it; it is validated at whatever path it lands on",
+                        ));
                     } else if meta.path.is_ident("config") {
                         let lit: LitStr = meta.value()?.parse()?;
                         config = Some(lit.value());
                     } else {
                         return Err(meta.error(
-                            "unknown `flusso` attribute (expected `index`, `path`, or `config`)",
+                            "unknown `flusso` attribute (expected `index`, `config`, \
+                                 or the deprecated `path`)",
                         ));
                     }
                     Ok(())
@@ -147,8 +166,6 @@ impl Attrs {
         Ok(Attrs {
             index,
             index_span,
-            path,
-            path_span,
             config,
             rename_all,
         })
@@ -190,29 +207,8 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         Err(message) => return syn::Error::new(attrs.index_span, message).to_compile_error(),
     };
 
-    let level = match resolved.fields_at(attrs.path.as_deref()) {
-        Ok(level) => level,
-        Err(message) => return syn::Error::new(attrs.path_span, message).to_compile_error(),
-    };
-
-    // The scope this struct's handles live in: `Root` (untagged) at the root and
-    // through flattened objects; the struct's own type under a `nested` array.
-    let scope_tag = match resolved.scope_at(attrs.path.as_deref()) {
-        Ok(Scope::Root) => quote! { ::flusso_query::Root },
-        Ok(Scope::SelfTagged) => quote! { Self },
-        Err(message) => return syn::Error::new(attrs.path_span, message).to_compile_error(),
-    };
-
-    let scope = match &attrs.path {
-        Some(path) => format!("`{path}` in index `{}`", attrs.index),
-        None => format!("index `{}`", attrs.index),
-    };
-    let prefix = attrs.path.as_deref().unwrap_or("");
-    let is_root = attrs.path.is_none();
-    let segments = match resolved.path_segments(attrs.path.as_deref()) {
-        Ok(segments) => segments,
-        Err(message) => return syn::Error::new(attrs.path_span, message).to_compile_error(),
-    };
+    let level = resolved.mapping.fields.as_slice();
+    let scope = format!("index `{}`", attrs.index);
     let hash = resolved.mapping.hash.to_string();
     let tracked: Vec<String> = resolved
         .tracked
@@ -221,16 +217,13 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
 
-    // The query surface always generates (it follows the schema, not the
-    // struct); field validation errors are reported alongside it.
+    // The query surface follows the *schema*, not the struct: every level of the
+    // index gets handles, whether or not this projection deserializes it.
     let items = doc::codegen(
         &input.ident,
+        &input.vis,
         &attrs.index,
         &hash,
-        prefix,
-        is_root,
-        &scope_tag,
-        &segments,
         level,
         &fields,
         &tracked,
@@ -240,6 +233,15 @@ fn expand(input: DeriveInput) -> TokenStream2 {
     let mut out = items;
     let (errors, asserts) = doc::validate(level, &fields, &scope);
     out.extend(asserts);
+
+    // This struct is the only one here that resolves the schema, so it bakes the
+    // level and drives the check into every shape it embeds — recursively, and
+    // once per embedding site.
+    out.extend(doc::embed_checks(level, &fields, &scope));
+    // …and it is itself embeddable, though its check is a no-op: it already
+    // validated every field against this level as part of its own expansion.
+    out.extend(fragment::embeddable_leaf(&input.ident));
+
     for error in errors {
         out.extend(error.to_compile_error());
     }

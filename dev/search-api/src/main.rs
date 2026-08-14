@@ -1,6 +1,6 @@
 //! A small but production-shaped HTTP API over a flusso-maintained search index.
 //!
-//! It uses `flusso-query` + `#[derive(FlussoDocument)]` against the **same**
+//! It uses `flusso-query` + `#[derive(FlussoRoot)]` against the **same**
 //! `../flusso.toml` the engine builds from (auto-discovered at compile time), so
 //! the document types are checked against the schema and the query surface is
 //! generated. Each index gets a filterable list endpoint plus a fetch-by-id
@@ -38,6 +38,7 @@ mod global;
 mod orders;
 mod products;
 mod response;
+mod shared;
 mod users;
 
 #[tokio::main]

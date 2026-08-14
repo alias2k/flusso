@@ -15,7 +15,7 @@ use super::{
     Common, FlussoValue, RangeRelation, Sort, SortOrder, Sortable, common_opts, exists_q, kind,
     single, wrap,
 };
-use crate::FlussoDocument;
+use crate::FlussoScope;
 use crate::query::{AsQuery, Query, Root};
 
 /// The JSON value for a typed date input, taken from its serde serialization
@@ -209,7 +209,7 @@ impl<S> Bool<S> {
     }
 }
 
-impl<S: FlussoDocument> Sortable for Bool<S> {
+impl<S: FlussoScope> Sortable for Bool<S> {
     fn asc(&self) -> Sort {
         Sort::field::<S>(&self.path, SortOrder::Asc)
     }
@@ -284,7 +284,7 @@ impl<K, S> Number<K, S> {
     }
 }
 
-impl<K, S: FlussoDocument> Sortable for Number<K, S> {
+impl<K, S: FlussoScope> Sortable for Number<K, S> {
     fn asc(&self) -> Sort {
         Sort::field::<S>(&self.path, SortOrder::Asc)
     }
@@ -361,7 +361,7 @@ impl<S> Date<S> {
     }
 }
 
-impl<S: FlussoDocument> Sortable for Date<S> {
+impl<S: FlussoScope> Sortable for Date<S> {
     fn asc(&self) -> Sort {
         Sort::field::<S>(&self.path, SortOrder::Asc)
     }
