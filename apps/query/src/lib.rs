@@ -88,6 +88,7 @@
 // unused to the `--test`-compiled lib.
 #![cfg_attr(test, allow(unused_crate_dependencies))]
 
+mod check;
 mod client;
 mod error;
 mod handles;
@@ -100,6 +101,10 @@ mod search;
 #[cfg(test)]
 mod tests;
 
+pub use check::{
+    FieldSpec, FlussoValueMeta, KindTag, array, children, exists, kind_is, nullable,
+    variants_covered,
+};
 pub use client::Client;
 pub use error::{Error, Result};
 pub use handles::{
