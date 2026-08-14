@@ -662,3 +662,31 @@ fn a_generated_nested_namespace_carries_its_path_for_sorting() -> Result {
     assert_eq!(sort["nested"]["path"], "orders");
     Ok(())
 }
+
+// `#[flusso(scope = "…")]` renames a generated namespace — to escape a clash
+// with a type the caller already has, or to shorten a deep chain. The rename
+// becomes the base for everything under that level.
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct ScopedUser {
+    id: i32,
+    #[flusso(scope = "Purchases")]
+    orders: Vec<Order>,
+}
+
+#[test]
+fn a_field_can_rename_its_generated_namespace() -> Result {
+    // `Purchases`, not `ScopedUserOrders` — and the sort still renders the
+    // nested boundary, so the renamed type carries the same `PATH`.
+    let body = ScopedUser::query()
+        .filter(ScopedUser::orders().any(Purchases::status().eq("paid")))
+        .sorts([Purchases::total().desc()])
+        .body();
+    assert_eq!(
+        body["query"]["bool"]["filter"][0]["nested"]["path"],
+        "orders"
+    );
+    assert_eq!(body["sort"][0]["orders.total"]["nested"]["path"], "orders");
+    Ok(())
+}

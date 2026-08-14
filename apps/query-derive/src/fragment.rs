@@ -230,7 +230,11 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
         let msg = message(
             fragment,
             key,
-            "is a `HashMap`, so the schema field here must be a `map` with a matching value type",
+            &format!(
+                "is a `HashMap` of `{}`, so the schema field here must be a `map` with \
+                 matching value type",
+                render(value_ty)
+            ),
         );
         return match primitive_kinds(value_ty) {
             Some(tags) => quote_spanned! {span=>
@@ -260,7 +264,10 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
         let msg = message(
             fragment,
             key,
-            "is declared `Vec<…>`, but the schema field here is not an array",
+            &format!(
+                "is declared `Vec<{}>`, but the schema field here is not an array",
+                render(element)
+            ),
         );
         checks.extend(quote_spanned! {span=>
             assert!(::flusso_query::array(level, #key), #msg);
@@ -270,7 +277,10 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
     let kind_msg = message(
         fragment,
         key,
-        "has a Rust type that cannot hold the schema field at this path",
+        &format!(
+            "is `{}`, which cannot hold the schema field at this path",
+            render(element)
+        ),
     );
     match primitive_kinds(element) {
         // A known leaf type — its acceptable kinds are baked right here.
@@ -309,8 +319,24 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
 
 /// `panic!` in a const context takes a literal, so every message is composed
 /// here — at macro time, where the fragment and field names are known.
+///
+/// The schema's own type can't appear: this side never sees the mapping, and a
+/// const message can't be built from the level it is handed. Naming the *Rust*
+/// type is the half that is knowable, and it is usually the one being fixed.
 fn message(fragment: &Ident, key: &str, problem: &str) -> String {
     format!("fragment `{fragment}`: field `{key}` {problem}")
+}
+
+/// A type as a reader would write it — `quote` renders `Vec < Item >`.
+fn render(ty: &Type) -> String {
+    quote!(#ty)
+        .to_string()
+        .replace(" < ", "<")
+        .replace(" > ", ">")
+        .replace(" >", ">")
+        .replace(" ,", ",")
+        .replace(":: ", "::")
+        .replace(" ::", "::")
 }
 
 /// The `KindTag`s a built-in leaf type may stand in

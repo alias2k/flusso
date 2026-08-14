@@ -26,6 +26,10 @@ pub(crate) struct DocField<'a> {
     /// its type is checked against that level rather than a sub-level, and the
     /// container name itself is never looked up.
     pub(crate) flatten: bool,
+    /// `#[flusso(scope = "Orders")]` — rename the namespace generated for this
+    /// container level, and everything under it. Escapes a collision with a type
+    /// the caller already has, and shortens a deep chain.
+    pub(crate) scope: Option<Ident>,
 }
 
 /// Parse a struct's named fields, resolving each document key from serde's
@@ -49,6 +53,7 @@ pub(crate) fn parse_fields<'a>(
                     skip: false,
                     opaque: false,
                     flatten: true,
+                    scope: None,
                 });
             }
             return Ok(out);
@@ -68,7 +73,7 @@ pub(crate) fn parse_fields<'a>(
             .ident
             .as_ref()
             .ok_or_else(|| syn::Error::new(field.span(), "field must be named"))?;
-        let (skip, opaque, rename) = flusso_field_attr(field)?;
+        let (skip, opaque, rename, scope) = flusso_field_attr(field)?;
         out.push(DocField {
             ident: Some(ident),
             ty: &field.ty,
@@ -76,6 +81,7 @@ pub(crate) fn parse_fields<'a>(
             skip,
             opaque,
             flatten: serde_flatten(field),
+            scope,
         });
     }
     Ok(out)
@@ -123,11 +129,15 @@ fn serde_rename(field: &Field) -> syn::Result<Option<String>> {
     Ok(renamed)
 }
 
-/// Read a field's `#[flusso(…)]` attributes: `skip`, `opaque`, `rename = "…"`.
-fn flusso_field_attr(field: &Field) -> syn::Result<(bool, bool, Option<String>)> {
+/// Read a field's `#[flusso(…)]` attributes: `skip`, `opaque`, `rename = "…"`,
+/// `scope = "…"`.
+type FieldAttrs = (bool, bool, Option<String>, Option<Ident>);
+
+fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
     let mut skip = false;
     let mut opaque = false;
     let mut rename = None;
+    let mut scope = None;
     for attr in &field.attrs {
         if attr.path().is_ident("flusso") {
             attr.parse_nested_meta(|meta| {
@@ -140,15 +150,27 @@ fn flusso_field_attr(field: &Field) -> syn::Result<(bool, bool, Option<String>)>
                 } else if meta.path.is_ident("rename") {
                     rename = Some(meta.value()?.parse::<LitStr>()?.value());
                     Ok(())
+                } else if meta.path.is_ident("scope") {
+                    let lit: LitStr = meta.value()?.parse()?;
+                    // It becomes a type name, so reject anything that isn't one
+                    // here rather than emitting code that won't parse.
+                    scope = Some(lit.parse::<Ident>().map_err(|_| {
+                        syn::Error::new(
+                            lit.span(),
+                            "`scope` must be a valid type name, e.g. `scope = \"Orders\"`",
+                        )
+                    })?);
+                    Ok(())
                 } else {
                     Err(meta.error(
-                        "unknown `flusso` field attribute (expected `skip`, `opaque`, or `rename`)",
+                        "unknown `flusso` field attribute (expected `skip`, `opaque`, \
+                         `rename`, or `scope`)",
                     ))
                 }
             })?;
         }
     }
-    Ok((skip, opaque, rename))
+    Ok((skip, opaque, rename, scope))
 }
 
 /// The container `#[serde(rename_all = "…")]`, if any. Best-effort: every other
@@ -538,19 +560,30 @@ fn is_primitive(ident: Option<&str>) -> bool {
 /// keeps two roots in one module from colliding. The root additionally
 /// implements `FlussoRoot` (`INDEX`/`SCHEMA_HASH`, inheriting `query`/`get`) —
 /// the entry points a child level must not have.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn codegen(
     ident: &Ident,
     vis: &syn::Visibility,
     index: &str,
     hash: &str,
     level: &[ResolvedField],
+    fields: &[DocField],
     tracked: &[String],
     auto_subfields: bool,
 ) -> TokenStream {
+    // A `#[flusso(scope = "…")]` on a root field renames that level's namespace
+    // (and everything under it). Only the root's own fields can carry it — a
+    // level the root doesn't project has nowhere to hang an attribute, so it
+    // keeps the generated name.
+    let renames = fields
+        .iter()
+        .filter_map(|field| Some((field.doc_key.clone(), field.scope.clone()?)))
+        .collect();
+
     let mut ctx = Namespaces {
-        root: ident,
         vis,
         auto_subfields,
+        renames,
         emitted: TokenStream::new(),
     };
 
@@ -592,17 +625,21 @@ enum Receiver {
 
 /// Accumulates the namespace types emitted while walking the mapping.
 struct Namespaces<'a> {
-    root: &'a Ident,
     vis: &'a syn::Visibility,
     auto_subfields: bool,
+    /// Root-field scope renames, keyed by document key.
+    renames: std::collections::HashMap<String, Ident>,
     emitted: TokenStream,
 }
 
 impl Namespaces<'_> {
     /// The handle fns for one level, emitting any namespace types beneath it.
+    ///
+    /// `base` names this level's type; a child namespace is `base` + the field
+    /// name, so a rename at any level flows down to everything under it.
     fn emit_level(
         &mut self,
-        owner: &Ident,
+        base: &Ident,
         scope: &TokenStream,
         prefix: &str,
         segments: &[PathSegment],
@@ -621,7 +658,7 @@ impl Namespaces<'_> {
                 name: resolved.name.to_string(),
                 nested: matches!(resolved.mapping.mapping_type, MappingType::Nested),
             });
-            let child = self.namespace_ident(&below);
+            let child = self.child_ident(base, resolved.name.as_ref(), segments.is_empty());
 
             let container = match &resolved.mapping.mapping_type {
                 // A `nested` array is its own scope: the child namespace tags
@@ -656,7 +693,6 @@ impl Namespaces<'_> {
                 Receiver::Method => quote! { pub fn #name(&self) -> #ret { #ctor } },
             });
         }
-        let _ = owner;
         handles
     }
 
@@ -717,14 +753,22 @@ impl Namespaces<'_> {
         });
     }
 
-    /// `User` + the path segments, PascalCased — `UserOrdersItems`. Root-prefixed
-    /// so two roots in one module can both have an `addresses` level.
-    fn namespace_ident(&self, segments: &[PathSegment]) -> Ident {
-        let mut name = self.root.to_string();
-        for segment in segments {
-            name.push_str(&to_pascal_case(&segment.name));
+    /// The namespace type for a child level: `base` + the field name,
+    /// PascalCased — `User` + `orders` → `UserOrders`, then `UserOrdersItems`.
+    /// Root-prefixed by construction, so two roots in one module can both have
+    /// an `addresses` level.
+    ///
+    /// At the root level a `#[flusso(scope = "…")]` replaces the name outright,
+    /// and since it becomes the `base` for the recursion, everything under it
+    /// follows.
+    fn child_ident(&self, base: &Ident, field: &str, at_root: bool) -> Ident {
+        if at_root && let Some(renamed) = self.renames.get(field) {
+            return renamed.clone();
         }
-        Ident::new(&name, Span::call_site())
+        Ident::new(
+            &format!("{base}{}", to_pascal_case(field)),
+            Span::call_site(),
+        )
     }
 }
 

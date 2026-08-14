@@ -239,6 +239,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         &attrs.index,
         &hash,
         level,
+        &fields,
         &tracked,
         resolved.auto_subfields,
     );

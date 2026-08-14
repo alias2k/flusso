@@ -1,0 +1,5 @@
+error: `scope` must be a valid type name, e.g. `scope = "Orders"`
+  --> tests/ui/scope_not_a_type_name.rs:14:22
+   |
+14 |     #[flusso(scope = "not a type")]
+   |                      ^^^^^^^^^^^^

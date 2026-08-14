@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: fragment `Geo`: field `lat` has a Rust type that cannot hold the schema field at this path
+error[E0080]: evaluation panicked: fragment `Geo`: field `lat` is `f64`, which cannot hold the schema field at this path
   --> tests/ui/fragment_deep_mismatch.rs:34:15
    |
 34 | const _: () = Address::__flusso_check(LEVEL);
