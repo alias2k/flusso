@@ -276,6 +276,43 @@ pub trait FlussoValueMeta {
     const VARIANTS: &'static [&'static str];
 }
 
+/// Mirrors the [`FlussoValue`](crate::FlussoValue) impls above, so a
+/// `#[derive(FlussoValue)]` newtype with no explicit kind can forward its inner
+/// type's kinds as *data* (`const KINDS = <Inner as FlussoValueMeta>::KINDS`)
+/// exactly as it forwards them as a bound.
+macro_rules! value_meta {
+    ($($ty:ty => [$($kind:ident),* $(,)?]),+ $(,)?) => {$(
+        impl FlussoValueMeta for $ty {
+            const KINDS: &'static [KindTag] = &[$(KindTag::$kind),*];
+            const VARIANTS: &'static [&'static str] = &[];
+        }
+    )+};
+}
+
+value_meta! {
+    String => [Keyword, Text, Date],
+    bool => [Bool],
+    i8 => [Byte, Short, Integer, Long, Float, Double, Decimal],
+    i16 => [Short, Integer, Long, Float, Double, Decimal],
+    i32 => [Integer, Long, Double, Decimal],
+    i64 => [Long, Decimal],
+    f32 => [Float, Double],
+    f64 => [Double],
+}
+
+#[cfg(feature = "decimal")]
+value_meta!(crate::Decimal => [Decimal]);
+
+#[cfg(feature = "uuid")]
+value_meta!(uuid::Uuid => [Keyword]);
+
+#[cfg(feature = "chrono")]
+value_meta! {
+    chrono::NaiveDate => [Date],
+    chrono::NaiveDateTime => [Date],
+    chrono::DateTime<chrono::Utc> => [Date],
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FieldSpec, KindTag, array, children, exists, kind_is, nullable, variants_covered};

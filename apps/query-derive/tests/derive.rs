@@ -431,3 +431,67 @@ fn multi_document_derive_lists_targets_and_dispatches_hits() -> Result {
     }
     Ok(())
 }
+
+// `FlussoValueMeta` is the const-readable twin of `FlussoValue<K>`: a fragment's
+// check runs in const evaluation, where the schema kind is only a value, so it
+// cannot name `FlussoValue<K>` — it reads these constants instead.
+
+#[test]
+fn value_derive_exposes_its_kinds_and_variants_as_constants() {
+    use flusso_query::{FlussoValueMeta, KindTag};
+
+    // An explicit kind tag → exactly that kind, and no variants.
+    assert_eq!(<Headline as FlussoValueMeta>::KINDS, &[KindTag::Text]);
+    assert!(<Headline as FlussoValueMeta>::VARIANTS.is_empty());
+
+    // No kind tag on a newtype → it inherits every kind the inner type has,
+    // exactly as the blanket `FlussoValue<K>` impl does. `String` is a valid
+    // keyword, text, *and* date value, so `Email` is too.
+    const EMAIL: &[KindTag] = <Email as FlussoValueMeta>::KINDS;
+    assert_eq!(EMAIL, <String as FlussoValueMeta>::KINDS);
+    assert!(EMAIL.contains(&KindTag::Keyword));
+
+    // An enum reports its variants as the *document* spells them, so they can be
+    // compared against the schema's declared `variants:` — note `rename_all`.
+    assert_eq!(
+        <OrderStatus as FlussoValueMeta>::VARIANTS,
+        &["paid", "pending", "cancelled"]
+    );
+
+    // A newtype with no kind tag forwards its inner type's kinds as data,
+    // mirroring how it forwards them as a bound.
+    assert_eq!(
+        <Money as FlussoValueMeta>::KINDS,
+        <flusso_query::Decimal as FlussoValueMeta>::KINDS
+    );
+}
+
+#[test]
+fn value_metadata_is_readable_during_const_evaluation() {
+    use flusso_query::{FieldSpec, FlussoValueMeta, KindTag, kind_is, variants_covered};
+
+    const LEVEL: &[FieldSpec] = &[FieldSpec {
+        name: "status",
+        kind: KindTag::Keyword,
+        nullable: false,
+        array: false,
+        variants: &["paid", "pending", "cancelled"],
+        children: &[],
+    }];
+
+    // Exactly the two assertions a generated fragment check emits for a
+    // custom-typed field — both resolved at compile time.
+    const _: () = assert!(kind_is(
+        LEVEL,
+        "status",
+        <OrderStatus as FlussoValueMeta>::KINDS
+    ));
+    const _: () = assert!(variants_covered(
+        LEVEL,
+        "status",
+        <OrderStatus as FlussoValueMeta>::VARIANTS
+    ));
+
+    // And the no-op leaf check that lets a fragment treat every custom type alike.
+    const _: () = OrderStatus::__flusso_check(&[]);
+}
