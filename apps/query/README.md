@@ -772,17 +772,23 @@ cannot start a search — it has no index to search.
 
 ### Migrating from `path`
 
-`#[flusso(path = "…")]` is gone, and `#[derive(FlussoDocument)]` is a deprecated
-alias for `FlussoRoot`. Two mechanical changes:
+Nothing is deleted: `#[flusso(path = "…")]` and `#[derive(FlussoDocument)]` are
+both **deprecated but still working**, so existing declarations keep compiling
+and warn with the replacement. A `path` struct still validates against its
+level — it just generates no handles and no `query`/`get`, since the surface
+lives on the root now. So the migration is mechanical, and the compiler walks
+you through it:
 
 | Before | After |
 | ------ | ----- |
 | `#[derive(FlussoDocument)] #[flusso(index = "users")]` on the root | `#[derive(FlussoRoot)] #[flusso(index = "users")]` |
-| `#[derive(FlussoDocument)] #[flusso(index = "users", path = "orders")]` | `#[derive(FlussoFragment)]` — drop both attributes |
+| `#[derive(FlussoDocument)] #[flusso(index = "users", path = "orders")]` | `#[derive(FlussoFragment)]` — drop the whole attribute |
 | `Order::status()` (child struct's handle) | `UserOrders::status()` (root-generated namespace) |
 | `Account::tier()` (object child struct) | `User::account().tier()` (chains from the parent) |
 
-The attribute error names the replacement if you miss one.
+Both deprecations carry the replacement in their note, so `cargo build` names
+what to change and where. Only the call sites in the last two rows are a hard
+error; the struct declarations keep compiling until you get to them.
 
 ### What the derive expands to
 

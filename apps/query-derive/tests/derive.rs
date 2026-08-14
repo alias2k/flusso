@@ -690,3 +690,33 @@ fn a_field_can_rename_its_generated_namespace() -> Result {
     assert_eq!(body["sort"][0]["orders.total"]["nested"]["path"], "orders");
     Ok(())
 }
+
+// The deprecated `path = "…"` form still compiles and still validates against
+// that level — it just generates nothing. Kept so existing declarations survive
+// the rename while their call sites move to the root's namespaces.
+#[allow(deprecated)]
+mod deprecated_path {
+    use flusso_query::FlussoRoot;
+
+    #[derive(serde::Deserialize, FlussoRoot)]
+    #[flusso(
+        index = "users",
+        path = "orders",
+        config = "tests/fixtures/flusso.toml"
+    )]
+    pub(super) struct LegacyOrder {
+        pub(super) status: String,
+        pub(super) total: f64,
+    }
+
+    #[test]
+    fn a_path_struct_still_validates_against_its_level() {
+        // It compiled, so `status`/`total` matched `users.orders`. It has no
+        // handles and no entry points — those live on the root now.
+        let order = LegacyOrder {
+            status: "paid".into(),
+            total: 1.0,
+        };
+        assert_eq!(order.status, "paid");
+    }
+}

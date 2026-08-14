@@ -284,7 +284,7 @@ The full user manual lives at **[alias2k.github.io/flusso](https://alias2k.githu
 | --- | --- |
 | [Authoring schemas](https://alias2k.github.io/flusso/guides/schema-authoring.html) | Every `*.schema.yml` key: field types, joins, aggregates, filters, validation rules |
 | [Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html) | Every `flusso.toml` key + source/sink option + environment variable — secrets, `FLUSSO_*` flags, index prefix, logging & telemetry |
-| [Querying](https://alias2k.github.io/flusso/guides/querying.html) | `flusso-query`, the typed query-side client and its `#[derive(FlussoDocument)]` (source: [`apps/query`](apps/query/README.md)) |
+| [Querying](https://alias2k.github.io/flusso/guides/querying.html) | `flusso-query`, the typed query-side client — one `#[derive(FlussoRoot)]` per index, `#[derive(FlussoFragment)]` for the shapes below it (source: [`apps/query`](apps/query/README.md)) |
 | [Deploying](https://alias2k.github.io/flusso/guides/deploying.html) | Docker recipes — smallest image, baking/compiling a `flusso.lock`, scoped `.dockerignore` |
 | [`dev/README.md`](dev/README.md) | The dev stack walk-through |
 | [`deploy/helm/flusso/README.md`](deploy/helm/flusso/README.md) | The Helm chart |

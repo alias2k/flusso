@@ -122,6 +122,9 @@ struct Attrs {
     index: String,
     /// Span of the `index = "…"` value — where index-resolution errors point.
     index_span: Span,
+    /// The **deprecated** `path = "…"`: still validates against that level, but
+    /// generates nothing. Superseded by `#[derive(FlussoFragment)]`.
+    path: Option<LitStr>,
     config: Option<String>,
     rename_all: Option<String>,
 }
@@ -130,6 +133,7 @@ impl Attrs {
     fn parse(input: &DeriveInput) -> syn::Result<Self> {
         let mut index: Option<String> = None;
         let mut index_span = input.ident.span();
+        let mut path: Option<LitStr> = None;
         let mut config: Option<String> = None;
         let mut rename_all: Option<String> = None;
 
@@ -141,18 +145,15 @@ impl Attrs {
                         index_span = lit.span();
                         index = Some(lit.value());
                     } else if meta.path.is_ident("path") {
-                        return Err(meta.error(
-                            "`path` is gone — the root generates handles for every level of \
-                             the index. Make this a `#[derive(FlussoFragment)]` shape and embed \
-                             it; it is validated at whatever path it lands on",
-                        ));
+                        path = Some(meta.value()?.parse()?);
                     } else if meta.path.is_ident("config") {
                         let lit: LitStr = meta.value()?.parse()?;
                         config = Some(lit.value());
                     } else {
-                        return Err(
-                            meta.error("unknown `flusso` attribute (expected `index` or `config`)")
-                        );
+                        return Err(meta.error(
+                            "unknown `flusso` attribute (expected `index`, `config`, \
+                                 or the deprecated `path`)",
+                        ));
                     }
                     Ok(())
                 })?;
@@ -180,6 +181,7 @@ impl Attrs {
         Ok(Attrs {
             index,
             index_span,
+            path,
             config,
             rename_all,
         })
@@ -220,6 +222,27 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         Ok(resolved) => resolved,
         Err(message) => return syn::Error::new(attrs.index_span, message).to_compile_error(),
     };
+
+    // The deprecated `path = "…"` form: validate against that level and stop.
+    // It generates no handles and no entry points — the surface lives on the
+    // root now — so it only keeps existing struct declarations compiling while
+    // their call sites move.
+    if let Some(path) = &attrs.path {
+        let level = match resolved.fields_at(&path.value()) {
+            Ok(level) => level,
+            Err(message) => return syn::Error::new(path.span(), message).to_compile_error(),
+        };
+        let scope = format!("`{}` in index `{}`", path.value(), attrs.index);
+        let mut out = deprecation_notice(&input.ident, path);
+        let (errors, asserts) = doc::validate(level, &fields, &scope);
+        out.extend(asserts);
+        out.extend(doc::embed_checks(level, &fields, &scope));
+        out.extend(fragment::embeddable_leaf(&input.ident));
+        for error in errors {
+            out.extend(error.to_compile_error());
+        }
+        return out;
+    }
 
     let level = resolved.mapping.fields.as_slice();
     let scope = format!("index `{}`", attrs.index);
@@ -270,4 +293,38 @@ mod dev_deps {
     use serde as _;
     use serde_json as _;
     use trybuild as _;
+}
+
+/// A real deprecation warning for `#[flusso(path = "…")]`.
+///
+/// A proc macro can't warn directly on stable, but it can emit a `#[deprecated]`
+/// item and use it. Unlike the enum-coverage case, the condition here is known
+/// at macro time — the attribute is either written or it isn't — so the warning
+/// fires exactly when it should.
+fn deprecation_notice(ident: &syn::Ident, path: &LitStr) -> TokenStream2 {
+    let note = format!(
+        "`path = \"{}\"` is deprecated: drop the `#[flusso(…)]` attribute and derive \
+         `FlussoFragment` instead. A fragment is validated wherever it is embedded, so one \
+         declaration covers every path it appears at; handles for that level come from the \
+         root's generated namespace. This form still validates, but generates no handles \
+         and no `query`/`get`.",
+        path.value(),
+    );
+    let flag = syn::Ident::new(
+        &format!(
+            "__FLUSSO_DEPRECATED_PATH_{}",
+            ident.to_string().to_uppercase()
+        ),
+        path.span(),
+    );
+    quote::quote_spanned! {path.span()=>
+        #[deprecated(note = #note)]
+        #[allow(non_upper_case_globals)]
+        const #flag: () = ();
+
+        const _: () = {
+            #[allow(clippy::let_unit_value)]
+            let _ = #flag;
+        };
+    }
 }

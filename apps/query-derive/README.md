@@ -19,7 +19,7 @@ use flusso_query::{FlussoFragment, FlussoRoot};
 | `FlussoMap` | A newtype wrapper over a dynamic-key `map` field. |
 | `FlussoMultiDocument` | The combined-search union over several document types. |
 
-`FlussoDocument` still works as a deprecated alias for `FlussoRoot`.
+`FlussoDocument` still works as a deprecated alias for `FlussoRoot`, and `#[flusso(path = "…")]` still validates against its level (generating nothing). Both warn with the replacement — nothing was deleted.
 
 ## What `FlussoRoot` does
 
