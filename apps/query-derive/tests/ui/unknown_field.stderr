@@ -1,4 +1,4 @@
-error: no field `bogus` in index `users` — known fields: createdAt, email, fullName, id, location, orderCount, orders, ownerId, tier
+error: no field `bogus` in index `users` — known fields: billingAddress, createdAt, email, fullName, id, location, orderCount, orders, ownerId, shippingAddress, tier
  --> tests/ui/unknown_field.rs:7:5
   |
 7 |     bogus: String,

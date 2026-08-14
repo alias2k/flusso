@@ -988,7 +988,14 @@ pub(crate) fn embed_checks(
             MappingType::Object | MappingType::Nested
         ) && resolved.mapping.map_values.is_none()
         {
+            // Assert embeddability first, so a plain un-derived struct gets
+            // `FlussoValueMeta`'s directed note ("add a derive, or mark the
+            // field opaque") rather than only a bare "no `__flusso_check`".
             calls.extend(quote::quote_spanned! {span=>
+                const _: fn() = || {
+                    fn __assert_embeddable<__T: ::flusso_query::FlussoValueMeta>() {}
+                    __assert_embeddable::<#element>();
+                };
                 <#element>::__flusso_check(::flusso_query::children(__FLUSSO_LEVEL, #key));
             });
         }

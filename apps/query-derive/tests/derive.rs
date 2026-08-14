@@ -618,3 +618,47 @@ fn a_transparent_newtype_inherits_the_whole_surface() -> Result {
     );
     Ok(())
 }
+
+// The case the whole feature exists for: ONE shape, TWO paths in the SAME index.
+// `Address` names neither, and is validated against each.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(rename_all = "camelCase")]
+struct Address {
+    city: String,
+    postal_code: Option<String>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[serde(rename_all = "camelCase")]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct AddressUser {
+    id: i32,
+    billing_address: Address,
+    shipping_address: Address,
+}
+
+#[test]
+fn one_fragment_serves_two_paths_in_the_same_index() -> Result {
+    // Compiling means `Address` was checked twice — once per embedding.
+    // Handles come from the root, so each path has its own, correctly prefixed.
+    let body = AddressUser::query()
+        .filter(AddressUser::billing_address().city().eq("Rome"))
+        .filter(AddressUser::shipping_address().city().eq("Milan"))
+        .body();
+    let filters = &body["query"]["bool"]["filter"];
+    assert_eq!(filters[0]["term"]["billingAddress.city"], "Rome");
+    assert_eq!(filters[1]["term"]["shippingAddress.city"], "Milan");
+    Ok(())
+}
+
+#[test]
+fn a_generated_nested_namespace_carries_its_path_for_sorting() -> Result {
+    // Sorting inside a `nested` array needs the boundary chain, which the
+    // generated namespace supplies through `FlussoScope::PATH`.
+    let body = User::query().sorts([UserOrders::total().desc()]).body();
+    let sort = &body["sort"][0]["orders.total"];
+    assert_eq!(sort["order"], "desc");
+    assert_eq!(sort["nested"]["path"], "orders");
+    Ok(())
+}

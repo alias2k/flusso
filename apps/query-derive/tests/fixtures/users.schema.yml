@@ -41,6 +41,23 @@ fields:
         fields:
           - keyword: carrier
             required: true
+  # Two groups with the SAME shape, at two different paths — one fragment
+  # covers both, and is checked against each.
+  - object: billingAddress
+    fields:
+      - keyword: city
+        required: true
+      - keyword: postalCode
+        column: billing_postal_code
+        required: false
+  - object: shippingAddress
+    fields:
+      - keyword: city
+        required: true
+      - keyword: postalCode
+        column: shipping_postal_code
+        required: false
+
   - count: orderCount
     table: orders
     foreign_key: user_id
