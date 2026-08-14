@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Wrong`: field `status` does not exist at the path this struct is embedded at
+  --> tests/ui/fragment_flatten_wrong_level.rs:17:12
+   |
+17 |     wrong: Wrong,
+   |            ^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Wrong::__flusso_check`
+  --> tests/ui/fragment_flatten_wrong_level.rs:9:13
+   |
+ 9 |     status: String,
+   |             ^^^^^^ the failure occurred here

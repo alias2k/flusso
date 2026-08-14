@@ -537,3 +537,36 @@ fn a_root_validates_the_fragments_it_embeds_against_the_real_mapping() -> Result
     assert_eq!(body["query"]["bool"]["filter"][0]["term"]["id"], 1);
     Ok(())
 }
+
+// A shared field group, flattened in. Its keys live at the *enclosing* level, so
+// the root checks it against that level rather than looking up a container
+// field named `common` — which doesn't exist in the mapping at all.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct Common {
+    id: i32,
+    email: String,
+}
+
+#[derive(serde::Deserialize, FlussoDocument)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct FlatUser {
+    #[serde(flatten)]
+    common: Common,
+    #[flusso(rename = "fullName")]
+    full_name: Option<String>,
+}
+
+#[test]
+fn a_flattened_group_is_checked_against_the_enclosing_level() -> Result {
+    // `id` and `email` are root fields of `users`; nothing named `common` is.
+    // Compiling proves the group was checked here, not one level down.
+    let body = FlatUser::query()
+        .filter(FlatUser::email().eq("ada@x.com"))
+        .body();
+    assert_eq!(
+        body["query"]["bool"]["filter"][0]["term"]["email"],
+        "ada@x.com"
+    );
+    Ok(())
+}
