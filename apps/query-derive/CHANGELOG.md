@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.15.0...flusso-query-derive-v0.15.1) - 2026-08-17
+
+### Fixed
+
+- *(query-derive)* finish the map-in-fragment story the derive fix started
+
+### Other
+
+- Merge branch 'main' into fix/query-derive-map-in-fragments
+
 ## [0.15.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.14.0...flusso-query-derive-v0.15.0) - 2026-08-17
 
 ### Fixed
