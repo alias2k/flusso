@@ -114,8 +114,8 @@ mod search;
 mod tests;
 
 pub use check::{
-    FieldSpec, FlussoValueMeta, KindTag, array, children, exists, kind_is, map_value_is, nullable,
-    variants_covered,
+    FieldSpec, FlussoValueMeta, KindTag, array, children, exists, kind_is, map_kind_ok,
+    map_value_is, nullable, variants_covered,
 };
 pub use client::Client;
 pub use error::{Error, Result};

@@ -295,6 +295,15 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 key,
                 "declares a variant the schema does not list for this field",
             );
+            let map_msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is `{}`, a map type — so the schema field here must be a `map` with a \
+                     matching value kind",
+                    render(element)
+                ),
+            );
             checks.extend(quote_spanned! {span=>
                 assert!(
                     ::flusso_query::kind_is(
@@ -302,6 +311,15 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                         <#element as ::flusso_query::FlussoValueMeta>::KINDS,
                     ),
                     #kind_msg
+                );
+                // A map wrapper carries its value kind, so check that too —
+                // otherwise this would only prove the field is object-ish.
+                assert!(
+                    ::flusso_query::map_kind_ok(
+                        level, #key,
+                        <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                    ),
+                    #map_msg
                 );
                 assert!(
                     ::flusso_query::variants_covered(

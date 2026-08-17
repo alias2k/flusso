@@ -273,8 +273,12 @@ impl FlussoValue<kind::Date> for chrono::DateTime<chrono::Utc> {}
 /// The canonical map type — `HashMap<String, V>` where `V` is a `K` value — is
 /// pre-implemented via a blanket impl, so `HashMap<String, String>` is a valid
 /// `text`/`keyword` map and `HashMap<String, i64>` a valid `long` map with no
-/// extra code. A whole-map newtype wrapper (`struct Translations(HashMap<…>)`)
-/// opts in with `#[derive(FlussoMap)]`. `FlussoDocument` emits a deferred bound
+/// extra code. A type of your own that stands in for a map opts in with
+/// `#[derive(FlussoMap)]` — a newtype, or a named-field struct whose *on-disk*
+/// shape is a flat object of same-kind values. Prefer the derive to a
+/// hand-written `impl FlussoMap<K>`: it also emits the marker a fragment's
+/// embed check reads, and carries the value kind so the check reaches the
+/// map's values rather than stopping at "this field is an object". `FlussoDocument` emits a deferred bound
 /// on this trait for a `map` field, so the document only compiles when its type
 /// genuinely fits the declared value kind.
 #[diagnostic::on_unimplemented(

@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Localized`: field `title` is `Translation`, a map type — so the schema field here must be a `map` with a matching value kind
+  --> tests/ui/fragment_map_wrong_values.rs:31:15
+   |
+31 | const _: () = Localized::__flusso_check(LEVEL);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Localized::__flusso_check`
+  --> tests/ui/fragment_map_wrong_values.rs:17:12
+   |
+17 |     title: Translation,
+   |            ^^^^^^^^^^^ the failure occurred here
