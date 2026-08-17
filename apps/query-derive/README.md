@@ -33,7 +33,7 @@ time and **with no database**:
    nullability matches — reporting every problem at once with precise spans;
 3. generates the typed query surface for the **whole index**: a handle for every field at
    every level, through one generated namespace per container (`User::account().tier()`
-   for an object, `user_scope::Orders::total()` for a `nested` array), plus `get`/`query` and
+   for an object, `flusso_user_query::Orders::total()` for a `nested` array), plus `get`/`query` and
    `SCHEMA_HASH`;
 4. bakes the resolved mapping into const data and drives the check into every fragment it
    embeds — recursively, once per embedding site.

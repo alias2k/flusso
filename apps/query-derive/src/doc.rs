@@ -556,8 +556,8 @@ fn is_primitive(ident: Option<&str>) -> bool {
 ///   type with associated fns: `UserOrders::total()`, and it implements
 ///   `FlussoScope` so a nesting-aware sort can read its `PATH`.
 ///
-/// Namespaces live in a generated `<root>_scope` module, named for their level
-/// (`user_scope::Orders`, `user_scope::OrdersItems`), so nothing the derive emits
+/// Namespaces live in a generated `flusso_<root>_query` module, named for their level
+/// (`flusso_user_query::Orders`, `flusso_user_query::OrdersItems`), so nothing the derive emits
 /// lands in the caller's namespace. The root additionally
 /// implements `FlussoRoot` (`INDEX`/`SCHEMA_HASH`, inheriting `query`/`get`) —
 /// the entry points a child level must not have.
@@ -587,9 +587,13 @@ pub(crate) fn codegen(
     // (a fragment named after the level it sits at) a redefinition — and the
     // derive's own `#[derive(Copy)]` then landed on *their* struct, so the real
     // error was buried under a cascade.
+    //
+    // `flusso_<root>_query` rather than something short: the module is the one
+    // name the caller can still collide with, and this one reads as obviously
+    // generated, so nobody picks it by accident.
     let module = scope_mod.cloned().unwrap_or_else(|| {
         Ident::new(
-            &format!("{}_scope", to_snake_case(&ident.to_string())),
+            &format!("flusso_{}_query", to_snake_case(&ident.to_string())),
             ident.span(),
         )
     });
@@ -807,7 +811,7 @@ impl Namespaces {
                 return renamed.clone();
             }
             // Directly under the root the module supplies the qualification, so
-            // the type is named for its level alone: `user_scope::Orders`.
+            // the type is named for its level alone: `flusso_user_query::Orders`.
             return Ident::new(&to_pascal_case(field), Span::call_site());
         }
         Ident::new(

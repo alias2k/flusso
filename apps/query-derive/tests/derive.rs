@@ -37,7 +37,7 @@ fn generated_surface_builds_queries() -> Result {
         .filter(User::email().eq("ada@example.com")) // keyword handle
         .filter(User::order_count().gte(5)) // count → Number
         .query(User::full_name().matches("ada")) // text (renamed fullName)
-        .filter(User::orders().any(user_scope::Orders::status().eq("paid"))) // nested + child handle
+        .filter(User::orders().any(flusso_user_query::Orders::status().eq("paid"))) // nested + child handle
         .filter(User::location().within(Distance::km(10.0), GeoPoint::new(52.37, 4.90))) // geo, not projected
         .body();
 
@@ -110,7 +110,10 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     // the typed value directly, matched against its serde string form.
     let body = TypedUser::query()
         .filter(TypedUser::email().eq("ada@example.com")) // &str still works
-        .filter(TypedUser::orders().any(typed_user_scope::Orders::status().eq(OrderStatus::Paid)))
+        .filter(
+            TypedUser::orders()
+                .any(flusso_typed_user_query::Orders::status().eq(OrderStatus::Paid)),
+        )
         .body();
 
     let json = body.to_string();
@@ -127,7 +130,7 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
 #[test]
 fn ordered_enum_sorts_by_declared_order_on_the_sort_subfield() -> Result {
     let body = TypedUser::query()
-        .sort(typed_user_scope::Orders::status().asc())
+        .sort(flusso_typed_user_query::Orders::status().asc())
         .body();
 
     let json = body.to_string();
@@ -150,14 +153,15 @@ fn number_handle_accepts_any_decimal_value_no_conversion() -> Result {
     let body = TypedUser::query()
         // `rust_decimal::Decimal` — the headline case, no `as f64`.
         .filter(
-            TypedUser::orders().any(typed_user_scope::Orders::total().eq(Decimal::new(105_050, 2))),
+            TypedUser::orders()
+                .any(flusso_typed_user_query::Orders::total().eq(Decimal::new(105_050, 2))),
         )
         // a bare integer literal widens losslessly into `decimal`.
-        .filter(TypedUser::orders().any(typed_user_scope::Orders::total().gte(100)))
+        .filter(TypedUser::orders().any(flusso_typed_user_query::Orders::total().gte(100)))
         // and a custom newtype over `Decimal`, as a query value.
         .filter(
             TypedUser::orders()
-                .any(typed_user_scope::Orders::total().lt(Money(Decimal::new(500_000, 2)))),
+                .any(flusso_typed_user_query::Orders::total().lt(Money(Decimal::new(500_000, 2)))),
         )
         .body();
 
@@ -588,7 +592,7 @@ fn a_transparent_newtype_inherits_the_whole_surface() -> Result {
     // `UserFields` was validated against the root level through the wrapper.
     let body = UserView::query()
         .filter(UserView::email().eq("ada@x.com"))
-        .filter(UserView::orders().any(user_view_scope::Orders::status().eq("paid")))
+        .filter(UserView::orders().any(flusso_user_view_query::Orders::status().eq("paid")))
         .body();
     assert_eq!(
         body["query"]["bool"]["filter"][0]["term"]["email"],
@@ -635,7 +639,7 @@ fn a_generated_nested_namespace_carries_its_path_for_sorting() -> Result {
     // Sorting inside a `nested` array needs the boundary chain, which the
     // generated namespace supplies through `FlussoScope::PATH`.
     let body = User::query()
-        .sorts([user_scope::Orders::total().desc()])
+        .sorts([flusso_user_query::Orders::total().desc()])
         .body();
     let sort = &body["sort"][0]["orders.total"];
     assert_eq!(sort["order"], "desc");
@@ -660,8 +664,8 @@ fn a_field_can_rename_its_generated_namespace() -> Result {
     // `Purchases`, not the default `Orders` — and the sort still renders the
     // nested boundary, so the renamed type carries the same `PATH`.
     let body = ScopedUser::query()
-        .filter(ScopedUser::orders().any(scoped_user_scope::Purchases::status().eq("paid")))
-        .sorts([scoped_user_scope::Purchases::total().desc()])
+        .filter(ScopedUser::orders().any(flusso_scoped_user_query::Purchases::status().eq("paid")))
+        .sorts([flusso_scoped_user_query::Purchases::total().desc()])
         .body();
     assert_eq!(
         body["query"]["bool"]["filter"][0]["nested"]["path"],
@@ -680,7 +684,13 @@ fn an_optional_nested_filter_means_different_things_inside_and_outside() -> Resu
     // INNER: an absent element predicate is *not* "skip" — `any` falls back to
     // `match_all`, so the clause becomes "has at least one order".
     let inner = User::query()
-        .filter(User::orders().any(absent.clone().map(|v| user_scope::Orders::status().eq(v))))
+        .filter(
+            User::orders().any(
+                absent
+                    .clone()
+                    .map(|v| flusso_user_query::Orders::status().eq(v)),
+            ),
+        )
         .body();
     assert_eq!(
         inner["query"]["bool"]["filter"][0]["nested"]["path"],
@@ -691,7 +701,7 @@ fn an_optional_nested_filter_means_different_things_inside_and_outside() -> Resu
     // OUTER: an absent nested clause drops out entirely — this is the one that
     // means "skip this filter when the request didn't ask for it".
     let outer = User::query()
-        .filter(absent.map(|v| User::orders().any(user_scope::Orders::status().eq(v))))
+        .filter(absent.map(|v| User::orders().any(flusso_user_query::Orders::status().eq(v))))
         .body();
     assert!(outer["query"]["match_all"].is_object());
 

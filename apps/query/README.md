@@ -83,7 +83,7 @@ surface. The only input is the **index name** — it finds `flusso.toml` itself 
 
 ```rust
 use flusso_query::{Client, FlussoFragment, FlussoRoot};
-use user_scope::{Addresses, Orders};   // generated scopes, imported like any type
+use flusso_user_query::{Addresses, Orders};   // generated scopes, imported like any type
 
 /// A `users` document — *you* write this. It's a **projection**: it deserializes
 /// the fields below and omits the rest of the index (addresses, profile,
@@ -526,11 +526,11 @@ each variant's `(INDEX, SCHEMA_HASH)` and a `decode` that matches on
 
 Because the scope is part of the type, a query is a value you can build, name,
 store, and reuse. A **nested** array introduces its own scope, and the root
-generates a namespace for it — `user_scope::Orders` for `users.orders` — whose handles are
-tagged with that scope, so they produce `Query<user_scope::Orders>`, not `Query<Root>`:
+generates a namespace for it — `flusso_user_query::Orders` for `users.orders` — whose handles are
+tagged with that scope, so they produce `Query<flusso_user_query::Orders>`, not `Query<Root>`:
 
 ```rust
-use user_scope::Orders;      // the generated scope for `users.orders`
+use flusso_user_query::Orders;      // the generated scope for `users.orders`
 
 // Reusable — a plain function returning a query:
 fn big_delivered() -> Query<Orders> {
@@ -786,7 +786,7 @@ the point: the compiler finds every site for you. It is mechanical:
 | `use flusso_query::FlussoIndex;` (the trait, for `query`/`get`) | `use flusso_query::FlussoRoot;` — one name now covers trait and derive |
 | `FlussoDocument` as a **trait** bound (the `PATH` carrier) | `FlussoScope` |
 | `#[derive(FlussoDocument)] #[flusso(index = "users", path = "orders")]` | `#[derive(FlussoFragment)]` — drop the whole attribute |
-| `Order::status()` (child struct's handle) | `user_scope::Orders::status()` (root-generated namespace) |
+| `Order::status()` (child struct's handle) | `flusso_user_query::Orders::status()` (root-generated namespace) |
 | `Account::tier()` (object child struct) | `User::account().tier()` (chains from the parent) |
 
 The `path` attribute error names its replacement; the rest are unresolved
@@ -808,9 +808,9 @@ impl User {
     pub fn id() -> Number<kind::Integer> { /* … */ }
     pub fn email() -> Keyword { /* … */ }
     pub fn full_name() -> Text { /* … */ }
-    pub fn account() -> user_scope::Account { /* … */ }             // object → its namespace, chained
-    pub fn addresses() -> Nested<Root, user_scope::Addresses> { /* … */ }
-    pub fn orders() -> Nested<Root, user_scope::Orders> { /* … */ }
+    pub fn account() -> flusso_user_query::Account { /* … */ }             // object → its namespace, chained
+    pub fn addresses() -> Nested<Root, flusso_user_query::Addresses> { /* … */ }
+    pub fn orders() -> Nested<Root, flusso_user_query::Orders> { /* … */ }
     pub fn order_count() -> Number<kind::Long> { /* … */ }
     // …one per schema field.
 }
@@ -821,11 +821,11 @@ impl FlussoRoot for User {
 }
 ```
 
-Plus **one namespace per container level**, generated into a `user_scope` module
-(`<root>_scope`, snake_cased) so nothing lands in your namespace:
+Plus **one namespace per container level**, generated into a `flusso_user_query` module
+(`flusso_<root>_query`, snake_cased) so nothing lands in your namespace:
 
 ```rust
-pub mod user_scope {
+pub mod flusso_user_query {
     // An object flattens into its enclosing scope, so its namespace chains from
     // the parent — fields are `&self` methods returning handles in that scope.
     pub struct Account;
@@ -853,7 +853,7 @@ pub mod user_scope {
 So an object chains from the root, and a nested scope is imported once:
 
 ```rust
-use user_scope::Orders;
+use flusso_user_query::Orders;
 
 User::account().tier().eq("gold")
 User::orders().any(Orders::total().gt(100))
@@ -863,9 +863,9 @@ User::orders().any(Orders::shipping().carrier().eq("dhl"))
 That last one — an object *inside* a nested array — works because the root knows
 the scope tag. A child struct never could, which is why it used to be rejected.
 
-Generated types live in a `<root>_scope` module (`User` → `user_scope`), never
+Generated types live in a `flusso_<root>_query` module (`User` → `flusso_user_query`), never
 in your own namespace — so your `struct UserOrders` and the generated
-`user_scope::Orders` coexist. Import what you query: `use user_scope::Orders;`.
+`flusso_user_query::Orders` coexist. Import what you query: `use flusso_user_query::Orders;`.
 
 If a name still reads wrong, or a deep chain gets unwieldy, rename it on the
 field and everything under it follows:
@@ -879,8 +879,9 @@ struct User {
 }
 ```
 
-The module name itself is the one thing that can still clash — if you already
-have a `user_scope` module, rename the generated one:
+The module name is the one thing that could still clash in principle. It reads
+as obviously generated precisely so that never happens, but if you somehow have a
+`flusso_user_query` module already, rename the generated one:
 
 ```rust
 #[flusso(index = "users", scope_mod = "user_queries")]

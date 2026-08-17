@@ -53,11 +53,11 @@ struct User {
 #[test]
 fn user_types_named_after_every_level_coexist_with_the_generated_scopes() {
     // Compiling at all is the assertion: the user's `UserOrders` / `Orders` /
-    // `UserBillingAddress` and the generated `user_scope::*` are different
+    // `UserBillingAddress` and the generated `flusso_user_query::*` are different
     // types living in different namespaces.
     let body = User::query()
         .filter(User::billing_address().city().eq("Rome"))
-        .filter(User::orders().any(user_scope::Orders::status().eq("paid")))
+        .filter(User::orders().any(flusso_user_query::Orders::status().eq("paid")))
         .body();
     assert_eq!(
         body["query"]["bool"]["filter"][0]["term"]["billingAddress.city"],
@@ -77,7 +77,7 @@ fn the_users_own_type_and_the_generated_scope_are_distinct() {
         status: "paid".into(),
     };
     assert_eq!(mine.status, "paid");
-    let generated = user_scope::Orders;
+    let generated = flusso_user_query::Orders;
     assert_eq!(format!("{generated:?}"), "Orders");
 }
 
@@ -95,10 +95,10 @@ struct Customer {
 #[test]
 fn two_roots_over_one_index_get_separate_scope_modules() {
     let a = User::query()
-        .filter(User::orders().any(user_scope::Orders::status().eq("paid")))
+        .filter(User::orders().any(flusso_user_query::Orders::status().eq("paid")))
         .body();
     let b = Customer::query()
-        .filter(Customer::orders().any(customer_scope::Orders::status().eq("paid")))
+        .filter(Customer::orders().any(flusso_customer_query::Orders::status().eq("paid")))
         .body();
     assert_eq!(a["query"], b["query"]);
 }
@@ -108,7 +108,7 @@ fn two_roots_over_one_index_get_separate_scope_modules() {
 // The one thing that *can* still clash is the module, if the caller already has
 // one by that name. `scope_mod` is the escape.
 
-mod invoice_scope {
+mod flusso_invoice_query {
     /// Claims the name the derive would otherwise generate for `Invoice`.
     #[derive(Debug)]
     pub(crate) struct AlreadyMine;
@@ -126,7 +126,7 @@ struct Invoice {
 
 #[test]
 fn scope_mod_escapes_a_module_name_the_caller_already_uses() {
-    let _ = invoice_scope::AlreadyMine;
+    let _ = flusso_invoice_query::AlreadyMine;
     let body = Invoice::query()
         .filter(Invoice::orders().any(invoice_queries::Orders::status().eq("paid")))
         .body();

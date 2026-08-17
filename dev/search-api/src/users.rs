@@ -14,7 +14,7 @@ use crate::error::ApiError;
 // ones this module queries so call sites stay short.
 use crate::response::Page;
 use crate::shared::{LineItem, OrderStatus};
-use crate::users::user_scope::{Addresses, Orders};
+use crate::users::flusso_user_query::{Addresses, Orders};
 
 // `pub(crate)`: the cross-index endpoints in `global` reuse this document and
 // its generated handles (same for `Product` and `Order`). Handles for every

@@ -13,8 +13,8 @@ use flusso_query::{
     Client, FlussoFragment, FlussoMultiDocument, FlussoRoot, FlussoValue, Search, SortBuilder,
     Sortable, SortOrder,
 };
-// Generated scope types live in `<root>_scope`; import the ones you query.
-use user_scope::Orders;
+// Generated scope types live in `flusso_<root>_query`; import the ones you query.
+use flusso_user_query::Orders;
 
 // ── Custom value type: a closed enum stored as a keyword ────────────────────
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, FlussoValue)]

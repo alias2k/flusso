@@ -12,7 +12,7 @@ use flusso_query::{FlussoRoot, Sortable};
 use crate::orders::Order;
 use crate::products::Product;
 use crate::users::User;
-use crate::users::user_scope::{Addresses, Orders};
+use crate::users::flusso_user_query::{Addresses, Orders};
 
 /// The `users` root reaches every level of its index, whether or not the
 /// projection deserializes it.
@@ -68,7 +68,7 @@ fn a_local_type_named_after_a_level_is_fine() {
 /// shape fits `users.orders.items` *and* `orders.items`.
 #[test]
 fn one_fragment_serves_both_indexes() {
-    use crate::orders::order_scope::Items;
+    use crate::orders::flusso_order_query::Items;
 
     let from_orders = Order::query()
         .filter(Order::items().any(Items::quantity().gte(2)))
@@ -80,10 +80,9 @@ fn one_fragment_serves_both_indexes() {
 
     // The same shape, three levels down in a different index.
     let from_users = User::query()
-        .filter(
-            User::orders()
-                .any(Orders::items().any(crate::users::user_scope::OrdersItems::quantity().gte(2))),
-        )
+        .filter(User::orders().any(
+            Orders::items().any(crate::users::flusso_user_query::OrdersItems::quantity().gte(2)),
+        ))
         .body();
     assert_eq!(
         from_users["query"]["bool"]["filter"][0]["nested"]["path"],
