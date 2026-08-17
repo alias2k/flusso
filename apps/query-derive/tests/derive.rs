@@ -37,7 +37,7 @@ fn generated_surface_builds_queries() -> Result {
         .filter(User::email().eq("ada@example.com")) // keyword handle
         .filter(User::order_count().gte(5)) // count → Number
         .query(User::full_name().matches("ada")) // text (renamed fullName)
-        .filter(User::orders().any(UserOrders::status().eq("paid"))) // nested + child handle
+        .filter(User::orders().any(user_scope::Orders::status().eq("paid"))) // nested + child handle
         .filter(User::location().within(Distance::km(10.0), GeoPoint::new(52.37, 4.90))) // geo, not projected
         .body();
 
@@ -110,7 +110,7 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     // the typed value directly, matched against its serde string form.
     let body = TypedUser::query()
         .filter(TypedUser::email().eq("ada@example.com")) // &str still works
-        .filter(TypedUser::orders().any(TypedUserOrders::status().eq(OrderStatus::Paid)))
+        .filter(TypedUser::orders().any(typed_user_scope::Orders::status().eq(OrderStatus::Paid)))
         .body();
 
     let json = body.to_string();
@@ -127,7 +127,7 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
 #[test]
 fn ordered_enum_sorts_by_declared_order_on_the_sort_subfield() -> Result {
     let body = TypedUser::query()
-        .sort(TypedUserOrders::status().asc())
+        .sort(typed_user_scope::Orders::status().asc())
         .body();
 
     let json = body.to_string();
@@ -149,12 +149,15 @@ fn number_handle_accepts_any_decimal_value_no_conversion() -> Result {
 
     let body = TypedUser::query()
         // `rust_decimal::Decimal` — the headline case, no `as f64`.
-        .filter(TypedUser::orders().any(TypedUserOrders::total().eq(Decimal::new(105_050, 2))))
+        .filter(
+            TypedUser::orders().any(typed_user_scope::Orders::total().eq(Decimal::new(105_050, 2))),
+        )
         // a bare integer literal widens losslessly into `decimal`.
-        .filter(TypedUser::orders().any(TypedUserOrders::total().gte(100)))
+        .filter(TypedUser::orders().any(typed_user_scope::Orders::total().gte(100)))
         // and a custom newtype over `Decimal`, as a query value.
         .filter(
-            TypedUser::orders().any(TypedUserOrders::total().lt(Money(Decimal::new(500_000, 2)))),
+            TypedUser::orders()
+                .any(typed_user_scope::Orders::total().lt(Money(Decimal::new(500_000, 2)))),
         )
         .body();
 
@@ -585,7 +588,7 @@ fn a_transparent_newtype_inherits_the_whole_surface() -> Result {
     // `UserFields` was validated against the root level through the wrapper.
     let body = UserView::query()
         .filter(UserView::email().eq("ada@x.com"))
-        .filter(UserView::orders().any(UserViewOrders::status().eq("paid")))
+        .filter(UserView::orders().any(user_view_scope::Orders::status().eq("paid")))
         .body();
     assert_eq!(
         body["query"]["bool"]["filter"][0]["term"]["email"],
@@ -631,7 +634,9 @@ fn one_fragment_serves_two_paths_in_the_same_index() -> Result {
 fn a_generated_nested_namespace_carries_its_path_for_sorting() -> Result {
     // Sorting inside a `nested` array needs the boundary chain, which the
     // generated namespace supplies through `FlussoScope::PATH`.
-    let body = User::query().sorts([UserOrders::total().desc()]).body();
+    let body = User::query()
+        .sorts([user_scope::Orders::total().desc()])
+        .body();
     let sort = &body["sort"][0]["orders.total"];
     assert_eq!(sort["order"], "desc");
     assert_eq!(sort["nested"]["path"], "orders");
@@ -652,11 +657,11 @@ struct ScopedUser {
 
 #[test]
 fn a_field_can_rename_its_generated_namespace() -> Result {
-    // `Purchases`, not `ScopedUserOrders` — and the sort still renders the
+    // `Purchases`, not the default `Orders` — and the sort still renders the
     // nested boundary, so the renamed type carries the same `PATH`.
     let body = ScopedUser::query()
-        .filter(ScopedUser::orders().any(Purchases::status().eq("paid")))
-        .sorts([Purchases::total().desc()])
+        .filter(ScopedUser::orders().any(scoped_user_scope::Purchases::status().eq("paid")))
+        .sorts([scoped_user_scope::Purchases::total().desc()])
         .body();
     assert_eq!(
         body["query"]["bool"]["filter"][0]["nested"]["path"],

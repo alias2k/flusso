@@ -14,7 +14,7 @@ The contract is the schema. `#[derive(FlussoRoot)]` reads the resolved schema **
 
 You write and own the struct (a **projection** — deserialize the subset you want). The query surface covers the **whole schema**, so you can filter/sort on fields the struct never deserializes.
 
-**Exactly one type names an index: the root.** Everything below it is a `#[derive(FlussoFragment)]` — a shape with no index and no path, validated by whichever root embeds it. One fragment can therefore serve several paths, several indexes, or a shared crate; embed it twice and it is checked twice. `path = "…"` and `FlussoDocument` were **removed** (see "Migrating off the removed form"); write everything with `FlussoRoot` + `FlussoFragment`. Namespace names are root-prefixed (`UserOrders`, `UserOrdersItems`); rename one with `#[flusso(scope = "Purchases")]` on the root field if it clashes with an existing type or reads too long.
+**Exactly one type names an index: the root.** Everything below it is a `#[derive(FlussoFragment)]` — a shape with no index and no path, validated by whichever root embeds it. One fragment can therefore serve several paths, several indexes, or a shared crate; embed it twice and it is checked twice. `path = "…"` and `FlussoDocument` were **removed** (see "Migrating off the removed form"); write everything with `FlussoRoot` + `FlussoFragment`. Generated scope types live in a `<root>_scope` module (`user_scope::Orders`, `user_scope::OrdersItems`) — never in the caller's namespace, so a struct they already named after a level is fine. Import what you query (`use user_scope::Orders;`); rename one with `#[flusso(scope = "Purchases")]` on the root field.
 
 ## Crates and features
 
@@ -45,7 +45,7 @@ pub struct User {
 
 // A fragment names NO index and NO path. `User` validates it against
 // `users.orders`; the same struct could be embedded elsewhere and checked there
-// too. Handles for that level come from the root, as `UserOrders::…`.
+// too. Handles for that level come from the root, as `user_scope::Orders::…`.
 #[derive(Debug, Clone, serde::Deserialize, FlussoFragment)]
 pub struct Order {
     pub status: String,                 // enum → keyword
@@ -63,7 +63,7 @@ let page = User::query()                                     // client-free valu
     .filter(User::email().eq("ada@example.com"))             // keyword → exact
     .filter(User::order_count().gte(5))                      // long → range
     .query(User::full_name().matches("ada lovelace"))        // text → analyzed
-    .filter(User::orders().any(UserOrders::status().eq("delivered")))  // nested, lifted
+    .filter(User::orders().any(user_scope::Orders::status().eq("delivered")))  // nested, lifted
     .sort(User::order_count().desc())
     .from(0).size(20)
     .send(&client).await?;
@@ -116,10 +116,10 @@ Two structs that differed only by path can now be **one** fragment embedded twic
 | Old | New | Why |
 | --- | --- | --- |
 | `Account::tier()` | `User::account().tier()` | an object flattens → chains from its parent |
-| `Order::status()` | `UserOrders::status()` | a `nested` array → a named namespace |
-| `Item::quantity()` | `UserOrdersItems::quantity()` | same rule, one level deeper |
+| `Order::status()` | `user_scope::Orders::status()` | a `nested` array → a named namespace |
+| `Item::quantity()` | `user_scope::OrdersItems::quantity()` | same rule, one level deeper |
 
-**Namespace = root struct name + each path segment PascalCased**, generated beside the root, nothing to import. Scope types move too (`Query<Order>` → `Query<UserOrders>`). On a name collision, rename at the root field: `#[flusso(scope = "Purchases")] orders: Vec<Order>,`.
+**Names live in a module: `<root>_scope`, snake_cased** — `User` → `user_scope`, and the type is named for its level (`Orders`, `OrdersItems`, `BillingAddress`). Generated types never enter your namespace, so a struct of your own named after a level is fine. Import what you use: `use user_scope::Orders;`. Scope types move too (`Query<Order>` → `Query<user_scope::Orders>`). Rename one at the root field: `#[flusso(scope = "Purchases")] orders: Vec<Order>,`.
 
 **4. Newly-checked embeds.** Embedding is checked by default, so a plain un-derived struct in an `object`/`nested` field now errors with the fix in the note. Prefer `#[derive(FlussoFragment)]` (it gets validated) over `#[flusso(opaque)]` (which only silences the check) — and call out every `opaque` you add, since it marks a spot that is no longer verified.
 
@@ -213,7 +213,7 @@ Readability is the goal — **compact *and* clear, both at once.** Aim to keep a
   ```rust
   // the clause is hard to read inline — name it:
   let high_value_delivered = User::orders()
-      .any(UserOrders::status().eq("delivered").and(UserOrders::total().gte(100.0)));
+      .any(user_scope::Orders::status().eq("delivered").and(user_scope::Orders::total().gte(100.0)));
 
   let page = User::query()
       .filter(high_value_delivered)
@@ -226,7 +226,7 @@ Readability is the goal — **compact *and* clear, both at once.** Aim to keep a
 
 ## Composing — scope is in the type
 
-A handle's operator produces `Query<S>`, carrying the **scope** `S` it was built in. The root and any flattened `object`/to-one join share `Root` (`Query<Root>`); a **`nested` array introduces a fresh scope, tagged with the namespace the root generated for it** (`UserOrders::status()` → `Query<UserOrders>`).
+A handle's operator produces `Query<S>`, carrying the **scope** `S` it was built in. The root and any flattened `object`/to-one join share `Root` (`Query<Root>`); a **`nested` array introduces a fresh scope, tagged with the namespace the root generated for it** (`user_scope::Orders::status()` → `Query<user_scope::Orders>`).
 
 ```rust
 // within a scope: and / or / not
@@ -237,11 +237,11 @@ User::query()
     .query(User::full_name().matches("ada"))    // scored
     .filter(User::order_count().gte(5))          // filtered, cached, no score
     .must_not(User::email().prefix("test-"))
-    .should(User::orders().any(UserOrders::status().eq("delivered")))
+    .should(User::orders().any(user_scope::Orders::status().eq("delivered")))
     .send(&client).await?;
 ```
 
-`User::email().and(UserOrders::status().eq(…))` **does not compile** — you can't `and` a `Query<Root>` with a `Query<UserOrders>`. Lift the child first: `User::orders().any(child)` takes a `Query<UserOrders>` → returns `Query<Root>`. Lifting composes through depth: `UserOrders::items().any(UserOrdersItems::quantity().gt(1))` is `Query<UserOrders>`, which `User::orders().any(…)` lifts to `Query<Root>`.
+`User::email().and(user_scope::Orders::status().eq(…))` **does not compile** — you can't `and` a `Query<Root>` with a `Query<user_scope::Orders>`. Lift the child first: `User::orders().any(child)` takes a `Query<user_scope::Orders>` → returns `Query<Root>`. Lifting composes through depth: `user_scope::Orders::items().any(user_scope::OrdersItems::quantity().gt(1))` is `Query<user_scope::Orders>`, which `User::orders().any(…)` lifts to `Query<Root>`.
 
 **Queries are values, the client appears once.** `Type::query()` takes no client — `Search<T>` is a plain `Clone` value. Build it in a helper, store it, reuse it; hand `&Client` to a terminal when running:
 
@@ -295,9 +295,9 @@ Two independent things, deliberately separate:
 
 ```rust
 let page = User::query()
-    .filter(User::orders().any(UserOrders::status().eq("delivered")))   // BY
+    .filter(User::orders().any(user_scope::Orders::status().eq("delivered")))   // BY
     .filter_nested(                                                // OF
-        User::orders().matching(UserOrders::status().eq("delivered"))
+        User::orders().matching(user_scope::Orders::status().eq("delivered"))
             .sort(Order::placed_at().desc()).size(5),
     )
     .send(&client).await?;
@@ -350,7 +350,7 @@ Let a scalar field be your own enum/newtype instead of a bare leaf:
 enum AccountTier { Free, Pro, Enterprise }
 ```
 
-A **newtype inherits its inner type's kinds** automatically — `struct Money(Decimal)` is a `decimal` value, `struct Sku(String)` a keyword + text value — *no kind tag*, queryable and rejected exactly where the inner type would be (`UserOrders::total().eq(Money(d))`, no cast). An **enum** has no inner type, so it needs an explicit string kind: `#[flusso(keyword)]` (default) or `#[flusso(text)]` — numeric/date tags don't exist (use a newtype). `FlussoValue<K>` has a `serde::Serialize` **supertrait**, so any `#[derive(FlussoValue)]` type derives `Serialize` too (even a doc-field-only one). A missing impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
+A **newtype inherits its inner type's kinds** automatically — `struct Money(Decimal)` is a `decimal` value, `struct Sku(String)` a keyword + text value — *no kind tag*, queryable and rejected exactly where the inner type would be (`user_scope::Orders::total().eq(Money(d))`, no cast). An **enum** has no inner type, so it needs an explicit string kind: `#[flusso(keyword)]` (default) or `#[flusso(text)]` — numeric/date tags don't exist (use a newtype). `FlussoValue<K>` has a `serde::Serialize` **supertrait**, so any `#[derive(FlussoValue)]` type derives `Serialize` too (even a doc-field-only one). A missing impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
 
 **Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
 

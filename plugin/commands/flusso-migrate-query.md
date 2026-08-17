@@ -43,12 +43,12 @@ This is the only breaking part. A child struct no longer carries handles — the
 | Old | New | Rule |
 | --- | --- | --- |
 | `Account::tier()` (object) | `User::account().tier()` | an object **flattens**, so it chains from its parent |
-| `Order::status()` (nested) | `UserOrders::status()` | a `nested` array is a **named namespace** |
-| `Item::quantity()` (deeper) | `UserOrdersItems::quantity()` | same rule, one level down |
+| `Order::status()` (nested) | `user_scope::Orders::status()` | a `nested` array is a **named namespace** |
+| `Item::quantity()` (deeper) | `user_scope::OrdersItems::quantity()` | same rule, one level down |
 
-**Namespace name = root struct name + each path segment, PascalCased.** `User` + `orders` → `UserOrders`; `User` + `orders.items` → `UserOrdersItems`; `User` + `billingAddress` → `UserBillingAddress`. Nothing to import — they are generated beside the root.
+**Names live in a module: `<root>_scope`, snake_cased** — `User` → `user_scope`, and the type is named for its level (`Orders`, `OrdersItems`, `BillingAddress`). Generated types never enter your namespace, so a struct of your own named after a level is fine. Import what you use: `use user_scope::Orders;`. They are never in your namespace, so nothing you already named can clash.
 
-Scope types in signatures move too: `Query<Order>` → `Query<UserOrders>`.
+Scope types in signatures move too: `Query<Order>` → `Query<user_scope::Orders>`.
 
 If a generated name collides with a type the project already has, rename it on the root field rather than working around it:
 
