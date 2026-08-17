@@ -378,10 +378,12 @@ derive.
 **Exactly one type references the schema: the root (issue #98).** `#[derive(FlussoRoot)]`
 (which replaced `FlussoDocument` outright — no alias) binds to an index and
 generates the **whole** handle tree — `doc.rs::codegen` walks the resolved mapping and
-emits one namespace per container level, root-prefixed (`UserOrders`, `UserOrdersItems`).
+emits one namespace per container level into a generated `<root>_scope` module
+(`user_scope::Orders`, `user_scope::OrdersItems`) — never the caller's namespace, so a user
+type named after a level can't collide.
 An **object** flattens into its enclosing scope so its namespace chains from the parent as
 `&self` methods (`User::account().tier()`); a **nested** array introduces its own scope so
-its namespace is a named type with associated fns (`UserOrders::total()`) implementing
+its namespace is a named type with associated fns (`user_scope::Orders::total()`) implementing
 `FlussoScope` (the renamed `FlussoDocument` *trait*; `FlussoIndex` → `FlussoRoot`; both old
 names removed). This
 retired `path = "…"`, `resolve::Scope`/`scope_at`, and the "object under nested"
@@ -475,7 +477,7 @@ scope, so combined search and object handles keep composing) and impls `FlussoSc
 (`asc`/`desc`, impl'd for `Keyword`/`Text`/`Number`/`Date`/`Bool`, **not** `Geo`/`Object`/map) whose
 sorts are nesting-aware: `Sort::field::<S>` reads `nested_boundaries(S::PATH)` and renders the
 recursive `nested:{path, nested:{…}}` chain (mode defaulted from direction), so a bare
-`UserOrders::placed_at().desc()` is correct at top level; `NestedProjection` (inner_hits) strips that
+`user_scope::Orders::placed_at().desc()` is correct at top level; `NestedProjection` (inner_hits) strips that
 wrapper. `SortBuilder` (`by`/`near`/`score`/`score_if`/`raw`/`tiebreak`/`or_default`/`build`,
 deduping by key) collapses request→`sort` mapping; `OrderBy`/`MaybeOrderBy` carry a direction +
 optionality (a request's `Option<dir>` self-skips). `Search`/`MultiSearch`/`NestedProjection` take
