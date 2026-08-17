@@ -1,0 +1,31 @@
+error[E0277]: `Translation` cannot be used as a document field type
+  --> tests/ui/fragment_map_hand_impl.rs:23:11
+   |
+23 |     name: Translation,
+   |           ^^^^^^^^^^^ needs a flusso derive
+   |
+help: the trait `FlussoValueMeta` is not implemented for `Translation`
+  --> tests/ui/fragment_map_hand_impl.rs:11:1
+   |
+11 | struct Translation {
+   | ^^^^^^^^^^^^^^^^^^
+   = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it
+   = help: the following other types implement trait `FlussoValueMeta`:
+             Localized
+             Uuid
+             bool
+             f32
+             f64
+             flusso_query::Decimal
+             i16
+             i32
+           and $N others
+
+error[E0599]: no associated item named `__flusso_check` found for struct `Translation` in the current scope
+  --> tests/ui/fragment_map_hand_impl.rs:23:11
+   |
+11 | struct Translation {
+   | ------------------ associated item `__flusso_check` not found for this struct
+...
+23 |     name: Translation,
+   |           ^^^^^^^^^^^ associated item not found in `Translation`

@@ -270,9 +270,10 @@ impl FlussoValue<kind::Date> for chrono::DateTime<chrono::Utc> {}
 /// A Rust type usable as the **document type** of a `map` field of value kind
 /// `K`: a dynamic-key object whose values are all of kind `K`.
 ///
-/// The canonical map type — `HashMap<String, V>` where `V` is a `K` value — is
-/// pre-implemented via a blanket impl, so `HashMap<String, String>` is a valid
-/// `text`/`keyword` map and `HashMap<String, i64>` a valid `long` map with no
+/// The canonical map types — `HashMap<String, V>` and `BTreeMap<String, V>`
+/// where `V` is a `K` value — are pre-implemented via blanket impls, so
+/// `HashMap<String, String>` is a valid `text`/`keyword` map and
+/// `BTreeMap<String, i64>` a valid `long` map with no
 /// extra code. A type of your own that stands in for a map opts in with
 /// `#[derive(FlussoMap)]` — a newtype, or a named-field struct whose *on-disk*
 /// shape is a flat object of same-kind values. Prefer the derive to a
@@ -284,8 +285,9 @@ impl FlussoValue<kind::Date> for chrono::DateTime<chrono::Utc> {}
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a valid map for a `{K}` field",
     label = "unsupported map type",
-    note = "use `HashMap<String, V>` with a `{K}` value type, or add `#[derive(FlussoMap)]` (with the matching kind) to `{Self}`"
+    note = "use `HashMap<String, V>` / `BTreeMap<String, V>` with a `{K}` value type, or add `#[derive(FlussoMap)]` (with the matching kind) to `{Self}`"
 )]
 pub trait FlussoMap<K> {}
 
 impl<K, V: FlussoValue<K>> FlussoMap<K> for std::collections::HashMap<String, V> {}
+impl<K, V: FlussoValue<K>> FlussoMap<K> for std::collections::BTreeMap<String, V> {}

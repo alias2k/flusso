@@ -6,7 +6,7 @@
 //! on its own: the same call, the same constants, no config resolution.
 #![allow(dead_code, unused_crate_dependencies)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use flusso_query::{FieldSpec, FlussoFragment, FlussoValue, KindTag};
 
@@ -55,6 +55,7 @@ struct LineItem {
     quantity: i32,
     status: OrderStatus,
     labels: HashMap<String, String>,
+    notes: BTreeMap<String, String>,
     #[flusso(skip)]
     computed: String,
     #[flusso(opaque)]
@@ -107,6 +108,17 @@ const LINE_ITEM: &[FieldSpec] = &[
         array: false,
         variants: &[],
         map_values: Some(KindTag::Text),
+        children: &[],
+    },
+    // A `BTreeMap` peels exactly like a `HashMap` — the deterministic-order
+    // sibling, identical on disk.
+    FieldSpec {
+        name: "notes",
+        kind: KindTag::Object,
+        nullable: false,
+        array: false,
+        variants: &[],
+        map_values: Some(KindTag::Keyword),
         children: &[],
     },
 ];
@@ -221,4 +233,45 @@ fn a_named_field_map_type_is_checked_down_to_its_value_kind() {
 
     // A non-map type has no opinion and passes either way.
     const _: () = assert!(map_kind_ok(TEXT_MAP, "title", &[]));
+}
+
+// Parity with a root: an opaque `json` field — an object with *no declared
+// children* — accepts anything, a bare map or a derived wrapper included. The
+// baked spec carries that shape (object, no children, no value kind), so the
+// fragment check recognises "opaque" without ever seeing the mapping.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct WithOpaqueJson {
+    meta: HashMap<String, String>,
+    extra: Translation,
+}
+
+const OPAQUE_JSON: &[FieldSpec] = &[
+    FieldSpec {
+        name: "meta",
+        kind: KindTag::Object,
+        nullable: false,
+        array: false,
+        variants: &[],
+        map_values: None,
+        children: &[],
+    },
+    FieldSpec {
+        name: "extra",
+        kind: KindTag::Object,
+        nullable: false,
+        array: false,
+        variants: &[],
+        map_values: None,
+        children: &[],
+    },
+];
+
+const _: () = WithOpaqueJson::__flusso_check(OPAQUE_JSON);
+
+#[test]
+fn an_opaque_json_field_accepts_map_shaped_types() {
+    // Reaching this line means the `const _` above evaluated: neither the
+    // `HashMap` nor the map wrapper was rejected for landing on opaque JSON.
+    assert_eq!(OPAQUE_JSON.len(), 2);
 }
