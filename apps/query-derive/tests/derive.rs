@@ -670,3 +670,30 @@ fn a_field_can_rename_its_generated_namespace() -> Result {
     assert_eq!(body["sort"][0]["orders.total"]["nested"]["path"], "orders");
     Ok(())
 }
+
+// Where you put the `Option` on a nested clause changes the meaning — the
+// compiler accepts both, so this pins the difference.
+#[test]
+fn an_optional_nested_filter_means_different_things_inside_and_outside() -> Result {
+    let absent: Option<String> = None;
+
+    // INNER: an absent element predicate is *not* "skip" — `any` falls back to
+    // `match_all`, so the clause becomes "has at least one order".
+    let inner = User::query()
+        .filter(User::orders().any(absent.clone().map(|v| user_scope::Orders::status().eq(v))))
+        .body();
+    assert_eq!(
+        inner["query"]["bool"]["filter"][0]["nested"]["path"],
+        "orders"
+    );
+    assert!(inner["query"]["bool"]["filter"][0]["nested"]["query"]["match_all"].is_object());
+
+    // OUTER: an absent nested clause drops out entirely — this is the one that
+    // means "skip this filter when the request didn't ask for it".
+    let outer = User::query()
+        .filter(absent.map(|v| User::orders().any(user_scope::Orders::status().eq(v))))
+        .body();
+    assert!(outer["query"]["match_all"].is_object());
+
+    Ok(())
+}
