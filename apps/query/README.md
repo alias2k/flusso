@@ -955,7 +955,12 @@ note: inside `Geo::__flusso_check`
 On top of the three checks above, a fragment field also verifies **enum variants**:
 a `#[derive(FlussoValue)]` enum declaring a variant the schema's `variants:` never
 lists is a compile error, because it could never match a document. Covering only
-*some* of the schema's variants is fine — that's a partial projection.
+*some* of the schema's variants is fine — that's a partial projection. A
+**map-typed field** is verified down to the map's *value kind*: the
+`#[derive(FlussoMap)]` derive bakes the kind onto the type, so a `text` wrapper
+embedded at a `keyword` map fails the build — the same check a root runs
+natively. (This is why a fragment needs the derive, not a hand-written
+`impl FlussoMap<K>` — see "Map document types" below.)
 
 Two limits worth knowing, both from `panic!` in a const context taking a literal:
 messages can't interpolate the schema's own type name, and there are **no
@@ -985,6 +990,7 @@ else and it won't compile (modulo the leaf-identifier rule above).
 | `timestamp`       | `date`     | `time::OffsetDateTime` (feature) | `Date`          |
 | `binary`          | `binary`   | `String` (base64)                | `Binary`        |
 | `json`            | `object`   | `serde_json::Value`              | `Json`          |
+| `map`             | `object` (dynamic) | `HashMap<String, V>` / `BTreeMap<String, V>`, or a `#[derive(FlussoMap)]` struct | `TextMap` / `KeywordMap` / `NumberMap` / `DateMap`, by value kind |
 | `geo_point`       | `geo_point`| `GeoPoint` (`{ lat, lon }`)      | `Geo`           |
 | `custom { opensearch }` | (given) | matching scalar, else `serde_json::Value` | by OS type |
 | `object`          | `object`   | a struct                         | `Object`        |
@@ -1039,6 +1045,37 @@ Customer::balance().gte(Money(Decimal::ONE)); // a decimal value, no cast
 fields stay in the struct as `Uuid` (no `#[flusso(skip)]`, no
 `Keyword::at("…")`), and `Customer::owner_id().eq(some_uuid)` works without
 `.to_string()`.
+
+**Map document types — `#[derive(FlussoMap)]`.** A `map` field (dynamic keys,
+one shared value kind) holds a `HashMap<String, V>` or `BTreeMap<String, V>`
+out of the box — `V` is checked against the declared value kind exactly like a
+scalar. A type of your own that stands in for the whole map opts in with
+`#[derive(FlussoMap)]` plus a string kind tag (`#[flusso(keyword)]` default, or
+`#[flusso(text)]`): a newtype over a map, or a named-field struct whose
+*on-disk* shape is a flat object of same-kind values — language keys plus a
+`fallback`, say. Use the derive rather than a hand-written `impl FlussoMap<K>`:
+a fragment validates its fields through const metadata only the derives emit
+(the field's kind *and* the map's value kind), so a hand impl compiles at a
+root but fails to compile as soon as the type appears in a `FlussoFragment`.
+
+```rust
+// On disk: {"fallback": "…", "en": "…", "it": "…"} — a flat text map.
+#[derive(serde::Deserialize, FlussoMap)]
+#[flusso(text)]
+struct Translation {
+    fallback: Option<String>,
+    #[serde(flatten)]
+    langs: BTreeMap<String, String>,
+}
+
+// Location-free, so it works in a fragment too — validated (value kind
+// included) against every path each embedding root puts it at.
+#[derive(serde::Deserialize, FlussoFragment)]
+struct Localized { name: Translation }
+```
+
+Number/date maps have no derive tag (their value kinds are split per type, which
+one tag can't name) — use `HashMap`/`BTreeMap` for those.
 
 ### Nullability is declared, not guessed
 
