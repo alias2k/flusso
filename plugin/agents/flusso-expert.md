@@ -59,8 +59,8 @@ Resolve the path **once**, up front: `root="$CLAUDE_PLUGIN_ROOT"` (Bash), then `
 2. **Children** (`#[flusso(index = "…", path = "…")]`): derive → `FlussoFragment`, and **delete the whole `#[flusso(…)]` line**. A fragment names no location, so two structs that differed only by path collapse into one embedded twice.
 3. **Call sites** — the only hard error. Handles moved from the child struct to the root, which generates one namespace per level:
    - object (flattens) chains from the parent: `Account::tier()` → `User::account().tier()`
-   - `nested` is a named namespace: `Order::status()` → `UserOrders::status()`, `Item::quantity()` → `UserOrdersItems::quantity()`
-   - **name = root struct + each path segment PascalCased**; nothing to import. Scope types move too: `Query<Order>` → `Query<UserOrders>`. On a collision, rename at the root field: `#[flusso(scope = "Purchases")]`.
+   - `nested` is a named namespace: `Order::status()` → `flusso_user_query::Orders::status()`, `Item::quantity()` → `flusso_user_query::OrdersItems::quantity()`
+   - **generated types live in a `flusso_<root>_query` module** (`User` → `flusso_user_query`), named for their level: `flusso_user_query::Orders`, `flusso_user_query::OrdersItems`. Import what you use (`use flusso_user_query::Orders;`). They are never in the caller's namespace, so a struct of the user's own named after a level is fine. Scope types move too: `Query<Order>` → `Query<flusso_user_query::Orders>`. Rename one with `#[flusso(scope = "Purchases")]` on the root field.
 
 Then `cargo check --workspace --all-targets` — clean. Two things to surface afterwards: any `#[flusso(opaque)]` you added (embedding is checked by default now, so a plain un-derived struct errors; `opaque` silences the check rather than satisfying it), and any structs you collapsed. Never redesign while migrating — names, modules, visibility, field sets, and `#[serde(rename)]`s stay.
 

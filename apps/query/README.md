@@ -83,6 +83,7 @@ surface. The only input is the **index name** — it finds `flusso.toml` itself 
 
 ```rust
 use flusso_query::{Client, FlussoFragment, FlussoRoot};
+use flusso_user_query::{Addresses, Orders};   // generated scopes, imported like any type
 
 /// A `users` document — *you* write this. It's a **projection**: it deserializes
 /// the fields below and omits the rest of the index (addresses, profile,
@@ -156,8 +157,8 @@ async fn main() -> anyhow::Result<()> {
         .filter(User::order_count().gte(5))               // long → range
         .filter(User::account().tier().eq("gold"))        // into the object's handles
         .query(User::full_name().matches("ada lovelace")) // text → analyzed match
-        .filter(User::orders().any(UserOrders::status().eq("delivered")))  // nested, via the generated namespace
-        .filter(User::addresses().any(UserAddresses::city().eq("Boston"))) // never projected — still queryable
+        .filter(User::orders().any(Orders::status().eq("delivered")))      // nested, via its scope
+        .filter(User::addresses().any(Addresses::city().eq("Boston")))     // never projected — still queryable
         .sort(User::order_count().desc())
         .from(0)
         .size(20)
@@ -525,36 +526,38 @@ each variant's `(INDEX, SCHEMA_HASH)` and a `decode` that matches on
 
 Because the scope is part of the type, a query is a value you can build, name,
 store, and reuse. A **nested** array introduces its own scope, and the root
-generates a namespace for it — `UserOrders` for `users.orders` — whose handles are
-tagged with that scope, so they produce `Query<UserOrders>`, not `Query<Root>`:
+generates a namespace for it — `flusso_user_query::Orders` for `users.orders` — whose handles are
+tagged with that scope, so they produce `Query<flusso_user_query::Orders>`, not `Query<Root>`:
 
 ```rust
-// Built from the generated namespace. Reusable — a plain function returning a query:
-fn big_delivered() -> Query<UserOrders> {
-    UserOrders::status().eq("delivered")
-        .and(UserOrders::total().gt(100.0))
+use flusso_user_query::Orders;      // the generated scope for `users.orders`
+
+// Reusable — a plain function returning a query:
+fn big_delivered() -> Query<Orders> {
+    Orders::status().eq("delivered")
+        .and(Orders::total().gt(100.0))
 }
 ```
 
 To merge a child filter into a parent, **lift** it through the nesting that holds
-it: `User::orders().any(child)` (or `.all(child)`) takes a `Query<UserOrders>` and
+it: `User::orders().any(child)` (or `.all(child)`) takes a `Query<Orders>` and
 returns a `Query<Root>` — a nested clause at the `orders` path — which composes
 with parent-scope queries like any other:
 
 ```rust
 let q = User::email().eq("ada@example.com")
-    .and(User::orders().any(big_delivered()));   // Query<UserOrders> → lifted → Query<Root>
+    .and(User::orders().any(big_delivered()));   // Query<Orders> → lifted → Query<Root>
 
 User::query().filter(q).send(&client).await?;
 ```
 
-The scope tag keeps this honest: `User::email().and(UserOrders::status().eq(…))`
-**does not compile** — you can't `and` a `Query<Root>` with a `Query<UserOrders>`;
+The scope tag keeps this honest: `User::email().and(Orders::status().eq(…))`
+**does not compile** — you can't `and` a `Query<Root>` with a `Query<Orders>`;
 the child query has to be lifted through `User::orders()` first. A child constraint
 can never be silently applied at the wrong level.
 
-Lifting composes through depth: `UserOrders::items().any(UserOrdersItems::quantity().gt(1))`
-is a `Query<UserOrders>`, which `User::orders().any(…)` then lifts the rest of the
+Lifting composes through depth: `Orders::items().any(OrdersItems::quantity().gt(1))`
+is a `Query<Orders>`, which `User::orders().any(…)` then lifts the rest of the
 way to `Query<Root>`.
 
 ### Optional filters
@@ -783,7 +786,7 @@ the point: the compiler finds every site for you. It is mechanical:
 | `use flusso_query::FlussoIndex;` (the trait, for `query`/`get`) | `use flusso_query::FlussoRoot;` — one name now covers trait and derive |
 | `FlussoDocument` as a **trait** bound (the `PATH` carrier) | `FlussoScope` |
 | `#[derive(FlussoDocument)] #[flusso(index = "users", path = "orders")]` | `#[derive(FlussoFragment)]` — drop the whole attribute |
-| `Order::status()` (child struct's handle) | `UserOrders::status()` (root-generated namespace) |
+| `Order::status()` (child struct's handle) | `flusso_user_query::Orders::status()` (root-generated namespace) |
 | `Account::tier()` (object child struct) | `User::account().tier()` (chains from the parent) |
 
 The `path` attribute error names its replacement; the rest are unresolved
@@ -805,9 +808,9 @@ impl User {
     pub fn id() -> Number<kind::Integer> { /* … */ }
     pub fn email() -> Keyword { /* … */ }
     pub fn full_name() -> Text { /* … */ }
-    pub fn account() -> UserAccount { /* … */ }             // object → its namespace, chained
-    pub fn addresses() -> Nested<Root, UserAddresses> { /* … */ }
-    pub fn orders() -> Nested<Root, UserOrders> { /* … */ }
+    pub fn account() -> flusso_user_query::Account { /* … */ }             // object → its namespace, chained
+    pub fn addresses() -> Nested<Root, flusso_user_query::Addresses> { /* … */ }
+    pub fn orders() -> Nested<Root, flusso_user_query::Orders> { /* … */ }
     pub fn order_count() -> Number<kind::Long> { /* … */ }
     // …one per schema field.
 }
@@ -818,46 +821,54 @@ impl FlussoRoot for User {
 }
 ```
 
-Plus **one namespace per container level**, generated from the schema and named
-root-prefixed so two roots in the same module can't collide.
-
-An **object** flattens into its enclosing scope, so its namespace chains from the
-parent — its fields are `&self` methods returning handles in that same scope:
+Plus **one namespace per container level**, generated into a `flusso_user_query` module
+(`flusso_<root>_query`, snake_cased) so nothing lands in your namespace:
 
 ```rust
-pub struct UserAccount;
-impl UserAccount {
-    pub fn exists(&self) -> Query<Root> { /* … */ }
-    pub fn tier(&self) -> Enum<Root> { /* … */ }        // at "account.tier"
-    pub fn country(&self) -> Keyword<Root> { /* … */ }
+pub mod flusso_user_query {
+    // An object flattens into its enclosing scope, so its namespace chains from
+    // the parent — fields are `&self` methods returning handles in that scope.
+    pub struct Account;
+    impl Account {
+        pub fn exists(&self) -> Query<Root> { /* … */ }
+        pub fn tier(&self) -> Enum<Root> { /* … */ }        // at "account.tier"
+        pub fn country(&self) -> Keyword<Root> { /* … */ }
+    }
+
+    // A nested array introduces its own scope, so its namespace is a named type
+    // with associated fns, carrying the PATH a nesting-aware sort reads.
+    pub struct Orders;
+    impl FlussoScope for Orders {
+        const PATH: &[Segment] = &[Segment { name: "orders", kind: SegmentKind::Nested }];
+    }
+    impl Orders {
+        pub fn status() -> Enum<Orders> { /* … */ }
+        pub fn total() -> Number<kind::Decimal, Orders> { /* … */ }
+        pub fn items() -> Nested<Orders, OrdersItems> { /* … */ }   // deeper nesting
+        pub fn shipping() -> OrdersShipping { /* … */ }             // object inside nested
+    }
 }
-// → User::account().tier().eq("gold")
 ```
 
-A **nested** array introduces its own scope, so its namespace is a named type with
-associated fns, and it carries the `PATH` a nesting-aware sort reads:
+So an object chains from the root, and a nested scope is imported once:
 
 ```rust
-pub struct UserOrders;
-impl FlussoScope for UserOrders {
-    const PATH: &[Segment] = &[Segment { name: "orders", kind: SegmentKind::Nested }];
-}
-impl UserOrders {
-    pub fn status() -> Enum<UserOrders> { /* … */ }
-    pub fn total() -> Number<kind::Decimal, UserOrders> { /* … */ }
-    pub fn items() -> Nested<UserOrders, UserOrdersItems> { /* … */ }   // deeper nesting
-    pub fn shipping() -> UserOrdersShipping { /* … */ }                 // object inside nested
-}
-// → User::orders().any(UserOrders::total().gt(100))
-// → User::orders().any(UserOrders::shipping().carrier().eq("dhl"))
+use flusso_user_query::Orders;
+
+User::account().tier().eq("gold")
+User::orders().any(Orders::total().gt(100))
+User::orders().any(Orders::shipping().carrier().eq("dhl"))
 ```
 
 That last one — an object *inside* a nested array — works because the root knows
 the scope tag. A child struct never could, which is why it used to be rejected.
 
-Namespace names are root-prefixed so two roots in one module can't collide. If a
-generated name still clashes with a type you already have — or a deep chain gets
-unwieldy — rename it on the field, and everything under it follows:
+Generated types live in a `flusso_<root>_query` module (`User` → `flusso_user_query`), never
+in your own namespace — so your `struct UserOrders` and the generated
+`flusso_user_query::Orders` coexist. Import what you query: `use flusso_user_query::Orders;`.
+
+If a name still reads wrong, or a deep chain gets unwieldy, rename it on the
+field and everything under it follows:
 
 ```rust
 #[derive(serde::Deserialize, FlussoRoot)]
@@ -866,6 +877,14 @@ struct User {
     #[flusso(scope = "Purchases")]
     orders: Vec<Order>,      // → `Purchases::total()`, `PurchasesItems::quantity()`
 }
+```
+
+The module name is the one thing that could still clash in principle. It reads
+as obviously generated precisely so that never happens, but if you somehow have a
+`flusso_user_query` module already, rename the generated one:
+
+```rust
+#[flusso(index = "users", scope_mod = "user_queries")]
 ```
 
 Finally, the root bakes the resolved mapping into const data and drives the check

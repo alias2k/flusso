@@ -13,6 +13,8 @@ use flusso_query::{
     Client, FlussoFragment, FlussoMultiDocument, FlussoRoot, FlussoValue, Search, SortBuilder,
     Sortable, SortOrder,
 };
+// Generated scope types live in `flusso_<root>_query`; import the ones you query.
+use flusso_user_query::Orders;
 
 // ── Custom value type: a closed enum stored as a keyword ────────────────────
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, FlussoValue)]
@@ -103,21 +105,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(User::order_count().gte(5))           // long → range
         .filter(User::tier().eq(Tier::Pro))           // custom keyword value
         .query(User::full_name().matches("ada lovelace")) // text → analyzed
-        .filter(User::orders().any(UserOrders::status().eq("delivered"))) // BY
+        .filter(User::orders().any(Orders::status().eq("delivered"))) // BY
         .filter_nested(
             User::orders()
-                .matching(UserOrders::status().eq("delivered"))
-                .sort(UserOrders::placed_at().desc())
+                .matching(Orders::status().eq("delivered"))
+                .sort(Orders::placed_at().desc())
                 .size(5),
         ) // OF
         // SortBuilder maps a request to the `sort` array: each `.by` skips a
         // `None`, `tiebreak` adds a stable final key, `or_default` is the
-        // fallback. `UserOrders::placed_at()` (a nested field) auto-wraps in its
+        // fallback. `Orders::placed_at()` (a nested field) auto-wraps in its
         // `nested` clause — same one-line `.by`.
         .sorts(
             SortBuilder::new()
                 .by(User::order_count(), SortOrder::Desc)
-                .by(UserOrders::placed_at(), None::<SortOrder>) // skipped here
+                .by(Orders::placed_at(), None::<SortOrder>) // skipped here
                 .tiebreak(User::id())
                 .or_default(User::order_count().desc())
                 .build(),

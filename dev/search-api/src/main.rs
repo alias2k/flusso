@@ -37,6 +37,8 @@ mod error;
 mod global;
 mod orders;
 mod products;
+#[cfg(test)]
+mod queries;
 mod response;
 mod shared;
 mod users;

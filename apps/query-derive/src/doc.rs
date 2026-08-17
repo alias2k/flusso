@@ -556,8 +556,9 @@ fn is_primitive(ident: Option<&str>) -> bool {
 ///   type with associated fns: `UserOrders::total()`, and it implements
 ///   `FlussoScope` so a nesting-aware sort can read its `PATH`.
 ///
-/// Namespaces are named root-prefixed (`UserOrders`, `UserOrdersItems`), which
-/// keeps two roots in one module from colliding. The root additionally
+/// Namespaces live in a generated `flusso_<root>_query` module, named for their level
+/// (`flusso_user_query::Orders`, `flusso_user_query::OrdersItems`), so nothing the derive emits
+/// lands in the caller's namespace. The root additionally
 /// implements `FlussoRoot` (`INDEX`/`SCHEMA_HASH`, inheriting `query`/`get`) —
 /// the entry points a child level must not have.
 #[allow(clippy::too_many_arguments)]
@@ -566,6 +567,7 @@ pub(crate) fn codegen(
     vis: &syn::Visibility,
     index: &str,
     hash: &str,
+    scope_mod: Option<&Ident>,
     level: &[ResolvedField],
     fields: &[DocField],
     tracked: &[String],
@@ -580,10 +582,26 @@ pub(crate) fn codegen(
         .filter_map(|field| Some((field.doc_key.clone(), field.scope.clone()?)))
         .collect();
 
+    // Generated types live in their own module, never in the caller's namespace.
+    // Emitting them beside the root made a name the user might reasonably pick
+    // (a fragment named after the level it sits at) a redefinition — and the
+    // derive's own `#[derive(Copy)]` then landed on *their* struct, so the real
+    // error was buried under a cascade.
+    //
+    // `flusso_<root>_query` rather than something short: the module is the one
+    // name the caller can still collide with, and this one reads as obviously
+    // generated, so nobody picks it by accident.
+    let module = scope_mod.cloned().unwrap_or_else(|| {
+        Ident::new(
+            &format!("flusso_{}_query", to_snake_case(&ident.to_string())),
+            ident.span(),
+        )
+    });
+
     let mut ctx = Namespaces {
-        vis,
         auto_subfields,
         renames,
+        module: module.clone(),
         emitted: TokenStream::new(),
     };
 
@@ -591,6 +609,22 @@ pub(crate) fn codegen(
     let handles = ctx.emit_level(ident, &root_scope, "", &[], level, Receiver::Associated);
 
     let namespaces = ctx.emitted;
+    let namespaces = if namespaces.is_empty() {
+        TokenStream::new()
+    } else {
+        let doc = format!(
+            "Query scopes for the `{ident}` document — one per container level of \
+             its index, generated from the schema.\n\nImport what you use: \
+             `use {module}::Orders;`."
+        );
+        quote! {
+            #[doc = #doc]
+            #[allow(unreachable_pub)]
+            #vis mod #module {
+                #namespaces
+            }
+        }
+    };
     let tracked = tracked.iter().map(|path| {
         let lit = LitStr::new(path, Span::call_site());
         quote! { const _: &[u8] = include_bytes!(#lit); }
@@ -624,15 +658,17 @@ enum Receiver {
 }
 
 /// Accumulates the namespace types emitted while walking the mapping.
-struct Namespaces<'a> {
-    vis: &'a syn::Visibility,
+struct Namespaces {
     auto_subfields: bool,
     /// Root-field scope renames, keyed by document key.
     renames: std::collections::HashMap<String, Ident>,
+    /// The module the namespaces live in — referenced from the root's handles,
+    /// but not from inside the module, where the names are already in scope.
+    module: Ident,
     emitted: TokenStream,
 }
 
-impl Namespaces<'_> {
+impl Namespaces {
     /// The handle fns for one level, emitting any namespace types beneath it.
     ///
     /// `base` names this level's type; a child namespace is `base` + the field
@@ -660,14 +696,23 @@ impl Namespaces<'_> {
             });
             let child = self.child_ident(base, resolved.name.as_ref(), segments.is_empty());
 
+            // At the root the namespace is one module away; inside the module
+            // its siblings are already in scope.
+            let child_path = if segments.is_empty() {
+                let module = &self.module;
+                quote! { #module::#child }
+            } else {
+                quote! { #child }
+            };
+
             let container = match &resolved.mapping.mapping_type {
                 // A `nested` array is its own scope: the child namespace tags
                 // the handles inside it, and carries the PATH a sort reads.
                 MappingType::Nested => {
                     self.emit_nested(&child, &path, &below, &resolved.children);
                     Some((
-                        quote! { ::flusso_query::Nested<#scope, #child> },
-                        quote! { ::flusso_query::Nested::<#scope, #child>::at(#path) },
+                        quote! { ::flusso_query::Nested<#scope, #child_path> },
+                        quote! { ::flusso_query::Nested::<#scope, #child_path>::at(#path) },
                     ))
                 }
                 // A group / to-one join flattens into the enclosing scope, so
@@ -676,7 +721,7 @@ impl Namespaces<'_> {
                     if resolved.mapping.map_values.is_none() && !resolved.children.is_empty() =>
                 {
                     self.emit_object(&child, scope, &path, &below, &resolved.children);
-                    Some((quote! { #child }, quote! { #child }))
+                    Some((quote! { #child_path }, quote! { #child_path }))
                 }
                 _ => None,
             };
@@ -707,12 +752,11 @@ impl Namespaces<'_> {
         let scope = quote! { #ident };
         let handles = self.emit_level(ident, &scope, path, segments, level, Receiver::Associated);
         let path_segments = path_segments(segments);
-        let vis = self.vis;
         self.emitted.extend(quote! {
             /// A `nested` array's element scope: its handles, and the path a
             /// nesting-aware sort reads. Generated from the schema.
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-            #vis struct #ident;
+            pub struct #ident;
 
             impl ::flusso_query::FlussoScope for #ident {
                 const PATH: &'static [::flusso_query::Segment] = &[ #(#path_segments),* ];
@@ -734,13 +778,12 @@ impl Namespaces<'_> {
         level: &[ResolvedField],
     ) {
         let handles = self.emit_level(ident, scope, path, segments, level, Receiver::Method);
-        let vis = self.vis;
         self.emitted.extend(quote! {
             /// A sub-document's handles — an `object` group or a to-one join.
             /// Flattened, so its fields query in the enclosing scope. Generated
             /// from the schema.
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-            #vis struct #ident;
+            pub struct #ident;
 
             impl #ident {
                 /// The sub-document is present — most useful on a nullable
@@ -753,17 +796,23 @@ impl Namespaces<'_> {
         });
     }
 
-    /// The namespace type for a child level: `base` + the field name,
-    /// PascalCased — `User` + `orders` → `UserOrders`, then `UserOrdersItems`.
-    /// Root-prefixed by construction, so two roots in one module can both have
-    /// an `addresses` level.
+    /// The namespace type for a child level.
+    ///
+    /// Directly under the root it is named for the level alone (`Orders`) — the
+    /// module already says which document it belongs to. Deeper levels append,
+    /// so `orders.items` is `OrdersItems`, keeping siblings apart.
     ///
     /// At the root level a `#[flusso(scope = "…")]` replaces the name outright,
     /// and since it becomes the `base` for the recursion, everything under it
     /// follows.
     fn child_ident(&self, base: &Ident, field: &str, at_root: bool) -> Ident {
-        if at_root && let Some(renamed) = self.renames.get(field) {
-            return renamed.clone();
+        if at_root {
+            if let Some(renamed) = self.renames.get(field) {
+                return renamed.clone();
+            }
+            // Directly under the root the module supplies the qualification, so
+            // the type is named for its level alone: `flusso_user_query::Orders`.
+            return Ident::new(&to_pascal_case(field), Span::call_site());
         }
         Ident::new(
             &format!("{base}{}", to_pascal_case(field)),

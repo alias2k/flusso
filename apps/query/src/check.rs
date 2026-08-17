@@ -235,6 +235,15 @@ pub const fn map_value_is(level: &[FieldSpec], name: &str, accepted: &[KindTag])
     false
 }
 
+/// Whether `name` is compatible with a type's [`FlussoValueMeta::MAP_VALUES`].
+///
+/// A type that is not a map (`accepted` empty) has no opinion and passes; one
+/// that is must land on a `map` field of a matching value kind.
+#[must_use]
+pub const fn map_kind_ok(level: &[FieldSpec], name: &str, accepted: &[KindTag]) -> bool {
+    accepted.is_empty() || map_value_is(level, name, accepted)
+}
+
 /// The sub-level under `name`, or an empty level when absent or a leaf.
 #[must_use]
 pub const fn children<'a>(level: &'a [FieldSpec], name: &str) -> &'a [FieldSpec] {
@@ -309,6 +318,16 @@ pub trait FlussoValueMeta {
     /// For an enum, its variants as the document spells them (serde renaming
     /// applied). Empty for anything that is not an enum.
     const VARIANTS: &'static [&'static str];
+
+    /// For a type standing in for a dynamic-key `map`, the value kinds it can
+    /// hold. Empty for anything that is not a map — which is why it defaults:
+    /// only `#[derive(FlussoMap)]` sets it.
+    ///
+    /// Without this a map wrapper embedded in a fragment could only be checked
+    /// as "the schema field here is object-ish", since a fragment can't see the
+    /// mapping; with it, the value kind is checked too, matching what a root
+    /// does natively.
+    const MAP_VALUES: &'static [KindTag] = &[];
 }
 
 /// Mirrors the [`FlussoValue`](crate::FlussoValue) impls above, so a

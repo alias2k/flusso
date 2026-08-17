@@ -13,7 +13,7 @@ breaks a field fails `cargo build`.
 
 Only the root (`User`, `Order`, `Product`) names an index. It owns the *whole* typed
 surface for that index — a handle for every field at every level, reached through a
-generated namespace: `User::account().tier()` for an object, `UserOrders::status()` for a
+generated scope: `User::account().tier()` for an object, `flusso_user_query::Orders::status()` for a
 `nested` array.
 
 Every other shape is a `#[derive(FlussoFragment)]`: no index, no path, validated by

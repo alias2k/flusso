@@ -10,8 +10,11 @@ use flusso_query::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
+// The root generates one scope type per container level of `users`; import the
+// ones this module queries so call sites stay short.
 use crate::response::Page;
 use crate::shared::{LineItem, OrderStatus};
+use crate::users::flusso_user_query::{Addresses, Orders};
 
 // `pub(crate)`: the cross-index endpoints in `global` reuse this document and
 // its generated handles (same for `Product` and `Order`). Handles for every
@@ -174,7 +177,7 @@ async fn list(
         // A field inside the `orders` nested array — the *same* one-line `.by`.
         // The nested clause (`mode: max` → the user's most recent order) is
         // derived from the handle's scope; no hand-written `nested` wrapper.
-        .by(UserOrders::placed_at(), filter.sort_recent_order)
+        .by(Orders::placed_at(), filter.sort_recent_order)
         // Stable final key so rows with equal leading values page deterministically.
         .tiebreak(User::id())
         // Used only when the request named no sort: busiest customers first.
@@ -211,12 +214,12 @@ async fn list(
         .filter(
             filter
                 .city
-                .map(|v| User::addresses().any(UserAddresses::city().eq(v))),
+                .map(|v| User::addresses().any(Addresses::city().eq(v))),
         )
         .filter(
             filter
                 .order_status
-                .map(|v| User::orders().any(UserOrders::status().eq(v))),
+                .map(|v| User::orders().any(Orders::status().eq(v))),
         )
         .filter(filter.min_orders.map(|v| User::order_count().gte(v)))
         .sorts(sorts)
@@ -228,7 +231,7 @@ async fn list(
         search = search.filter_nested(
             User::orders()
                 .project()
-                .sort(UserOrders::placed_at().desc())
+                .sort(Orders::placed_at().desc())
                 .size(recent),
         );
     }

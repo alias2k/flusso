@@ -154,3 +154,71 @@ fn a_subset_of_the_schema_variants_is_a_legal_projection() {
     ));
     assert_eq!(<OrderStatus as FlussoValueMeta>::VARIANTS.len(), 3);
 }
+
+// A type of your own standing in for a `map` — not a newtype, a named-field
+// struct whose *on-disk* shape is a flat object of same-kind values (language
+// keys plus a `fallback`). `#[derive(FlussoMap)]` accepts it, and carries the
+// declared value kind so a fragment checks the map's values, not merely that
+// the schema field is object-ish.
+
+#[derive(serde::Deserialize, flusso_query::FlussoMap)]
+#[flusso(text)]
+struct Translation {
+    fallback: Option<String>,
+    #[serde(flatten)]
+    langs: HashMap<String, String>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct Localized {
+    title: Translation,
+}
+
+const TEXT_MAP: &[FieldSpec] = &[FieldSpec {
+    name: "title",
+    kind: KindTag::Object,
+    nullable: false,
+    array: false,
+    variants: &[],
+    map_values: Some(KindTag::Text),
+    children: &[],
+}];
+
+const _: () = Localized::__flusso_check(TEXT_MAP);
+
+#[test]
+fn a_named_field_map_type_is_checked_down_to_its_value_kind() {
+    use flusso_query::{FlussoValueMeta, map_kind_ok};
+
+    // The declared kind travels with the type…
+    assert_eq!(
+        <Translation as FlussoValueMeta>::MAP_VALUES,
+        &[KindTag::Text]
+    );
+    // …so a text map passes,
+    const _: () = assert!(map_kind_ok(
+        TEXT_MAP,
+        "title",
+        <Translation as FlussoValueMeta>::MAP_VALUES
+    ));
+
+    // …and a keyword map does not. (The generated check turns this into a
+    // compile error at the embedding — see tests/ui/fragment_map_wrong_values.rs.)
+    const KEYWORD_MAP: &[FieldSpec] = &[FieldSpec {
+        name: "title",
+        kind: KindTag::Object,
+        nullable: false,
+        array: false,
+        variants: &[],
+        map_values: Some(KindTag::Keyword),
+        children: &[],
+    }];
+    assert!(!map_kind_ok(
+        KEYWORD_MAP,
+        "title",
+        <Translation as FlussoValueMeta>::MAP_VALUES
+    ));
+
+    // A non-map type has no opinion and passes either way.
+    const _: () = assert!(map_kind_ok(TEXT_MAP, "title", &[]));
+}

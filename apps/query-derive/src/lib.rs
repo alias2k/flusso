@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, LitStr, parse_macro_input};
+use syn::{Data, DeriveInput, Ident, LitStr, parse_macro_input};
 
 mod doc;
 mod fragment;
@@ -107,6 +107,10 @@ struct Attrs {
     index: String,
     /// Span of the `index = "…"` value — where index-resolution errors point.
     index_span: Span,
+    /// `scope_mod = "…"` — rename the module the generated scopes live in, for
+    /// the one case the module itself can clash: the caller already has a module
+    /// by that name.
+    scope_mod: Option<Ident>,
     config: Option<String>,
     rename_all: Option<String>,
 }
@@ -115,6 +119,7 @@ impl Attrs {
     fn parse(input: &DeriveInput) -> syn::Result<Self> {
         let mut index: Option<String> = None;
         let mut index_span = input.ident.span();
+        let mut scope_mod: Option<Ident> = None;
         let mut config: Option<String> = None;
         let mut rename_all: Option<String> = None;
 
@@ -131,13 +136,22 @@ impl Attrs {
                              level of its index. Make this a `#[derive(FlussoFragment)]` shape \
                              and embed it; it is validated at whatever path it lands on",
                         ));
+                    } else if meta.path.is_ident("scope_mod") {
+                        let lit: LitStr = meta.value()?.parse()?;
+                        scope_mod = Some(lit.parse::<Ident>().map_err(|_| {
+                            syn::Error::new(
+                                lit.span(),
+                                "`scope_mod` must be a valid module name, e.g. \
+                                 `scope_mod = \"user_queries\"`",
+                            )
+                        })?);
                     } else if meta.path.is_ident("config") {
                         let lit: LitStr = meta.value()?.parse()?;
                         config = Some(lit.value());
                     } else {
                         return Err(meta.error(
                             "unknown `flusso` attribute (expected `index`, `config`, \
-                                 or the deprecated `path`)",
+                             or `scope_mod`)",
                         ));
                     }
                     Ok(())
@@ -166,6 +180,7 @@ impl Attrs {
         Ok(Attrs {
             index,
             index_span,
+            scope_mod,
             config,
             rename_all,
         })
@@ -224,6 +239,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         &input.vis,
         &attrs.index,
         &hash,
+        attrs.scope_mod.as_ref(),
         level,
         &fields,
         &tracked,
