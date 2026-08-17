@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.14.0...flusso-query-v0.15.0) - 2026-08-17
+
+### Fixed
+
+- *(query-derive)* FlussoMap accepts any struct, and carries its value kind
+- *(query-derive)* [**breaking**] generated scopes live in a module, not the caller's namespace
+
+### Other
+
+- *(query-derive)* [**breaking**] name the generated module flusso_<root>_query
+- *(query-derive)* pin the namespace collision, and cover the dev example
+
 ## [0.14.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.13.0...flusso-query-v0.14.0) - 2026-08-14
 
 ### Added
