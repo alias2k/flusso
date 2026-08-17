@@ -275,3 +275,110 @@ fn an_opaque_json_field_accepts_map_shaped_types() {
     // `HashMap` nor the map wrapper was rejected for landing on opaque JSON.
     assert_eq!(OPAQUE_JSON.len(), 2);
 }
+
+// The reported payment-method topology: a nullable object level containing a
+// `text`-map `name`, projected by a fragment whose field is a map wrapper. The
+// checks run in order (kind → map value kind → variants), so which assert fires
+// tells apart the ways this can go wrong; the cases below pin each one.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct PaymentMethod {
+    name: Translation,
+}
+
+/// Derived with **no** kind tag — `FlussoMap` defaults to `keyword`, exactly
+/// like `FlussoValue`. The likely way to hit the "matching value kind" error
+/// on a `text` map is forgetting the tag when switching from a hand impl.
+#[derive(serde::Deserialize, flusso_query::FlussoMap)]
+struct UntaggedTranslation {
+    fallback: Option<String>,
+    #[serde(flatten)]
+    langs: HashMap<String, String>,
+}
+
+const PAYMENT_METHOD: &[FieldSpec] = &[FieldSpec {
+    name: "name",
+    kind: KindTag::Object,
+    nullable: false,
+    array: false,
+    variants: &[],
+    map_values: Some(KindTag::Text),
+    children: &[],
+}];
+
+const CUSTOMER: &[FieldSpec] = &[FieldSpec {
+    name: "paymentMethod",
+    kind: KindTag::Object,
+    nullable: true,
+    array: false,
+    variants: &[],
+    map_values: None,
+    children: PAYMENT_METHOD,
+}];
+
+// What the root emits for `payment_method: Option<PaymentMethod>` — the
+// fragment is checked against the object's sub-level. Text tag on the
+// wrapper + text map in the schema: passes.
+const _: () = PaymentMethod::__flusso_check(flusso_query::children(CUSTOMER, "paymentMethod"));
+
+#[test]
+fn the_map_value_kind_error_separates_its_three_causes() {
+    use flusso_query::{FlussoValueMeta, map_kind_ok};
+
+    let level = flusso_query::children(CUSTOMER, "paymentMethod");
+
+    // Cause 1 — the wrapper forgot `#[flusso(text)]` and defaulted to keyword:
+    // rejected against the text map (the generated check makes this the
+    // compile error pinned in tests/ui/fragment_map_untagged_kind.rs).
+    assert_eq!(
+        <UntaggedTranslation as FlussoValueMeta>::MAP_VALUES,
+        &[KindTag::Keyword]
+    );
+    assert!(!map_kind_ok(
+        level,
+        "name",
+        <UntaggedTranslation as FlussoValueMeta>::MAP_VALUES
+    ));
+
+    // Cause 2 — the schema declares a map of another value kind (a keyword map
+    // under a text-tagged wrapper): rejected. Same assert, other direction.
+    const KEYWORD_NAME: &[FieldSpec] = &[FieldSpec {
+        name: "name",
+        kind: KindTag::Object,
+        nullable: false,
+        array: false,
+        variants: &[],
+        map_values: Some(KindTag::Keyword),
+        children: &[],
+    }];
+    assert!(!map_kind_ok(
+        KEYWORD_NAME,
+        "name",
+        <Translation as FlussoValueMeta>::MAP_VALUES
+    ));
+
+    // Cause 3 — the schema declares `name` as a *structured* object (children,
+    // no value kind): rejected, a wrapper is not a sub-document.
+    const OBJECT_NAME: &[FieldSpec] = &[FieldSpec {
+        name: "name",
+        kind: KindTag::Object,
+        nullable: false,
+        array: false,
+        variants: &[],
+        map_values: None,
+        children: PAYMENT_METHOD,
+    }];
+    assert!(!map_kind_ok(
+        OBJECT_NAME,
+        "name",
+        <Translation as FlussoValueMeta>::MAP_VALUES
+    ));
+
+    // And the correct declaration — `map:` with `values: text` — passes, as
+    // does opaque `json` (covered by `an_opaque_json_field_accepts_map_shaped_types`).
+    assert!(map_kind_ok(
+        level,
+        "name",
+        <Translation as FlussoValueMeta>::MAP_VALUES
+    ));
+}
