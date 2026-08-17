@@ -155,7 +155,7 @@ pub(crate) fn embedded_type<'a>(field: &DocField<'a>) -> Option<&'a Type> {
         return None;
     }
     let inner = strip_option(field.ty);
-    if leaf_ident(inner).as_deref() == Some("Value") || hashmap_value(inner).is_some() {
+    if leaf_ident(inner).as_deref() == Some("Value") || map_container_value(inner).is_some() {
         return None;
     }
     let element = vec_inner(inner).unwrap_or(inner);
@@ -226,12 +226,13 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
     }
 
     // A dynamic-key map: check the declared value kind, not the container.
-    if let Some(value_ty) = hashmap_value(inner) {
+    if let Some(value_ty) = map_container_value(inner) {
+        let container = leaf_ident(inner).unwrap_or_else(|| "HashMap".to_string());
         let msg = message(
             fragment,
             key,
             &format!(
-                "is a `HashMap` of `{}`, so the schema field here must be a `map` with \
+                "is a `{container}` of `{}`, so the schema field here must be a `map` with \
                  matching value type",
                 render(value_ty)
             ),
@@ -346,7 +347,7 @@ fn message(fragment: &Ident, key: &str, problem: &str) -> String {
 }
 
 /// A type as a reader would write it — `quote` renders `Vec < Item >`.
-fn render(ty: &Type) -> String {
+pub(crate) fn render(ty: &Type) -> String {
     quote!(#ty)
         .to_string()
         .replace(" < ", "<")
@@ -409,12 +410,12 @@ fn leaf_ident(ty: &Type) -> Option<String> {
     }
 }
 
-fn hashmap_value(ty: &Type) -> Option<&Type> {
+fn map_container_value(ty: &Type) -> Option<&Type> {
     let Type::Path(path) = ty else {
         return None;
     };
     let segment = path.path.segments.last()?;
-    if segment.ident != "HashMap" {
+    if segment.ident != "HashMap" && segment.ident != "BTreeMap" {
         return None;
     }
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {

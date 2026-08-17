@@ -212,14 +212,18 @@ pub const fn variants_covered(level: &[FieldSpec], name: &str, rust: &[&str]) ->
 /// Whether `name` is a dynamic-key `map` whose values are one of `accepted`.
 ///
 /// A field that is not a map fails — so a `HashMap<String, _>` declared against
-/// a plain `object` is caught, not silently accepted.
+/// a plain `object` is caught, not silently accepted. Two exceptions, matching
+/// what a root does natively: an *opaque* object (a `json` field — `Object` with
+/// no declared children) accepts anything, and an unmodeled kind
+/// ([`Other`](KindTag::Other)) never rejects.
 #[must_use]
 pub const fn map_value_is(level: &[FieldSpec], name: &str, accepted: &[KindTag]) -> bool {
     let Some(field) = find(level, name) else {
         return false;
     };
     let Some(values) = field.map_values else {
-        return false;
+        return matches!(field.kind, KindTag::Other)
+            || (matches!(field.kind, KindTag::Object) && field.children.is_empty());
     };
     if accepted.is_empty() {
         return true;
@@ -238,7 +242,8 @@ pub const fn map_value_is(level: &[FieldSpec], name: &str, accepted: &[KindTag])
 /// Whether `name` is compatible with a type's [`FlussoValueMeta::MAP_VALUES`].
 ///
 /// A type that is not a map (`accepted` empty) has no opinion and passes; one
-/// that is must land on a `map` field of a matching value kind.
+/// that is must land on a `map` field of a matching value kind — or on an
+/// opaque object / unmodeled kind, which accept anything (see [`map_value_is`]).
 #[must_use]
 pub const fn map_kind_ok(level: &[FieldSpec], name: &str, accepted: &[KindTag]) -> bool {
     accepted.is_empty() || map_value_is(level, name, accepted)
@@ -309,7 +314,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be used as a document field type",
     label = "needs a flusso derive",
-    note = "add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it"
+    note = "add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it"
 )]
 pub trait FlussoValueMeta {
     /// The mapping kinds this type may stand in for. Empty means "no opinion".
@@ -369,7 +374,10 @@ value_meta! {
 
 #[cfg(test)]
 mod tests {
-    use super::{FieldSpec, KindTag, array, children, exists, kind_is, nullable, variants_covered};
+    use super::{
+        FieldSpec, KindTag, array, children, exists, kind_is, map_kind_ok, map_value_is, nullable,
+        variants_covered,
+    };
 
     const STATUS_VARIANTS: &[&str] = &["pending", "shipped", "delivered"];
 
@@ -426,6 +434,35 @@ mod tests {
                 map_values: None,
                 children: &[],
             }],
+        },
+        FieldSpec {
+            name: "labels",
+            kind: KindTag::Object,
+            nullable: false,
+            array: false,
+            variants: &[],
+            map_values: Some(KindTag::Text),
+            children: &[],
+        },
+        // An opaque `json` field: an object with no declared children.
+        FieldSpec {
+            name: "meta",
+            kind: KindTag::Object,
+            nullable: false,
+            array: false,
+            variants: &[],
+            map_values: None,
+            children: &[],
+        },
+        // A `custom { opensearch }` field this vocabulary does not model.
+        FieldSpec {
+            name: "custom",
+            kind: KindTag::Other,
+            nullable: false,
+            array: false,
+            variants: &[],
+            map_values: None,
+            children: &[],
         },
     ];
 
@@ -494,6 +531,42 @@ mod tests {
         let geo = children(LEVEL, "geo");
         assert!(exists(geo, "lat"));
         assert!(kind_is(geo, "lat", &[KindTag::Double]));
+    }
+
+    #[test]
+    fn a_map_field_checks_its_declared_value_kind() {
+        assert!(map_value_is(LEVEL, "labels", &[KindTag::Text]));
+        assert!(!map_value_is(LEVEL, "labels", &[KindTag::Keyword]));
+        assert!(map_value_is(LEVEL, "labels", &[]));
+    }
+
+    #[test]
+    fn a_structured_object_or_a_leaf_is_not_a_map() {
+        assert!(!map_value_is(LEVEL, "geo", &[KindTag::Text]));
+        assert!(!map_value_is(LEVEL, "city", &[KindTag::Text]));
+        assert!(!map_value_is(LEVEL, "town", &[KindTag::Text]));
+    }
+
+    #[test]
+    fn an_opaque_object_accepts_any_map() {
+        // Parity with the root: a `json` field (object, no children) accepts
+        // anything — a `HashMap` or a map wrapper of any value kind included.
+        assert!(map_value_is(LEVEL, "meta", &[KindTag::Text]));
+        assert!(map_value_is(LEVEL, "meta", &[KindTag::Double]));
+        assert!(map_kind_ok(LEVEL, "meta", &[KindTag::Keyword]));
+        // …and an unmodeled kind never rejects, in maps as everywhere else.
+        assert!(map_value_is(LEVEL, "custom", &[KindTag::Text]));
+    }
+
+    #[test]
+    fn a_non_map_type_has_no_opinion_on_any_field() {
+        assert!(map_kind_ok(LEVEL, "geo", &[]));
+        assert!(map_kind_ok(LEVEL, "city", &[]));
+    }
+
+    #[test]
+    fn a_map_type_rejects_a_structured_object() {
+        assert!(!map_kind_ok(LEVEL, "geo", &[KindTag::Text]));
     }
 
     #[test]

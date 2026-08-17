@@ -380,10 +380,11 @@ fn value_assert(ty: &Type, kind: TokenStream) -> TokenStream {
 }
 
 /// Validate a `map` field's Rust type against its declared value kind `values`.
-/// The type is either `HashMap<String, V>` — peel to `V` and check it exactly
-/// as a scalar value (a known primitive must match the kind; an unknown type
-/// defers to `FlussoValue<kind>`) — or a whole-map newtype wrapper, which defers
-/// a `FlussoMap<kind>` bound satisfied by `#[derive(FlussoMap)]`.
+/// The type is either `HashMap<String, V>` / `BTreeMap<String, V>` — peel to `V`
+/// and check it exactly as a scalar value (a known primitive must match the
+/// kind; an unknown type defers to `FlussoValue<kind>`) — or a whole-map
+/// wrapper, which defers a `FlussoMap<kind>` bound satisfied by
+/// `#[derive(FlussoMap)]`.
 fn check_map_type(
     field: &DocField,
     inner: &Type,
@@ -393,7 +394,7 @@ fn check_map_type(
     // Map value kinds carry no decimal flag (`map_values` is just a mapping
     // type), so a `double`-valued map keys to the `Double` kind.
     let kind = kind_of(values, false);
-    match hashmap_value(inner) {
+    match map_container_value(inner) {
         Some(value_ty) => {
             let expected = expected_leaves(values);
             let found = leaf_ident(value_ty);
@@ -414,14 +415,15 @@ fn check_map_type(
     }
 }
 
-/// The value type `V` of a `HashMap<String, V>` (the last path segment must be
-/// `HashMap`), else `None`. Peels a map field to its value type for checking.
-fn hashmap_value(ty: &Type) -> Option<&Type> {
+/// The value type `V` of a `HashMap<String, V>` / `BTreeMap<String, V>` (by the
+/// last path segment), else `None`. Peels a map field to its value type for
+/// checking.
+fn map_container_value(ty: &Type) -> Option<&Type> {
     let Type::Path(path) = ty else {
         return None;
     };
     let segment = path.path.segments.last()?;
-    if segment.ident != "HashMap" {
+    if segment.ident != "HashMap" && segment.ident != "BTreeMap" {
         return None;
     }
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
@@ -1081,14 +1083,29 @@ pub(crate) fn embed_checks(
             MappingType::Object | MappingType::Nested
         ) && resolved.mapping.map_values.is_none()
         {
-            // Assert embeddability first, so a plain un-derived struct gets
-            // `FlussoValueMeta`'s directed note ("add a derive, or mark the
-            // field opaque") rather than only a bare "no `__flusso_check`".
+            // The `map_kind_ok` assert mirrors what a fragment checks: a map
+            // wrapper (its `MAP_VALUES` is non-empty) cannot stand in for a
+            // structured object or a nested array — only for a `map` (already
+            // handled by `check_type`, which never reaches here) or an opaque
+            // `json`. Whether the type *is* a map is only knowable at const
+            // evaluation, so this cannot be a macro-time error. Reading
+            // `MAP_VALUES` also doubles as the embeddability probe: a plain
+            // un-derived struct fails it with `FlussoValueMeta`'s directed
+            // note ("add a derive, or mark the field opaque") rather than
+            // only a bare "no `__flusso_check`".
+            let map_message = format!(
+                "field `{key}` in {scope} is not a `map` — `{}` is a map type, so it can \
+                 only hold a `map` field with a matching value kind",
+                crate::fragment::render(element),
+            );
             calls.extend(quote::quote_spanned! {span=>
-                const _: fn() = || {
-                    fn __assert_embeddable<__T: ::flusso_query::FlussoValueMeta>() {}
-                    __assert_embeddable::<#element>();
-                };
+                assert!(
+                    ::flusso_query::map_kind_ok(
+                        __FLUSSO_LEVEL, #key,
+                        <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                    ),
+                    #map_message
+                );
                 <#element>::__flusso_check(::flusso_query::children(__FLUSSO_LEVEL, #key));
             });
         }

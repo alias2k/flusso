@@ -2,7 +2,7 @@
 //! `flusso.toml` fixture → a generated query surface that builds real requests.
 #![allow(dead_code, unused_crate_dependencies)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use flusso_query::{
     AsQuery, Distance, FlussoFragment, FlussoMap, FlussoRoot, FlussoValue, Fuzziness, GeoPoint,
@@ -368,6 +368,72 @@ fn map_doc_types_accept_hashmap_custom_value_and_wrapper() -> Result {
     // generated handles still follow the schema regardless of the doc type.
     let body = MappedProduct::query()
         .query(MappedProduct::title().key("it").matches("ciao"))
+        .body();
+    assert!(body.to_string().contains(r#""title.it""#));
+    Ok(())
+}
+
+/// The real-world shape that pushed `FlussoMap` beyond newtypes: multilingual
+/// text stored as a flat object of language keys plus a dedicated `fallback` —
+/// a named-field struct, `BTreeMap`-backed. The derive (not a hand-written
+/// `impl FlussoMap<K>`) is what makes it embeddable in a *fragment*: only the
+/// derive emits the const metadata a fragment's check reads.
+#[derive(serde::Deserialize, FlussoMap)]
+#[flusso(text)]
+struct Translation {
+    fallback: Option<String>,
+    #[serde(flatten)]
+    langs: BTreeMap<String, String>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct NamedWrapperProduct {
+    sku: String,
+    title: Translation,
+    codes: Option<BTreeMap<String, String>>,
+}
+
+#[test]
+fn a_named_field_map_wrapper_and_a_btreemap_work_at_a_root() -> Result {
+    // Compiling proves the deferred `FlussoMap<Text>` bound held for the
+    // named-field wrapper, and that a `BTreeMap` peeled like a `HashMap`.
+    let body = NamedWrapperProduct::query()
+        .query(NamedWrapperProduct::title().key("it").matches("ciao"))
+        .filter(NamedWrapperProduct::codes().key("ean").eq("0049"))
+        .body();
+    let json = body.to_string();
+    assert!(json.contains(r#""title.it""#), "{json}");
+    assert!(json.contains(r#""codes.ean""#), "{json}");
+    Ok(())
+}
+
+// The same wrapper inside a *fragment*, embedded by a real root — the case
+// that used to fail with "FlussoValueMeta is not implemented". The fragment
+// cannot see the mapping, so its check rides the derive-emitted metadata:
+// kind (object), map value kind (text), and the no-op recursion.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct LocalizedProduct {
+    title: Translation,
+    codes: Option<BTreeMap<String, String>>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct FlattenedProduct {
+    sku: String,
+    #[serde(flatten)]
+    localized: LocalizedProduct,
+}
+
+#[test]
+fn a_map_wrapper_inside_a_fragment_is_validated_by_the_embedding_root() -> Result {
+    // Compiling is the check: `title` was validated as a `text` map against
+    // the real products mapping, value kind included. Handles follow the
+    // schema as usual.
+    let body = FlattenedProduct::query()
+        .query(FlattenedProduct::title().key("it").matches("ciao"))
         .body();
     assert!(body.to_string().contains(r#""title.it""#));
     Ok(())

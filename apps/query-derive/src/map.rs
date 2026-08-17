@@ -13,9 +13,11 @@
 //! struct Translations(std::collections::HashMap<String, String>);
 //! ```
 //!
-//! The kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
-//! `#[flusso(number)]`, or `#[flusso(date)]` — the same attribute as
-//! `FlussoValue`. Any struct shape is accepted; on success it emits
+//! The kind is chosen with `#[flusso(keyword)]` (the default) or
+//! `#[flusso(text)]` — the same attribute as `FlussoValue`. Number/date maps
+//! use `HashMap`/`BTreeMap` directly: their value kinds are split per type
+//! (`Byte`…`Decimal`, `Date`), which a single tag can't name.
+//! Any struct shape is accepted; on success it emits
 //! `impl ::flusso_query::FlussoMap<#kind> for #ident {}` plus the marker a
 //! fragment's embed check reads (`FlussoValueMeta` + a no-op `__flusso_check`),
 //! which is why deriving beats a hand-written `impl FlussoMap<K>`: the hand-written

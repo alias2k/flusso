@@ -408,9 +408,17 @@ handle per value kind — `TextMap`/`KeywordMap`/`NumberMap`/`DateMap` — where
 of the declared kind: runtime keys, compile-time value type. `TextMap::search(q)` builds a
 `MapSearch` (a `best_fields` `multi_match` over `prefer`'d keys plus a `path.*` fallback) for
 cross-key search with per-key preference; `has_key`/`exists` are presence checks. The
-doc-side type is `HashMap<String, V>` (a blanket `FlussoMap<K>` impl for any
-`V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` newtype wrapper; the derive's `check_type`
-map arm hard-checks a `HashMap` value type and defers a `FlussoMap<kind>` bound otherwise.
+doc-side type is `HashMap<String, V>` or `BTreeMap<String, V>` (blanket `FlussoMap<K>` impls
+for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape** — newtype or
+named fields (e.g. a translations type with a `fallback` beside the language keys); the
+derive's `check_type` map arm hard-checks a `HashMap`/`BTreeMap` value type and defers a
+`FlussoMap<kind>` bound otherwise. The `FlussoMap` derive also emits `FlussoValueMeta` (its
+`MAP_VALUES` carries the declared value kind) + a no-op `__flusso_check`, which is what lets
+the type sit inside a `FlussoFragment`; a hand-written `impl FlussoMap<K>` works only at a
+root — in a fragment it fails to compile, with the E0277 note pointing at the derive. Both
+sides also enforce the value kind symmetrically (fragment `map_kind_ok` assert; the root's
+`embed_checks` mirrors it, so a map wrapper on a plain object/nested is rejected everywhere),
+and an opaque `json` field (object, no children) accepts any map-shaped type on both sides.
 `handle_fn` dispatches on `Mapping.map_values` (`Text`→`TextMap`, `Keyword`→`KeywordMap`,
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (`dynamic_templates` per-key
 analyzers for per-language stemming) is deferred.

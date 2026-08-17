@@ -1,12 +1,3 @@
-error[E0599]: no associated item named `__flusso_check` found for struct `Plain` in the current scope
-  --> tests/ui/embed_not_a_fragment.rs:15:13
-   |
- 7 | struct Plain {
-   | ------------ associated item `__flusso_check` not found for this struct
-...
-15 |     orders: Vec<Plain>,
-   |             ^^^ associated item not found in `Plain`
-
 error[E0277]: `Plain` cannot be used as a document field type
   --> tests/ui/embed_not_a_fragment.rs:15:17
    |
@@ -18,7 +9,7 @@ help: the trait `FlussoValueMeta` is not implemented for `Plain`
    |
  7 | struct Plain {
    | ^^^^^^^^^^^^
-   = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it
+   = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it
    = help: the following other types implement trait `FlussoValueMeta`:
              User
              Uuid
@@ -29,8 +20,12 @@ help: the trait `FlussoValueMeta` is not implemented for `Plain`
              i16
              i32
            and $N others
-note: required by a bound in `__assert_embeddable`
+
+error[E0599]: no associated item named `__flusso_check` found for struct `Plain` in the current scope
   --> tests/ui/embed_not_a_fragment.rs:15:13
    |
+ 7 | struct Plain {
+   | ------------ associated item `__flusso_check` not found for this struct
+...
 15 |     orders: Vec<Plain>,
-   |             ^^^ required by this bound in `__assert_embeddable`
+   |             ^^^ associated item not found in `Plain`

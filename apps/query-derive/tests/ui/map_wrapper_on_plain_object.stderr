@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: field `billingAddress` in index `users` is not a `map` — `Translations` is a map type, so it can only hold a `map` field with a matching value kind
+  --> tests/ui/map_wrapper_on_plain_object.rs:17:22
+   |
+17 |     billing_address: Translations,
+   |                      ^^^^^^^^^^^^ evaluation of `_` failed here
