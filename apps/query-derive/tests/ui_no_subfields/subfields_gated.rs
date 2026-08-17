@@ -1,10 +1,10 @@
-use flusso_query::FlussoDocument;
+use flusso_query::FlussoRoot;
 
 // Resolved against `no_subfields.toml` (FLUSSO_CONFIG, set by the harness),
 // whose OpenSearch sink has `auto_subfields = false`. So the derive stamps
 // `text`/`keyword` handles `NoSubfields` and the auto-subfield accessors don't
 // exist — a would-be runtime 400 becomes a compile error.
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
     email: String,

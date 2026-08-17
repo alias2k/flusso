@@ -1,4 +1,4 @@
-use flusso_query::FlussoDocument;
+use flusso_query::FlussoRoot;
 use std::collections::HashMap;
 
 // `title` is a `text` map. A whole-map newtype wrapper is allowed *only* if it
@@ -7,7 +7,7 @@ use std::collections::HashMap;
 #[derive(serde::Deserialize)]
 struct Translations(HashMap<String, String>);
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products")]
 struct Product {
     sku: String,

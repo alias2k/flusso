@@ -1,6 +1,6 @@
-use flusso_query::{FlussoDocument, FlussoMultiDocument};
+use flusso_query::{FlussoRoot, FlussoMultiDocument};
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
     email: String,

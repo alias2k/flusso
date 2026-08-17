@@ -15,7 +15,7 @@ use super::{
     Common, FlussoValue, Fuzziness, MinimumShouldMatch, MultiMatchType, Operator, Sort, SortOrder,
     Sortable, TermsQuery, ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
 };
-use crate::FlussoDocument;
+use crate::FlussoScope;
 use crate::query::{AsQuery, Query, Root};
 
 /// The keyword term for a value, taken from its serde serialization — so a
@@ -447,7 +447,7 @@ impl<S, Sub> Keyword<S, Sub> {
 /// key through [`KeywordMap::sort_key`](crate::KeywordMap::sort_key) instead).
 macro_rules! keyword_sortable {
     ($sub:ty) => {
-        impl<S: FlussoDocument> Sortable for Keyword<S, $sub> {
+        impl<S: FlussoScope> Sortable for Keyword<S, $sub> {
             fn asc(&self) -> Sort {
                 Sort::field::<S>(&self.path, SortOrder::Asc)
             }
@@ -530,7 +530,7 @@ impl<S> Enum<S, NoSubfields> {
 
 /// The declared order sorts on the prebaked `.sort` subfield (a rank-mapped
 /// keyword), nesting-aware like any field sort.
-impl<S: FlussoDocument, Sub> Sortable for Enum<S, Sub> {
+impl<S: FlussoScope, Sub> Sortable for Enum<S, Sub> {
     fn asc(&self) -> Sort {
         Sort::field::<S>(
             &format!("{}.{ENUM_SORT_SUBFIELD}", self.path),
@@ -799,7 +799,7 @@ impl<S> Text<S, WithSubfields> {
 /// Sorting a `text` field goes through its case/accent-insensitive
 /// `.keyword_lowercase` subfield (the analyzed field itself isn't sortable), so
 /// it's [`Sortable`] only when the field carries auto subfields.
-impl<S: FlussoDocument> Sortable for Text<S, WithSubfields> {
+impl<S: FlussoScope> Sortable for Text<S, WithSubfields> {
     fn asc(&self) -> Sort {
         self.keyword_lowercase().asc()
     }

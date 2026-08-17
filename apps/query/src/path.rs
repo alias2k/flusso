@@ -1,7 +1,7 @@
 //! Document path metadata: where a scope sits relative to the index root.
 //!
 //! Every scope type (the [`Root`](crate::Root) marker and each `nested` element
-//! struct) implements [`FlussoDocument`](crate::FlussoDocument), which carries a
+//! struct) implements [`FlussoScope`](crate::FlussoScope), which carries a
 //! `const PATH: &[Segment]` — the chain of container levels from the root down to
 //! that scope. A nesting-aware sort reads it to render the right `nested` clause.
 //!
@@ -51,7 +51,7 @@ pub struct Segment {
 ///
 /// Object levels extend the running path but contribute no boundary. A pure
 /// function of the path — identical for every document — so it lives here rather
-/// than on [`FlussoDocument`](crate::FlussoDocument). An empty result (a root or
+/// than on [`FlussoScope`](crate::FlussoScope). An empty result (a root or
 /// flattened-object field) means a plain, non-nested sort.
 #[must_use]
 pub fn nested_boundaries(path: &[Segment]) -> Vec<String> {

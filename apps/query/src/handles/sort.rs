@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 use super::{Geo, GeoPoint, NumericType, ScriptSortType};
 use crate::query::{AsQuery, Root};
-use crate::{FlussoDocument, nested_boundaries};
+use crate::{FlussoScope, nested_boundaries};
 
 /// Sort direction.
 #[derive(Debug, Clone, Copy)]
@@ -155,7 +155,7 @@ impl Sort {
     /// the matching `nested` chain (and defaults `mode` from the direction —
     /// `asc → min`, `desc → max`). A root or flattened-object field (empty path)
     /// renders a plain sort. Backs every [`Sortable`] handle.
-    pub(crate) fn field<S: FlussoDocument>(path: &str, order: SortOrder) -> Self {
+    pub(crate) fn field<S: FlussoScope>(path: &str, order: SortOrder) -> Self {
         let mut sort = Sort::new(path, order);
         let boundaries = nested_boundaries(S::PATH);
         if let Some(nested) = nested_clause(&boundaries) {
@@ -492,7 +492,7 @@ impl<S> MapKeySort<S> {
     }
 }
 
-impl<S: FlussoDocument> MapKeySort<S> {
+impl<S: FlussoScope> MapKeySort<S> {
     fn build(&self, order: SortOrder) -> Sort {
         let fields: Vec<Value> = self
             .keys
@@ -536,7 +536,7 @@ impl<S: FlussoDocument> MapKeySort<S> {
 }
 
 /// `.asc()` / `.desc()` build the `_script` sort; a bare value defaults to `asc`.
-impl<S: FlussoDocument> Sortable for MapKeySort<S> {
+impl<S: FlussoScope> Sortable for MapKeySort<S> {
     fn asc(&self) -> Sort {
         self.build(SortOrder::Asc)
     }
@@ -545,13 +545,13 @@ impl<S: FlussoDocument> Sortable for MapKeySort<S> {
     }
 }
 
-impl<S: FlussoDocument> From<MapKeySort<S>> for Sort {
+impl<S: FlussoScope> From<MapKeySort<S>> for Sort {
     fn from(map_sort: MapKeySort<S>) -> Self {
         map_sort.build(SortOrder::Asc)
     }
 }
 
-impl<S: FlussoDocument> From<MapKeySort<S>> for Option<Sort> {
+impl<S: FlussoScope> From<MapKeySort<S>> for Option<Sort> {
     fn from(map_sort: MapKeySort<S>) -> Self {
         Some(map_sort.into())
     }

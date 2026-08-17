@@ -6,25 +6,28 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, Decimal, FlussoDocument, FlussoIndex, Sortable};
+use flusso_query::{Client, Decimal, FlussoRoot, Sortable};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::response::Page;
+use crate::shared::{LineItem, OrderStatus};
 
 // `pub(crate)`: reused by the cross-index endpoints in `global`.
-#[derive(Debug, Serialize, Deserialize, FlussoDocument)]
+#[derive(Debug, Serialize, Deserialize, FlussoRoot)]
 #[serde(rename_all = "camelCase")]
 #[flusso(index = "orders")]
 pub(crate) struct Order {
     id: i32,
     user_id: i32,
-    status: String,
+    status: OrderStatus,
     // A `decimal` column → a `Decimal` handle, queried with `Decimal` (no `f64`
     // cast). Needs the `decimal` feature on `flusso-query`.
     total: Decimal,
     item_count: i64,
     units_sold: Option<i32>,
+    // The *shared* fragment — the same one `users` embeds three levels deep.
+    items: Vec<LineItem>,
 }
 
 #[derive(Debug, Default, Deserialize)]

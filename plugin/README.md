@@ -23,7 +23,7 @@ One module per domain, layered the way flusso is (source → bridge → sink). T
 | --- | --- |
 | `flusso-postgres` | Understanding/debugging the **source** — logical replication, the slot, the publication (`manage_publication`), `REPLICA IDENTITY`, relational→join mapping, privileges. |
 | `flusso-schema` | Creating/editing a `*.schema.yml` or `flusso.toml` — type-first fields, joins, aggregates, geo, filters, soft-delete, validation. Points to `flusso design` (the visual, DB-aware editor) for a no-grammar path. |
-| `flusso-query` | Writing read-side Rust with `flusso-query` + `#[derive(FlussoDocument)]` — typed query surface, nested filtering, custom value types, multi-index. |
+| `flusso-query` | Writing read-side Rust with `flusso-query` + `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` — typed query surface, nested filtering, custom value types, multi-index. |
 | `flusso-opensearch` | Understanding the **sink** — `dynamic:strict` ownership, hashed index + alias, generations/reindex, the `flusso_*` analyzers + subfields (which to query), refresh. |
 | `flusso-integrate` | Standing flusso up in a project or migrating from a hand-rolled indexer — prerequisites, config, first index, `check`, `run`, `build`. |
 | `flusso-internals` | Modifying the flusso Rust codebase — crate layering, the sync pipeline, engine invariants, the query derive, the strict lints, CI order. |
@@ -37,7 +37,8 @@ Each schema/query skill ships worked `examples/` you can copy from.
 | `/flusso:expert [question or task]` | **Enter expert mode** — answer questions or drive flusso work, backed by the skills; escalates heavy multi-file work to the `flusso-expert` agent. |
 | `/flusso-new-index <name> [table]` | Scaffold a new index: a `*.schema.yml` + its `[[index]]` entry. |
 | `/flusso-check [path]` | Run `flusso check` and triage any validation errors. |
-| `/flusso-doc-struct <index> [Struct]` | Scaffold a typed `#[derive(FlussoDocument)]` query struct. |
+| `/flusso-doc-struct <index> [Struct]` | Scaffold a typed `#[derive(FlussoRoot)]` query struct. |
+| `/flusso-migrate-query [path]` | Migrate read-side Rust off the removed `FlussoDocument` / `path = "…"` form onto `FlussoRoot` + `FlussoFragment`. |
 
 ### Agent
 
@@ -53,7 +54,7 @@ Two `PostToolUse` hooks run **after any edit** (`Edit`/`Write`/`MultiEdit`):
 - **Silent on success**, speaks only when validation fails. Unrelated edits, files outside a flusso project, or a missing runner all exit quietly.
 - **Runner resolution:** `$FLUSSO_CHECK_CMD` (a full command prefix) → `flusso` on `PATH` → `cargo run --quiet --` from the nearest Cargo workspace (repo-dev mode).
 
-**`hooks/flusso_query_lint.py`** — on a `.rs` edit, flags the one query anti-pattern a compiler can't: a `Keyword`/`Text` **string-path handle** (`Keyword::at("…")` / `Text::<Root>::at("…")`) in a file that also uses `#[derive(FlussoDocument)]`. There every schema field already has a generated `Type::field()` handle, so a string path bypasses the compile-time mapping check — the classic escape-hatch mistake. High precision: a file with no derive (hand-written handles) is never flagged; the typed fix is fed back for a same-turn correction. Style only — it never blocks editing.
+**`hooks/flusso_query_lint.py`** — on a `.rs` edit, flags the one query anti-pattern a compiler can't: a `Keyword`/`Text` **string-path handle** (`Keyword::at("…")` / `Text::<Root>::at("…")`) in a file that also uses `#[derive(FlussoRoot)]`. There every schema field already has a generated `Type::field()` handle, so a string path bypasses the compile-time mapping check — the classic escape-hatch mistake. High precision: a file with no derive (hand-written handles) is never flagged; the typed fix is fed back for a same-turn correction. Style only — it never blocks editing.
 
 Both require `python3` (only to parse the hook's stdin JSON; the validation/lint logic is local) and are **silent on success**.
 

@@ -629,7 +629,7 @@ protocol you choose: pointing the default HTTP exporter at a gRPC `:4317` port j
 
 ### The derive (compile-time)
 
-`#[derive(FlussoDocument)]` (the [`flusso-query`](querying.md) client) reads **`FLUSSO_CONFIG`
+`#[derive(FlussoRoot)]` (the [`flusso-query`](querying.md) client) reads **`FLUSSO_CONFIG`
 at compile time** to locate `flusso.toml` when it can't be found by walking up from the
 crate's `CARGO_MANIFEST_DIR`. Same name as the CLI flag, consumed by the proc-macro instead
 of the binary. (You can also point a single struct at a config with

@@ -370,13 +370,40 @@ order with no script; out-of-set values sort after. Parsing lives in
 ### Query side — `flusso-query` + the derive
 
 `apps/query` (crate `flusso-query`) is a backend-neutral OpenSearch/Elasticsearch query
-client. `apps/query-derive` (`flusso-query-derive`, re-exported as `flusso_query::FlussoDocument`
-behind the `derive` feature) is a proc-macro that, **at compile time and with no DB**,
-discovers `flusso.toml`, resolves the named index mapping, validates the struct against it,
-and generates a typed query surface. `dev/search-api` is a working axum consumer. This is a
-deep subsystem — the proc-macro internals (scope tagging, `FlussoValue<K>` kind markers,
-nested/object handles) are documented in the `flusso-query-derive` memory note; read that
-before changing the derive.
+client. `apps/query-derive` (`flusso-query-derive`, re-exported behind the `derive`
+feature) is a proc-macro that, **at compile time and with no DB**, discovers `flusso.toml`,
+resolves the named index mapping, validates the struct against it, and generates a typed
+query surface. `dev/search-api` is a working axum consumer. This is a deep subsystem — the
+proc-macro internals (scope tagging, `FlussoValue<K>` kind markers, nested/object handles)
+are documented in the `flusso-query-derive` memory note; read that before changing the
+derive.
+
+**Exactly one type references the schema: the root (issue #98).** `#[derive(FlussoRoot)]`
+(which replaced `FlussoDocument` outright — no alias) binds to an index and
+generates the **whole** handle tree — `doc.rs::codegen` walks the resolved mapping and
+emits one namespace per container level into a generated `flusso_<root>_query` module
+(`flusso_user_query::Orders`, `flusso_user_query::OrdersItems`) — never the caller's namespace, so a user
+type named after a level can't collide.
+An **object** flattens into its enclosing scope so its namespace chains from the parent as
+`&self` methods (`User::account().tier()`); a **nested** array introduces its own scope so
+its namespace is a named type with associated fns (`flusso_user_query::Orders::total()`) implementing
+`FlussoScope` (the renamed `FlussoDocument` *trait*; `FlussoIndex` → `FlussoRoot`; both old
+names removed). This
+retired `path = "…"`, `resolve::Scope`/`scope_at`, and the "object under nested"
+restriction.
+Everything below the root is `#[derive(FlussoFragment)]`: **location-free**, so one
+declaration serves several paths/indexes, validated by each root that embeds it. The two
+derives can't see each other's tokens, so they meet as **const data**: the root bakes the
+resolved level (`spec.rs` → `&[FieldSpec]` in `apps/query/src/check.rs`) and emits
+`const _: () = Frag::__flusso_check(children(LEVEL, "…"))` spanned on its field;
+`fragment.rs` emits that const fn with one baked-message assertion per field, recursing
+into sub-fragments. `FlussoValueMeta` carries a custom type's kinds/variants as consts (a
+const fn can't name `FlussoValue<K>` for a `K` it only has as a value) — which is also how
+enum-variant coverage is checked. Constraints: const `panic!` takes a literal (no
+interpolation) and const eval **can't warn**, so a Rust variant the schema doesn't declare
+is a hard error while a subset is silently fine. Embedding is checked by default;
+`#[flusso(opaque)]` opts a plain struct out. `#[serde(flatten)]` and
+`#[serde(transparent)]` newtypes are supported (both checked against the enclosing level).
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
 handle per value kind — `TextMap`/`KeywordMap`/`NumberMap`/`DateMap` — where
@@ -442,17 +469,18 @@ explicit `#[flusso(keyword|text)]` (numeric/date tags don't exist).
 type for `multi_match`/composition). Issue #19 acceptance test: `apps/query-derive/tests/
 derive.rs::acceptance_realistic_projection_needs_no_escape_hatch`.
 
-**Sorting + nesting-aware path metadata (issue #49).** `FlussoDocument` now carries only
+**Sorting + nesting-aware path metadata (issue #49).** `FlussoScope` carries only
 `const PATH: &[Segment]` (the container chain from the index root, in `apps/query/src/path.rs`);
-the index identity + `query`/`get` moved to a root-only `FlussoIndex: FlussoDocument` supertrait,
-so a child projection physically can't `.query()`. The derive emits `FlussoDocument` for **every**
-struct (root + each nested element) and `FlussoIndex` only for the root; the `Root` scope marker
-stays (the shared root/flattened-object scope, so combined search and object handles keep
-composing) and impls `FlussoDocument` with `PATH = &[]`. Sorting goes through a `Sortable` trait
+the index identity + `query`/`get` live on the root-only `FlussoRoot: FlussoScope` supertrait,
+so a fragment physically can't `.query()`. Since #98 the derive emits `FlussoScope` for the root
+and for **each generated nested namespace** (a fragment gets neither — it has no location), and
+`FlussoRoot` only for the root; the `Root` scope marker stays (the shared root/flattened-object
+scope, so combined search and object handles keep composing) and impls `FlussoScope` with
+`PATH = &[]`. Sorting goes through a `Sortable` trait
 (`asc`/`desc`, impl'd for `Keyword`/`Text`/`Number`/`Date`/`Bool`, **not** `Geo`/`Object`/map) whose
 sorts are nesting-aware: `Sort::field::<S>` reads `nested_boundaries(S::PATH)` and renders the
 recursive `nested:{path, nested:{…}}` chain (mode defaulted from direction), so a bare
-`Order::placed_at().desc()` is correct at top level; `NestedProjection` (inner_hits) strips that
+`flusso_user_query::Orders::placed_at().desc()` is correct at top level; `NestedProjection` (inner_hits) strips that
 wrapper. `SortBuilder` (`by`/`near`/`score`/`score_if`/`raw`/`tiebreak`/`or_default`/`build`,
 deduping by key) collapses request→`sort` mapping; `OrderBy`/`MaybeOrderBy` carry a direction +
 optionality (a request's `Option<dir>` self-skips). `Search`/`MultiSearch`/`NestedProjection` take
@@ -527,7 +555,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives the `Daemon::start`/`run` **restart loop**, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations + restart trigger) | sink: `libs/1-sinks/2-opensearch/src/sink.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `CaptureGuard` + daemon `LagGuard` (clean cancel) + `Daemon::with_status`; CLI `commands/run.rs` (restart loop), `http/mod.rs` (`POST /reindex`), `commands/admin.rs` (client). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `apps/query/src/` |
-| `#[derive(FlussoDocument)]` proc-macro | `apps/query-derive/src/` (+ the `flusso-query-derive` memory note) |
+| `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `apps/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `apps/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/guides/deploying.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |

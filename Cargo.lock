@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-daemon"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-design"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-dev-search-api"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "axum",
  "flusso-query",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-engine"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "criterion",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-query"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "flusso-query-derive",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-query-derive"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "flusso-query",
  "flusso-schema",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-queue-channel"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "flusso-queue-core",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-queue-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "thiserror 2.0.18",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-schema"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "flusso-schema-config-toml",
  "flusso-schema-core",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-schema-config-toml"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "flusso-schema-core",
  "serde",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-schema-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bon",
  "chrono",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-schema-index-yaml"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "flusso-schema-core",
  "rust_decimal",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sinks-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "flusso-schema-core",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sinks-opensearch"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "criterion",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sinks-stdout"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sources-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "flusso-schema-core",
@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sources-postgres"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "chrono",

@@ -3,7 +3,7 @@ description: Enter flusso expert mode — answer questions or drive flusso work 
 argument-hint: [question or task, e.g. "index the products table and query it from Rust"]
 ---
 
-You are now the **flusso expert** for the rest of this conversation. flusso keeps OpenSearch in sync with Postgres from declarative config: a search document is described in `*.schema.yml`, flusso derives the index mapping, seeds it, then follows Postgres logical replication so the index stays current. The read side is the `flusso-query` crate + `#[derive(FlussoDocument)]`.
+You are now the **flusso expert** for the rest of this conversation. flusso keeps OpenSearch in sync with Postgres from declarative config: a search document is described in `*.schema.yml`, flusso derives the index mapping, seeds it, then follows Postgres logical replication so the index stays current. The read side is the `flusso-query` crate + `#[derive(FlussoRoot)]` (one root per index) plus `#[derive(FlussoFragment)]` for the shapes below it.
 
 ## Stay inside the project (hard rule)
 
@@ -39,7 +39,8 @@ The `flusso` **binary** is ground truth for syntax and validity — prefer `flus
 
 **After a schema lands (created or scaffolded + validated), offer the next step** — unless the user already asked for the whole chain. Ask one clear question, then act on the answer:
 
-- **Rust project** (a `Cargo.toml` is present)? → *"Want me to generate the Rust query side — the `#[derive(FlussoDocument)]` struct + typed queries for `<index>`?"* If yes: `/flusso-doc-struct` + **flusso-query**.
+- **Rust project** (a `Cargo.toml` is present)? → *"Want me to generate the Rust query side — the `#[derive(FlussoRoot)]` struct + typed queries for `<index>`?"* If yes: `/flusso-doc-struct` + **flusso-query**.
+- **Has flusso query code that no longer builds** (unresolved `FlussoDocument`/`FlussoIndex`, or `` `path` no longer exists ``)? → *"Want me to migrate the read side onto `FlussoRoot` + `FlussoFragment`?"* If yes: `/flusso-migrate-query`.
 - **A migration** (you're replacing an existing search/indexer)? → *"Want me to switch the current implementation over to this flusso-backed one?"* If yes: do the cutover.
 - Neither / non-Rust / unsure → state what's next in one line (`flusso check` → `flusso run`) and stop. Don't nag.
 

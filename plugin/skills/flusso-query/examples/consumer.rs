@@ -10,9 +10,11 @@
 //!   time = "0.3"
 
 use flusso_query::{
-    Client, FlussoDocument, FlussoIndex, FlussoMultiDocument, FlussoValue, Search, SortBuilder,
+    Client, FlussoFragment, FlussoMultiDocument, FlussoRoot, FlussoValue, Search, SortBuilder,
     Sortable, SortOrder,
 };
+// Generated scope types live in `flusso_<root>_query`; import the ones you query.
+use flusso_user_query::Orders;
 
 // ── Custom value type: a closed enum stored as a keyword ────────────────────
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, FlussoValue)]
@@ -27,7 +29,7 @@ pub enum Tier {
 // ── Root document: a PROJECTION of the `users` index ────────────────────────
 // The derive validates every field against the schema and generates the query
 // surface for the WHOLE schema (so you can filter on fields not declared here).
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
+#[derive(Debug, Clone, serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")] // only input: which index. flusso.toml is auto-discovered.
 pub struct User {
     pub id: i32,                    // primary key (integer) → never null
@@ -43,8 +45,8 @@ pub struct User {
     pub lifetime_value: Option<f64>, // sum aggregate → nullable double
 }
 
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "account")] // a child struct names its dotted path
+// A fragment: no index, no path. `User` validates it at `users.account`.
+#[derive(Debug, Clone, serde::Deserialize, FlussoFragment)]
 pub struct Account {
     pub tier: Tier,
     pub country: Option<String>,
@@ -52,8 +54,7 @@ pub struct Account {
     pub created_at: time::OffsetDateTime,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, FlussoDocument)]
-#[flusso(index = "users", path = "orders")]
+#[derive(Debug, Clone, serde::Deserialize, FlussoFragment)]
 pub struct Order {
     pub status: String,
     pub total: f64,
@@ -104,21 +105,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(User::order_count().gte(5))           // long → range
         .filter(User::tier().eq(Tier::Pro))           // custom keyword value
         .query(User::full_name().matches("ada lovelace")) // text → analyzed
-        .filter(User::orders().any(Order::status().eq("delivered"))) // BY
+        .filter(User::orders().any(Orders::status().eq("delivered"))) // BY
         .filter_nested(
             User::orders()
-                .matching(Order::status().eq("delivered"))
-                .sort(Order::placed_at().desc())
+                .matching(Orders::status().eq("delivered"))
+                .sort(Orders::placed_at().desc())
                 .size(5),
         ) // OF
         // SortBuilder maps a request to the `sort` array: each `.by` skips a
         // `None`, `tiebreak` adds a stable final key, `or_default` is the
-        // fallback. `Order::placed_at()` (a nested field) auto-wraps in its
+        // fallback. `Orders::placed_at()` (a nested field) auto-wraps in its
         // `nested` clause — same one-line `.by`.
         .sorts(
             SortBuilder::new()
                 .by(User::order_count(), SortOrder::Desc)
-                .by(Order::placed_at(), None::<SortOrder>) // skipped here
+                .by(Orders::placed_at(), None::<SortOrder>) // skipped here
                 .tiebreak(User::id())
                 .or_default(User::order_count().desc())
                 .build(),

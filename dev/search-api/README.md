@@ -1,13 +1,27 @@
 # flusso-dev-search-api
 
 A small axum HTTP API over the dev indexes — the read side of the dev stack, built with
-`flusso-query` + `#[derive(FlussoDocument)]`. The engine keeps OpenSearch in sync from
+`flusso-query` + `#[derive(FlussoRoot)]`. The engine keeps OpenSearch in sync from
 Postgres; this serves typed, filterable queries over the result.
 
 The document structs here are **projections** of the schemas in
-[`../flusso.toml`](../flusso.toml) — the derive discovers that config at compile time
+[`../flusso.toml`](../flusso.toml) — the root derive discovers that config at compile time
 (walking up from this crate) and checks each struct against it, so a schema change that
 breaks a field fails `cargo build`.
+
+### One root per index, fragments everywhere else
+
+Only the root (`User`, `Order`, `Product`) names an index. It owns the *whole* typed
+surface for that index — a handle for every field at every level, reached through a
+generated scope: `User::account().tier()` for an object, `flusso_user_query::Orders::status()` for a
+`nested` array.
+
+Every other shape is a `#[derive(FlussoFragment)]`: no index, no path, validated by
+whichever root embeds it. [`src/shared.rs`](src/shared.rs) is the point — one `LineItem`
+is embedded at `users.orders.items` **and** at `orders.items`, in two different indexes,
+and checked against both. Retype one of its fields and you get two errors, one per
+embedding site. Before fragments that was two identical structs with nothing keeping them
+in agreement.
 
 ## Run it
 

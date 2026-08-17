@@ -1,17 +1,17 @@
-//! End-to-end test of `#[derive(FlussoDocument)]`: a hand-written struct +
+//! End-to-end test of `#[derive(FlussoRoot)]`: a hand-written struct +
 //! `flusso.toml` fixture → a generated query surface that builds real requests.
 #![allow(dead_code, unused_crate_dependencies)]
 
 use std::collections::HashMap;
 
 use flusso_query::{
-    AsQuery, Distance, FlussoDocument, FlussoIndex, FlussoMap, FlussoValue, Fuzziness, GeoPoint,
+    AsQuery, Distance, FlussoFragment, FlussoMap, FlussoRoot, FlussoValue, Fuzziness, GeoPoint,
     Sortable,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct User {
     id: i32,
@@ -25,12 +25,7 @@ struct User {
     // partial projections are allowed, and their handles still generate.
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
-#[flusso(
-    index = "users",
-    path = "orders",
-    config = "tests/fixtures/flusso.toml"
-)]
+#[derive(serde::Deserialize, FlussoFragment)]
 struct Order {
     status: String,
     total: f64,
@@ -42,7 +37,7 @@ fn generated_surface_builds_queries() -> Result {
         .filter(User::email().eq("ada@example.com")) // keyword handle
         .filter(User::order_count().gte(5)) // count → Number
         .query(User::full_name().matches("ada")) // text (renamed fullName)
-        .filter(User::orders().any(Order::status().eq("paid"))) // nested + child handle
+        .filter(User::orders().any(flusso_user_query::Orders::status().eq("paid"))) // nested + child handle
         .filter(User::location().within(Distance::km(10.0), GeoPoint::new(52.37, 4.90))) // geo, not projected
         .body();
 
@@ -63,7 +58,7 @@ fn generated_surface_builds_queries() -> Result {
 
 // `#[derive(FlussoValue)]` lets a field be a Rust enum or newtype wrapper
 // instead of a bare leaf type: the derive impls `FlussoValue<K>` for the chosen
-// kind, which `FlussoDocument` defers to. Works across kinds — `keyword` here,
+// kind, which `FlussoRoot` defers to. Works across kinds — `keyword` here,
 // plus a `number` newtype on the orders' decimal `total`.
 
 /// A newtype wrapper over the `email` keyword (kind defaults to `keyword`).
@@ -93,7 +88,7 @@ enum OrderStatus {
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, FlussoValue)]
 struct Money(flusso_query::Decimal);
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct TypedUser {
     email: Email,
@@ -102,12 +97,7 @@ struct TypedUser {
     orders: Vec<TypedOrder>,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
-#[flusso(
-    index = "users",
-    path = "orders",
-    config = "tests/fixtures/flusso.toml"
-)]
+#[derive(serde::Deserialize, FlussoFragment)]
 struct TypedOrder {
     status: OrderStatus,
     total: Money,
@@ -120,7 +110,10 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
     // the typed value directly, matched against its serde string form.
     let body = TypedUser::query()
         .filter(TypedUser::email().eq("ada@example.com")) // &str still works
-        .filter(TypedUser::orders().any(TypedOrder::status().eq(OrderStatus::Paid)))
+        .filter(
+            TypedUser::orders()
+                .any(flusso_typed_user_query::Orders::status().eq(OrderStatus::Paid)),
+        )
         .body();
 
     let json = body.to_string();
@@ -136,7 +129,9 @@ fn value_derive_accepts_enums_and_newtypes() -> Result {
 // nesting-aware, since `status` lives under the nested `orders` array.
 #[test]
 fn ordered_enum_sorts_by_declared_order_on_the_sort_subfield() -> Result {
-    let body = TypedUser::query().sort(TypedOrder::status().asc()).body();
+    let body = TypedUser::query()
+        .sort(flusso_typed_user_query::Orders::status().asc())
+        .body();
 
     let json = body.to_string();
     assert!(json.contains(r#""orders.status.sort""#), "{json}");
@@ -157,11 +152,17 @@ fn number_handle_accepts_any_decimal_value_no_conversion() -> Result {
 
     let body = TypedUser::query()
         // `rust_decimal::Decimal` — the headline case, no `as f64`.
-        .filter(TypedUser::orders().any(TypedOrder::total().eq(Decimal::new(105_050, 2))))
+        .filter(
+            TypedUser::orders()
+                .any(flusso_typed_user_query::Orders::total().eq(Decimal::new(105_050, 2))),
+        )
         // a bare integer literal widens losslessly into `decimal`.
-        .filter(TypedUser::orders().any(TypedOrder::total().gte(100)))
+        .filter(TypedUser::orders().any(flusso_typed_user_query::Orders::total().gte(100)))
         // and a custom newtype over `Decimal`, as a query value.
-        .filter(TypedUser::orders().any(TypedOrder::total().lt(Money(Decimal::new(500_000, 2)))))
+        .filter(
+            TypedUser::orders()
+                .any(flusso_typed_user_query::Orders::total().lt(Money(Decimal::new(500_000, 2)))),
+        )
         .body();
 
     let json = body.to_string();
@@ -185,7 +186,7 @@ enum CustomerTier {
     Free,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct Customer {
     email: String,
@@ -292,7 +293,7 @@ struct Translations(HashMap<String, String>);
 // Each of these compiling proves a `check_type` map arm: a bare `HashMap`
 // (hard-checked value kind), a `HashMap` of a custom `FlussoValue`, and a
 // whole-map `FlussoMap` wrapper. `codes` is nullable → `Option`.
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct MappedProduct {
     sku: String,
@@ -303,14 +304,14 @@ struct MappedProduct {
     release_dates: Option<HashMap<String, String>>,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct CustomValueProduct {
     sku: String,
     title: HashMap<String, Locale>,
 }
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct WrappedProduct {
     sku: String,
@@ -376,7 +377,7 @@ fn map_doc_types_accept_hashmap_custom_value_and_wrapper() -> Result {
 // document types from two indexes. Purely syntactic: the generated impl
 // references each payload's derive-baked `INDEX`/`SCHEMA_HASH`.
 
-#[derive(serde::Deserialize, FlussoDocument)]
+#[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
 struct Product {
     sku: String,
@@ -429,5 +430,280 @@ fn multi_document_derive_lists_targets_and_dispatches_hits() -> Result {
         Err(other) => return Err(format!("wrong error: {other}").into()),
         Ok(_) => return Err("expected an unexpected-index error".into()),
     }
+    Ok(())
+}
+
+// `FlussoValueMeta` is the const-readable twin of `FlussoValue<K>`: a fragment's
+// check runs in const evaluation, where the schema kind is only a value, so it
+// cannot name `FlussoValue<K>` — it reads these constants instead.
+
+#[test]
+fn value_derive_exposes_its_kinds_and_variants_as_constants() {
+    use flusso_query::{FlussoValueMeta, KindTag};
+
+    // An explicit kind tag → exactly that kind, and no variants.
+    assert_eq!(<Headline as FlussoValueMeta>::KINDS, &[KindTag::Text]);
+    assert!(<Headline as FlussoValueMeta>::VARIANTS.is_empty());
+
+    // No kind tag on a newtype → it inherits every kind the inner type has,
+    // exactly as the blanket `FlussoValue<K>` impl does. `String` is a valid
+    // keyword, text, *and* date value, so `Email` is too.
+    const EMAIL: &[KindTag] = <Email as FlussoValueMeta>::KINDS;
+    assert_eq!(EMAIL, <String as FlussoValueMeta>::KINDS);
+    assert!(EMAIL.contains(&KindTag::Keyword));
+
+    // An enum reports its variants as the *document* spells them, so they can be
+    // compared against the schema's declared `variants:` — note `rename_all`.
+    assert_eq!(
+        <OrderStatus as FlussoValueMeta>::VARIANTS,
+        &["paid", "pending", "cancelled"]
+    );
+
+    // A newtype with no kind tag forwards its inner type's kinds as data,
+    // mirroring how it forwards them as a bound.
+    assert_eq!(
+        <Money as FlussoValueMeta>::KINDS,
+        <flusso_query::Decimal as FlussoValueMeta>::KINDS
+    );
+}
+
+#[test]
+fn value_metadata_is_readable_during_const_evaluation() {
+    use flusso_query::{FieldSpec, FlussoValueMeta, KindTag, kind_is, variants_covered};
+
+    const LEVEL: &[FieldSpec] = &[FieldSpec {
+        name: "status",
+        kind: KindTag::Keyword,
+        nullable: false,
+        array: false,
+        variants: &["paid", "pending", "cancelled"],
+        map_values: None,
+        children: &[],
+    }];
+
+    // Exactly the two assertions a generated fragment check emits for a
+    // custom-typed field — both resolved at compile time.
+    const _: () = assert!(kind_is(
+        LEVEL,
+        "status",
+        <OrderStatus as FlussoValueMeta>::KINDS
+    ));
+    const _: () = assert!(variants_covered(
+        LEVEL,
+        "status",
+        <OrderStatus as FlussoValueMeta>::VARIANTS
+    ));
+
+    // And the no-op leaf check that lets a fragment treat every custom type alike.
+    const _: () = OrderStatus::__flusso_check(&[]);
+}
+
+// The root is the only type that resolves the schema, so it bakes the resolved
+// level and drives the check into every shape it embeds. These fragments carry
+// no location at all — they are validated purely by where `FragUser` puts them.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct FragOrder {
+    status: String,
+    // `decimal` in the schema — OpenSearch stores it as `double`, and the
+    // baked tag keeps the two apart.
+    total: f64,
+    // An object *inside* a nested array: the one shape the old `path =` model
+    // could not express at all, because such a struct could not name its scope.
+    // A `has_one` join is nullable, so the schema requires the `Option`.
+    shipping: Option<FragShipping>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct FragShipping {
+    carrier: String,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct FragUser {
+    id: i32,
+    // Checked against `users.orders`, and `FragShipping` against
+    // `users.orders.shipping` — reached by recursion, without either struct
+    // naming that path.
+    orders: Vec<FragOrder>,
+}
+
+#[test]
+fn a_root_validates_the_fragments_it_embeds_against_the_real_mapping() -> Result {
+    // Compiling at all means the baked level matched: `orders` resolved to a
+    // nested array, its `status`/`total` matched, and recursion reached
+    // `shipping.carrier` two levels down. The query surface works alongside it.
+    let body = FragUser::query().filter(FragUser::id().eq(1)).body();
+    assert_eq!(body["query"]["bool"]["filter"][0]["term"]["id"], 1);
+    Ok(())
+}
+
+// A shared field group, flattened in. Its keys live at the *enclosing* level, so
+// the root checks it against that level rather than looking up a container
+// field named `common` — which doesn't exist in the mapping at all.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct Common {
+    id: i32,
+    email: String,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct FlatUser {
+    #[serde(flatten)]
+    common: Common,
+    #[flusso(rename = "fullName")]
+    full_name: Option<String>,
+}
+
+#[test]
+fn a_flattened_group_is_checked_against_the_enclosing_level() -> Result {
+    // `id` and `email` are root fields of `users`; nothing named `common` is.
+    // Compiling proves the group was checked here, not one level down.
+    let body = FlatUser::query()
+        .filter(FlatUser::email().eq("ada@x.com"))
+        .body();
+    assert_eq!(
+        body["query"]["bool"]["filter"][0]["term"]["email"],
+        "ada@x.com"
+    );
+    Ok(())
+}
+
+// A `#[serde(transparent)]` newtype: same shape, new name. The wrapper gets the
+// full root surface, and the inner shape is checked against the root level.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct UserFields {
+    id: i32,
+    email: String,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[serde(transparent)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct UserView(UserFields);
+
+#[test]
+fn a_transparent_newtype_inherits_the_whole_surface() -> Result {
+    // `UserView` has every handle the index has, and can start a search — while
+    // `UserFields` was validated against the root level through the wrapper.
+    let body = UserView::query()
+        .filter(UserView::email().eq("ada@x.com"))
+        .filter(UserView::orders().any(flusso_user_view_query::Orders::status().eq("paid")))
+        .body();
+    assert_eq!(
+        body["query"]["bool"]["filter"][0]["term"]["email"],
+        "ada@x.com"
+    );
+    Ok(())
+}
+
+// The case the whole feature exists for: ONE shape, TWO paths in the SAME index.
+// `Address` names neither, and is validated against each.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(rename_all = "camelCase")]
+struct Address {
+    city: String,
+    postal_code: Option<String>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[serde(rename_all = "camelCase")]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct AddressUser {
+    id: i32,
+    billing_address: Address,
+    shipping_address: Address,
+}
+
+#[test]
+fn one_fragment_serves_two_paths_in_the_same_index() -> Result {
+    // Compiling means `Address` was checked twice — once per embedding.
+    // Handles come from the root, so each path has its own, correctly prefixed.
+    let body = AddressUser::query()
+        .filter(AddressUser::billing_address().city().eq("Rome"))
+        .filter(AddressUser::shipping_address().city().eq("Milan"))
+        .body();
+    let filters = &body["query"]["bool"]["filter"];
+    assert_eq!(filters[0]["term"]["billingAddress.city"], "Rome");
+    assert_eq!(filters[1]["term"]["shippingAddress.city"], "Milan");
+    Ok(())
+}
+
+#[test]
+fn a_generated_nested_namespace_carries_its_path_for_sorting() -> Result {
+    // Sorting inside a `nested` array needs the boundary chain, which the
+    // generated namespace supplies through `FlussoScope::PATH`.
+    let body = User::query()
+        .sorts([flusso_user_query::Orders::total().desc()])
+        .body();
+    let sort = &body["sort"][0]["orders.total"];
+    assert_eq!(sort["order"], "desc");
+    assert_eq!(sort["nested"]["path"], "orders");
+    Ok(())
+}
+
+// `#[flusso(scope = "…")]` renames a generated namespace — to escape a clash
+// with a type the caller already has, or to shorten a deep chain. The rename
+// becomes the base for everything under that level.
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct ScopedUser {
+    id: i32,
+    #[flusso(scope = "Purchases")]
+    orders: Vec<Order>,
+}
+
+#[test]
+fn a_field_can_rename_its_generated_namespace() -> Result {
+    // `Purchases`, not the default `Orders` — and the sort still renders the
+    // nested boundary, so the renamed type carries the same `PATH`.
+    let body = ScopedUser::query()
+        .filter(ScopedUser::orders().any(flusso_scoped_user_query::Purchases::status().eq("paid")))
+        .sorts([flusso_scoped_user_query::Purchases::total().desc()])
+        .body();
+    assert_eq!(
+        body["query"]["bool"]["filter"][0]["nested"]["path"],
+        "orders"
+    );
+    assert_eq!(body["sort"][0]["orders.total"]["nested"]["path"], "orders");
+    Ok(())
+}
+
+// Where you put the `Option` on a nested clause changes the meaning — the
+// compiler accepts both, so this pins the difference.
+#[test]
+fn an_optional_nested_filter_means_different_things_inside_and_outside() -> Result {
+    let absent: Option<String> = None;
+
+    // INNER: an absent element predicate is *not* "skip" — `any` falls back to
+    // `match_all`, so the clause becomes "has at least one order".
+    let inner = User::query()
+        .filter(
+            User::orders().any(
+                absent
+                    .clone()
+                    .map(|v| flusso_user_query::Orders::status().eq(v)),
+            ),
+        )
+        .body();
+    assert_eq!(
+        inner["query"]["bool"]["filter"][0]["nested"]["path"],
+        "orders"
+    );
+    assert!(inner["query"]["bool"]["filter"][0]["nested"]["query"]["match_all"].is_object());
+
+    // OUTER: an absent nested clause drops out entirely — this is the one that
+    // means "skip this filter when the request didn't ask for it".
+    let outer = User::query()
+        .filter(absent.map(|v| User::orders().any(flusso_user_query::Orders::status().eq(v))))
+        .body();
+    assert!(outer["query"]["match_all"].is_object());
+
     Ok(())
 }

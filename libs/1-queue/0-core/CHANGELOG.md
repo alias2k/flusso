@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/alias2k/flusso/compare/flusso-queue-core-v0.13.0...flusso-queue-core-v0.14.0) - 2026-08-14
+
+### Added
+
+- *(query-derive)* [**breaking**] deprecate path= instead of deleting it
+
 ## [0.11.0](https://github.com/alias2k/flusso/compare/flusso-queue-core-v0.10.1...flusso-queue-core-v0.11.0) - 2026-07-23
 
 ### Other

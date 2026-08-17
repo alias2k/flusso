@@ -12,10 +12,10 @@ error[E0277]: `{float}` is not a valid value for a `flusso_query::kind::Long` fi
              `f32` implements `FlussoValue<flusso_query::kind::Double>`
              `f32` implements `FlussoValue<flusso_query::kind::Float>`
              `f64` implements `FlussoValue<flusso_query::kind::Double>`
-             `i16` implements `FlussoValue<Integer>`
              `i16` implements `FlussoValue<flusso_query::kind::Decimal>`
              `i16` implements `FlussoValue<flusso_query::kind::Double>`
              `i16` implements `FlussoValue<flusso_query::kind::Float>`
+             `i16` implements `FlussoValue<flusso_query::kind::Integer>`
              `i16` implements `FlussoValue<flusso_query::kind::Long>`
            and $N others
 note: required by a bound in `flusso_query::Number::<K, S>::eq`

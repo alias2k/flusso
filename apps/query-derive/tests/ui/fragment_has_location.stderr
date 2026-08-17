@@ -1,0 +1,5 @@
+error: a fragment has no location — drop `index`/`path`. It is validated by each root that embeds it, at every path it appears
+ --> tests/ui/fragment_has_location.rs:6:10
+  |
+6 | #[flusso(index = "users", path = "account")]
+  |          ^^^^^
