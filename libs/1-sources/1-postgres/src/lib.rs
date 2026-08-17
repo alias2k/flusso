@@ -5,9 +5,11 @@
 #![cfg_attr(test, allow(unused_crate_dependencies))]
 
 mod cdc;
+mod config;
 mod document;
 
 pub use cdc::WalChangeCapture;
+pub use config::{replication_config, sql_connection_url};
 pub use document::PgDocumentBuilder;
 
 // Re-exported so callers can build a capture without depending on

@@ -333,6 +333,9 @@ export const it: Record<string, string> = {
   "config.removeIndexTitle": "Rimuovere l'indice?",
   "config.removeIndex": 'Rimuovere l\'indice "{name}"? (il file schema resta su disco)',
   "config.connection": "connessione",
+  "config.tls": "TLS",
+  "config.sslRequireWarn":
+    "require cifra ma non verifica affatto il certificato del server — in produzione usa verify-full",
   "config.envVar": "variabile env",
   "config.host": "host",
   "config.port": "porta",

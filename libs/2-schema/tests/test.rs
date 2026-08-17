@@ -103,12 +103,22 @@ fn compiled_artifact_roundtrips_and_preserves_mappings() {
 
 #[test]
 fn compiled_artifact_keeps_env_secret_unresolved() {
-    use schema::{Compiled, Config, ConnectionSpec, FORMAT_VERSION, Secret, Source, SourceType};
+    use schema::{
+        Compiled, Config, ConnectionSpec, FORMAT_VERSION, Secret, Source, SourceTls, SourceType,
+        SslMode,
+    };
     let config = Config {
         source: Source {
             source_type: SourceType::Postgres,
             connection: Some(ConnectionSpec::Url(Secret::Env("DATABASE_URL".to_owned()))),
             manage_publication: true,
+            tls: SourceTls {
+                mode: Some(SslMode::VerifyFull),
+                root_cert: Some("/etc/ssl/ca.pem".into()),
+                client_cert: None,
+                client_key: None,
+                sni_hostname: Some("db.internal".to_owned()),
+            },
         },
         sinks: Default::default(),
         indexes: Default::default(),
@@ -129,4 +139,43 @@ fn compiled_artifact_keeps_env_secret_unresolved() {
         Some(ConnectionSpec::Url(Secret::Env(var))) => assert_eq!(var, "DATABASE_URL"),
         other => panic!("expected an unresolved env secret, got {other:?}"),
     }
+
+    // The declared TLS settings survive the binary round-trip.
+    assert_eq!(config.source.tls.mode, Some(SslMode::VerifyFull));
+    assert_eq!(
+        config.source.tls.root_cert.as_deref(),
+        Some("/etc/ssl/ca.pem".as_ref())
+    );
+    assert_eq!(
+        config.source.tls.sni_hostname.as_deref(),
+        Some("db.internal")
+    );
+}
+
+#[test]
+fn compiled_artifact_without_tls_field_defaults() {
+    use schema::{Compiled, Config, FORMAT_VERSION, Source, SourceTls, SourceType};
+    // A lock written before the `tls` field existed carries no such key (the
+    // field is skipped when unset) — deserializing must default it, not fail.
+    let config = Config {
+        source: Source {
+            source_type: SourceType::Postgres,
+            connection: None,
+            manage_publication: true,
+            tls: SourceTls::default(),
+        },
+        sinks: Default::default(),
+        indexes: Default::default(),
+        on_error: Default::default(),
+        server: Default::default(),
+        prefix: String::new(),
+    };
+    let compiled = Compiled {
+        format_version: FORMAT_VERSION,
+        flusso_version: "test".to_owned(),
+        config,
+    };
+    let bytes = schema::to_bytes(&compiled).unwrap();
+    let config = schema::from_bytes(&bytes).unwrap();
+    assert!(config.source.tls.is_unset());
 }

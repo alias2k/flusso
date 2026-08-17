@@ -246,6 +246,12 @@ per-source/per-sink options are in
   the slot; for flusso to also *manage the publication* (above) the role must own
   those tables and hold `CREATE` on the database — otherwise flusso just prints
   the SQL for you to run with a privileged role.
+- **TLS as your server demands it** — `?sslmode=…` in the URL is honored
+  (default `prefer`: try TLS, fall back to plaintext), so a managed provider's
+  `DATABASE_URL` works as pasted; flat `[source]` keys (`ssl_mode`,
+  `ssl_root_cert`, `ssl_cert`/`ssl_key` for mTLS, `ssl_sni_hostname`) override
+  the URL for what it can't express. Details and the `require`-verifies-nothing
+  caveat: [source TLS](https://alias2k.github.io/flusso/guides/configuration.html#tls).
 
 **OpenSearch (the sink):**
 

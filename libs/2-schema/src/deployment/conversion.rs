@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use schema_config_toml::{ConfigToml, EnvOrValue, entities};
 use schema_core::{
-    ConnectionSpec, OpensearchSink, Secret, StdoutSink, TextAnalysis, common::SourceType,
+    ConnectionSpec, OpensearchSink, Secret, SourceTls, StdoutSink, TextAnalysis, common::SourceType,
 };
 
 use super::{Config, ServerConfig, Sink, Source};
@@ -49,6 +49,13 @@ fn convert_source(source: entities::Source) -> Source {
             source_type: SourceType::Postgres,
             connection: pg.connection_url.map(convert_connection_spec),
             manage_publication: pg.manage_publication.unwrap_or(true),
+            tls: SourceTls {
+                mode: pg.ssl_mode,
+                root_cert: pg.ssl_root_cert.map(Into::into),
+                client_cert: pg.ssl_cert.map(Into::into),
+                client_key: pg.ssl_key.map(Into::into),
+                sni_hostname: pg.ssl_sni_hostname,
+            },
         },
     }
 }

@@ -111,6 +111,7 @@ export function ConfigPanel({
             label="manage_publication"
             onChange={(v) => onChange({ ...config, source: { ...config.source, manage_publication: v } })}
           />
+          <TlsEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
         </div>
       </Stage>
 
@@ -350,6 +351,60 @@ function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: 
         </>
       )}
     </div>
+  );
+}
+
+/// The source's TLS keys, collapsed by default (most deployments say nothing
+/// and get the `prefer` default). Config keys override the URL's own `ssl*`
+/// parameters; an empty field removes its key so the emitted TOML stays clean.
+function TlsEditor({ source, onChange }: { source: Source; onChange: (s: Source) => void }) {
+  const { t } = useT();
+  const str = (key: string) => {
+    const value = source[key];
+    return typeof value === "string" ? value : "";
+  };
+  const set = (key: string, value: string) => onChange({ ...source, [key]: value || undefined });
+  const mode = str("ssl_mode");
+  const count = ["ssl_mode", "ssl_root_cert", "ssl_cert", "ssl_key", "ssl_sni_hostname"].filter(
+    (k) => str(k) !== "",
+  ).length;
+
+  return (
+    <Drawer title={t("config.tls")} count={count || undefined}>
+      <Field label="ssl_mode">
+        <Select
+          value={mode || "default"}
+          options={[
+            { value: "default", label: "default · prefer" },
+            { value: "disable", label: "disable" },
+            { value: "prefer", label: "prefer" },
+            { value: "require", label: "require" },
+            { value: "verify-ca", label: "verify-ca" },
+            { value: "verify-full", label: "verify-full" },
+          ]}
+          onChange={(v) => set("ssl_mode", v === "default" ? "" : v)}
+        />
+      </Field>
+      {mode === "require" && <div className="mb-1.5 text-2xs text-warn">{t("config.sslRequireWarn")}</div>}
+      <Field label="ssl_root_cert">
+        <Text value={str("ssl_root_cert")} onChange={(v) => set("ssl_root_cert", v)} placeholder="/etc/ssl/ca.pem" />
+      </Field>
+      <div className="flex flex-wrap gap-3">
+        <Field label="ssl_cert">
+          <Text value={str("ssl_cert")} onChange={(v) => set("ssl_cert", v)} placeholder="/etc/ssl/client.pem" />
+        </Field>
+        <Field label="ssl_key">
+          <Text value={str("ssl_key")} onChange={(v) => set("ssl_key", v)} placeholder="/etc/ssl/client.key" />
+        </Field>
+      </div>
+      <Field label="ssl_sni_hostname">
+        <Text
+          value={str("ssl_sni_hostname")}
+          onChange={(v) => set("ssl_sni_hostname", v)}
+          placeholder="db.internal.example.com"
+        />
+      </Field>
+    </Drawer>
   );
 }
 

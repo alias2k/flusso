@@ -45,8 +45,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   via the `sources-postgres` `fuzzing` feature (`fuzz_pgoutput_decode`). Contract: the
   decoder must never panic on arbitrary bytes — an `Err` is the correct outcome. Run from the
   crate dir; a crash lands in `fuzz/artifacts/`.
-- The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration` and
-  `config_coverage` binaries plus `engine`'s `wal` and `pipeline` binaries (the full
+- The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration`,
+  `config_coverage`, `publication`, `introspection`, and `tls` binaries (`tls` boots a
+  hostssl-only PG 16 with a committed throwaway self-signed cert and proves the
+  replication stream + SQL pool honor `sslmode`) plus `engine`'s `wal` and `pipeline`
+  binaries (the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
   the engine, or it can't be published before the engine and the layering is violated);
   `testcontainers` spins up Postgres (and, for `pipeline`, OpenSearch). `engine`'s `wal`
