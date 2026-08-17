@@ -567,6 +567,7 @@ pub(crate) fn codegen(
     vis: &syn::Visibility,
     index: &str,
     hash: &str,
+    scope_mod: Option<&Ident>,
     level: &[ResolvedField],
     fields: &[DocField],
     tracked: &[String],
@@ -586,10 +587,12 @@ pub(crate) fn codegen(
     // (a fragment named after the level it sits at) a redefinition — and the
     // derive's own `#[derive(Copy)]` then landed on *their* struct, so the real
     // error was buried under a cascade.
-    let module = Ident::new(
-        &format!("{}_scope", to_snake_case(&ident.to_string())),
-        ident.span(),
-    );
+    let module = scope_mod.cloned().unwrap_or_else(|| {
+        Ident::new(
+            &format!("{}_scope", to_snake_case(&ident.to_string())),
+            ident.span(),
+        )
+    });
 
     let mut ctx = Namespaces {
         auto_subfields,

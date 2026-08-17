@@ -879,6 +879,13 @@ struct User {
 }
 ```
 
+The module name itself is the one thing that can still clash — if you already
+have a `user_scope` module, rename the generated one:
+
+```rust
+#[flusso(index = "users", scope_mod = "user_queries")]
+```
+
 Finally, the root bakes the resolved mapping into const data and drives the check
 into every shape it embeds:
 
