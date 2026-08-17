@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `PaymentMethod`: field `name` is `Translation`, a map type — so the schema field here must be a `map` with a matching value kind (the `FlussoMap` kind tag defaults to `keyword`; a text map needs `#[flusso(text)]` on the type)
+  --> tests/ui/fragment_map_untagged_kind.rs:32:15
+   |
+32 | const _: () = PaymentMethod::__flusso_check(LEVEL);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `PaymentMethod::__flusso_check`
+  --> tests/ui/fragment_map_untagged_kind.rs:18:11
+   |
+18 |     name: Translation,
+   |           ^^^^^^^^^^^ the failure occurred here

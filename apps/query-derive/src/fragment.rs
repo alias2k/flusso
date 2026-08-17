@@ -301,7 +301,8 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 key,
                 &format!(
                     "is `{}`, a map type — so the schema field here must be a `map` with a \
-                     matching value kind",
+                     matching value kind (the `FlussoMap` kind tag defaults to `keyword`; a \
+                     text map needs `#[flusso(text)]` on the type)",
                     render(element)
                 ),
             );

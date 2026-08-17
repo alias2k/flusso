@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: fragment `Localized`: field `title` is `Translation`, a map type — so the schema field here must be a `map` with a matching value kind
+error[E0080]: evaluation panicked: fragment `Localized`: field `title` is `Translation`, a map type — so the schema field here must be a `map` with a matching value kind (the `FlussoMap` kind tag defaults to `keyword`; a text map needs `#[flusso(text)]` on the type)
   --> tests/ui/fragment_map_wrong_values.rs:31:15
    |
 31 | const _: () = Localized::__flusso_check(LEVEL);
