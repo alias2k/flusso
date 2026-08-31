@@ -34,3 +34,39 @@ fn never_regresses_below_start_lsn() {
     s.confirm(a);
     assert_eq!(s.confirmed_lsn(), 100);
 }
+
+#[test]
+fn register_confirmed_advances_in_place_when_nothing_is_in_flight() {
+    let s = AckShared::new(0);
+    s.register_confirmed(100);
+    assert_eq!(s.confirmed_lsn(), 100);
+    s.register_confirmed(200);
+    assert_eq!(s.confirmed_lsn(), 200);
+}
+
+#[test]
+fn register_confirmed_waits_for_in_flight_changes() {
+    let s = AckShared::new(0);
+    let a = s.register(10);
+    s.register_confirmed(100); // keepalive past an unconfirmed change
+    assert_eq!(s.confirmed_lsn(), 0, "must not pass the unflushed change");
+    s.confirm(a); // the gap fills → jumps across the keepalive too
+    assert_eq!(s.confirmed_lsn(), 100);
+}
+
+#[test]
+fn register_confirmed_never_regresses() {
+    let s = AckShared::new(100);
+    s.register_confirmed(50); // a stale/low position
+    assert_eq!(s.confirmed_lsn(), 100);
+}
+
+#[test]
+fn changes_after_a_pre_confirmed_position_still_gate_their_own_lsn() {
+    let s = AckShared::new(0);
+    s.register_confirmed(100);
+    let a = s.register(200); // emitted after the keepalive
+    assert_eq!(s.confirmed_lsn(), 100);
+    s.confirm(a);
+    assert_eq!(s.confirmed_lsn(), 200);
+}
