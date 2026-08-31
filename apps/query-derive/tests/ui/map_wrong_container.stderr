@@ -5,7 +5,7 @@ error[E0277]: `std::string::String` is not a valid map for a `flusso_query::kind
   |            ^^^^^^ unsupported map type
   |
   = help: the trait `FlussoMap<flusso_query::kind::Text>` is not implemented for `std::string::String`
-  = note: use `HashMap<String, V>` / `BTreeMap<String, V>` with a `flusso_query::kind::Text` value type, or add `#[derive(FlussoMap)]` (with the matching kind) to `std::string::String`
+  = note: use `HashMap<String, V>` / `BTreeMap<String, V>` with a `flusso_query::kind::Text` value type, or add `#[derive(FlussoMap)]` to `std::string::String` with the `#[flusso(…)]` tag naming `flusso_query::kind::Text` — `#[flusso(text)]` for `kind::Text`, `#[flusso(keyword)]` for `kind::Keyword` (number/date maps use the plain containers; no tag names them)
 help: the following other types implement trait `FlussoMap<K>`
  --> $WORKSPACE/apps/query/src/handles/mod.rs
   |
