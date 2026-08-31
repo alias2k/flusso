@@ -28,7 +28,9 @@ TLS.
 
 - **`ChangeCapture`** streams thin per-row changes (table + primary key) from a
   replication slot and confirms progress via an LSN watermark. The slot advances
-  only as far as the engine has durably written — at-least-once.
+  only as far as the engine has durably written — at-least-once. While the
+  watched tables are idle it still advances from the server's keepalives, so
+  unrelated write traffic never pins WAL retention.
 - **`DocumentBuilder`** resolves which documents a changed row affects and
   assembles each one. It also implements `Catalog`, the store-specific half of
   index validation (a column's SQL type + nullability).
