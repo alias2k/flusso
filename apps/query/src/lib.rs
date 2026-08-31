@@ -161,16 +161,17 @@ pub use flusso_query_derive::FlussoRoot;
 pub use flusso_query_derive::FlussoFragment;
 
 /// `#[derive(FlussoValue)]` — implements [`trait@FlussoValue`] for an enum or newtype
-/// wrapper, so it may stand in for a field of the chosen kind (`#[flusso(keyword)]`
-/// — the default — `#[flusso(text)]`, `#[flusso(number)]`, or `#[flusso(date)]`)
-/// in a [`FlussoRoot`] struct. Enabled by the `derive` feature.
+/// wrapper, so it may stand in for a field of the chosen kind in a [`FlussoRoot`]
+/// struct. An enum requires an explicit `#[flusso(keyword)]` or `#[flusso(text)]`
+/// (no default); an untagged newtype inherits its inner type's kinds. Enabled by
+/// the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoValue;
 
 /// `#[derive(FlussoMap)]` — implements [`trait@FlussoMap`] for a newtype wrapper
-/// over a `map` field, so it may stand in for a `map` of the chosen value kind
-/// (`#[flusso(keyword)]` — the default — `#[flusso(text)]`, `#[flusso(number)]`,
-/// or `#[flusso(date)]`) in a [`FlussoRoot`] struct. A bare
+/// over a `map` field, so it may stand in for a `map` of the declared value kind
+/// in a [`FlussoRoot`] struct. The kind tag is required — `#[flusso(keyword)]` or
+/// `#[flusso(text)]`, matching the schema map's `values:` (no default). A bare
 /// `HashMap<String, V>` needs no derive. Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoMap;

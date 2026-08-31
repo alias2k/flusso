@@ -1018,16 +1018,17 @@ type's kinds** automatically, so `struct Money(Decimal)` is a `decimal` value an
 `struct Sku(String)` a keyword + text value — *no kind tag needed*, and each is
 queryable and rejected exactly where the inner type would be. `FlussoValue`
 requires `serde::Serialize` (a supertrait), so derive it too. An **enum** has no
-inner type, so it needs an explicit string kind — `#[flusso(keyword)]` (default)
-or `#[flusso(text)]`; numeric/date tags don't exist (use a newtype, which
-inherits). Enum keyword fields stay typed — never `#[flusso(skip)]` them.
+inner type, so it requires an explicit string kind — `#[flusso(keyword)]` or
+`#[flusso(text)]`, no default; omitting it is a compile error. Numeric/date tags
+don't exist (use a newtype, which inherits). Enum keyword fields stay typed —
+never `#[flusso(skip)]` them.
 
 ```rust
 // Newtype: inherits Decimal's kinds — a `decimal`/`scaled_float` value.
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, FlussoValue)]
 struct Money(Decimal);
 
-// Enum: string-valued, so a kind tag is required (keyword default).
+// Enum: string-valued, and the kind tag is required — no default.
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[serde(rename_all = "camelCase")]
 #[flusso(keyword)]
@@ -1050,8 +1051,10 @@ fields stay in the struct as `Uuid` (no `#[flusso(skip)]`, no
 one shared value kind) holds a `HashMap<String, V>` or `BTreeMap<String, V>`
 out of the box — `V` is checked against the declared value kind exactly like a
 scalar. A type of your own that stands in for the whole map opts in with
-`#[derive(FlussoMap)]` plus a string kind tag (`#[flusso(keyword)]` default, or
-`#[flusso(text)]`): a newtype over a map, or a named-field struct whose
+`#[derive(FlussoMap)]` plus a **required** string kind tag — `#[flusso(keyword)]`
+or `#[flusso(text)]`, matching the schema map's `values:`; there is no default,
+an untagged derive is a compile error: a newtype over a map, or a named-field
+struct whose
 *on-disk* shape is a flat object of same-kind values — language keys plus a
 `fallback`, say. Use the derive rather than a hand-written `impl FlussoMap<K>`:
 a fragment validates its fields through const metadata only the derives emit

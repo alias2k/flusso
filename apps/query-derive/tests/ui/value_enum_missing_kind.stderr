@@ -1,0 +1,5 @@
+error: an enum FlussoValue has no default kind — add `#[flusso(keyword)]` (exact string) or `#[flusso(text)]` (analyzed full-text)
+ --> tests/ui/value_enum_missing_kind.rs:6:6
+  |
+6 | enum Tier {
+  |      ^^^^

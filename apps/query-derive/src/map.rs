@@ -13,8 +13,9 @@
 //! struct Translations(std::collections::HashMap<String, String>);
 //! ```
 //!
-//! The kind is chosen with `#[flusso(keyword)]` (the default) or
-//! `#[flusso(text)]` — the same attribute as `FlussoValue`. Number/date maps
+//! The kind tag is **required** — `#[flusso(keyword)]` or `#[flusso(text)]`,
+//! the same attribute as `FlussoValue`, matching the schema map's `values:`;
+//! omitting it is a compile error, there is no default. Number/date maps
 //! use `HashMap`/`BTreeMap` directly: their value kinds are split per type
 //! (`Byte`…`Decimal`, `Date`), which a single tag can't name.
 //! Any struct shape is accepted; on success it emits

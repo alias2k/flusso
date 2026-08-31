@@ -1,13 +1,15 @@
 //! `#[derive(FlussoValue)]` — opts a Rust type into `flusso_query::FlussoValue<K>`,
 //! so it may stand in for a field of kind `K` in a `FlussoDocument` struct.
 //!
-//! The kind is chosen with a `#[flusso(…)]` attribute and defaults to `keyword`:
+//! The kind comes from one of two places — there is **no default**:
 //!
-//! - `#[flusso(keyword)]` / `#[flusso(text)]` — an **enum** with only unit
-//!   variants (`Pro`/`Enterprise`/`Free`, serializing to strings) or a
-//!   **newtype** wrapper over a string;
-//! - `#[flusso(number)]` / `#[flusso(date)]` — a **newtype** wrapper over a
-//!   numeric / timestamp value (an enum serializes to a string, not a number).
+//! - `#[flusso(keyword)]` / `#[flusso(text)]` — **required** on an enum with
+//!   only unit variants (`Pro`/`Enterprise`/`Free`, serializing to strings);
+//!   on a newtype it restricts the wrapper to that single string kind.
+//! - An untagged **newtype** inherits all of its inner type's kinds
+//!   (`struct Money(Decimal)` is a decimal value). Numeric/date kinds are only
+//!   reachable this way: they are split per type for lossless widening, which
+//!   a single tag can't name.
 //!
 //! On success it emits `impl ::flusso_query::FlussoValue<#kind> for #ident {}`.
 //! The leaf value's actual serde form is enforced by serde at the boundary;
@@ -107,18 +109,24 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
 /// inherits *all* of its inner type's kinds (a blanket impl forwarding to the
 /// field type) — so `struct Pippo(String)` is a keyword **and** text value, and
 /// `struct Money(Decimal)` a decimal value, with no annotation. An explicit
-/// `#[flusso(keyword | text)]` (or an enum, which defaults to keyword) restricts
-/// to that single string kind.
+/// `#[flusso(keyword | text)]` restricts to that single string kind; an
+/// **enum** has no inner type to inherit from, so it must always carry one.
 fn build_impl(input: &DeriveInput, explicit: Option<Kind>) -> syn::Result<TokenStream> {
     let ident = &input.ident;
     match &input.data {
         Data::Enum(data) => {
-            let kind = explicit.unwrap_or(Kind::Keyword);
+            let Some(kind) = explicit else {
+                return Err(syn::Error::new(
+                    input.ident.span(),
+                    "an enum FlussoValue has no default kind — add `#[flusso(keyword)]` \
+                     (exact string) or `#[flusso(text)]` (analyzed full-text)",
+                ));
+            };
             if !kind.is_string() {
                 return Err(syn::Error::new(
                     input.ident.span(),
                     "an enum FlussoValue is string-valued — use `#[flusso(keyword)]` \
-                     (the default) or `#[flusso(text)]`",
+                     or `#[flusso(text)]`",
                 ));
             }
             for variant in &data.variants {
@@ -332,11 +340,17 @@ pub(crate) fn kind_attr(input: &DeriveInput) -> syn::Result<Option<Kind>> {
     Ok(kind)
 }
 
-/// The kind for the `FlussoMap` derive — `#[flusso(keyword | text)]`, default
-/// keyword. (Map value kinds beyond strings come from `HashMap<String, V>`'s `V`
-/// via the blanket impl, not this derive.)
+/// The kind for the `FlussoMap` derive — a **required** `#[flusso(keyword | text)]`
+/// matching the schema map's `values:`. (Map value kinds beyond strings come from
+/// `HashMap<String, V>`'s `V` via the blanket impl, not this derive.)
 pub(crate) fn parse_kind(input: &DeriveInput) -> syn::Result<Kind> {
-    Ok(kind_attr(input)?.unwrap_or(Kind::Keyword))
+    kind_attr(input)?.ok_or_else(|| {
+        syn::Error::new(
+            input.ident.span(),
+            "FlussoMap has no default value kind — add `#[flusso(keyword)]` or \
+             `#[flusso(text)]`, matching the schema map's `values:`",
+        )
+    })
 }
 
 #[cfg(test)]

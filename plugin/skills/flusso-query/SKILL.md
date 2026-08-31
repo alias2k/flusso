@@ -313,7 +313,7 @@ By default `filter_nested` **replaces** `hit.source.<path>` with the matched sub
 
 A `map` is a `jsonb`-backed object whose **keys are runtime** but whose values all share **one leaf kind** — translations (`name: {"it": "ciao", "en": "hi"}`), per-currency prices, per-region dates. Schema: `- map: name` + a required `values:` leaf type (`text`/`keyword`/number/`date`). The derive gives it one handle per value kind: `TextMap`, `KeywordMap`, `NumberMap<K>`, `DateMap`.
 
-**Doc side** — the field type is `HashMap<String, V>` where `V` is a value of the declared kind (blanket impl, no derive): `HashMap<String, String>` for a text/keyword map, `HashMap<String, f64>` for a `double` map. A whole-map newtype opts in with `#[derive(FlussoMap)]` (`#[flusso(text)]`, etc.). Nullable map → `Option<HashMap<…>>`.
+**Doc side** — the field type is `HashMap<String, V>` where `V` is a value of the declared kind (blanket impl, no derive): `HashMap<String, String>` for a text/keyword map, `HashMap<String, f64>` for a `double` map. A whole-map newtype opts in with `#[derive(FlussoMap)]` plus a required kind tag (`#[flusso(text)]` / `#[flusso(keyword)]`, matching the schema's `values:` — no default). Nullable map → `Option<HashMap<…>>`.
 
 ```rust
 #[derive(serde::Deserialize, FlussoRoot)]
@@ -346,11 +346,11 @@ Let a scalar field be your own enum/newtype instead of a bare leaf:
 
 ```rust
 #[derive(serde::Deserialize, serde::Serialize, FlussoValue)]
-#[flusso(keyword)]                       // enum kind: keyword (default) | text
+#[flusso(keyword)]                       // enum kind: keyword | text — required, no default
 enum AccountTier { Free, Pro, Enterprise }
 ```
 
-A **newtype inherits its inner type's kinds** automatically — `struct Money(Decimal)` is a `decimal` value, `struct Sku(String)` a keyword + text value — *no kind tag*, queryable and rejected exactly where the inner type would be (`flusso_user_query::Orders::total().eq(Money(d))`, no cast). An **enum** has no inner type, so it needs an explicit string kind: `#[flusso(keyword)]` (default) or `#[flusso(text)]` — numeric/date tags don't exist (use a newtype). `FlussoValue<K>` has a `serde::Serialize` **supertrait**, so any `#[derive(FlussoValue)]` type derives `Serialize` too (even a doc-field-only one). A missing impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
+A **newtype inherits its inner type's kinds** automatically — `struct Money(Decimal)` is a `decimal` value, `struct Sku(String)` a keyword + text value — *no kind tag*, queryable and rejected exactly where the inner type would be (`flusso_user_query::Orders::total().eq(Money(d))`, no cast). An **enum** has no inner type, so it requires an explicit string kind: `#[flusso(keyword)]` or `#[flusso(text)]` — no default, omitting it is a compile error; numeric/date tags don't exist (use a newtype). `FlussoValue<K>` has a `serde::Serialize` **supertrait**, so any `#[derive(FlussoValue)]` type derives `Serialize` too (even a doc-field-only one). A missing impl gives a precise "`T` is not a valid value for a `kind::Keyword` field" error.
 
 **Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
 

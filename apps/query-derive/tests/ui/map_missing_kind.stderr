@@ -1,0 +1,5 @@
+error: FlussoMap has no default value kind — add `#[flusso(keyword)]` or `#[flusso(text)]`, matching the schema map's `values:`
+  --> tests/ui/map_missing_kind.rs:10:8
+   |
+10 | struct Translation {
+   |        ^^^^^^^^^^^
