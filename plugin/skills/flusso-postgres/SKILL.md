@@ -25,6 +25,8 @@ flusso always creates the slot on first connect (default name `flusso`, override
 
 So: **one slot → one running instance** (this is why the Helm chart pins `replicas: 1`). And **drop the slot when you retire a deployment** (`SELECT pg_drop_replication_slot('flusso');`), or it leaks WAL forever.
 
+A **running** flusso is safe even when the indexed tables are idle: it advances the slot from the walsender's keepalives (and from commits the publication filtered out), so steady writes to *unwatched* tables don't pin WAL retention. Only a stopped flusso lets WAL pile up.
+
 ## The publication — which tables stream
 
 A publication is the server-side allowlist of tables whose changes are decoded. flusso derives the **full table set from your schema** — every root table plus every table a join or aggregate reads — and, by default, manages the publication for you (default name `flusso`, override `--publication`):

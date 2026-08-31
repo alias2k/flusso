@@ -64,7 +64,7 @@ flusso doesn't own Postgres or OpenSearch — it's a guest in both. A few things
 
 > ℹ️ **Info — managing the publication.** flusso derives the table set from the schema and creates/extends the publication itself, exactly as it does the slot — *if* the source role can. Creating or extending a publication needs table ownership plus `CREATE` on the database (or superuser), a stronger grant than the read-only role above. When the role can't, flusso doesn't fail: it logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION … ADD TABLE` to run, and `flusso check` prints the same. Set `[source] manage_publication = false` (or `FLUSSO_MANAGE_PUBLICATION=false`) to manage it yourself.
 
-> ⚠️ **Warning** — Postgres retains WAL until flusso confirms it. A flusso that's down for a long time means WAL piling up on the server. Drop the slot when you retire a deployment.
+> ⚠️ **Warning** — Postgres retains WAL until flusso confirms it. A flusso that's down for a long time means WAL piling up on the server. Drop the slot when you retire a deployment. (A *running* flusso keeps the slot advancing even while the indexed tables are idle — WAL from unrelated tables doesn't pile up.)
 
 ### OpenSearch (the sink)
 
