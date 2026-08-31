@@ -296,6 +296,42 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 key,
                 "declares a variant the schema does not list for this field",
             );
+            // `map_kind_ok` only fails for a map wrapper (a type with declared
+            // `MAP_VALUES` — always `keyword` or `text`, the derive allows no
+            // other tag), so when the schema's `values:` kind is readable the
+            // message can name the exact tag to put on it. A const panic takes
+            // a literal, so this is one assert per possible `values:` kind,
+            // each guarded to fire only for its own case.
+            let map_text_msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is `{}`, a map wrapper whose kind tag does not match — the schema \
+                     field here is a `map` of `text` values, so the type needs \
+                     `#[flusso(text)]`",
+                    render(element)
+                ),
+            );
+            let map_keyword_msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is `{}`, a map wrapper whose kind tag does not match — the schema \
+                     field here is a `map` of `keyword` values, so the type needs \
+                     `#[flusso(keyword)]`",
+                    render(element)
+                ),
+            );
+            let map_other_msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is `{}`, a map wrapper — but the schema field here is a `map` of \
+                     number/date values, which a kind tag cannot name; use a \
+                     `HashMap`/`BTreeMap` of the matching value type instead",
+                    render(element)
+                ),
+            );
             let map_msg = message(
                 fragment,
                 key,
@@ -315,6 +351,33 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 );
                 // A map wrapper carries its value kind, so check that too —
                 // otherwise this would only prove the field is object-ish.
+                assert!(
+                    ::flusso_query::map_kind_ok(
+                        level, #key,
+                        <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                    ) || !matches!(
+                        ::flusso_query::map_values_of(level, #key),
+                        Some(::flusso_query::KindTag::Text),
+                    ),
+                    #map_text_msg
+                );
+                assert!(
+                    ::flusso_query::map_kind_ok(
+                        level, #key,
+                        <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                    ) || !matches!(
+                        ::flusso_query::map_values_of(level, #key),
+                        Some(::flusso_query::KindTag::Keyword),
+                    ),
+                    #map_keyword_msg
+                );
+                assert!(
+                    ::flusso_query::map_kind_ok(
+                        level, #key,
+                        <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                    ) || ::flusso_query::map_values_of(level, #key).is_none(),
+                    #map_other_msg
+                );
                 assert!(
                     ::flusso_query::map_kind_ok(
                         level, #key,
@@ -339,9 +402,12 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
 /// `panic!` in a const context takes a literal, so every message is composed
 /// here — at macro time, where the fragment and field names are known.
 ///
-/// The schema's own type can't appear: this side never sees the mapping, and a
-/// const message can't be built from the level it is handed. Naming the *Rust*
-/// type is the half that is knowable, and it is usually the one being fixed.
+/// The schema's own type can't be *interpolated*: this side never sees the
+/// mapping, and a const message can't be built from the level it is handed.
+/// Naming the *Rust* type is the half that is knowable here. Where the schema
+/// side should still steer the message, the caller bakes one literal per case
+/// and guards each assert with a const-readable probe of the level (see the
+/// map value-kind chain in `shape_check`).
 fn message(fragment: &Ident, key: &str, problem: &str) -> String {
     format!("fragment `{fragment}`: field `{key}` {problem}")
 }

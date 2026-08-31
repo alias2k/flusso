@@ -249,6 +249,18 @@ pub const fn map_kind_ok(level: &[FieldSpec], name: &str, accepted: &[KindTag]) 
     accepted.is_empty() || map_value_is(level, name, accepted)
 }
 
+/// The declared `values:` kind when `name` is a dynamic-key `map`; `None` for
+/// anything else. A generated check reads this to *select* among pre-baked
+/// panic messages (a const panic takes a literal, so the message can't be
+/// composed from the level — but which literal fires can depend on it).
+#[must_use]
+pub const fn map_values_of(level: &[FieldSpec], name: &str) -> Option<KindTag> {
+    match find(level, name) {
+        Some(field) => field.map_values,
+        None => None,
+    }
+}
+
 /// The sub-level under `name`, or an empty level when absent or a leaf.
 #[must_use]
 pub const fn children<'a>(level: &'a [FieldSpec], name: &str) -> &'a [FieldSpec] {

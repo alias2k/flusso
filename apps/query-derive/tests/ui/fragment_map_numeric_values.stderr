@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Listing`: field `prices` is `Prices`, a map wrapper — but the schema field here is a `map` of number/date values, which a kind tag cannot name; use a `HashMap`/`BTreeMap` of the matching value type instead
+  --> tests/ui/fragment_map_numeric_values.rs:31:15
+   |
+31 | const _: () = Listing::__flusso_check(LEVEL);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Listing::__flusso_check`
+  --> tests/ui/fragment_map_numeric_values.rs:17:13
+   |
+17 |     prices: Prices,
+   |             ^^^^^^ the failure occurred here

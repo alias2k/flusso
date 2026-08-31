@@ -285,7 +285,7 @@ impl FlussoValue<kind::Date> for chrono::DateTime<chrono::Utc> {}
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a valid map for a `{K}` field",
     label = "unsupported map type",
-    note = "use `HashMap<String, V>` / `BTreeMap<String, V>` with a `{K}` value type, or add `#[derive(FlussoMap)]` (with the matching kind) to `{Self}`"
+    note = "use `HashMap<String, V>` / `BTreeMap<String, V>` with a `{K}` value type, or add `#[derive(FlussoMap)]` to `{Self}` with the `#[flusso(…)]` tag naming `{K}` — `#[flusso(text)]` for `kind::Text`, `#[flusso(keyword)]` for `kind::Keyword` (number/date maps use the plain containers; no tag names them)"
 )]
 pub trait FlussoMap<K> {}
 
