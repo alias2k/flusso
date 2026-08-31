@@ -7,6 +7,11 @@
 //! contiguous watermark: each emitted change gets a monotonically increasing
 //! sequence number paired with its commit LSN, and the confirmed LSN only moves
 //! up to the highest sequence whose predecessors are all confirmed.
+//!
+//! Progress-only positions — a keepalive's reported WAL end, an empty
+//! transaction's commit — join the same sequence pre-confirmed (see
+//! [`AckShared::register_confirmed`]), so the slot keeps advancing while the
+//! watched tables are idle without ever passing an unflushed change.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -68,28 +73,48 @@ impl AckShared {
         self.lock().confirmed_lsn
     }
 
+    /// Record a progress-only position — a keepalive's reported WAL end or an
+    /// empty transaction's commit — and confirm it in place.
+    ///
+    /// The advance obeys the same contiguous watermark as real changes: it
+    /// lands immediately when nothing earlier is in flight, and otherwise
+    /// waits until every previously emitted change is confirmed. That is what
+    /// keeps the slot moving while the watched tables are idle without ever
+    /// passing an unflushed change.
+    pub(crate) fn register_confirmed(&self, lsn: u64) {
+        let mut inner = self.lock();
+        let seq = inner.next_seq;
+        inner.next_seq += 1;
+        inner.lsn_by_seq.insert(seq, lsn);
+        inner.confirm(seq);
+    }
+
     /// Confirm one sequence, advancing the watermark across any newly contiguous run.
     fn confirm(&self, seq: u64) {
-        let mut inner = self.lock();
+        self.lock().confirm(seq);
+    }
+}
 
-        if seq < inner.lowest_unconfirmed {
+impl AckInner {
+    fn confirm(&mut self, seq: u64) {
+        if seq < self.lowest_unconfirmed {
             return; // already accounted for
         }
-        if seq > inner.lowest_unconfirmed {
-            inner.confirmed_ahead.insert(seq);
+        if seq > self.lowest_unconfirmed {
+            self.confirmed_ahead.insert(seq);
             return;
         }
 
         let mut current = seq;
         loop {
-            if let Some(lsn) = inner.lsn_by_seq.remove(&current)
-                && lsn > inner.confirmed_lsn
+            if let Some(lsn) = self.lsn_by_seq.remove(&current)
+                && lsn > self.confirmed_lsn
             {
-                inner.confirmed_lsn = lsn;
+                self.confirmed_lsn = lsn;
             }
             let next = current + 1;
-            inner.lowest_unconfirmed = next;
-            if inner.confirmed_ahead.remove(&next) {
+            self.lowest_unconfirmed = next;
+            if self.confirmed_ahead.remove(&next) {
                 current = next;
             } else {
                 break;
