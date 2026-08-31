@@ -415,7 +415,9 @@ of the declared kind: runtime keys, compile-time value type. `TextMap::search(q)
 cross-key search with per-key preference; `has_key`/`exists` are presence checks. The
 doc-side type is `HashMap<String, V>` or `BTreeMap<String, V>` (blanket `FlussoMap<K>` impls
 for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape** — newtype or
-named fields (e.g. a translations type with a `fallback` beside the language keys); the
+named fields (e.g. a translations type with a `fallback` beside the language keys) with a
+**required** `#[flusso(keyword|text)]` value-kind tag (no default — untagged is a compile
+error); the
 derive's `check_type` map arm hard-checks a `HashMap`/`BTreeMap` value type and defers a
 `FlussoMap<kind>` bound otherwise. The `FlussoMap` derive also emits `FlussoValueMeta` (its
 `MAP_VALUES` carries the declared value kind) + a no-op `__flusso_check`, which is what lets
@@ -472,8 +474,8 @@ on `long`/`double`/`decimal` but a float on an integer field (or `i64` on a `sho
 error. `decimal` vs `double` is carried by `Mapping.decimal` (0-core), since both map to OS
 `double`. `Bool` is kind-based too (`kind::Bool`). `FlussoValue<K>` has a `serde::Serialize`
 supertrait. A `#[derive(FlussoValue)]` **newtype inherits its inner type's kinds** (blanket
-forward impl) — `struct Money(Decimal)` is a decimal value with no tag; only enums need an
-explicit `#[flusso(keyword|text)]` (numeric/date tags don't exist).
+forward impl) — `struct Money(Decimal)` is a decimal value with no tag; an enum requires an
+explicit `#[flusso(keyword|text)]`, no default (numeric/date tags don't exist).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `apps/query-derive/tests/

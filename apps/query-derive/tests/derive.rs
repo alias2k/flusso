@@ -61,7 +61,8 @@ fn generated_surface_builds_queries() -> Result {
 // kind, which `FlussoRoot` defers to. Works across kinds — `keyword` here,
 // plus a `number` newtype on the orders' decimal `total`.
 
-/// A newtype wrapper over the `email` keyword (kind defaults to `keyword`).
+/// A newtype wrapper over the `email` keyword (untagged, so it inherits
+/// `String`'s keyword + text kinds).
 /// `FlussoValue` requires `Serialize` (so the type can be a query value).
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 struct Email(String);

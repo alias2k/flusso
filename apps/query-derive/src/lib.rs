@@ -49,9 +49,9 @@ pub fn derive_flusso_fragment(input: TokenStream) -> TokenStream {
 }
 
 /// Implement `flusso_query::FlussoValue<K>` for an enum or newtype wrapper, so
-/// it may stand in for a field of kind `K` in a `FlussoRoot` struct. The
-/// kind is chosen with `#[flusso(keyword)]` (the default), `#[flusso(text)]`,
-/// `#[flusso(number)]`, or `#[flusso(date)]`.
+/// it may stand in for a field of kind `K` in a `FlussoRoot` struct. An enum
+/// requires an explicit `#[flusso(keyword)]` or `#[flusso(text)]` (no default);
+/// an untagged newtype inherits its inner type's kinds.
 ///
 /// ```ignore
 /// #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
@@ -68,8 +68,8 @@ pub fn derive_flusso_value(input: TokenStream) -> TokenStream {
 /// Implement `flusso_query::FlussoMap<K>` for a newtype wrapper over a map, so
 /// it may stand in for a `map` field of value kind `K` in a `FlussoDocument`
 /// struct. `HashMap<String, V>` already implements the trait directly — this is
-/// only for wrapping it. The kind is chosen with `#[flusso(keyword)]` (the
-/// default), `#[flusso(text)]`, `#[flusso(number)]`, or `#[flusso(date)]`.
+/// only for wrapping it. The value kind is required: `#[flusso(keyword)]` or
+/// `#[flusso(text)]`, matching the schema map's `values:` (no default).
 ///
 /// ```ignore
 /// #[derive(serde::Deserialize, FlussoMap)]
