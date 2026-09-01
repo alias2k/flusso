@@ -2,195 +2,87 @@
 description: Implement a GitHub issue end-to-end — grill, open a draft plan PR with a live checklist, tick it off as you go, ready when green
 ---
 
-Implement GitHub issue **#$ARGUMENTS** from start to finish.
+Implement GitHub issue **$ARGUMENTS** from start to finish.
 
-The shape of this flow: **open a draft PR up front** whose body is a self-contained implementation
-spec plus a **detailed checklist** of the work, then **tick each box as it lands** (committing and
-pushing per unit) so the PR is a live progress tracker — not a big reveal at the end. Mark it
-**ready for review** once every box is checked and CI-parity is green.
+The shape: **open a draft PR up front** whose body is a self-contained implementation spec plus a
+**detailed checklist**, then **tick each box as it lands** (committing and pushing per unit) so the
+PR is a live progress tracker rather than a reveal at the end. Mark it ready once every box is
+checked and CI-parity is green.
 
-**The PR must be resumable.** Write it so that if this session is interrupted and a *fresh* agent
-(or you, cold) picks it up with no memory of the discussion, the PR alone is enough to continue:
-the approach is described, and each unchecked box says specifically what to do and where. Detail
-that serves resumption is the goal — not a marketing blurb, and not a terse list nobody can act on.
+**The PR must be resumable.** If this session dies and a cold agent picks it up with no memory of the
+discussion, the PR alone must be enough to continue: the approach is described, and each unchecked
+box says specifically what to do and where.
 
 ## 1. Read the issue
 
-- `gh issue view $ARGUMENTS` to get the title, body, and any discussion.
-- Make sure you understand the **problem**. The issue describes the problem, **not** the
-  solution — so you do not yet know how to solve it. Do not assume.
+`gh issue view $ARGUMENTS`. The issue describes the **problem**, not the solution, so you do not yet
+know how to solve it. Don't assume.
 
-## 2. Grill on the solution — HIGH intensity
+## 2. Grill on the solution
 
-The issue deliberately contains no chosen solution. Before any code, interrogate the user hard
-to pin down the solution. This is the most important step — be relentless, not polite:
+Run **`/grilling`**. It is the interview primitive: work the design tree in rounds, ask the whole
+frontier at once with a recommendation per question, and find facts yourself instead of asking.
 
-- Propose 2–3 concrete approaches (use the issue's "Possible solutions" as a starting point if
-  present) with explicit trade-offs, and make the user choose.
-- Push on every gap: edge cases, failure modes, backwards/forwards compatibility, performance,
-  the engine/at-least-once invariants, crate layering, public API surface, migration/rollout,
-  what's explicitly *out* of scope.
-- Challenge the user's first answer. If something smells wrong, say so and argue it. Surface
-  hidden assumptions and force a decision on each. Prefer `AskUserQuestion` for crisp forks.
-- Do NOT stop grilling until the solution is fully specified and unambiguous — you should be able
-  to state exactly what you'll build, where, and why, with no open "it depends". Only then move on.
-- If the user asks to review the plan first, it's fine to open the draft PR (step 4) with the plan
-  **before** writing any code, and wait for their go-ahead.
+Two flusso-specific additions to what it pushes on: the engine's at-least-once and dedup invariants,
+and the crate layering. A proposal that violates either is wrong regardless of how good it looks.
+
+Stop only when you could state exactly what you'll build, where, and why, with no open "it depends".
 
 ## 3. Branch
 
-- Never work on `main`. Create a branch named `<type>/<slug>`, where `<type>` matches the change
-  (`feat`, `fix`, `docs`, `chore`, `refactor`, …) and `<slug>` is a short kebab-case summary
-  derived from the issue (e.g. `fix/query-log-search-body`).
-- `git checkout -b <type>/<slug>`.
+Never work on `main`. `git checkout -b <type>/<slug>` where `<type>` matches the change (`feat`,
+`fix`, `docs`, `chore`, `refactor`, …).
 
-## 4. Open the plan PR up front — draft, resumable spec + detailed checklist
+## 4. Open the plan PR
 
-Open the PR **now**, before (or alongside) the first commit, as the living tracker **and** the
-hand-off document. Write it so a cold reader could finish the work from the PR alone (see the
-"resumable" rule above).
+Push the branch (an empty commit is fine), then `gh pr create --draft`. Body, in order:
 
-- Push the branch (an empty commit is fine to get it started): `git push -u origin <branch>`.
-- `gh pr create --draft --title "<title>" --body "<body>"`.
-- The body has these parts, in order:
-  - **A description of the implementation** — not a blurb. State the settled decisions from step 2
-    and *how* the change works: the mechanism, the key types/files/functions it adds or touches,
-    the data flow, and any non-obvious choice (and why). Enough that someone resuming knows the
-    approach without re-deriving it. Keep it scannable (short paragraphs / bullets), but do not
-    sacrifice the detail needed to resume — clarity, not brevity, is the bar here.
-  - `Closes #$ARGUMENTS`.
-  - A `## To implement` **checklist** (`- [ ]` per line). Each box must be **specific enough to act
-    on cold**: name the concrete change *and where it lands* — the crate/file (and function/type
-    when it helps) — e.g. `- [ ] Core: add \`Column.enum_order\` + project to \`Mapping.enum_order\`
-    (libs/0-core)`, not `- [ ] core changes`. Order them so ticking top-to-bottom is a valid build
-    order (typically core → parse/convert → sink → query/derive → editor JSON schema → designer +
-    i18n → docs → plugin → tests + CI). Only list what applies. This list is the resume point: an
-    interrupted run continues from the first unchecked box.
-  - A `## Follow-ups (out of scope)` list for anything deferred (file the issues and link them).
-  - End with:
-    ```
-    🤖 Generated with [Claude Code](https://claude.com/claude-code)
-    ```
-- Report the PR URL back.
+- **The implementation description.** The settled decisions and *how* the change works: the
+  mechanism, the key types/files/functions, the data flow, any non-obvious choice and why. Enough
+  that someone resuming knows the approach without re-deriving it. Record any assumption you
+  verified (a probe against a live service, a config shape you checked) so nobody re-verifies it.
+- `Closes #<issue>`.
+- A `## To implement` checklist, `- [ ]` per line. Each box names the concrete change **and where it
+  lands** — the crate or file, and the function or type when it helps. `- [ ] Core: add
+  \`Column.enum_order\` + project to \`Mapping.enum_order\` (libs/0-core)`, never `- [ ] core
+  changes`. Order them so ticking top-to-bottom is a valid build order. This list is the resume
+  point.
+- A `## Follow-ups (out of scope)` list, with issues filed and linked.
+- End with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
-The spec + checklist live in the **PR body** (not an issue comment). If you verified a key
-assumption (e.g. a probe against a live service), record the result in the body — a resuming
-reader shouldn't have to re-verify it.
+Report the PR URL. Keep the body current: if the approach shifts, update it so the PR never lies.
 
-Keep the body current as you learn: if the approach shifts mid-implementation, update the
-description and checklist so the PR never lies about the plan.
+## 5. Work the checklist top-down
 
-## 5. Implement, ticking the checklist as you go
+Per item: do the work as a self-contained chunk, **run `cargo fmt --all`**, commit, push, then tick
+its box (`gh pr edit --body-file …`) so the PR reflects real progress.
 
-Work the checklist top-down. For each item:
+Conventional Commits, matching this repo's history (`fix(query): …`, `feat(engine): …`). **No
+`Co-Authored-By` or AI-attribution trailer.**
 
-- Do the work in a meaningful, self-contained chunk; **commit it** (not one giant end commit) and
-  **push**.
-- **Tick its box on the PR** (`- [ ]` → `- [x]`, via `gh pr edit --body-file …`) as soon as it
-  lands, so the PR reflects real progress.
-- **Run `cargo fmt --all` before *every* commit** and stage the result, so no commit lands
-  unformatted (the verify step's `cargo fmt --all --check` then has nothing to flag).
-- **Conventional Commits** style, matching this repo's history: `fix(query): …`, `feat(engine): …`,
-  `chore(fmt)`, etc.
-- **Do NOT add a `Co-Authored-By` / AI-attribution trailer** to commit messages.
-- Keep `CLAUDE.md` current in the *same* change if you alter crate layout, commands, engine
-  invariants, lint policy, or config/schema format (per its "Keeping this file current" rule).
+## 6. Alignment gates
 
-Steps 6–9 below describe what specific checklist items entail; tick each as it completes.
+`CLAUDE.md` owns the definition of done and is the only current copy. Read the relevant section
+rather than working from memory, and put each gate on the checklist as its own box:
 
-## 6. Align the editor LSP schemas (if the format changed)
+| If the change touched… | Read |
+| --- | --- |
+| a `flusso.toml` or `*.schema.yml` key, tag, sibling, enum token, sink option | "Keeping the designer current" — the editor JSON schemas **and** the designer, its translations, and the two CI guards |
+| any crate's behaviour | that crate's `README.md`, which is its `//!` |
+| the user-facing surface | the owning mdBook chapter under `docs/src/` |
+| layout, commands, invariants, lint policy, format | `CLAUDE.md` itself, in the same change |
+| anything a plugin skill teaches | `plugin/ARCHITECTURE.md`, then the skill that owns that meaning |
 
-If the change touched `flusso.toml` or `*.schema.yml` format — a new key, field type tag, field
-sibling, enum token, sink field, default, or description — update the hand-curated JSON Schemas
-that drive editor completion, which live **inside** the parser crates so they ship in the
-published crate:
+## 7. Review and verify
 
-- `libs/2-schema/1-config-toml/config.schema.json` (`schema_config_toml::CONFIG_SCHEMA`)
-- `libs/2-schema/1-index-yaml/index.schema.yml` (`schema_index_yaml::INDEX_SCHEMA`)
+Run **`/code-review`** against the merge-base, then fix what it finds.
 
-Keep them in lockstep with the parser entities. `libs/2-schema/tests/schema_drift.rs` enforces the
-**enumerable** sets (type tags, field siblings, enum tokens, sink fields) and runs in verify — but
-it does **not** check descriptions, defaults, the permissive `field` union, or identifier
-`pattern`s, so align those by hand. Don't forget the matching docs in `guides/configuration.md` /
-`guides/schema-authoring.md` (the documentation step) — and a format change is exactly what the
-designer must also support (next step).
+Then match CI parity in the order `CLAUDE.md` lists under "Match CI before assuming green", with
+`--workspace` on the test steps (`default-members = ["apps/cli"]`, so a bare invocation only touches
+the CLI). If Docker isn't available for `--run-ignored all`, say so explicitly rather than silently
+skipping it.
 
-## 7. Align the visual designer + translations (if it touched the authored surface)
+## 8. Ready for review
 
-The designer (`apps/design`) is part of the product surface — a feature isn't done until the
-designer can author it and its UI is fully translated. If the change added/altered anything a
-user authors (a `*.schema.yml`/`flusso.toml` key, a field type tag/sibling, an enum token, a
-sink option, a source/sink capability):
-
-- **Support it in the designer**: the model/codegen/preview (`apps/design/src/`) and the
-  canvas/inspector controls (`apps/design/frontend/`); wire the introspection/source-steer if
-  the source informs the choice (nullability, suggested type, FK optionality).
-- **Translate every new UI string**: route it through `t("ns.key")` and add the key to **every**
-  locale catalog in `apps/design/frontend/src/locales/` (`en.ts` is the base; translate the rest).
-  Run `just design-i18n` (or `npm --prefix apps/design/frontend run check:i18n`) — CI's
-  `designer-frontend` job fails on any key missing from a locale.
-- **Rebuild + commit the SPA**: `npm --prefix apps/design/frontend ci && npm --prefix
-  apps/design/frontend run build`, then commit `apps/design/dist/` (the dist-drift guard fails
-  otherwise).
-
-## 8. Update the documentation — code + every README, fully
-
-Bring **all** docs up to date so nothing lags the change. Do this **before** the plugin — docs are
-the source of truth the plugin's skills teach from.
-
-- **In-code docs**: `///` on public items and `//!` module headers for anything you added or
-  changed; keep doctests compiling (`cargo test --doc` runs in verify).
-- **The mdBook manual** under `docs/src/` — the canonical user docs. Update the owning chapter:
-  `guides/schema-authoring.md` (schema keys), `guides/configuration.md` (`flusso.toml`/env vars),
-  `guides/deploying.md` (Docker/ship), `guides/querying.md` (query side), plus
-  `getting-started.md`/`introduction.md`/`SUMMARY.md` if scope/structure changed.
-- **Every README**: the root `README.md`, the per-crate `README.md`s (each is its
-  crates.io/docs.rs landing via `#![doc = include_str!("../README.md")]`), `libs/README.md`
-  (crate-layering map), and `apps/query/README.md` (the full query manual).
-- Update the doc that **owns** the content; don't duplicate or resurrect deleted root `.md`s.
-- Don't forget `CLAUDE.md` itself (its "Keeping this file current" rule) if layout/commands/
-  invariants/format changed.
-
-## 9. Update the flusso Claude plugin
-
-With the docs settled, bring the repo's own Claude plugin under `plugin/` in lockstep:
-
-- `plugin/skills/*/SKILL.md` (`flusso-schema`, `flusso-query`, `flusso-postgres`,
-  `flusso-opensearch`, `flusso-internals`, `flusso-integrate`) and their `examples/`.
-- `plugin/agents/flusso-expert.md`, `plugin/commands/*.md`, `plugin/hooks/` (the validate/lint
-  hooks), `plugin/.claude-plugin/plugin.json`, `plugin/README.md`.
-- If the change altered schema/config format, the query derive, engine behavior, CLI commands, or
-  anything a skill teaches, update the affected skill/agent/example so the plugin can't teach
-  something now wrong. New capability worth surfacing → add/extend a skill.
-
-## 10. Verify — full CI parity
-
-Run, in order, and fix anything that fails before marking the PR ready:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace
-cargo check --workspace --all-targets
-cargo nextest run --workspace --run-ignored all   # needs a running Docker daemon for the e2e tests
-cargo test --doc --workspace
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
-```
-
-Note: `--workspace` matters — `default-members = ["apps/cli"]`, so a bare `cargo nextest run` /
-`cargo test --doc` only touches the CLI. If you touched the designer (step 7), also run its guards:
-
-```sh
-npm --prefix apps/design/frontend ci
-npm --prefix apps/design/frontend run check:i18n   # translations complete in every locale
-npm --prefix apps/design/frontend run build        # then `git diff --exit-code apps/design/dist` must be clean
-```
-
-If Docker isn't available for the `--run-ignored all` step, say so explicitly rather than
-silently skipping it.
-
-## 11. Mark the PR ready for review
-
-- Tick the final checklist box (tests + CI parity).
-- `gh pr ready $ARGUMENTS`'s PR (or `gh pr ready <number>`) to flip it out of draft.
-- Confirm the body's `Closes #$ARGUMENTS` and any follow-up links are present, and report the final
-  PR URL.
+Tick the final box, `gh pr ready <number>`, confirm `Closes #<issue>` and the follow-up links are
+present, and report the final PR URL.
