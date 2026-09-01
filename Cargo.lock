@@ -1133,16 +1133,11 @@ version = "0.15.1"
 dependencies = [
  "chrono",
  "flusso-query-derive",
- "flusso-schema-core",
- "flusso-sinks-core",
- "flusso-sinks-opensearch",
  "reqwest 0.12.28",
  "rust_decimal",
  "serde",
  "serde_json",
- "testcontainers-modules",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "url",
  "uuid",
@@ -1161,6 +1156,21 @@ dependencies = [
  "syn 2.0.117",
  "toml",
  "trybuild",
+]
+
+[[package]]
+name = "flusso-query-e2e"
+version = "0.0.0"
+dependencies = [
+ "flusso-query",
+ "flusso-schema-core",
+ "flusso-sinks-core",
+ "flusso-sinks-opensearch",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "testcontainers-modules",
+ "tokio",
 ]
 
 [[package]]

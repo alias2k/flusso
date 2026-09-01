@@ -14,10 +14,14 @@
 //! [`flusso_query::MultiSearch`], every hit missed dispatch and the search
 //! failed with `UnexpectedIndex`.
 //!
+//! It lives in this unpublished crate (not `apps/query/tests/`) so the
+//! published `flusso-query` carries no flusso lib dependencies — the query
+//! release train can't be dragged into a release by a libs bump.
+//!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
 //! ```text
-//! cargo nextest run -p flusso-query --run-ignored all
+//! cargo nextest run -p flusso-query-e2e --run-ignored all
 //! ```
 
 #![allow(
