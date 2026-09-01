@@ -1,0 +1,11 @@
+# A minimal second index for the golden fixture (disabled in flusso.toml).
+version: 1
+table: archived_orders
+primary_key: id
+
+fields:
+  - long: id
+    required: true
+  - timestamp: archivedAt
+    column: archived_at
+    required: true

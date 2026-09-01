@@ -1,0 +1,57 @@
+# The golden fixture: exercises every config surface so the committed lock
+# pins the full serialized shape. Paired with catalog.schema.yml / archive.schema.yml.
+
+prefix = "staging_"
+on_error = "skip"
+
+[server]
+public_address = "0.0.0.0:9464"
+private_address = "127.0.0.1:9465"
+
+[source]
+type = "postgres"
+manage_publication = false
+ssl_mode = "verify-full"
+ssl_root_cert = "/etc/ssl/ca.pem"
+ssl_cert = "/etc/ssl/client.pem"
+ssl_key = "/etc/ssl/client.key"
+ssl_sni_hostname = "db.internal"
+
+[source.connection_url]
+host = "db.example.com"
+port = 5432
+user = "flusso"
+password = { env = "PGPASSWORD" }
+database = "shop"
+
+[sinks.primary]
+type = "opensearch"
+url = "https://search.example.com:9200"
+username = "indexer"
+password = { env = "OPENSEARCH_PASSWORD" }
+tls_verify = true
+batch_size = 500
+max_bytes = 5242880
+timeout_secs = 60
+max_retries = 5
+pipeline = "enrich"
+number_of_shards = 2
+number_of_replicas = 1
+refresh_interval = "30s"
+text_analysis = "icu"
+auto_subfields = false
+
+[sinks.audit]
+type = "stdout"
+pretty = true
+
+[[index]]
+name = "catalog"
+schema = "catalog.schema.yml"
+enabled = true
+on_error = "stop"
+
+[[index]]
+name = "archive"
+schema = "archive.schema.yml"
+enabled = false
