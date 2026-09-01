@@ -1,88 +1,50 @@
 ---
 name: flusso-internals
-description: Work on the flusso Rust codebase itself — add a source/sink backend, change the engine/pipeline, touch the config or schema layers, or extend the query derive. Use when contributing to or modifying flusso's implementation (not just authoring config). Covers crate layering, the sync pipeline, engine invariants, and where things live.
+description: Change the flusso Rust codebase — add a source/sink backend, edit the engine pipeline, the config/schema layers, or the query derive. Use when contributing to flusso's implementation rather than authoring config.
 ---
 
 # Working on the flusso implementation
 
-flusso keeps OpenSearch in sync with Postgres from declarative config. This skill is for changing the **Rust codebase**; for authoring config use **flusso-schema**, for the read client use **flusso-query**.
+For authoring config use **flusso-schema**; for the read client use **flusso-query**. This skill is
+for changing the Rust.
 
-Before a non-trivial change, read the repo's `CLAUDE.md` — it's the living architecture index and the source of truth. This skill is the orientation; `CLAUDE.md` has the detail and stays current.
+**The repo's `CLAUDE.md` owns the detail and is the only current copy.** It is a living index kept
+in lockstep with the code, and it is already loaded in any checkout, so this skill does not restate
+it. Changing the codebase requires a checkout; without one, there is nothing here to act on.
 
-**Docs layout.** `libs/README.md` maps the crate layering for humans (the contributor companion to `CLAUDE.md`'s index). Every library crate has its own `README.md` wired as the crate-root doc via `#![doc = include_str!("../README.md")]` — so a crate's README *is* its `//!`; edit them as one file, and any ```rust block in it is a doctest that must compile. (`apps/query` is the exception: its README is the full query manual, kept separate from a curated `//!`.) The user-facing manual is an mdBook under `docs/` published to GitHub Pages — the canonical user docs are `docs/src/guides/{schema-authoring,configuration,deploying}.md` and `apps/query/README.md`. Touch a crate's behavior → update its README/`//!` in the same change, just like `CLAUDE.md`.
+## Where to look in `CLAUDE.md`
 
-**The visual designer is part of the product surface — keep it aligned.** A feature isn't done until the designer (`apps/design`) can author it and its UI is fully translated. If a change adds or alters anything a user authors — a `*.schema.yml`/`flusso.toml` key, a field type tag/sibling, an enum token, a sink option, a source/sink capability — align the designer in the **same** change: the model/codegen/preview (`apps/design/src/`) and the canvas/inspector controls (`apps/design/frontend/`), wiring the introspection/source-steer when the source informs the choice. Every user-facing string goes through `t("ns.key")` (namespaced keys, ICU MessageFormat) with the key added to **every** locale catalog in `apps/design/frontend/src/locales/` (`en.ts` is the base; translate the rest). Two CI guards in the `designer-frontend` job enforce this: `npm run check:i18n` (key parity across locales — `just design-i18n`) and the dist-drift guard (rebuild + commit `apps/design/dist/`). Add Playwright coverage (`apps/design/frontend/e2e/`) for new interactions.
+| Task | Section |
+| --- | --- |
+| Find the file for anything | "Where things live" — the fastest jump-to map, start here |
+| Touch the sync loop, batching, or ack ordering | "The pipeline" — the invariants and each one's guard test |
+| Add or change a config / schema key | "Config layer — two-stage parse then convert", **plus the format-freeze bullet under "Commands"**: the formats are frozen backwards for the major, so deprecate rather than remove, and `golden_lock.rs` / `compat.rs` will tell you when you broke it |
+| Change the query derive | "Query side", plus the `flusso-query-derive` memory note |
+| Release, or get a libs fix into the shipped binaries | "Conventions" — releases are three independent trains, and a libs fix reaches the binaries only through a `fix(cli): adopt …` commit on `apps/cli/ADOPTIONS.md` |
+| Before claiming green | "Workspace lints are strict", and the CI-order bullet under "Commands" — note a PR confined to the query train skips the container suites it can't break |
+| Anything a user authors | "Keeping the designer current" — the designer and its translations ship in the same change, and two CI guards enforce it |
 
 ## Crate layering — the numeric prefix is the dependency layer
-
-Crates under `libs/` and `apps/`. A crate depends **only on lower-numbered layers**. Keep it acyclic.
 
 ```
 0-core  →  1-{queue,sources,sinks}  →  2-{engine,schema}  →  3-daemon  →  apps
 ```
 
-- **`libs/0-core`** (`schema-core`) — the cross-cutting vocabulary every layer trades in: `GenericValue`, newtypes, `IndexMapping`, `IndexSchema`, `Field`/`Filter`, `FailurePolicy`, per-sink configs. The **only** layer-0 crate.
-- **Layer 1** — concrete backends + abstractions: sources (`1-sources/0-core` traits, `1-sources/1-postgres`), sinks (`1-sinks/0-core`, `1-sinks/2-opensearch`), queue (`1-queue`).
-- **Layer 2** — `2-engine` (the orchestrator) and `2-schema` (config loading: the file parsers `1-config-toml`/`1-index-yaml`, the assembled `Config`, conversion, loader). Parsers live at layer 2 **on purpose** so layer-1 backends can't reach config-loading machinery.
-- **`libs/3-daemon`** — the domain: assembles the pipeline from a `Config` but names **no** concrete backend (backends arrive via the `Backends` trait). Telemetry-agnostic, owns no transport.
-- **`apps/cli`** — the **composition root**: the one crate that names concrete backends, installs telemetry, serves HTTP, owns signals.
-- **`apps/design`** (`flusso-design`) — the `flusso design` visual schema designer: an axum server + embedded React SPA that introspects the source, edits the files, previews the document/mapping, and writes them back. Depends on `schema` + `sources-postgres`; the CLI's `design` subcommand is a thin wrapper.
+A crate depends only on lower-numbered layers. Keep it acyclic. Three placements carry rationale
+worth knowing before you move code: the file parsers sit at layer 2 so a layer-1 backend **cannot**
+reach config-loading machinery or see the assembled `Config`; `libs/3-daemon` assembles the pipeline
+while naming no concrete backend; and the published `flusso-query` has **zero** flusso dependencies,
+so its live e2e lives in the unpublished `dev/query-e2e` crate. Keep it that way.
 
-## The pipeline (`libs/2-engine/src/lib.rs`)
+## The seams — where new things attach
 
-```
-ChangeCapture ─▶ queue ─▶ resolve ─▶ build ─▶ Sink ─▶ flush ─▶ ack
-```
+- **A source or sink backend** → a match arm in `apps/cli/src/backends.rs` plus its crate. The
+  engine and daemon stay untouched. The source builder takes a `SourceSpec`, not the whole `Config`.
+- **Catalog introspection** (discovery tooling, the designer) → `sources-core`'s
+  `SchemaIntrospection`, beside `Catalog` (one column's type) and `CaptureProvisioning` (coverage).
+- **Transport, telemetry, signals** → `apps/cli/src/`. The daemon owns none of them.
+- **Daemon wiring** → `libs/3-daemon/src/`. It exposes data: `Observer` events and a `Status` handle.
 
-The engine is the only orchestrator; everything it drives is a **trait object**. Invariants to preserve (each has a guard test — keep it passing):
-
-- **At-least-once via flush-then-confirm.** Source acks are confirmed *only after* `Sink::flush` makes documents durable. A crash before flush redelivers the batch; re-applied idempotently by deterministic id. (`confirms_no_ack_before_its_flush`)
-- **Two-step resolve → build, deduped per batch.** Buffer changes → resolve each to `DocumentId`s → dedup → `build_many` assembles each touched doc **once**. (`builds_a_repeatedly_touched_document_once_per_batch`)
-- **Backfill is the sink's decision.** On start `ensure_index` every mapping, then ask each sink `is_seeded`; snapshot root tables for the unseeded, then `mark_seeded`.
-- **Item-level rejection vs flush-wide error.** `Sink::flush` returns a `FlushReport`: `Err` is flush-wide (always stops); an `Ok` report lists per-document rejections. `FailurePolicies` (`Stop`/`Skip`, global + per-index by **logical** name) decide each in `commit`. (`skip_policy_*`/`stop_policy_*`/`per_index_stop_*`)
-- **Observability is a trait.** The engine reports to an `Observer` (`observer.rs`) — sync, cheap, no-op by default. The daemon is the consumer, fanning to metrics + status. (`reports_lifecycle_and_progress_to_the_observer`)
-
-`BatchPolicy` (default 256 changes / 50ms) controls flush grouping.
-
-## The seams (where to add things)
-
-- **Add a source/sink backend** → a new match arm in `apps/cli/src/backends.rs` (`FlussoBackends`) plus its crate. The daemon and engine are untouched. The source builder takes a `SourceSpec` (enabled indexes + schemas, layer-0 types), not the whole `Config` — translation is `backends.rs`'s `source_spec` helper.
-- **Change the daemon wiring** → `libs/3-daemon/src/` (`lib.rs` `Daemon`/`RunningDaemon`, `observer.rs`, `status.rs`, `lag.rs`). It exposes *data*: `Observer` events + a `Status` handle.
-- **Catalog introspection (for the designer / discovery tooling)** → `sources-core`'s `SchemaIntrospection` trait (`introspection.rs`) enumerates the relational catalog (`RelationalCatalog`); `junction_candidates` is a free function over it. Backed per-source (`sources-postgres` over `pg_catalog`). It's the third source-neutral capability beside `Catalog` (one column's type) and `CaptureProvisioning` (coverage). Codegen/preview live in `apps/design` (`codegen.rs`, `preview.rs`); the designer's model is the validated vocabulary itself (`IndexSchema`/`ConfigToml` as JSON), so there's no parallel model.
-- **Transport/telemetry/signals** → `apps/cli/src/` (`telemetry/`, `http/` public+private routers + auth, `commands/run.rs` restart loop).
-
-## Config layer — two-stage parse then convert
-
-`schema::load(path)` is the front door. Each file parser works in two stages: **parse** (serde → permissive entity types, unknown fields rejected) then **convert** (lift into the model, apply rules the format can't express). `*.schema.yml` → `IndexSchema` conversion lives in `schema-index-yaml`; `flusso.toml` → `Config` conversion lives in the `schema` crate (`deployment/conversion.rs`), next to `Config`, so the toml parser stays free of `Config`.
-
-**Secrets are deferred** — `{ env = "VAR" }` becomes a `Secret`, resolved in the running environment, never at parse time. A compiled `flusso.lock` carries no baked secret.
-
-**The file formats are frozen for the major** (issue #109) — backwards only: any `flusso.toml`/`*.schema.yml`/`flusso.lock` an earlier release in the major accepts must keep loading (`deny_unknown_fields` stays; deprecate, don't remove). The lock is deterministic TOML (format 2, `libs/2-schema/src/compiled.rs` — no `flusso_version`, byte-stable across upgrades; pre-freeze MessagePack locks are rejected with a regenerate hint). Guards in `libs/2-schema/tests/`: `golden_lock.rs` byte-pins the serialized shape (re-bless with `FLUSSO_BLESS=1`), `compat.rs` walks the immutable `tests/compat/` corpus — never edit a snapshot, fix the change.
-
-Schema YAML is **type-first**: `- <type>: <name>`. Joins split by verb (`belongs_to`/`has_one`/`has_many`/`many_to_many`), aggregates by op (`count`/`sum`/`avg`/`min`/`max`/`ids`). The `ids` op is `AggregateOp::Ids { element_type }` — a flat array of the related table's PK; it reuses the aggregate `Relation`/`AggregateKey` machinery (so CDC/reverse-resolution/publication are automatic) and sets `ResolvedField.array` so the mapping is the bare element type and the query derive expects `Vec<T>`. Parsing: `libs/2-schema/1-index-yaml/src/entities/field.rs`; core model `schema_core::FieldSource`; reverse resolution per kind in `libs/1-sources/1-postgres/src/document/resolve.rs`.
-
-## Query derive (`apps/query` + `apps/query-derive`)
-
-A deep subsystem — read the `flusso-query-derive` memory note before changing it. In short: `#[derive(FlussoRoot)]` discovers `flusso.toml`, resolves the index mapping DB-free, validates the struct (exists/leaf-type/nullability), and generates the query surface for the **whole index** — one namespace per container level, inside a generated `flusso_<root>_query` module (`flusso_user_query::Orders`, `flusso_user_query::OrdersItems`) so nothing lands in the caller's namespace. Scope tagging keeps nested queries honest (`Query<Root>` vs `Query<flusso_user_query::Orders>`, lifted via `User::orders().any(...)`). Everything below the root is `#[derive(FlussoFragment)]`: location-free, validated by each root that embeds it — the two derives can't see each other's tokens, so they meet as const data (`apps/query/src/check.rs`, baked by `spec.rs`, asserted by `fragment.rs`). Sibling derives: `FlussoMultiDocument` (blended union, purely syntactic), `FlussoValue` (custom scalar value types; also carries kinds/variants — and the opt-in `exhaustive` full-coverage flag — as consts via `FlussoValueMeta`). UI tests are trybuild snapshots — re-bless with `TRYBUILD=overwrite`.
-
-## The lints are strict — they fail the build
-
-`Cargo.toml [workspace.lints]` **denies** (not warns): `unwrap_used`/`expect_used` (return `Result`; tests opt out), `print_stdout`/`print_stderr` (use `tracing`), `indexing_slicing` (use `.get(i)`), `warnings`, `unsafe_code`, `missing_debug_implementations`, `unused_*`. Code that trips these won't compile. `clippy` runs **without** `--all-targets` because test code uses `.unwrap()`.
-
-## Match CI before assuming green
-
-In order: `cargo fmt --all --check` → `cargo clippy --workspace` (no `--all-targets`) → `cargo check --workspace --all-targets` → `cargo nextest run --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`. PRs confined to the query train (`apps/query`, `apps/query-derive`, `dev/query-e2e`) skip the Postgres/OpenSearch container suites (the query train's own `combined_search` live e2e still runs); main always runs everything. A separate job runs a 60s `pgoutput_decode` smoke fuzz on nightly.
-
-Test notes:
-- `cargo nextest run` for fast tests; `--run-ignored all` adds the Postgres e2e (needs Docker; `testcontainers`).
-- `cargo test --doc` — nextest does **not** run doctests.
-- The `schema` crate's `flusso.toml` env-var tests mutate process-wide env — under plain `cargo test` use `-p schema -- --test-threads=1` (nextest is fine: process per test).
-- The toolchain is pinned in `rust-toolchain.toml` because the derive's trybuild `.stderr` snapshots are compiler-version-sensitive.
-
-## Releases are three trains, not lockstep
-
-The `version_group`s in `release-plz.toml` (issue #110): **libs** (every `libs/*` crate, one version), **cli** (`flusso-cli` + `flusso-design`), **query** (`flusso-query` + `flusso-query-derive`, exact-pinned). Each crate owns its `version`; the internal `[workspace.dependencies]` reqs are **minor-precision** (`"0.15"`) and that precision is load-bearing — release-plz rewrites a dependent's req only when the new version stops matching, so a libs patch releases only libs while a libs 0.x minor (breaking) legitimately cascades. Never tighten those reqs to patch precision. Shipping a libs fix in the docker/dist binaries takes a cli-train release: a `fix(cli): adopt …` commit appending to `apps/cli/ADOPTIONS.md`. The published `flusso-query` has **zero** flusso deps — its live e2e lives in the unpublished `dev/query-e2e` crate; keep it that way.
-
-## Keep `CLAUDE.md` current
-
-It's a living index. When a change makes it wrong — a crate moved/renamed, a new engine invariant/guard test, a lint or format change — update it in the **same** change. The "Where things live" table in `CLAUDE.md` is the fastest jump-to map; start there.
+Adding a crate means placing it in that layering first, and picking the release train it belongs to.
+Everything else about the change is in `CLAUDE.md`, including the rule that a change making
+`CLAUDE.md` wrong fixes it in the same commit.
