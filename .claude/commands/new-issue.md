@@ -9,12 +9,11 @@ solution. Follow this flow:
 
 ## 1. Understand the problem (do this first — do NOT create the issue yet)
 
-- Investigate the problem in the codebase as needed so your questions are informed, not generic.
-- Ask the user clarifying questions about the **problem itself** to make the description as
-  detailed and precise as possible: what triggers it, scope, who/what is affected, expected vs
-  actual behavior, constraints, edge cases, why it matters. Prefer the `AskUserQuestion` tool for
-  crisp choices; use plain follow-ups for open-ended detail.
-- Keep digging until the problem is unambiguous. Resolve every "it depends" before drafting.
+Investigate in the codebase first so your questions are informed, then run **`/grilling`** aimed at
+the **problem**, not a solution: what triggers it, scope, who is affected, expected versus actual,
+constraints, edge cases, why it matters.
+
+Keep going until the problem is unambiguous. Resolve every "it depends" before drafting.
 
 ## 2. Draft the issue
 
