@@ -57,6 +57,8 @@ The engine is the only orchestrator; everything it drives is a **trait object**.
 
 **Secrets are deferred** — `{ env = "VAR" }` becomes a `Secret`, resolved in the running environment, never at parse time. A compiled `flusso.lock` carries no baked secret.
 
+**The file formats are frozen for the major** (issue #109) — backwards only: any `flusso.toml`/`*.schema.yml`/`flusso.lock` an earlier release in the major accepts must keep loading (`deny_unknown_fields` stays; deprecate, don't remove). The lock is deterministic TOML (format 2, `libs/2-schema/src/compiled.rs` — no `flusso_version`, byte-stable across upgrades; pre-freeze MessagePack locks are rejected with a regenerate hint). Guards in `libs/2-schema/tests/`: `golden_lock.rs` byte-pins the serialized shape (re-bless with `FLUSSO_BLESS=1`), `compat.rs` walks the immutable `tests/compat/` corpus — never edit a snapshot, fix the change.
+
 Schema YAML is **type-first**: `- <type>: <name>`. Joins split by verb (`belongs_to`/`has_one`/`has_many`/`many_to_many`), aggregates by op (`count`/`sum`/`avg`/`min`/`max`/`ids`). The `ids` op is `AggregateOp::Ids { element_type }` — a flat array of the related table's PK; it reuses the aggregate `Relation`/`AggregateKey` machinery (so CDC/reverse-resolution/publication are automatic) and sets `ResolvedField.array` so the mapping is the bare element type and the query derive expects `Vec<T>`. Parsing: `libs/2-schema/1-index-yaml/src/entities/field.rs`; core model `schema_core::FieldSource`; reverse resolution per kind in `libs/1-sources/1-postgres/src/document/resolve.rs`.
 
 ## Query derive (`apps/query` + `apps/query-derive`)

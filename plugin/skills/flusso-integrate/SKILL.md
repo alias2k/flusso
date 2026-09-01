@@ -98,7 +98,7 @@ flusso build --config flusso.toml -o flusso.lock   # compile config + every sche
 flusso run                                          # loads flusso.lock by default; resolves secrets from its own env
 ```
 
-The lock carries `{ env = … }` refs as references, so the same artifact runs in any environment that supplies the secrets (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`).
+The lock carries `{ env = … }` refs as references, so the same artifact runs in any environment that supplies the secrets (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). It is deterministic, generated-only TOML — commit it and diffs stay reviewable; rebuilds from unchanged inputs are byte-identical (`flusso run` skips the rewrite). The file formats are frozen for the major: a config, schema, or lock a release accepts keeps loading on every later release in it.
 
 ## Operational surface
 
