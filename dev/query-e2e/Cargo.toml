@@ -1,0 +1,26 @@
+[package]
+name = "flusso-query-e2e"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Live-service e2e for flusso-query against the real OpenSearch sink. Not published — keeps the published flusso-query free of flusso lib dependencies, so the query train releases independently of the libs train."
+# A runnable guard, not shipping code (like dev/search-api).
+publish = false
+
+[lints]
+workspace = true
+
+# Everything lives in [dev-dependencies]: the crate has no lib code, only the
+# integration test, so nothing here counts against `unused_crate_dependencies`.
+[dev-dependencies]
+flusso-query = { path = "../../apps/query" }
+schema-core.workspace = true
+sinks-core.workspace = true
+sinks-opensearch.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+testcontainers-modules = { workspace = true, features = ["http_wait"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

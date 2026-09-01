@@ -15,6 +15,7 @@ members = [
   "libs/3-daemon",
   "apps/*",
   "dev/search-api",
+  "dev/query-e2e",
 ]
 default-members = ["apps/cli"]
 resolver = "3"
