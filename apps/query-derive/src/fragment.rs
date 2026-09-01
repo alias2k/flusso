@@ -296,6 +296,25 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 key,
                 "declares a variant the schema does not list for this field",
             );
+            let exhausted_msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is `{}`, marked `exhaustive` — but it does not cover every variant \
+                     the schema declares for this field",
+                    render(element)
+                ),
+            );
+            let no_variants_msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is `{}`, marked `exhaustive` — but the schema field here declares no \
+                     variants, so there is nothing to cover; declare `variants:` on it or \
+                     drop the marker",
+                    render(element)
+                ),
+            );
             // `map_kind_ok` only fails for a map wrapper (a type with declared
             // `MAP_VALUES` — always `keyword` or `text`, the derive allows no
             // other tag), so when the schema's `values:` kind is readable the
@@ -391,6 +410,19 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                         <#element as ::flusso_query::FlussoValueMeta>::VARIANTS,
                     ),
                     #variant_msg
+                );
+                assert!(
+                    !<#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE
+                        || ::flusso_query::has_variants(level, #key),
+                    #no_variants_msg
+                );
+                assert!(
+                    !<#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE
+                        || ::flusso_query::variants_exhausted(
+                            level, #key,
+                            <#element as ::flusso_query::FlussoValueMeta>::VARIANTS,
+                        ),
+                    #exhausted_msg
                 );
                 <#element>::__flusso_check(::flusso_query::children(level, #key));
             });
