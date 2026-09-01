@@ -354,6 +354,8 @@ A **newtype inherits its inner type's kinds** automatically — `struct Money(De
 
 **Enum keyword fields stay typed — never `#[flusso(skip)]`** them: derive `FlussoValue` on the enum and keep it as the field type. Likewise, with the **`uuid` feature**, `uuid::Uuid` is a `keyword` value — id / foreign-key fields stay as `Uuid` (no skip, no `Keyword::at("…")`), and `User::owner_id().eq(some_uuid)` works without `.to_string()` (the derive defers a `FlussoValue<Keyword>` bound, satisfied by the feature impl).
 
+**Enum variant coverage.** An enum used as a document field is checked against the schema's declared `variants:`: a Rust variant the schema never lists is a compile error (it could never match a document), while covering only *some* of the declared variants is a legal partial projection. Opt into **full** coverage with `#[flusso(keyword, exhaustive)]` — every embedding then requires the enum to cover the schema's whole declared set, so a variant added to the schema breaks the build until the enum catches up. Enum-only (an untagged newtype inherits it from its inner type); at a field with no declared `variants:` the marker is a compile error, so a schema edit dropping them can't silently disarm the guarantee.
+
 ## flusso type → Rust type (what the derive expects)
 
 | flusso `type` | Rust | Handle |
