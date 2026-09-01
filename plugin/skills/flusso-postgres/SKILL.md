@@ -1,6 +1,6 @@
 ---
 name: flusso-postgres
-description: How flusso's Postgres source side works — logical replication, the replication slot, the publication (manage_publication), wal_level, REPLICA IDENTITY / row identity, how relational structure (tables, foreign keys, junctions) maps to flusso joins and aggregates, and the privileges the source role needs. Use to understand or debug what flusso requires of the database, why a change isn't captured, or why a join needs a publication. Covers the flusso-relevant slice of Postgres, not the whole manual.
+description: flusso's Postgres source — logical replication, the slot, the publication, `wal_level`, `REPLICA IDENTITY`, privileges, TLS. Use to debug why a change isn't captured, or to check what flusso requires of the database.
 ---
 
 # flusso's Postgres source (how the read-from side works)
@@ -53,18 +53,11 @@ Rule of thumb: a PK is enough until a join keys off a *mutable* foreign key; if 
 
 ## How relational structure becomes a document
 
-flusso reads your existing schema; the mapping is declared in `*.schema.yml` (see **flusso-schema**), but it mirrors the relational shape:
-
-| Postgres shape | flusso field | Where the key lives |
-| --- | --- | --- |
-| The document's own table | `table:` (root) | — |
-| FK on **this** table → parent | `belongs_to` | this table's `column` |
-| FK on a **related** table → this row (one) | `has_one` | related table's `foreign_key` |
-| FK on a **related** table → this row (many) | `has_many` | related table's `foreign_key` |
-| Two FKs through a junction table | `many_to_many` | the junction's `through` keys |
-| Reduce related rows to a scalar | `count`/`sum`/`avg`/`min`/`max` | `foreign_key` xor `through` |
-
-Reverse resolution (a change to a *related* row → which root documents to rebuild) is computed per join kind from these keys — which is why **`primary_key` is mandatory on the root once any relation exists**.
+The declaration lives in `*.schema.yml` (see **flusso-schema** for the verbs and their key
+siblings). What matters on this side is **reverse resolution**: when a *related* row changes, flusso
+computes which root documents to rebuild from that join's key. Which is why **`primary_key` is
+mandatory on the root once any relation exists**, and why a new join or aggregate pulls a new table
+into the publication.
 
 ## Privileges, minimally
 
