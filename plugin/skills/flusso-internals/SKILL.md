@@ -71,13 +71,17 @@ A deep subsystem — read the `flusso-query-derive` memory note before changing 
 
 ## Match CI before assuming green
 
-In order: `cargo fmt --all --check` → `cargo clippy --workspace` (no `--all-targets`) → `cargo check --workspace --all-targets` → `cargo nextest run --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`. A separate job runs a 60s `pgoutput_decode` smoke fuzz on nightly.
+In order: `cargo fmt --all --check` → `cargo clippy --workspace` (no `--all-targets`) → `cargo check --workspace --all-targets` → `cargo nextest run --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`. PRs confined to the query train (`apps/query`, `apps/query-derive`, `dev/query-e2e`) skip the Postgres/OpenSearch container suites (the query train's own `combined_search` live e2e still runs); main always runs everything. A separate job runs a 60s `pgoutput_decode` smoke fuzz on nightly.
 
 Test notes:
 - `cargo nextest run` for fast tests; `--run-ignored all` adds the Postgres e2e (needs Docker; `testcontainers`).
 - `cargo test --doc` — nextest does **not** run doctests.
 - The `schema` crate's `flusso.toml` env-var tests mutate process-wide env — under plain `cargo test` use `-p schema -- --test-threads=1` (nextest is fine: process per test).
 - The toolchain is pinned in `rust-toolchain.toml` because the derive's trybuild `.stderr` snapshots are compiler-version-sensitive.
+
+## Releases are three trains, not lockstep
+
+The `version_group`s in `release-plz.toml` (issue #110): **libs** (every `libs/*` crate, one version), **cli** (`flusso-cli` + `flusso-design`), **query** (`flusso-query` + `flusso-query-derive`, exact-pinned). Each crate owns its `version`; the internal `[workspace.dependencies]` reqs are **minor-precision** (`"0.15"`) and that precision is load-bearing — release-plz rewrites a dependent's req only when the new version stops matching, so a libs patch releases only libs while a libs 0.x minor (breaking) legitimately cascades. Never tighten those reqs to patch precision. Shipping a libs fix in the docker/dist binaries takes a cli-train release: a `fix(cli): adopt …` commit appending to `apps/cli/ADOPTIONS.md`. The published `flusso-query` has **zero** flusso deps — its live e2e lives in the unpublished `dev/query-e2e` crate; keep it that way.
 
 ## Keep `CLAUDE.md` current
 
