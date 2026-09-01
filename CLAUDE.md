@@ -475,7 +475,12 @@ error. `decimal` vs `double` is carried by `Mapping.decimal` (0-core), since bot
 `double`. `Bool` is kind-based too (`kind::Bool`). `FlussoValue<K>` has a `serde::Serialize`
 supertrait. A `#[derive(FlussoValue)]` **newtype inherits its inner type's kinds** (blanket
 forward impl) — `struct Money(Decimal)` is a decimal value with no tag; an enum requires an
-explicit `#[flusso(keyword|text)]`, no default (numeric/date tags don't exist).
+explicit `#[flusso(keyword|text)]`, no default (numeric/date tags don't exist). An enum may
+add `exhaustive` (`#[flusso(keyword, exhaustive)]`, issue #100): a partial projection is
+normally legal, but the marker makes every embedding demand the schema's **whole** declared
+`variants:` set (rides `FlussoValueMeta::EXHAUSTIVE` as const data; an untagged newtype
+forwards it; enum-only — on a newtype/`FlussoMap` it's a macro error, and at a field with no
+declared variants it's a const error, so a schema edit can't silently disarm it).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `apps/query-derive/tests/

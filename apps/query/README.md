@@ -955,7 +955,9 @@ note: inside `Geo::__flusso_check`
 On top of the three checks above, a fragment field also verifies **enum variants**:
 a `#[derive(FlussoValue)]` enum declaring a variant the schema's `variants:` never
 lists is a compile error, because it could never match a document. Covering only
-*some* of the schema's variants is fine — that's a partial projection. A
+*some* of the schema's variants is fine — that's a partial projection — unless the
+enum is marked `#[flusso(keyword, exhaustive)]`, which demands the **whole**
+declared set at every embedding (see "Custom value types" below). A
 **map-typed field** is verified down to the map's *value kind*: the
 `#[derive(FlussoMap)]` derive bakes the kind onto the type, so a `text` wrapper
 embedded at a `keyword` map fails the build — the same check a root runs
@@ -1040,6 +1042,29 @@ struct Customer { tier: Tier, balance: Money /* … */ }
 
 Customer::tier().eq(Tier::Pro);              // term against "pro"
 Customer::balance().gte(Money(Decimal::ONE)); // a decimal value, no cast
+```
+
+**Opt into full variant coverage with `exhaustive`.** An enum used as a document
+field may cover only *some* of the schema's declared `variants:` — a legal
+partial projection, but a `.eq(…)` can then never select the missing ones, which
+is usually an oversight. Add `exhaustive` to the kind tag —
+`#[flusso(keyword, exhaustive)]` — and every embedding requires the enum to
+cover the schema's **whole** declared set: a missing variant becomes a compile
+error naming the declared list. The marker is enum-only (an untagged newtype
+inherits it from its inner type, like the kinds), and it hard-errors where it
+could verify nothing: on a field that declares no `variants:` at all, so a
+schema edit dropping them can't silently disarm the guarantee. It rides
+`FlussoValueMeta::EXHAUSTIVE`, so it works in fragments and at roots alike.
+
+```rust
+// The schema declares variants: [free, pro, enterprise] — all covered, compiles.
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+#[serde(rename_all = "camelCase")]
+#[flusso(keyword, exhaustive)]
+enum Tier { Free, Pro, Enterprise }
+// Drop `Enterprise` and the build fails:
+// "field `tier` … declares variants [free, pro, enterprise] — the Rust type
+//  is marked `exhaustive` but does not cover them all"
 ```
 
 **`uuid::Uuid` is a keyword value behind the `uuid` feature** — id / foreign-key
