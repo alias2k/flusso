@@ -54,11 +54,37 @@ jobs:
       - name: Check server-only build (no designer)
         run: cargo check -p flusso-cli --no-default-features
 
+      # PRs confined to the query release train (apps/query, apps/query-derive,
+      # dev/query-e2e — see release-plz.toml) skip the Postgres/OpenSearch e2e
+      # suites those paths can't break; everything else, and every push to
+      # main, runs the full set. Decided from the PR's own file list (REST,
+      # paginated — `gh pr view --json files` caps at 100 files). Fails open:
+      # any file outside those trees means the full run.
+      - name: Decide e2e scope
+        id: scope
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename')
+          if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^(apps/query|apps/query-derive|dev/query-e2e)/'; then
+            echo "read_side_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # `--run-ignored all` includes the `#[ignore]`d container-backed e2e
       # tests; the `ci` profile gives them retries and a longer timeout. The
       # `query.rs` proptests are ordinary `#[test]`s, so they run here too.
       - name: Test (unit + integration + e2e)
+        if: steps.scope.outputs.read_side_only != 'true'
         run: cargo nextest run --profile ci --workspace --run-ignored all
+
+      # Read-side-only PRs: the same run minus the container-backed
+      # Postgres/OpenSearch suites — every tests/ binary in those three crates
+      # is container e2e, so excluding them by kind is exact. The query train's
+      # own live e2e (dev/query-e2e's combined_search) still runs.
+      - name: Test (read-side scope — full unit/integration + query e2e)
+        if: steps.scope.outputs.read_side_only == 'true'
+        run: cargo nextest run --profile ci --workspace --run-ignored all -E 'all() - (kind(test) & (package(flusso-sources-postgres) + package(flusso-engine) + package(flusso-sinks-opensearch)))'
 
       # nextest does not run doctests; run them separately.
       - name: Doctests
