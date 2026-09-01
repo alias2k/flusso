@@ -23,7 +23,7 @@ schema-config-toml.workspace = true
 schema-index-yaml.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-rmp-serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
