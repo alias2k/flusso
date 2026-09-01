@@ -74,6 +74,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   serialized shape against a maximal fixture (`tests/fixtures/golden/`; re-bless with
   `FLUSSO_BLESS=1` after reviewing the diff) and `compat.rs` walks the immutable per-release
   corpus `tests/compat/` (see its README; never edit a snapshot — fix the change instead).
+- `apps/cli/tests/agent_docs_paths.rs` asserts every repo path named in `plugin/**` and
+  `.claude/commands/**` exists — the moved-file guard for those pointer-heavy trees. Ordinary test,
+  caught by the nextest step.
 - **The `schema` crate's config env-var tests must run single-threaded**: the
   `flusso.toml` parse/convert tests (`libs/2-schema/tests/config_toml.rs`) mutate process-wide
   env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its own process so it's
@@ -592,6 +595,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/guides/deploying.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
+| Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
 
 ## Conventions
 
@@ -659,6 +663,14 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   on crates.io before its dependents): `flusso-schema-core` → parsers →
   `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon`, then apps on top
   (`flusso-design` → `flusso-cli`; `flusso-query-derive` → `flusso-query`).
+- **Agent-facing docs follow `writing-for-agents`, not `docs/STYLE.md`.** `plugin/**` and
+  `.claude/commands/**` are consumed by an agent, so `plugin/ARCHITECTURE.md` is the standard: each
+  meaning has exactly one home and everything else points at it. **This file owns the definition of
+  done** (the designer + i18n + dist rule, the editor JSON schemas, the CI order, the engine
+  invariants); a skill or command restating any of it is the defect, so point here instead. The
+  internal commands point at the `mattpocock-skills` collection (`/grilling`, `/code-review`), which
+  `.claude/settings.json` declares so any checkout has it. `apps/cli/tests/agent_docs_paths.rs`
+  fails the build on a dangling repo path in either tree.
 - `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
   completion live **inside the parser crate that owns each** (so they ship in the published
   `.crate`): `schema_config_toml::CONFIG_SCHEMA`
