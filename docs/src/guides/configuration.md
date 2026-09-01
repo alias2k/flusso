@@ -642,7 +642,7 @@ of the binary. (You can also point a single struct at a config with
 ## Compiling
 
 `flusso build --config config.toml -o flusso.lock` runs all validation and writes the whole
-validated configuration — every schema inlined — to a single binary artifact (MessagePack).
+validated configuration — every schema inlined — to a single deterministic TOML file.
 Because schemas are self-describing and secrets are
 [deferred](#env_or_value-references), compiling needs no database and bakes in
 no secret: `{ env = … }` references travel as references, not values.
@@ -652,6 +652,31 @@ credentials in its own environment; `flusso run --config flusso.toml` compiles f
 and runs that. So a deployment ships one file — no YAML tree, no source checkout — and the
 same artifact runs anywhere its environment provides the secrets. The Docker shipping
 recipes are in [deploying](deploying.md).
+
+The lock is **generated-only, but reviewable**: like `Cargo.lock`, flusso owns and rewrites
+it (hand edits aren't a supported input), yet it's plain TOML, so a committed lock diffs
+meaningfully in review. Rebuilds are **byte-stable** — the same config and schemas always
+produce the identical file, nothing in it changes just because flusso was upgraded, and
+`flusso run` skips the rewrite entirely when the recompiled lock is identical.
+
+> ℹ️ **Info** — Locks written by releases before the text format (a binary file) are
+> rejected with a regenerate hint. Re-run `flusso build` (or `flusso run` with the config
+> present) once and commit the result.
+
+---
+
+## Format stability
+
+The files you own are covered by a compatibility guarantee for the rest of the current
+major:
+
+- **Backwards, always.** Any `flusso.toml`, `*.schema.yml`, or `flusso.lock` that a release
+  in this major accepts keeps loading on every later release in it. CI enforces this with a
+  frozen corpus of earlier-release files that must keep loading.
+- **Deprecate, don't remove.** A key can be superseded and warned about, but keeps working
+  for the major.
+- **Forward is not guaranteed.** A file using *newer* keys may fail to load on an *older*
+  binary — unknown keys are a loud error by design, never a silent no-op.
 
 ---
 

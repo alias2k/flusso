@@ -73,9 +73,10 @@ type it out.
 
    The raw commands behind these are `cargo run -- check --config dev/flusso.toml`
    and `cargo run -- run --config dev/flusso.toml --public-address 127.0.0.1:9464`.
-   With `--config` given, `run` recompiles and rewrites `flusso.lock` on start
-   (cargo-style), so an edited schema lands in the committable lock with no separate
-   `build` step. Pass `--locked` to run the existing lock untouched.
+   With `--config` given, `run` recompiles `flusso.lock` on start (cargo-style)
+   and rewrites it only when the content changed, so an edited schema lands in the
+   committable lock with no separate `build` step and an unchanged config never
+   dirties it. Pass `--locked` to run the existing lock untouched.
 
 3. **Make changes** in another terminal and watch them appear. `just psql` opens a
    shell on the dev database; to replay the curated sample set, feed it

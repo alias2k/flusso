@@ -23,7 +23,8 @@ Two different "compilations" — conflating them is what makes Docker feel heavy
    `alias2k/flusso:VERSION` and build *from* it.
 2. **A `flusso.lock`** — `flusso build` inlines your `flusso.toml` + every
    referenced `*.schema.yml` into one portable, self-contained file. No DB, no
-   toolchain, no secrets baked in.
+   toolchain, no secrets baked in — and it's deterministic TOML, so a committed
+   lock stays reviewable in a diff.
 
 > ℹ️ **Info** — The image is published to two registries with identical tags.
 > Use **Docker Hub** as the primary: [`alias2k/flusso`](https://hub.docker.com/r/alias2k/flusso)
@@ -130,7 +131,10 @@ flusso build --config flusso.toml --out flusso.lock   # inlines all scattered sc
 
 Commit `flusso.lock`, or publish it as a CI artifact, and the image build never
 sees a schema file — there's no pattern to match, no context to prune, no tree to
-preserve. Just one file. (`flusso build` needs the `flusso` binary; in CI, run it
+preserve. Just one file. Committing works well because the lock is deterministic
+TOML: a PR that changes the config shows a readable lock diff, and a rebuild from
+unchanged inputs is byte-identical, so it never churns (a lock from a pre-text
+release is rejected with a hint — rebuild it once). (`flusso build` needs the `flusso` binary; in CI, run it
 from the published image: `docker run --rm -v "$PWD:/src" -w /src
 alias2k/flusso:VERSION build --config flusso.toml --out flusso.lock`.)
 
