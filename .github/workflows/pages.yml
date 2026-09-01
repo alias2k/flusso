@@ -17,7 +17,9 @@ name: pages
 #   schemas/latest/index.schema.yml   newest version overall
 #   (same three forms for config.schema.json)
 #
-# Every crate shares one version, so the two schema crates' tags move together. Versions
+# The two schema parser crates sit in the same `libs` version group
+# (release-plz.toml), so their tags move together even though the workspace
+# releases as independent trains. Versions
 # whose tag predates the in-crate schema layout are skipped (their files lived elsewhere)
 # — the schema tree effectively starts at the first release after that move.
 
