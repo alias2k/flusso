@@ -565,6 +565,68 @@ fn value_metadata_is_readable_during_const_evaluation() {
     const _: () = OrderStatus::__flusso_check(&[]);
 }
 
+// Issue #100: `#[flusso(…, exhaustive)]` demands the *whole* declared variant
+// set at every embedding. These enums cover their fields' sets fully, so the
+// types compile — at the root (`tier`) and through a fragment (`orders.status`)
+// alike. A marked enum missing a variant is a compile error (see
+// tests/ui/root_exhaustive_partial.rs and fragment_exhaustive_partial.rs);
+// `OrderStatus` above stays a legal partial projection because it is unmarked.
+
+/// Covers every variant `tier` declares — allowed to demand exhaustiveness.
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+#[serde(rename_all = "camelCase")]
+#[flusso(keyword, exhaustive)]
+enum FullTier {
+    Free,
+    Pro,
+    Enterprise,
+}
+
+/// Covers every variant `orders.status` declares, checked via the fragment.
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+#[serde(rename_all = "camelCase")]
+#[flusso(keyword, exhaustive)]
+enum FullOrderStatus {
+    Pending,
+    Paid,
+    Shipped,
+    Delivered,
+    Cancelled,
+}
+
+/// An untagged newtype forwards its inner type's exhaustiveness with its kinds.
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+struct WrappedTier(FullTier);
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct ExhaustiveOrder {
+    status: FullOrderStatus,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct ExhaustiveUser {
+    tier: FullTier,
+    orders: Vec<ExhaustiveOrder>,
+}
+
+#[test]
+fn exhaustive_enums_covering_the_whole_declared_set_compile() -> Result {
+    use flusso_query::FlussoValueMeta;
+
+    let body = ExhaustiveUser::query()
+        .filter(ExhaustiveUser::tier().eq(FullTier::Pro))
+        .body();
+    assert!(body.to_string().contains(r#""pro""#));
+
+    // The marker rides `FlussoValueMeta` as const data; off by default, and an
+    // untagged newtype forwards it like `KINDS`/`VARIANTS`.
+    assert!(<FullTier as FlussoValueMeta>::EXHAUSTIVE);
+    assert!(!<OrderStatus as FlussoValueMeta>::EXHAUSTIVE);
+    assert!(<WrappedTier as FlussoValueMeta>::EXHAUSTIVE);
+    Ok(())
+}
+
 // The root is the only type that resolves the schema, so it bakes the resolved
 // level and drives the check into every shape it embeds. These fragments carry
 // no location at all — they are validated purely by where `FragUser` puts them.

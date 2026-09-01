@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Order`: field `status` is `OrderStatus`, marked `exhaustive` — but the schema field here declares no variants, so there is nothing to cover; declare `variants:` on it or drop the marker
+  --> tests/ui/fragment_exhaustive_no_variants.rs:29:15
+   |
+29 | const _: () = Order::__flusso_check(LEVEL);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Order::__flusso_check`
+  --> tests/ui/fragment_exhaustive_no_variants.rs:16:13
+   |
+16 |     status: OrderStatus,
+   |             ^^^^^^^^^^^ the failure occurred here
