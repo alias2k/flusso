@@ -209,6 +209,40 @@ pub const fn variants_covered(level: &[FieldSpec], name: &str, rust: &[&str]) ->
     true
 }
 
+/// Whether `name` declares any `variants:` at all — the precondition an
+/// `exhaustive` type needs before [`variants_exhausted`] can verify anything.
+/// Absent → `false`.
+#[must_use]
+pub const fn has_variants(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => !field.variants.is_empty(),
+        None => false,
+    }
+}
+
+/// Whether every variant the schema declares for `name` also exists in `rust`.
+///
+/// The reverse direction of [`variants_covered`]: asserted together they make
+/// the two sets equal. Read only for a type marked `#[flusso(…, exhaustive)]` —
+/// a partial projection is legal, so nothing asserts this by default. A field
+/// with no declared variants passes vacuously; [`has_variants`] owns that case,
+/// with its own message.
+#[must_use]
+pub const fn variants_exhausted(level: &[FieldSpec], name: &str, rust: &[&str]) -> bool {
+    let Some(field) = find(level, name) else {
+        return false;
+    };
+    let mut i = 0;
+    while i < field.variants.len() {
+        #[allow(clippy::indexing_slicing)]
+        if !contains(rust, field.variants[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Whether `name` is a dynamic-key `map` whose values are one of `accepted`.
 ///
 /// A field that is not a map fails — so a `HashMap<String, _>` declared against
@@ -345,6 +379,12 @@ pub trait FlussoValueMeta {
     /// mapping; with it, the value kind is checked too, matching what a root
     /// does natively.
     const MAP_VALUES: &'static [KindTag] = &[];
+
+    /// Whether the type demands *full* coverage of the schema's declared
+    /// variants — set by `#[flusso(…, exhaustive)]` on a `FlussoValue` enum,
+    /// forwarded by an untagged newtype. Off by default: a Rust enum covering
+    /// only some of the schema's variants is a legal partial projection.
+    const EXHAUSTIVE: bool = false;
 }
 
 /// Mirrors the [`FlussoValue`](crate::FlussoValue) impls above, so a
@@ -387,8 +427,8 @@ value_meta! {
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldSpec, KindTag, array, children, exists, kind_is, map_kind_ok, map_value_is, nullable,
-        variants_covered,
+        FieldSpec, KindTag, array, children, exists, has_variants, kind_is, map_kind_ok,
+        map_value_is, nullable, variants_covered, variants_exhausted,
     };
 
     const STATUS_VARIANTS: &[&str] = &["pending", "shipped", "delivered"];
@@ -536,6 +576,45 @@ mod tests {
     #[test]
     fn a_field_without_declared_variants_accepts_any() {
         assert!(variants_covered(LEVEL, "city", &["anything"]));
+    }
+
+    #[test]
+    fn exhaustion_requires_every_declared_variant() {
+        assert!(variants_exhausted(
+            LEVEL,
+            "status",
+            &["pending", "shipped", "delivered"]
+        ));
+        assert!(!variants_exhausted(
+            LEVEL,
+            "status",
+            &["pending", "shipped"]
+        ));
+        assert!(!variants_exhausted(LEVEL, "town", &["pending"]));
+    }
+
+    #[test]
+    fn extra_rust_variants_do_not_satisfy_exhaustion_alone() {
+        // `variants_exhausted` only checks schema ⊆ rust — the reverse
+        // direction stays `variants_covered`'s job, asserted alongside.
+        assert!(variants_exhausted(
+            LEVEL,
+            "status",
+            &["pending", "shipped", "delivered", "refunded"]
+        ));
+        assert!(!variants_covered(
+            LEVEL,
+            "status",
+            &["pending", "shipped", "delivered", "refunded"]
+        ));
+    }
+
+    #[test]
+    fn a_field_without_declared_variants_is_vacuously_exhausted() {
+        assert!(variants_exhausted(LEVEL, "city", &[]));
+        assert!(!has_variants(LEVEL, "city"));
+        assert!(has_variants(LEVEL, "status"));
+        assert!(!has_variants(LEVEL, "town"));
     }
 
     #[test]
