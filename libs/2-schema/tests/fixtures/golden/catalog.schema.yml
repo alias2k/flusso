@@ -1,0 +1,180 @@
+# The golden fixture's maximal schema: every field type tag, every join kind,
+# every aggregate op, and every sibling the format allows — so the committed
+# lock pins the serialized shape of the whole vocabulary.
+version: 1
+table: products
+schema: shop
+primary_key: id
+
+soft_delete:
+  column: deleted
+  when:
+    - { column: status, op: eq, value: retired }
+
+filters:
+  - { column: visible, op: eq, value: true }
+
+fields:
+  - integer: id
+    required: true
+  - identifier: slug
+    required: true
+  - keyword: sku
+    required: true
+    transforms: [trim, lowercase]
+  - text: name
+    required: true
+    options:
+      analyzer: english
+  - text: description
+    required: false
+    default: ""
+  - enum: status
+    required: true
+    variants: [draft, active, retired]
+  - enum: condition
+    required: false
+  - uuid: externalId
+    column: external_id
+    required: false
+  - boolean: inStock
+    column: in_stock
+    required: true
+    default: false
+  - short: shelf
+    required: false
+  - long: viewCount
+    column: view_count
+    required: true
+    default: 0
+  - float: weightKg
+    column: weight_kg
+    required: false
+  - double: score
+    required: false
+  - decimal: price
+    required: true
+  - date: releasedOn
+    column: released_on
+    required: false
+  - timestamp: createdAt
+    column: created_at
+    required: true
+    options:
+      format: "strict_date_optional_time||epoch_millis"
+  - binary: thumbnail
+    required: false
+  - json: attributes
+    required: false
+  - custom: rating
+    column: rating_raw
+    postgres: [numeric]
+    opensearch: scaled_float
+    required: false
+    options: { scaling_factor: 10 }
+  - geo: location
+    lat: latitude
+    lon: longitude
+    required: false
+  - geo: warehouse
+    column: warehouse_point
+    required: false
+  - map: title
+    values: text
+    required: true
+  - map: badges
+    values: keyword
+    required: false
+
+  - object: dimensions
+    fields:
+      - float: widthCm
+        column: width_cm
+        required: false
+      - float: heightCm
+        column: height_cm
+        required: false
+
+  - belongs_to: brand
+    table: brands
+    column: brand_id
+    primary_key: id
+    required: true
+    fields:
+      - keyword: name
+        required: true
+      - keyword: country
+        required: false
+
+  - has_one: detail
+    table: product_details
+    foreign_key: product_id
+    primary_key: product_id
+    fields:
+      - text: longDescription
+        column: long_description
+        required: false
+
+  - has_many: reviews
+    table: reviews
+    foreign_key: product_id
+    primary_key: id
+    filters:
+      - { column: spam, op: neq, value: true }
+    order_by:
+      - { column: created_at, direction: desc }
+      - { column: id, direction: asc }
+    limit: 100
+    fields:
+      - short: stars
+        required: true
+      - text: body
+        required: false
+
+  - many_to_many: tags
+    table: tags
+    through:
+      table: product_tags
+      left_key: product_id
+      right_key: tag_id
+    primary_key: id
+    order_by:
+      - { column: label, direction: asc }
+    fields:
+      - keyword: label
+        required: true
+
+  - count: reviewCount
+    table: reviews
+    foreign_key: product_id
+  - count: goodReviewCount
+    table: reviews
+    foreign_key: product_id
+    filters:
+      - { column: stars, op: gte, value: 4 }
+  - sum: totalStars
+    table: reviews
+    column: stars
+    value_type: long
+    foreign_key: product_id
+  - avg: avgStars
+    table: reviews
+    column: stars
+    foreign_key: product_id
+  - min: worstStars
+    table: reviews
+    column: stars
+    value_type: short
+    foreign_key: product_id
+  - max: bestStars
+    table: reviews
+    column: stars
+    value_type: short
+    foreign_key: product_id
+  - ids: reviewIds
+    table: reviews
+    foreign_key: product_id
+    element_type: long
+
+  - constant: docSource
+    value: catalog
