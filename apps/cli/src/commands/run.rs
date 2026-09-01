@@ -48,8 +48,9 @@ pub(crate) struct RunArgs {
     #[arg(short, long, env = "FLUSSO_CONFIG")]
     config: Option<PathBuf>,
 
-    /// Compiled lock path: rewritten from the config on every start (cargo-style),
-    /// and loaded directly when there is no config to compile.
+    /// Compiled lock path: recompiled from the config on every start
+    /// (cargo-style) and rewritten only when its content changed, and loaded
+    /// directly when there is no config to compile.
     #[arg(long, env = "FLUSSO_LOCK", default_value = DEFAULT_LOCK)]
     lock: PathBuf,
 
@@ -313,9 +314,11 @@ fn plan_config(
 }
 
 /// Resolve the configuration a `run` should use, cargo-style: compile the config
-/// and **(re)write the lock** when one is present, fall back to the existing lock
-/// otherwise, or run the lock as-is under `--locked`. A lock write failure is
-/// fatal — the committed lock must reflect the config it was compiled from.
+/// and **(re)write the lock** when one is present (skipping the write when the
+/// bytes are already identical, so a no-change run leaves a committed lock
+/// untouched), fall back to the existing lock otherwise, or run the lock as-is
+/// under `--locked`. A lock write failure is fatal — the committed lock must
+/// reflect the config it was compiled from.
 fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
     let default_config = PathBuf::from(crate::DEFAULT_CONFIG);
     match plan_config(
@@ -328,12 +331,13 @@ fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
         ConfigPlan::Compile(config_path) => {
             let compiled = schema::compile(&config_path)
                 .with_context(|| format!("compiling config from {}", config_path.display()))?;
-            schema::write(&compiled, &args.lock)
+            let wrote = schema::write_if_changed(&compiled, &args.lock)
                 .with_context(|| format!("writing compiled lock to {}", args.lock.display()))?;
             tracing::info!(
                 indexes = compiled.config.indexes.len(),
                 lock = %args.lock.display(),
-                "compiled config and wrote lock"
+                "compiled config; {}",
+                if wrote { "wrote lock" } else { "lock already current" }
             );
             Ok(compiled.config)
         }
