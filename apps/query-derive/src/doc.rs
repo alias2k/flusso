@@ -1109,27 +1109,63 @@ pub(crate) fn embed_checks(
                 <#element>::__flusso_check(::flusso_query::children(__FLUSSO_LEVEL, #key));
             });
         }
-        // Only an ordered enum has a variant set to disagree with. The message is
-        // baked here because this is the side that knows the schema's variants.
-        {
-            let order = match &resolved.mapping.enum_order {
-                Some(order) => order,
-                None => continue,
-            };
-            let message = format!(
-                "field `{key}` in {scope} declares variants [{}] — the Rust type declares one \
-                 that is not among them, so it could never match a document",
-                order.join(", "),
-            );
-            calls.extend(quote::quote_spanned! {span=>
-                assert!(
-                    ::flusso_query::variants_covered(
-                        __FLUSSO_LEVEL, #key,
-                        <#element as ::flusso_query::FlussoValueMeta>::VARIANTS,
-                    ),
-                    #message
+        // Only an ordered enum has a variant set to disagree with. The messages
+        // are baked here because this is the side that knows the schema's
+        // variants. An `exhaustive` type additionally demands the whole
+        // declared set — and a field that declares none at all, where the
+        // guarantee would verify nothing.
+        match &resolved.mapping.enum_order {
+            Some(order) => {
+                let covered_message = format!(
+                    "field `{key}` in {scope} declares variants [{}] — the Rust type declares \
+                     one that is not among them, so it could never match a document",
+                    order.join(", "),
                 );
-            });
+                let exhausted_message = format!(
+                    "field `{key}` in {scope} declares variants [{}] — the Rust type is marked \
+                     `exhaustive` but does not cover them all",
+                    order.join(", "),
+                );
+                calls.extend(quote::quote_spanned! {span=>
+                    assert!(
+                        ::flusso_query::variants_covered(
+                            __FLUSSO_LEVEL, #key,
+                            <#element as ::flusso_query::FlussoValueMeta>::VARIANTS,
+                        ),
+                        #covered_message
+                    );
+                    assert!(
+                        !<#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE
+                            || ::flusso_query::variants_exhausted(
+                                __FLUSSO_LEVEL, #key,
+                                <#element as ::flusso_query::FlussoValueMeta>::VARIANTS,
+                            ),
+                        #exhausted_message
+                    );
+                });
+            }
+            // Only where an enum can actually sit (a string leaf) — reading
+            // the meta on any other field would pile a second error onto a
+            // missing derive, which `check_type`'s deferred bound already
+            // reports better.
+            None if matches!(
+                resolved.mapping.mapping_type,
+                MappingType::Keyword | MappingType::Text
+            ) && resolved.mapping.map_values.is_none() =>
+            {
+                let message = format!(
+                    "field `{key}` in {scope} declares no variants — the Rust type is marked \
+                     `exhaustive`, but there is nothing to cover; declare `variants:` on the \
+                     schema field or drop the marker",
+                );
+                calls.extend(quote::quote_spanned! {span=>
+                    assert!(
+                        !<#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE,
+                        #message
+                    );
+                });
+            }
+            None => {}
         }
     }
 
