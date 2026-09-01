@@ -31,4 +31,4 @@ Follow the **flusso-schema** skill for the field syntax. Do this:
 
 4. Run `flusso check --config flusso.toml` (add `--offline` if no DB is reachable) and fix any errors before finishing.
 
-Report what was created and the next command to run. Then, unless the user already said otherwise, **offer the next step**: if a `Cargo.toml` is present, ask whether to generate the Rust query side for `$1` (`/flusso-doc-struct` + the **flusso-query** skill); if this index replaces an existing search/indexer, ask whether to switch that implementation over. One question, then act.
+Report what was created and the next command to run. Then, unless the user already said otherwise, **offer one next step**: a `Cargo.toml` present → the Rust query side (`/flusso-doc-struct`); this index replacing an existing search or indexer → the cutover. One question, then act.
