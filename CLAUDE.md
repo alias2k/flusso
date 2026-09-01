@@ -65,6 +65,15 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   the `GenericValue` variant; see `cdc/pgoutput.rs::typed_value` vs
   `document/value.rs::decode_column`). `.config/nextest.toml` caps their concurrency and
   retries them — they're legitimately slow/flaky.
+- **The file formats are frozen for the major** (issue #109): any `flusso.toml`,
+  `*.schema.yml`, or `flusso.lock` a release in the major accepts must keep loading on every
+  later one (backwards only — `deny_unknown_fields` stays; deprecate, don't remove). The lock
+  is **deterministic TOML** (format 2; `libs/2-schema/src/compiled.rs`, no `flusso_version`
+  field — byte-stable across flusso upgrades; pre-freeze MessagePack locks are rejected with a
+  regenerate hint). Two guards in `libs/2-schema/tests/`: `golden_lock.rs` byte-pins the
+  serialized shape against a maximal fixture (`tests/fixtures/golden/`; re-bless with
+  `FLUSSO_BLESS=1` after reviewing the diff) and `compat.rs` walks the immutable per-release
+  corpus `tests/compat/` (see its README; never edit a snapshot — fix the change instead).
 - **The `schema` crate's config env-var tests must run single-threaded**: the
   `flusso.toml` parse/convert tests (`libs/2-schema/tests/config_toml.rs`) mutate process-wide
   env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its own process so it's
@@ -158,9 +167,10 @@ and the container at once (same replication slot).
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
 baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run`
 (cargo-style: when a `flusso.toml` is present — the default path, or `--config` — it
-recompiles and **rewrites the `flusso.lock`** then runs that, so the committed lock stays
-current; with no config it loads the existing `--lock`; `--locked` runs the lock as-is with
-no recompile; a lock-write failure is fatal; `--skip-backfill` resumes live only — see
+recompiles and **rewrites the `flusso.lock`** (skipped when byte-identical) then runs that,
+so the committed lock stays current; with no config it loads the existing `--lock`;
+`--locked` runs the lock as-is with no recompile; a lock-write failure is fatal;
+`--skip-backfill` resumes live only — see
 `resolve_config`/`plan_config` in `apps/cli/src/commands/run.rs`), `schema` (print an embedded
 editor-assist JSON Schema: `schema config` or `schema index`; no DB). See `dev/README.md` for the walk-through. **Every flag also reads a
 `FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.

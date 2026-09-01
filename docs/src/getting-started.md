@@ -30,8 +30,8 @@ The core subcommands. **Every flag also reads a `FLUSSO_*` env var** (the flag w
 
 | Command | Does | Database? |
 | --- | --- | --- |
-| `flusso build` | Compile config + schemas into one portable `flusso.lock`. No secrets baked in (`{ env = "VAR" }` refs carry through). | no |
-| `flusso run` | Stream changes through the engine. Like `cargo run`: with a `flusso.toml` present it recompiles + **rewrites `flusso.lock`**, then runs; with no config it loads the existing lock; `--locked` runs the lock as-is. Credentials resolve here, at run time. | yes |
+| `flusso build` | Compile config + schemas into one portable `flusso.lock` — deterministic, reviewable TOML. No secrets baked in (`{ env = "VAR" }` refs carry through). | no |
+| `flusso run` | Stream changes through the engine. Like `cargo run`: with a `flusso.toml` present it recompiles + **rewrites `flusso.lock`** when it changed, then runs; with no config it loads the existing lock; `--locked` runs the lock as-is. Credentials resolve here, at run time. | yes |
 | `flusso check` | Validate and print the fully-typed mapping. `--offline` skips the database; without it, declared types are also confirmed against live columns. | optional |
 | `flusso design` | Open a visual, database-aware editor for the `*.schema.yml` + `flusso.toml` files. See [Designing schemas visually](guides/designing.md). | optional |
 

@@ -9,6 +9,13 @@ The format-specific crates (`schema-config-toml`, `schema-index-yaml`) and the c
 (`schema-core`) sit underneath. Downstream code depends only on this crate and reaches the
 core types through its re-exports.
 
+The crate also owns the compiled artifact: [`compile`] wraps a loaded [`Config`] in a
+versioned envelope and [`write`](fn@write)/[`load_compiled`] serialize it as `flusso.lock` —
+deterministic, generated-only TOML (same inputs, identical bytes), so a committed lock is
+reviewable in a diff. The file formats are frozen for the major: a `flusso.toml`,
+`*.schema.yml`, or `flusso.lock` valid on an earlier release keeps loading on every later
+one, enforced by the golden-lock and compat-corpus tests in `tests/`.
+
 # Example
 
 ```no_run

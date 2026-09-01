@@ -160,11 +160,11 @@ wins when both are set) — handy for containers.
 - **`flusso build`** — compile a config and its schemas into one portable
   `flusso.lock`. No database, no secrets baked in (`{ env = "VAR" }` refs are
   carried through and resolved wherever it runs). Ship one file instead of a tree
-  of YAML.
+  of YAML — deterministic TOML, so a committed lock stays reviewable in a diff.
 - **`flusso run`** — stream changes through the engine. Like `cargo run`, it
   compiles first: when a `flusso.toml` is present (the default, or `--config`) it
-  recompiles and **rewrites `flusso.lock`**, then runs — so the committed lock
-  stays current for free. With no config it loads the existing `flusso.lock`, and
+  recompiles and **rewrites `flusso.lock`** when it changed, then runs — so the
+  committed lock stays current for free without churning. With no config it loads the existing `flusso.lock`, and
   `--locked` runs the lock as-is without recompiling. Credentials are resolved
   here, in the running environment.
 - **`flusso check`** — validate the config and print the fully-typed mapping, with
