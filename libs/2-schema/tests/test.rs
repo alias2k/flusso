@@ -87,7 +87,7 @@ fn compiled_artifact_roundtrips_and_preserves_mappings() {
     let bytes = schema::to_bytes(&compiled).unwrap();
     let config = schema::from_bytes(&bytes).unwrap();
 
-    // The whole configuration survives the binary round-trip.
+    // The whole configuration survives the round-trip.
     assert_eq!(config.indexes.len(), 2);
 
     // The mapping (and its content hash → physical index name) is identical to
@@ -128,7 +128,6 @@ fn compiled_artifact_keeps_env_secret_unresolved() {
     };
     let compiled = Compiled {
         format_version: FORMAT_VERSION,
-        flusso_version: "test".to_owned(),
         config,
     };
     let bytes = schema::to_bytes(&compiled).unwrap();
@@ -140,7 +139,7 @@ fn compiled_artifact_keeps_env_secret_unresolved() {
         other => panic!("expected an unresolved env secret, got {other:?}"),
     }
 
-    // The declared TLS settings survive the binary round-trip.
+    // The declared TLS settings survive the round-trip.
     assert_eq!(config.source.tls.mode, Some(SslMode::VerifyFull));
     assert_eq!(
         config.source.tls.root_cert.as_deref(),
@@ -172,7 +171,6 @@ fn compiled_artifact_without_tls_field_defaults() {
     };
     let compiled = Compiled {
         format_version: FORMAT_VERSION,
-        flusso_version: "test".to_owned(),
         config,
     };
     let bytes = schema::to_bytes(&compiled).unwrap();
