@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: field `tier` in index `users` declares variants [free, pro, enterprise] — the Rust type is marked `exhaustive` but does not cover them all
+  --> tests/ui/root_exhaustive_partial.rs:17:11
+   |
+17 |     tier: Tier,
+   |           ^^^^ evaluation of `_` failed here

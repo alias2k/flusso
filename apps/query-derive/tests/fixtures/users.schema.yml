@@ -15,6 +15,7 @@ fields:
     required: true
   - enum: tier
     required: true
+    variants: [free, pro, enterprise]
   - timestamp: createdAt
     column: created_at
     required: false

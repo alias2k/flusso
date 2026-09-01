@@ -1,0 +1,5 @@
+error: `exhaustive` applies to an enum — only an enum declares variants to cover; an untagged newtype inherits its inner type's exhaustiveness
+ --> tests/ui/value_exhaustive_newtype.rs:6:19
+  |
+6 | #[flusso(keyword, exhaustive)]
+  |                   ^^^^^^^^^^

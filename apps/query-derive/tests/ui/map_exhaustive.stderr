@@ -1,0 +1,5 @@
+error: `exhaustive` applies to a FlussoValue enum — a map has no variant set to cover
+ --> tests/ui/map_exhaustive.rs:8:16
+  |
+8 | #[flusso(text, exhaustive)]
+  |                ^^^^^^^^^^

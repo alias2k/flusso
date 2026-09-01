@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: field `email` in index `users` declares no variants — the Rust type is marked `exhaustive`, but there is nothing to cover; declare `variants:` on the schema field or drop the marker
+  --> tests/ui/root_exhaustive_no_variants.rs:17:12
+   |
+17 |     email: Email,
+   |            ^^^^^ evaluation of `_` failed here
