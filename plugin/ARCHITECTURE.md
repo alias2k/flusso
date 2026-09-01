@@ -65,6 +65,10 @@ home; everything else points at it.
 
 A command or the agent restating any of the above is the defect. Point instead.
 
+**One accepted duplication:** the four-bullet style block is inline in both `commands/expert.md` and
+`agents/flusso-expert.md`. They are separate consumers with separate contexts, and a subagent should
+not spend a file read on four bullets. Change both together.
+
 ## Drift guard
 
 `apps/cli/tests/agent_docs_paths.rs` asserts that every repo path named in `plugin/**` and
