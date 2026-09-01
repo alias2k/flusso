@@ -1,6 +1,6 @@
 ---
 name: flusso-opensearch
-description: How flusso's OpenSearch sink side works — flusso owns the index (dynamic:strict typed mapping derived from the schema), the hashed physical index name + convenience alias, generations and reindex, the flusso_* analyzers and auto subfields (and which subfield to query for exact vs full-text vs case-insensitive), refresh behavior, and the sink config keys. Use to understand what flusso produces in OpenSearch and how to query it correctly. Covers the flusso-relevant slice of OpenSearch, not the whole query DSL.
+description: flusso's OpenSearch sink — the `dynamic:strict` mapping it owns, hashed index names and aliases, generations and reindex, the `flusso_*` analyzers and auto subfields, refresh, sink config keys. Use to understand what flusso produces in OpenSearch, or which subfield to query.
 ---
 
 # flusso's OpenSearch sink (how the write-to side works)
@@ -68,6 +68,8 @@ Indexes are created with auto-refresh **disabled** (`refresh_interval: -1`) for 
 
 Define multiple `[sinks.<name>]` and flusso **fans out** — every document lands in each. No sinks → it falls back to a `stdout` sink (handy to *see* documents while integrating). Full reference: `docs/src/guides/configuration.md` (the Sinks section).
 
-## Querying — don't hand-roll it
+## Querying
 
-The typed, compile-time-checked way to query a flusso index is **flusso-query** + `#[derive(FlussoRoot)]` (see that skill). It addresses the physical index, picks the right subfield per operator, and fails to compile if your struct drifts from the mapping. Reach for the raw OpenSearch DSL only for what the typed surface defers (aggregations/facets, `knn`, `function_score`, `script`, `geo_shape`) — via the derive's `raw` escape hatch.
+Use **flusso-query** and `#[derive(FlussoRoot)]`. It addresses the physical index, picks the right
+subfield per operator, and fails to compile when the struct drifts from the mapping. That skill owns
+the read side; nothing about it is repeated here.

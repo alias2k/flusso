@@ -1,6 +1,6 @@
 ---
 name: flusso-schema
-description: Author or edit a flusso index schema (*.schema.yml) or deployment config (flusso.toml). Use whenever creating, editing, or reviewing a flusso schema file — the type-first field syntax, joins, aggregates, geo points, filters, soft-delete, and how to validate. Trigger on any *.schema.yml or flusso.toml work.
+description: Author or edit a flusso `*.schema.yml` or `flusso.toml`. Use when creating, editing or reviewing one — type-first fields, joins, aggregates, geo, filters, soft-delete, validation.
 ---
 
 # Authoring flusso schemas
@@ -14,22 +14,20 @@ flusso syncs OpenSearch from Postgres off declarative files. You write two kinds
 
 **Don't want to hand-write the grammar?** `flusso design --config flusso.toml` opens a local, database-aware web UI that authors both file kinds — pick tables and columns from the live database, preview the resulting document and mapping, and save the files in place (canonical regeneration: it preserves meaning, not comments). It's the no-grammar path to a correct schema; this skill is still the reference for what the files mean and for reviewing/refining them by hand.
 
-## First: get live validation, never guess the format
+## First: wire live validation
 
-Wire your editor to flusso's published schema. Add this line to the **top of every `*.schema.yml`**:
+Put this at the top of **every** `*.schema.yml`:
 
 ```yaml
 # yaml-language-server: $schema=https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml
 ```
 
-**Pin to the minor line matching the running flusso — never `main`.** flusso publishes each release's schema to GitHub Pages at an immutable per-version path; the `vMAJOR.MINOR` alias (`v0.3` above) re-resolves to the newest patch in that line, so you get fixes automatically but never a breaking format change — those ride a minor/major bump. The two URLs:
+**Pin `vMAJOR.MINOR` to the running flusso, never `main`.** The minor alias re-resolves to the newest
+patch in that line, so you get fixes but never a breaking format change. Resolve the version from
+`flusso --version` or the `flusso`/`flusso-cli` pin in `Cargo.toml`. For a byte-exact pin use the
+full `v0.3.0`.
 
-- index schema (`*.schema.yml`): `https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml`
-- config schema (`flusso.toml`, via `.taplo.toml`): `https://alias2k.github.io/flusso/schemas/v0.3/config.schema.json`
-
-Set `vMAJOR.MINOR` to your flusso version (`flusso --version`, or the `flusso`/`flusso-cli` pin in `Cargo.toml`). For a byte-exact pin, use the full version instead — `…/schemas/v0.3.0/index.schema.yml`.
-
-TOML has no in-file modeline, so wire `flusso.toml` once via `.taplo.toml` at the project root (read by taplo / VS Code's Even Better TOML):
+TOML has no modeline, so wire `flusso.toml` once via `.taplo.toml` at the project root:
 
 ```toml
 [[rule]]
@@ -38,18 +36,22 @@ include = ["**/flusso.toml"]
 path = "https://alias2k.github.io/flusso/schemas/v0.3/config.schema.json"
 ```
 
-**Offer to add this `.taplo.toml` for the user — but ask first.** When working in a project that has a `flusso.toml`, propose creating/extending `.taplo.toml` with the rule above so their editor validates `flusso.toml` as they type, and add it only once they say yes. Never write or edit `.taplo.toml` unprompted (it's project-wide editor config they own).
+**Offer to add that `.taplo.toml`, and add it only once the user agrees** — it is project-wide editor
+config they own. Never write it unprompted.
 
-(Offline only: `flusso schema index > index.schema.yml` writes a local copy you can point `$schema=./index.schema.yml` at instead — but never reference a schema in another repo/checkout via a `../../…` path that escapes this project.)
+Offline alternative: `flusso schema index > index.schema.yml` and point `$schema=./index.schema.yml`
+at the local copy. Never reference a schema in another checkout through a `../../` path that escapes
+this project.
 
-Validate the whole deployment before declaring done:
+Validate before declaring done:
 
 ```sh
 flusso check --config flusso.toml            # validates + prints the typed mapping
-flusso check --config flusso.toml --offline  # skip the DB; format/rules only
+flusso check --config flusso.toml --offline  # skip the DB; format and rules only
 ```
 
-`check` against a live DB also confirms each declared type/nullability against the real columns. The structured forms below are preferred over raw SQL because `check` can reason about them.
+Against a live DB this also confirms each declared type and nullability against the real columns.
+The structured forms below beat raw SQL because `check` can reason about them.
 
 ## The one rule that explains the whole format: type-first
 
@@ -150,7 +152,9 @@ So: value comes from a lowercase Postgres column, lands under a document key you
 
 ## Secrets and connection values
 
-In `flusso.toml`, anywhere a secret/URL is expected, use a literal **or** `{ env = "VAR" }`. Env refs resolve at **run time**, not parse time — so a compiled `flusso.lock` carries no baked secret. Reserved: `DATABASE_URL` and `<SINK>_OPENSEARCH_URL` override the config.
+Anywhere `flusso.toml` expects a secret or URL, use a literal **or** `{ env = "VAR" }`. Env refs
+resolve at run time, so a compiled `flusso.lock` carries no baked secret. `DATABASE_URL` and
+`<SINK>_OPENSEARCH_URL` are reserved and override the config.
 
 ## Before you call it done
 
