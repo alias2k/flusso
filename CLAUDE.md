@@ -84,7 +84,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   skip — clippy omits `--all-targets`, nextest only builds test targets) → `cargo nextest run
   --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
-  the build). Match these before assuming green. A separate `fuzz` job runs a 60-second
+  the build). Match these before assuming green. One scope note: on PRs confined to the query
+  release train (`apps/query`, `apps/query-derive`, `dev/query-e2e`) the nextest step swaps in a
+  filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
+  query train's own `combined_search` live e2e still runs); pushes to main always run everything.
+  A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step.
 - **The designer (`apps/design`) has two test layers.** (1) A property/"fuzz" round-trip
@@ -534,7 +538,9 @@ collapsed back to a union variant's `{logical}_{hash}` before dispatch — ancho
 union's known targets, not a blind trailing-`_{digits}` trim, because the eight-hex hash can
 itself be all digits. Without this, every hit from a real deployment missed dispatch (issue
 #67). Single-index search and `_msearch` don't dispatch by `_index`, so they were unaffected.
-Guarded by the `multi_decode_*` unit tests and the `combined_search` live e2e (`apps/query/tests/`).
+Guarded by the `multi_decode_*` unit tests and the `combined_search` live e2e (`dev/query-e2e/tests/`
+— an unpublished crate, so the published `flusso-query` carries no flusso lib deps and the query
+release train can't be dragged into a release by a libs bump).
 
 ## Keeping this file current
 
@@ -629,7 +635,8 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`
-  (`flusso-dev-search-api`, `publish = false` — a runnable example, not shipping code). The
+  (`flusso-dev-search-api`) and `dev/query-e2e` (`flusso-query-e2e`) — both `publish = false`
+  (a runnable example and a live-e2e guard, not shipping code). The
   catch: a crate's published **package name** (`flusso-engine`, `flusso-schema-core`, …) differs
   from the **extern name** code uses (`engine`, `schema_core`, …). Two mechanisms keep that split
   so the rename needs **no source change**: each lib sets `[lib] name = "<extern>"`, and each
@@ -637,11 +644,21 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   So `use schema_core::…`, `package(flusso-sources-postgres)` in `.config/nextest.toml`, and the
   fuzz crate's `package = "flusso-sources-postgres"` path-dep all coexist. Shared listing metadata
   (license, repo, authors, keywords, readme) lives in `[workspace.package]`; crates inherit it
-  with `.workspace = true`, and set their own `description` + `categories`. **Publish order is
-  bottom-up** (a dep must be on crates.io before its dependents): `flusso-schema-core` → parsers →
-  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon` → `flusso-design`
-  (depends on `flusso-schema` + `flusso-sources-postgres`) → `flusso-query-derive` →
-  `flusso-query` → `flusso-cli`.
+  with `.workspace = true`, and set their own `description` + `categories`. **Releases are three
+  independent trains** (issue #110; the `version_group`s in `release-plz.toml`): **libs** (every
+  `libs/*` crate, one version), **cli** (`flusso-cli` + `flusso-design` — the SPA ships in the
+  binary), **query** (`flusso-query` + `flusso-query-derive`, the derive exact-pinned `=x.y.z`
+  serde-style). Each crate owns its `version` (no shared `[workspace.package] version`), and the
+  internal `[workspace.dependencies]` reqs are **minor-precision** (`"0.15"`) — that precision is
+  load-bearing: release-plz rewrites a dependent's req only when the new version stops matching,
+  so a libs *patch* releases nothing but libs, while a libs 0.x *minor* (breaking) legitimately
+  cascades a bump into the dependent trains. Never tighten those reqs to patch precision. A libs
+  fix reaches the docker/dist binaries only via a cli-train release: land a `fix(cli): adopt …`
+  commit appending to `apps/cli/ADOPTIONS.md` (the binaries build in-tree from the tag, so they
+  always carry main-tip libs). **Publish order within a train is still bottom-up** (a dep must be
+  on crates.io before its dependents): `flusso-schema-core` → parsers →
+  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon`, then apps on top
+  (`flusso-design` → `flusso-cli`; `flusso-query-derive` → `flusso-query`).
 - `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
   completion live **inside the parser crate that owns each** (so they ship in the published
   `.crate`): `schema_config_toml::CONFIG_SCHEMA`
@@ -654,7 +671,8 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   immutable per-version path
   (`https://alias2k.github.io/flusso/schemas/v<version>/{index.schema.yml,config.schema.json}`, plus
   `v<minor>` and `latest` aliases), triggered by the schema crates' release tags
-  (`flusso-schema-{index-yaml,config-toml}-v*`, which move together since all crates share a version);
+  (`flusso-schema-{index-yaml,config-toml}-v*`, which move together since both sit in the `libs`
+  version group);
   editor `# yaml-language-server: $schema=…` modelines point at that versioned URL, while in-repo files
   (`dev/*.schema.yml`, the parser test fixtures) use a relative path to the in-crate `schemas/`.
   `libs/2-schema/tests/schema_drift.rs` guards their enumerable sets — field type tags, field
