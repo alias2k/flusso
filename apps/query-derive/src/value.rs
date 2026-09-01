@@ -14,6 +14,13 @@
 //! On success it emits `impl ::flusso_query::FlussoValue<#kind> for #ident {}`.
 //! The leaf value's actual serde form is enforced by serde at the boundary;
 //! this derive guarantees the *shape* fits the kind.
+//!
+//! An enum may add `exhaustive` (`#[flusso(keyword, exhaustive)]`): every
+//! embedding then requires the enum to cover the schema's **whole** declared
+//! variant set, not just a subset — a schema variant the enum misses becomes a
+//! compile error instead of a silently unselectable value. The flag rides
+//! `FlussoValueMeta::EXHAUSTIVE`; an untagged newtype forwards its inner
+//! type's flag.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -94,12 +101,12 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         .to_compile_error();
     }
 
-    let explicit = match kind_attr(&input) {
-        Ok(kind) => kind,
+    let attrs = match value_attrs(&input) {
+        Ok(attrs) => attrs,
         Err(error) => return error.to_compile_error(),
     };
 
-    match build_impl(&input, explicit) {
+    match build_impl(&input, attrs) {
         Ok(tokens) => tokens,
         Err(error) => error.to_compile_error(),
     }
@@ -111,8 +118,14 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
 /// `struct Money(Decimal)` a decimal value, with no annotation. An explicit
 /// `#[flusso(keyword | text)]` restricts to that single string kind; an
 /// **enum** has no inner type to inherit from, so it must always carry one.
-fn build_impl(input: &DeriveInput, explicit: Option<Kind>) -> syn::Result<TokenStream> {
+///
+/// An `exhaustive` token is enum-only: it sets `FlussoValueMeta::EXHAUSTIVE`,
+/// which every embedding turns into "this enum must cover the schema's whole
+/// declared variant set". A newtype forwards its inner type's flag on the
+/// untagged path; an explicit `exhaustive` on a struct is an error.
+fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream> {
     let ident = &input.ident;
+    let explicit = attrs.kind;
     match &input.data {
         Data::Enum(data) => {
             let Some(kind) = explicit else {
@@ -145,16 +158,28 @@ fn build_impl(input: &DeriveInput, explicit: Option<Kind>) -> syn::Result<TokenS
             let tag = kind.tag();
             let variants = variant_keys(input, data)?;
             let leaf_check = leaf_check(ident);
+            let exhaustive = attrs.exhaustive.map(|_| {
+                quote! { const EXHAUSTIVE: bool = true; }
+            });
             Ok(quote! {
                 impl ::flusso_query::FlussoValue<#marker> for #ident {}
                 impl ::flusso_query::FlussoValueMeta for #ident {
                     const KINDS: &'static [::flusso_query::KindTag] = &[#tag];
                     const VARIANTS: &'static [&'static str] = &[#(#variants),*];
+                    #exhaustive
                 }
                 #leaf_check
             })
         }
         Data::Struct(data) => {
+            if let Some(span) = attrs.exhaustive {
+                return Err(syn::Error::new(
+                    span,
+                    "`exhaustive` applies to an enum — only an enum declares variants \
+                     to cover; an untagged newtype inherits its inner type's \
+                     exhaustiveness",
+                ));
+            }
             // The single field of a newtype tuple struct — pulled via the
             // iterator (not indexing, which the workspace lints forbid).
             let mut fields = match &data.fields {
@@ -190,6 +215,8 @@ fn build_impl(input: &DeriveInput, explicit: Option<Kind>) -> syn::Result<TokenS
                             <#inner as ::flusso_query::FlussoValueMeta>::KINDS;
                         const VARIANTS: &'static [&'static str] =
                             <#inner as ::flusso_query::FlussoValueMeta>::VARIANTS;
+                        const EXHAUSTIVE: bool =
+                            <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
                     }
                     #leaf_check
                 }),
@@ -314,37 +341,60 @@ fn newtype_required(input: &DeriveInput) -> syn::Error {
     )
 }
 
-/// Read an explicit `#[flusso(keyword | text)]` kind; `None` when absent. Only
+/// The type-site `#[flusso(…)]` tokens a value type may carry.
+pub(crate) struct ValueAttrs {
+    /// The explicit string kind (`keyword` | `text`), when tagged.
+    pub(crate) kind: Option<Kind>,
+    /// The span of an `exhaustive` token, when present.
+    pub(crate) exhaustive: Option<proc_macro2::Span>,
+}
+
+/// Read the type-site attr: an explicit `#[flusso(keyword | text)]` kind (only
 /// the string kinds are nameable — numeric/date/bool newtypes inherit their
-/// inner type's kinds instead (a single name can't capture lossless widening).
-pub(crate) fn kind_attr(input: &DeriveInput) -> syn::Result<Option<Kind>> {
-    let mut kind = None;
+/// inner type's kinds instead, a single name can't capture lossless widening)
+/// plus an optional `exhaustive` token (full variant coverage, enums only).
+pub(crate) fn value_attrs(input: &DeriveInput) -> syn::Result<ValueAttrs> {
+    let mut attrs = ValueAttrs {
+        kind: None,
+        exhaustive: None,
+    };
     for attr in &input.attrs {
         if !attr.path().is_ident("flusso") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("keyword") {
-                kind = Some(Kind::Keyword);
+                attrs.kind = Some(Kind::Keyword);
             } else if meta.path.is_ident("text") {
-                kind = Some(Kind::Text);
+                attrs.kind = Some(Kind::Text);
+            } else if meta.path.is_ident("exhaustive") {
+                attrs.exhaustive = Some(meta.path.span());
             } else {
                 return Err(meta.error(
-                    "unknown `flusso` kind (expected `keyword` or `text`; numeric/date \
-                     newtypes inherit their inner type's kinds, so need no tag)",
+                    "unknown `flusso` token (expected `keyword` or `text` — numeric/date \
+                     newtypes inherit their inner type's kinds, so need no tag — or \
+                     `exhaustive` on an enum)",
                 ));
             }
             Ok(())
         })?;
     }
-    Ok(kind)
+    Ok(attrs)
 }
 
 /// The kind for the `FlussoMap` derive — a **required** `#[flusso(keyword | text)]`
 /// matching the schema map's `values:`. (Map value kinds beyond strings come from
 /// `HashMap<String, V>`'s `V` via the blanket impl, not this derive.)
 pub(crate) fn parse_kind(input: &DeriveInput) -> syn::Result<Kind> {
-    kind_attr(input)?.ok_or_else(|| {
+    let attrs = value_attrs(input)?;
+    if let Some(span) = attrs.exhaustive {
+        return Err(syn::Error::new(
+            span,
+            "`exhaustive` applies to a FlussoValue enum — a map has no variant \
+             set to cover",
+        ));
+    }
+    attrs.kind.ok_or_else(|| {
         syn::Error::new(
             input.ident.span(),
             "FlussoMap has no default value kind — add `#[flusso(keyword)]` or \
