@@ -1,15 +1,39 @@
 # release-plz configuration — https://release-plz.dev/docs/config
 #
-# Defaults fit this workspace: every crate shares the version in
-# Cargo.toml [workspace.package], release-plz bumps it from conventional
-# commits, updates CHANGELOG.md, and publishes all 17 publishable crates to
-# crates.io in dependency order. `flusso-dev-search-api` is publish = false in
-# its manifest, so release-plz skips it automatically.
+# The workspace releases as THREE independent trains (issue #110), not in
+# lockstep. Each crate carries its own `version` (no shared
+# [workspace.package] version), and the `version_group`s below keep each
+# train internally lockstep while letting the trains diverge:
+#
+#   * libs  — every libs/* crate. One version: it's one engine. Also keeps
+#             the two schema-parser tags moving together, which pages.yml
+#             relies on for the versioned editor-schema URLs.
+#   * cli   — flusso-cli + flusso-design. The designer SPA is embedded in
+#             the binary, so a designer fix ships a CLI release (and via the
+#             `flusso-cli-v*` tag, the docker + dist artifacts).
+#   * query — flusso-query + flusso-query-derive. The read side; the derive
+#             is re-exported behind the `derive` feature and exact-pinned
+#             (`=x.y.z`), serde/serde_derive-style.
+#
+# Trains stay decoupled because the internal version reqs in
+# [workspace.dependencies] are MINOR-precision ("0.15", not "0.15.1").
+# release-plz rewrites a dependent's req only when the new version no longer
+# matches it — so a libs patch releases nothing but libs, while a libs 0.x
+# minor (breaking) legitimately cascades a bump to the trains that depend on
+# it. Do NOT tighten those reqs to patch precision: every libs patch would
+# then rewrite the dependents' manifests and re-couple the trains.
+#
+# A libs fix reaches the shipped binaries (docker/dist) only when the cli
+# train releases: land a `fix(cli): adopt …` commit appending a line to
+# apps/cli/ADOPTIONS.md (docker/dist build in-tree from the tag checkout, so
+# any cli release carries main-tip libs). `flusso-dev-search-api` and
+# `flusso-query-e2e` are publish = false in their manifests, so release-plz
+# skips them automatically.
 
 [workspace]
 # Surface accidental SemVer breakage as a note in the release PR.
 semver_check = true
-# Maintain CHANGELOG.md from conventional commits.
+# Maintain per-crate CHANGELOG.md from conventional commits.
 changelog_update = true
 # Publish ONLY when the release PR is merged, never on ordinary pushes to main.
 # release-plz recognizes the release-PR merge by its `release-plz-*` head branch.
@@ -25,3 +49,77 @@ release_always = false
 # Create the GitHub Release (the dist + docker workflows attach their artifacts
 # to the tag it pushes). Set to false if you'd rather dist own the release.
 git_release_enable = true
+
+# ─── the libs train ───────────────────────────────────────────────────────────
+
+[[package]]
+name = "flusso-schema-core"
+version_group = "libs"
+
+[[package]]
+name = "flusso-schema"
+version_group = "libs"
+
+[[package]]
+name = "flusso-schema-config-toml"
+version_group = "libs"
+
+[[package]]
+name = "flusso-schema-index-yaml"
+version_group = "libs"
+
+[[package]]
+name = "flusso-queue-core"
+version_group = "libs"
+
+[[package]]
+name = "flusso-queue-channel"
+version_group = "libs"
+
+[[package]]
+name = "flusso-sinks-core"
+version_group = "libs"
+
+[[package]]
+name = "flusso-sinks-stdout"
+version_group = "libs"
+
+[[package]]
+name = "flusso-sinks-opensearch"
+version_group = "libs"
+
+[[package]]
+name = "flusso-sources-core"
+version_group = "libs"
+
+[[package]]
+name = "flusso-sources-postgres"
+version_group = "libs"
+
+[[package]]
+name = "flusso-engine"
+version_group = "libs"
+
+[[package]]
+name = "flusso-daemon"
+version_group = "libs"
+
+# ─── the cli train ────────────────────────────────────────────────────────────
+
+[[package]]
+name = "flusso-cli"
+version_group = "cli"
+
+[[package]]
+name = "flusso-design"
+version_group = "cli"
+
+# ─── the query train ──────────────────────────────────────────────────────────
+
+[[package]]
+name = "flusso-query"
+version_group = "query"
+
+[[package]]
+name = "flusso-query-derive"
+version_group = "query"
