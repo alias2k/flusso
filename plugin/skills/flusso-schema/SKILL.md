@@ -98,7 +98,7 @@ If you use any join or aggregate, you **must** set `primary_key` — reverse res
 
 Scalar/`geo` siblings: `required`, `column` (source column, defaults to the document key), `transforms` (`lowercase`, `trim`), `default`, `options` (extra OpenSearch mapping props).
 
-An `enum` takes an optional `variants:` list — its values in rank order (`variants: [low, medium, high]`). Given it, the field sorts by that order instead of alphabetically (the rank is prebaked into the index; the query side's `Enum` handle `.asc()`/`.desc()` uses it automatically). Omit it for a plain keyword-like enum. Variants must be unique and free of `=>`/newlines; a stored value not in the list sorts after the declared ones. Changing the list rotates the index like any schema change.
+An `enum` takes an optional `variants:` list — its values in rank order (`variants: [low, medium, high]`). Given it, the field sorts by that order instead of alphabetically (the rank is prebaked into the index; the query side's `Enum` handle `.asc()`/`.desc()` uses it automatically). Omit it for a plain keyword-like enum. Variants must be unique and free of `=>`/newlines; a stored value not in the list sorts after the declared ones. Changing the list rotates the index like any schema change. (Read-side: a Rust enum may cover the list partially; `#[flusso(keyword, exhaustive)]` on it demands full coverage — see the flusso-query skill.)
 
 ## Joins — fold a related table in. The verb names where the key lives.
 
