@@ -46,11 +46,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   decoder must never panic on arbitrary bytes — an `Err` is the correct outcome. Run from the
   crate dir; a crash lands in `fuzz/artifacts/`.
 - The `#[ignore]`d e2e tests live in `sources-postgres`'s `integration`,
-  `config_coverage`, `publication`, `introspection`, `tls`, and `wal_idle` binaries
+  `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, and `continuity` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
   advancing from keepalives/filtered commits while watched tables are idle, so unrelated
-  writes don't pin WAL retention — issue #111) plus `engine`'s `wal` and `pipeline`
+  writes don't pin WAL retention — issue #111; `continuity`: `prepare` reports `Fresh` exactly
+  when it created the slot, `Resumed` otherwise — issue #120) plus `engine`'s `wal` and `pipeline`
   binaries (the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
   the engine, or it can't be published before the engine and the layering is violated);
@@ -59,7 +60,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   drives a **real OpenSearch sink** and reads the index back over HTTP, asserting the
   actual document after each change: live insert/update/delete across
   `uuid`/`int`/`bigint`/`text` keys, soft-delete tombstoning (boolean + timestamp markers,
-  set→removed, cleared→restored), and backfill (active rows seeded, soft-deleted skipped).
+  set→removed, cleared→restored), backfill (active rows seeded, soft-deleted skipped), and the
+  two seed-marker contradictions (restart after the generation index was deleted → reseeded in
+  place; restart after the slot was dropped + data changed → rebuilt into a new generation, stale
+  rows gone, old generation dropped). New e2e binaries must be added to the filtersets in
+  `.config/nextest.toml` (both profiles) to get the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
   the `GenericValue` variant; see `cdc/pgoutput.rs::typed_value` vs
@@ -253,6 +258,21 @@ touching the loop. Key invariants to preserve when editing the engine:
   mapping, then (unless `--skip-backfill`) asks each sink `is_seeded`; unseeded indexes get
   their root tables snapshotted through the same queue→resolve→build→sink path, scoped so a
   seeded index sharing a table isn't rewritten, then `mark_seeded`.
+- **…but a seed is only as good as the stream behind it (issue #120).** The very first call
+  of a run is `ChangeCapture::prepare` → `Continuity::{Resumed, Fresh}` (`sources-core`): the
+  source establishes its durable resume point (Postgres: creates the slot, *before* any
+  snapshot) and says whether it already existed. On `Fresh`, after `ensure_index`, the engine
+  warns and stages `sink.reindex` + `ensure_index` for every index still `is_seeded` (a fresh
+  generation, so rows gone from the source are dropped on the swap; never an in-place reseed),
+  then the normal backfill refills them. Only *seeded* indexes are staged (an unseeded one is
+  already being rebuilt; staging again would orphan a generation — #121). Under
+  `--skip-backfill` it warns only. `prepare` is a required trait method — a source must state
+  its continuity contract. The sink-side half: the OpenSearch `ensure_index` retracts a seeded
+  marker whose generation index is missing (warn + rewrite unseeded, recreate empty), so
+  deleting the generation is a "rebuild on next start" signal. Guarded by the engine's
+  `fresh_source_*`/`resumed_source_*`/`skip_backfill_with_a_fresh_source_*` unit tests, the
+  sink's `deleted_generation_is_recreated_and_reported_unseeded` e2e, the Postgres
+  `continuity` e2e, and the two `restart_*` cases in `engine`'s `pipeline` e2e.
 - `BatchPolicy` (default 256 changes / 50ms) controls flush grouping; `max_changes: 1`
   reproduces flush-per-change.
 - **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:
@@ -583,7 +603,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | `flusso.toml` parsing (entities only; conversion is in the `schema` loader) | `libs/2-schema/1-config-toml/src/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/2-schema/1-index-yaml/src/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/1-sources/1-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
-| Source trait abstractions (`ChangeCapture`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
+| Source trait abstractions (`ChangeCapture` + `Continuity`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-sources/0-core/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
 | Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sinks_core::to_json`) |
 | `Sink` trait, JSON render, fan-out | `libs/1-sinks/0-core/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/1-sinks/2-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |

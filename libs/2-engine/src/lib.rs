@@ -84,6 +84,8 @@ impl Engine {
     /// Force-skip the backfill phase entirely, regardless of what the sink
     /// reports. An escape hatch for sinks that can't persist seeded-state (so
     /// they would otherwise re-seed every run) or to resume without re-checking.
+    /// It also suppresses the rebuild a fresh source resume point would
+    /// otherwise trigger (see [`run`](Self::run)) — the engine only warns.
     pub fn skip_backfill(mut self, skip: bool) -> Self {
         self.skip_backfill = skip;
         self
@@ -99,8 +101,12 @@ impl Engine {
 
     /// Run until the live change stream ends or an error stops the pipeline.
     ///
-    /// First seeds any unseeded index (unless [`skip_backfill`](Self::skip_backfill)
-    /// is set), then follows live changes.
+    /// Establishes the source's resume point first
+    /// ([`prepare`](ChangeCapture::prepare)), ensures every index, then seeds any
+    /// unseeded index (unless [`skip_backfill`](Self::skip_backfill) is set) and
+    /// follows live changes. A resume point that had to be *created* invalidates
+    /// every earlier seed, so those indexes are staged for a from-scratch rebuild
+    /// ([`Sink::reindex`]) before the backfill — see the crate docs.
     #[tracing::instrument(
         name = "engine.run",
         skip_all,

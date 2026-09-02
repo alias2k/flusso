@@ -14,7 +14,7 @@ Postgres is the *substrate*. This covers only the slice flusso touches; for the 
 | Requirement | Why | If missing |
 | --- | --- | --- |
 | `wal_level = logical` | Logical decoding can't run without it. Server-wide setting, **needs a restart**. | flusso can't start capture. |
-| A **replication slot** | The server's bookmark of how far flusso has consumed; it gates WAL retention. | flusso **creates it automatically** on first connect (needs only the `REPLICATION` role attribute). |
+| A **replication slot** | The server's bookmark of how far flusso has consumed; it gates WAL retention. | flusso **creates it automatically** before the first backfill (needs only the `REPLICATION` role attribute). |
 | **Row identity** on every replicated table — a primary key (usual) or an explicit `REPLICA IDENTITY` | A change has to be addressable to a row so flusso can rebuild the right document. | A keyless table is **skipped in backfill** and a live change against it **errors** ("relation … carries no key columns"). |
 
 ## The replication slot — the one operational gotcha
@@ -24,6 +24,8 @@ flusso always creates the slot on first connect (default name `flusso`, override
 > **Postgres retains WAL until the slot's consumer confirms it.** A flusso that is down for a long time means WAL piling up on the server — eventually a disk-full outage.
 
 So: **one slot → one running instance** (this is why the Helm chart pins `replicas: 1`). And **drop the slot when you retire a deployment** (`SELECT pg_drop_replication_slot('flusso');`), or it leaks WAL forever.
+
+**The slot is also the seed's alibi.** A seeded index is only trustworthy while the slot that fed it exists — a slot flusso has to *create* starts at the current WAL position and knows nothing of earlier changes. So on a start where the slot is missing but the sink reports indexes as seeded (a replaced database — Postgres refuses `DROP DATABASE` while a logical slot is bound to it, so the slot always goes too — or a hand-dropped slot), flusso warns and **rebuilds every seeded index from scratch** into a fresh generation. Dropping the slot is therefore the supported "rebuild everything on next start" lever; `--skip-backfill` suppresses the rebuild (warn only).
 
 A **running** flusso is safe even when the indexed tables are idle: it advances the slot from the walsender's keepalives (and from commits the publication filtered out), so steady writes to *unwatched* tables don't pin WAL retention. Only a stopped flusso lets WAL pile up.
 
