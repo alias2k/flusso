@@ -18,11 +18,12 @@ use super::{backfill, publication, stream};
 ///
 /// Exposes the three [`ChangeCapture`] capabilities the engine orchestrates:
 ///
-/// - [`prepare`](ChangeCapture::prepare) makes sure the replication slot exists
-///   and reports whether it already did. The slot *is* the resume point: a slot
-///   that had to be created starts at the current WAL position and knows nothing
-///   of earlier changes, so it reports [`Continuity::Fresh`] and the engine
-///   rebuilds every index the sink still calls seeded. Runs before any snapshot,
+/// - [`continuity`](ChangeCapture::continuity) reports, read-only, whether the
+///   replication slot exists. The slot *is* the resume point: a missing slot will
+///   be created at the current WAL position and knows nothing of earlier
+///   changes, so this reports [`Continuity::Fresh`] and the engine rebuilds
+///   every index the sink still calls seeded. [`prepare`](ChangeCapture::prepare)
+///   then creates the slot — after that reconciliation and before any snapshot,
 ///   so a backfill can't miss a write that lands between snapshot and stream.
 /// - [`live`](ChangeCapture::live) connects to the replication slot and streams
 ///   committed row changes as thin [`Change`]s. Resume is the slot's: its
@@ -106,65 +107,70 @@ impl WalChangeCapture {
             .await
     }
 
-    /// Ensure the replication slot exists, creating it if it does not, and
-    /// report which of the two happened.
-    ///
-    /// Runs over the shared admin pool so the check can run before the
-    /// replication connection is opened. If the slot already exists its plugin
-    /// is validated; a slot with the wrong plugin name is an error (it was
-    /// created for a different consumer and we should not clobber it).
-    async fn ensure_slot(&self) -> Result<Continuity> {
+    /// Whether the replication slot exists — read-only. If it does, its plugin
+    /// is validated: a slot with the wrong plugin was created for a different
+    /// consumer and must not be clobbered, so that is an error.
+    async fn slot_continuity(&self) -> Result<Continuity> {
         let pool = self.admin_pool().await?;
-
         let row = sqlx::query("SELECT plugin FROM pg_replication_slots WHERE slot_name = $1")
             .bind(&self.config.slot)
             .fetch_optional(pool)
             .await
             .map_err(|e| SourceError::Query(e.to_string()))?;
-
-        match row {
-            Some(row) => {
-                let plugin: String = row
-                    .try_get("plugin")
-                    .map_err(|e| SourceError::Query(e.to_string()))?;
-                if plugin != "pgoutput" {
-                    return Err(SourceError::Connection(format!(
-                        "replication slot '{}' exists but uses plugin '{}', expected 'pgoutput'",
-                        self.config.slot, plugin,
-                    )));
-                }
-                tracing::debug!(slot = %self.config.slot, "replication slot already exists");
-                Ok(Continuity::Resumed)
-            }
-            None => {
-                sqlx::query("SELECT pg_create_logical_replication_slot($1, 'pgoutput')")
-                    .bind(&self.config.slot)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| {
-                        SourceError::Connection(format!(
-                            "failed to create replication slot '{}': {e}",
-                            self.config.slot,
-                        ))
-                    })?;
-                tracing::info!(slot = %self.config.slot, "created replication slot");
-                Ok(Continuity::Fresh)
-            }
+        let Some(row) = row else {
+            return Ok(Continuity::Fresh);
+        };
+        let plugin: String = row
+            .try_get("plugin")
+            .map_err(|e| SourceError::Query(e.to_string()))?;
+        if plugin != "pgoutput" {
+            return Err(SourceError::Connection(format!(
+                "replication slot '{}' exists but uses plugin '{}', expected 'pgoutput'",
+                self.config.slot, plugin,
+            )));
         }
+        Ok(Continuity::Resumed)
+    }
+
+    /// Ensure the replication slot exists, creating it if it does not. Runs
+    /// over the shared admin pool so it can run before the replication
+    /// connection is opened.
+    async fn ensure_slot(&self) -> Result<()> {
+        if self.slot_continuity().await? == Continuity::Resumed {
+            tracing::debug!(slot = %self.config.slot, "replication slot already exists");
+            return Ok(());
+        }
+        let pool = self.admin_pool().await?;
+        sqlx::query("SELECT pg_create_logical_replication_slot($1, 'pgoutput')")
+            .bind(&self.config.slot)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                SourceError::Connection(format!(
+                    "failed to create replication slot '{}': {e}",
+                    self.config.slot,
+                ))
+            })?;
+        tracing::info!(slot = %self.config.slot, "created replication slot");
+        Ok(())
     }
 }
 
 #[async_trait]
 impl ChangeCapture for WalChangeCapture {
+    #[tracing::instrument(name = "wal.continuity", skip_all, err)]
+    async fn continuity(&self) -> Result<Continuity> {
+        self.slot_continuity().await
+    }
+
     #[tracing::instrument(name = "wal.prepare", skip_all, err)]
-    async fn prepare(&self) -> Result<Continuity> {
+    async fn prepare(&self) -> Result<()> {
         self.ensure_slot().await
     }
 
     /// Opens the replication stream. The slot check is repeated here (it is
     /// idempotent) so `live` stays correct for a caller that never ran
-    /// [`prepare`](ChangeCapture::prepare) — but by then a missing slot is a
-    /// cold start with no seed to protect, so its `Continuity` is ignored.
+    /// [`prepare`](ChangeCapture::prepare).
     #[tracing::instrument(name = "wal.live", skip_all, err)]
     async fn live(&self) -> Result<BoxStream<'static, Result<Change>>> {
         self.ensure_slot().await?;

@@ -305,13 +305,18 @@ Details worth knowing:
 - **Backfill.** Before live capture, the engine asks each sink whether an index is already
   seeded and, for those that aren't, snapshots the root tables to seed them.
   `--skip-backfill` resumes live capture only.
-- **A recreated slot means a rebuild.** The slot is created *before* the first backfill,
-  and its existence is what makes an earlier seed trustworthy. If flusso has to create the
-  slot while the sink already reports indexes as seeded — the database was replaced, or
-  someone dropped the slot — every change since those seeds is gone, so flusso warns and
-  rebuilds them from scratch into a fresh generation (the old one keeps serving until the
-  swap). With `--skip-backfill` it only warns and serves them as-is. Dropping the slot is
-  therefore the supported way to force a full rebuild of every index.
+- **A missing slot means a rebuild.** The slot's existence is what makes an earlier seed
+  trustworthy: a slot flusso has to create starts from now, and the changes before it are
+  gone.
+  - **When** — the slot is missing at startup while the sink still reports indexes as
+    seeded (the database was replaced, or someone dropped the slot).
+  - **What happens** — flusso warns and rebuilds those indexes from scratch into a fresh
+    generation; the old one keeps serving until the swap. The rebuilds are staged before the
+    slot is created (and the slot before the first backfill), so a crash in between just
+    stages them again.
+  - **`--skip-backfill`** — warns only and serves the indexes as-is.
+  - **Use it** — dropping the slot is the supported way to force a full rebuild of every
+    index.
 - Requires `wal_level = logical` on the server. See the
   [`dev/`](https://github.com/alias2k/flusso/tree/main/dev) environment for a ready-to-run
   Postgres configured for this.

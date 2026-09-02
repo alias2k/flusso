@@ -1,8 +1,9 @@
-//! Continuity e2e: [`ChangeCapture::prepare`] must report [`Continuity::Fresh`]
-//! exactly when it had to create the replication slot, and
-//! [`Continuity::Resumed`] whenever the slot already exists — including on the
-//! very next call, so a crash after a fresh `prepare` cannot re-trigger the
-//! rebuild it announced (issue #120, case B).
+//! Continuity e2e: [`ChangeCapture::continuity`] must report
+//! [`Continuity::Fresh`] exactly while the replication slot is missing and
+//! [`Continuity::Resumed`] once it exists, without ever creating it itself;
+//! [`ChangeCapture::prepare`] creates it, idempotently. Together that is what
+//! lets the engine stage rebuilds *before* the slot comes into existence, so a
+//! crash in between re-stages instead of trusting a stale seed (issue #120).
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -22,7 +23,7 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn prepare_reports_fresh_on_slot_creation_then_resumed() {
+async fn continuity_is_read_only_and_prepare_creates_the_slot() {
     let container = Postgres::default()
         .with_tag("16-alpine")
         .with_cmd([
@@ -41,17 +42,19 @@ async fn prepare_reports_fresh_on_slot_creation_then_resumed() {
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
 
-    let replication = ReplicationConfig::new(
-        "127.0.0.1",
-        "postgres",
-        "postgres",
-        "postgres",
-        "flusso",
-        "flusso",
-    )
-    .with_port(port);
-    let capture = WalChangeCapture::new(replication, url.clone());
-
+    // One capture per "run", as each `flusso run` builds its own.
+    let run = || {
+        let replication = ReplicationConfig::new(
+            "127.0.0.1",
+            "postgres",
+            "postgres",
+            "postgres",
+            "flusso",
+            "flusso",
+        )
+        .with_port(port);
+        WalChangeCapture::new(replication, url.clone())
+    };
     let slot_exists = || async {
         sqlx::query("SELECT count(*) AS n FROM pg_replication_slots WHERE slot_name = 'flusso'")
             .fetch_one(&pool)
@@ -62,30 +65,27 @@ async fn prepare_reports_fresh_on_slot_creation_then_resumed() {
             == 1
     };
 
-    assert!(!slot_exists().await, "no slot before the first prepare");
+    let first = run();
+    assert_eq!(first.continuity().await.unwrap(), Continuity::Fresh);
+    assert!(
+        !slot_exists().await,
+        "continuity is read-only: asking must not create the slot"
+    );
     assert_eq!(
-        capture.prepare().await.unwrap(),
+        first.continuity().await.unwrap(),
         Continuity::Fresh,
-        "creating the slot is a fresh start"
+        "still fresh until prepare runs"
     );
-    assert!(slot_exists().await, "prepare created the slot");
 
-    // A second call — a restart, or a crash right after the first — finds the
-    // slot it created and must *not* announce another fresh start.
-    assert_eq!(capture.prepare().await.unwrap(), Continuity::Resumed);
-    let another_run = WalChangeCapture::new(
-        ReplicationConfig::new(
-            "127.0.0.1",
-            "postgres",
-            "postgres",
-            "postgres",
-            "flusso",
-            "flusso",
-        )
-        .with_port(port),
-        url,
-    );
-    assert_eq!(another_run.prepare().await.unwrap(), Continuity::Resumed);
+    first.prepare().await.unwrap();
+    assert!(slot_exists().await, "prepare created the slot");
+    assert_eq!(first.continuity().await.unwrap(), Continuity::Resumed);
+    first.prepare().await.unwrap();
+    assert!(slot_exists().await, "prepare is idempotent");
+
+    // A restart finds the slot the previous run created.
+    let second = run();
+    assert_eq!(second.continuity().await.unwrap(), Continuity::Resumed);
 
     // The operator drops the slot (a replaced database drops it too, since
     // Postgres refuses DROP DATABASE while a logical slot is bound to it).
@@ -94,8 +94,8 @@ async fn prepare_reports_fresh_on_slot_creation_then_resumed() {
         .await
         .unwrap();
     assert_eq!(
-        another_run.prepare().await.unwrap(),
+        second.continuity().await.unwrap(),
         Continuity::Fresh,
-        "a recreated slot is a fresh start again"
+        "a missing slot is a fresh start again"
     );
 }

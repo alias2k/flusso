@@ -1,6 +1,6 @@
 //! The pipeline execution: the borrowed run-context ([`Pipeline`]), the
-//! top-level orchestration ([`run_inner`] → prepare → ensure-index → backfill →
-//! live), and
+//! top-level orchestration ([`run_inner`] → continuity → ensure-index →
+//! prepare → backfill → live), and
 //! the capture/worker machinery (queue draining, batch buffering, flush-then-ack
 //! commit). [`Engine`](crate::Engine) constructs a [`Pipeline`] and drives it
 //! through [`run_inner`]; the invariants this upholds are documented on the
@@ -45,11 +45,7 @@ pub(crate) async fn run_inner(
     source: &dyn ChangeCapture,
     skip_backfill: bool,
 ) -> Result<()> {
-    // The resume point must exist before any snapshot is taken: a write that
-    // lands between the snapshot and the first live read is only observable if
-    // the point already covers it. The answer also decides below whether the
-    // seeds the sink recorded earlier can still be trusted.
-    let continuity = source.prepare().await?;
+    let continuity = source.continuity().await?;
 
     // ensure_index runs on every start, before any document flows — idempotent
     // (create-if-absent), so it is safe across resumes and backfills alike.
@@ -63,6 +59,13 @@ pub(crate) async fn run_inner(
     if continuity == Continuity::Fresh {
         rebuild_stale_seeds(pipeline, &mappings, skip_backfill).await?;
     }
+
+    // Ordering, twice over. After the rebuilds are staged: a crash before this
+    // point comes back as `Fresh` and stages them again, instead of as
+    // `Resumed` with stale seeds now trusted. Before any snapshot: a write that
+    // lands between the snapshot and the first live read is only observable if
+    // the resume point already covers it.
+    source.prepare().await?;
 
     if skip_backfill {
         tracing::info!("skipping backfill (skip_backfill set)");
@@ -82,8 +85,8 @@ pub(crate) async fn run_inner(
     result
 }
 
-/// The source's resume point was just created, so every seed the sink recorded
-/// before it is stale: the changes between that seed and now are unobservable.
+/// The source has no resume point, so every seed the sink recorded is stale:
+/// the changes between that seed and now are unobservable.
 ///
 /// Each index the sink still reports as seeded gets a from-scratch rebuild
 /// staged ([`Sink::reindex`] — a fresh target, so rows that no longer exist at
@@ -111,21 +114,15 @@ async fn rebuild_stale_seeds(
     }
 
     let names: Vec<&str> = stale.iter().map(|m| m.index.as_ref()).collect();
-    if skip_backfill {
-        tracing::warn!(
-            indexes = ?names,
-            "the source's resume point was just created, so the changes since these indexes \
-             were seeded are lost — but skip_backfill is set, so they are served as-is and may \
-             be stale",
-        );
-        return Ok(());
-    }
-
     tracing::warn!(
         indexes = ?names,
-        "the source's resume point was just created, so the changes since these indexes were \
-         seeded are lost; rebuilding them from scratch",
+        skip_backfill,
+        "the source has no resume point, so the changes since these indexes were seeded are \
+         lost; rebuilding them from scratch (with skip_backfill they are served as-is)",
     );
+    if skip_backfill {
+        return Ok(());
+    }
     for mapping in stale {
         pipeline.sink.reindex(mapping).await?;
         pipeline.sink.ensure_index(mapping).await?;

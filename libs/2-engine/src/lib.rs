@@ -101,12 +101,12 @@ impl Engine {
 
     /// Run until the live change stream ends or an error stops the pipeline.
     ///
-    /// Establishes the source's resume point first
-    /// ([`prepare`](ChangeCapture::prepare)), ensures every index, then seeds any
-    /// unseeded index (unless [`skip_backfill`](Self::skip_backfill) is set) and
-    /// follows live changes. A resume point that had to be *created* invalidates
-    /// every earlier seed, so those indexes are staged for a from-scratch rebuild
-    /// ([`Sink::reindex`]) before the backfill — see the crate docs.
+    /// Asks the source whether its resume point survived
+    /// ([`continuity`](ChangeCapture::continuity)), ensures every index, stages a
+    /// from-scratch rebuild ([`Sink::reindex`]) of each seeded index if it did
+    /// not, establishes the resume point ([`prepare`](ChangeCapture::prepare)),
+    /// then seeds any unseeded index (unless [`skip_backfill`](Self::skip_backfill)
+    /// is set) and follows live changes — see the crate docs.
     #[tracing::instrument(
         name = "engine.run",
         skip_all,
