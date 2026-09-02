@@ -28,6 +28,12 @@ and the crate layering. A proposal that violates either is wrong regardless of h
 
 Stop only when you could state exactly what you'll build, where, and why, with no open "it depends".
 
+**Each grilling round ends the turn.** Ask the round, then wait for the user's answers before the
+next round, and do not branch or open the PR until every round is answered. This holds even when
+the session is autonomous or the harness says the user isn't watching: the recommendations are
+proposals, and building on them before they're confirmed can make the branch, PR, and first commits
+wrong. The one acceptable shortcut is the user saying up front to proceed on the recommendations.
+
 ## 3. Branch
 
 Never work on `main`. `git checkout -b <type>/<slug>` where `<type>` matches the change (`feat`,
