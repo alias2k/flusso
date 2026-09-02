@@ -7,7 +7,7 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `text` | `text`, `varchar` | `text` | Analyzed natural language with `flusso_text`. Descriptions, bios. |
 | `identifier` | `text`, `varchar` | `text` | Analyzed identifier-like text with `flusso_code`: `C-01234` is found by `C01234`, `c-01234`, `01234`. Names, SKUs, codes. |
 | `keyword` | `text`, `varchar` | `keyword` | Exact match, aggregatable, sortable. |
-| `enum` | `text`, `varchar`, a PG enum | `keyword` | A closed string set. Add `variants` for order-correct sort. See [enum](#enum). |
+| `enum` | `text`, `varchar` | `keyword` | A closed string set. Add `variants` for order-correct sort. See [enum](#enum). |
 | `uuid` | `uuid` | `keyword` | |
 | `boolean` | `boolean` | `boolean` | |
 | `short` | `smallint` | `short` | |
