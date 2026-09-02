@@ -11,7 +11,7 @@ password = "literal-secret"
 password = { env = "OS_PASSWORD" }
 ```
 
-A reference is **deferred**: a compiled `flusso.lock` carries the variable's name, never its value, and an unset variable fails at run time, not at build time. The variable name is yours.
+A reference is **deferred**: a compiled `flusso.lock` carries the variable's name, never its value, and an unset variable fails at run time, not at build time. Any variable name works.
 
 A few **reserved names** act as a deployment override layer, so one file runs unedited across environments. When set, the override is logged at startup.
 

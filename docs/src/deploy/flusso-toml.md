@@ -59,7 +59,7 @@ You're standing up flusso against a database and a cluster, or adding a sink or 
 ## Options and variations
 
 - **Share one cluster across environments** with `prefix = "staging_"`. The read side must use the same prefix. See [prefix](../reference/config-toml.md#prefix).
-- **Add a stdout sink** during development to see every document as it's written: `[sinks.audit] type = "stdout"`. Sinks fan out.
+- **Add a stdout sink** during development to see every document as it's written: a `[sinks.audit]` table with `type = "stdout"`. Sinks fan out.
 - **Hand-manage the publication** with `manage_publication = false` when the source role can't own the tables. `check` prints the SQL.
 - **Editor completion.** `flusso schema config > config.schema.json`, or point a `.taplo.toml` rule at `https://alias2k.github.io/flusso/schemas/latest/config.schema.json`.
 

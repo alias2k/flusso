@@ -25,10 +25,10 @@ facts live.
 | Part | Reader | Page types |
 | --- | --- | --- |
 | Start here | evaluating flusso | explanation, one tutorial |
-| Author | writing `*.schema.yml` | how-to |
+| Author | writing `*.schema.yml` | how-to, plus the designer reference |
 | Deploy | writing `flusso.toml`, shipping it | how-to |
 | Operate | running it in production | how-to (runbooks) |
-| Query | reading the index from Rust | how-to + explanation |
+| Query | reading the index from Rust | guide |
 | **Reference** | anyone, mid-task | reference only |
 | Contribute | changing flusso itself | explanation |
 
@@ -45,8 +45,9 @@ drifting apart.
 pages may run longer when a single table needs it; nothing else does.
 
 **Linking.** Link the first mention of a project noun on a page to its home
-(Reference or the glossary). Don't link the same noun twice on one page. Use
-relative paths (`../reference/joins.md`) so mdBook checks them.
+(Reference or the glossary). Don't link the same noun twice in the body; a closing
+`## Related` may repeat a link. Use relative paths (`../reference/joins.md`) so
+mdBook checks them.
 
 ## Page types — templates
 
@@ -82,15 +83,28 @@ Table-first. The reader arrived from a search or a link and wants one row.
 
 ```
 TL;DR
-| key | type | default | meaning |   — the full table, at the top
+| key | type | default | meaning |   — the full table, at the top (or one per group)
 ## <one section per key or group>   — only where a row needs more than a cell
-## Example                          — one complete, copy-pasteable snippet
+## Example                          — one complete snippet, where the page has a file to show
 ```
 
-Every row states its default. `—` means required. Types use the file's own
+Every row states its default. `—` means required, `none` means optional with no
+default. A page that is itself a table of commands, endpoints, or metrics needs no
+`## Example`. Types use the file's own
 vocabulary (`string`, `bool`, `list of string`, `table`).
 
-### Explanation (Start here · Query · Contribute)
+### Guide (Query)
+
+The query chapters teach an API surface, so they sit between how-to and
+explanation: concept first, code that confirms it, no numbered steps.
+
+```
+TL;DR
+## <one section per concept>   — prose, then the snippet that confirms it
+## Related                     — links
+```
+
+### Explanation (Start here · Contribute)
 
 Why it works the way it does. No steps, no tables of keys. Prose with the
 occasional diagram.

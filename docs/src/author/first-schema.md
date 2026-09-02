@@ -24,7 +24,7 @@ You have a table whose rows should become search documents and you're writing th
    ```yaml
    fields:
      - integer: id
-       required: false
+       required: true
      - keyword: email
        required: true
      - text: bio

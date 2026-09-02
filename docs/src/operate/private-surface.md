@@ -4,7 +4,7 @@ Change the control surface's default credentials, keep it off the network, and r
 
 ## When to use this
 
-Before the first deployment anywhere other than a laptop. The private surface (`/indexes`, `/reindex`) ships with `admin` / `flusso` so it works out of the box, and flusso logs a warning on every start while the password is unchanged.
+Before the first deployment anywhere other than a laptop. The private surface (`/indexes`, `/reindex`) ships with well-known default credentials so it works out of the box (they're listed in [HTTP endpoints](../reference/http.md)), and flusso logs a warning on every start while the password is unchanged.
 
 ## Steps
 
@@ -16,9 +16,9 @@ Before the first deployment anywhere other than a laptop. The private surface (`
 
    In Kubernetes, put both in the Secret the chart mounts with `envFrom`.
 
-2. **Leave the bind address on localhost.** The default `127.0.0.1:9465` is correct for production. The public surface is the one that needs `0.0.0.0` for scrapes and probes; the private one doesn't.
+2. **Leave the bind address on localhost.** The default bind is correct for production. The public surface is the one that needs `0.0.0.0` for scrapes and probes; the private one doesn't.
 
-3. **Reach it through a tunnel.** From the host, the client subcommands default to `127.0.0.1:9465`. From outside, forward the port:
+3. **Reach it through a tunnel.** From the host, the client subcommands already point at the local private surface. From outside, forward the port:
 
    ```sh
    kubectl -n flusso port-forward deploy/flusso 9465:9465

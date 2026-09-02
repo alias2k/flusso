@@ -44,17 +44,6 @@ secrets:
     FLUSSO_ADMIN_PASSWORD: change-me
 ```
 
-## Key values
+## Values
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `image.repository` / `image.tag` | `alias2k/flusso` / chart `appVersion` | Docker Hub; `ghcr.io/alias2k/flusso` mirrors it |
-| `config.create` / `config.flussoToml` / `config.schemas` | `true` / sample / `{}` | render the config into a ConfigMap mounted at `/config` |
-| `config.existingConfigMap` | `""` | bring your own |
-| `secrets.create` / `secrets.data` / `secrets.existingSecret` | `false` / `{}` / `""` | the env-var Secret, mounted with `envFrom` |
-| `run.slot` / `run.publication` / `run.skipBackfill` / `run.queueCapacity` / `run.lagPollSecs` / `run.extraArgs` | `flusso` / `flusso` / `false` / `1024` / `15` / `[]` | `flusso run` flags |
-| `http.port` / `http.privatePort` | `9464` / `9465` | public surface, Service-exposed / private surface, localhost only |
-| `metrics.serviceMonitor.enabled` | `false` | Prometheus Operator ServiceMonitor |
-| `resources`, `nodeSelector`, `tolerations`, `affinity` | `{}` | scheduling |
-
-`values.yaml` documents every key. The full walkthrough, including how config and secrets flow and how to reach the private surface, is the manual's [Deploy with Helm](https://alias2k.github.io/flusso/deploy/helm.html).
+`values.yaml` documents every key. The manual lists them with defaults in [Helm chart values](https://alias2k.github.io/flusso/reference/helm-values.html); the walkthrough, including how config and secrets flow and how to reach the private surface, is [Deploy with Helm](https://alias2k.github.io/flusso/deploy/helm.html).

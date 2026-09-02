@@ -12,7 +12,7 @@ Prose docs follow `docs/STYLE.md`; agent-facing docs follow the `writing-for-age
 
 ## The book
 
-The mdBook under `docs/` has seven parts. Six are for a reader with a job; **Reference** is where facts live, and every other page links there instead of restating a key, flag, default, metric, or endpoint. A page is a tutorial, a how-to, a reference, or an explanation, and follows that type's template in `STYLE.md`. Every page opens with a one-line TL;DR and stays under about 200 lines.
+The mdBook under `docs/` has seven parts; `docs/src/SUMMARY.md` is the tree. **Reference** is where facts live and every other page links there. `STYLE.md` defines the page types, their templates, and the length and linking rules; read it before adding a page.
 
 Build and check it locally:
 
@@ -27,11 +27,11 @@ When a page moves, add an `[output.html.redirect]` entry in `docs/book.toml` and
 
 ## READMEs
 
-A README is a landing, not a manual: what the crate or directory is, one example, links into the book. Crate READMEs are the crates.io and docs.rs landing and are `include_str!`'d as the crate's `//!`, so they must stay crate-local (`cargo package` only bundles files under the crate dir) and must not `{{#include}}` anything. The root `README.md` is the GitHub pitch.
+`STYLE.md`'s README section applies. The one constraint worth repeating because it's mechanical: crate READMEs are `include_str!`'d as the crate's `//!` and `cargo package` only bundles files under the crate directory, so a README must stay crate-local and must not `{{#include}}` anything.
 
 ## The definition of done
 
-`CLAUDE.md` owns it. When a change touches a user-authored surface (a `*.schema.yml` or `flusso.toml` key, a type tag, an enum token, a sink option), the same change updates the embedded JSON Schemas, the designer and its two locale catalogs, and the owning Reference page. When a change makes `CLAUDE.md` wrong, fix it in the same change.
+`CLAUDE.md` owns it; read its "Keeping the designer current" and "Keeping this file current" sections before shipping a change that touches a user-authored surface. The short version: the docs are part of the change, not a follow-up.
 
 ## Where this shows up
 

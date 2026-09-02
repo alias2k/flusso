@@ -37,10 +37,10 @@ You have a validated config and want to run it, locally or in a deployment. The 
 ## Options and variations
 
 - **Configure from the environment.** Every flag has a `FLUSSO_*` twin: `FLUSSO_CONFIG`, `FLUSSO_PUBLIC_ADDRESS`, `FLUSSO_INDEX_PREFIX`. See [Environment variables](../reference/environment.md#cli-flags).
-- **Where it listens.** Public defaults to `127.0.0.1:9464`; a container needs `0.0.0.0`. Private defaults to `127.0.0.1:9465` and should stay there. See [HTTP endpoints](../reference/http.md).
+- **Where it listens.** Both surfaces default to localhost. A container needs the public one on `0.0.0.0`; the private one should stay on localhost. Defaults and ports are in [HTTP endpoints](../reference/http.md).
 - **Change the admin password** before exposing anything: `--admin-password` / `FLUSSO_ADMIN_PASSWORD`. flusso warns on every start while it's the default.
 - **Logs** go to stderr; `RUST_LOG` filters them; `FLUSSO_LOG_FORMAT=json` structures them.
-- **Queue depth.** `--queue-capacity` (default 1024) bounds changes buffered between capture and the sink. Capture blocks when it's full; that's back-pressure, not a fault.
+- **Queue depth.** `--queue-capacity` bounds changes buffered between capture and the sink. Capture blocks when it's full; that's back-pressure, not a fault.
 
 ## Related
 

@@ -17,7 +17,9 @@ Only some rows of the root table belong in the index; rows are retired by a flag
    filters:
      - { column: item_type, op: eq, value: serialized }
      - { column: archived_at, op: is_null }
-   fields: [ … ]
+   fields:
+     - keyword: sku
+       required: true
    ```
 
    A row that later stops matching emits a tombstone; a row that starts matching upserts. Backfill applies the same predicate.
@@ -47,7 +49,9 @@ Only some rows of the root table belong in the index; rows are retired by a flag
      primary_key: id
      filters:
        - { column: status, op: not_in, value: [cancelled, refunded] }
-     fields: [ … ]
+     fields:
+       - decimal: total
+         required: true
    ```
 
 4. **Reach for raw SQL when the structured forms can't say it.**

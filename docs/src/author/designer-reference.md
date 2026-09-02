@@ -4,13 +4,7 @@ Every panel, control, and shortcut in `flusso design`, and how saving maps to fi
 
 ## Launch
 
-| Flag | Env | Default | Meaning |
-| --- | --- | --- | --- |
-| `--config` | `FLUSSO_CONFIG` | `flusso.toml` | Deployment to edit. May not exist yet. |
-| `--address` | `FLUSSO_DESIGN_ADDRESS` | `127.0.0.1:7700` | Bind address. Localhost only by default. |
-| `--no-open` | `FLUSSO_DESIGN_NO_OPEN` | off | Print the URL instead of opening a browser. |
-
-Absent from the server-only build (`cargo build -p flusso-cli --no-default-features` and the registry image).
+`flusso design` and its three flags are in the [CLI reference](../reference/cli.md#design). It binds to localhost and is absent from the server-only build (`--no-default-features`, which the registry image uses).
 
 ## Layout
 

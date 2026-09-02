@@ -9,8 +9,8 @@ The `[source]` table with `type = "postgres"`: how flusso connects, how it secur
 | `manage_publication` | bool | `true` | Let flusso create or extend the publication when the role can. `false` reports gaps and never issues DDL. See [Capture](#capture). |
 | `ssl_mode` | `disable` \| `prefer` \| `require` \| `verify-ca` \| `verify-full` | URL's `sslmode`, else `prefer` | TLS mode, libpq semantics. See [TLS](#tls). |
 | `ssl_root_cert` | path | bundled Mozilla roots | CA bundle PEM for the `verify-*` modes. |
-| `ssl_cert` | path | — | Client certificate PEM for mutual TLS. Pairs with `ssl_key`. |
-| `ssl_key` | path | — | Client key PEM for mutual TLS. Pairs with `ssl_cert`. |
+| `ssl_cert` | path | none | Client certificate PEM for mutual TLS. Pairs with `ssl_key`. |
+| `ssl_key` | path | none | Client key PEM for mutual TLS. Pairs with `ssl_cert`. |
 | `ssl_sni_hostname` | string | connection host | SNI name sent in the handshake. Replication stream only. |
 
 ## Connection
@@ -69,7 +69,7 @@ TLS settings come from two surfaces, merged: the URL's libpq parameters (`sslmod
 
 ## Capture
 
-flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are CLI flags, `--slot` and `--publication`, defaulting to `flusso`.
+flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are the `--slot` and `--publication` flags of [`run`](cli.md#run).
 
 - **The slot is created automatically** when missing; that needs only the `REPLICATION` attribute. A slot that had to be created has no memory of earlier changes, which is why a missing slot triggers a rebuild of every seeded index. See [Recover from a dropped slot](../operate/dropped-slot.md).
 - **The publication is managed automatically** when `manage_publication` is on and the role can: flusso derives the full table set from the schemas (root tables plus every joined or aggregated table) and creates or extends it. Creating or extending a publication needs ownership of those tables plus `CREATE` on the database, or superuser. When the role can't, flusso logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION … ADD TABLE` statements and keeps running; `flusso check` prints the same coverage report.

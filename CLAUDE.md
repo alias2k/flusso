@@ -7,7 +7,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 flusso keeps OpenSearch in sync with Postgres from declarative config. You describe a
 search document in YAML (`*.schema.yml`); flusso derives the index mapping, seeds it,
 then follows Postgres logical replication so the index stays current. Read `README.md`
-for the full picture. The user manual is an mdBook under `docs/`, published to GitHub Pages at the site root (`alias2k.github.io/flusso/`; the versioned editor schemas sit beside it under `/schemas/`). It has seven parts — Start here, Author, Deploy, Operate, Query, Reference, Contribute — and one rule, **one fact, one home**: every `*.schema.yml` key, `flusso.toml` key, source/sink option, env var, CLI flag, metric, and HTTP endpoint is documented once, under `docs/src/reference/` (`schema-top-level.md`/`field-types.md`/`objects-and-maps.md`/`joins.md`/`aggregates.md`/`filters-and-soft-delete.md`/`identifiers.md` for the schema; `config-toml.md`/`source-postgres.md`/`sink-opensearch.md`/`sink-stdout.md`/`index-and-on-error.md`/`environment.md`/`cli.md`/`lock.md` for the deployment; `metrics.md`/`http.md`/`glossary.md` for ops), and the how-to parts link there instead of restating it. Docker recipes are `docs/src/deploy/docker.md`, the Helm chart `docs/src/deploy/helm.md`, the query manual the twelve chapters under `docs/src/query/`, the designer `docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing architecture tour `docs/src/contribute/` (this file stays the agent-facing index). Page types, templates, and the ownership rule are in `docs/STYLE.md`. Every crate has its own `README.md` — its crates.io/docs.rs landing, wired via `#![doc = include_str!("../README.md")]` (the `apps/query` README is a landing too, kept separate from its `//!`) — and `libs/README.md` maps the crate layering. When you change a doc's content, update the Reference page or README that owns it; when you move a page, add an `[output.html.redirect]` entry in `docs/book.toml`. CI's `docs` job builds the book, runs `lychee --offline --include-fragments` on it, and asserts every `alias2k.github.io/flusso/<path>` URL in the repo's markdown and Rust resolves to a built page (`.github/scripts/check-manual-links.sh`).
+for the full picture. The user manual is an mdBook under `docs/`, published to GitHub Pages at the site root
+(`alias2k.github.io/flusso/`; the versioned editor schemas sit beside it under `/schemas/`).
+`docs/src/SUMMARY.md` is the page tree: seven parts (Start here, Author, Deploy, Operate,
+Query, Reference, Contribute) under one rule, **one fact, one home**. Every `*.schema.yml`
+key, `flusso.toml` key, source/sink option, env var, CLI flag, Helm value, metric, and HTTP
+endpoint is documented once, on a page under `docs/src/reference/`, and the how-to parts link
+there instead of restating it. Docker recipes are `docs/src/deploy/docker.md`, the query
+manual is the twelve chapters under `docs/src/query/`, the designer is
+`docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing
+architecture tour is `docs/src/contribute/` (this file stays the agent-facing index). Page
+types, templates, and the ownership rule are in `docs/STYLE.md`. Every crate has its own
+`README.md` — its crates.io/docs.rs landing, wired via `#![doc = include_str!("../README.md")]`
+(the `apps/query` README is a landing too, kept separate from its `//!`) — and `libs/README.md`
+maps the crate layering. When you change a doc's content, update the Reference page or README
+that owns it; when you move a page, add an `[output.html.redirect]` entry in `docs/book.toml`.
+CI's `docs` job builds the book, runs `lychee --offline --include-fragments` on it, and asserts
+every `alias2k.github.io/flusso/<path>` URL in the repo's markdown and Rust resolves to a built
+page (`.github/scripts/check-manual-links.sh`).
 
 ## Commands
 
@@ -79,7 +96,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   Intermittent `MissingConnectionUrl` / wrong-override failures are this race, not a regression.
 - CI's `test` job runs, in order: `cargo fmt --all --check` → `cargo clippy --workspace` →
   `cargo check --workspace --all-targets` (compiles benches + examples, which clippy and nextest
-  skip — clippy omits `--all-targets`, nextest only builds test targets) → `cargo nextest run
+  skip — clippy omits `--all-targets`, nextest only builds test targets) → `cargo check -p
+  flusso-cli --no-default-features` (the server-only image build) → `cargo nextest run
   --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
   the build). Match these before assuming green. One scope note: on PRs confined to the query
