@@ -19,11 +19,11 @@ flusso design --config flusso.toml
 
 ## Layout
 
-- `codegen` — model → type-first YAML / TOML.
-- `preview` — schema → mapping + document tree.
-- `api` — the JSON operations: project, catalog, test-connection, parse, preview, validate, sample, diff, save.
-- `server` — the axum router serving the API and the embedded SPA.
-- `frontend/` — Vite + React + TypeScript; React Flow canvas, Tailwind v4 + shadcn. Built to `dist/` and embedded with `rust-embed`; rebuild with `npm --prefix frontend ci && npm --prefix frontend run build`. Localized through `frontend/src/i18n.tsx` with per-language catalogs in `frontend/src/locales/` (English base, Italian), an ICU MessageFormat evaluator, and a CI check that every key exists in every locale.
+- `codegen`: model to type-first YAML and TOML.
+- `preview`: schema to mapping and document tree.
+- `api`: the JSON operations, project, catalog, test-connection, parse, preview, validate, sample, diff, save.
+- `server`: the axum router serving the API and the embedded SPA.
+- `frontend/`: Vite + React + TypeScript; React Flow canvas, Tailwind v4 + shadcn. Built to `dist/` and embedded with `rust-embed`; rebuild with `npm --prefix frontend ci && npm --prefix frontend run build`. Localized through `frontend/src/i18n.tsx` with per-language catalogs in `frontend/src/locales/` (English base, Italian), an ICU MessageFormat evaluator, and a CI check that every key exists in every locale.
 
 ## Learn more
 
