@@ -4,7 +4,7 @@ Build the smallest possible flusso image from the published base and a `flusso.l
 
 ## When to use this
 
-You're deploying flusso as a container. Two things get "compiled" and conflating them is what makes Docker feel heavy: the **binary**, a full Rust build published once per release as `alias2k/flusso`, and the **lock**, which `flusso build` produces from your config in a second. You never build the binary. Get a lock, ship the lock, run the lock.
+flusso is going into a container. Two things get "compiled" and conflating them is what makes Docker feel heavy: the **binary**, a full Rust build published once per release as `alias2k/flusso`, and the **lock**, which `flusso build` produces from a config in a second. The binary is never built downstream. Get a lock, ship the lock, run the lock.
 
 ## Steps
 

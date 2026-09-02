@@ -6,7 +6,7 @@
 
 flusso's schema is a contract. It fixes every document's shape: which fields exist, their types, which are nested arrays. flusso enforces it on the write side. `flusso-query` enforces it on the read side, at `cargo build`, with no database.
 
-You write the document struct by hand and keep full control of it. `#[derive(FlussoRoot)]` then does two things against the resolved mapping:
+The document struct is written by hand and stays under the caller's control. `#[derive(FlussoRoot)]` then does two things against the resolved mapping:
 
 1. **Validates** every struct field: it exists, its Rust type matches, its nullability matches. A drifted struct stops compiling, pointing at the field.
 2. **Generates the typed query surface** from the whole schema: a handle per field at every level, `get`/`query`, the schema hash. Operators exist only on the handles whose type supports them.

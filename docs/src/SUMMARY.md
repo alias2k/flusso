@@ -58,6 +58,7 @@
 - [Environment variables](reference/environment.md)
 - [CLI](reference/cli.md)
 - [flusso.lock](reference/lock.md)
+- [Helm chart values](reference/helm-values.md)
 - [Schema top-level keys](reference/schema-top-level.md)
 - [Field types](reference/field-types.md)
 - [Objects and maps](reference/objects-and-maps.md)

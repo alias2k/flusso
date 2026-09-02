@@ -71,7 +71,7 @@ soft_delete:
 
 fields:
   - integer: id
-    required: false
+    required: true
   - keyword: email
     required: true
     transforms: [lowercase, trim]
