@@ -2,17 +2,105 @@
 
 How to write flusso's prose docs — the mdBook chapters under `docs/src/` and the
 per-crate `README.md`s. This is about *tone and shape*, not what's true; for the
-facts, the chapters and READMEs are canonical. (Code-comment tone — `///`/`//!` —
-lives in `CLAUDE.md` under "Conventions"; this file is its prose counterpart.)
+facts, the chapters are canonical. (Code-comment tone — `///`/`//!` — lives in
+`CLAUDE.md` under "Conventions"; this file is its prose counterpart. Agent-facing
+docs under `plugin/**` follow `writing-for-agents` instead.)
 
 ## TL;DR
 
+- **One fact, one home.** Every key, flag, metric, endpoint is documented once, in Reference. Everything else links there.
+- **Every page is one of four types** — tutorial, how-to, reference, explanation — and follows that type's template.
+- **Every page opens with a one-line TL;DR** before the first heading, and stays under ~200 lines.
 - **State facts about the system**, not "you do X" or "we do X". Save direct "you" + imperative for real instructions.
 - **Conversational, not stiff.** Contractions are fine. Lively, plain words. Dry wit, sparingly.
 - **Write for a competent engineer.** Push newcomer help into callout boxes, not the body.
 - **Terse and scannable.** Lead with the point. Short sentences. Bullets/tables for anything enumerable.
-- **Every page opens with a one-line TL;DR** before the first heading.
 - **`flusso` is always lowercase** — even at the start of a sentence.
+
+## Shape — the book
+
+The manual has seven parts. Six are for a reader with a job to do; one is the place
+facts live.
+
+| Part | Reader | Page types |
+| --- | --- | --- |
+| Start here | evaluating flusso | explanation, one tutorial |
+| Author | writing `*.schema.yml` | how-to |
+| Deploy | writing `flusso.toml`, shipping it | how-to |
+| Operate | running it in production | how-to (runbooks) |
+| Query | reading the index from Rust | how-to + explanation |
+| **Reference** | anyone, mid-task | reference only |
+| Contribute | changing flusso itself | explanation |
+
+**Ownership rule.** A key, flag, env var, default, metric name, or endpoint has
+exactly one home: a Reference page. A how-to *uses* it and links to it; it never
+re-documents it. If a how-to needs a table of options, that table is the sign a
+Reference page is missing — write it there and link. This is what stops two pages
+drifting apart.
+
+**One topic per page.** A page answers one question. When a page needs a second
+`##` that doesn't serve the title, it's two pages.
+
+**~200 lines, soft cap.** Past that, look for the page hiding inside. Reference
+pages may run longer when a single table needs it; nothing else does.
+
+**Linking.** Link the first mention of a project noun on a page to its home
+(Reference or the glossary). Don't link the same noun twice on one page. Use
+relative paths (`../reference/joins.md`) so mdBook checks them.
+
+## Page types — templates
+
+### Tutorial (Start here only)
+
+A guaranteed-to-work path with a visible result at the end. One per book.
+
+```
+TL;DR
+## What you'll end up with
+## Before you start        — the exact prerequisites, nothing more
+## Step 1 … Step N         — one command or edit per step, output shown
+## What just happened      — 3–5 bullets linking to the explanation
+## Next                    — two or three how-tos
+```
+
+### How-to (Author · Deploy · Operate · Query)
+
+Goal-shaped title (`Reindex without downtime`, not `Reindexing`). Assumes the
+reader knows *what* they want; shows *how*.
+
+```
+TL;DR
+## When to use this         — one paragraph; when *not* to, if it's a footgun
+## Steps                    — numbered; each step is one action + how to verify it
+## Options / variations     — bullets, each linking to its Reference key
+## Related                  — links
+```
+
+### Reference (Reference part)
+
+Table-first. The reader arrived from a search or a link and wants one row.
+
+```
+TL;DR
+| key | type | default | meaning |   — the full table, at the top
+## <one section per key or group>   — only where a row needs more than a cell
+## Example                          — one complete, copy-pasteable snippet
+```
+
+Every row states its default. `—` means required. Types use the file's own
+vocabulary (`string`, `bool`, `list of string`, `table`).
+
+### Explanation (Start here · Query · Contribute)
+
+Why it works the way it does. No steps, no tables of keys. Prose with the
+occasional diagram.
+
+```
+TL;DR
+## The model                — the mental picture, one screen
+## <one section per idea>   — each ≤ ~6 paragraphs
+## Where this shows up      — links to the how-tos and Reference that rely on it
+```
 
 ## Voice — impersonal, about the system
 
@@ -113,4 +201,13 @@ If so, cut it.
 - **`flusso.toml`**, **`*.schema.yml`**, **`flusso.lock`** — exact casing, in code font.
 - Subcommands (`check`, `run`, `build`) and flags (`--config`) in code font.
 - "the index mapping", "the WAL", "a generation", "a tombstone" — use the project's
-  own nouns consistently; don't invent synonyms.
+  own nouns consistently; don't invent synonyms. The glossary (`docs/src/reference/glossary.md`)
+  is the list.
+
+## READMEs
+
+A `README.md` is a *landing*, not a manual: what the crate/directory is, one example,
+and links into the book. The root `README.md` is the GitHub pitch (what, why, a
+five-minute quickstart, links). Crate READMEs are the crates.io/docs.rs landing and are
+`include_str!`'d as the crate's `//!`, so they must stay crate-local and must not
+`{{#include}}` anything.
