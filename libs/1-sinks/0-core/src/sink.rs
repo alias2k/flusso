@@ -63,6 +63,14 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// writes, so a sink that owns its index can pin field types up front
     /// instead of letting the destination guess them. The default is a no-op —
     /// correct for sinks with no schema-bound index (e.g. stdout).
+    ///
+    /// This is also where a sink reconciles its seed marker with reality: a
+    /// marker that says "seeded" for an index that had to be created here is
+    /// wrong, and must be retracted so [`is_seeded`](Self::is_seeded) reports
+    /// `false`. The engine always asks `is_seeded` *after* `ensure_index`, so
+    /// this is the one place that has both facts. Never let a marker outlive
+    /// the data it describes — a recreated-empty index that claims to be seeded
+    /// is served, silently, with nothing in it.
     async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<()> {
         Ok(())
     }
@@ -90,14 +98,21 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     async fn flush(&self, caught_up: bool) -> Result<FlushReport>;
 
     /// Whether `index` has already been seeded — its initial backfill completed
-    /// and durably applied here. The engine asks this at startup and skips the
-    /// backfill for indexes that report `true`.
+    /// and durably applied here. The engine asks this at startup, after
+    /// [`ensure_index`](Self::ensure_index), and skips the backfill for indexes
+    /// that report `true`.
     ///
     /// Seeded-state is destination knowledge, so it belongs to the sink: only
     /// the sink knows whether its target already holds the data. The default is
     /// `false` (never seeded) — correct for sinks that can't persist this, which
     /// then re-seed on every run. Sinks that can store it (a metadata document,
     /// a row, a sidecar) should override both methods.
+    ///
+    /// What the sink can't know is whether the *source* still remembers the
+    /// changes since that seed. The engine checks that separately
+    /// ([`ChangeCapture::prepare`](https://docs.rs/flusso-sources-core)) and,
+    /// when the source's resume point had to be recreated, treats every `true`
+    /// here as stale and calls [`reindex`](Self::reindex) on it.
     async fn is_seeded(&self, _: &IndexName) -> Result<bool> {
         Ok(false)
     }

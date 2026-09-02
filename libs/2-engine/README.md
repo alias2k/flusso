@@ -10,7 +10,7 @@ ChangeCapture ─▶ queue ─▶ resolve ─▶ build ─▶ Sink ─▶ flush 
 
 | Edge (trait object) | Job | Swap to… |
 | --- | --- | --- |
-| [`ChangeCapture`] | stream + snapshot the source | WAL, polling, … |
+| [`ChangeCapture`] | establish the resume point, stream + snapshot the source | WAL, polling, … |
 | [`queue`](queue_channel) | bounded buffer, back-pressures capture | channel, durable broker |
 | [`DocumentBuilder`] | resolve a row → document ids, assemble each | per source |
 | [`Sink`] | buffer, flush, ack, report seeding | stdout, OpenSearch |
@@ -20,6 +20,7 @@ ChangeCapture ─▶ queue ─▶ resolve ─▶ build ─▶ Sink ─▶ flush 
 | **At-least-once** — acks confirmed only *after* the flush that persisted their docs | crash before flush → whole batch redelivered, re-applied idempotently | flush-then-confirm |
 | **Two-step resolve → build, deduped** | a doc touched N times in a batch is built once | dedup per batch |
 | **Backfill is the sink's call** | the destination decides what needs seeding, not the source | `is_seeded` per index |
+| **A seed is only as good as the stream behind it** | a resume point that had to be *created* invalidates every earlier seed — those indexes are rebuilt, not trusted | `prepare` → [`Continuity`](sources_core::cdc::Continuity) |
 | **Item rejections vs flush errors** | one poison doc doesn't have to stop the run | [`FailurePolicies`] |
 
 ## The loop
@@ -49,13 +50,19 @@ written by deterministic id.
 Stopping on any error is therefore safe: unconfirmed changes are redelivered
 when the run restarts.
 
-## Mapping first
+## Resume point first
 
-Before anything else, the engine asks the [`DocumentBuilder`] for each
-index's resolved mapping and tells the sink to create it
-([`ensure_index`](Sink::ensure_index)) — so the destination uses the
-configured field types instead of guessing. This is idempotent, so it runs
-on every start, including resumes.
+The very first call of a run is [`prepare`](ChangeCapture::prepare): the
+source establishes its durable resume point (the replication slot) and says
+whether it was already there. Doing this before any snapshot means a write
+that lands between the snapshot and the first live read is still observable.
+
+## Mapping next
+
+Then the engine asks the [`DocumentBuilder`] for each index's resolved mapping
+and tells the sink to create it ([`ensure_index`](Sink::ensure_index)) — so
+the destination uses the configured field types instead of guessing. This is
+idempotent, so it runs on every start, including resumes.
 
 ## Backfill
 
@@ -66,6 +73,17 @@ already seeded; for those that aren't, it asks the source to
 finite stream through the same queue → resolve → build → sink path (scoped to
 just the unseeded indexes), then records each as seeded. So "is a backfill
 needed?" is the destination's call, not the source's.
+
+The one thing that overrides a seed marker is the stream behind it. When
+`prepare` reports [`Continuity::Fresh`](sources_core::cdc::Continuity) — the
+resume point didn't exist and was just created — every change since the seed
+is unobservable, so no seeded index can be trusted. The engine warns, stages a
+from-scratch rebuild of each one ([`reindex`](Sink::reindex), a fresh target so
+rows that no longer exist at the source are dropped on the swap), and lets the
+backfill refill them while the old copy keeps serving. Under `skip_backfill`
+it only warns. A sink whose marker contradicts its *own* destination (the
+OpenSearch sink finds the seed marker but not the index it names) reconciles
+that inside `ensure_index`, and reports unseeded.
 
 > 💡 **Did you know** — the queue, source, sink, and document builder are all
 > trait objects, so the backend choices (WAL vs polling, stdout vs OpenSearch,

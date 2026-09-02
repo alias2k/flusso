@@ -33,7 +33,8 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
 - **Refresh.** Off during seeding; flips to `refresh_interval` once seeded; an
   immediate refresh on any caught-up flush.
 - **Seeding.** Persisted in a hidden `flusso_meta` index, so restarts skip a
-  completed backfill.
+  completed backfill. A marker whose generation index is gone is retracted, so
+  deleting the generation means "rebuild on next start".
 
 ## Index naming — alias over generations
 
@@ -89,6 +90,22 @@ Operations are buffered in memory until `flush` is called. Large flushes are
 chunked by `batch_size` to stay within OpenSearch request limits. Seeding state
 is persisted in a hidden `flusso_meta` index so restarts skip a completed
 backfill.
+
+## The seed marker never outlives its index
+
+`ensure_index` checks that the generation the meta doc calls seeded actually
+exists. If it doesn't — an operator deleted it, a snapshot restore predates it —
+the marker is rewritten unseeded (with a warning), the generation is recreated
+empty under the same number, and the engine's backfill refills it. So deleting
+`{logical}_{hash}_{gen}` between runs is the supported way to force a rebuild of
+one index. (The reverse, a missing marker with the index present, was already
+safe: it stages the next generation and reseeds behind the alias.)
+
+The marker also can't vouch for the *source*: when the Postgres replication slot
+had to be recreated, the engine treats every seeded index as stale and stages a
+[`reindex`](OpensearchSink::reindex) — a fresh generation, so rows that no longer
+exist at the source are dropped on the swap — before backfilling. That decision
+lives in the engine, not here; see the `flusso-engine` docs.
 
 ## Module layout
 

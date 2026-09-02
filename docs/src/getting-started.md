@@ -58,7 +58,7 @@ flusso doesn't own Postgres or OpenSearch — it's a guest in both. A few things
 | --- | --- |
 | **PG 14+, `wal_level = logical`** | A restart-required setting. `max_wal_senders` / `max_replication_slots` high enough for flusso plus any other consumers. |
 | **A publication** | Covers *every* table any index reads — root tables and every table a join or aggregate pulls from. flusso manages it when the role is privileged enough (see below); otherwise it logs the exact SQL. |
-| **A replication slot** | flusso always creates it on first connect (needs only `REPLICATION`). |
+| **A replication slot** | flusso always creates it before the first backfill (needs only `REPLICATION`). Having to create it later — the database was replaced, or the slot dropped — means the indexes are rebuilt from scratch, since the changes in between are gone. |
 | **Row identity** | A primary key (usual case) or an explicit `REPLICA IDENTITY` on every replicated table. Keyless tables are skipped in backfill and error on a live change. |
 | **A role with `REPLICATION` + `SELECT`** | Enough to stream and create the slot. Managing the publication needs more — see below. |
 

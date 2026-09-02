@@ -305,6 +305,13 @@ Details worth knowing:
 - **Backfill.** Before live capture, the engine asks each sink whether an index is already
   seeded and, for those that aren't, snapshots the root tables to seed them.
   `--skip-backfill` resumes live capture only.
+- **A recreated slot means a rebuild.** The slot is created *before* the first backfill,
+  and its existence is what makes an earlier seed trustworthy. If flusso has to create the
+  slot while the sink already reports indexes as seeded — the database was replaced, or
+  someone dropped the slot — every change since those seeds is gone, so flusso warns and
+  rebuilds them from scratch into a fresh generation (the old one keeps serving until the
+  swap). With `--skip-backfill` it only warns and serves them as-is. Dropping the slot is
+  therefore the supported way to force a full rebuild of every index.
 - Requires `wal_level = logical` on the server. See the
   [`dev/`](https://github.com/alias2k/flusso/tree/main/dev) environment for a ready-to-run
   Postgres configured for this.
@@ -390,7 +397,11 @@ overridden per sink via reserved deployment-override variables — naming and pr
   `auto_subfields` is off, well-shaped `text`/`keyword` fields — see
   [Index analysis & subfields](#index-analysis--subfields).
 - **Seeding markers.** Seeded state is persisted in a hidden `flusso_meta` index, so a
-  restart skips a completed backfill instead of redoing it.
+  restart skips a completed backfill instead of redoing it. The marker is checked against
+  the generation index it names on every start: if that index is gone, the marker is
+  retracted (with a warning), the index is recreated empty, and the backfill refills it. So
+  deleting `{logical}_{hash}_{gen}` between runs is the supported way to force a rebuild
+  of one index.
 
 #### Index analysis & subfields
 

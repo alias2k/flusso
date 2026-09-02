@@ -30,7 +30,11 @@ TLS.
   replication slot and confirms progress via an LSN watermark. The slot advances
   only as far as the engine has durably written — at-least-once. While the
   watched tables are idle it still advances from the server's keepalives, so
-  unrelated write traffic never pins WAL retention.
+  unrelated write traffic never pins WAL retention. `prepare` creates the slot
+  before the first backfill and reports whether it had to: a slot that had to be
+  created has no memory of earlier changes (`Continuity::Fresh`), which is the
+  engine's cue to rebuild every index the sink still calls seeded — a replaced
+  database or a dropped slot can't leave a stale index behind.
 - **`DocumentBuilder`** resolves which documents a changed row affects and
   assembles each one. It also implements `Catalog`, the store-specific half of
   index validation (a column's SQL type + nullability).
