@@ -31,6 +31,12 @@ impl Sink for OpensearchSink {
     ///   at it *only* when nothing else is serving yet. A reindex leaves the alias
     ///   on the old generation until [`mark_seeded`](Self::mark_seeded) swaps it,
     ///   so reads never see a half-built index.
+    /// - **seeded, but the generation is gone** — the marker is retracted
+    ///   (rewritten unseeded, with a warning) and the generation recreated
+    ///   empty, so the engine's [`is_seeded`](Self::is_seeded) reports `false`
+    ///   and the backfill refills it. Deleting the generation index is therefore
+    ///   a "rebuild this index on the next start" signal, never a way to end up
+    ///   serving an empty index that claims to be seeded.
     #[tracing::instrument(
         name = "os.ensure_index",
         skip_all,
@@ -51,7 +57,7 @@ impl Sink for OpensearchSink {
             )));
         }
 
-        let (generation, seeded) = match self.read_index_meta(&hash_alias).await? {
+        let (generation, mut seeded) = match self.read_index_meta(&hash_alias).await? {
             Some(state) => state,
             None => {
                 let generation =
@@ -69,6 +75,19 @@ impl Sink for OpensearchSink {
         if self.index_exists(&index).await? {
             debug!(index, "generation exists; leaving its mapping untouched");
         } else {
+            // A seed marker without the generation it describes is a
+            // contradiction, and the marker is the one that is wrong: the data is
+            // gone. Retract it before recreating, so the engine reseeds the empty
+            // index instead of serving it — deleting the generation is how an
+            // operator asks for a rebuild.
+            if seeded {
+                warn!(
+                    index,
+                    "the seed marker names a generation that no longer exists; \
+                     recreating it empty and reseeding",
+                );
+                seeded = false;
+            }
             self.create_index(&index, mapping).await?;
         }
 

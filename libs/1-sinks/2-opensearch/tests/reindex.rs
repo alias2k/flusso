@@ -7,7 +7,10 @@
 //! generation 2 from scratch. It asserts the behavior the unit tests can't reach:
 //! the stable `{logical}_{hash}` alias swaps atomically onto the new generation,
 //! the old generation is dropped, reads stay on the old generation until the
-//! swap, and documents only present in the old generation are gone after.
+//! swap, and documents only present in the old generation are gone after. A
+//! second test covers the seed marker outliving its generation index (issue
+//! #120): `ensure_index` must retract the marker and report the recreated,
+//! empty generation unseeded rather than serve it.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -369,4 +372,70 @@ async fn index_prefix_isolates_two_deployments_and_scopes_reindex() {
             && alias_targets(&client, &base, &stg_alias).await == vec![stg_gen1.clone()],
         "the dev reindex left staging's generation and alias entirely untouched",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn deleted_generation_is_recreated_and_reported_unseeded() {
+    // The seed marker says generation 1 is seeded, but an operator deleted the
+    // generation index between runs. The next run must not trust the marker: it
+    // recreates the (empty) generation, points the aliases at it, and reports
+    // it unseeded so the engine backfills it (issue #120, case A).
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    // ── Run 1: seed generation 1 ─────────────────────────────────────────────
+    let run1 = sink(&base);
+    run1.ensure_index(&mapping).await.unwrap();
+    run1.upsert(&index, "1", &document(1)).await.unwrap();
+    run1.flush(true).await.unwrap();
+    run1.mark_seeded(&index).await.unwrap();
+    assert!(run1.is_seeded(&index).await.unwrap());
+
+    // ── The operator deletes the generation (its aliases go with it) ─────────
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {gen1} returned {status}");
+    assert!(alias_targets(&client, &base, &hash_alias).await.is_empty());
+
+    // ── Run 2: the marker is contradicted; the sink must side with the index ─
+    let run2 = sink(&base);
+    run2.ensure_index(&mapping).await.unwrap();
+    assert!(
+        !run2.is_seeded(&index).await.unwrap(),
+        "a seeded marker whose generation is gone must read back as unseeded"
+    );
+    assert!(
+        index_exists(&client, &base, &gen1).await,
+        "the generation is recreated under its previous number"
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()],
+        "nothing else serves, so the aliases point at the recreated generation"
+    );
+    assert!(
+        !doc_exists(&client, &base, &hash_alias, "1").await,
+        "the recreated generation is empty until the backfill refills it"
+    );
+
+    // ── The engine's backfill then reseeds and marks it ──────────────────────
+    run2.upsert(&index, "1", &document(1)).await.unwrap();
+    run2.flush(true).await.unwrap();
+    run2.mark_seeded(&index).await.unwrap();
+    assert!(run2.is_seeded(&index).await.unwrap());
+    assert!(doc_exists(&client, &base, &hash_alias, "1").await);
+
+    // ── Run 3: a plain restart trusts the (now consistent) marker again ──────
+    let run3 = sink(&base);
+    run3.ensure_index(&mapping).await.unwrap();
+    assert!(run3.is_seeded(&index).await.unwrap());
 }
