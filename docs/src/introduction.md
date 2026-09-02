@@ -36,14 +36,14 @@ fields:
 
 | You want to… | Start at |
 | --- | --- |
-| understand what it does before committing | [How flusso works](how-it-works.md) |
-| see it run in ten minutes | [Quickstart](quickstart.md) |
-| write a `*.schema.yml` | [Your first schema](../author/first-schema.md) |
-| point it at your infrastructure and ship it | [Write flusso.toml](../deploy/flusso-toml.md) |
-| run it in production | [Watch it run](../operate/watch-it-run.md) |
-| query the index from Rust | [Query overview](../query/overview.md) |
-| look up one key, flag, or metric | [Reference](../reference/config-toml.md) |
-| change flusso itself | [Architecture](../contribute/architecture.md) |
+| understand what it does before committing | [How flusso works](start/how-it-works.md) |
+| see it run in ten minutes | [Quickstart](start/quickstart.md) |
+| write a `*.schema.yml` | [Your first schema](author/first-schema.md) |
+| point it at your infrastructure and ship it | [Write flusso.toml](deploy/flusso-toml.md) |
+| run it in production | [Watch it run](operate/watch-it-run.md) |
+| query the index from Rust | [Query overview](query/overview.md) |
+| look up one key, flag, or metric | [Reference](reference/config-toml.md) |
+| change flusso itself | [Architecture](contribute/architecture.md) |
 
 > ℹ️ **Info** — Every key, flag, environment variable, metric, and endpoint has exactly one home in the **Reference** part. The other parts link there instead of repeating it, so a reference table is never stale relative to a how-to.
 

@@ -75,7 +75,7 @@ flusso's replication stream and its SQL connections negotiate TLS from **one mer
 - **`ssl_sni_hostname`** (config-only, replication-only): the handshake hostname when connecting by IP or through a load balancer — `verify-full` to an IP requires it.
 - `sslmode=allow` in a URL is treated as `prefer`.
 
-Full reference: the [configuration guide's TLS section](https://alias2k.github.io/flusso/guides/configuration.html#tls).
+Full reference: the [configuration guide's TLS section](https://alias2k.github.io/flusso/reference/source-postgres.html#tls).
 
 ## Debugging checklist ("changes aren't showing up")
 

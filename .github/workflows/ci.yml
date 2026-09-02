@@ -105,6 +105,31 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
+  docs:
+    name: manual (build + links)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook,lychee
+
+      - name: Build the book
+        run: mdbook build docs
+
+      # Every relative link and `#anchor` inside the book must resolve. Offline:
+      # external URLs are not the book's responsibility and would make the job
+      # flaky.
+      - name: Check internal links and anchors
+        run: lychee --offline --include-fragments --root-dir "$PWD/docs/book" 'docs/book/**/*.html'
+
+      # The README, crate docs, rustdoc, and plugin skills deep-link into the
+      # published manual by absolute URL. Each must land on a page in this build
+      # (issue #117: every one of them 404'd before the restructure).
+      - name: Check the repo's deep links into the manual
+        run: .github/scripts/check-manual-links.sh docs/book
+
   fuzz:
     name: fuzz (pgoutput decoder)
     runs-on: ubuntu-latest

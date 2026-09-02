@@ -5,7 +5,7 @@
 //! not by separate crates.
 //!
 //! This is the **runtime** layer described in the
-//! [querying guide](https://alias2k.github.io/flusso/guides/querying.html):
+//! [Query part of the manual](https://alias2k.github.io/flusso/query/overview.html):
 //! the transport, the field-handle / [`Query`] / [`Search`] builder, and the
 //! typed [`SearchResponse`]. It is generic over the caller's document type `T`.
 //!
@@ -140,7 +140,7 @@ pub use search::{FlussoRoot, FlussoScope, Highlight, Hit, Search, SearchResponse
 /// through a generated namespace per container) and implements
 /// [`FlussoRoot`](trait@FlussoRoot) (`INDEX`/`SCHEMA_HASH` + `query`/`get`).
 /// It also validates every shape it embeds. See the
-/// [querying guide](https://alias2k.github.io/flusso/guides/querying.html).
+/// [Binding to the schema](https://alias2k.github.io/flusso/query/binding.html).
 /// Enabled by the `derive` feature.
 #[cfg(feature = "derive")]
 pub use flusso_query_derive::FlussoRoot;
