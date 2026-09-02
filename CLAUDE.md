@@ -7,18 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 flusso keeps OpenSearch in sync with Postgres from declarative config. You describe a
 search document in YAML (`*.schema.yml`); flusso derives the index mapping, seeds it,
 then follows Postgres logical replication so the index stays current. Read `README.md`
-for the full picture. The user manual is an mdBook under `docs/` (published to GitHub
-Pages); its chapters are the canonical docs: `docs/src/guides/schema-authoring.md` for
-every `*.schema.yml` key, `docs/src/guides/configuration.md` for every `flusso.toml` key,
-source/sink option, and environment variable (secrets, the `FLUSSO_*` flag overrides,
-logging/telemetry — all centralized there), and `docs/src/guides/deploying.md` for the
-Docker shipping recipes (bake/compile a `flusso.lock`, scoped per-Dockerfile
-`.dockerignore`). The query side is `apps/query/README.md` (the `flusso-query` crate;
-`docs/src/guides/querying.md` `{{#include}}`s it). Every crate has its own `README.md`
-— its crates.io/docs.rs landing, wired via `#![doc = include_str!("../README.md")]`
-(except the `apps/query` README, kept separate from its `//!` because it's the full query
-manual) — and `libs/README.md` maps the crate layering. When you change a doc's content,
-update the chapter/README that owns it, not a now-deleted root `.md`.
+for the full picture. The user manual is an mdBook under `docs/`, published to GitHub Pages at the site root (`alias2k.github.io/flusso/`; the versioned editor schemas sit beside it under `/schemas/`). It has seven parts — Start here, Author, Deploy, Operate, Query, Reference, Contribute — and one rule, **one fact, one home**: every `*.schema.yml` key, `flusso.toml` key, source/sink option, env var, CLI flag, metric, and HTTP endpoint is documented once, under `docs/src/reference/` (`schema-top-level.md`/`field-types.md`/`objects-and-maps.md`/`joins.md`/`aggregates.md`/`filters-and-soft-delete.md`/`identifiers.md` for the schema; `config-toml.md`/`source-postgres.md`/`sink-opensearch.md`/`sink-stdout.md`/`index-and-on-error.md`/`environment.md`/`cli.md`/`lock.md` for the deployment; `metrics.md`/`http.md`/`glossary.md` for ops), and the how-to parts link there instead of restating it. Docker recipes are `docs/src/deploy/docker.md`, the Helm chart `docs/src/deploy/helm.md`, the query manual the twelve chapters under `docs/src/query/`, the designer `docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing architecture tour `docs/src/contribute/` (this file stays the agent-facing index). Page types, templates, and the ownership rule are in `docs/STYLE.md`. Every crate has its own `README.md` — its crates.io/docs.rs landing, wired via `#![doc = include_str!("../README.md")]` (the `apps/query` README is a landing too, kept separate from its `//!`) — and `libs/README.md` maps the crate layering. When you change a doc's content, update the Reference page or README that owns it; when you move a page, add an `[output.html.redirect]` entry in `docs/book.toml`. CI's `docs` job builds the book, runs `lychee --offline --include-fragments` on it, and asserts every `alias2k.github.io/flusso/<path>` URL in the repo's markdown and Rust resolves to a built page (`.github/scripts/check-manual-links.sh`).
 
 ## Commands
 
@@ -97,7 +86,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   release train (`apps/query`, `apps/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
   query train's own `combined_search` live e2e still runs); pushes to main always run everything.
-  A separate `fuzz` job runs a 60-second
+  A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
+  --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
+  `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step.
 - **The designer (`apps/design`) has two test layers.** (1) A property/"fuzz" round-trip
@@ -620,7 +611,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Query client (`flusso-query`) | `apps/query/src/` |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `apps/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `apps/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
-| Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/guides/deploying.md` |
+| Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
 

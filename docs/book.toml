@@ -21,7 +21,6 @@ enable = true
 # The pre-restructure chapter paths (issue #117). Keep these so old links land
 # on the page that now owns the topic.
 [output.html.redirect]
-"/introduction.html" = "start/introduction.html"
 "/getting-started.html" = "start/quickstart.html"
 "/guides/schema-authoring.html" = "../author/first-schema.html"
 "/guides/designing.html" = "../author/design-visually.html"

@@ -19,7 +19,7 @@ use flusso_query::{FlussoFragment, FlussoRoot};
 | `FlussoMap` | A newtype wrapper over a dynamic-key `map` field. |
 | `FlussoMultiDocument` | The combined-search union over several document types. |
 
-`FlussoDocument` and `#[flusso(path = "…")]` are **removed** — a clean break at the major bump. See the migration table in the [querying guide](https://alias2k.github.io/flusso/guides/querying.html).
+`FlussoDocument` and `#[flusso(path = "…")]` are **removed** — a clean break at the major bump. See [Migrating from path](https://alias2k.github.io/flusso/query/migrating-from-path.html).
 
 ## What `FlussoRoot` does
 
@@ -56,6 +56,6 @@ Because a fragment carries no location, embedding it twice checks it twice.
 ## Learn more
 
 The query surface, the typed handles, and how the binding works are documented in the
-[Querying guide](https://alias2k.github.io/flusso/guides/querying.html) and the
+[Query part of the manual](https://alias2k.github.io/flusso/query/overview.html) and the
 [`flusso-query` crate docs](https://docs.rs/flusso-query). flusso as a whole lives at
 [github.com/alias2k/flusso](https://github.com/alias2k/flusso).

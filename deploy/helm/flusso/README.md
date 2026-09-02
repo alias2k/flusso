@@ -1,50 +1,20 @@
 # flusso Helm chart
 
-Deploys [flusso](../../../README.md) — OpenSearch kept in sync with Postgres from
-declarative config — as a single Kubernetes Deployment. Postgres and OpenSearch are
-external; point flusso at your existing clusters.
+Deploys [flusso](https://alias2k.github.io/flusso/), OpenSearch kept in sync with Postgres from declarative config, as a single Kubernetes Deployment. Postgres and OpenSearch are external.
 
-> ⚠️ **Warning** — One instance only. flusso consumes a single Postgres logical
-> replication slot, so the chart pins `replicas: 1` (and **fails** if you raise
-> `replicaCount`) and uses the `Recreate` strategy so a new pod never overlaps the old
-> one on the slot.
-
-## Key values
-
-| Key | Default | Description |
-| --- | --- | --- |
-| `image.repository` / `image.tag` | `alias2k/flusso` / chart appVersion | Image to run (Docker Hub; `ghcr.io/alias2k/flusso` is an equivalent mirror). |
-| `config.create` / `config.flussoToml` / `config.schemas` | `true` / sample / `{}` | Render config into a ConfigMap. |
-| `config.existingConfigMap` | `""` | Use an existing config ConfigMap instead. |
-| `secrets.create` / `secrets.data` | `false` / `{}` | Manage a Secret of env vars. |
-| `secrets.existingSecret` | `""` | Use an existing Secret instead. |
-| `run.slot` / `run.publication` | `flusso` / `flusso` | Replication slot / publication. |
-| `run.skipBackfill` | `false` | Resume live capture only. |
-| `run.queueCapacity` / `run.lagPollSecs` | `1024` / `15` | Queue size / lag poll interval. |
-| `run.extraArgs` | `[]` | Raw args appended verbatim, e.g. `["--pretty"]`. |
-| `http.port` / `http.privatePort` | `9464` / `9465` | Public surface (Service-exposed) / private control surface (localhost only). |
-| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor. |
-| `resources` / `nodeSelector` / `tolerations` / `affinity` | `{}` | Standard scheduling knobs. |
-
-See [`values.yaml`](values.yaml) for the full list.
+> ⚠️ **Warning** — One instance only. flusso consumes a single replication slot, so the chart pins `replicas: 1`, fails if `replicaCount` is raised, and uses the `Recreate` strategy so a new pod never overlaps the old one.
 
 ## Install
 
 ```sh
 helm install flusso ./deploy/helm/flusso \
-  --namespace flusso --create-namespace \
-  --set image.repository=alias2k/flusso \
-  --set secrets.create=true \
-  --set-string secrets.data.DATABASE_URL='postgres://user:pass@pg:5432/app' \
-  --set-string secrets.data.PRIMARY_OPENSEARCH_URL='https://opensearch:9200' \
-  -f my-values.yaml
+  --namespace flusso --create-namespace -f my-values.yaml
 ```
 
-A typical `my-values.yaml` supplies the config and schemas:
+A minimal `my-values.yaml` supplies the config inline and the secrets as env vars:
 
 ```yaml
 config:
-  create: true
   flussoToml: |
     [source]
     type = "postgres"
@@ -57,6 +27,7 @@ config:
     [[index]]
     name = "users"
     schema = "users.schema.yml"
+    enabled = true
   schemas:
     users.schema.yml: |
       version: 1
@@ -64,35 +35,26 @@ config:
       primary_key: id
       fields:
         - keyword: email
+          required: true
+secrets:
+  create: true
+  data:
+    DATABASE_URL: postgres://flusso:…@pg:5432/app
+    PRIMARY_OPENSEARCH_URL: https://opensearch:9200
+    FLUSSO_ADMIN_PASSWORD: change-me
 ```
 
-## How config and secrets flow
+## Key values
 
-- **Config** (`config.*`): with `config.create=true` the chart renders
-  `flussoToml` and every entry under `schemas` into a ConfigMap, mounts it at
-  `config.mountPath` (default `/config`), and runs `flusso run --config
-  /config/flusso.toml`. Schema `schema =` paths resolve relative to that file —
-  i.e. against the `schemas` keys. Use `config.existingConfigMap` to bring your
-  own, or set `config.create=false` with no ConfigMap when the image already
-  carries a baked `/app/flusso.lock`. In the `--config` modes `run` recompiles
-  the lock from the config on each start; the chart points `--lock` at a writable
-  `lock-state` emptyDir (the root filesystem is read-only), so the ConfigMap
-  remains the source of truth and the recompiled lock is ephemeral.
-- **Secrets** (`secrets.*`): connection/sink URLs in the config should be
-  `{ env = "VAR" }` references. The matching env vars come from a Secret mounted
-  via `envFrom` — either managed here (`secrets.create=true` + `secrets.data`)
-  or your own (`secrets.existingSecret`). So no secret ever lands in the
-  ConfigMap.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `image.repository` / `image.tag` | `alias2k/flusso` / chart `appVersion` | Docker Hub; `ghcr.io/alias2k/flusso` mirrors it |
+| `config.create` / `config.flussoToml` / `config.schemas` | `true` / sample / `{}` | render the config into a ConfigMap mounted at `/config` |
+| `config.existingConfigMap` | `""` | bring your own |
+| `secrets.create` / `secrets.data` / `secrets.existingSecret` | `false` / `{}` / `""` | the env-var Secret, mounted with `envFrom` |
+| `run.slot` / `run.publication` / `run.skipBackfill` / `run.queueCapacity` / `run.lagPollSecs` / `run.extraArgs` | `flusso` / `flusso` / `false` / `1024` / `15` / `[]` | `flusso run` flags |
+| `http.port` / `http.privatePort` | `9464` / `9465` | public surface, Service-exposed / private surface, localhost only |
+| `metrics.serviceMonitor.enabled` | `false` | Prometheus Operator ServiceMonitor |
+| `resources`, `nodeSelector`, `tolerations`, `affinity` | `{}` | scheduling |
 
-## Configuration is also available via env vars
-
-Every `flusso` CLI flag also reads a `FLUSSO_*` environment variable (the flag wins when
-both are set). The chart sets flags explicitly under `run.*`, but you can equally drive
-them through `env`/`secrets` — e.g. `FLUSSO_SLOT`, `FLUSSO_PUBLICATION`,
-`FLUSSO_PUBLIC_ADDRESS`, `FLUSSO_SKIP_BACKFILL`.
-
-## Metrics
-
-The pod serves Prometheus metrics on the public surface at `:9464/metrics`. With the
-Prometheus Operator installed, set `metrics.serviceMonitor.enabled=true` to scrape it.
-For plain Prometheus, scrape the Service directly.
+`values.yaml` documents every key. The full walkthrough, including how config and secrets flow and how to reach the private surface, is the manual's [Deploy with Helm](https://alias2k.github.io/flusso/deploy/helm.html).

@@ -33,7 +33,7 @@ pub struct ConfigToml {
     /// deployments can share one OpenSearch cluster without colliding. The
     /// `--index-prefix` flag / `FLUSSO_INDEX_PREFIX` env var override it at
     /// runtime (which win); see the [configuration
-    /// guide](https://alias2k.github.io/flusso/guides/configuration.html). Empty
+    /// reference](https://alias2k.github.io/flusso/reference/config-toml.html#prefix). Empty
     /// (the default) means no prefix.
     #[serde(default)]
     pub prefix: String,
@@ -43,7 +43,7 @@ pub struct ConfigToml {
     pub on_error: schema_core::FailurePolicy,
     /// Bind addresses for the operational HTTP surfaces. The binary layers
     /// `FLUSSO_*` env vars and CLI flags on top (which win); see the
-    /// [configuration guide](https://alias2k.github.io/flusso/guides/configuration.html).
+    /// [`[server]` reference](https://alias2k.github.io/flusso/reference/config-toml.html#server).
     /// Omitted from serialized output when no address is set.
     #[serde(default, skip_serializing_if = "Server::is_empty")]
     pub server: Server,

@@ -9,6 +9,10 @@ name: pages
 # tracks the current code; the schema tree is rebuilt from EVERY release tag on every
 # run (idempotent), so a new release never drops older versions.
 #
+# The manual used to live under /docs/ (issue #117 moved it to the root so the
+# deep links across the repo and the crate docs resolve). Redirect stubs are
+# written at the old /docs/… paths so links published before the move still land.
+#
 # Schema pinning — a `# yaml-language-server: $schema=…` modeline (and the `.taplo.toml`
 # rule) can target the schema matching the running flusso:
 #
@@ -58,12 +62,29 @@ jobs:
         with:
           tool: mdbook
 
-      - name: Build the mdBook manual
+      - name: Build the mdBook manual at the site root
         run: |
           set -euo pipefail
           mdbook build docs
           mkdir -p site
-          cp -r docs/book site/docs
+          cp -r docs/book/. site/
+
+      - name: Redirect the pre-#117 /docs/ paths
+        run: |
+          set -euo pipefail
+          stub() {  # stub <old path under site/docs> <new path relative to that file>
+            mkdir -p "site/docs/$(dirname "$1")"
+            printf '<!doctype html><meta charset=utf-8><meta http-equiv="refresh" content="0; url=%s"><link rel=canonical href="%s"><title>flusso</title><p>Moved to <a href="%s">%s</a>.</p>\n' \
+              "$2" "$2" "$2" "$2" > "site/docs/$1"
+          }
+          stub index.html                    ../index.html
+          stub introduction.html             ../introduction.html
+          stub getting-started.html          ../start/quickstart.html
+          stub guides/schema-authoring.html  ../../author/first-schema.html
+          stub guides/designing.html         ../../author/design-visually.html
+          stub guides/configuration.html     ../../deploy/flusso-toml.html
+          stub guides/querying.html          ../../query/overview.html
+          stub guides/deploying.html         ../../deploy/docker.html
 
       - name: Assemble versioned schema site from release tags
         run: |
@@ -98,21 +119,16 @@ jobs:
           git show "flusso-schema-index-yaml-v${latest}:${idx}"  > site/schemas/latest/index.schema.yml
           git show "flusso-schema-config-toml-v${latest}:${cfg}" > site/schemas/latest/config.schema.json
           {
-            echo "<!doctype html><meta charset=utf-8><title>flusso</title>"
-            echo "<h1>flusso</h1>"
-            echo "<p>Keep OpenSearch in sync with Postgres, driven by declarative config.</p>"
-            echo "<h2><a href=\"docs/\">📖 Documentation</a></h2>"
-            echo "<p>The full manual — getting started, authoring schemas, configuring a"
-            echo "deployment, querying, and deploying.</p>"
-            echo "<h2>Editor-assist schemas</h2>"
+            echo "<!doctype html><meta charset=utf-8><title>flusso editor schemas</title>"
+            echo "<h1>flusso editor-assist schemas</h1>"
             echo "<p>Pin a <code># yaml-language-server: \$schema=…</code> modeline (or a <code>.taplo.toml</code> rule) at"
             echo "<code>schemas/&lt;ref&gt;/…</code> — <code>latest</code>, a minor like <code>v0.3</code>"
-            echo "(newest patch, recommended), or an exact <code>v0.3.0</code>.</p><ul>"
+            echo "(newest patch, recommended), or an exact <code>v0.3.0</code>. The <a href=\"../\">manual</a> explains each key.</p><ul>"
             for d in $(ls -1 site/schemas | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -rV); do
-              echo "<li>${d}: <a href=\"schemas/${d}/index.schema.yml\">index</a> · <a href=\"schemas/${d}/config.schema.json\">config</a></li>"
+              echo "<li>${d}: <a href=\"${d}/index.schema.yml\">index</a> · <a href=\"${d}/config.schema.json\">config</a></li>"
             done
             echo "</ul>"
-          } > site/index.html
+          } > site/schemas/index.html
 
       - uses: actions/configure-pages@v5
         with:

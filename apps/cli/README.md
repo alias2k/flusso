@@ -47,8 +47,8 @@ Common `run` flags:
 | `--private-address` | `FLUSSO_PRIVATE_ADDRESS` | — | Bind the private control surface. |
 | `--index-prefix` | `FLUSSO_INDEX_PREFIX` | — | Prefix every owned index name. |
 
-The full flag set lives in
-[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
+The full flag set lives in the manual's
+[CLI reference](https://alias2k.github.io/flusso/reference/cli.html).
 
 ```sh
 flusso --help
@@ -66,7 +66,7 @@ flusso run    --skip-backfill                       # resume live capture only
 both are set) — so the binary configures cleanly from a container or Helm chart. This is
 separate from the config's reserved connection/secret variables (`DATABASE_URL`,
 `<SINK>_OPENSEARCH_URL`, …), all centralized in
-[Configuring a deployment](https://alias2k.github.io/flusso/guides/configuration.html).
+[Environment variables](https://alias2k.github.io/flusso/reference/environment.html).
 
 ## HTTP surfaces
 
