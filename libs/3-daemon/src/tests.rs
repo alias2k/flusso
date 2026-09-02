@@ -104,8 +104,12 @@ struct LaggySource(Option<u64>);
 
 #[async_trait]
 impl ChangeCapture for LaggySource {
-    async fn prepare(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> sources_core::Result<Continuity> {
         Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> sources_core::Result<()> {
+        Ok(())
     }
 
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
@@ -204,8 +208,12 @@ struct ScriptedSource {
 
 #[async_trait]
 impl ChangeCapture for ScriptedSource {
-    async fn prepare(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> sources_core::Result<Continuity> {
         Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> sources_core::Result<()> {
+        Ok(())
     }
 
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {

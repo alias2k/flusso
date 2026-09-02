@@ -50,8 +50,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/1-s
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
   advancing from keepalives/filtered commits while watched tables are idle, so unrelated
-  writes don't pin WAL retention — issue #111; `continuity`: `prepare` reports `Fresh` exactly
-  when it created the slot, `Resumed` otherwise — issue #120) plus `engine`'s `wal` and `pipeline`
+  writes don't pin WAL retention — issue #111; `continuity`: `continuity()` is read-only and
+  reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120) plus
+  `engine`'s `wal` and `pipeline`
   binaries (the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
   the engine, or it can't be published before the engine and the layering is violated);
@@ -258,21 +259,27 @@ touching the loop. Key invariants to preserve when editing the engine:
   mapping, then (unless `--skip-backfill`) asks each sink `is_seeded`; unseeded indexes get
   their root tables snapshotted through the same queue→resolve→build→sink path, scoped so a
   seeded index sharing a table isn't rewritten, then `mark_seeded`.
-- **…but a seed is only as good as the stream behind it (issue #120).** The very first call
-  of a run is `ChangeCapture::prepare` → `Continuity::{Resumed, Fresh}` (`sources-core`): the
-  source establishes its durable resume point (Postgres: creates the slot, *before* any
-  snapshot) and says whether it already existed. On `Fresh`, after `ensure_index`, the engine
-  warns and stages `sink.reindex` + `ensure_index` for every index still `is_seeded` (a fresh
-  generation, so rows gone from the source are dropped on the swap; never an in-place reseed),
-  then the normal backfill refills them. Only *seeded* indexes are staged (an unseeded one is
-  already being rebuilt; staging again would orphan a generation — #121). Under
-  `--skip-backfill` it warns only. `prepare` is a required trait method — a source must state
-  its continuity contract. The sink-side half: the OpenSearch `ensure_index` retracts a seeded
+- **…but a seed is only as good as the stream behind it (issue #120).** Run order is
+  `source.continuity()` → `ensure_index` all → (on `Fresh`) stage rebuilds → `source.prepare()`
+  → backfill → live. `ChangeCapture::continuity` → `Continuity::{Resumed, Fresh}`
+  (`sources-core`) is **read-only** (Postgres: does the slot exist?); `prepare` creates the
+  resume point. On `Fresh` the engine warns and stages `sink.reindex` + `ensure_index` for every
+  index still `is_seeded` (a fresh generation, so rows gone from the source are dropped on the
+  swap; never an in-place reseed), then the normal backfill refills them. **The order is
+  load-bearing twice**: rebuilds are staged *before* `prepare` creates the slot (a crash in
+  between comes back `Fresh` and re-stages, instead of `Resumed` with stale seeds trusted), and
+  `prepare` runs *before* the snapshot (a write between snapshot and first live read is
+  covered). Only *seeded* indexes are staged (an unseeded one is already being rebuilt; staging
+  again would orphan a generation — #121). Under `--skip-backfill` it warns only. Both trait
+  methods are required — a source must state its continuity contract. `FanOutSink` forwards
+  `reindex` (with the no-op default, `is_seeded` would stay `true` and the rebuild would
+  silently never happen). The sink-side half: the OpenSearch `ensure_index` retracts a seeded
   marker whose generation index is missing (warn + rewrite unseeded, recreate empty), so
   deleting the generation is a "rebuild on next start" signal. Guarded by the engine's
-  `fresh_source_*`/`resumed_source_*`/`skip_backfill_with_a_fresh_source_*` unit tests, the
-  sink's `deleted_generation_is_recreated_and_reported_unseeded` e2e, the Postgres
-  `continuity` e2e, and the two `restart_*` cases in `engine`'s `pipeline` e2e.
+  `fresh_source_*` (incl. the `reindex → prepare → snapshot` order)/`resumed_source_*`/
+  `skip_backfill_with_a_fresh_source_*` unit tests, the sink's
+  `deleted_generation_is_recreated_and_reported_unseeded` e2e, the Postgres `continuity` e2e,
+  and the two `restart_*` cases in `engine`'s `pipeline` e2e.
 - `BatchPolicy` (default 256 changes / 50ms) controls flush grouping; `max_changes: 1`
   reproduces flush-per-change.
 - **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:

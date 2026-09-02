@@ -110,9 +110,9 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     ///
     /// What the sink can't know is whether the *source* still remembers the
     /// changes since that seed. The engine checks that separately
-    /// ([`ChangeCapture::prepare`](https://docs.rs/flusso-sources-core)) and,
-    /// when the source's resume point had to be recreated, treats every `true`
-    /// here as stale and calls [`reindex`](Self::reindex) on it.
+    /// ([`ChangeCapture::continuity`](https://docs.rs/flusso-sources-core)) and,
+    /// when the source's resume point is gone, treats every `true` here as
+    /// stale and calls [`reindex`](Self::reindex) on it.
     async fn is_seeded(&self, _: &IndexName) -> Result<bool> {
         Ok(false)
     }

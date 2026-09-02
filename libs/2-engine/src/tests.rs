@@ -30,8 +30,12 @@ struct MockSource {
 
 #[async_trait]
 impl ChangeCapture for MockSource {
-    async fn prepare(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> sources_core::Result<Continuity> {
         Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> sources_core::Result<()> {
+        Ok(())
     }
 
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
@@ -453,16 +457,18 @@ async fn confirms_no_ack_before_its_flush() {
     assert_eq!(observed.get(&3), Some(&2), "seq 3 confirmed after flush 2");
 }
 
-/// A source whose `live` stream is empty (so `run` returns), whose `prepare`
+/// A source whose `live` stream is empty (so `run` returns), whose `continuity`
 /// reports a configurable [`Continuity`] (`Resumed` by default), and whose
 /// `snapshot` records that it was called, with what tables, and replays a
-/// fixed set of rows.
+/// fixed set of rows. `prepare` and `snapshot` append to a shared `events` log
+/// (a [`SeedSink`] can share it) so a test can assert their order.
 #[derive(Debug)]
 struct SeedSource {
     rows: Mutex<Option<Vec<Change>>>,
     called: Arc<AtomicBool>,
     tables: Arc<Mutex<Vec<SnapshotTable>>>,
     continuity: Continuity,
+    events: Arc<Mutex<Vec<String>>>,
 }
 
 impl SeedSource {
@@ -472,6 +478,7 @@ impl SeedSource {
             called: Arc::new(AtomicBool::new(false)),
             tables: Arc::new(Mutex::new(Vec::new())),
             continuity: Continuity::Resumed,
+            events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -479,12 +486,22 @@ impl SeedSource {
         self.continuity = continuity;
         self
     }
+
+    fn with_events(mut self, events: &Arc<Mutex<Vec<String>>>) -> Self {
+        self.events = Arc::clone(events);
+        self
+    }
 }
 
 #[async_trait]
 impl ChangeCapture for SeedSource {
-    async fn prepare(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> sources_core::Result<Continuity> {
         Ok(self.continuity)
+    }
+
+    async fn prepare(&self) -> sources_core::Result<()> {
+        self.events.lock().unwrap().push("prepare".to_owned());
+        Ok(())
     }
 
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
@@ -496,6 +513,7 @@ impl ChangeCapture for SeedSource {
         tables: &[SnapshotTable],
     ) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
         self.called.store(true, Ordering::SeqCst);
+        self.events.lock().unwrap().push("snapshot".to_owned());
         *self.tables.lock().unwrap() = tables.to_vec();
         let rows = self.rows.lock().unwrap().take().unwrap_or_default();
         Ok(Box::pin(stream::iter(
@@ -507,12 +525,13 @@ impl ChangeCapture for SeedSource {
 
 /// A sink with a settable seeded-state that records `mark_seeded` and `reindex`
 /// calls and the upserts it receives. `reindex` flips it unseeded, as a real
-/// sink staging a rebuild does.
+/// sink staging a rebuild does, and appends to the shared `events` log.
 #[derive(Debug)]
 struct SeedSink {
     seeded: AtomicBool,
     marked: Arc<Mutex<Vec<String>>>,
     reindexed: Arc<Mutex<Vec<String>>>,
+    events: Arc<Mutex<Vec<String>>>,
     ops: Arc<Mutex<Vec<String>>>,
 }
 
@@ -522,8 +541,14 @@ impl SeedSink {
             seeded: AtomicBool::new(seeded),
             marked: Arc::clone(marked),
             reindexed: Arc::new(Mutex::new(Vec::new())),
+            events: Arc::new(Mutex::new(Vec::new())),
             ops: Arc::clone(ops),
         }
+    }
+
+    fn with_events(mut self, events: &Arc<Mutex<Vec<String>>>) -> Self {
+        self.events = Arc::clone(events);
+        self
     }
 }
 
@@ -564,10 +589,9 @@ impl Sink for SeedSink {
     }
 
     async fn reindex(&self, mapping: &IndexMapping) -> sinks_core::Result<()> {
-        self.reindexed
-            .lock()
-            .unwrap()
-            .push(mapping.index.as_ref().to_owned());
+        let index = mapping.index.as_ref().to_owned();
+        self.events.lock().unwrap().push(format!("reindex {index}"));
+        self.reindexed.lock().unwrap().push(index);
         self.seeded.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -632,12 +656,14 @@ async fn fresh_source_rebuilds_seeded_indexes_into_a_new_generation() {
     // created: whatever changed since that seed is gone. The engine must stage a
     // from-scratch rebuild (reindex, not an in-place reseed) and then backfill.
     let acks = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
     let source = SeedSource::new(vec![upsert_change(1, 0, &acks), upsert_change(3, 1, &acks)])
-        .with_continuity(Continuity::Fresh);
+        .with_continuity(Continuity::Fresh)
+        .with_events(&events);
     let called = Arc::clone(&source.called);
     let ops = Arc::new(Mutex::new(Vec::new()));
     let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
+    let sink = Arc::new(SeedSink::new(true, &marked, &ops).with_events(&events));
     let reindexed = Arc::clone(&sink.reindexed);
 
     Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
@@ -649,6 +675,18 @@ async fn fresh_source_rebuilds_seeded_indexes_into_a_new_generation() {
         *reindexed.lock().unwrap(),
         vec!["users".to_owned()],
         "a seeded index is staged for a rebuild when continuity is lost"
+    );
+    // The rebuild is staged (durably, at the sink) *before* the resume point
+    // is created, so a crash in between re-stages rather than trusting the
+    // stale seed; and the resume point exists before the snapshot is taken.
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            "reindex users".to_owned(),
+            "prepare".to_owned(),
+            "snapshot".to_owned()
+        ],
+        "stage the rebuild, then establish the resume point, then snapshot"
     );
     assert!(
         called.load(Ordering::SeqCst),

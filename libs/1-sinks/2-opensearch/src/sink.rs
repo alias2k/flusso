@@ -75,11 +75,6 @@ impl Sink for OpensearchSink {
         if self.index_exists(&index).await? {
             debug!(index, "generation exists; leaving its mapping untouched");
         } else {
-            // A seed marker without the generation it describes is a
-            // contradiction, and the marker is the one that is wrong: the data is
-            // gone. Retract it before recreating, so the engine reseeds the empty
-            // index instead of serving it — deleting the generation is how an
-            // operator asks for a rebuild.
             if seeded {
                 warn!(
                     index,

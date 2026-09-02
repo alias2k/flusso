@@ -10,9 +10,10 @@
 //! 1. **Resume is internal.** No position or cursor crosses this API. Each
 //!    mechanism owns its resume state — trivially so for WAL, where the
 //!    replication slot is durable on the server. The one thing that *does*
-//!    cross is [`Continuity`]: [`ChangeCapture::prepare`] establishes the resume
-//!    point up front and says whether it was already there, because a seed the
-//!    sink recorded earlier is only valid while the point that fed it survives.
+//!    cross is [`Continuity`]: [`ChangeCapture::continuity`] says, read-only,
+//!    whether the resume point survived, because a seed the sink recorded
+//!    earlier is only valid while the point that fed it does;
+//!    [`ChangeCapture::prepare`] then establishes it before any snapshot.
 //! 2. **Live and snapshot are separate capabilities.**
 //!    [`ChangeCapture::live`] streams ongoing changes;
 //!    [`ChangeCapture::snapshot`] reads current rows for a backfill. The engine

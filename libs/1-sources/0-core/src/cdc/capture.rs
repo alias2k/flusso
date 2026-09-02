@@ -6,7 +6,7 @@ use crate::{Result, SnapshotTable};
 use super::Change;
 
 /// Whether a [`ChangeCapture`]'s durable resume point survived from the
-/// previous run — the answer to [`ChangeCapture::prepare`].
+/// previous run — the answer to [`ChangeCapture::continuity`].
 ///
 /// A seed recorded by an earlier run is only trustworthy if every change since
 /// then is still observable. That holds exactly when the resume point that fed
@@ -17,9 +17,10 @@ pub enum Continuity {
     /// The resume point already existed: the stream continues where the last
     /// run confirmed, so existing seeds stay valid.
     Resumed,
-    /// The resume point did not exist and was created now (a first run, a
-    /// replaced database, a dropped replication slot). Anything before this
-    /// instant is unobservable, so every earlier seed is stale.
+    /// The resume point does not exist (a first run, a replaced database, a
+    /// dropped replication slot): [`prepare`](ChangeCapture::prepare) will
+    /// create it from *now*, so anything earlier is unobservable and every
+    /// earlier seed is stale.
     Fresh,
 }
 
@@ -29,11 +30,13 @@ pub enum Continuity {
 /// The mechanism exposes three capabilities; the engine decides when to use
 /// each:
 ///
-/// - [`prepare`](Self::prepare) establishes the mechanism's durable resume
-///   point and reports whether it already existed ([`Continuity`]). The engine
-///   calls it first, before any snapshot, so a seed can never outrun the
-///   position that will follow it — and so a resume point that had to be
-///   *created* is known to invalidate every earlier seed.
+/// - [`continuity`](Self::continuity) reports, read-only, whether the
+///   mechanism's durable resume point survived from the last run
+///   ([`Continuity`]). The engine asks this first: a resume point that is
+///   *missing* invalidates every seed recorded before it.
+/// - [`prepare`](Self::prepare) establishes that resume point. The engine calls
+///   it after the sinks have been reconciled and before any snapshot, so a seed
+///   can never outrun the position that will follow it.
 /// - [`live`](Self::live) streams ongoing changes, resuming from the
 ///   mechanism's own durable position (a replication slot's
 ///   `confirmed_flush_lsn`, a poll cursor, …). No position is threaded through
@@ -55,25 +58,32 @@ pub enum Continuity {
 /// rather than borrowing from `self`.
 #[async_trait]
 pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
-    /// Establish the durable resume point and report whether it was already
-    /// there.
+    /// Whether the durable resume point survived from the previous run.
+    /// **Read-only**: this must not create anything.
     ///
-    /// The engine calls this **first**, before any snapshot or live stream. Two
-    /// guarantees hang off it:
+    /// The engine asks this **first**. [`Continuity::Fresh`] means no earlier
+    /// seed can be trusted — whatever changed before the resume point existed is
+    /// gone for good — so the engine stages a rebuild of every index the sink
+    /// still reports as seeded *before* calling [`prepare`](Self::prepare). That
+    /// order is what makes the answer crash-safe: the rebuilds are durably
+    /// staged at the sink before the resume point comes into existence, so a
+    /// crash in between comes back as `Fresh` again and stages them again,
+    /// rather than as `Resumed` with the stale seeds now trusted.
     ///
-    /// - After it returns, every change from this instant on is observable
-    ///   through [`live`](Self::live) — so a backfill that snapshots *after*
-    ///   `prepare` can never miss a write that landed between the snapshot and
-    ///   the first live read.
-    /// - [`Continuity::Fresh`] tells the engine no earlier seed can be trusted:
-    ///   whatever changed before the resume point existed is gone for good, so
-    ///   the engine rebuilds every index the sink still reports as seeded.
+    /// Required (no default) because it is a statement about correctness, not
+    /// an optional capability — a mechanism with no durable position of its own
+    /// must still say so explicitly.
+    async fn continuity(&self) -> Result<Continuity>;
+
+    /// Establish the durable resume point (idempotent: a point that already
+    /// exists is left alone).
     ///
-    /// Idempotent: a second call finds the point it created and reports
-    /// [`Continuity::Resumed`]. Required (no default) because it is a statement
-    /// about correctness, not an optional capability — a mechanism with no
-    /// durable position of its own must still say so explicitly.
-    async fn prepare(&self) -> Result<Continuity>;
+    /// The engine calls this after [`continuity`](Self::continuity) and the
+    /// sink reconciliation it drives, and **before any snapshot**: once it
+    /// returns, every change from this instant on is observable through
+    /// [`live`](Self::live), so a backfill that snapshots afterwards can never
+    /// miss a write that landed between the snapshot and the first live read.
+    async fn prepare(&self) -> Result<()>;
 
     /// Connect, ensure setup, resume from the last confirmed point, and stream
     /// live changes.

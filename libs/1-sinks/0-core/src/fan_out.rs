@@ -7,11 +7,14 @@ use crate::{FlushReport, Result, Sink};
 
 /// Dispatches every sink operation to a set of inner sinks in declaration order.
 ///
-/// `ensure_index`, `upsert`, `delete`, and `flush` are sent to each sink
-/// sequentially; the first error short-circuits. `is_seeded` returns `true` only when **all**
-/// inner sinks report the index as seeded (AND semantics: every destination
-/// must hold the data before a backfill is considered complete). `mark_seeded`
-/// is called on all inner sinks.
+/// `ensure_index`, `upsert`, `delete`, `flush`, and `reindex` are sent to each
+/// sink sequentially; the first error short-circuits. `is_seeded` returns `true`
+/// only when **all** inner sinks report the index as seeded (AND semantics:
+/// every destination must hold the data before a backfill is considered
+/// complete). `mark_seeded` is called on all inner sinks. Forwarding `reindex`
+/// is what lets the engine's stale-seed rebuild reach every destination — with
+/// the trait's no-op default here, `is_seeded` would keep answering `true` and
+/// the rebuild would silently never happen.
 #[derive(Debug, Clone)]
 pub struct FanOutSink {
     sinks: Vec<Arc<dyn Sink>>,
@@ -68,6 +71,13 @@ impl Sink for FanOutSink {
     async fn mark_seeded(&self, index: &IndexName) -> Result<()> {
         for sink in &self.sinks {
             sink.mark_seeded(index).await?;
+        }
+        Ok(())
+    }
+
+    async fn reindex(&self, mapping: &IndexMapping) -> Result<()> {
+        for sink in &self.sinks {
+            sink.reindex(mapping).await?;
         }
         Ok(())
     }

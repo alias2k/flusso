@@ -118,8 +118,12 @@ struct BackfillOnly {
 
 #[async_trait]
 impl ChangeCapture for BackfillOnly {
-    async fn prepare(&self) -> SourceResult<Continuity> {
+    async fn continuity(&self) -> SourceResult<Continuity> {
         Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> SourceResult<()> {
+        Ok(())
     }
 
     async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
@@ -171,8 +175,12 @@ struct BurstCapture {
 
 #[async_trait]
 impl ChangeCapture for BurstCapture {
-    async fn prepare(&self) -> SourceResult<Continuity> {
+    async fn continuity(&self) -> SourceResult<Continuity> {
         Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> SourceResult<()> {
+        Ok(())
     }
 
     async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
