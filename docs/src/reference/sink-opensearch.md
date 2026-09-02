@@ -28,7 +28,7 @@ A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk opt
 | --- | --- |
 | OpenSearch 2.x | The query side also speaks Elasticsearch 7.x. |
 | A reachable HTTP(S) endpoint | The `url`. |
-| A user that can create, alias, write, and delete flusso's indexes | Plus the small hidden `{prefix}flusso_meta` index. |
+| A user that can create, alias, write, and delete flusso's indexes | Plus the small `{prefix}flusso_meta` index. |
 | `analysis-icu` on every node | Only with `text_analysis = "icu"`. |
 
 ## Index naming

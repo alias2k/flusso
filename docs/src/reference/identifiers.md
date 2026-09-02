@@ -19,7 +19,7 @@ Loading a `flusso.toml` and its schemas fails with a specific error when any of 
 - Every table, column, schema, index, and sink name is a Postgres identifier; every document key is a field name.
 - Each field has exactly one type key, and only the siblings that type allows.
 - A join carries exactly the key sibling its verb implies: `column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, `through` for `many_to_many`. To-one verbs take no `limit`; `belongs_to` takes no `order_by`.
-- An aggregate names exactly one of `foreign_key` or `through`; `sum`/`avg`/`min`/`max` carry a `column`; `sum`/`min`/`max` carry a `value_type`; `ids` carries an `element_type` and nothing else; `element_type` appears nowhere else.
+- An aggregate names exactly one of `foreign_key` or `through`; `sum`/`avg`/`min`/`max` carry a `column`; `sum`/`min`/`max` carry a `value_type`; `ids` carries a scalar `element_type` (not `geo` or `custom`); `element_type` appears on no other op.
 - `required` appears only on scalars, `geo`, `map`, and to-one joins.
 - A `default` is a scalar.
 - A `map`'s `values` is a leaf kind.
