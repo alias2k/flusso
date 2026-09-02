@@ -25,6 +25,12 @@
 //! - [`backfill_indexes_active_rows_and_skips_soft_deleted`] — the initial seed:
 //!   rows that pre-date the slot are indexed by backfill, except soft-deleted
 //!   ones, which must never appear.
+//! - [`restart_reseeds_when_the_generation_index_was_deleted`] and
+//!   [`restart_rebuilds_when_the_replication_slot_was_dropped`] — the two ways a
+//!   seed marker can lie (issue #120): the generation index it names is gone, or
+//!   the replication slot that fed it is gone. Either way a restart must refill
+//!   the index rather than trust the marker; the slot case must also drop rows
+//!   that no longer exist at the source, which only a fresh generation can do.
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -328,6 +334,158 @@ async fn backfill_indexes_active_rows_and_skips_soft_deleted() {
     live.shutdown();
 }
 
+// ─────────────────── tests 4 + 5: the seed marker can lie ────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn restart_reseeds_when_the_generation_index_was_deleted() {
+    // Issue #120, case A: the operator deletes the generation index between
+    // runs. The seed marker still says "seeded"; the next run must not believe
+    // it. Deleting the index is the "rebuild this" signal.
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+
+    create_table(
+        &pg.pool,
+        "CREATE TABLE things (id int PRIMARY KEY, name text)",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "INSERT INTO things (id, name) VALUES (1, 'one'), (2, 'two')",
+    )
+    .await;
+
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("things"),
+        simple_schema("things", None),
+    )]));
+    let first = start_pipeline(&pg, &os, spec.clone(), &["things"]).await;
+    first.await_seeded(1).await;
+    first
+        .assert_eventually("things", "1", Some("one"))
+        .await
+        .unwrap_or_else(|got| panic!("[things] row 1 should be seeded, saw {got}"));
+    let generation = first
+        .alias_targets("things")
+        .await
+        .pop()
+        .expect("the convenience alias points at the seeded generation");
+    first.shutdown_and_release(&pg).await;
+
+    // ── The operator deletes the generation index while flusso is stopped ────
+    let status = reqwest::Client::new()
+        .delete(format!("{}/{generation}", os.url))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {generation} returned {status}");
+
+    // ── Restart: the marker is contradicted by the index → reseed ────────────
+    let second = spawn_pipeline(&pg, &os, spec).await;
+    second
+        .assert_eventually("things", "1", Some("one"))
+        .await
+        .unwrap_or_else(|got| panic!("[things] row 1 should be reseeded, saw {got}"));
+    second
+        .assert_eventually("things", "2", Some("two"))
+        .await
+        .unwrap_or_else(|got| panic!("[things] row 2 should be reseeded, saw {got}"));
+    assert_eq!(
+        second.alias_targets("things").await,
+        vec![generation],
+        "the recreated generation keeps its number and serves the alias"
+    );
+    second.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn restart_rebuilds_when_the_replication_slot_was_dropped() {
+    // Issue #120, case B: the source is replaced. Modelled as "the slot is gone
+    // and the data changed while flusso was down" — a dropped slot is what a
+    // dropdb/createdb or a fresh cluster leaves behind, since Postgres refuses
+    // to drop a database a logical slot is bound to. The index still holds the
+    // old rows; the restart must rebuild it from the *current* rows, which
+    // means adding what's new and dropping what's gone.
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+
+    create_table(
+        &pg.pool,
+        "CREATE TABLE things (id int PRIMARY KEY, name text)",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "INSERT INTO things (id, name) VALUES (1, 'one'), (3, 'three')",
+    )
+    .await;
+
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("things"),
+        simple_schema("things", None),
+    )]));
+    let first = start_pipeline(&pg, &os, spec.clone(), &["things"]).await;
+    first.await_seeded(1).await;
+    first
+        .assert_eventually("things", "3", Some("three"))
+        .await
+        .unwrap_or_else(|got| panic!("[things] row 3 should be seeded, saw {got}"));
+    let old_generation = first
+        .alias_targets("things")
+        .await
+        .pop()
+        .expect("the convenience alias points at the seeded generation");
+    first.shutdown_and_release(&pg).await;
+
+    // ── While flusso is down: the slot vanishes and the data moves on ────────
+    exec(&pg.pool, "SELECT pg_drop_replication_slot('flusso')").await;
+    exec(&pg.pool, "DELETE FROM things WHERE id = 3").await;
+    exec(&pg.pool, "INSERT INTO things (id, name) VALUES (4, 'four')").await;
+
+    // ── Restart: a fresh slot → the seed can't be trusted → rebuild ──────────
+    let second = spawn_pipeline(&pg, &os, spec).await;
+    let new_generation = second
+        .await_alias_moved_off("things", &old_generation)
+        .await;
+    assert_ne!(new_generation, old_generation);
+    second
+        .assert_eventually("things", "4", Some("four"))
+        .await
+        .unwrap_or_else(|got| panic!("[things] row 4 should be in the rebuilt index, saw {got}"));
+    second
+        .assert_eventually("things", "1", Some("one"))
+        .await
+        .unwrap_or_else(|got| panic!("[things] row 1 should survive the rebuild, saw {got}"));
+    second
+        .assert_eventually("things", "3", None)
+        .await
+        .unwrap_or_else(|got| {
+            panic!("[things] row 3 no longer exists at the source and must be gone, saw {got}")
+        });
+    let old_index_exists = reqwest::Client::new()
+        .head(format!("{}/{old_generation}", os.url))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success();
+    assert!(
+        !old_index_exists,
+        "the superseded generation is dropped once the rebuilt one is swapped in"
+    );
+
+    // ── And live capture works on the new slot ───────────────────────────────
+    exec(&pg.pool, "INSERT INTO things (id, name) VALUES (5, 'five')").await;
+    second
+        .assert_eventually("things", "5", Some("five"))
+        .await
+        .unwrap_or_else(|got| panic!("[things] live insert after the rebuild, saw {got}"));
+    second.shutdown();
+}
+
 // ───────────────────────────────── harness ───────────────────────────────────
 
 /// A running Postgres with logical replication and a connection pool.
@@ -346,20 +504,33 @@ struct Os {
 
 /// A live pipeline: the engine task plus a client for reading the index back.
 struct Pipeline {
-    engine: tokio::task::JoinHandle<engine::Result<()>>,
+    engine: tokio::task::JoinHandle<()>,
+    /// How the engine run ended, once it has. Every poll below checks it so a
+    /// run that stopped on an error fails the test immediately, with the error,
+    /// instead of timing out on an assertion that can never become true.
+    outcome: Arc<std::sync::Mutex<Option<String>>>,
     http: reqwest::Client,
     os_url: String,
 }
 
 impl Pipeline {
-    /// Wait until the engine has stood up and seeded every index — finished
-    /// `ensure_index` + backfill and gone live. Issuing a change before that
-    /// races startup (the change predates the live stream), which is a harness
-    /// artifact, not what these tests probe. Each index writes one `flusso_meta`
-    /// doc when marked seeded.
+    fn fail_if_stopped(&self) {
+        if let Some(outcome) = self.outcome.lock().unwrap().as_deref() {
+            panic!("the engine stopped: {outcome}");
+        }
+    }
+
+    /// Wait until the engine has seeded `want` indexes — finished `ensure_index`
+    /// + backfill and marked each seeded. Issuing a change before that races
+    /// startup (the change predates the live stream), which is a harness
+    /// artifact, not what these tests probe. Only markers with `seeded: true`
+    /// count: `ensure_index` writes an *unseeded* marker up front, so a bare doc
+    /// count would return while the backfill is still running (and a shutdown
+    /// then could beat `mark_seeded`, leaving the index unseeded for the next run).
     async fn await_seeded(&self, want: usize) {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
+            self.fail_if_stopped();
             let _ = self
                 .http
                 .post(format!("{}/flusso_meta/_refresh", self.os_url))
@@ -367,7 +538,8 @@ impl Pipeline {
                 .await;
             let count = self
                 .http
-                .get(format!("{}/flusso_meta/_count", self.os_url))
+                .post(format!("{}/flusso_meta/_count", self.os_url))
+                .json(&serde_json::json!({ "query": { "term": { "seeded": true } } }))
                 .send()
                 .await
                 .ok()
@@ -386,7 +558,7 @@ impl Pipeline {
             }
             assert!(
                 Instant::now() < deadline,
-                "engine did not seed {want} indexes in time (flusso_meta count = {count})"
+                "engine did not seed {want} indexes in time (seeded markers = {count})"
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -403,6 +575,7 @@ impl Pipeline {
     ) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
+            self.fail_if_stopped();
             let observed = match self.fetch_name(index, id).await {
                 Some(name) => name,
                 None => "absent".to_owned(),
@@ -446,13 +619,92 @@ impl Pipeline {
         )
     }
 
+    /// The concrete indexes the alias `alias` currently points at.
+    async fn alias_targets(&self, alias: &str) -> Vec<String> {
+        let resp = self
+            .http
+            .get(format!("{}/_alias/{alias}", self.os_url))
+            .send()
+            .await
+            .unwrap();
+        if !resp.status().is_success() {
+            return Vec::new();
+        }
+        let body: serde_json::Value = resp.json().await.unwrap();
+        body.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Poll until the convenience alias `alias` points at something other than
+    /// `not` — the moment a rebuilt generation is swapped in.
+    async fn await_alias_moved_off(&self, alias: &str, not: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            self.fail_if_stopped();
+            let targets = self.alias_targets(alias).await;
+            if let Some(target) = targets.iter().find(|t| t.as_str() != not) {
+                return target.clone();
+            }
+            if Instant::now() >= deadline {
+                // What OpenSearch holds at the deadline — the index inventory,
+                // aliases, and seed markers — is the fastest way to tell *which*
+                // step of a rebuild never happened.
+                let dump = |path: &str| {
+                    let url = format!("{}/{path}", self.os_url);
+                    let http = self.http.clone();
+                    async move { http.get(url).send().await.unwrap().text().await.unwrap() }
+                };
+                eprintln!("--- _cat/indices\n{}", dump("_cat/indices?v").await);
+                eprintln!("--- _cat/aliases\n{}", dump("_cat/aliases?v").await);
+                eprintln!(
+                    "--- flusso_meta\n{}",
+                    dump("flusso_meta/_search?pretty").await
+                );
+                panic!("the alias {alias} never moved off {not} (still {targets:?})");
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Stop the engine and wait for its replication connection to be gone, so
+    /// the slot can be dropped or the next run can attach to it.
+    async fn shutdown_and_release(self, pg: &Pg) {
+        self.engine.abort();
+        let _ = self.engine.await;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let active: Option<i32> = sqlx::query_scalar(
+                "SELECT active_pid FROM pg_replication_slots WHERE slot_name = 'flusso'",
+            )
+            .fetch_optional(&pg.pool)
+            .await
+            .unwrap()
+            .flatten();
+            match active {
+                None => return,
+                Some(pid) => {
+                    let _ = sqlx::query("SELECT pg_terminate_backend($1)")
+                        .bind(pid)
+                        .execute(&pg.pool)
+                        .await;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the replication connection never released the slot"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     fn shutdown(self) {
         self.engine.abort();
     }
 }
 
-/// Bring up Postgres, the publication + slot over `tables`, and the real engine
-/// driving the real OpenSearch sink for `spec`.
+/// Bring up the publication + slot over `tables`, then the real engine driving
+/// the real OpenSearch sink for `spec` (see [`spawn_pipeline`]).
 async fn start_pipeline(pg: &Pg, os: &Os, spec: SourceSpec, tables: &[&str]) -> Pipeline {
     let quoted = tables
         .iter()
@@ -469,7 +721,17 @@ async fn start_pipeline(pg: &Pg, os: &Os, spec: SourceSpec, tables: &[&str]) -> 
         "SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')",
     )
     .await;
+    spawn_pipeline(pg, os, spec).await
+}
 
+/// A (re)start of the engine against an already-provisioned Postgres: builds a
+/// fresh source, document builder, and sink — as a new `flusso run` does — and
+/// runs the engine. The publication and slot are whatever the database has.
+async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let documents = Arc::new(
         PgDocumentBuilder::connect(&pg.url, Arc::new(spec))
             .await
@@ -490,8 +752,14 @@ async fn start_pipeline(pg: &Pg, os: &Os, spec: SourceSpec, tables: &[&str]) -> 
         documents,
         sink,
     );
+    let outcome = Arc::new(std::sync::Mutex::new(None));
+    let record = Arc::clone(&outcome);
     Pipeline {
-        engine: tokio::spawn(engine.run()),
+        engine: tokio::spawn(async move {
+            let result = engine.run().await;
+            *record.lock().unwrap() = Some(format!("{result:?}"));
+        }),
+        outcome,
         http: reqwest::Client::new(),
         os_url: os.url.clone(),
     }
