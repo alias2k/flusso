@@ -74,7 +74,7 @@ use schema_core::{
 };
 use sinks_core::{Result as SinkResult, Sink};
 use sinks_opensearch::OpensearchSink;
-use sources_core::cdc::{Ack, AckSink, Change, ChangeCapture, ChangeEvent};
+use sources_core::cdc::{Ack, AckSink, Change, ChangeCapture, ChangeEvent, Continuity};
 use sources_core::document::{Document, DocumentBuilder, DocumentId};
 use sources_core::{Result as SourceResult, RowKey, SnapshotTable, SourceSpec};
 use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
@@ -118,6 +118,10 @@ struct BackfillOnly {
 
 #[async_trait]
 impl ChangeCapture for BackfillOnly {
+    async fn prepare(&self) -> SourceResult<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
     async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
         Ok(Box::pin(stream::empty()))
     }
@@ -167,6 +171,10 @@ struct BurstCapture {
 
 #[async_trait]
 impl ChangeCapture for BurstCapture {
+    async fn prepare(&self) -> SourceResult<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
     async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
         let ack_sink: Arc<dyn AckSink> = Arc::new(NoopAck);
         let changes: Vec<SourceResult<Change>> = (1..=self.count as i64)

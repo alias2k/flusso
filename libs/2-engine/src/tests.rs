@@ -13,10 +13,10 @@ use futures::stream;
 use futures::stream::BoxStream;
 use queue_channel::channel;
 use queue_core::Producer;
-use schema_core::{ColumnName, GenericValue, IndexName, TableName};
+use schema_core::{ColumnName, GenericValue, IndexMapping, IndexName, TableName};
 use sources_core::RowKey;
 use sources_core::SnapshotTable;
-use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
+use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
 use sources_core::document::{Document, DocumentId};
 
 use super::*;
@@ -30,6 +30,10 @@ struct MockSource {
 
 #[async_trait]
 impl ChangeCapture for MockSource {
+    async fn prepare(&self) -> sources_core::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
         let changes = self.changes.lock().unwrap().take().unwrap_or_default();
         Ok(Box::pin(stream::iter(
@@ -87,6 +91,14 @@ impl DocumentBuilder for MockDocuments {
                 table: TableName::try_new("users").unwrap(),
             },
         }]
+    }
+
+    async fn index_mappings(&self) -> sources_core::Result<Vec<IndexMapping>> {
+        Ok(vec![IndexMapping {
+            index: IndexName::try_new("users").unwrap(),
+            hash: schema_core::ContentHash::new(1),
+            fields: Vec::new(),
+        }])
     }
 }
 
@@ -441,7 +453,8 @@ async fn confirms_no_ack_before_its_flush() {
     assert_eq!(observed.get(&3), Some(&2), "seq 3 confirmed after flush 2");
 }
 
-/// A source whose `live` stream is empty (so `run` returns) and whose
+/// A source whose `live` stream is empty (so `run` returns), whose `prepare`
+/// reports a configurable [`Continuity`] (`Resumed` by default), and whose
 /// `snapshot` records that it was called, with what tables, and replays a
 /// fixed set of rows.
 #[derive(Debug)]
@@ -449,6 +462,7 @@ struct SeedSource {
     rows: Mutex<Option<Vec<Change>>>,
     called: Arc<AtomicBool>,
     tables: Arc<Mutex<Vec<SnapshotTable>>>,
+    continuity: Continuity,
 }
 
 impl SeedSource {
@@ -457,12 +471,22 @@ impl SeedSource {
             rows: Mutex::new(Some(rows)),
             called: Arc::new(AtomicBool::new(false)),
             tables: Arc::new(Mutex::new(Vec::new())),
+            continuity: Continuity::Resumed,
         }
+    }
+
+    fn with_continuity(mut self, continuity: Continuity) -> Self {
+        self.continuity = continuity;
+        self
     }
 }
 
 #[async_trait]
 impl ChangeCapture for SeedSource {
+    async fn prepare(&self) -> sources_core::Result<Continuity> {
+        Ok(self.continuity)
+    }
+
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
         Ok(Box::pin(stream::empty()))
     }
@@ -481,13 +505,26 @@ impl ChangeCapture for SeedSource {
     }
 }
 
-/// A sink that reports a fixed seeded-state, records `mark_seeded` calls, and
-/// records the upserts it receives.
+/// A sink with a settable seeded-state that records `mark_seeded` and `reindex`
+/// calls and the upserts it receives. `reindex` flips it unseeded, as a real
+/// sink staging a rebuild does.
 #[derive(Debug)]
 struct SeedSink {
-    seeded: bool,
+    seeded: AtomicBool,
     marked: Arc<Mutex<Vec<String>>>,
+    reindexed: Arc<Mutex<Vec<String>>>,
     ops: Arc<Mutex<Vec<String>>>,
+}
+
+impl SeedSink {
+    fn new(seeded: bool, marked: &Arc<Mutex<Vec<String>>>, ops: &Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            seeded: AtomicBool::new(seeded),
+            marked: Arc::clone(marked),
+            reindexed: Arc::new(Mutex::new(Vec::new())),
+            ops: Arc::clone(ops),
+        }
+    }
 }
 
 #[async_trait]
@@ -518,11 +555,20 @@ impl Sink for SeedSink {
     }
 
     async fn is_seeded(&self, _index: &IndexName) -> sinks_core::Result<bool> {
-        Ok(self.seeded)
+        Ok(self.seeded.load(Ordering::SeqCst))
     }
 
     async fn mark_seeded(&self, index: &IndexName) -> sinks_core::Result<()> {
         self.marked.lock().unwrap().push(index.as_ref().to_owned());
+        Ok(())
+    }
+
+    async fn reindex(&self, mapping: &IndexMapping) -> sinks_core::Result<()> {
+        self.reindexed
+            .lock()
+            .unwrap()
+            .push(mapping.index.as_ref().to_owned());
+        self.seeded.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -535,11 +581,7 @@ async fn seeds_an_unseeded_index_then_marks_it() {
     let tables = Arc::clone(&source.tables);
     let ops = Arc::new(Mutex::new(Vec::new()));
     let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink {
-        seeded: false,
-        marked: Arc::clone(&marked),
-        ops: Arc::clone(&ops),
-    });
+    let sink = Arc::new(SeedSink::new(false, &marked, &ops));
 
     Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
         .run()
@@ -569,11 +611,7 @@ async fn skips_backfill_when_the_sink_reports_seeded() {
     let called = Arc::clone(&source.called);
     let ops = Arc::new(Mutex::new(Vec::new()));
     let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink {
-        seeded: true,
-        marked: Arc::clone(&marked),
-        ops: Arc::clone(&ops),
-    });
+    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
 
     Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
         .run()
@@ -584,6 +622,117 @@ async fn skips_backfill_when_the_sink_reports_seeded() {
         !called.load(Ordering::SeqCst),
         "a seeded index is not snapshotted"
     );
+    assert!(ops.lock().unwrap().is_empty());
+    assert!(marked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fresh_source_rebuilds_seeded_indexes_into_a_new_generation() {
+    // The seed marker says "seeded", but the source's resume point had to be
+    // created: whatever changed since that seed is gone. The engine must stage a
+    // from-scratch rebuild (reindex, not an in-place reseed) and then backfill.
+    let acks = Arc::new(AtomicU64::new(0));
+    let source = SeedSource::new(vec![upsert_change(1, 0, &acks), upsert_change(3, 1, &acks)])
+        .with_continuity(Continuity::Fresh);
+    let called = Arc::clone(&source.called);
+    let ops = Arc::new(Mutex::new(Vec::new()));
+    let marked = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
+    let reindexed = Arc::clone(&sink.reindexed);
+
+    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
+        .run()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *reindexed.lock().unwrap(),
+        vec!["users".to_owned()],
+        "a seeded index is staged for a rebuild when continuity is lost"
+    );
+    assert!(
+        called.load(Ordering::SeqCst),
+        "the rebuild is then seeded by a snapshot"
+    );
+    assert_eq!(
+        *ops.lock().unwrap(),
+        vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
+    );
+    assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
+}
+
+#[tokio::test]
+async fn fresh_source_leaves_an_unseeded_index_to_the_normal_backfill() {
+    // A first run: the resume point is created *and* nothing is seeded yet.
+    // No rebuild is staged — the index is about to be seeded anyway, and
+    // staging would orphan a target — it just goes through the normal backfill.
+    let acks = Arc::new(AtomicU64::new(0));
+    let source =
+        SeedSource::new(vec![upsert_change(1, 0, &acks)]).with_continuity(Continuity::Fresh);
+    let ops = Arc::new(Mutex::new(Vec::new()));
+    let marked = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(SeedSink::new(false, &marked, &ops));
+    let reindexed = Arc::clone(&sink.reindexed);
+
+    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
+        .run()
+        .await
+        .unwrap();
+
+    assert!(
+        reindexed.lock().unwrap().is_empty(),
+        "an unseeded index is not staged again"
+    );
+    assert_eq!(*ops.lock().unwrap(), vec!["upsert users 1".to_owned()]);
+    assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
+}
+
+#[tokio::test]
+async fn resumed_source_trusts_the_seed_marker() {
+    let acks = Arc::new(AtomicU64::new(0));
+    let source =
+        SeedSource::new(vec![upsert_change(1, 0, &acks)]).with_continuity(Continuity::Resumed);
+    let called = Arc::clone(&source.called);
+    let ops = Arc::new(Mutex::new(Vec::new()));
+    let marked = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
+    let reindexed = Arc::clone(&sink.reindexed);
+
+    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
+        .run()
+        .await
+        .unwrap();
+
+    assert!(reindexed.lock().unwrap().is_empty());
+    assert!(!called.load(Ordering::SeqCst));
+    assert!(ops.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn skip_backfill_with_a_fresh_source_stages_nothing() {
+    // The operator opted out of seeding. Staging a rebuild nobody backfills
+    // would send live writes into an unserved target, so the engine only warns
+    // and serves the (possibly stale) index as-is.
+    let acks = Arc::new(AtomicU64::new(0));
+    let source =
+        SeedSource::new(vec![upsert_change(1, 0, &acks)]).with_continuity(Continuity::Fresh);
+    let called = Arc::clone(&source.called);
+    let ops = Arc::new(Mutex::new(Vec::new()));
+    let marked = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
+    let reindexed = Arc::clone(&sink.reindexed);
+
+    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
+        .skip_backfill(true)
+        .run()
+        .await
+        .unwrap();
+
+    assert!(
+        reindexed.lock().unwrap().is_empty(),
+        "no rebuild is staged under skip_backfill"
+    );
+    assert!(!called.load(Ordering::SeqCst));
     assert!(ops.lock().unwrap().is_empty());
     assert!(marked.lock().unwrap().is_empty());
 }
@@ -659,11 +808,7 @@ async fn skip_backfill_flag_overrides_an_unseeded_index() {
     let called = Arc::clone(&source.called);
     let ops = Arc::new(Mutex::new(Vec::new()));
     let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink {
-        seeded: false,
-        marked: Arc::clone(&marked),
-        ops: Arc::clone(&ops),
-    });
+    let sink = Arc::new(SeedSink::new(false, &marked, &ops));
 
     Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
         .skip_backfill(true)

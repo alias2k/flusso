@@ -11,7 +11,7 @@ use futures::stream::{self, BoxStream};
 use schema::{Source, SourceType};
 use schema_core::{ColumnName, DatabaseSchema, GenericValue, IndexName, TableName};
 use sinks_core::{FlushReport, Sink};
-use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent};
+use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
 use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use sources_core::{RowKey, SnapshotTable};
 use tokio::sync::Notify;
@@ -104,6 +104,10 @@ struct LaggySource(Option<u64>);
 
 #[async_trait]
 impl ChangeCapture for LaggySource {
+    async fn prepare(&self) -> sources_core::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
         Ok(Box::pin(stream::empty()))
     }
@@ -200,6 +204,10 @@ struct ScriptedSource {
 
 #[async_trait]
 impl ChangeCapture for ScriptedSource {
+    async fn prepare(&self) -> sources_core::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
     async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
         let changes = self.changes.lock().unwrap().take().unwrap_or_default();
         Ok(Box::pin(stream::iter(

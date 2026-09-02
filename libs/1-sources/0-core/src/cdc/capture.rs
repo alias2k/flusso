@@ -5,12 +5,35 @@ use crate::{Result, SnapshotTable};
 
 use super::Change;
 
+/// Whether a [`ChangeCapture`]'s durable resume point survived from the
+/// previous run — the answer to [`ChangeCapture::prepare`].
+///
+/// A seed recorded by an earlier run is only trustworthy if every change since
+/// then is still observable. That holds exactly when the resume point that fed
+/// it is intact; a point that had to be (re)created starts from *now* and has
+/// no memory of what happened before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Continuity {
+    /// The resume point already existed: the stream continues where the last
+    /// run confirmed, so existing seeds stay valid.
+    Resumed,
+    /// The resume point did not exist and was created now (a first run, a
+    /// replaced database, a dropped replication slot). Anything before this
+    /// instant is unobservable, so every earlier seed is stale.
+    Fresh,
+}
+
 /// A pluggable change-capture mechanism — logical replication (WAL) today,
 /// polling or trigger-based capture later.
 ///
-/// The mechanism exposes two independent capabilities; the engine decides when
-/// to use each:
+/// The mechanism exposes three capabilities; the engine decides when to use
+/// each:
 ///
+/// - [`prepare`](Self::prepare) establishes the mechanism's durable resume
+///   point and reports whether it already existed ([`Continuity`]). The engine
+///   calls it first, before any snapshot, so a seed can never outrun the
+///   position that will follow it — and so a resume point that had to be
+///   *created* is known to invalidate every earlier seed.
 /// - [`live`](Self::live) streams ongoing changes, resuming from the
 ///   mechanism's own durable position (a replication slot's
 ///   `confirmed_flush_lsn`, a poll cursor, …). No position is threaded through
@@ -32,6 +55,26 @@ use super::Change;
 /// rather than borrowing from `self`.
 #[async_trait]
 pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
+    /// Establish the durable resume point and report whether it was already
+    /// there.
+    ///
+    /// The engine calls this **first**, before any snapshot or live stream. Two
+    /// guarantees hang off it:
+    ///
+    /// - After it returns, every change from this instant on is observable
+    ///   through [`live`](Self::live) — so a backfill that snapshots *after*
+    ///   `prepare` can never miss a write that landed between the snapshot and
+    ///   the first live read.
+    /// - [`Continuity::Fresh`] tells the engine no earlier seed can be trusted:
+    ///   whatever changed before the resume point existed is gone for good, so
+    ///   the engine rebuilds every index the sink still reports as seeded.
+    ///
+    /// Idempotent: a second call finds the point it created and reports
+    /// [`Continuity::Resumed`]. Required (no default) because it is a statement
+    /// about correctness, not an optional capability — a mechanism with no
+    /// durable position of its own must still say so explicitly.
+    async fn prepare(&self) -> Result<Continuity>;
+
     /// Connect, ensure setup, resume from the last confirmed point, and stream
     /// live changes.
     async fn live(&self) -> Result<BoxStream<'static, Result<Change>>>;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use pgwire_replication::{ReplicationClient, ReplicationConfig};
-use sources_core::cdc::{AckSink, Change, ChangeCapture};
+use sources_core::cdc::{AckSink, Change, ChangeCapture, Continuity};
 use sources_core::{
     CaptureProvisioning, CoverageReport, QualifiedTable, Result, SnapshotTable, SourceError,
 };
@@ -16,9 +16,15 @@ use super::{backfill, publication, stream};
 
 /// Postgres change capture over logical replication (pgoutput).
 ///
-/// Exposes the two [`ChangeCapture`] capabilities the engine orchestrates:
+/// Exposes the three [`ChangeCapture`] capabilities the engine orchestrates:
 ///
-/// - [`live`](ChangeCapture::live) connects to a replication slot and streams
+/// - [`prepare`](ChangeCapture::prepare) makes sure the replication slot exists
+///   and reports whether it already did. The slot *is* the resume point: a slot
+///   that had to be created starts at the current WAL position and knows nothing
+///   of earlier changes, so it reports [`Continuity::Fresh`] and the engine
+///   rebuilds every index the sink still calls seeded. Runs before any snapshot,
+///   so a backfill can't miss a write that lands between snapshot and stream.
+/// - [`live`](ChangeCapture::live) connects to the replication slot and streams
 ///   committed row changes as thin [`Change`]s. Resume is the slot's: its
 ///   `confirmed_flush_lsn` is the durable cursor on the server, advanced as the
 ///   engine confirms changes (see [`Ack`](sources_core::cdc::Ack)).
@@ -29,7 +35,8 @@ use super::{backfill, publication, stream};
 /// # Prerequisites
 ///
 /// The server must have `wal_level = logical`. The replication **slot** is
-/// created automatically on first connect if it does not exist yet, and the
+/// created automatically by [`prepare`](ChangeCapture::prepare) (before the first
+/// backfill) if it does not exist yet, and the
 /// **publication** is created/extended to cover every table any index reads —
 /// see [`CaptureProvisioning`] — when the role is privileged enough and
 /// management is not opted out; otherwise flusso warns with the SQL to run.
@@ -99,13 +106,14 @@ impl WalChangeCapture {
             .await
     }
 
-    /// Ensure the replication slot exists, creating it if it does not.
+    /// Ensure the replication slot exists, creating it if it does not, and
+    /// report which of the two happened.
     ///
     /// Runs over the shared admin pool so the check can run before the
     /// replication connection is opened. If the slot already exists its plugin
     /// is validated; a slot with the wrong plugin name is an error (it was
     /// created for a different consumer and we should not clobber it).
-    async fn ensure_slot(&self) -> Result<()> {
+    async fn ensure_slot(&self) -> Result<Continuity> {
         let pool = self.admin_pool().await?;
 
         let row = sqlx::query("SELECT plugin FROM pg_replication_slots WHERE slot_name = $1")
@@ -126,6 +134,7 @@ impl WalChangeCapture {
                     )));
                 }
                 tracing::debug!(slot = %self.config.slot, "replication slot already exists");
+                Ok(Continuity::Resumed)
             }
             None => {
                 sqlx::query("SELECT pg_create_logical_replication_slot($1, 'pgoutput')")
@@ -139,15 +148,23 @@ impl WalChangeCapture {
                         ))
                     })?;
                 tracing::info!(slot = %self.config.slot, "created replication slot");
+                Ok(Continuity::Fresh)
             }
         }
-
-        Ok(())
     }
 }
 
 #[async_trait]
 impl ChangeCapture for WalChangeCapture {
+    #[tracing::instrument(name = "wal.prepare", skip_all, err)]
+    async fn prepare(&self) -> Result<Continuity> {
+        self.ensure_slot().await
+    }
+
+    /// Opens the replication stream. The slot check is repeated here (it is
+    /// idempotent) so `live` stays correct for a caller that never ran
+    /// [`prepare`](ChangeCapture::prepare) — but by then a missing slot is a
+    /// cold start with no seed to protect, so its `Continuity` is ignored.
     #[tracing::instrument(name = "wal.live", skip_all, err)]
     async fn live(&self) -> Result<BoxStream<'static, Result<Change>>> {
         self.ensure_slot().await?;
