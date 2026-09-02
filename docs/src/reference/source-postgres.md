@@ -83,8 +83,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 | Postgres 14 or newer | |
 | `wal_level = logical` | Restart-required server setting. |
 | `max_wal_senders`, `max_replication_slots` | Room for flusso plus any other consumer. |
-| Row identity on every replicated table | A primary key, or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change. |
-| `REPLICA IDENTITY FULL` on soft-deleted tables | Only if a `soft_delete` keys off a column that can change; the WAL must carry the pre-image. |
+| Row identity on every replicated table | A single-column primary key (the default `REPLICA IDENTITY` then carries it), or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change. `REPLICA IDENTITY FULL` is not needed: documents are rebuilt from the current row, not from the WAL image. |
 | A role with `REPLICATION` and `SELECT` on the read tables | Enough to stream and create the slot. Publication management needs the stronger grant above. |
 
 > ⚠️ **Warning** — Postgres retains WAL until the slot confirms it. A flusso that stays down for days means WAL piling up on the server. Drop the slot when retiring a deployment.
