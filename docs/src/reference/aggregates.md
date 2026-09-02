@@ -16,8 +16,8 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 | `table` | [Postgres identifier](identifiers.md) | all | The related table. Required. |
 | `foreign_key` | Postgres identifier | all | The related table's column pointing back at the parent. Exactly one of `foreign_key` or `through`. |
 | `through` | table | all | A junction, as in [Joins](joins.md#through). Exactly one of `foreign_key` or `through`. |
-| `column` | Postgres identifier | `sum`, `avg`, `min`, `max` | The column to reduce. Required there; `count` and `ids` don't read it. |
-| `value_type` | a scalar type key | `sum`, `min`, `max` | The result type; it mirrors the column. Required there; the other ops don't read it. |
+| `column` | Postgres identifier | `sum`, `avg`, `min`, `max` | The column to reduce. Required there; `count` doesn't read it; `ids` rejects it. |
+| `value_type` | a scalar type key | `sum`, `min`, `max` | The result type; it mirrors the column. Required there; `count` and `avg` don't read it; `ids` rejects it. |
 | `element_type` | a scalar type key | `ids` | The type of each collected key, usually `long` or `keyword`; `geo` and `custom` are rejected. Required on `ids`, rejected on every other op. |
 | `filters` | list | all | Which rows count. See [Filters](filters-and-soft-delete.md). |
 
