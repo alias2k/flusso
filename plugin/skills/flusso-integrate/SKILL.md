@@ -43,7 +43,7 @@ for the privilege floor and what to do when the role can't manage the publicatio
 ```toml
 [source]
 type = "postgres"
-connection_url = { env = "DATABASE_URL" }   # or a literal postgresql://… URL
+connection_url = { env = "PG_URL" }   # or a literal postgresql://… URL; SOURCE_POSTGRES_CONNECTION_URL overrides either
 
 [sinks.primary]
 type = "opensearch"

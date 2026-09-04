@@ -1,6 +1,6 @@
 # Write flusso.toml
 
-Describe a deployment in one file: the source, the sinks, the indexes, and how secrets reach it.
+Describe a deployment in one file: the source, the stream, the sinks, the indexes, and how secrets reach it.
 
 ## When to use this
 
@@ -13,11 +13,11 @@ You're standing up flusso against a database and a cluster, or adding a sink or 
    ```toml
    [source]
    type = "postgres"
-   connection_url = { env = "DATABASE_URL" }
+   connection_url = { env = "PG_URL" }
    ssl_mode = "verify-full"
    ```
 
-   `ssl_mode` matters: `require` encrypts but verifies nothing. See [TLS](../reference/source-postgres.md#tls).
+   `ssl_mode` matters: `require` encrypts but verifies nothing. See [TLS](../reference/source-postgres.md#tls). Every key besides `type` is the adapter's own option; `flusso check` rejects a misspelled one. The `[stream]` table can be left out entirely; see [Stream: channel](../reference/stream-channel.md) for when to size it.
 
 2. **Declare the sink.** Give it a name; that name also names its override variables.
 
@@ -29,7 +29,7 @@ You're standing up flusso against a database and a cluster, or adding a sink or 
    password = { env = "OS_PASSWORD" }
    ```
 
-   `PRIMARY_OPENSEARCH_URL` is also the reserved override for this sink's `url`, so `url` could be omitted entirely. Rules in [Environment variables](../reference/environment.md#config-values).
+   `PRIMARY_OPENSEARCH_URL` is also the override variable for this sink's `url`, so `url` could be omitted entirely. The same rule names the source's: `SOURCE_POSTGRES_CONNECTION_URL`. Rules in [Environment variables](../reference/environment.md#config-values).
 
 3. **List the indexes.** One entry each; paths resolve from this file's directory.
 

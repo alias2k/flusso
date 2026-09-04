@@ -8,7 +8,7 @@ The `flusso` binary has seven subcommands. Five work locally; `indexes` and `rei
 | [`run`](#run) | Compile if a config is present, then backfill and follow. | yes |
 | [`check`](#check) | Validate and print the typed mapping; confirm against live columns. | optional |
 | [`design`](#design) | Open the visual designer. | optional |
-| [`schema`](#schema) | Print an embedded editor-assist JSON Schema. | no |
+| [`schema`](#schema) | Print an editor-assist JSON Schema, or the adapters' Reference option tables. | no |
 | [`indexes`](#indexes) | List a running server's indexes and states. | no (a running flusso) |
 | [`reindex`](#reindex) | Rebuild one index on a running server. | no (a running flusso) |
 
@@ -30,12 +30,12 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `-c`, `--config <path>` | `flusso.toml` if present | Config to compile. An explicit path that doesn't exist is an error. |
 | `--lock <path>` | `flusso.lock` | The lock to rewrite, or to load when there's no config. |
 | `--locked` | off | Run the lock as is; no recompile, no rewrite. For deterministic deploys off a committed lock. |
-| `--slot <name>` | `flusso` | Replication slot to consume. Created when missing. |
-| `--publication <name>` | `flusso` | Publication to subscribe to. Created or extended when allowed. |
+| `--slot <name>` | `[source] slot`, else `flusso` | Replication slot to consume. Created when missing. |
+| `--publication <name>` | `[source] publication`, else `flusso` | Publication to subscribe to. Created or extended when allowed. |
 | `--manage-publication <bool>` | `[source] manage_publication`, else `true` | Whether flusso may issue publication DDL. |
 | `--skip-backfill` | off | Resume live capture only. A fresh slot then only warns instead of rebuilding. |
-| `--pretty` | off | Pretty-print the fallback stdout sink's output. |
-| `--queue-capacity <n>` | `1024` | Changes buffered between capture and processing. |
+| `--pretty` | off | Pretty-print every stdout sink's output (the default sink included). |
+| `--queue-capacity <n>` | `[stream] capacity`, else `1024` | Changes buffered between capture and processing. |
 | `--public-address <host:port>` | `[server] public_address`, else `127.0.0.1:9464` | Bind the public surface. |
 | `--private-address <host:port>` | `[server] private_address`, else `127.0.0.1:9465` | Bind the private surface. |
 | `--admin-user <user>` | `admin` | Basic-auth user for the private surface. |
@@ -43,17 +43,17 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--lag-poll-secs <n>` | `15` | How often to sample slot lag. |
 | `--index-prefix <prefix>` | `prefix` from config, else none | Prefix every owned index name. |
 
-Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
+The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
 
 ## check
 
-Loads and validates the config and every schema, then prints the source, the sinks, and each index's fully typed mapping. Without `--offline` it also confirms every declared type and nullability against the live columns and prints the publication coverage report with the exact SQL for any gap. `check` never mutates the database.
+Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also confirms every declared type and nullability against the live columns and prints the publication coverage report with the exact SQL for any gap. `check` never mutates the database.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-c`, `--config <path>` | `flusso.toml` | Config to check. |
 | `--offline` | off | Files only; skip the database and the coverage report. |
-| `--publication <name>` | `flusso` | Publication whose coverage to report. |
+| `--publication <name>` | `[source] publication`, else `flusso` | Publication whose coverage to report. |
 | `--manage-publication <bool>` | config, else `true` | Affects the report's phrasing only. |
 | `--format <human\|json>` | `human` | `json` prints one machine-readable document. |
 
@@ -71,14 +71,15 @@ Opens the visual designer, a local web UI over the config and its schemas. Binds
 
 ## schema
 
-Prints the embedded JSON Schema for editor completion. It's compiled into the binary, so it always matches the installed version.
+Prints an artifact for editor assist or the docs. No database.
 
-```sh
-flusso schema config > config.schema.json    # for flusso.toml
-flusso schema index  > index.schema.yml      # for *.schema.yml
-```
+| Argument | Prints |
+| --- | --- |
+| `config` | The complete JSON Schema for `flusso.toml`: the top-level keys plus, for each port table, one alternative per registered adapter with that adapter's options. |
+| `index` | The JSON Schema (authored as YAML) for `*.schema.yml`. |
+| `docs` | One Markdown option table per registered adapter, the tables the Reference pages include. `--out <dir>` writes them as `<port>-<kind>.md` files instead. |
 
-Versioned copies are published per release at `https://alias2k.github.io/flusso/schemas/<ref>/…`, where `<ref>` is `latest`, a minor like `v0.16`, or an exact `v0.16.0`. A `# yaml-language-server: $schema=…` modeline pins one.
+Both schemas are also published per release at `https://alias2k.github.io/flusso/schemas/<ref>/`, so an editor modeline can pin the version you run; see [Write your first schema](../author/first-schema.md).
 
 ## indexes
 

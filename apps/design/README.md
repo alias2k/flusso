@@ -2,7 +2,7 @@
 
 The visual, database-aware schema designer behind `flusso design`: a local web UI that authors `*.schema.yml` and `flusso.toml` without hand-writing the type-first grammar.
 
-It introspects the configured source through `sources-core`'s `SchemaIntrospection`, so column and table pickers reflect the real database and any future source backend gets a designer for free. The committed files stay the source of truth; the UI is a round-tripping view over them.
+It introspects the configured source through the `source` port's `SchemaIntrospection`, so column and table pickers reflect the real database and any future source backend gets a designer for free. The committed files stay the source of truth; the UI is a round-tripping view over them.
 
 ```sh
 flusso design --config flusso.toml

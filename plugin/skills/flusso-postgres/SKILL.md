@@ -19,7 +19,7 @@ Postgres is the *substrate*. This covers only the slice flusso touches; for the 
 
 ## The replication slot — the one operational gotcha
 
-flusso always creates the slot on first connect (default name `flusso`, override `--slot` / `FLUSSO_SLOT`). The catch lives in how slots work:
+flusso always creates the slot on first connect (default name `flusso`; the `[source] slot` key, overridden by `--slot` / `FLUSSO_SLOT`). The catch lives in how slots work:
 
 > **Postgres retains WAL until the slot's consumer confirms it.** A flusso that is down for a long time means WAL piling up on the server — eventually a disk-full outage.
 
@@ -68,7 +68,7 @@ into the publication.
 
 ## TLS — managed Postgres, internal PKI, mTLS
 
-flusso's replication stream and its SQL connections negotiate TLS from **one merged decision**: the URL's libpq parameters (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`) plus the flat `[source]` keys (`ssl_mode`, `ssl_root_cert`, `ssl_cert`, `ssl_key`, `ssl_sni_hostname`) — **config keys win**. Default is `prefer` (try TLS, fall back to plaintext), so local plaintext keeps working and a managed provider's `DATABASE_URL=…?sslmode=require` works as pasted.
+flusso's replication stream and its SQL connections negotiate TLS from **one merged decision**: the URL's libpq parameters (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`) plus the flat `[source]` keys (`ssl_mode`, `ssl_root_cert`, `ssl_cert`, `ssl_key`, `ssl_sni_hostname`) — **config keys win**. Default is `prefer` (try TLS, fall back to plaintext), so local plaintext keeps working and a managed provider's `…?sslmode=require` URL works as pasted.
 
 - **`require` verifies nothing** (libpq semantics — any cert accepted); use `verify-full` in production, with `ssl_root_cert` for an internal CA / RDS bundle.
 - **mTLS** needs both `ssl_cert` and `ssl_key`; one without the other is a config error.

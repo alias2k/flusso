@@ -16,7 +16,7 @@ You run Kubernetes and Postgres and OpenSearch already exist; the chart deploys 
      flussoToml: |
        [source]
        type = "postgres"
-       connection_url = { env = "DATABASE_URL" }
+       connection_url = { env = "SOURCE_POSTGRES_CONNECTION_URL" }
 
        [sinks.primary]
        type = "opensearch"
@@ -42,7 +42,7 @@ You run Kubernetes and Postgres and OpenSearch already exist; the chart deploys 
    secrets:
      create: true
      data:
-       DATABASE_URL: postgres://flusso:…@pg:5432/app
+       SOURCE_POSTGRES_CONNECTION_URL: postgres://flusso:…@pg:5432/app
        PRIMARY_OPENSEARCH_URL: https://opensearch:9200
        FLUSSO_ADMIN_PASSWORD: change-me
    ```
