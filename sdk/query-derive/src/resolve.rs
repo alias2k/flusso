@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use config::{IndexMapping, IndexName, Sink};
+use config::{IndexMapping, IndexName};
 
 /// One path level for codegen: the field name plus whether it's a `nested`
 /// boundary (vs a flattened object). Mirrors `flusso_query::Segment`.
@@ -57,16 +57,20 @@ pub(crate) fn resolve(index: &str, config_override: Option<&str>) -> Result<Reso
 
     // Indexes fan out to every configured sink (there's no per-index sink
     // selection), so the subfields are guaranteed only if every OpenSearch sink
-    // provisions them. Stdout sinks don't create indexes — ignore them. No
-    // OpenSearch sink (nothing to query) → leave the permissive default.
+    // provisions them. Other sinks don't create indexes — ignore them. No
+    // OpenSearch sink (nothing to query) → leave the permissive default. The
+    // option is read off the entry by name: this crate queries OpenSearch and
+    // is a legitimate consumer of that adapter's option namespace.
     let auto_subfields = config
         .sinks
         .values()
-        .filter_map(|sink| match sink {
-            Sink::Opensearch(os) => Some(os.auto_subfields),
-            Sink::Stdout(_) => None,
-        })
-        .all(|on| on);
+        .filter(|sink| sink.kind == "opensearch")
+        .all(|sink| {
+            sink.options
+                .get("auto_subfields")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true)
+        });
 
     Ok(Resolved {
         mapping,

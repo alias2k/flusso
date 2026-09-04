@@ -5,10 +5,13 @@
 #![cfg_attr(test, allow(unused_crate_dependencies))]
 
 mod bulk;
+mod config;
 mod generations;
 mod mapping;
 mod sink_impl;
 mod transport;
+
+pub use config::{OpensearchConfig, TextAnalysis};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
@@ -75,7 +78,7 @@ impl OpensearchSink {
     /// connection URL and credentials are resolved here, in the running
     /// environment, applying the `<NAME>_OPENSEARCH_*` deployment overrides for
     /// the sink named `name`.
-    pub fn from_config(name: &SinkName, config: &kernel::OpensearchSink) -> Result<Self> {
+    pub fn from_config(name: &SinkName, config: &OpensearchConfig) -> Result<Self> {
         let mut builder =
             reqwest::Client::builder().timeout(Duration::from_secs(config.timeout_secs));
 

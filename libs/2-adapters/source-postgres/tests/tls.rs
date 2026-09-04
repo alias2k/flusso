@@ -17,9 +17,8 @@
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
 use futures::StreamExt;
-use kernel::{SourceTls, SslMode};
 use source::cdc::ChangeCapture;
-use source_postgres::{WalChangeCapture, replication_config, sql_connection_url};
+use source_postgres::{SslMode, Tls, WalChangeCapture, replication_config, sql_connection_url};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::CopyDataSource;
@@ -67,7 +66,7 @@ async fn ssl_only_postgres() -> ContainerAsync<Postgres> {
         .unwrap()
 }
 
-fn capture(url: &str, tls: &SourceTls) -> WalChangeCapture {
+fn capture(url: &str, tls: &Tls) -> WalChangeCapture {
     let replication = replication_config(url, tls, "flusso_tls", "flusso_tls").unwrap();
     let sql_url = sql_connection_url(url, tls).unwrap();
     WalChangeCapture::new(replication, sql_url)
@@ -107,7 +106,7 @@ async fn tls_required_server_accepts_require_and_rejects_disable() {
     // pool and opens the pgwire replication connection — the handshake this
     // feature exists for. A URL-borne sslmode=require must carry through.
     let url = format!("{base}?sslmode=require");
-    let mut stream = capture(&url, &SourceTls::default()).live().await.unwrap();
+    let mut stream = capture(&url, &Tls::default()).live().await.unwrap();
 
     // A change flows over the encrypted stream end-to-end.
     sqlx::query("INSERT INTO t (id) VALUES (1)")
@@ -123,9 +122,9 @@ async fn tls_required_server_accepts_require_and_rejects_disable() {
     drop(stream);
 
     // Config keys work without any URL parameter (the flat ssl_mode key).
-    let config_tls = SourceTls {
+    let config_tls = Tls {
         mode: Some(SslMode::Require),
-        ..SourceTls::default()
+        ..Tls::default()
     };
     let stream = capture(&base, &config_tls)
         .live()
@@ -134,9 +133,9 @@ async fn tls_required_server_accepts_require_and_rejects_disable() {
     drop(stream);
 
     // And an explicit disable fails against this server, for both connections.
-    let disabled = SourceTls {
+    let disabled = Tls {
         mode: Some(SslMode::Disable),
-        ..SourceTls::default()
+        ..Tls::default()
     };
     assert!(
         capture(&base, &disabled).live().await.is_err(),

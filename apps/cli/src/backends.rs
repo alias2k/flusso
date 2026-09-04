@@ -1,64 +1,58 @@
-//! The backend assembler — the composition root's wiring of concrete backends.
+//! The composition root's [`Backends`]: assembles the Postgres source, the
+//! configured sinks, and the source-side helpers from a [`Config`].
 //!
-//! [`FlussoBackends`] is the one place in the codebase that names Postgres and
-//! the concrete sinks: it turns a validated [`Config`] into the source capture,
-//! its document builder, and the sink the daemon drives. Connection and
-//! credentials are resolved here, in the running environment (a compiled
-//! `flusso.lock` carries no secrets it wasn't given literally).
-//!
-//! Adding a backend means a new match arm here (plus its crate); the daemon and
-//! engine are untouched.
+//! This is where each port entry's options become a running adapter. The
+//! adapter *kinds* are resolved in [`crate::adapters`]; this module builds the
+//! instances, resolving connection URLs and credentials in the running
+//! environment. The daemon and the engine never see an adapter's name.
 
 use std::sync::Arc;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use async_trait::async_trait;
-use config::{Config, Sink as SinkConfig, SourceType};
+use config::Config;
 use daemon::{Backends, DaemonOptions, SourceParts};
 use sink::{FanOutSink, Sink};
 use sink_opensearch::OpensearchSink;
-use sink_stdout::StdoutSink;
+use sink_stdout::{StdoutConfig, StdoutSink};
 use source::cdc::ChangeCapture;
 use source::document::DocumentBuilder;
 use source::{CaptureProvisioning, SourceSpec};
 use source_postgres::{
-    PgDocumentBuilder, WalChangeCapture, replication_config, sql_connection_url,
+    PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
 };
 
-/// The composition root's backend assembler: a Postgres source plus the
-/// configured sinks.
+use crate::adapters::{self, SinkConfig};
+
+/// The one [`Backends`] implementation: the composition root's choice of
+/// concrete adapters, looked up by each port entry's `type`.
 #[derive(Debug, Default)]
 pub(crate) struct FlussoBackends;
 
 #[async_trait]
 impl Backends for FlussoBackends {
+    fn validate(&self, config: &Config) -> anyhow::Result<()> {
+        adapters::validate(config)
+    }
+
     async fn source(
         &self,
         config: Arc<Config>,
-        options: &DaemonOptions,
+        _options: &DaemonOptions,
     ) -> anyhow::Result<SourceParts> {
-        ensure!(
-            config.source.source_type == SourceType::Postgres,
-            "only postgres sources are supported",
-        );
-
-        let connection_url = resolve_connection_url(&config)?;
-        let replication = replication_config(
-            &connection_url,
-            &config.source.tls,
-            &options.slot,
-            &options.publication,
-        )
-        .context("building the replication connection config")?;
-        let sql_url = sql_connection_url(&connection_url, &config.source.tls)
+        let postgres = adapters::source_config(&config)?;
+        let connection_url = resolve_connection_url(&postgres)?;
+        let tls = postgres.tls();
+        let replication =
+            replication_config(&connection_url, &tls, &postgres.slot, &postgres.publication)
+                .context("building the replication connection config")?;
+        let sql_url = sql_connection_url(&connection_url, &tls)
             .context("applying the source TLS settings to the connection URL")?;
 
-        // The capture provisions its own publication on `live`: it must cover
-        // every table the enabled indexes read (root + join/aggregate sources).
         let capture: Arc<dyn ChangeCapture> = Arc::new(
             WalChangeCapture::new(replication, sql_url.clone()).with_publication_management(
                 source_spec(&config).all_tables(),
-                options.manage_publication,
+                postgres.manage_publication,
             ),
         );
         let documents = build_documents(&sql_url, &config).await?;
@@ -69,43 +63,46 @@ impl Backends for FlussoBackends {
     async fn sink(
         &self,
         config: &Config,
-        options: &DaemonOptions,
+        _options: &DaemonOptions,
     ) -> anyhow::Result<Arc<dyn Sink>> {
-        build_sink(config, options.pretty)
+        build_sink(config)
     }
 }
 
-/// Build a read-only [`CaptureProvisioning`] handle for `check` to inspect
-/// publication coverage with, without starting the pipeline. Keeps the Postgres
-/// type named here (the composition root), handing `check` only the neutral
-/// trait object. Inspection touches the publication and the catalog, never the
-/// replication slot, so a placeholder slot name satisfies the config shape.
+/// A source capture used only for its read-only provisioning surface
+/// (`flusso check`): the slot name is irrelevant there.
 pub(crate) fn build_provisioning(
     config: &Config,
     publication: &str,
 ) -> anyhow::Result<Arc<dyn CaptureProvisioning>> {
-    let connection_url = resolve_connection_url(config)?;
-    let replication =
-        replication_config(&connection_url, &config.source.tls, "flusso", publication)
-            .context("building the replication connection config")?;
-    let sql_url = sql_connection_url(&connection_url, &config.source.tls)
+    let postgres = adapters::source_config(config)?;
+    let connection_url = resolve_connection_url(&postgres)?;
+    let tls = postgres.tls();
+    let replication = replication_config(&connection_url, &tls, "flusso", publication)
+        .context("building the replication connection config")?;
+    let sql_url = sql_connection_url(&connection_url, &tls)
         .context("applying the source TLS settings to the connection URL")?;
     let capture = WalChangeCapture::new(replication, sql_url);
     Ok(Arc::new(capture))
 }
 
-/// Resolve the source connection URL in this environment (applying
-/// `DATABASE_URL`).
-fn resolve_connection_url(config: &Config) -> anyhow::Result<String> {
-    let url = config
-        .source
+/// The resolved SQL connection URL (TLS settings applied) for the source, as
+/// `check` and the document builder need it.
+pub(crate) fn source_sql_url(config: &Config) -> anyhow::Result<(PostgresConfig, String)> {
+    let postgres = adapters::source_config(config)?;
+    let connection_url = resolve_connection_url(&postgres)?;
+    let sql_url = sql_connection_url(&connection_url, &postgres.tls())
+        .context("applying the source TLS settings to the connection URL")?;
+    Ok((postgres, sql_url))
+}
+
+fn resolve_connection_url(postgres: &PostgresConfig) -> anyhow::Result<String> {
+    let url = postgres
         .resolve_connection_url()
         .context("resolving the source connection URL")?;
     Ok(url.as_ref().to_owned())
 }
 
-/// Connect the Postgres document builder, translating the config into the
-/// source's own [`SourceSpec`] so the backend never sees the full `Config`.
 async fn build_documents(
     connection_url: &str,
     config: &Config,
@@ -117,10 +114,8 @@ async fn build_documents(
     Ok(Arc::new(builder))
 }
 
-/// Translate a [`Config`] into the source's [`SourceSpec`]: the **enabled**
-/// indexes and their schemas, dropping disabled ones. This is the composition
-/// root's job — the backend depends only on the resulting spec, never on
-/// `Config`.
+/// The enabled indexes and their schemas: the source-facing subset of a
+/// [`Config`].
 pub(crate) fn source_spec(config: &Config) -> SourceSpec {
     let indexes = config
         .indexes
@@ -131,28 +126,27 @@ pub(crate) fn source_spec(config: &Config) -> SourceSpec {
     SourceSpec::new(indexes)
 }
 
-/// Build the sink from config: a single configured sink directly, several as a
-/// [`FanOutSink`], or stdout when none are configured. `pretty` only affects the
-/// no-sink-configured stdout fallback.
-fn build_sink(config: &Config, pretty: bool) -> anyhow::Result<Arc<dyn Sink>> {
+/// Every configured sink, fanned out; with no sink configured, a plain stdout
+/// sink so a first run shows its documents.
+fn build_sink(config: &Config) -> anyhow::Result<Arc<dyn Sink>> {
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
-    for (name, sink_config) in &config.sinks {
-        let sink: Arc<dyn Sink> = match sink_config {
+    for (name, entry) in &config.sinks {
+        let built: Arc<dyn Sink> = match adapters::sink_config(name, entry)? {
             SinkConfig::Opensearch(os) => Arc::new(
-                OpensearchSink::from_config(name, os)
+                OpensearchSink::from_config(name, &os)
                     .with_context(|| format!("building OpenSearch sink '{name}'"))?
                     .with_index_prefix(&config.prefix),
             ),
-            SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(s)),
+            SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(&s)),
         };
-        sinks.push(sink);
+        sinks.push(built);
     }
     Ok(match sinks.len() {
-        0 => Arc::new(StdoutSink::new(pretty)),
+        0 => Arc::new(StdoutSink::from_config(&StdoutConfig::default())),
         1 => sinks
             .into_iter()
             .next()
-            .unwrap_or_else(|| Arc::new(StdoutSink::new(pretty))),
+            .unwrap_or_else(|| Arc::new(StdoutSink::from_config(&StdoutConfig::default()))),
         _ => Arc::new(FanOutSink::new(sinks)),
     })
 }

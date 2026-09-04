@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use config::{Source, SourceType};
 use engine::BatchStats;
 use futures::stream::{self, BoxStream};
+use kernel::PortEntry;
 use kernel::{ColumnName, DatabaseSchema, GenericValue, IndexName, TableName};
 use sink::{FlushReport, Sink};
 use source::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
@@ -177,6 +177,10 @@ struct MockBackends {
 
 #[async_trait]
 impl Backends for MockBackends {
+    fn validate(&self, _config: &Config) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn source(
         &self,
         _config: Arc<Config>,
@@ -329,12 +333,8 @@ fn row_change(delete: bool, id: i64, seq: u64, acks: &Arc<AtomicU64>) -> Change 
 /// daemon (for the status surface), and it's intentionally empty.
 fn backendless_config() -> Config {
     Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: None,
-            manage_publication: true,
-            tls: Default::default(),
-        },
+        source: PortEntry::new("mock"),
+        stream: PortEntry::new(config::DEFAULT_STREAM_KIND),
         sinks: BTreeMap::new(),
         indexes: BTreeMap::new(),
         on_error: Default::default(),

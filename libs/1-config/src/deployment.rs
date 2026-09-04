@@ -1,11 +1,11 @@
 //! The assembled deployment configuration — a **composition** concern.
 //!
-//! [`Config`] names a source, the sinks, and the indexes to build. It sits
-//! *above* the backend crates: sources and sinks depend only on the
-//! `kernel` vocabulary (`IndexSchema`, `IndexMapping`, the newtypes), never
-//! on this crate, so a backend can't reach the top-level config. The composition
-//! root (CLI/daemon) translates `Config` into the backend-facing subsets each
-//! side needs (a source spec, the per-sink configs).
+//! [`Config`] names one source, one stream, the sinks, and the indexes to
+//! build. Each port is a [`PortEntry`]: the adapter kind plus its options,
+//! **uninterpreted** here. The adapters depend only on the kernel vocabulary
+//! and never on this crate, and this crate names no adapter: the composition
+//! root (the CLI) looks each kind up in its adapter registry and hands the
+//! options to that adapter's config type, which validates them strictly.
 //!
 //! These types were lifted out of `kernel` for exactly that reason —
 //! keeping the cross-cutting vocabulary at the bottom layer while the
@@ -13,17 +13,15 @@
 
 mod conversion;
 mod projection;
-mod sink;
-mod source;
-
-pub use sink::Sink;
-pub use source::Source;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use kernel::{FailurePolicy, IndexSchema, common};
+use kernel::{FailurePolicy, IndexSchema, PortEntry, common};
 use serde::{Deserialize, Serialize};
+
+/// The stream adapter used when `[stream]` is omitted: the in-process channel.
+pub const DEFAULT_STREAM_KIND: &str = "channel";
 
 /// A whole deployment: where data comes from, where it goes, and what to build.
 ///
@@ -33,8 +31,17 @@ use serde::{Deserialize, Serialize};
 /// literal secrets either way.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub source: Source,
-    pub sinks: BTreeMap<common::SinkName, Sink>,
+    /// The source port entry (`[source]`): its adapter kind and options.
+    pub source: PortEntry,
+    /// The stream port entry (`[stream]`); [`DEFAULT_STREAM_KIND`] with no
+    /// options when the file omits it.
+    #[serde(default = "default_stream")]
+    pub stream: PortEntry,
+    /// The sink port entries (`[sinks.<name>]`), by name. Empty means the
+    /// composition root's default sink (stdout).
+    #[serde(default)]
+    pub sinks: BTreeMap<common::SinkName, PortEntry>,
+    #[serde(default)]
     pub indexes: BTreeMap<common::IndexName, Index>,
     /// What to do when a sink rejects a document at the item level. The default
     /// for every index; override per index with [`Index::on_error`].
@@ -54,6 +61,10 @@ pub struct Config {
     /// `flusso-query` client must apply the same prefix at runtime to read back.
     #[serde(default)]
     pub prefix: String,
+}
+
+fn default_stream() -> PortEntry {
+    PortEntry::new(DEFAULT_STREAM_KIND)
 }
 
 /// Bind addresses for the two operational HTTP surfaces, as configured in

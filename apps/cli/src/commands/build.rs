@@ -23,6 +23,8 @@ pub(crate) struct BuildArgs {
 pub(crate) fn execute(args: BuildArgs) -> anyhow::Result<()> {
     let compiled = config::compile(&args.config)
         .with_context(|| format!("compiling config from {}", args.config.display()))?;
+    crate::adapters::validate(&compiled.config)
+        .with_context(|| format!("validating {}", args.config.display()))?;
     config::write(&compiled, &args.out)
         .with_context(|| format!("writing compiled artifact to {}", args.out.display()))?;
 

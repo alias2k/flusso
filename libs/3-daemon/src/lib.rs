@@ -24,25 +24,18 @@ use config::Config;
 use engine::{Engine, FailurePolicies, FanOut};
 use source::cdc::ChangeCapture;
 
-/// How a [`Daemon`] run is parameterized — the pipeline knobs the CLI exposes as
-/// flags. Transport settings (HTTP address, …) are the binary's concern, not the
-/// daemon's, so they are not here.
+/// How a [`Daemon`] run is parameterized: the knobs that belong to the
+/// deployment as a whole. Adapter settings (the slot, the publication,
+/// pretty-printing, …) live in each port entry's options and reach the adapter
+/// through [`Backends`]; transport settings (HTTP address, …) are the binary's.
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
-    /// Logical replication slot to consume. Must already exist or be creatable.
-    pub slot: String,
-    /// Publication to subscribe to.
-    pub publication: String,
-    /// Auto-create/extend the publication to cover every table the indexes read
-    /// when the source role is privileged enough. When false, a coverage gap is
-    /// only reported (the source still streams whatever the publication covers).
-    pub manage_publication: bool,
     /// Skip the initial backfill and resume live capture only.
     pub skip_backfill: bool,
-    /// Changes buffered between capture and processing.
+    /// Changes buffered between capture and processing. The composition root
+    /// reads it from the stream entry; the engine owns the buffer until the
+    /// stream becomes an injected port.
     pub queue_capacity: usize,
-    /// Pretty-print documents on the stdout fallback sink (no sink configured).
-    pub pretty: bool,
     /// How often to sample source capture lag.
     pub lag_poll_interval: Duration,
 }
@@ -50,12 +43,8 @@ pub struct DaemonOptions {
 impl Default for DaemonOptions {
     fn default() -> Self {
         Self {
-            slot: "flusso".to_owned(),
-            publication: "flusso".to_owned(),
-            manage_publication: true,
             skip_backfill: false,
             queue_capacity: 1024,
-            pretty: false,
             lag_poll_interval: Duration::from_secs(15),
         }
     }
@@ -129,9 +118,11 @@ impl Daemon {
             status,
         } = self;
 
+        backends.validate(&config)?;
         tracing::info!(
-            slot = %options.slot,
-            publication = %options.publication,
+            source = %config.source.kind,
+            stream = %config.stream.kind,
+            sinks = config.sinks.len(),
             indexes = config.indexes.len(),
             "starting sync",
         );

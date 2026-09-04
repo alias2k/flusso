@@ -136,14 +136,24 @@ fn write_bytes(bytes: &[u8], path: &Path) -> Result<(), CompileError> {
 /// with a regenerate hint.
 pub fn from_bytes(bytes: &[u8]) -> Result<Config, CompileError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CompileError::LegacyFormat)?;
-    let compiled: Compiled = toml::from_str(text)?;
-    if compiled.format_version != FORMAT_VERSION {
+    // The version is checked before the body is decoded, so a lock written in
+    // another format reports the version mismatch (and its regenerate hint)
+    // rather than whichever field of the old shape fails first.
+    let header: Header = toml::from_str(text)?;
+    if header.format_version != FORMAT_VERSION {
         return Err(CompileError::VersionMismatch {
-            got: compiled.format_version,
+            got: header.format_version,
             expected: FORMAT_VERSION,
         });
     }
+    let compiled: Compiled = toml::from_str(text)?;
     Ok(compiled.config)
+}
+
+/// Just the version line of a lock, read ahead of the body.
+#[derive(Deserialize)]
+struct Header {
+    format_version: u8,
 }
 
 /// Read a compiled artifact from `path` and return its [`Config`].

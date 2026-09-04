@@ -30,6 +30,7 @@
 //!   index on a running server (zero read-downtime; reads stay on the old copy
 //!   until the rebuild swaps in).
 
+mod adapters;
 mod backends;
 mod commands;
 mod http;

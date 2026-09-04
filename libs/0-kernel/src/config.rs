@@ -8,9 +8,7 @@ mod join;
 mod projection;
 mod schema;
 mod secret;
-mod sink;
 mod soft_delete;
-mod tls;
 mod transform;
 
 pub use aggregate::*;
@@ -22,9 +20,7 @@ pub use index_mapping::*;
 pub use join::*;
 pub use schema::*;
 pub use secret::*;
-pub use sink::*;
 pub use soft_delete::*;
-pub use tls::*;
 pub use transform::*;
 
 use serde::{Deserialize, Serialize};
@@ -35,7 +31,7 @@ use crate::common;
 /// it accepted the batch but refused a specific document (a mapping conflict, a
 /// malformed value). Distinct from a flush-wide failure, which always stops the
 /// run. Set globally on the config and overridable per index (both live in the
-/// `schema` crate's `Config`/`Index`, which assemble this policy).
+/// `config` crate's `Config`/`Index`, which assemble this policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailurePolicy {

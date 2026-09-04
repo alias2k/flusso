@@ -29,7 +29,7 @@ set -euo pipefail
 
 # ── config (override via env) ────────────────────────────────────────────────
 USERS_DEFAULT=20000
-DB_URL="${DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/flusso}"
+DB_URL="${SOURCE_POSTGRES_CONNECTION_URL:-postgres://postgres:postgres@127.0.0.1:5432/flusso}"
 WRITERS="${WRITERS:-8}"                 # concurrent writer sessions (concurrency)
 OPS_PER_TICK="${OPS_PER_TICK:-3}"       # ops per committed transaction (keep small)
 WRITE_INTERVAL="${WRITE_INTERVAL:-20}"  # avg seconds between writes, per user

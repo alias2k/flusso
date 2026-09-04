@@ -1,4 +1,9 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
+mod config;
+
+pub use config::ChannelConfig;
 
 use async_trait::async_trait;
 use stream::{AckHandle, Consumer, Delivery, Producer, QueueError, Result};

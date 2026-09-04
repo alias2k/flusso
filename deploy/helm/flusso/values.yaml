@@ -38,7 +38,7 @@ config:
   flussoToml: |
     [source]
     type = "postgres"
-    connection_url = { env = "DATABASE_URL" }
+    connection_url = { env = "SOURCE_POSTGRES_CONNECTION_URL" }
 
     [sinks.primary]
     type = "opensearch"
@@ -79,13 +79,13 @@ http:
 # Secrets injected as environment variables (resolved by `{ env = "VAR" }`
 # references in the config). Use `create` to manage a Secret from `data`, or
 # point at an `existingSecret` you manage yourself. Either way it is mounted
-# with envFrom, so its keys become env vars (e.g. DATABASE_URL,
+# with envFrom, so its keys become env vars (e.g. SOURCE_POSTGRES_CONNECTION_URL,
 # PRIMARY_OPENSEARCH_URL, OS_PASSWORD).
 secrets:
   create: false
   existingSecret: ""
   data: {}
-    # DATABASE_URL: "postgres://user:pass@postgres:5432/app"
+    # SOURCE_POSTGRES_CONNECTION_URL: "postgres://user:pass@postgres:5432/app"
     # PRIMARY_OPENSEARCH_URL: "https://opensearch:9200"
 
 # Extra plain environment variables (non-secret), e.g. RUST_LOG, OTEL_*.

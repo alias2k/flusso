@@ -2,7 +2,9 @@
 //! `dynamic: strict` mapping, the `flusso_*` analysis definitions, and the
 //! production-ready subfield enrichment for `text`/`keyword` fields.
 
-use kernel::{MappingType, ResolvedField, TextAnalysis};
+use kernel::{MappingType, ResolvedField};
+
+use crate::config::TextAnalysis;
 use serde_json::{Map, Value, json};
 use sink::to_json;
 

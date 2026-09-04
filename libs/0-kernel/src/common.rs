@@ -1,5 +1,4 @@
 mod column_name;
-mod connection_url;
 mod field_name;
 mod generic_value;
 mod http_url;
@@ -8,11 +7,9 @@ mod index_prefix;
 mod raw_filter_value;
 mod schema_path;
 mod sink_name;
-mod source_type;
 mod table_name;
 
 pub use column_name::*;
-pub use connection_url::*;
 pub use field_name::*;
 pub use generic_value::*;
 pub use http_url::*;
@@ -21,5 +18,4 @@ pub use index_prefix::*;
 pub use raw_filter_value::*;
 pub use schema_path::*;
 pub use sink_name::*;
-pub use source_type::*;
 pub use table_name::*;

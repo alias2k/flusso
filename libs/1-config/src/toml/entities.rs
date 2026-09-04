@@ -1,13 +1,11 @@
 //! The parsed `flusso.toml` entities — neutral types that mirror the file. They
-//! are public so the `schema` crate's `From<ConfigToml>` conversion can lift
-//! them into the assembled `Config`.
+//! are public so the `From<ConfigToml>` conversion beside `Config` can lift
+//! them into the assembled `Config`. The port entries themselves are the
+//! kernel's [`PortEntry`](kernel::PortEntry): a `type` plus uninterpreted
+//! options.
 
 mod index_entry;
 mod server;
-mod sink;
-mod source;
 
 pub use index_entry::*;
 pub use server::*;
-pub use sink::*;
-pub use source::*;

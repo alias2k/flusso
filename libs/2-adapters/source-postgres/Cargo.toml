@@ -24,7 +24,12 @@ fuzzing = []
 
 [dependencies]
 source.workspace = true
-kernel.workspace = true
+kernel = { workspace = true, features = ["derive"] }
+serde.workspace = true
+schemars.workspace = true
+nutype.workspace = true
+regex.workspace = true
+bon.workspace = true
 pgwire-replication.workspace = true
 async-trait.workspace = true
 futures.workspace = true
@@ -40,6 +45,7 @@ serde_json.workspace = true
 [dev-dependencies]
 source.workspace = true
 kernel.workspace = true
+toml.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 async-trait.workspace = true
