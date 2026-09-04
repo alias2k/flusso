@@ -12,7 +12,10 @@
 use std::io::{IsTerminal, Write};
 
 use anyhow::Result;
-use config::{Config, ConnectionSpec, IndexMapping, ResolvedField, Secret, Sink, SoftDelete};
+use config::{Config, IndexMapping, ResolvedField, SoftDelete};
+use kernel::{OptionValue, Port, PortEntry};
+
+use crate::adapters;
 use source::{CoverageReport, Diagnostic, Severity};
 
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
@@ -147,18 +150,19 @@ pub(crate) fn coverage(
 /// indexes are declared. Field detail is left to the schema trees.
 pub(crate) fn config(out: &mut impl Write, pen: Pen, config: &Config) -> Result<()> {
     section(out, pen, "Source")?;
-    let source_kind = match config.source.source_type {
-        config::SourceType::Postgres => "postgres",
-    };
-    let mut connection = describe_connection(config.source.connection.as_ref());
-    if let Some(tls) = describe_tls(&config.source.tls) {
-        connection = format!("{connection}  {tls}");
-    }
     writeln!(
         out,
         "  {}  {}",
-        pen.magenta(source_kind),
-        pen.dim(&connection),
+        pen.magenta(&config.source.kind),
+        pen.dim(&describe_entry(Port::Source, &config.source)),
+    )?;
+
+    section(out, pen, "Stream")?;
+    writeln!(
+        out,
+        "  {}  {}",
+        pen.magenta(&config.stream.kind),
+        pen.dim(&describe_entry(Port::Stream, &config.stream)),
     )?;
 
     section(out, pen, "Sinks")?;
@@ -168,12 +172,11 @@ pub(crate) fn config(out: &mut impl Write, pen: Pen, config: &Config) -> Result<
         let rows: Vec<(String, String, String)> = config
             .sinks
             .iter()
-            .map(|(name, sink)| {
-                let (kind, detail) = describe_sink(sink);
+            .map(|(name, entry)| {
                 (
                     name.as_ref().to_owned(),
-                    pen.magenta(kind),
-                    pen.dim(&detail),
+                    pen.magenta(&entry.kind),
+                    pen.dim(&describe_entry(Port::Sink, entry)),
                 )
             })
             .collect();
@@ -344,23 +347,54 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
     Ok(())
 }
 
-fn describe_sink(sink: &Sink) -> (&'static str, String) {
-    match sink {
-        Sink::Opensearch(os) => {
-            let mut detail = describe_secret_url(&os.url);
-            if !os.tls_verify {
-                detail.push_str("   tls-verify off");
+/// One port entry's options on a line, `key=value` pairs in key order, without
+/// interpreting them: the adapter's description says which fields are secrets,
+/// and those are shown as their variable name (`${VAR}`), as a URL with the
+/// password masked, or as `***`.
+fn describe_entry(port: Port, entry: &PortEntry) -> String {
+    let secrets: Vec<String> = adapters::description(port, &entry.kind)
+        .map(|d| d.secrets.clone())
+        .unwrap_or_default();
+    let mut parts = Vec::new();
+    for (key, value) in &entry.options.0 {
+        parts.push(format!("{key}={}", describe_value(value, key, &secrets)));
+    }
+    parts.join(" ")
+}
+
+fn describe_value(value: &OptionValue, path: &str, secrets: &[String]) -> String {
+    let secret = secrets.iter().any(|s| s == path);
+    match value {
+        OptionValue::Map(map) => {
+            if secret && let Some(var) = map.get("env").and_then(OptionValue::as_str) {
+                return format!("${{{var}}}");
             }
-            ("opensearch", detail)
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{k}={}", describe_value(v, &format!("{path}.{k}"), secrets)))
+                .collect();
+            format!("{{{}}}", inner.join(" "))
         }
-        Sink::Stdout(s) => (
-            "stdout",
-            if s.pretty {
-                "pretty".into()
+        OptionValue::String(text) if secret => {
+            if text.contains("://") {
+                redact_url(text)
             } else {
-                String::new()
-            },
+                "***".to_owned()
+            }
+        }
+        OptionValue::String(text) => text.clone(),
+        OptionValue::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|v| describe_value(v, path, secrets))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
+        OptionValue::Bool(b) => b.to_string(),
+        OptionValue::Integer(i) => i.to_string(),
+        OptionValue::Float(f) => f.to_string(),
+        OptionValue::Null => "null".to_owned(),
     }
 }
 
@@ -368,55 +402,6 @@ fn describe_soft_delete(sd: &SoftDelete) -> String {
     match sd {
         SoftDelete::Column(c) => format!("column \"{}\"", c.column),
         SoftDelete::Field(f) => format!("field \"{}\"", f.field),
-    }
-}
-
-/// Describe the source connection without resolving it: an env reference shows
-/// the variable, a literal URL shows itself (password masked), parts show the
-/// host/database, and an absent connection notes the `DATABASE_URL` fallback.
-fn describe_connection(spec: Option<&ConnectionSpec>) -> String {
-    match spec {
-        None => "(from DATABASE_URL at runtime)".to_owned(),
-        Some(ConnectionSpec::Url(secret)) => describe_secret_url(secret),
-        Some(ConnectionSpec::Parts {
-            host,
-            port,
-            user,
-            database,
-            ..
-        }) => format!("{user}@{host}:{port}/{database}"),
-    }
-}
-
-/// The config-declared TLS settings, when any are set. URL-borne `ssl*`
-/// parameters are not shown — the connection may be an unresolved env
-/// reference here.
-fn describe_tls(tls: &config::SourceTls) -> Option<String> {
-    if tls.is_unset() {
-        return None;
-    }
-    let mut parts = Vec::new();
-    if let Some(mode) = tls.mode {
-        parts.push(format!("ssl={mode}"));
-    }
-    if let Some(ca) = &tls.root_cert {
-        parts.push(format!("ca={}", ca.display()));
-    }
-    if tls.client_cert.is_some() || tls.client_key.is_some() {
-        parts.push("mtls".to_owned());
-    }
-    if let Some(sni) = &tls.sni_hostname {
-        parts.push(format!("sni={sni}"));
-    }
-    Some(parts.join(" "))
-}
-
-/// Describe a URL-bearing secret without leaking it: an env reference shows the
-/// variable name, a literal shows the URL with any embedded password masked.
-fn describe_secret_url(secret: &Secret) -> String {
-    match secret {
-        Secret::Env(var) => format!("${{{var}}}"),
-        Secret::Value(url) => redact_url(url),
     }
 }
 

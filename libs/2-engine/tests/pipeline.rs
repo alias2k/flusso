@@ -809,7 +809,7 @@ async fn exec(pool: &PgPool, sql: &str) {
 }
 
 fn opensearch_sink(os_url: &str) -> OpensearchSink {
-    let config = kernel::OpensearchSink {
+    let config = sink_opensearch::OpensearchConfig {
         url: Secret::Value(os_url.to_owned()),
         username: None,
         password: None,
@@ -822,7 +822,7 @@ fn opensearch_sink(os_url: &str) -> OpensearchSink {
         number_of_shards: 1,
         number_of_replicas: 1,
         refresh_interval: "1s".to_owned(),
-        text_analysis: kernel::TextAnalysis::Builtin,
+        text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
     };
     OpensearchSink::from_config(&SinkName::try_new("e2e").unwrap(), &config).unwrap()

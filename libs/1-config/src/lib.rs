@@ -13,7 +13,7 @@ pub use compiled::{
     CompileError, Compiled, FORMAT_VERSION, compile, from_bytes, load_compiled, to_bytes, write,
     write_if_changed,
 };
-pub use deployment::{Config, Index, ServerConfig, Sink, Source};
+pub use deployment::{Config, DEFAULT_STREAM_KIND, Index, ServerConfig};
 pub use loader::{LoadError, load};
 
 // Re-export the kernel vocabulary so downstream crates depend only on `config`

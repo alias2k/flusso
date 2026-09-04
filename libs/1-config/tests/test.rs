@@ -7,7 +7,8 @@
 
 use std::path::Path;
 
-use config::{ConnectionSpec, IndexName, LoadError, Secret, load};
+use config::{IndexName, LoadError, load};
+use kernel::{OptionValue, PortEntry};
 
 fn index_name(name: &str) -> IndexName {
     IndexName::try_new(name).unwrap()
@@ -24,10 +25,15 @@ fn loads_config_with_indexes() {
     let config = load(fixture("config.toml")).unwrap();
 
     // Source and sinks come from the TOML; the connection stays deferred.
-    match &config.source.connection {
-        Some(ConnectionSpec::Url(Secret::Value(v))) => assert!(v.contains("localhost")),
-        other => panic!("expected a literal connection URL, got {other:?}"),
-    }
+    assert_eq!(config.source.kind, "postgres");
+    assert!(
+        config
+            .source
+            .options
+            .get("connection_url")
+            .and_then(OptionValue::as_str)
+            .is_some_and(|url| url.contains("localhost"))
+    );
     assert_eq!(config.sinks.len(), 1);
 
     // Both index entries are loaded from their YAML files, keyed by name.
@@ -103,23 +109,15 @@ fn compiled_artifact_roundtrips_and_preserves_mappings() {
 
 #[test]
 fn compiled_artifact_keeps_env_secret_unresolved() {
-    use config::{
-        Compiled, Config, ConnectionSpec, FORMAT_VERSION, Secret, Source, SourceTls, SourceType,
-        SslMode,
-    };
+    use config::{Compiled, Config, FORMAT_VERSION};
+    let mut source = PortEntry::new("postgres");
+    let mut env = kernel::Options::empty();
+    env.insert("env", "PG_URL");
+    source.options.insert("connection_url", env);
+    source.options.insert("ssl_mode", "verify-full");
     let config = Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: Some(ConnectionSpec::Url(Secret::Env("DATABASE_URL".to_owned()))),
-            manage_publication: true,
-            tls: SourceTls {
-                mode: Some(SslMode::VerifyFull),
-                root_cert: Some("/etc/ssl/ca.pem".into()),
-                client_cert: None,
-                client_key: None,
-                sni_hostname: Some("db.internal".to_owned()),
-            },
-        },
+        source,
+        stream: PortEntry::new(config::DEFAULT_STREAM_KIND),
         sinks: Default::default(),
         indexes: Default::default(),
         on_error: Default::default(),
@@ -131,49 +129,39 @@ fn compiled_artifact_keeps_env_secret_unresolved() {
         config,
     };
     let bytes = config::to_bytes(&compiled).unwrap();
-    let config = config::from_bytes(&bytes).unwrap();
-
-    // The env reference is carried through verbatim — never resolved or baked.
-    match config.source.connection {
-        Some(ConnectionSpec::Url(Secret::Env(var))) => assert_eq!(var, "DATABASE_URL"),
-        other => panic!("expected an unresolved env secret, got {other:?}"),
-    }
-
-    // The declared TLS settings survive the round-trip.
-    assert_eq!(config.source.tls.mode, Some(SslMode::VerifyFull));
-    assert_eq!(
-        config.source.tls.root_cert.as_deref(),
-        Some("/etc/ssl/ca.pem".as_ref())
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(
+        text.contains("[config.source.connection_url]\nenv = \"PG_URL\""),
+        "{text}"
     );
+    let config = config::from_bytes(&bytes).unwrap();
+    let env = config
+        .source
+        .options
+        .get("connection_url")
+        .and_then(OptionValue::as_map)
+        .unwrap();
+    assert_eq!(env.get("env").and_then(OptionValue::as_str), Some("PG_URL"));
     assert_eq!(
-        config.source.tls.sni_hostname.as_deref(),
-        Some("db.internal")
+        config
+            .source
+            .options
+            .get("ssl_mode")
+            .and_then(OptionValue::as_str),
+        Some("verify-full")
     );
 }
 
 #[test]
-fn compiled_artifact_without_tls_field_defaults() {
-    use config::{Compiled, Config, FORMAT_VERSION, Source, SourceTls, SourceType};
-    // A lock written before the `tls` field existed carries no such key (the
-    // field is skipped when unset) — deserializing must default it, not fail.
-    let config = Config {
-        source: Source {
-            source_type: SourceType::Postgres,
-            connection: None,
-            manage_publication: true,
-            tls: SourceTls::default(),
-        },
-        sinks: Default::default(),
-        indexes: Default::default(),
-        on_error: Default::default(),
-        server: Default::default(),
-        prefix: String::new(),
-    };
-    let compiled = Compiled {
-        format_version: FORMAT_VERSION,
-        config,
-    };
-    let bytes = config::to_bytes(&compiled).unwrap();
-    let config = config::from_bytes(&bytes).unwrap();
-    assert!(config.source.tls.is_unset());
+fn compiled_artifact_without_stream_defaults_to_the_channel() {
+    let text = r#"
+format_version = 3
+
+[config]
+
+[config.source]
+type = "postgres"
+"#;
+    let config = config::from_bytes(text.as_bytes()).unwrap();
+    assert_eq!(config.stream, PortEntry::new(config::DEFAULT_STREAM_KIND));
 }

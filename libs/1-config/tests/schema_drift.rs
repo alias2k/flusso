@@ -6,23 +6,22 @@
     clippy::indexing_slicing
 )]
 
-//! Drift guard between the parsers and the editor-assist JSON Schemas.
+//! Drift guard between the `*.schema.yml` parser and its editor-assist JSON
+//! Schema.
 //!
-//! The schemas the parser crates embed (`config.schema.json` for `flusso.toml`,
-//! `index.schema.yml` for `*.schema.yml`) are hand-curated for editor UX, but
-//! the **sets** they enumerate — field type tags, field siblings, enum tokens,
-//! and sink fields — must stay in lockstep with what the parsers accept. Each
-//! test reflects a set from the Rust types and asserts the schema lists exactly
-//! the same one.
+//! `index.schema.yml` is hand-curated for editor UX, but the **sets** it
+//! enumerates — field type tags, field siblings, enum tokens — must stay in
+//! lockstep with what the parser accepts. Each test reflects a set from the Rust
+//! types and asserts the schema lists exactly the same one. (The `flusso.toml`
+//! schema is *generated* from the adapters' descriptions by the CLI and guarded
+//! by a drift test there.)
 //!
 //! The reflection is compile-coupled to the types, not hand-copied:
 //! - enum tokens come from `Serialize` (the real wire name), and the full
 //!   variant list is fronted by a **wildcard-free `match`** that fails to
 //!   *compile* when a variant is added;
 //! - struct field sets come from **field-complete destructures** (no `..`) that
-//!   likewise fail to compile when a field is added;
-//! - the config-side field sets are read back from a fully-populated sample that
-//!   is parsed and re-serialized, so a new field shows up automatically.
+//!   likewise fail to compile when a field is added.
 //!
 //! What this deliberately does NOT check (see the schema file headers and
 //! CLAUDE.md): prose descriptions, defaults, the intentionally permissive
@@ -31,19 +30,13 @@
 
 use std::collections::BTreeSet;
 
-use config::ParseFrom;
 use serde::Serialize;
 use serde_json::Value;
 
 // ── loading the embedded schemas ──────────────────────────────────────────────
 //
-// Read the schemas as the crates embed them (`include_str!`), so the test
+// Read the schema as the crate embeds it (`include_str!`), so the test
 // validates the bytes that ship and emit — not a loose file that could diverge.
-
-/// The TOML config schema, as JSON.
-fn config_schema() -> Value {
-    serde_json::from_str(config::CONFIG_SCHEMA).expect("config schema is JSON")
-}
 
 /// The index schema (authored in YAML, but a JSON Schema document), as JSON.
 fn index_schema() -> Value {
@@ -165,28 +158,6 @@ fn all_aggregate_ops() -> Vec<config::yaml::AggregateOp> {
         }
     }
     vec![Count, Sum, Avg, Min, Max, Ids]
-}
-
-fn all_ssl_modes() -> Vec<config::SslMode> {
-    use config::SslMode::*;
-    fn _exhaustive(m: config::SslMode) {
-        use config::SslMode::*;
-        match m {
-            Disable | Prefer | Require | VerifyCa | VerifyFull => {}
-        }
-    }
-    vec![Disable, Prefer, Require, VerifyCa, VerifyFull]
-}
-
-fn all_text_analyses() -> Vec<config::TextAnalysis> {
-    use config::TextAnalysis::*;
-    fn _exhaustive(t: config::TextAnalysis) {
-        use config::TextAnalysis::*;
-        match t {
-            Builtin | Icu => {}
-        }
-    }
-    vec![Builtin, Icu]
 }
 
 /// The 16 scalar `FlussoType`s — those usable as a field type tag and as an
@@ -441,171 +412,5 @@ fn index_order_by_directions_match_parser() {
         ),
         tokens(&all_directions()),
         "order_by directions drifted",
-    );
-}
-
-// ── config schema ────────────────────────────────────────────────────────────
-
-/// A sample config that populates *every* field (including the optional,
-/// skip-when-none ones), parsed and re-serialized so the resulting JSON carries
-/// the full key set the parser accepts.
-fn populated_config_json() -> Value {
-    let toml = r#"
-        [source]
-        type = "postgres"
-        connection_url = { host = "h", port = 5432, user = "u", password = { env = "P" }, database = "d" }
-        manage_publication = true
-        ssl_mode = "verify-full"
-        ssl_root_cert = "/ca.pem"
-        ssl_cert = "/client.pem"
-        ssl_key = "/client.key"
-        ssl_sni_hostname = "db.internal"
-
-        [sinks.os]
-        type = "opensearch"
-        url = "https://example:9200"
-        username = { env = "U" }
-        password = { env = "PW" }
-        tls_verify = true
-        batch_size = 1
-        max_bytes = 1
-        timeout_secs = 1
-        max_retries = 0
-        pipeline = "p"
-        number_of_shards = 1
-        number_of_replicas = 0
-        refresh_interval = "10s"
-        text_analysis = "icu"
-        auto_subfields = true
-
-        [sinks.out]
-        type = "stdout"
-        pretty = true
-
-        [[index]]
-        name = "i"
-        schema = "i.schema.yml"
-        enabled = true
-        on_error = "skip"
-    "#;
-    let config = config::toml::ConfigToml::try_parse(toml).expect("sample config parses");
-    serde_json::to_value(&config).expect("config serializes")
-}
-
-#[test]
-fn config_opensearch_sink_fields_match_parser() {
-    let cfg = populated_config_json();
-    let rust = object_keys(cfg.pointer("/sinks/os").expect("os sink"));
-    let schema = schema_keys(&config_schema(), "/definitions/opensearch_sink/properties");
-    assert_eq!(rust, schema, "opensearch sink fields drifted");
-}
-
-#[test]
-fn config_stdout_sink_fields_match_parser() {
-    let cfg = populated_config_json();
-    let rust = object_keys(cfg.pointer("/sinks/out").expect("out sink"));
-    let schema = schema_keys(&config_schema(), "/definitions/stdout_sink/properties");
-    assert_eq!(rust, schema, "stdout sink fields drifted");
-}
-
-#[test]
-fn config_text_analysis_enum_matches_parser() {
-    assert_eq!(
-        schema_enum(
-            &config_schema(),
-            "/definitions/opensearch_sink/properties/text_analysis/enum"
-        ),
-        tokens(&all_text_analyses()),
-        "text_analysis enum drifted",
-    );
-}
-
-#[test]
-fn config_sink_types_match_parser() {
-    let schema = config_schema();
-    let schema_types: BTreeSet<String> = [
-        "/definitions/opensearch_sink/properties/type/const",
-        "/definitions/stdout_sink/properties/type/const",
-    ]
-    .iter()
-    .map(|p| schema.pointer(p).unwrap().as_str().unwrap().to_owned())
-    .collect();
-
-    let cfg = populated_config_json();
-    let rust_types: BTreeSet<String> = ["/sinks/os/type", "/sinks/out/type"]
-        .iter()
-        .map(|p| cfg.pointer(p).unwrap().as_str().unwrap().to_owned())
-        .collect();
-
-    assert_eq!(schema_types, rust_types, "sink type discriminators drifted");
-}
-
-#[test]
-fn config_source_parts_fields_match_parser() {
-    // The parts form is the connection_url branch that carries `host`.
-    let schema = config_schema();
-    let branches = schema
-        .pointer("/properties/source/oneOf/0/properties/connection_url/oneOf")
-        .expect("connection_url.oneOf")
-        .as_array()
-        .expect("array");
-    let parts = branches
-        .iter()
-        .find(|b| b.pointer("/properties/host").is_some())
-        .expect("a parts branch with host");
-    let schema_parts = object_keys(parts.get("properties").expect("properties"));
-
-    let cfg = populated_config_json();
-    let rust_parts = object_keys(
-        cfg.pointer("/source/connection_url")
-            .expect("connection_url"),
-    );
-
-    assert_eq!(schema_parts, rust_parts, "source connection parts drifted");
-}
-
-#[test]
-fn config_source_fields_match_parser() {
-    let cfg = populated_config_json();
-    let rust = object_keys(cfg.pointer("/source").expect("source"));
-    let schema = schema_keys(&config_schema(), "/properties/source/oneOf/0/properties");
-    assert_eq!(rust, schema, "source fields drifted");
-}
-
-#[test]
-fn config_ssl_mode_enum_matches_parser() {
-    assert_eq!(
-        schema_enum(
-            &config_schema(),
-            "/properties/source/oneOf/0/properties/ssl_mode/enum"
-        ),
-        tokens(&all_ssl_modes()),
-        "ssl_mode enum drifted",
-    );
-}
-
-#[test]
-fn config_index_entry_fields_match_parser() {
-    let cfg = populated_config_json();
-    let rust = object_keys(cfg.pointer("/index/0").expect("index entry"));
-    let schema = schema_keys(&config_schema(), "/properties/index/items/properties");
-    assert_eq!(rust, schema, "index entry fields drifted");
-}
-
-#[test]
-fn config_on_error_enum_matches_parser() {
-    let rust = tokens(&[config::FailurePolicy::Stop, config::FailurePolicy::Skip]);
-    assert_eq!(
-        rust,
-        schema_enum(&config_schema(), "/properties/on_error/enum"),
-        "global on_error tokens drifted from config.schema.json",
-    );
-    assert_eq!(
-        rust,
-        schema_enum(
-            &config_schema(),
-            "/properties/index/items/properties/on_error/enum",
-        ),
-        "per-index on_error tokens drifted from config.schema.json",
     );
 }

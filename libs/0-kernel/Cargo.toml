@@ -28,7 +28,6 @@ serde_json.workspace = true
 schemars.workspace = true
 nutype.workspace = true
 regex.workspace = true
-bon.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 uuid.workspace = true

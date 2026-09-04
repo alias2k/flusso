@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use clap::{Args, ValueEnum};
-use config::SourceType;
 use source_postgres::PgDocumentBuilder;
 
+use crate::adapters;
 use crate::backends::source_spec;
 
 use crate::DEFAULT_CONFIG;
@@ -30,10 +30,10 @@ pub(crate) struct CheckArgs {
     #[arg(long, env = "FLUSSO_OFFLINE")]
     offline: bool,
 
-    /// Publication whose coverage to report. Matches `flusso run`'s default, so
-    /// the report reflects the publication a run would use.
-    #[arg(long, env = "FLUSSO_PUBLICATION", default_value = "flusso")]
-    publication: String,
+    /// Publication whose coverage to report. Overrides `[source] publication`,
+    /// like `flusso run`, so the report reflects the publication a run would use.
+    #[arg(long, env = "FLUSSO_PUBLICATION")]
+    publication: Option<String>,
 
     /// Whether `flusso run` would auto-create/extend the publication. Controls
     /// the coverage report's phrasing only (check never mutates). Overrides the
@@ -55,27 +55,28 @@ enum OutputFormat {
 }
 
 pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
-    let config = Arc::new(
-        config::load(&args.config)
-            .with_context(|| format!("loading config from {}", args.config.display()))?,
+    let mut config = config::load(&args.config)
+        .with_context(|| format!("loading config from {}", args.config.display()))?;
+    adapters::apply_overrides(
+        &mut config,
+        &adapters::Overrides {
+            publication: args.publication.clone(),
+            manage_publication: args.manage_publication,
+            ..adapters::Overrides::default()
+        },
     );
+    // Every entry must instantiate its adapter config, offline or not: a
+    // misspelled sink option is a config error, and `check` exists to catch it.
+    adapters::validate(&config).with_context(|| format!("validating {}", args.config.display()))?;
+    let config = Arc::new(config);
 
     let mappings = config.resolve_mappings();
+    let postgres = adapters::source_config(&config)?;
 
     let diagnostics = if args.offline {
         None
     } else {
-        ensure!(
-            config.source.source_type == SourceType::Postgres,
-            "only postgres sources are supported",
-        );
-        let connection_url = config
-            .source
-            .resolve_connection_url()
-            .context("resolving the source connection URL")?;
-        let sql_url =
-            source_postgres::sql_connection_url(connection_url.as_ref(), &config.source.tls)
-                .context("applying the source TLS settings to the connection URL")?;
+        let (_, sql_url) = crate::backends::source_sql_url(&config)?;
         let spec = Arc::new(source_spec(&config));
         let documents = PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec))
             .await
@@ -90,7 +91,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     let coverage = if args.offline {
         None
     } else {
-        let provisioning = crate::backends::build_provisioning(&config, &args.publication)?;
+        let provisioning = crate::backends::build_provisioning(&config, &postgres.publication)?;
         let required = source_spec(&config).all_tables();
         Some(
             provisioning
@@ -99,9 +100,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                 .context("inspecting publication coverage")?,
         )
     };
-    let manage = args
-        .manage_publication
-        .unwrap_or(config.source.manage_publication);
+    let manage = postgres.manage_publication;
 
     let has_errors = diagnostics
         .as_ref()

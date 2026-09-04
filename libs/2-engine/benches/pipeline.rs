@@ -370,7 +370,7 @@ async fn setup() -> Services {
     let documents: Arc<dyn DocumentBuilder> = Arc::new(builder);
 
     let (opensearch, os_url) = start_opensearch().await;
-    let os_config = kernel::OpensearchSink {
+    let os_config = sink_opensearch::OpensearchConfig {
         url: Secret::Value(os_url.clone()),
         username: None,
         password: None,
@@ -383,7 +383,7 @@ async fn setup() -> Services {
         number_of_shards: 1,
         number_of_replicas: 1,
         refresh_interval: "10s".to_owned(),
-        text_analysis: kernel::TextAnalysis::Builtin,
+        text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
     };
     let os_name = SinkName::try_new("bench").unwrap();

@@ -1029,11 +1029,13 @@ dependencies = [
  "flusso-config",
  "flusso-daemon",
  "flusso-design",
+ "flusso-kernel",
  "flusso-sink",
  "flusso-sink-opensearch",
  "flusso-sink-stdout",
  "flusso-source",
  "flusso-source-postgres",
+ "flusso-stream-channel",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
@@ -1143,7 +1145,6 @@ dependencies = [
 name = "flusso-kernel"
 version = "0.15.1"
 dependencies = [
- "bon",
  "chrono",
  "flusso-kernel-derive",
  "nutype",
@@ -1237,9 +1238,12 @@ dependencies = [
  "flusso-kernel",
  "flusso-sink",
  "reqwest 0.12.28",
+ "schemars 1.2.1",
+ "serde",
  "serde_json",
  "testcontainers-modules",
  "tokio",
+ "toml",
  "tracing",
 ]
 
@@ -1252,6 +1256,8 @@ dependencies = [
  "flusso-kernel",
  "flusso-sink",
  "futures",
+ "schemars 1.2.1",
+ "serde",
  "serde_json",
 ]
 
@@ -1272,18 +1278,24 @@ name = "flusso-source-postgres"
 version = "0.15.1"
 dependencies = [
  "async-trait",
+ "bon",
  "chrono",
  "criterion",
  "flusso-kernel",
  "flusso-source",
  "futures",
+ "nutype",
  "pgwire-replication",
  "proptest",
+ "regex",
  "rust_decimal",
+ "schemars 1.2.1",
+ "serde",
  "serde_json",
  "sqlx",
  "testcontainers-modules",
  "tokio",
+ "toml",
  "tracing",
  "url",
  "uuid",
@@ -1302,8 +1314,12 @@ name = "flusso-stream-channel"
 version = "0.15.1"
 dependencies = [
  "async-trait",
+ "flusso-kernel",
  "flusso-stream",
+ "schemars 1.2.1",
+ "serde",
  "tokio",
+ "toml",
 ]
 
 [[package]]

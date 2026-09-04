@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use config::Config;
 use config::toml::ConfigToml;
 use config::yaml::SchemaYaml;
+use kernel::AdapterConfig;
 use kernel::common::IndexName;
 use kernel::{IndexSchema, ParseFrom};
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,7 @@ use source::{
     junction_candidates, validate_indexes,
 };
 use source_postgres::{
-    PgDocumentBuilder, WalChangeCapture, replication_config, sql_connection_url,
+    PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
 };
 
 use crate::codegen;
@@ -708,12 +709,16 @@ pub async fn validate(request: ValidateRequest) -> ValidateResponse {
     };
 
     let config = Config::from(request.config);
-    let connection_url = match config.source.resolve_connection_url() {
+    let postgres = match postgres_config(&config) {
+        Ok(postgres) => postgres,
+        Err(e) => return unreachable("reading the source configuration", format!("{e:#}")),
+    };
+    let connection_url = match postgres.resolve_connection_url() {
         Ok(url) => url,
         Err(e) => return unreachable("resolving the source connection URL", e.to_string()),
     };
 
-    let sql_url = match source_sql_url(connection_url.as_ref(), &config) {
+    let sql_url = match source_sql_url(connection_url.as_ref(), &postgres) {
         Ok(url) => url,
         Err(e) => return unreachable("applying the source TLS settings", e.to_string()),
     };
@@ -832,12 +837,12 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
     }
 
     let config = Config::from(request.config);
-    let connection_url = config
-        .source
+    let postgres = postgres_config(&config)?;
+    let connection_url = postgres
         .resolve_connection_url()
         .context("resolving the source connection URL")?;
 
-    let sql_url = source_sql_url(connection_url.as_ref(), &config)?;
+    let sql_url = source_sql_url(connection_url.as_ref(), &postgres)?;
 
     let name = request.name.clone();
     let mut indexes: BTreeMap<IndexName, IndexSchema> = BTreeMap::new();
@@ -877,28 +882,39 @@ fn diagnostic_dto(diagnostic: Diagnostic) -> DiagnosticDto {
     }
 }
 
+/// The source entry as the Postgres adapter's config. The designer introspects
+/// Postgres, so it is one of the two places (with the CLI) that name it.
+fn postgres_config(config: &Config) -> Result<PostgresConfig> {
+    anyhow::ensure!(
+        config.source.kind == PostgresConfig::KIND,
+        "the designer supports a postgres source, not `{}`",
+        config.source.kind
+    );
+    PostgresConfig::from_options(config.source.options.clone()).context("[source]")
+}
+
 /// Build a Postgres capture from `config`'s resolved connection — introspection
 /// only uses its admin pool (the slot/publication names are irrelevant here).
 fn build_capture(config: &Config) -> Result<WalChangeCapture> {
-    let connection_url = config
-        .source
+    let postgres = postgres_config(config)?;
+    let connection_url = postgres
         .resolve_connection_url()
         .context("resolving the source connection URL")?;
     let replication = replication_config(
         connection_url.as_ref(),
-        &config.source.tls,
+        &postgres.tls(),
         "flusso_design",
         "flusso_design",
     )
     .context("building the replication connection config")?;
-    let sql_url = source_sql_url(connection_url.as_ref(), config)?;
+    let sql_url = source_sql_url(connection_url.as_ref(), &postgres)?;
     Ok(WalChangeCapture::new(replication, sql_url))
 }
 
 /// The SQL-side connection URL with the config's declared TLS settings applied
 /// — what every sqlx connection in the designer must use.
-fn source_sql_url(connection_url: &str, config: &Config) -> Result<String> {
-    sql_connection_url(connection_url, &config.source.tls)
+fn source_sql_url(connection_url: &str, postgres: &PostgresConfig) -> Result<String> {
+    sql_connection_url(connection_url, &postgres.tls())
         .context("applying the source TLS settings to the connection URL")
 }
 

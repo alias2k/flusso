@@ -81,7 +81,7 @@ async fn start_opensearch() -> (
 
 /// A sink configured for `base_url` with the given bulk `batch_size`.
 fn sink(base_url: &str, batch_size: u32) -> sink_opensearch::OpensearchSink {
-    let config = kernel::OpensearchSink {
+    let config = sink_opensearch::OpensearchConfig {
         url: kernel::Secret::Value(base_url.to_owned()),
         username: None,
         password: None,
@@ -94,7 +94,7 @@ fn sink(base_url: &str, batch_size: u32) -> sink_opensearch::OpensearchSink {
         number_of_shards: 1,
         number_of_replicas: 1,
         refresh_interval: "10s".to_owned(),
-        text_analysis: kernel::TextAnalysis::Builtin,
+        text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
     };
     let name = kernel::SinkName::try_new("bench").unwrap();

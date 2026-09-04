@@ -19,8 +19,12 @@ workspace = true
 
 [dependencies]
 stream.workspace = true
+kernel = { workspace = true, features = ["derive"] }
+serde.workspace = true
+schemars.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+toml.workspace = true

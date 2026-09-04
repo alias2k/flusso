@@ -27,6 +27,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::DEFAULT_LOCK;
+use crate::adapters;
 use crate::backends::FlussoBackends;
 use crate::http::{self, BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
 use crate::telemetry::observer::OtelObserver;
@@ -59,14 +60,16 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_LOCKED")]
     locked: bool,
 
-    /// Logical replication slot to consume. Must already exist.
-    #[arg(long, env = "FLUSSO_SLOT", default_value = "flusso")]
-    slot: String,
+    /// Logical replication slot to consume. Overrides `[source] slot`; defaults
+    /// to it, then to `flusso`.
+    #[arg(long, env = "FLUSSO_SLOT")]
+    slot: Option<String>,
 
-    /// Publication to subscribe to. flusso creates/extends it to cover every
-    /// table the indexes read when the source role is privileged enough.
-    #[arg(long, env = "FLUSSO_PUBLICATION", default_value = "flusso")]
-    publication: String,
+    /// Publication to subscribe to. Overrides `[source] publication`; defaults
+    /// to it, then to `flusso`. flusso creates/extends it to cover every table
+    /// the indexes read when the source role is privileged enough.
+    #[arg(long, env = "FLUSSO_PUBLICATION")]
+    publication: Option<String>,
 
     /// Whether flusso may auto-create/extend the publication. Overrides the
     /// `[source] manage_publication` config option; defaults to that, then to
@@ -80,13 +83,15 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_SKIP_BACKFILL")]
     skip_backfill: bool,
 
-    /// Pretty-print documents instead of compact one-per-line JSON.
+    /// Pretty-print documents on every stdout sink instead of compact
+    /// one-per-line JSON. Overrides `pretty` on those sinks.
     #[arg(long, env = "FLUSSO_PRETTY")]
     pretty: bool,
 
-    /// Maximum changes buffered between capture and processing.
-    #[arg(long, env = "FLUSSO_QUEUE_CAPACITY", default_value_t = 1024)]
-    queue_capacity: usize,
+    /// Maximum changes buffered between capture and processing. Overrides
+    /// `[stream] capacity`; defaults to it, then to 1024.
+    #[arg(long, env = "FLUSSO_QUEUE_CAPACITY")]
+    queue_capacity: Option<usize>,
 
     /// Bind address for the public, read-only HTTP surface (`/healthz`,
     /// `/readyz`, `/status`, `/metrics`). Overrides `[server].public_address`
@@ -135,6 +140,21 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     config::validate_index_prefix(&config.prefix)
         .map_err(|reason| anyhow::anyhow!("invalid index prefix: {reason}"))?;
 
+    // Adapter knobs given as flags/env are laid over the file's entries, then
+    // every entry is validated against its adapter before anything connects.
+    adapters::apply_overrides(
+        &mut config,
+        &adapters::Overrides {
+            slot: args.slot.clone(),
+            publication: args.publication.clone(),
+            manage_publication: args.manage_publication,
+            pretty: args.pretty,
+            queue_capacity: args.queue_capacity,
+        },
+    );
+    adapters::validate(&config)?;
+    let queue_capacity = adapters::stream_config(&config)?.capacity;
+
     let public_addr = args
         .public_address
         .or(config.server.public_address)
@@ -165,14 +185,8 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let registry = metrics.registry.clone();
 
     let options = DaemonOptions {
-        slot: args.slot,
-        publication: args.publication,
-        manage_publication: args
-            .manage_publication
-            .unwrap_or(config.source.manage_publication),
         skip_backfill: args.skip_backfill,
-        queue_capacity: args.queue_capacity,
-        pretty: args.pretty,
+        queue_capacity,
         lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
     };
 

@@ -8,44 +8,47 @@ on_error = "skip"
 prefix = "staging_"
 
 [config.source]
-source_type = "postgres"
+type = "postgres"
 manage_publication = false
+ssl_cert = "/etc/ssl/client.pem"
+ssl_key = "/etc/ssl/client.key"
+ssl_mode = "verify-full"
+ssl_root_cert = "/etc/ssl/ca.pem"
+ssl_sni_hostname = "db.internal"
 
-[config.source.connection.parts]
+[config.source.connection_url]
+database = "shop"
 host = "db.example.com"
 port = 5432
 user = "flusso"
-database = "shop"
 
-[config.source.connection.parts.password]
+[config.source.connection_url.password]
 env = "PGPASSWORD"
 
-[config.source.tls]
-mode = "verify-full"
-root_cert = "/etc/ssl/ca.pem"
-client_cert = "/etc/ssl/client.pem"
-client_key = "/etc/ssl/client.key"
-sni_hostname = "db.internal"
+[config.stream]
+type = "channel"
 
-[config.sinks.audit.stdout]
+[config.sinks.audit]
+type = "stdout"
 pretty = true
 
-[config.sinks.primary.opensearch]
-url = "https://search.example.com:9200"
-username = "indexer"
-tls_verify = true
+[config.sinks.primary]
+type = "opensearch"
+auto_subfields = false
 batch_size = 500
 max_bytes = 5242880
-timeout_secs = 60
 max_retries = 5
-pipeline = "enrich"
-number_of_shards = 2
 number_of_replicas = 1
+number_of_shards = 2
+pipeline = "enrich"
 refresh_interval = "30s"
 text_analysis = "icu"
-auto_subfields = false
+timeout_secs = 60
+tls_verify = true
+url = "https://search.example.com:9200"
+username = "indexer"
 
-[config.sinks.primary.opensearch.password]
+[config.sinks.primary.password]
 env = "OPENSEARCH_PASSWORD"
 
 [config.indexes.archive]

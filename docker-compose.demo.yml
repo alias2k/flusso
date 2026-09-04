@@ -23,7 +23,7 @@ services:
     container_name: flusso-flusso
     environment:
       # Point the baked-in (127.0.0.1) config at the in-network service names.
-      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/flusso"
+      SOURCE_POSTGRES_CONNECTION_URL: "postgres://postgres:postgres@postgres:5432/flusso"
       PRIMARY_OPENSEARCH_URL: "http://opensearch:9200"
       RUST_LOG: "info"
     # Publish 9464 so the base Prometheus reaches it via host.docker.internal:9464,

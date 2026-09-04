@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
 
+mod config;
+
+pub use config::StdoutConfig;
+
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,7 +38,7 @@ impl StdoutSink {
         }
     }
 
-    pub fn from_config(config: &kernel::StdoutSink) -> Self {
+    pub fn from_config(config: &StdoutConfig) -> Self {
         Self::new(config.pretty)
     }
 
