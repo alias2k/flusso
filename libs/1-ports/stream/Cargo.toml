@@ -1,0 +1,22 @@
+[package]
+name = "flusso-stream"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Queue abstraction for the flusso change-processing pipeline."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "stream"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true

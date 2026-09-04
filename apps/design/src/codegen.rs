@@ -13,7 +13,7 @@
 //! `roundtrips_*` tests assert against the real parser.
 //!
 //! ```
-//! # use schema_core::IndexSchema;
+//! # use kernel::IndexSchema;
 //! # fn demo(schema: &IndexSchema) -> anyhow::Result<()> {
 //! let yaml = design::codegen::schema_to_yaml(schema)?;
 //! assert!(yaml.starts_with("version:"));
@@ -22,12 +22,12 @@
 //! ```
 
 use anyhow::Result;
-use schema_config_toml::ConfigToml;
-use schema_core::{
+use config::toml::ConfigToml;
+use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, Field, FieldSource, Filter, FilterValue, Geo,
     IndexSchema, Join, JoinKind, NullOp, OrderBy, Relation, SoftDelete, Through, Transform,
 };
-use schema_core::{FlussoType, GenericValue};
+use kernel::{FlussoType, GenericValue};
 use serde_yaml::{Mapping, Value};
 
 /// Render an [`IndexSchema`] as a type-first `*.schema.yml` document.
@@ -259,8 +259,8 @@ fn order_by_value(order_by: &[OrderBy]) -> Value {
                 map.insert(Value::from("column"), Value::from(ob.column.as_ref()));
                 if let Some(direction) = ob.direction {
                     let token = match direction {
-                        schema_core::Direction::Asc => "asc",
-                        schema_core::Direction::Desc => "desc",
+                        kernel::Direction::Asc => "asc",
+                        kernel::Direction::Desc => "desc",
                     };
                     map.insert(Value::from("direction"), Value::from(token));
                 }
@@ -390,8 +390,8 @@ fn scalar_tag(ty: &FlussoType) -> &'static str {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use schema_core::ParseFrom;
-    use schema_index_yaml::SchemaYaml;
+    use config::yaml::SchemaYaml;
+    use kernel::ParseFrom;
 
     /// Parse a `*.schema.yml` body into the validated [`IndexSchema`].
     fn parse(yaml: &str) -> IndexSchema {

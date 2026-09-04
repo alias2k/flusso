@@ -66,18 +66,18 @@ use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use engine::{BatchPolicy, Engine};
 use futures::stream::{self, BoxStream};
-use schema_core::{
+use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Direction, Field,
     FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, IndexMapping,
     IndexName, IndexSchema, Join, JoinKind, OrderBy, Relation, Secret, SinkName, SoftDelete,
     SoftDeleteColumn, TableName, Through, Transform, ValueOpFilter,
 };
-use sinks_core::{Result as SinkResult, Sink};
-use sinks_opensearch::OpensearchSink;
-use sources_core::cdc::{Ack, AckSink, Change, ChangeCapture, ChangeEvent, Continuity};
-use sources_core::document::{Document, DocumentBuilder, DocumentId};
-use sources_core::{Result as SourceResult, RowKey, SnapshotTable, SourceSpec};
-use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
+use sink::{Result as SinkResult, Sink};
+use sink_opensearch::OpensearchSink;
+use source::cdc::{Ack, AckSink, Change, ChangeCapture, ChangeEvent, Continuity};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{Result as SourceResult, RowKey, SnapshotTable, SourceSpec};
+use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
@@ -158,7 +158,7 @@ impl Sink for AlwaysUnseeded {
     async fn delete(&self, index: &IndexName, id: &str) -> SinkResult<()> {
         self.inner.delete(index, id).await
     }
-    async fn flush(&self, caught_up: bool) -> SinkResult<sinks_core::FlushReport> {
+    async fn flush(&self, caught_up: bool) -> SinkResult<sink::FlushReport> {
         self.inner.flush(caught_up).await
     }
 }
@@ -370,7 +370,7 @@ async fn setup() -> Services {
     let documents: Arc<dyn DocumentBuilder> = Arc::new(builder);
 
     let (opensearch, os_url) = start_opensearch().await;
-    let os_config = schema_core::OpensearchSink {
+    let os_config = kernel::OpensearchSink {
         url: Secret::Value(os_url.clone()),
         username: None,
         password: None,
@@ -383,7 +383,7 @@ async fn setup() -> Services {
         number_of_shards: 1,
         number_of_replicas: 1,
         refresh_interval: "10s".to_owned(),
-        text_analysis: schema_core::TextAnalysis::Builtin,
+        text_analysis: kernel::TextAnalysis::Builtin,
         auto_subfields: true,
     };
     let os_name = SinkName::try_new("bench").unwrap();

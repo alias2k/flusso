@@ -21,9 +21,9 @@ pub(crate) struct BuildArgs {
 }
 
 pub(crate) fn execute(args: BuildArgs) -> anyhow::Result<()> {
-    let compiled = schema::compile(&args.config)
+    let compiled = config::compile(&args.config)
         .with_context(|| format!("compiling config from {}", args.config.display()))?;
-    schema::write(&compiled, &args.out)
+    config::write(&compiled, &args.out)
         .with_context(|| format!("writing compiled artifact to {}", args.out.display()))?;
 
     let mut out = std::io::stdout().lock();

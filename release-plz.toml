@@ -5,9 +5,9 @@
 # [workspace.package] version), and the `version_group`s below keep each
 # train internally lockstep while letting the trains diverge:
 #
-#   * libs  — every libs/* crate. One version: it's one engine. Also keeps
-#             the two schema-parser tags moving together, which pages.yml
-#             relies on for the versioned editor-schema URLs.
+#   * libs  — every libs/* crate. One version: it's one engine. pages.yml
+#             reads the editor schemas at the `flusso-config-v*` tag for the
+#             versioned editor-schema URLs.
 #   * cli   — flusso-cli + flusso-design. The designer SPA is embedded in
 #             the binary, so a designer fix ships a CLI release (and via the
 #             `flusso-cli-v*` tag, the docker + dist artifacts).
@@ -53,47 +53,43 @@ git_release_enable = true
 # ─── the libs train ───────────────────────────────────────────────────────────
 
 [[package]]
-name = "flusso-schema-core"
+name = "flusso-kernel"
 version_group = "libs"
 
 [[package]]
-name = "flusso-schema"
+name = "flusso-kernel-derive"
 version_group = "libs"
 
 [[package]]
-name = "flusso-schema-config-toml"
+name = "flusso-source"
 version_group = "libs"
 
 [[package]]
-name = "flusso-schema-index-yaml"
+name = "flusso-stream"
 version_group = "libs"
 
 [[package]]
-name = "flusso-queue-core"
+name = "flusso-sink"
 version_group = "libs"
 
 [[package]]
-name = "flusso-queue-channel"
+name = "flusso-config"
 version_group = "libs"
 
 [[package]]
-name = "flusso-sinks-core"
+name = "flusso-source-postgres"
 version_group = "libs"
 
 [[package]]
-name = "flusso-sinks-stdout"
+name = "flusso-stream-channel"
 version_group = "libs"
 
 [[package]]
-name = "flusso-sinks-opensearch"
+name = "flusso-sink-opensearch"
 version_group = "libs"
 
 [[package]]
-name = "flusso-sources-core"
-version_group = "libs"
-
-[[package]]
-name = "flusso-sources-postgres"
+name = "flusso-sink-stdout"
 version_group = "libs"
 
 [[package]]

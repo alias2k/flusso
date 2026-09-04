@@ -1,0 +1,62 @@
+//! The `flusso.toml` parser: the **parse** stage only.
+//!
+//! [`ConfigToml`] deserializes the file 1:1 into neutral entity types (unknown
+//! fields rejected). Each port entry (`[source]`, `[stream]`, `[sinks.<name>]`)
+//! is carried as its `type` plus an opaque options map; no adapter is named
+//! here. Lifting the entities into the assembled [`Config`](crate::Config) is a
+//! composition step that lives beside [`Config`](crate::Config). Secrets stay deferred:
+//! a `{ env = "VAR" }` reference is carried through unchanged and read in the
+//! environment that runs the pipeline.
+
+pub mod entities;
+mod env_value;
+mod parser;
+
+pub use env_value::EnvOrValue;
+pub use parser::ParseError;
+
+/// The JSON Schema describing a `flusso.toml` config file, embedded from this
+/// crate's `schemas/` directory for editor assist and programmatic access (both
+/// re-exported from `schema` and emitted by `flusso schema config`). Kept in
+/// lockstep with this parser by `schema`'s `schema_drift` test.
+pub const CONFIG_SCHEMA: &str = include_str!("../../config.schema.json");
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use entities::IndexEntry;
+use entities::Server;
+use entities::Sink;
+use entities::Source;
+use kernel::common;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigToml {
+    // Field order is the `flusso.toml` serialization order: the `toml` writer
+    // floats the scalar globals (prefix, on_error) to the top, then emits tables
+    // in declaration order — source, server, sinks, indexes.
+    pub source: Source,
+    /// Literal prefix prepended to every index name flusso owns, so several
+    /// deployments can share one OpenSearch cluster without colliding. The
+    /// `--index-prefix` flag / `FLUSSO_INDEX_PREFIX` env var override it at
+    /// runtime (which win); see the [configuration
+    /// reference](https://alias2k.github.io/flusso/reference/config-toml.html#prefix). Empty
+    /// (the default) means no prefix.
+    #[serde(default)]
+    pub prefix: String,
+    /// Global item-level rejection policy; per-index overrides live on each
+    /// [`IndexEntry`]. Defaults to [`FailurePolicy::Stop`](kernel::FailurePolicy::Stop).
+    #[serde(default)]
+    pub on_error: kernel::FailurePolicy,
+    /// Bind addresses for the operational HTTP surfaces. The binary layers
+    /// `FLUSSO_*` env vars and CLI flags on top (which win); see the
+    /// [`[server]` reference](https://alias2k.github.io/flusso/reference/config-toml.html#server).
+    /// Omitted from serialized output when no address is set.
+    #[serde(default, skip_serializing_if = "Server::is_empty")]
+    pub server: Server,
+    #[serde(default)]
+    pub sinks: BTreeMap<common::SinkName, Sink>,
+    #[serde(default)]
+    pub index: Vec<IndexEntry>,
+}

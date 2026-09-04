@@ -1,0 +1,25 @@
+[package]
+name = "flusso-sink"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sink trait, JSON rendering, and fan-out for flusso."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "sink"
+
+[lints]
+workspace = true
+
+[dependencies]
+kernel.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+rust_decimal.workspace = true

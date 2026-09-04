@@ -1,0 +1,179 @@
+#![allow(
+    unused_crate_dependencies,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
+use std::path::Path;
+
+use config::{ConnectionSpec, IndexName, LoadError, Secret, load};
+
+fn index_name(name: &str) -> IndexName {
+    IndexName::try_new(name).unwrap()
+}
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+#[test]
+fn loads_config_with_indexes() {
+    let config = load(fixture("config.toml")).unwrap();
+
+    // Source and sinks come from the TOML; the connection stays deferred.
+    match &config.source.connection {
+        Some(ConnectionSpec::Url(Secret::Value(v))) => assert!(v.contains("localhost")),
+        other => panic!("expected a literal connection URL, got {other:?}"),
+    }
+    assert_eq!(config.sinks.len(), 1);
+
+    // Both index entries are loaded from their YAML files, keyed by name.
+    assert_eq!(config.indexes.len(), 2);
+
+    let users = config
+        .indexes
+        .get(&index_name("users"))
+        .expect("users index");
+    assert!(users.enabled);
+    assert_eq!(users.schema.table.as_ref(), "users");
+    assert_eq!(users.schema.fields.len(), 2);
+
+    let orders = config
+        .indexes
+        .get(&index_name("orders"))
+        .expect("orders index");
+    assert!(!orders.enabled);
+    assert_eq!(orders.schema.table.as_ref(), "orders");
+}
+
+#[test]
+fn missing_config_file_errors() {
+    let err = load(fixture("does-not-exist.toml")).unwrap_err();
+    assert!(matches!(err, LoadError::ReadConfig { .. }));
+}
+
+#[test]
+fn missing_schema_file_errors() {
+    // A config that references a schema file which does not exist on disk.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let config_path = dir.join("missing_schema_config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[source]
+type = "postgres"
+connection_url = "postgres://app@localhost/mydb"
+
+[[index]]
+name = "ghost"
+schema = "ghost.schema.yml"
+enabled = true
+"#,
+    )
+    .unwrap();
+
+    let err = load(&config_path).unwrap_err();
+    std::fs::remove_file(&config_path).ok();
+
+    assert!(matches!(err, LoadError::ReadSchema { .. }));
+}
+
+#[test]
+fn compiled_artifact_roundtrips_and_preserves_mappings() {
+    let compiled = config::compile(fixture("config.toml")).unwrap();
+    let bytes = config::to_bytes(&compiled).unwrap();
+    let config = config::from_bytes(&bytes).unwrap();
+
+    // The whole configuration survives the round-trip.
+    assert_eq!(config.indexes.len(), 2);
+
+    // The mapping (and its content hash → physical index name) is identical to
+    // the one derived directly from source — the artifact is faithful.
+    let from_source = load(fixture("config.toml")).unwrap().resolve_mappings();
+    let from_artifact = config.resolve_mappings();
+    assert_eq!(from_source.len(), from_artifact.len());
+    for (a, b) in from_source.iter().zip(&from_artifact) {
+        assert_eq!(a.index, b.index);
+        assert_eq!(a.hash, b.hash);
+    }
+}
+
+#[test]
+fn compiled_artifact_keeps_env_secret_unresolved() {
+    use config::{
+        Compiled, Config, ConnectionSpec, FORMAT_VERSION, Secret, Source, SourceTls, SourceType,
+        SslMode,
+    };
+    let config = Config {
+        source: Source {
+            source_type: SourceType::Postgres,
+            connection: Some(ConnectionSpec::Url(Secret::Env("DATABASE_URL".to_owned()))),
+            manage_publication: true,
+            tls: SourceTls {
+                mode: Some(SslMode::VerifyFull),
+                root_cert: Some("/etc/ssl/ca.pem".into()),
+                client_cert: None,
+                client_key: None,
+                sni_hostname: Some("db.internal".to_owned()),
+            },
+        },
+        sinks: Default::default(),
+        indexes: Default::default(),
+        on_error: Default::default(),
+        server: Default::default(),
+        prefix: String::new(),
+    };
+    let compiled = Compiled {
+        format_version: FORMAT_VERSION,
+        config,
+    };
+    let bytes = config::to_bytes(&compiled).unwrap();
+    let config = config::from_bytes(&bytes).unwrap();
+
+    // The env reference is carried through verbatim — never resolved or baked.
+    match config.source.connection {
+        Some(ConnectionSpec::Url(Secret::Env(var))) => assert_eq!(var, "DATABASE_URL"),
+        other => panic!("expected an unresolved env secret, got {other:?}"),
+    }
+
+    // The declared TLS settings survive the round-trip.
+    assert_eq!(config.source.tls.mode, Some(SslMode::VerifyFull));
+    assert_eq!(
+        config.source.tls.root_cert.as_deref(),
+        Some("/etc/ssl/ca.pem".as_ref())
+    );
+    assert_eq!(
+        config.source.tls.sni_hostname.as_deref(),
+        Some("db.internal")
+    );
+}
+
+#[test]
+fn compiled_artifact_without_tls_field_defaults() {
+    use config::{Compiled, Config, FORMAT_VERSION, Source, SourceTls, SourceType};
+    // A lock written before the `tls` field existed carries no such key (the
+    // field is skipped when unset) — deserializing must default it, not fail.
+    let config = Config {
+        source: Source {
+            source_type: SourceType::Postgres,
+            connection: None,
+            manage_publication: true,
+            tls: SourceTls::default(),
+        },
+        sinks: Default::default(),
+        indexes: Default::default(),
+        on_error: Default::default(),
+        server: Default::default(),
+        prefix: String::new(),
+    };
+    let compiled = Compiled {
+        format_version: FORMAT_VERSION,
+        config,
+    };
+    let bytes = config::to_bytes(&compiled).unwrap();
+    let config = config::from_bytes(&bytes).unwrap();
+    assert!(config.source.tls.is_unset());
+}

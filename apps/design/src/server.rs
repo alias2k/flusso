@@ -118,7 +118,7 @@ async fn dirs(State(state): State<AppState>) -> Response {
     Json(api::list_dirs(&state.config_path)).into_response()
 }
 
-async fn test_connection(Json(config): Json<schema_config_toml::ConfigToml>) -> Response {
+async fn test_connection(Json(config): Json<config::toml::ConfigToml>) -> Response {
     Json(api::test_connection(config).await).into_response()
 }
 

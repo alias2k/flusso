@@ -16,14 +16,14 @@
 
 use std::collections::BTreeMap;
 
-use proptest::prelude::*;
-use schema_core::common::ColumnName;
-use schema_core::{
+use config::yaml::SchemaYaml;
+use kernel::common::ColumnName;
+use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, DatabaseSchema, Field, FieldName, FieldSource,
     FlussoType, GenericValue, Geo, IndexSchema, Join, JoinKind, OrderBy, ParseFrom, Relation,
     TableName, Through, Transform,
 };
-use schema_index_yaml::SchemaYaml;
+use proptest::prelude::*;
 
 const DEPTH: u32 = 2;
 
@@ -72,7 +72,7 @@ fn agg_key() -> impl Strategy<Value = AggregateKey> {
     ]
 }
 fn order_by_opt() -> impl Strategy<Value = Option<Vec<OrderBy>>> {
-    use schema_core::Direction;
+    use kernel::Direction;
     let dir = prop_oneof![
         Just(None),
         Just(Some(Direction::Asc)),

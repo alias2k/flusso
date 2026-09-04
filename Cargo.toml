@@ -1,18 +1,18 @@
 [workspace]
 members = [
-  "libs/0-core",
-  "libs/2-schema",
-  "libs/2-schema/1-config-toml",
-  "libs/2-schema/1-index-yaml",
-  "libs/1-queue/0-core",
-  "libs/1-queue/1-channel",
-  "libs/1-sinks/0-core",
-  "libs/1-sinks/1-stdout",
-  "libs/1-sinks/2-opensearch",
-  "libs/1-sources/0-core",
-  "libs/1-sources/1-postgres",
+  "libs/0-kernel",
+  "libs/0-kernel/derive",
+  "libs/1-ports/source",
+  "libs/1-ports/stream",
+  "libs/1-ports/sink",
+  "libs/1-config",
+  "libs/2-adapters/source-postgres",
+  "libs/2-adapters/stream-channel",
+  "libs/2-adapters/sink-opensearch",
+  "libs/2-adapters/sink-stdout",
   "libs/2-engine",
   "libs/3-daemon",
+  "sdk/*",
   "apps/*",
   "dev/search-api",
   "dev/query-e2e",
@@ -156,21 +156,18 @@ opentelemetry-prometheus = { version = "0.32.*" }
 tracing-opentelemetry = { version = "0.33.*" }
 prometheus = { version = "0.14.*" }
 
-schema = { path = "libs/2-schema", version = "0.15", package = "flusso-schema" }
-schema-core = { path = "libs/0-core", version = "0.15", package = "flusso-schema-core" }
-schema-config-toml = { path = "libs/2-schema/1-config-toml", version = "0.15", package = "flusso-schema-config-toml" }
-schema-index-yaml = { path = "libs/2-schema/1-index-yaml", version = "0.15", package = "flusso-schema-index-yaml" }
+kernel = { path = "libs/0-kernel", version = "0.15", package = "flusso-kernel" }
+kernel-derive = { path = "libs/0-kernel/derive", version = "0.15", package = "flusso-kernel-derive" }
+source = { path = "libs/1-ports/source", version = "0.15", package = "flusso-source" }
+stream = { path = "libs/1-ports/stream", version = "0.15", package = "flusso-stream" }
+sink = { path = "libs/1-ports/sink", version = "0.15", package = "flusso-sink" }
+config = { path = "libs/1-config", version = "0.15", package = "flusso-config" }
+
+source-postgres = { path = "libs/2-adapters/source-postgres", version = "0.15", package = "flusso-source-postgres" }
+stream-channel = { path = "libs/2-adapters/stream-channel", version = "0.15", package = "flusso-stream-channel" }
+sink-opensearch = { path = "libs/2-adapters/sink-opensearch", version = "0.15", package = "flusso-sink-opensearch" }
+sink-stdout = { path = "libs/2-adapters/sink-stdout", version = "0.15", package = "flusso-sink-stdout" }
 
 engine = { path = "libs/2-engine", version = "0.15", package = "flusso-engine" }
 daemon = { path = "libs/3-daemon", version = "0.15", package = "flusso-daemon" }
 design = { path = "apps/design", version = "0.15", package = "flusso-design" }
-
-sources-core = { path = "libs/1-sources/0-core", version = "0.15", package = "flusso-sources-core" }
-sources-postgres = { path = "libs/1-sources/1-postgres", version = "0.15", package = "flusso-sources-postgres" }
-
-sinks-core = { path = "libs/1-sinks/0-core", version = "0.15", package = "flusso-sinks-core" }
-sinks-stdout = { path = "libs/1-sinks/1-stdout", version = "0.15", package = "flusso-sinks-stdout" }
-sinks-opensearch = { path = "libs/1-sinks/2-opensearch", version = "0.15", package = "flusso-sinks-opensearch" }
-
-queue-core = { path = "libs/1-queue/0-core", version = "0.15", package = "flusso-queue-core" }
-queue-channel = { path = "libs/1-queue/1-channel", version = "0.15", package = "flusso-queue-channel" }

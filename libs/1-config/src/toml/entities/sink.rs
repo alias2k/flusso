@@ -1,0 +1,100 @@
+use serde::{Deserialize, Serialize};
+
+use super::super::EnvOrValue;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Sink {
+    Opensearch(OpensearchSink),
+    Stdout(StdoutSink),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpensearchSink {
+    pub url: EnvOrValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<EnvOrValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<EnvOrValue>,
+    #[serde(default = "default_tls_verify")]
+    pub tls_verify: bool,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: u32,
+    #[serde(default = "default_max_bytes")]
+    pub max_bytes: u64,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<String>,
+    #[serde(default = "default_number_of_shards")]
+    pub number_of_shards: u32,
+    #[serde(default = "default_number_of_replicas")]
+    pub number_of_replicas: u32,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval: String,
+    #[serde(default)]
+    pub text_analysis: TextAnalysis,
+    #[serde(default = "default_auto_subfields")]
+    pub auto_subfields: bool,
+}
+
+/// Which analysis backend the `flusso_*` analyzers use. `builtin` (the default)
+/// needs no plugins; `icu` requires `analysis-icu` installed on every node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAnalysis {
+    #[default]
+    Builtin,
+    Icu,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StdoutSink {
+    #[serde(default)]
+    pub pretty: bool,
+}
+
+fn default_tls_verify() -> bool {
+    true
+}
+
+fn default_batch_size() -> u32 {
+    1000
+}
+
+/// 10 MiB — within OpenSearch's recommended 5–15 MB bulk range and well under
+/// the 100 MB `http.max_content_length` default.
+fn default_max_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+fn default_timeout_secs() -> u64 {
+    30
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_number_of_shards() -> u32 {
+    1
+}
+
+fn default_number_of_replicas() -> u32 {
+    1
+}
+
+/// A 10s steady-state ceiling: under sustained backlog (when flusso never
+/// catches up to force a refresh) documents are visible within 10s, while bulk
+/// indexing stays cheap. `"-1"` disables automatic refresh entirely.
+fn default_refresh_interval() -> String {
+    "10s".to_owned()
+}
+
+fn default_auto_subfields() -> bool {
+    true
+}

@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Args;
+use config::{Config, IndexName};
 use daemon::{Daemon, DaemonOptions};
-use schema::{Config, IndexName};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
@@ -132,7 +132,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     if let Some(prefix) = args.index_prefix.clone() {
         config.prefix = prefix;
     }
-    schema::validate_index_prefix(&config.prefix)
+    config::validate_index_prefix(&config.prefix)
         .map_err(|reason| anyhow::anyhow!("invalid index prefix: {reason}"))?;
 
     let public_addr = args
@@ -329,9 +329,9 @@ fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
     ) {
         ConfigPlan::UseLock => load_lock(&args.lock),
         ConfigPlan::Compile(config_path) => {
-            let compiled = schema::compile(&config_path)
+            let compiled = config::compile(&config_path)
                 .with_context(|| format!("compiling config from {}", config_path.display()))?;
-            let wrote = schema::write_if_changed(&compiled, &args.lock)
+            let wrote = config::write_if_changed(&compiled, &args.lock)
                 .with_context(|| format!("writing compiled lock to {}", args.lock.display()))?;
             tracing::info!(
                 indexes = compiled.config.indexes.len(),
@@ -355,7 +355,7 @@ fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
 }
 
 fn load_lock(path: &Path) -> anyhow::Result<Config> {
-    schema::load_compiled(path)
+    config::load_compiled(path)
         .with_context(|| format!("loading compiled lock from {}", path.display()))
 }
 

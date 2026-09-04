@@ -1,0 +1,28 @@
+[package]
+name = "flusso-sink-stdout"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "stdout sink for flusso, for debugging and development."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "sink_stdout"
+
+[lints]
+workspace = true
+
+[dependencies]
+sink.workspace = true
+kernel.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+
+[dev-dependencies]
+futures.workspace = true

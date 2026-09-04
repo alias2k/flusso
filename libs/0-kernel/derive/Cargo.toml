@@ -1,0 +1,21 @@
+[package]
+name = "flusso-kernel-derive"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macro for flusso adapter configuration: #[derive(AdapterConfig)] declares an adapter's options, schema, and examples once."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["development-tools::procedural-macro-helpers"]
+readme = "README.md"
+
+[lib]
+name = "kernel_derive"
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]

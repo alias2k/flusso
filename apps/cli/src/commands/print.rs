@@ -12,8 +12,8 @@
 use std::io::{IsTerminal, Write};
 
 use anyhow::Result;
-use schema::{Config, ConnectionSpec, IndexMapping, ResolvedField, Secret, Sink, SoftDelete};
-use sources_core::{CoverageReport, Diagnostic, Severity};
+use config::{Config, ConnectionSpec, IndexMapping, ResolvedField, Secret, Sink, SoftDelete};
+use source::{CoverageReport, Diagnostic, Severity};
 
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
 /// threaded by value through the render functions.
@@ -148,7 +148,7 @@ pub(crate) fn coverage(
 pub(crate) fn config(out: &mut impl Write, pen: Pen, config: &Config) -> Result<()> {
     section(out, pen, "Source")?;
     let source_kind = match config.source.source_type {
-        schema::SourceType::Postgres => "postgres",
+        config::SourceType::Postgres => "postgres",
     };
     let mut connection = describe_connection(config.source.connection.as_ref());
     if let Some(tls) = describe_tls(&config.source.tls) {
@@ -391,7 +391,7 @@ fn describe_connection(spec: Option<&ConnectionSpec>) -> String {
 /// The config-declared TLS settings, when any are set. URL-borne `ssl*`
 /// parameters are not shown — the connection may be an unresolved env
 /// reference here.
-fn describe_tls(tls: &schema::SourceTls) -> Option<String> {
+fn describe_tls(tls: &config::SourceTls) -> Option<String> {
     if tls.is_unset() {
         return None;
     }

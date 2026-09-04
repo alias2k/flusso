@@ -112,6 +112,6 @@ ahead of its version bump + CHANGELOG. Now the bump always lands first.
 ## First release — read once
 
 - **Versions are permanent.** Once `0.1.0` is published it can be *yanked* but never reused. The first publish also **claims all 17 `flusso-*` names** for your account.
-- **Publish order is handled** by release-plz (bottom-up: `flusso-schema-core` → parsers → `flusso-schema` → engine/sinks/sources/queue → `flusso-daemon` → `flusso-query-derive` → `flusso-query` → `flusso-cli`).
-- **Prefer to do the very first publish by hand?** `cargo login`, then `cargo publish` each crate in the order above (`--dry-run` fully verifies only the leaf `flusso-schema-core`; each later crate can't dry-run until its deps are live). After that, let release-plz drive subsequent releases.
+- **Publish order is handled** by release-plz (bottom-up: `flusso-kernel` → `flusso-kernel-derive` → the ports (`flusso-source`/`flusso-stream`/`flusso-sink`) → `flusso-config` → the adapters → `flusso-engine` → `flusso-daemon` → `flusso-query-derive` → `flusso-query` → `flusso-design` → `flusso-cli`).
+- **Prefer to do the very first publish by hand?** `cargo login`, then `cargo publish` each crate in the order above (`--dry-run` fully verifies only the leaf `flusso-kernel`; each later crate can't dry-run until its deps are live). After that, let release-plz drive subsequent releases.
 - **CI on the release PR:** the PR is opened with `GITHUB_TOKEN`, so CI won't run on it by default. Use a fine-grained PAT or the release-plz GitHub App if you want it to. See <https://release-plz.dev/docs/github>.

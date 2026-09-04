@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use design::api::{self, FileOp, OpKind, PreviewRequest, SaveRequest};
-use schema_core::IndexName;
+use kernel::IndexName;
 
 /// A unique scratch directory for this test process, seeded with the dev files.
 fn fixture() -> PathBuf {

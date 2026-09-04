@@ -9,10 +9,10 @@
 
 use std::sync::Arc;
 
-use schema::Config;
-use sinks_core::Sink;
-use sources_core::cdc::ChangeCapture;
-use sources_core::document::DocumentBuilder;
+use config::Config;
+use sink::Sink;
+use source::cdc::ChangeCapture;
+use source::document::DocumentBuilder;
 
 use crate::DaemonOptions;
 
@@ -25,7 +25,7 @@ use crate::DaemonOptions;
 pub struct SourceParts {
     /// Streams row changes (live tail + backfill snapshot) and reports lag.
     pub capture: Arc<dyn ChangeCapture>,
-    /// Resolves changed rows to [`DocumentId`](sources_core::document)s and
+    /// Resolves changed rows to [`DocumentId`](source::document)s and
     /// assembles the documents.
     pub documents: Arc<dyn DocumentBuilder>,
 }

@@ -11,15 +11,15 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 pub enum EngineError {
     /// From the source — capturing changes or resolving/assembling documents.
     #[error(transparent)]
-    Source(#[from] sources_core::SourceError),
+    Source(#[from] source::SourceError),
 
     /// From a sink write.
     #[error(transparent)]
-    Sink(#[from] sinks_core::SinkError),
+    Sink(#[from] sink::SinkError),
 
     /// From the work queue.
     #[error(transparent)]
-    Queue(#[from] queue_core::QueueError),
+    Queue(#[from] stream::QueueError),
 
     /// A spawned task failed to join (panicked).
     #[error("task failed: {0}")]

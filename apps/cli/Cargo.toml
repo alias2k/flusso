@@ -27,14 +27,14 @@ default = ["design"]
 design = ["dep:design"]
 
 [dependencies]
-schema.workspace = true
+config.workspace = true
 daemon.workspace = true
 design = { workspace = true, optional = true }
-sources-core.workspace = true
-sources-postgres.workspace = true
-sinks-core.workspace = true
-sinks-stdout.workspace = true
-sinks-opensearch.workspace = true
+source.workspace = true
+source-postgres.workspace = true
+sink.workspace = true
+sink-stdout.workspace = true
+sink-opensearch.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true

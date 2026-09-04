@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use schema_core::IndexName;
+use kernel::IndexName;
 
 /// What one committed batch did — reported to [`Observer::on_batch_committed`].
 #[derive(Debug, Clone)]
@@ -33,7 +33,7 @@ pub struct BatchStats {
     /// Documents built per target index, for per-index metrics. One entry per
     /// index the batch touched.
     pub documents_by_index: Vec<(IndexName, usize)>,
-    /// How long the [`flush`](sinks_core::Sink::flush) that made the batch
+    /// How long the [`flush`](sink::Sink::flush) that made the batch
     /// durable took.
     pub flush: Duration,
 }
@@ -75,7 +75,7 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
 
     /// The source's capture lag, in bytes behind the latest position — e.g. a
     /// replication slot's distance from the server's current WAL. Reported by
-    /// whoever polls [`ChangeCapture::lag`](sources_core::cdc::ChangeCapture::lag),
+    /// whoever polls [`ChangeCapture::lag`](source::cdc::ChangeCapture::lag),
     /// not by the engine loop itself.
     fn on_slot_lag(&self, bytes: u64) {
         let _ = bytes;
@@ -109,7 +109,7 @@ impl Observer for NoopObserver {}
 ///
 /// The engine drives a single observer, so this composes many — e.g. one that
 /// updates a status surface and one that records metrics — without the engine
-/// knowing how many there are. Mirrors [`FanOutSink`](sinks_core::FanOutSink).
+/// knowing how many there are. Mirrors [`FanOutSink`](sink::FanOutSink).
 #[derive(Debug, Default)]
 pub struct FanOut {
     observers: Vec<Arc<dyn Observer>>,

@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use clap::{Args, ValueEnum};
-use schema::SourceType;
-use sources_postgres::PgDocumentBuilder;
+use config::SourceType;
+use source_postgres::PgDocumentBuilder;
 
 use crate::backends::source_spec;
 
@@ -56,7 +56,7 @@ enum OutputFormat {
 
 pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     let config = Arc::new(
-        schema::load(&args.config)
+        config::load(&args.config)
             .with_context(|| format!("loading config from {}", args.config.display()))?,
     );
 
@@ -74,14 +74,14 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             .resolve_connection_url()
             .context("resolving the source connection URL")?;
         let sql_url =
-            sources_postgres::sql_connection_url(connection_url.as_ref(), &config.source.tls)
+            source_postgres::sql_connection_url(connection_url.as_ref(), &config.source.tls)
                 .context("applying the source TLS settings to the connection URL")?;
         let spec = Arc::new(source_spec(&config));
         let documents = PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec))
             .await
             .context("connecting to the database")?;
         Some(
-            sources_core::validate_indexes(&spec, &documents)
+            source::validate_indexes(&spec, &documents)
                 .await
                 .context("validating schemas against the database")?,
         )
@@ -103,10 +103,9 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         .manage_publication
         .unwrap_or(config.source.manage_publication);
 
-    let has_errors = diagnostics.as_ref().is_some_and(|ds| {
-        ds.iter()
-            .any(|d| d.severity == sources_core::Severity::Error)
-    });
+    let has_errors = diagnostics
+        .as_ref()
+        .is_some_and(|ds| ds.iter().any(|d| d.severity == source::Severity::Error));
 
     let mut out = std::io::stdout().lock();
     match args.format {

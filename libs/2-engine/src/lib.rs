@@ -18,9 +18,9 @@ pub use policy::{BatchPolicy, FailurePolicies, FailurePolicy};
 
 use std::sync::Arc;
 
-use sinks_core::Sink;
-use sources_core::cdc::ChangeCapture;
-use sources_core::document::DocumentBuilder;
+use sink::Sink;
+use source::cdc::ChangeCapture;
+use source::document::DocumentBuilder;
 
 use crate::pipeline::{Pipeline, run_inner};
 

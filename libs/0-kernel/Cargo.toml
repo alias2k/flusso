@@ -1,0 +1,28 @@
+[package]
+name = "flusso-kernel"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared domain vocabulary for flusso: values, validated newtypes, and index mappings."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "kernel"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+nutype.workspace = true
+regex.workspace = true
+bon.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true

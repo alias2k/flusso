@@ -49,14 +49,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use engine::Engine;
-use schema_core::{
+use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, IndexName,
     IndexSchema, Secret, SinkName, SoftDelete, SoftDeleteColumn, TableName,
 };
-use sinks_core::Sink;
-use sinks_opensearch::OpensearchSink;
-use sources_core::SourceSpec;
-use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
+use sink::Sink;
+use sink_opensearch::OpensearchSink;
+use source::SourceSpec;
+use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use testcontainers_modules::postgres::Postgres;
@@ -809,7 +809,7 @@ async fn exec(pool: &PgPool, sql: &str) {
 }
 
 fn opensearch_sink(os_url: &str) -> OpensearchSink {
-    let config = schema_core::OpensearchSink {
+    let config = kernel::OpensearchSink {
         url: Secret::Value(os_url.to_owned()),
         username: None,
         password: None,
@@ -822,7 +822,7 @@ fn opensearch_sink(os_url: &str) -> OpensearchSink {
         number_of_shards: 1,
         number_of_replicas: 1,
         refresh_interval: "1s".to_owned(),
-        text_analysis: schema_core::TextAnalysis::Builtin,
+        text_analysis: kernel::TextAnalysis::Builtin,
         auto_subfields: true,
     };
     OpensearchSink::from_config(&SinkName::try_new("e2e").unwrap(), &config).unwrap()

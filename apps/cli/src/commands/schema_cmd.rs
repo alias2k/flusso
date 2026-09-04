@@ -26,8 +26,8 @@ enum SchemaKind {
 /// the schema is compiled into the binary, so it always matches this version.
 pub(crate) fn execute(args: SchemaArgs) -> anyhow::Result<()> {
     let body = match args.which {
-        SchemaKind::Config => schema::CONFIG_SCHEMA,
-        SchemaKind::Index => schema::INDEX_SCHEMA,
+        SchemaKind::Config => config::CONFIG_SCHEMA,
+        SchemaKind::Index => config::INDEX_SCHEMA,
     };
     let mut out = std::io::stdout().lock();
     writeln!(out, "{}", body.trim_end())?;

@@ -54,7 +54,7 @@ jobs:
       - name: Check server-only build (no designer)
         run: cargo check -p flusso-cli --no-default-features
 
-      # PRs confined to the query release train (apps/query, apps/query-derive,
+      # PRs confined to the query release train (sdk/query, sdk/query-derive,
       # dev/query-e2e — see release-plz.toml) skip the Postgres/OpenSearch e2e
       # suites those paths can't break; everything else, and every push to
       # main, runs the full set. Decided from the PR's own file list (REST,
@@ -67,7 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename')
-          if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^(apps/query|apps/query-derive|dev/query-e2e)/'; then
+          if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^(sdk/query|sdk/query-derive|dev/query-e2e)/'; then
             echo "read_side_only=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -84,7 +84,7 @@ jobs:
       # own live e2e (dev/query-e2e's combined_search) still runs.
       - name: Test (read-side scope — full unit/integration + query e2e)
         if: steps.scope.outputs.read_side_only == 'true'
-        run: cargo nextest run --profile ci --workspace --run-ignored all -E 'all() - (kind(test) & (package(flusso-sources-postgres) + package(flusso-engine) + package(flusso-sinks-opensearch)))'
+        run: cargo nextest run --profile ci --workspace --run-ignored all -E 'all() - (kind(test) & (package(flusso-source-postgres) + package(flusso-engine) + package(flusso-sink-opensearch)))'
 
       # nextest does not run doctests; run them separately.
       - name: Doctests
@@ -158,7 +158,7 @@ jobs:
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: libs/1-sources/1-postgres/fuzz
+          workspaces: libs/2-adapters/source-postgres/fuzz
 
       # A time-boxed smoke run, not an exhaustive campaign: a regression that
       # makes the decoder panic on malformed bytes fails CI here. A crash is
@@ -171,7 +171,7 @@ jobs:
       # which isn't installed and whose static crt is incompatible with the ASan
       # the fuzzer needs ("sanitizer is incompatible with statically linked libc").
       - name: Fuzz pgoutput decoder (60s)
-        working-directory: libs/1-sources/1-postgres
+        working-directory: libs/2-adapters/source-postgres
         run: cargo +nightly-2026-07-22 fuzz run pgoutput_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60
 
       - name: Upload crash artifacts
@@ -179,7 +179,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-artifacts
-          path: libs/1-sources/1-postgres/fuzz/artifacts/
+          path: libs/2-adapters/source-postgres/fuzz/artifacts/
           if-no-files-found: ignore
 
   designer-frontend:

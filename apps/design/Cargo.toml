@@ -21,13 +21,11 @@ name = "design"
 workspace = true
 
 [dependencies]
-schema.workspace = true
-schema-core.workspace = true
-schema-config-toml.workspace = true
-schema-index-yaml.workspace = true
-sources-core.workspace = true
-sources-postgres.workspace = true
-sinks-core.workspace = true
+config.workspace = true
+kernel.workspace = true
+source.workspace = true
+source-postgres.workspace = true
+sink.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -41,8 +39,8 @@ mime_guess.workspace = true
 open.workspace = true
 
 [dev-dependencies]
-schema-core.workspace = true
-schema-index-yaml.workspace = true
+kernel.workspace = true
+config.workspace = true
 serde_json.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }

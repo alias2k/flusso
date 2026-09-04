@@ -2,8 +2,8 @@
 #
 # Why nextest here:
 #   * Each test runs in its own process, so the env-var mutation in the
-#     `schema` crate's config tests (libs/2-schema/tests/config_toml.rs) can't
-#     race across tests.
+#     `config` crate's tests (libs/1-config/tests/config_toml.rs) can't race
+#     across tests.
 #   * The container-backed e2e tests (Postgres via testcontainers, plus the
 #     OpenSearch reindex/pipeline tests) get their own concurrency caps and
 #     retries — container startup is occasionally flaky and legitimately slow.
@@ -33,14 +33,14 @@ max-threads = 1
 # `#[ignore]`d by default (run with `--run-ignored all`). Put them in the
 # `docker` group, retry transient failures, and allow a slow startup.
 [[profile.default.overrides]]
-filter = 'package(flusso-sources-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-sources-postgres) & binary(config_coverage) | package(flusso-sources-postgres) & binary(publication) | package(flusso-sources-postgres) & binary(tls) | package(flusso-sources-postgres) & binary(wal_idle) | package(flusso-sources-postgres) & binary(continuity)'
+filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(continuity)'
 test-group = 'docker'
 retries = 2
 slow-timeout = { period = "90s", terminate-after = 4 }
 
 # OpenSearch-backed e2e: serialized via the `opensearch` group, generous startup.
 [[profile.default.overrides]]
-filter = 'package(flusso-sinks-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline) | package(flusso-query-e2e) & binary(combined_search)'
+filter = 'package(flusso-sink-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline) | package(flusso-query-e2e) & binary(combined_search)'
 test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
@@ -54,13 +54,13 @@ fail-fast = false
 path = "junit.xml"
 
 [[profile.ci.overrides]]
-filter = 'package(flusso-sources-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-sources-postgres) & binary(config_coverage) | package(flusso-sources-postgres) & binary(publication) | package(flusso-sources-postgres) & binary(tls) | package(flusso-sources-postgres) & binary(wal_idle) | package(flusso-sources-postgres) & binary(continuity)'
+filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(continuity)'
 test-group = 'docker'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 [[profile.ci.overrides]]
-filter = 'package(flusso-sinks-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline) | package(flusso-query-e2e) & binary(combined_search)'
+filter = 'package(flusso-sink-opensearch) & binary(reindex) | package(flusso-engine) & binary(pipeline) | package(flusso-query-e2e) & binary(combined_search)'
 test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "150s", terminate-after = 5 }

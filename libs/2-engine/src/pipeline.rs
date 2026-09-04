@@ -11,13 +11,13 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use queue_channel::{ChannelConsumer, channel};
-use queue_core::{AckHandle, Consumer, Delivery, Producer};
-use schema_core::{GenericValue, IndexMapping, IndexName};
-use sinks_core::Sink;
-use sources_core::SnapshotTable;
-use sources_core::cdc::{Ack, Change, ChangeCapture, ChangeEvent, Continuity};
-use sources_core::document::{Document, DocumentBuilder, DocumentId};
+use kernel::{GenericValue, IndexMapping, IndexName};
+use sink::Sink;
+use source::SnapshotTable;
+use source::cdc::{Ack, Change, ChangeCapture, ChangeEvent, Continuity};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use stream::{AckHandle, Consumer, Delivery, Producer};
+use stream_channel::{ChannelConsumer, channel};
 use tokio::time::{Instant, timeout_at};
 
 use crate::error::{EngineError, Result};
@@ -184,7 +184,7 @@ async fn backfill(pipeline: Pipeline<'_>, source: &dyn ChangeCapture) -> Result<
 #[tracing::instrument(name = "pump", skip_all)]
 async fn pump(
     pipeline: Pipeline<'_>,
-    stream: BoxStream<'static, sources_core::Result<Change>>,
+    stream: BoxStream<'static, source::Result<Change>>,
     filter: Option<&HashSet<IndexName>>,
 ) -> Result<()> {
     let (producer, mut consumer) = channel::<Change>(pipeline.queue_capacity);
@@ -237,8 +237,8 @@ impl Drop for CaptureGuard {
 /// stream is exhausted.
 #[tracing::instrument(name = "capture", skip_all)]
 async fn capture(
-    mut stream: BoxStream<'static, sources_core::Result<Change>>,
-    producer: queue_channel::ChannelProducer<Change>,
+    mut stream: BoxStream<'static, source::Result<Change>>,
+    producer: stream_channel::ChannelProducer<Change>,
     observer: Arc<dyn Observer>,
 ) -> Result<()> {
     let mut captured = 0u64;
