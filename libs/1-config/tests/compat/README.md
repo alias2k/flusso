@@ -10,6 +10,10 @@ valid at the start of the major keeps loading for the rest of it.** A change
 that breaks a snapshot fails CI — that is the point. Fix the change, don't
 edit the snapshot.
 
+The guarantee covers the two user-authored formats from 0.15 on. The lock was
+re-versioned once, to format 3 in 0.16 (ADR 0005), so the `v0.15` snapshot
+carries no lock and the lock guarantee starts with `v0.16`.
+
 Rules:
 
 - **Snapshots are immutable.** Never edit, regenerate, or delete a file in an

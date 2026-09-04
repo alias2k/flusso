@@ -1,7 +1,10 @@
+use std::borrow::Cow;
 use std::fmt;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::SECRET_MARKER;
 use crate::common::{ConnectionUrl, ConnectionUrlError, HttpUrl, HttpUrlError, SinkName};
 
 /// The reserved environment variable that supplies / overrides the source
@@ -14,8 +17,12 @@ pub const SOURCE_URL_VAR: &str = "DATABASE_URL";
 /// resolution is what lets a compiled config travel without its secrets — a
 /// literal is carried as-is, an [`Env`](Self::Env) reference carries only the
 /// variable name, and the real value is read in the environment that runs it.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// Serialized exactly as it is written in `flusso.toml`: a plain string for a
+/// literal, `{ env = "VAR" }` for a reference. The `Deserialize` is hand-written
+/// (not `#[serde(untagged)]`) so a wrong shape reports what was expected instead
+/// of serde's opaque "data did not match any variant".
+#[derive(Clone, PartialEq, Eq)]
 pub enum Secret {
     /// A literal value, stored verbatim.
     Value(String),
@@ -33,6 +40,110 @@ impl Secret {
                 std::env::var(var).map_err(|_| ResolveError::EnvNotSet(var.clone()))
             }
         }
+    }
+
+    /// Resolve a **required** secret with `override_var` as its deployment
+    /// override (see [`override_var`](crate::override_var)). Precedence: an
+    /// explicit `Env` reference names its own source and wins; otherwise the
+    /// override variable, if set; otherwise the literal.
+    pub fn resolve(&self, override_var: &str) -> Result<String, ResolveError> {
+        resolve_required(self, override_var)
+    }
+
+    /// Resolve an **optional** secret: same precedence as [`resolve`](Self::resolve),
+    /// and when the config omits it the override variable fills it if set.
+    pub fn resolve_optional(
+        secret: Option<&Secret>,
+        override_var: &str,
+    ) -> Result<Option<String>, ResolveError> {
+        resolve_optional(secret, override_var)
+    }
+}
+
+/// A secret is a string or `{ env = "VAR" }`; the schema says so and plants the
+/// [`SECRET_MARKER`] so an adapter description can list its override variable.
+impl JsonSchema for Secret {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("Secret")
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        let mut schema = json_schema!({
+            "description": "A literal value, or `{ env = \"VAR\" }` to read it from the environment at run time.",
+            "anyOf": [
+                { "type": "string" },
+                {
+                    "type": "object",
+                    "properties": { "env": { "type": "string", "description": "The environment variable to read." } },
+                    "required": ["env"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+        schema.insert(SECRET_MARKER.to_owned(), serde_json::Value::Bool(true));
+        schema
+    }
+}
+
+/// The accepted shapes, named once so every error message stays consistent.
+const EXPECTED: &str = "a string value or an env reference `{ env = \"VAR\" }`";
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Secret::Value(value) => serializer.serialize_str(value),
+            Secret::Env(env) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("env", env)?;
+                map.end()
+            }
+        }
+    }
+}
+
+struct SecretVisitor;
+
+impl<'de> serde::de::Visitor<'de> for SecretVisitor {
+    type Value = Secret;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(EXPECTED)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Secret::Value(value.to_owned()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(Secret::Value(value))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        use serde::de::Error;
+        let Some(key) = map.next_key::<String>()? else {
+            return Err(A::Error::custom(format!(
+                "expected {EXPECTED}, found an empty table"
+            )));
+        };
+        if key != "env" {
+            return Err(A::Error::custom(format!(
+                "unknown key `{key}` — expected {EXPECTED}"
+            )));
+        }
+        let env: String = map.next_value()?;
+        if let Some(extra) = map.next_key::<String>()? {
+            return Err(A::Error::custom(format!(
+                "unexpected key `{extra}` in env reference — write it as `{{ env = \"VAR\" }}`"
+            )));
+        }
+        Ok(Secret::Env(env))
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(SecretVisitor)
     }
 }
 

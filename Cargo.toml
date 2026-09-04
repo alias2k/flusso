@@ -129,6 +129,9 @@ sqlx = { version = "0.9.*", default-features = false, features = [
 chrono = { version = "0.4.*", default-features = false, features = ["std", "serde"] }
 uuid = { version = "1.*", features = ["serde"] }
 serde_json = { version = "1.*" }
+# Adapter option schemas (`#[derive(AdapterConfig)]` → editor schema, Reference
+# tables, designer forms). The kernel owns the `Secret` schema; adapters derive.
+schemars = { version = "1.2.*" }
 # Our HTTP client stays on 0.12. The OTLP exporter pulls its own reqwest 0.13
 # transitively; deduping would force a 0.13 TLS-feature migration (rustls-tls →
 # rustls + a crypto provider) that risks colliding with sqlx's rustls provider,

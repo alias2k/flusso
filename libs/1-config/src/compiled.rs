@@ -33,7 +33,7 @@ use crate::loader::{self, LoadError};
 /// migration trigger, never a rejection. Version 1 was the pre-freeze
 /// MessagePack format, sanctioned as the last break; it is rejected with a
 /// regenerate hint (see [`CompileError::LegacyFormat`]).
-pub const FORMAT_VERSION: u8 = 2;
+pub const FORMAT_VERSION: u8 = 3;
 
 /// The comment header written at the top of every artifact. Static text — part
 /// of the byte-stable output, never derived from the producing binary.
@@ -73,7 +73,8 @@ pub enum CompileError {
     Decode(#[from] toml::de::Error),
     #[error(
         "compiled config format version {got} is not supported by this build \
-         (expected {expected}); recompile with a matching `flusso`"
+         (expected {expected}); re-run `flusso build` (or `flusso run` without \
+         `--locked`) against the `flusso.toml` to regenerate the lock"
     )]
     VersionMismatch { got: u8, expected: u8 },
     #[error(

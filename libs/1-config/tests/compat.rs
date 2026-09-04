@@ -36,9 +36,15 @@ fn every_frozen_config_still_loads_and_converts() {
     }
 }
 
+/// Snapshots frozen before lock format 3 (ADR 0005) keep only their
+/// user-authored files; the lock guarantee starts with the first snapshot that
+/// carries a `flusso.lock`.
 #[test]
 fn every_frozen_lock_still_decodes() {
-    for snapshot in snapshots() {
+    let with_lock = snapshots()
+        .into_iter()
+        .filter(|snapshot| snapshot.join("flusso.lock").exists());
+    for snapshot in with_lock {
         let from_lock = config::load_compiled(snapshot.join("flusso.lock"))
             .unwrap_or_else(|err| panic!("{} lock no longer decodes: {err}", snapshot.display()));
         let from_config = config::load(snapshot.join("flusso.toml")).unwrap();
