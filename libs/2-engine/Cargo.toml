@@ -4,7 +4,7 @@ version = "0.15.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The flusso sync engine: the resolve, build, flush, and ack pipeline."
+description = "The flusso engines: the ingest engine (capture, build once, publish) and the sink engine (receive, apply, flush, ack)."
 authors.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -21,15 +21,16 @@ workspace = true
 source.workspace = true
 sink.workspace = true
 stream.workspace = true
-stream-channel.workspace = true
 kernel.workspace = true
+async-trait.workspace = true
+chrono = { workspace = true, features = ["clock"] }
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 
 [dev-dependencies]
-async-trait.workspace = true
+stream-channel.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 # Concrete source + sink, exercised together only here — the engine is the one
 # component that legitimately spans both halves of the pipeline.

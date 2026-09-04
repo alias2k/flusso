@@ -1,122 +1,238 @@
-//! The live operational state of a running daemon.
+//! The live operational state a transport reads: one ingest side, one entry per
+//! sink, serialized as the `/status` document.
 //!
-//! [`Status`] is the shared handle the crate's status observer (`StatusObserver`)
-//! writes to as the engine emits events, and the HTTP `/status` endpoint reads
-//! from. It
-//! holds only fast, lock-light state (atomics for counters, short-held mutexes
-//! for the phase, the per-index map, and the last error) so updating it never
-//! blocks the pipeline's hot path.
+//! Counters are atomics and the small enums sit behind mutexes, so the
+//! observer's sync callbacks never block the engines and a reader always gets a
+//! consistent-enough snapshot. Per-sink state is what makes a stalled or
+//! failing sink visible without stopping the others.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use kernel::IndexName;
+use kernel::{IndexName, SinkName};
 use serde::Serialize;
 
-/// Recover a poisoned mutex rather than panicking — a writer that panicked
-/// mid-update leaves at worst slightly stale status, never a downed endpoint.
-/// (`.lock().unwrap()` is forbidden by the workspace lints anyway.)
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The pipeline's overall phase, in the order the engine moves through them.
+/// Where the deployment as a whole is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
-    /// Starting up; indexes not yet ensured.
+    /// Engines are being staged; nothing follows the source yet.
     Starting,
-    /// Seeding one or more unseeded indexes from a snapshot.
+    /// Live, and at least one sink is still seeding an index.
     Backfilling,
-    /// Following live changes.
+    /// Every engine is following its feed.
     Live,
-    /// The run has ended (clean stop or error).
+    /// The ingest engine has stopped; the deployment is no longer syncing.
     Stopped,
 }
 
-/// Where one index is in its lifecycle.
+/// Where one sink engine is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkPhase {
+    /// Not yet staged.
+    Starting,
+    /// Following its lane while at least one index is being seeded.
+    Backfilling,
+    /// Following its lane with every index seeded.
+    Live,
+    /// Stopped on an error; the daemon is restarting it with backoff.
+    Failed,
+    /// Its lane closed; it will not run again this process.
+    Stopped,
+}
+
+/// Where one index is, on one sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexState {
-    /// Not yet known to be seeded this run.
+    /// Not yet staged.
     Pending,
-    /// Its initial backfill is in progress.
+    /// A snapshot is in flight for it.
     Backfilling,
-    /// Seeded — either backfilled this run or already seeded on start.
+    /// The sink holds a complete snapshot.
     Seeded,
 }
 
-/// Shared, mutable operational state. Cheap to update concurrently from the
-/// observer; snapshotted to JSON for the `/status` endpoint.
+/// The live status of one deployment.
 #[derive(Debug)]
 pub struct Status {
     started_at: Instant,
     phase: Mutex<Phase>,
-    indexes: Mutex<BTreeMap<IndexName, IndexState>>,
     changes_captured: AtomicU64,
-    changes_committed: AtomicU64,
     documents_built: AtomicU64,
-    documents_quarantined: AtomicU64,
-    batches: AtomicU64,
-    last_flush_micros: AtomicU64,
     slot_lag_bytes: AtomicU64,
     slot_lag_known: AtomicBool,
     errors: AtomicU64,
     last_error: Mutex<Option<String>>,
+    sinks: BTreeMap<SinkName, SinkStatus>,
+    indexes: Vec<IndexName>,
+}
+
+/// The live status of one sink engine.
+#[derive(Debug)]
+pub struct SinkStatus {
+    phase: Mutex<SinkPhase>,
+    indexes: Mutex<BTreeMap<IndexName, IndexState>>,
+    changes_committed: AtomicU64,
+    envelopes_applied: AtomicU64,
+    batches: AtomicU64,
+    documents_quarantined: AtomicU64,
+    last_flush_micros: AtomicU64,
+}
+
+impl SinkStatus {
+    fn new(indexes: &[IndexName]) -> Self {
+        Self {
+            phase: Mutex::new(SinkPhase::Starting),
+            indexes: Mutex::new(
+                indexes
+                    .iter()
+                    .map(|index| (index.clone(), IndexState::Pending))
+                    .collect(),
+            ),
+            changes_committed: AtomicU64::new(0),
+            envelopes_applied: AtomicU64::new(0),
+            batches: AtomicU64::new(0),
+            documents_quarantined: AtomicU64::new(0),
+            last_flush_micros: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self, captured: u64) -> SinkSnapshot {
+        let committed = self.changes_committed.load(Ordering::Relaxed);
+        SinkSnapshot {
+            phase: *lock(&self.phase),
+            indexes: lock(&self.indexes)
+                .iter()
+                .map(|(name, state)| (name.as_ref().to_owned(), *state))
+                .collect(),
+            changes_committed: committed,
+            changes_in_flight: captured.saturating_sub(committed),
+            envelopes_applied: self.envelopes_applied.load(Ordering::Relaxed),
+            batches: self.batches.load(Ordering::Relaxed),
+            documents_quarantined: self.documents_quarantined.load(Ordering::Relaxed),
+            last_flush_micros: self.last_flush_micros.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl Status {
-    /// A fresh status with every configured index `Pending`. `now` is the start
-    /// instant uptime is measured from.
-    pub fn new(indexes: impl IntoIterator<Item = IndexName>, now: Instant) -> Self {
-        let indexes = indexes
-            .into_iter()
-            .map(|index| (index, IndexState::Pending))
-            .collect();
+    /// A status for `indexes` maintained on `sinks`, everything pending.
+    pub fn new(
+        indexes: impl IntoIterator<Item = IndexName>,
+        sinks: impl IntoIterator<Item = SinkName>,
+        now: Instant,
+    ) -> Self {
+        let indexes: Vec<IndexName> = indexes.into_iter().collect();
         Self {
             started_at: now,
             phase: Mutex::new(Phase::Starting),
-            indexes: Mutex::new(indexes),
             changes_captured: AtomicU64::new(0),
-            changes_committed: AtomicU64::new(0),
             documents_built: AtomicU64::new(0),
-            documents_quarantined: AtomicU64::new(0),
-            batches: AtomicU64::new(0),
-            last_flush_micros: AtomicU64::new(0),
             slot_lag_bytes: AtomicU64::new(0),
             slot_lag_known: AtomicBool::new(false),
             errors: AtomicU64::new(0),
             last_error: Mutex::new(None),
+            sinks: sinks
+                .into_iter()
+                .map(|sink| (sink, SinkStatus::new(&indexes)))
+                .collect(),
+            indexes,
         }
+    }
+
+    fn sink(&self, sink: &SinkName) -> Option<&SinkStatus> {
+        self.sinks.get(sink)
     }
 
     pub(crate) fn set_phase(&self, phase: Phase) {
         *lock(&self.phase) = phase;
     }
 
-    pub(crate) fn mark_backfilling(&self, indexes: &[IndexName]) {
-        let mut map = lock(&self.indexes);
-        for index in indexes {
-            map.insert(index.clone(), IndexState::Backfilling);
+    /// The overall phase, derived from the sinks: live only when every sink is.
+    fn recompute_phase(&self) {
+        let mut phase = lock(&self.phase);
+        if *phase == Phase::Stopped {
+            return;
+        }
+        let sink_phases: Vec<SinkPhase> = self.sinks.values().map(|s| *lock(&s.phase)).collect();
+        if sink_phases.contains(&SinkPhase::Starting) {
+            return;
+        }
+        *phase = if sink_phases.contains(&SinkPhase::Backfilling) {
+            Phase::Backfilling
+        } else {
+            Phase::Live
+        };
+    }
+
+    pub(crate) fn mark_ingest_live(&self) {
+        self.recompute_phase();
+        let mut phase = lock(&self.phase);
+        if *phase == Phase::Starting {
+            *phase = Phase::Live;
         }
     }
 
-    pub(crate) fn mark_seeded(&self, index: &IndexName) {
-        lock(&self.indexes).insert(index.clone(), IndexState::Seeded);
+    pub(crate) fn mark_sink_started(&self, sink: &SinkName) {
+        if let Some(status) = self.sink(sink) {
+            let backfilling = lock(&status.indexes)
+                .values()
+                .any(|s| *s == IndexState::Backfilling);
+            *lock(&status.phase) = if backfilling {
+                SinkPhase::Backfilling
+            } else {
+                SinkPhase::Live
+            };
+            if !backfilling {
+                for state in lock(&status.indexes).values_mut() {
+                    *state = IndexState::Seeded;
+                }
+            }
+        }
+        self.recompute_phase();
     }
 
-    /// Reaching live capture means every index is seeded by definition, so any
-    /// still `Pending` (already seeded before this run, never backfilled here)
-    /// is promoted to `Seeded`.
-    pub(crate) fn mark_all_seeded(&self) {
-        for state in lock(&self.indexes).values_mut() {
-            if *state != IndexState::Seeded {
-                *state = IndexState::Seeded;
+    pub(crate) fn mark_backfilling(&self, sink: &SinkName, indexes: &[IndexName]) {
+        if let Some(status) = self.sink(sink) {
+            let mut map = lock(&status.indexes);
+            for index in indexes {
+                map.insert(index.clone(), IndexState::Backfilling);
             }
+            *lock(&status.phase) = SinkPhase::Backfilling;
+        }
+        self.recompute_phase();
+    }
+
+    pub(crate) fn mark_seeded(&self, sink: &SinkName, index: &IndexName) {
+        if let Some(status) = self.sink(sink) {
+            let mut map = lock(&status.indexes);
+            map.insert(index.clone(), IndexState::Seeded);
+            if map.values().all(|s| *s == IndexState::Seeded) {
+                *lock(&status.phase) = SinkPhase::Live;
+            }
+        }
+        self.recompute_phase();
+    }
+
+    pub(crate) fn mark_sink_failed(&self, sink: &SinkName) {
+        if let Some(status) = self.sink(sink) {
+            *lock(&status.phase) = SinkPhase::Failed;
+        }
+    }
+
+    pub(crate) fn mark_sink_stopped(&self, sink: &SinkName) {
+        if let Some(status) = self.sink(sink) {
+            *lock(&status.phase) = SinkPhase::Stopped;
         }
     }
 
@@ -124,25 +240,35 @@ impl Status {
         self.changes_captured.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn record_commit(&self, changes: u64, documents: u64, flush_micros: u64) {
-        self.changes_committed.fetch_add(changes, Ordering::Relaxed);
+    pub(crate) fn record_build(&self, documents: u64) {
         self.documents_built.fetch_add(documents, Ordering::Relaxed);
-        self.batches.fetch_add(1, Ordering::Relaxed);
-        self.last_flush_micros
-            .store(flush_micros, Ordering::Relaxed);
     }
 
-    /// Changes captured but not yet committed — the queue/back-pressure signal.
-    /// A cheap two-atomic read, safe to call from a metrics collection thread
-    /// (e.g. an observable-gauge callback in the binary).
-    pub fn in_flight(&self) -> u64 {
-        self.changes_captured
-            .load(Ordering::Relaxed)
-            .saturating_sub(self.changes_committed.load(Ordering::Relaxed))
+    pub(crate) fn record_commit(
+        &self,
+        sink: &SinkName,
+        changes: u64,
+        envelopes: u64,
+        flush_micros: u64,
+    ) {
+        if let Some(status) = self.sink(sink) {
+            status
+                .changes_committed
+                .fetch_add(changes, Ordering::Relaxed);
+            status
+                .envelopes_applied
+                .fetch_add(envelopes, Ordering::Relaxed);
+            status.batches.fetch_add(1, Ordering::Relaxed);
+            status
+                .last_flush_micros
+                .store(flush_micros, Ordering::Relaxed);
+        }
     }
 
-    pub(crate) fn record_quarantine(&self) {
-        self.documents_quarantined.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_quarantine(&self, sink: &SinkName) {
+        if let Some(status) = self.sink(sink) {
+            status.documents_quarantined.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub(crate) fn record_lag(&self, bytes: u64) {
@@ -155,52 +281,114 @@ impl Status {
         *lock(&self.last_error) = Some(error.to_owned());
     }
 
-    /// A point-in-time, serializable view of the status for the HTTP endpoint.
+    /// Changes captured but not yet committed by the slowest sink.
+    pub fn in_flight(&self) -> u64 {
+        let captured = self.changes_captured.load(Ordering::Relaxed);
+        let slowest = self
+            .sinks
+            .values()
+            .map(|s| s.changes_committed.load(Ordering::Relaxed))
+            .min()
+            .unwrap_or(captured);
+        captured.saturating_sub(slowest)
+    }
+
+    /// Changes captured but not yet committed by `sink`.
+    pub fn in_flight_for(&self, sink: &SinkName) -> u64 {
+        let captured = self.changes_captured.load(Ordering::Relaxed);
+        self.sink(sink).map_or(0, |s| {
+            captured.saturating_sub(s.changes_committed.load(Ordering::Relaxed))
+        })
+    }
+
+    /// The sinks this status tracks.
+    pub fn sinks(&self) -> impl Iterator<Item = &SinkName> {
+        self.sinks.keys()
+    }
+
+    /// Whether every engine is ready: the ingest engine is live and every sink
+    /// engine is live or backfilling.
+    pub fn is_ready(&self) -> bool {
+        let phase = *lock(&self.phase);
+        matches!(phase, Phase::Live | Phase::Backfilling)
+            && self
+                .sinks
+                .values()
+                .all(|s| matches!(*lock(&s.phase), SinkPhase::Live | SinkPhase::Backfilling))
+    }
+
+    /// A point-in-time copy for serialization.
     pub fn snapshot(&self) -> StatusSnapshot {
         let captured = self.changes_captured.load(Ordering::Relaxed);
-        let committed = self.changes_committed.load(Ordering::Relaxed);
+        let sinks: BTreeMap<String, SinkSnapshot> = self
+            .sinks
+            .iter()
+            .map(|(name, status)| (name.as_ref().to_owned(), status.snapshot(captured)))
+            .collect();
+        let indexes = self
+            .indexes
+            .iter()
+            .map(|index| {
+                let states: Vec<IndexState> = self
+                    .sinks
+                    .values()
+                    .filter_map(|s| lock(&s.indexes).get(index).copied())
+                    .collect();
+                let state = if states.contains(&IndexState::Backfilling) {
+                    IndexState::Backfilling
+                } else if !states.is_empty() && states.iter().all(|s| *s == IndexState::Seeded) {
+                    IndexState::Seeded
+                } else {
+                    IndexState::Pending
+                };
+                (index.as_ref().to_owned(), state)
+            })
+            .collect();
         StatusSnapshot {
             phase: *lock(&self.phase),
             uptime_seconds: self.started_at.elapsed().as_secs(),
-            indexes: lock(&self.indexes)
-                .iter()
-                .map(|(name, state)| (name.as_ref().to_owned(), *state))
-                .collect(),
+            indexes,
             changes_captured: captured,
-            changes_committed: committed,
-            changes_in_flight: captured.saturating_sub(committed),
+            changes_in_flight: self.in_flight(),
             documents_built: self.documents_built.load(Ordering::Relaxed),
-            documents_quarantined: self.documents_quarantined.load(Ordering::Relaxed),
-            batches: self.batches.load(Ordering::Relaxed),
-            last_flush_micros: self.last_flush_micros.load(Ordering::Relaxed),
             slot_lag_bytes: self
                 .slot_lag_known
                 .load(Ordering::Relaxed)
                 .then(|| self.slot_lag_bytes.load(Ordering::Relaxed)),
             errors: self.errors.load(Ordering::Relaxed),
             last_error: lock(&self.last_error).clone(),
+            sinks,
         }
     }
 }
 
-/// A serializable snapshot of [`Status`], returned as JSON by `/status`.
+/// The `/status` document.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusSnapshot {
     pub phase: Phase,
     pub uptime_seconds: u64,
+    /// Each index's state across sinks: backfilling if any sink is seeding it,
+    /// seeded when every sink holds it.
     pub indexes: BTreeMap<String, IndexState>,
     pub changes_captured: u64,
-    pub changes_committed: u64,
+    /// Captured but not yet committed by the slowest sink.
     pub changes_in_flight: u64,
     pub documents_built: u64,
-    /// Documents the sink rejected and the engine skipped (failure policy
-    /// `skip`). A non-zero value means data is being dropped — alert on it.
-    pub documents_quarantined: u64,
-    pub batches: u64,
-    pub last_flush_micros: u64,
-    /// `None` until the source first reports lag (e.g. the slot doesn't exist
-    /// yet), otherwise bytes the destination trails the source by.
     pub slot_lag_bytes: Option<u64>,
     pub errors: u64,
     pub last_error: Option<String>,
+    pub sinks: BTreeMap<String, SinkSnapshot>,
+}
+
+/// One sink's slice of the `/status` document.
+#[derive(Debug, Clone, Serialize)]
+pub struct SinkSnapshot {
+    pub phase: SinkPhase,
+    pub indexes: BTreeMap<String, IndexState>,
+    pub changes_committed: u64,
+    pub changes_in_flight: u64,
+    pub envelopes_applied: u64,
+    pub batches: u64,
+    pub documents_quarantined: u64,
+    pub last_flush_micros: u64,
 }

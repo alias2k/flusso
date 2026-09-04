@@ -1,65 +1,45 @@
-//! Progress tracking that turns per-event confirmations into a single LSN the
-//! slot can advance to.
+//! Position bookkeeping for the live stream: which LSN each emitted position
+//! stands for, and how far the slot may advance once the engine confirms one.
 //!
-//! The engine confirms each [`Change`](source::cdc::Change) independently and
-//! possibly out of order. The replication slot, though, can only safely advance
-//! to a point where *everything before it* is durably processed. So we track a
-//! contiguous watermark: each emitted change gets a monotonically increasing
-//! sequence number paired with its commit LSN, and the confirmed LSN only moves
-//! up to the highest sequence whose predecessors are all confirmed.
-//!
-//! Progress-only positions — a keepalive's reported WAL end, an empty
-//! transaction's commit — join the same sequence pre-confirmed (see
-//! [`AckShared::register_confirmed`]), so the slot keeps advancing while the
-//! watched tables are idle without ever passing an unflushed change.
+//! Confirmation is **cumulative**: confirming position `P` covers every position
+//! at or before `P`, because the stream's watermark is the lowest position every
+//! sink has acknowledged and lanes are acknowledged in order. So the resume
+//! point becomes the highest LSN among the confirmed positions, and the
+//! entries at or before `P` are dropped.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::BTreeMap;
+use std::sync::{Mutex, PoisonError};
 
-use source::cdc::AckSink;
-
-/// Shared, lock-guarded progress. Written from the stream task (registering
-/// emitted changes, reading the watermark) and from the engine (confirming).
+/// The seq → LSN map for one live stream, shared between the stream (which
+/// registers) and the capture (which confirms).
 #[derive(Debug)]
-pub(crate) struct AckShared {
-    inner: Mutex<AckInner>,
+pub(crate) struct Positions {
+    inner: Mutex<Inner>,
 }
 
 #[derive(Debug)]
-struct AckInner {
-    /// Sequence number to assign to the next emitted change.
+struct Inner {
     next_seq: u64,
-    /// Lowest sequence not yet confirmed — the front of the contiguous run.
-    lowest_unconfirmed: u64,
-    /// Sequences confirmed ahead of `lowest_unconfirmed`, awaiting the gap to fill.
-    confirmed_ahead: BTreeSet<u64>,
-    /// Commit LSN of each emitted-but-not-yet-cleared sequence.
     lsn_by_seq: BTreeMap<u64, u64>,
-    /// Highest LSN safe to report to the server.
     confirmed_lsn: u64,
 }
 
-impl AckShared {
+impl Positions {
     pub(crate) fn new(start_lsn: u64) -> Self {
         Self {
-            inner: Mutex::new(AckInner {
+            inner: Mutex::new(Inner {
                 next_seq: 0,
-                lowest_unconfirmed: 0,
-                confirmed_ahead: BTreeSet::new(),
                 lsn_by_seq: BTreeMap::new(),
                 confirmed_lsn: start_lsn,
             }),
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, AckInner> {
-        // A poisoned lock means another holder panicked mid-update. The data is
-        // still structurally valid for our purposes, so recover rather than
-        // propagate a panic (the workspace forbids `unwrap`/`expect`).
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Record a change about to be emitted and return its sequence number.
+    /// Assign the next position to a change committed at `lsn`.
     pub(crate) fn register(&self, lsn: u64) -> u64 {
         let mut inner = self.lock();
         let seq = inner.next_seq;
@@ -68,78 +48,33 @@ impl AckShared {
         seq
     }
 
-    /// The highest LSN whose every preceding change has been confirmed.
+    /// The LSN the slot may be advanced to.
     pub(crate) fn confirmed_lsn(&self) -> u64 {
         self.lock().confirmed_lsn
     }
 
-    /// Record a progress-only position — a keepalive's reported WAL end or an
-    /// empty transaction's commit — and confirm it in place.
-    ///
-    /// The advance obeys the same contiguous watermark as real changes: it
-    /// lands immediately when nothing earlier is in flight, and otherwise
-    /// waits until every previously emitted change is confirmed. That is what
-    /// keeps the slot moving while the watched tables are idle without ever
-    /// passing an unflushed change.
+    /// A position with nothing to deliver (a keepalive or an empty commit at
+    /// `lsn`): confirmed in place when no emitted change is outstanding, else
+    /// queued behind them so the slot never passes an unconfirmed change.
     pub(crate) fn register_confirmed(&self, lsn: u64) {
         let mut inner = self.lock();
-        let seq = inner.next_seq;
-        inner.next_seq += 1;
-        inner.lsn_by_seq.insert(seq, lsn);
-        inner.confirm(seq);
-    }
-
-    /// Confirm one sequence, advancing the watermark across any newly contiguous run.
-    fn confirm(&self, seq: u64) {
-        self.lock().confirm(seq);
-    }
-}
-
-impl AckInner {
-    fn confirm(&mut self, seq: u64) {
-        if seq < self.lowest_unconfirmed {
-            return; // already accounted for
-        }
-        if seq > self.lowest_unconfirmed {
-            self.confirmed_ahead.insert(seq);
-            return;
-        }
-
-        let mut current = seq;
-        loop {
-            if let Some(lsn) = self.lsn_by_seq.remove(&current)
-                && lsn > self.confirmed_lsn
-            {
-                self.confirmed_lsn = lsn;
-            }
-            let next = current + 1;
-            self.lowest_unconfirmed = next;
-            if self.confirmed_ahead.remove(&next) {
-                current = next;
-            } else {
-                break;
-            }
+        if inner.lsn_by_seq.is_empty() {
+            inner.confirmed_lsn = inner.confirmed_lsn.max(lsn);
+        } else {
+            let seq = inner.next_seq;
+            inner.next_seq += 1;
+            inner.lsn_by_seq.insert(seq, lsn);
         }
     }
-}
 
-/// The [`AckSink`] handed to every [`Ack`](source::cdc::Ack). Forwards
-/// confirmations to the shared watermark; the stream task does the actual
-/// reporting to the server when it next reads the watermark.
-#[derive(Debug)]
-pub(crate) struct WalAckSink {
-    shared: Arc<AckShared>,
-}
-
-impl WalAckSink {
-    pub(crate) fn new(shared: Arc<AckShared>) -> Self {
-        Self { shared }
-    }
-}
-
-impl AckSink for WalAckSink {
-    fn confirm(&self, seq: u64) {
-        self.shared.confirm(seq);
+    /// Every position at or before `seq` is durable downstream.
+    pub(crate) fn confirm(&self, seq: u64) {
+        let mut inner = self.lock();
+        let after = inner.lsn_by_seq.split_off(&(seq + 1));
+        let covered = std::mem::replace(&mut inner.lsn_by_seq, after);
+        if let Some(highest) = covered.values().max() {
+            inner.confirmed_lsn = inner.confirmed_lsn.max(*highest);
+        }
     }
 }
 

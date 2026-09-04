@@ -32,6 +32,7 @@ use kernel::{
     ContentHash, FieldName, GenericValue, IndexMapping, IndexName, Mapping, MappingType,
     ResolvedField,
 };
+use kernel::{Envelope, Position};
 use reqwest::StatusCode;
 use serde_json::Value;
 use sink::Sink;
@@ -192,7 +193,7 @@ async fn reindex_swaps_generations_and_drops_the_old_one() {
         "a fresh index is unseeded before its backfill"
     );
     for i in [1, 2, 3] {
-        run1.upsert(&index, &i.to_string(), &document(i))
+        run1.apply(&upsert(&index, &i.to_string(), &document(i)))
             .await
             .unwrap();
     }
@@ -230,7 +231,7 @@ async fn reindex_swaps_generations_and_drops_the_old_one() {
         "reads stay on generation 1 while generation 2 is being built",
     );
     for i in [1, 2] {
-        run2.upsert(&index, &i.to_string(), &document(i))
+        run2.apply(&upsert(&index, &i.to_string(), &document(i)))
             .await
             .unwrap();
     }
@@ -285,7 +286,7 @@ async fn index_prefix_isolates_two_deployments_and_scopes_reindex() {
     let dev = sink_with_prefix(&base, "dev_");
     dev.ensure_index(&mapping).await.unwrap();
     for i in [1, 2, 3] {
-        dev.upsert(&index, &i.to_string(), &document(i))
+        dev.apply(&upsert(&index, &i.to_string(), &document(i)))
             .await
             .unwrap();
     }
@@ -296,7 +297,7 @@ async fn index_prefix_isolates_two_deployments_and_scopes_reindex() {
     staging.ensure_index(&mapping).await.unwrap();
     for i in [1, 2] {
         staging
-            .upsert(&index, &i.to_string(), &document(i))
+            .apply(&upsert(&index, &i.to_string(), &document(i)))
             .await
             .unwrap();
     }
@@ -351,7 +352,7 @@ async fn index_prefix_isolates_two_deployments_and_scopes_reindex() {
     let dev2 = sink_with_prefix(&base, "dev_");
     dev2.ensure_index(&mapping).await.unwrap();
     for i in [1, 2] {
-        dev2.upsert(&index, &i.to_string(), &document(i))
+        dev2.apply(&upsert(&index, &i.to_string(), &document(i)))
             .await
             .unwrap();
     }
@@ -391,7 +392,9 @@ async fn deleted_generation_is_recreated_and_reported_unseeded() {
     // ── Run 1: seed generation 1 ─────────────────────────────────────────────
     let run1 = sink(&base);
     run1.ensure_index(&mapping).await.unwrap();
-    run1.upsert(&index, "1", &document(1)).await.unwrap();
+    run1.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
     run1.flush(true).await.unwrap();
     run1.mark_seeded(&index).await.unwrap();
     assert!(run1.is_seeded(&index).await.unwrap());
@@ -428,7 +431,9 @@ async fn deleted_generation_is_recreated_and_reported_unseeded() {
     );
 
     // ── The engine's backfill then reseeds and marks it ──────────────────────
-    run2.upsert(&index, "1", &document(1)).await.unwrap();
+    run2.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
     run2.flush(true).await.unwrap();
     run2.mark_seeded(&index).await.unwrap();
     assert!(run2.is_seeded(&index).await.unwrap());
@@ -438,4 +443,16 @@ async fn deleted_generation_is_recreated_and_reported_unseeded() {
     let run3 = sink(&base);
     run3.ensure_index(&mapping).await.unwrap();
     assert!(run3.is_seeded(&index).await.unwrap());
+}
+
+/// A live-shaped upsert envelope for `doc` under `id`, positioned arbitrarily:
+/// the sink only reads index, id, op, and document.
+fn upsert(index: &IndexName, id: &str, doc: &GenericValue) -> Envelope {
+    Envelope::upsert(
+        index.clone(),
+        id,
+        doc.clone(),
+        Some(Position(0)),
+        chrono::Utc::now(),
+    )
 }

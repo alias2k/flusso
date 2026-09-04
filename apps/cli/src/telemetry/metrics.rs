@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use daemon::Status;
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::ObservableGauge;
 use opentelemetry_sdk::Resource;
@@ -122,8 +123,15 @@ pub(crate) fn init(prometheus: bool) -> anyhow::Result<Metrics> {
 pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u64> {
     global::meter("flusso")
         .u64_observable_gauge("flusso.changes.in_flight")
-        .with_description("Captured but not yet committed changes (back-pressure)")
-        .with_callback(move |observer| observer.observe(status.in_flight(), &[]))
+        .with_description("Captured but not yet committed changes per sink (back-pressure)")
+        .with_callback(move |observer| {
+            for sink in status.sinks() {
+                observer.observe(
+                    status.in_flight_for(sink),
+                    &[KeyValue::new("sink", sink.as_ref().to_owned())],
+                );
+            }
+        })
         .build()
 }
 

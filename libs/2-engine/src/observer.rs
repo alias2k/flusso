@@ -1,152 +1,139 @@
-//! Pipeline observability — a backend-neutral [`Observer`] the engine reports
-//! lifecycle and progress events to.
+//! The progress trait both engines report through: sync, cheap, no-op by
+//! default. The daemon fans it out to a live status surface and to whatever
+//! metrics observer the binary attaches; the engines depend on the trait only.
 //!
-//! The engine emits events at the transitions and boundaries it already has
-//! (indexes ensured, backfill phases, live start, each change captured, each
-//! batch committed, errors). It depends only on this trait, never on a concrete
-//! metrics or status backend — exactly the trait-object discipline the rest of
-//! the pipeline uses for sources and sinks. A consumer (the `daemon` crate)
-//! implements [`Observer`] to fan these events out to metrics, a live status
-//! surface, or anything else.
-//!
-//! Methods are **synchronous and cheap** (`&self`, no `await`): they run inline
-//! on the pipeline's hot path, so an implementation must do only fast,
-//! non-blocking work (bump a counter, update an atomic). Anything slower belongs
-//! on a separate task fed by what the observer records. Every method has a
-//! no-op default so an implementation overrides only what it cares about, and
-//! [`NoopObserver`] is the default when none is set.
+//! Every sink-side event names the sink, so status and metrics carry a sink
+//! dimension. Ingest-side events have no sink: they describe the one build
+//! path every lane is fed from.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use kernel::IndexName;
+use kernel::{IndexName, SinkName};
 
-/// What one committed batch did — reported to [`Observer::on_batch_committed`].
+/// What one ingest commit produced: how many changes it covered, how many
+/// documents it built (deduplicated), per index, and how long the build took.
 #[derive(Debug, Clone)]
-pub struct BatchStats {
-    /// Changes buffered into this batch (what [`BatchPolicy`](crate::BatchPolicy)
-    /// caps).
+pub struct BuildStats {
     pub changes: usize,
-    /// Distinct documents the batch built and wrote — `<= changes` after the
-    /// per-batch dedup. Equals the sum of [`documents_by_index`](Self::documents_by_index).
     pub documents: usize,
-    /// Documents built per target index, for per-index metrics. One entry per
-    /// index the batch touched.
     pub documents_by_index: Vec<(IndexName, usize)>,
-    /// How long the [`flush`](sink::Sink::flush) that made the batch
-    /// durable took.
+    pub build: Duration,
+}
+
+/// What one sink engine committed: the batch's envelopes applied and flushed,
+/// how many source changes that batch covered, and the flush duration.
+#[derive(Debug, Clone)]
+pub struct CommitStats {
+    pub envelopes: usize,
+    pub changes: usize,
     pub flush: Duration,
 }
 
-/// A sink for the engine's lifecycle and progress events.
-///
-/// See this module's docs for the hot-path contract. All methods default
-/// to no-ops.
+/// The engine an event or error belongs to: the ingest engine, or one sink's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineId {
+    Ingest,
+    Sink(SinkName),
+}
+
+impl std::fmt::Display for EngineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineId::Ingest => f.write_str("ingest"),
+            EngineId::Sink(name) => write!(f, "sink {name}"),
+        }
+    }
+}
+
+/// Lifecycle and progress events. Every method has a no-op default.
 pub trait Observer: std::fmt::Debug + Send + Sync {
-    /// The target indexes have been ensured at the sink (`count` of them),
-    /// before any documents flow.
-    fn on_indexes_ensured(&self, count: usize) {
-        let _ = count;
-    }
-
-    /// Backfill is starting for `indexes` (those the sink reported unseeded).
-    fn on_backfill_started(&self, indexes: &[IndexName]) {
-        let _ = indexes;
-    }
-
-    /// `index`'s backfill is complete and it has been marked seeded.
-    fn on_index_seeded(&self, index: &IndexName) {
-        let _ = index;
-    }
-
-    /// The backfill phase finished (all unseeded indexes seeded), or was skipped.
-    fn on_backfill_completed(&self) {}
-
-    /// Live capture has started; the pipeline is now following ongoing changes.
+    /// The ingest engine opened the live stream and is following it.
     fn on_live_started(&self) {}
 
-    /// One change was pulled from the source into the queue.
+    /// One live change was captured into the current batch.
     fn on_change_captured(&self) {}
 
-    /// A batch was built, flushed, and acked. See [`BatchStats`].
-    fn on_batch_committed(&self, stats: BatchStats) {
+    /// The ingest engine built one batch and published it to every lane.
+    fn on_batch_built(&self, stats: BuildStats) {
         let _ = stats;
     }
 
-    /// The source's capture lag, in bytes behind the latest position — e.g. a
-    /// replication slot's distance from the server's current WAL. Reported by
-    /// whoever polls [`ChangeCapture::lag`](source::cdc::ChangeCapture::lag),
-    /// not by the engine loop itself.
+    /// A snapshot of `indexes` started, for the lanes that requested it.
+    fn on_snapshot_started(&self, indexes: &[IndexName]) {
+        let _ = indexes;
+    }
+
+    /// The snapshot of `indexes` is fully published.
+    fn on_snapshot_completed(&self, indexes: &[IndexName]) {
+        let _ = indexes;
+    }
+
+    /// The source's resume point trails its latest position by `bytes`.
     fn on_slot_lag(&self, bytes: u64) {
         let _ = bytes;
     }
 
-    /// A document was **quarantined**: the sink rejected it at the item level
-    /// and the engine's failure policy is to skip and continue (see
-    /// [`FailurePolicy::Skip`](crate::FailurePolicy)). The document is not
-    /// applied and the batch proceeds, so it is *not* redelivered — this is the
-    /// signal to surface it (a metric, a log, a dead-letter record). `index` and
-    /// `id` are the destination's names for it; `reason` is why it was rejected.
-    fn on_document_quarantined(&self, index: &str, id: &str, reason: &str) {
-        let _ = (index, id, reason);
+    /// A sink engine ensured `count` indexes at its destination.
+    fn on_indexes_ensured(&self, sink: &SinkName, count: usize) {
+        let _ = (sink, count);
     }
 
-    /// The pipeline stopped on an error (rendered to a string, since the engine's
-    /// error type is not part of this neutral surface).
-    fn on_error(&self, error: &str) {
-        let _ = error;
+    /// A sink engine asked for a snapshot of `indexes` into its lane.
+    fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
+        let _ = (sink, indexes);
+    }
+
+    /// A sink recorded `index` as seeded.
+    fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
+        let _ = (sink, index);
+    }
+
+    /// A sink engine finished staging and is following its lane.
+    fn on_sink_started(&self, sink: &SinkName) {
+        let _ = sink;
+    }
+
+    /// A sink engine applied, flushed, and acknowledged one batch.
+    fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
+        let _ = (sink, stats);
+    }
+
+    /// A sink rejected one document and the `skip` policy left it out.
+    fn on_document_quarantined(&self, sink: &SinkName, index: &str, id: &str, reason: &str) {
+        let _ = (sink, index, id, reason);
+    }
+
+    /// An engine stopped on an error. The daemon decides whether it restarts.
+    fn on_engine_error(&self, engine: &EngineId, error: &str) {
+        let _ = (engine, error);
+    }
+
+    /// An engine ended its run without an error (its stream or lane closed).
+    fn on_engine_stopped(&self, engine: &EngineId) {
+        let _ = engine;
     }
 }
 
-/// The default [`Observer`]: every event is dropped. Used when an engine is run
-/// without [`with_observer`](crate::Engine::with_observer).
+/// The default: observe nothing.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopObserver;
 
 impl Observer for NoopObserver {}
 
-/// An [`Observer`] that forwards every event to several observers in turn.
-///
-/// The engine drives a single observer, so this composes many — e.g. one that
-/// updates a status surface and one that records metrics — without the engine
-/// knowing how many there are. Mirrors [`FanOutSink`](sink::FanOutSink).
+/// Forwards every event to several observers, in order.
 #[derive(Debug, Default)]
 pub struct FanOut {
     observers: Vec<Arc<dyn Observer>>,
 }
 
 impl FanOut {
-    /// Compose the given observers; each receives every event, in order.
     pub fn new(observers: Vec<Arc<dyn Observer>>) -> Self {
         Self { observers }
     }
 }
 
 impl Observer for FanOut {
-    fn on_indexes_ensured(&self, count: usize) {
-        for observer in &self.observers {
-            observer.on_indexes_ensured(count);
-        }
-    }
-
-    fn on_backfill_started(&self, indexes: &[IndexName]) {
-        for observer in &self.observers {
-            observer.on_backfill_started(indexes);
-        }
-    }
-
-    fn on_index_seeded(&self, index: &IndexName) {
-        for observer in &self.observers {
-            observer.on_index_seeded(index);
-        }
-    }
-
-    fn on_backfill_completed(&self) {
-        for observer in &self.observers {
-            observer.on_backfill_completed();
-        }
-    }
-
     fn on_live_started(&self) {
         for observer in &self.observers {
             observer.on_live_started();
@@ -159,9 +146,21 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_batch_committed(&self, stats: BatchStats) {
+    fn on_batch_built(&self, stats: BuildStats) {
         for observer in &self.observers {
-            observer.on_batch_committed(stats.clone());
+            observer.on_batch_built(stats.clone());
+        }
+    }
+
+    fn on_snapshot_started(&self, indexes: &[IndexName]) {
+        for observer in &self.observers {
+            observer.on_snapshot_started(indexes);
+        }
+    }
+
+    fn on_snapshot_completed(&self, indexes: &[IndexName]) {
+        for observer in &self.observers {
+            observer.on_snapshot_completed(indexes);
         }
     }
 
@@ -171,15 +170,51 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_document_quarantined(&self, index: &str, id: &str, reason: &str) {
+    fn on_indexes_ensured(&self, sink: &SinkName, count: usize) {
         for observer in &self.observers {
-            observer.on_document_quarantined(index, id, reason);
+            observer.on_indexes_ensured(sink, count);
         }
     }
 
-    fn on_error(&self, error: &str) {
+    fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
         for observer in &self.observers {
-            observer.on_error(error);
+            observer.on_backfill_requested(sink, indexes);
+        }
+    }
+
+    fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
+        for observer in &self.observers {
+            observer.on_index_seeded(sink, index);
+        }
+    }
+
+    fn on_sink_started(&self, sink: &SinkName) {
+        for observer in &self.observers {
+            observer.on_sink_started(sink);
+        }
+    }
+
+    fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
+        for observer in &self.observers {
+            observer.on_batch_committed(sink, stats.clone());
+        }
+    }
+
+    fn on_document_quarantined(&self, sink: &SinkName, index: &str, id: &str, reason: &str) {
+        for observer in &self.observers {
+            observer.on_document_quarantined(sink, index, id, reason);
+        }
+    }
+
+    fn on_engine_error(&self, engine: &EngineId, error: &str) {
+        for observer in &self.observers {
+            observer.on_engine_error(engine, error);
+        }
+    }
+
+    fn on_engine_stopped(&self, engine: &EngineId) {
+        for observer in &self.observers {
+            observer.on_engine_stopped(engine);
         }
     }
 }

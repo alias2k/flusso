@@ -7,12 +7,13 @@
 //! existing lock, and `--locked` runs the lock as-is without recompiling. See
 //! [`resolve_config`].
 //!
-//! The daemon owns the pipeline and exposes its live [`Status`](daemon::Status);
-//! this command owns the *transport* around it: telemetry export (traces +
-//! metrics), the two operational HTTP surfaces, and process signals. It binds
-//! both listeners, installs the meter provider, starts the daemon, serves its
-//! public status/metrics + private control surface, and runs until the stream
-//! ends, an error stops it, or a signal arrives — then drains and flushes.
+//! The daemon owns the deployment and exposes its live [`Status`](daemon::Status)
+//! and a [`DaemonControl`](daemon::DaemonControl); this command owns the
+//! *transport* around them: telemetry export (traces + metrics), the two
+//! operational HTTP surfaces, and process signals. It binds both listeners,
+//! installs the meter provider, starts the daemon, serves its public
+//! status/metrics + private control surface, and runs until the stream ends or
+//! a signal arrives — then drains and flushes.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -21,10 +22,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Args;
-use config::{Config, IndexName};
+use config::Config;
 use daemon::{Daemon, DaemonOptions};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::DEFAULT_LOCK;
 use crate::adapters;
@@ -153,7 +154,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         },
     );
     adapters::validate(&config)?;
-    let queue_capacity = adapters::stream_config(&config)?.capacity;
 
     let public_addr = args
         .public_address
@@ -186,21 +186,20 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
     let options = DaemonOptions {
         skip_backfill: args.skip_backfill,
-        queue_capacity,
         lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
+        ..DaemonOptions::default()
     };
 
-    // One status for the whole process, reused by every (re)started daemon run —
-    // so the long-lived HTTP surface + metrics keep reading the same handle and
-    // its counters/uptime survive a reindex restart. (`config` is moved into the
-    // daemon below, so read its index names first.)
-    let status = Arc::new(daemon::Status::new(
-        config.indexes.keys().cloned(),
-        std::time::Instant::now(),
-    ));
+    let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends);
+    let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new());
+    let running = Daemon::new(config, Arc::clone(&backends))
+        .with_options(options)
+        .with_observer(otel_observer)
+        .start()
+        .await?;
+    let status = running.status();
+    let control = running.control();
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
-
-    let (reindex_tx, mut reindex_rx) = mpsc::channel::<IndexName>(8);
 
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
     let (private_shutdown, private_rx) = oneshot::channel::<()>();
@@ -219,41 +218,16 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         http::private_router(
             http::PrivateState {
                 status: Arc::clone(&status),
-                reindex: reindex_tx,
+                control,
             },
             Arc::clone(&basic_auth),
         ),
         private_rx,
     ));
 
-    let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends);
-    let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new());
-
-    // Run the pipeline, restarting it whenever a reindex is requested. A reindex
-    // stages a fresh generation (on a throwaway sink) and the restarted run's
-    // backfill seeds it; the alias swaps on completion. Otherwise the run ends
-    // only when the stream stops, an error halts it, or a signal arrives.
-    let result = loop {
-        let running = Daemon::new(config.clone(), Arc::clone(&backends))
-            .with_options(options.clone())
-            .with_observer(Arc::clone(&otel_observer))
-            .with_status(Arc::clone(&status))
-            .start()
-            .await?;
-
-        let index = tokio::select! {
-            outcome = running.run(shutdown_signal()) => break outcome,
-            Some(index) = reindex_rx.recv() => index,
-        };
-
-        tracing::info!(
-            index = index.as_ref(),
-            "reindex requested; staging a fresh generation and restarting"
-        );
-        if let Err(error) = stage_reindex(&config, &options, backends.as_ref(), &index).await {
-            tracing::error!(%error, index = index.as_ref(), "failed to stage reindex; restarting without it");
-        }
-    };
+    // The daemon supervises its engines itself; a reindex reaches the targeted
+    // sink engine through the control handle the private surface holds.
+    let result = running.run(shutdown_signal()).await;
 
     let _ = public_shutdown.send(());
     let _ = private_shutdown.send(());
@@ -270,26 +244,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
 
     result
-}
-
-/// Stage a reindex of `index`: resolve its mapping from the config, build a sink,
-/// and ask it to prepare a fresh generation. The mapping (with its schema hash)
-/// is all the sink needs — it doesn't touch the running engine's in-memory state,
-/// so a throwaway sink built here is enough.
-async fn stage_reindex(
-    config: &Config,
-    options: &DaemonOptions,
-    backends: &dyn daemon::Backends,
-    index: &IndexName,
-) -> anyhow::Result<()> {
-    let mapping = config
-        .resolve_mappings()
-        .into_iter()
-        .find(|mapping| &mapping.index == index)
-        .with_context(|| format!("no such index {}", index.as_ref()))?;
-    let sink = backends.sink(config, options).await?;
-    sink.reindex(&mapping).await?;
-    Ok(())
 }
 
 /// What `run` does to obtain its [`Config`], decided purely from the flags plus

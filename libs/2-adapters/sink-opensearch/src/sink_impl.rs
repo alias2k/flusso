@@ -1,13 +1,13 @@
-//! The [`Sink`] trait implementation: how the engine's `ensure_index` /
-//! `upsert` / `delete` / `flush` / `is_seeded` / `mark_seeded` / `reindex`
-//! calls drive the alias-over-generations scheme and the bulk buffer. The
+//! The [`Sink`] trait implementation: how the sink engine's `ensure_index` /
+//! `apply` / `flush` / `is_seeded` / `mark_seeded` / `reindex` calls drive the
+//! alias-over-generations scheme and the bulk buffer. The
 //! lower-level pieces live in [`transport`](crate), [`generations`](crate),
 //! [`mapping`](crate), and [`bulk`](crate).
 
 use std::sync::PoisonError;
 
 use async_trait::async_trait;
-use kernel::{GenericValue, IndexMapping, IndexName};
+use kernel::{Envelope, IndexMapping, IndexName, Op};
 use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, to_json};
 use tracing::{debug, warn};
 
@@ -108,20 +108,22 @@ impl Sink for OpensearchSink {
         Ok(())
     }
 
-    async fn upsert(&self, index: &IndexName, id: &str, document: &GenericValue) -> Result<()> {
-        let action = BulkAction::Index {
-            index: self.physical(index.as_ref()),
-            id: id.to_owned(),
-            doc: to_json(document),
-        };
-        self.buffer.lock().await.push(action);
-        Ok(())
-    }
-
-    async fn delete(&self, index: &IndexName, id: &str) -> Result<()> {
-        let action = BulkAction::Delete {
-            index: self.physical(index.as_ref()),
-            id: id.to_owned(),
+    async fn apply(&self, envelope: &Envelope) -> Result<()> {
+        let index = self.physical(envelope.index.as_ref());
+        let id = envelope.id.clone();
+        let action = match (envelope.op, &envelope.document) {
+            (Op::Upsert, Some(document)) => BulkAction::Index {
+                index,
+                id,
+                doc: to_json(document),
+            },
+            (Op::Upsert, None) => {
+                return Err(SinkError::Write(format!(
+                    "upsert of {}/{id} carries no document",
+                    envelope.index
+                )));
+            }
+            (Op::Delete, _) => BulkAction::Delete { index, id },
         };
         self.buffer.lock().await.push(action);
         Ok(())

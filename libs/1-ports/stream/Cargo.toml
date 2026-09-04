@@ -18,5 +18,7 @@ name = "stream"
 workspace = true
 
 [dependencies]
+kernel.workspace = true
+serde.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true

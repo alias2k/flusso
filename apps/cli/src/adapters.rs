@@ -151,7 +151,7 @@ pub(crate) fn apply_overrides(config: &mut Config, overrides: &Overrides) {
     {
         config
             .sinks
-            .insert(name, PortEntry::new(StdoutConfig::KIND));
+            .insert(name, config::SinkEntry::new(StdoutConfig::KIND));
     }
     if overrides.pretty {
         for entry in config.sinks.values_mut() {

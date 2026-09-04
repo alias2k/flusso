@@ -39,6 +39,7 @@ use kernel::{
     ContentHash, FieldName, GenericValue, IndexMapping, IndexName, Mapping, MappingType,
     ResolvedField,
 };
+use kernel::{Envelope, Position};
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
@@ -171,7 +172,15 @@ async fn combined_search_decodes_generation_named_hits() {
 async fn seed(sink: &OpensearchSink, mapping: IndexMapping, id: &str, doc: GenericValue) {
     let index = mapping.index.clone();
     sink.ensure_index(&mapping).await.unwrap();
-    sink.upsert(&index, id, &doc).await.unwrap();
+    sink.apply(&Envelope::upsert(
+        index.clone(),
+        id,
+        doc,
+        Some(Position(0)),
+        chrono::Utc::now(),
+    ))
+    .await
+    .unwrap();
     sink.flush(true).await.unwrap();
     sink.mark_seeded(&index).await.unwrap();
 }
