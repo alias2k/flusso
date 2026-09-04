@@ -1,9 +1,10 @@
 //! Postgres change capture over logical replication (WAL / pgoutput).
 //!
 //! Implements [`source::cdc::ChangeCapture`] on top of `pgwire-replication`.
-//! [`WalChangeCapture`]'s `start` connects to a replication slot and yields a
-//! stream of thin [`Change`](source::cdc::Change)s — table name and primary
-//! key per committed row change — that the engine re-reads and assembles.
+//! [`WalChangeCapture`]'s `live` connects to a replication slot and yields a
+//! stream of positioned [`ChangeEvent`](source::cdc::ChangeEvent)s — table
+//! name and primary key per committed row change — that the engine re-reads
+//! and assembles.
 //!
 //! What this crate does:
 //!
@@ -12,9 +13,10 @@
 //!   relation metadata so it can extract each changed row's key.
 //! - Buffers a transaction's changes and emits them on `Commit`, tagged with
 //!   the commit LSN, so acknowledgements map to clean commit boundaries.
-//! - Translates the per-change [`Ack`](source::cdc::Ack) into a contiguous LSN
-//!   watermark and reports it to the server, advancing the slot only as far as
-//!   the engine has durably confirmed (at-least-once).
+//! - Maps each [`Position`](kernel::Position) the engine
+//!   [`confirm`](source::cdc::ChangeCapture::confirm)s back to its commit LSN
+//!   and reports a contiguous watermark to the server, advancing the slot only
+//!   as far as every sink has durably confirmed (at-least-once).
 //!
 //! Configuration and prerequisites live on [`WalChangeCapture`]. The relevant
 //! `pgwire-replication` types are re-exported below for convenience.

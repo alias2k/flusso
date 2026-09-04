@@ -22,8 +22,7 @@
 //! projects the same decision back onto the URL handed to every sqlx pool.
 //!
 //! ```rust
-//! use kernel::Tls;
-//! use source_postgres::replication_config;
+//! use source_postgres::{Tls, replication_config};
 //!
 //! let config = replication_config(
 //!     "postgres://app:pw@db.example.com/appdb?sslmode=verify-full",
