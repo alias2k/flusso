@@ -11,6 +11,8 @@ pub use observer::StatusObserver;
 pub use status::{IndexState, Phase, SinkPhase, SinkSnapshot, Status, StatusSnapshot};
 pub use supervise::{ControlError, DaemonControl};
 
+use supervise::ControlReceivers;
+
 pub use engine::{BuildStats, CommitStats, EngineId, Observer};
 pub use kernel::{IndexName, SinkName};
 
@@ -61,6 +63,8 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// A deployment over `config`, built through `backends`, with default
+    /// [`DaemonOptions`].
     pub fn new(config: Config, backends: Arc<dyn Backends>) -> Self {
         Self {
             config,
@@ -70,6 +74,7 @@ impl Daemon {
         }
     }
 
+    /// Set the deployment-wide knobs.
     pub fn with_options(mut self, options: DaemonOptions) -> Self {
         self.options = options;
         self
@@ -164,9 +169,11 @@ impl Daemon {
             })
             .collect();
 
+        let (control, control_receivers) = DaemonControl::new(&sink_names);
         Ok(RunningDaemon {
             status,
-            control: DaemonControl::new(&sink_names),
+            control,
+            control_receivers,
             ingest,
             sink_engines,
             continuity,
@@ -184,6 +191,7 @@ impl Daemon {
 pub struct RunningDaemon {
     status: Arc<Status>,
     control: DaemonControl,
+    control_receivers: ControlReceivers,
     ingest: IngestEngine,
     sink_engines: Vec<SinkEngine>,
     continuity: Continuity,
@@ -215,7 +223,8 @@ impl RunningDaemon {
     pub async fn run(self, shutdown: impl Future<Output = ()> + Send) -> anyhow::Result<()> {
         let RunningDaemon {
             status,
-            control,
+            control: _,
+            control_receivers,
             ingest,
             sink_engines,
             continuity,
@@ -232,7 +241,7 @@ impl RunningDaemon {
         )));
 
         let result = tokio::select! {
-            res = supervise::run_all(ingest, sink_engines, control, continuity, &source, &stream, &options) => res,
+            res = supervise::run_all(ingest, sink_engines, control_receivers, continuity, &source, &stream, &options) => res,
             () = shutdown => {
                 tracing::info!("shutdown requested; stopping the deployment");
                 Ok(())

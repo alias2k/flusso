@@ -4,7 +4,7 @@ use source::RowKey;
 use super::*;
 
 fn state() -> (DecodeState, Arc<Positions>) {
-    let ack = Arc::new(Positions::new(0));
+    let ack = Arc::new(Positions::new(0, 0));
     let decode = DecodeState {
         relations: HashMap::new(),
         open_txn: Vec::new(),

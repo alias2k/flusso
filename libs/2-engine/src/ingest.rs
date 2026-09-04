@@ -27,7 +27,7 @@ use chrono::Utc;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use kernel::{Envelope, GenericValue, IndexName, Position, SinkName};
-use source::cdc::{ChangeCapture, ChangeEvent, LiveChange};
+use source::cdc::{ChangeCapture, ChangeEvent};
 use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{SnapshotTable, SourceError};
 use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
@@ -40,6 +40,14 @@ use crate::policy::BatchPolicy;
 /// How often the watermark is confirmed to the source while no commit happens,
 /// so acknowledgements that arrive during a quiet period still advance it.
 const CONFIRM_TICK: Duration = Duration::from_secs(1);
+
+/// How long the engine keeps collecting requests after the first one before
+/// it starts the snapshot, so a reindex fanned to every sink (each answering
+/// between its own batches) becomes one pass over the table.
+const REQUEST_COALESCE_WINDOW: Duration = Duration::from_secs(1);
+
+/// The producing end of every sink's lane, by sink name.
+type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;
 
 /// The ingest engine over one source, one document builder, and one stream.
 #[derive(Debug)]
@@ -70,11 +78,13 @@ impl IngestEngine {
         }
     }
 
+    /// Report lifecycle and progress to `observer`.
     pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
         self.observer = observer;
         self
     }
 
+    /// How live changes are grouped into batches (at least one per batch).
     pub fn with_batch(mut self, batch: BatchPolicy) -> Self {
         self.batch = BatchPolicy {
             max_changes: batch.max_changes.max(1),
@@ -108,7 +118,7 @@ impl IngestEngine {
 
     async fn run_inner(&self) -> Result<()> {
         self.source.prepare().await?;
-        let lanes: Vec<(SinkName, Box<dyn Producer<LaneItem>>)> = self
+        let lanes: Lanes = self
             .sinks
             .iter()
             .map(|sink| Ok((sink.clone(), self.stream.lane(sink)?.producer)))
@@ -125,7 +135,7 @@ impl IngestEngine {
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
-        let mut pending = LiveBatch::new(self.batch.max_changes);
+        let mut pending = PendingBatch::new(self.batch.max_changes);
         let mut snapshot: Option<Snapshot> = None;
         let mut last_confirmed: Option<Position> = None;
         let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
@@ -181,10 +191,12 @@ impl IngestEngine {
                     }
                     Some(first) => {
                         let mut deliveries = vec![first];
-                        while let Ok(Ok(Some(more))) =
-                            timeout(self.batch.max_delay, requests.recv()).await
-                        {
-                            deliveries.push(more);
+                        loop {
+                            match timeout(REQUEST_COALESCE_WINDOW, requests.recv()).await {
+                                Ok(Ok(Some(more))) => deliveries.push(more),
+                                Ok(Ok(None)) | Err(_) => break,
+                                Ok(Err(error)) => return Err(error.into()),
+                            }
                         }
                         snapshot = self.start_snapshot(deliveries, &scopes, &lanes).await?;
                     }
@@ -198,19 +210,14 @@ impl IngestEngine {
     /// deduplicated, and its position.
     async fn buffer_live(
         &self,
-        pending: &mut LiveBatch,
+        pending: &mut PendingBatch,
         position: Position,
         event: ChangeEvent,
     ) -> Result<()> {
         self.observer.on_change_captured();
         let affected = self.documents.resolve(event.table(), event.key()).await?;
         tracing::trace!(documents = affected.len(), "change resolved to documents");
-        for id in affected {
-            if pending.seen.insert(id.clone()) {
-                pending.ids.push(id);
-            }
-        }
-        pending.changes += 1;
+        pending.add(affected);
         pending.position = Some(position);
         if pending.deadline.is_none() {
             pending.deadline = Some(Instant::now() + self.batch.max_delay);
@@ -221,29 +228,25 @@ impl IngestEngine {
     /// Build the batch's documents once and publish them to every lane with
     /// the batch's position. A batch that resolved to no document is still
     /// published (empty), so the lanes acknowledge its position.
-    #[tracing::instrument(name = "ingest.commit", level = "debug", skip_all, fields(changes = pending.changes, documents = pending.ids.len()))]
-    async fn commit_live(
-        &self,
-        pending: &mut LiveBatch,
-        lanes: &[(SinkName, Box<dyn Producer<LaneItem>>)],
-    ) -> Result<()> {
-        if pending.changes == 0 {
+    #[tracing::instrument(name = "ingest.commit", level = "debug", skip_all, fields(changes = pending.count, documents = pending.ids.len()))]
+    async fn commit_live(&self, pending: &mut PendingBatch, lanes: &Lanes) -> Result<()> {
+        if pending.count == 0 {
             return Ok(());
         }
         let started = Instant::now();
         let (envelopes, by_index) = self.build(&pending.ids, pending.position).await?;
         let stats = BuildStats {
-            changes: pending.changes,
+            changes: pending.count,
             documents: envelopes.len(),
             documents_by_index: by_index.into_iter().collect(),
             build: started.elapsed(),
         };
         let item = LaneItem::Batch(Batch {
             position: pending.position,
-            changes: pending.changes,
+            changes: pending.count,
             envelopes,
         });
-        for (_, producer) in lanes {
+        for producer in lanes.values() {
             producer.publish(item.clone()).await?;
         }
         pending.clear();
@@ -294,7 +297,7 @@ impl IngestEngine {
         &self,
         deliveries: Vec<stream::Delivery<Request>>,
         scopes: &HashMap<IndexName, SnapshotTable>,
-        lanes: &[(SinkName, Box<dyn Producer<LaneItem>>)],
+        lanes: &Lanes,
     ) -> Result<Option<Snapshot>> {
         let mut requested: BTreeMap<SinkName, BTreeSet<IndexName>> = BTreeMap::new();
         let mut handles = Vec::with_capacity(deliveries.len());
@@ -328,7 +331,7 @@ impl IngestEngine {
             requested,
             indexes: indexes.iter().cloned().collect(),
             handles,
-            batch: SnapshotBatch::new(self.batch.max_changes),
+            batch: PendingBatch::new(self.batch.max_changes),
         };
         if tables.is_empty() {
             self.finish_snapshot(&mut snapshot, lanes).await?;
@@ -348,23 +351,17 @@ impl IngestEngine {
 
     async fn buffer_snapshot(&self, snapshot: &mut Snapshot, event: ChangeEvent) -> Result<()> {
         let affected = self.documents.resolve(event.table(), event.key()).await?;
-        for id in affected {
-            if snapshot.indexes.contains(&id.index) && snapshot.batch.seen.insert(id.clone()) {
-                snapshot.batch.ids.push(id);
-            }
-        }
-        snapshot.batch.rows += 1;
+        let requested = affected
+            .into_iter()
+            .filter(|id| snapshot.indexes.contains(&id.index));
+        snapshot.batch.add(requested);
         Ok(())
     }
 
     /// Build the snapshot batch once and publish each lane the slice of it that
     /// lane requested, with no position.
-    async fn commit_snapshot(
-        &self,
-        snapshot: &mut Snapshot,
-        lanes: &[(SinkName, Box<dyn Producer<LaneItem>>)],
-    ) -> Result<()> {
-        if snapshot.batch.rows == 0 {
+    async fn commit_snapshot(&self, snapshot: &mut Snapshot, lanes: &Lanes) -> Result<()> {
+        if snapshot.batch.count == 0 {
             return Ok(());
         }
         let started = Instant::now();
@@ -378,7 +375,7 @@ impl IngestEngine {
             if slice.is_empty() {
                 continue;
             }
-            let Some((_, producer)) = lanes.iter().find(|(name, _)| name == sink) else {
+            let Some(producer) = lanes.get(sink) else {
                 tracing::warn!(%sink, "snapshot requested by a sink with no lane; dropping its slice");
                 continue;
             };
@@ -402,13 +399,9 @@ impl IngestEngine {
 
     /// Publish `SnapshotComplete` to every requesting lane, then acknowledge
     /// the requests: a crash before this point redelivers them.
-    async fn finish_snapshot(
-        &self,
-        snapshot: &mut Snapshot,
-        lanes: &[(SinkName, Box<dyn Producer<LaneItem>>)],
-    ) -> Result<()> {
+    async fn finish_snapshot(&self, snapshot: &mut Snapshot, lanes: &Lanes) -> Result<()> {
         for (sink, indexes) in &snapshot.requested {
-            let Some((_, producer)) = lanes.iter().find(|(name, _)| name == sink) else {
+            let Some(producer) = lanes.get(sink) else {
                 continue;
             };
             producer
@@ -427,38 +420,49 @@ impl IngestEngine {
     }
 }
 
-/// A live batch in the making: the deduplicated document ids the buffered
-/// changes resolved to, how many changes, the last position, and the deadline.
+/// A batch in the making: the deduplicated document ids the buffered changes
+/// (or snapshot rows) resolved to, how many were buffered, and — for a live
+/// batch — the last position and the flush deadline.
 #[derive(Debug)]
-struct LiveBatch {
+struct PendingBatch {
     ids: Vec<DocumentId>,
     seen: HashSet<DocumentId>,
-    changes: usize,
+    count: usize,
     position: Option<Position>,
     deadline: Option<Instant>,
     capacity: usize,
 }
 
-impl LiveBatch {
+impl PendingBatch {
     fn new(capacity: usize) -> Self {
         Self {
             ids: Vec::with_capacity(capacity),
             seen: HashSet::with_capacity(capacity),
-            changes: 0,
+            count: 0,
             position: None,
             deadline: None,
             capacity,
         }
     }
 
+    /// Buffer one change's affected documents, deduplicated.
+    fn add(&mut self, affected: impl IntoIterator<Item = DocumentId>) {
+        for id in affected {
+            if self.seen.insert(id.clone()) {
+                self.ids.push(id);
+            }
+        }
+        self.count += 1;
+    }
+
     fn is_full(&self) -> bool {
-        self.changes >= self.capacity
+        self.count >= self.capacity
     }
 
     fn clear(&mut self) {
         self.ids.clear();
         self.seen.clear();
-        self.changes = 0;
+        self.count = 0;
         self.position = None;
         self.deadline = None;
     }
@@ -471,36 +475,7 @@ struct Snapshot {
     requested: BTreeMap<SinkName, BTreeSet<IndexName>>,
     indexes: HashSet<IndexName>,
     handles: Vec<Box<dyn AckHandle>>,
-    batch: SnapshotBatch,
-}
-
-#[derive(Debug)]
-struct SnapshotBatch {
-    ids: Vec<DocumentId>,
-    seen: HashSet<DocumentId>,
-    rows: usize,
-    capacity: usize,
-}
-
-impl SnapshotBatch {
-    fn new(capacity: usize) -> Self {
-        Self {
-            ids: Vec::with_capacity(capacity),
-            seen: HashSet::with_capacity(capacity),
-            rows: 0,
-            capacity,
-        }
-    }
-
-    fn is_full(&self) -> bool {
-        self.rows >= self.capacity
-    }
-
-    fn clear(&mut self) {
-        self.ids.clear();
-        self.seen.clear();
-        self.rows = 0;
-    }
+    batch: PendingBatch,
 }
 
 async fn next_snapshot_row(
@@ -577,9 +552,4 @@ impl From<SourceError> for EngineError {
     fn from(error: SourceError) -> Self {
         EngineError::Source(error)
     }
-}
-
-#[allow(dead_code)]
-fn _assert_live_change_shape(change: LiveChange) -> (Position, ChangeEvent) {
-    change
 }

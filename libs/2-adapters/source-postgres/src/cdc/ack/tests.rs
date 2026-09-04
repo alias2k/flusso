@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn in_order_confirmations_advance_the_resume_point() {
-    let p = Positions::new(0);
+    let p = Positions::new(0, 0);
     let a = p.register(10);
     let b = p.register(20);
     assert_eq!(p.confirmed_lsn(), 0);
@@ -14,7 +14,7 @@ fn in_order_confirmations_advance_the_resume_point() {
 
 #[test]
 fn confirmation_is_cumulative() {
-    let p = Positions::new(0);
+    let p = Positions::new(0, 0);
     p.register(10);
     p.register(20);
     let c = p.register(30);
@@ -26,7 +26,7 @@ fn confirmation_is_cumulative() {
 
 #[test]
 fn never_regresses_below_start_lsn() {
-    let p = Positions::new(100);
+    let p = Positions::new(100, 0);
     let a = p.register(50);
     p.confirm(a);
     assert_eq!(p.confirmed_lsn(), 100);
@@ -34,7 +34,7 @@ fn never_regresses_below_start_lsn() {
 
 #[test]
 fn register_confirmed_advances_in_place_when_nothing_is_in_flight() {
-    let p = Positions::new(0);
+    let p = Positions::new(0, 0);
     p.register_confirmed(100);
     assert_eq!(p.confirmed_lsn(), 100);
     p.register_confirmed(200);
@@ -43,7 +43,7 @@ fn register_confirmed_advances_in_place_when_nothing_is_in_flight() {
 
 #[test]
 fn register_confirmed_waits_for_in_flight_changes() {
-    let p = Positions::new(0);
+    let p = Positions::new(0, 0);
     let a = p.register(10);
     p.register_confirmed(100);
     assert_eq!(p.confirmed_lsn(), 0, "must not pass the unflushed change");
@@ -60,17 +60,37 @@ fn register_confirmed_waits_for_in_flight_changes() {
 
 #[test]
 fn register_confirmed_never_regresses() {
-    let p = Positions::new(100);
+    let p = Positions::new(100, 0);
     p.register_confirmed(50);
     assert_eq!(p.confirmed_lsn(), 100);
 }
 
 #[test]
 fn a_position_past_a_confirmed_one_still_gates_its_own_lsn() {
-    let p = Positions::new(0);
+    let p = Positions::new(0, 0);
     p.register_confirmed(100);
     let a = p.register(200);
     assert_eq!(p.confirmed_lsn(), 100);
     p.confirm(a);
     assert_eq!(p.confirmed_lsn(), 200);
+}
+
+/// A reopened stream continues the numbering, so a watermark the lanes still
+/// hold from the previous stream never covers a change of the new one.
+#[test]
+fn a_reopened_stream_continues_the_numbering() {
+    let first = Positions::new(0, 0);
+    assert_eq!(first.register(10), 0);
+    assert_eq!(first.register(20), 1);
+
+    let second = Positions::new(0, first.next_seq());
+    assert_eq!(second.register(30), 2);
+    second.confirm(1);
+    assert_eq!(
+        second.confirmed_lsn(),
+        0,
+        "an old-stream position confirms nothing new"
+    );
+    second.confirm(2);
+    assert_eq!(second.confirmed_lsn(), 30);
 }

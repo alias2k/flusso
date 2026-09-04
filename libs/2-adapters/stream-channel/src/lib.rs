@@ -148,7 +148,10 @@ impl<T> Channel<T> {
         self.lock().acked
     }
 
-    /// Mark `tickets` for redelivery, in their original order.
+    /// Mark `tickets` for redelivery: the cursor moves back to the earliest of
+    /// them, so it and everything delivered after it come back in their original
+    /// order (a lane consumer processes in order, so what followed a failed item
+    /// is redone too).
     fn release(&self, tickets: &[Ticket]) {
         let mut ledger = self.lock();
         let earliest = ledger
@@ -200,6 +203,14 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
         let ticket = ledger.next_ticket;
         ledger.next_ticket += 1;
         ledger.in_flight.push((ticket, item.clone()));
+        // A release that landed while awaiting the channel moved the cursor
+        // back: serve the redelivery first and leave the new item in order
+        // behind it, so nothing is delivered twice or out of order.
+        if ledger.cursor + 1 < ledger.in_flight.len() {
+            let entry = ledger.in_flight.get(ledger.cursor).cloned()?;
+            ledger.cursor += 1;
+            return Some(entry);
+        }
         ledger.cursor = ledger.in_flight.len();
         Some((ticket, item))
     }

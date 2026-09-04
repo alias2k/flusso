@@ -7,16 +7,9 @@ pub use config::StdoutConfig;
 use std::io::Write;
 
 use async_trait::async_trait;
-use chrono::SecondsFormat;
-use kernel::{Envelope, Op};
-use serde_json::{Map, Value, json};
+use kernel::{Envelope, EnvelopeMeta, Op};
+use serde_json::{Map, Value};
 use sink::{FlushReport, Result, Sink, SinkError, to_json};
-
-/// Identifies this sink in every envelope's `sink` field.
-const SINK_NAME: &str = "stdout";
-
-/// This crate's version, stamped into every envelope's `version` field.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Writes each document operation to stdout as a JSON envelope.
 #[derive(Debug, Clone)]
@@ -34,7 +27,7 @@ impl StdoutSink {
         Self::new(config.pretty)
     }
 
-    fn render(&self, envelope: &Value) -> Result<String> {
+    fn render(&self, envelope: &Envelope<Value>) -> Result<String> {
         let json = if self.pretty {
             serde_json::to_string_pretty(envelope)
         } else {
@@ -74,40 +67,26 @@ impl Sink for StdoutSink {
     }
 }
 
-/// The kernel envelope as this sink writes it: its fields as-is, plus the
-/// emitting sink's name, the flusso version, the position rendered as the
-/// opaque `seq` string, and a `meta` summary of the document.
-fn wire_envelope(envelope: &Envelope) -> Value {
-    let mut out = Map::new();
-    out.insert("sink".to_owned(), json!(SINK_NAME));
-    out.insert("version".to_owned(), json!(VERSION));
-    out.insert(
-        "ts".to_owned(),
-        json!(envelope.ts.to_rfc3339_opts(SecondsFormat::Millis, true)),
-    );
-    if let Some(position) = envelope.position {
-        out.insert("seq".to_owned(), json!(position.to_string()));
-    }
-    out.insert("index".to_owned(), json!(envelope.index.as_ref()));
-    out.insert("op".to_owned(), json!(envelope.op.to_string()));
-    out.insert("id".to_owned(), json!(envelope.id));
-    if envelope.op == Op::Upsert
-        && let Some(document) = &envelope.document
+/// The kernel envelope as this sink writes it: the same shape, with the
+/// document translated to JSON and the `meta` summary filled in. `sink` is
+/// already stamped by the sink engine.
+fn wire_envelope(envelope: &Envelope) -> Envelope<Value> {
+    let mut wire = envelope.clone().map_document(|document| to_json(&document));
+    if wire.op == Op::Upsert
+        && let Some(document) = &wire.document
     {
-        let document = to_json(document);
-        out.insert("meta".to_owned(), document_meta(&document));
-        out.insert("document".to_owned(), document);
+        wire.meta = Some(document_meta(document));
     }
-    Value::Object(out)
+    wire
 }
 
 /// At-a-glance facts about a serialized document: how many top-level fields it
-/// has (`null` when it isn't an object) and its compact byte size.
-fn document_meta(document: &Value) -> Value {
-    json!({
-        "fields": document.as_object().map(serde_json::Map::len),
-        "bytes": document.to_string().len(),
-    })
+/// has (`None` when it isn't an object) and its compact byte size.
+fn document_meta(document: &Value) -> EnvelopeMeta {
+    EnvelopeMeta {
+        fields: document.as_object().map(Map::len),
+        bytes: document.to_string().len(),
+    }
 }
 
 #[cfg(test)]
