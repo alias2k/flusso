@@ -24,12 +24,13 @@ The reverse direction is what makes sync possible. When a row changes, flusso re
 ## The pipeline
 
 ```text
-ChangeCapture ─▶ queue ─▶ resolve ─▶ build ─▶ Sink ─▶ flush ─▶ ack
+ChangeCapture ─▶ ingest engine ─▶ lane per sink ─▶ sink engine ─▶ apply ─▶ flush ─▶ ack
+                 resolve · build once · publish                                     └▶ watermark ─▶ slot
 ```
 
-A capture task drains Postgres logical replication into a bounded queue. A worker pulls changes, resolves each to affected document ids, deduplicates them, builds each document **once** per batch, and hands it to the sink. Batches flush as one bulk request.
+An **ingest engine** follows Postgres logical replication, resolves each change to the document ids it affects, deduplicates them, builds each document **once** per batch, and publishes the batch onto one lane per sink. A **sink engine** per sink pulls from its lane, applies the documents, flushes them as one bulk request, and acknowledges. Sinks are independent: each seeds itself, a reindex targets one sink, and one sink's outage stops only that sink.
 
-Delivery is **at-least-once**. The replication slot advances only after the flush that made a batch's documents durable. A crash before the flush redelivers the batch; the rebuild is idempotent, so redelivery is harmless.
+Delivery is **at-least-once**. Each lane's acknowledgements feed a watermark, and the replication slot advances only to the lowest position **every** sink has flushed. A crash before a flush redelivers that sink's batch; the rebuild is idempotent, so redelivery is harmless.
 
 ## flusso owns the index
 

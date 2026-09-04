@@ -23,7 +23,7 @@ The project's nouns, each with a pointer to the page that owns it.
 | **reverse resolution** | Mapping a changed related row back to the parent documents it affects. | [Joins](joins.md#what-a-related-change-rebuilds) |
 | **root table** | The table a schema's documents are built from; one document per row (subject to root filters). | [Schema top-level keys](schema-top-level.md) |
 | **seed marker** | The `flusso_meta` record saying an index's generation is fully backfilled. | [Sink: OpenSearch](sink-opensearch.md#seeding) |
-| **sink** | A destination: OpenSearch or stdout. Several fan out. | [flusso.toml top level](config-toml.md#fan-out) |
+| **sink** | A destination: OpenSearch or stdout. Each runs its own engine over its own lane; `backfill = false` opts a stateless one out of seeding. | [flusso.toml top level](config-toml.md#several-sinks) |
 | **slot** | The Postgres logical replication slot flusso consumes. Its confirmed position is the resume point. | [Source: Postgres](source-postgres.md#capture) |
 | **slot lag** | Bytes between the WAL head and the slot's confirmed position. | [Metrics](metrics.md) |
 | **soft-delete** | A row marked deleted by a column or field rather than a `DELETE`; emits a tombstone. | [Filters and soft_delete](filters-and-soft-delete.md#soft_delete) |

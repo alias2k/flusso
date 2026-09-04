@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAdapters } from "../model/adapters";
 import { AdapterForm, KindBadge, KindToggle } from "./AdapterForm";
-import { Drawer, Field, PanelTitle, RemoveButton, Select, Text } from "./widgets";
+import { Check, Drawer, Field, PanelTitle, RemoveButton, Select, Text } from "./widgets";
 import {
   Dialog,
   DialogContent,
@@ -376,7 +376,12 @@ function SinkEditor({
   onRemove: () => void;
 }) {
   const { t } = useT();
-  const { kind, options } = splitEntry(sink);
+  const { kind, options: entry } = splitEntry(sink);
+  // `backfill` is the one universal sink key: it belongs to the sink engine, not
+  // to the adapter, so it never reaches the adapter form.
+  const { backfill: rawBackfill, ...options } = entry;
+  const backfill = rawBackfill !== false;
+  const withBackfill = (next: Record<string, unknown>, on: boolean) => (on ? next : { ...next, backfill: false });
   const description = adapters.find((a) => a.kind === kind);
 
   // Local draft so a half-typed name doesn't rename the config-map key on every
@@ -411,7 +416,7 @@ function SinkEditor({
           value={kind}
           onChange={(next) => {
             const target = adapters.find((a) => a.kind === next);
-            onChange({ type: next, ...(target?.example ?? {}) });
+            onChange(withBackfill({ type: next, ...(target?.example ?? {}) }, backfill));
           }}
           icon={kindIcon}
         />
@@ -423,11 +428,19 @@ function SinkEditor({
           <AdapterForm
             description={description}
             value={options}
-            onChange={(next) => onChange({ type: kind, ...next })}
+            onChange={(next) => onChange(withBackfill({ type: kind, ...next }, backfill))}
           />
         ) : (
           <span className="text-2xs text-warn">{t("config.unknownAdapter", { kind })}</span>
         )}
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <Check
+          value={backfill}
+          onChange={(on) => onChange(withBackfill({ type: kind, ...options }, on))}
+          label={t("config.backfill")}
+        />
+        <span className="text-2xs text-muted-foreground">{t("config.backfillHint")}</span>
       </div>
     </div>
   );

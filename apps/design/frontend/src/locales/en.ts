@@ -310,6 +310,8 @@ export const en: Record<string, string> = {
   "config.source": "Source",
   "config.stageIndexesHint": "synced documents",
   "config.stageSinksHint": "destinations",
+  "config.backfill": "Backfill",
+  "config.backfillHint": "Seed unseeded indexes from a snapshot. Off: live changes only, for a stateless sink.",
   "config.sinks": "Sinks",
   "config.sink": "sink",
   "config.name": "name",

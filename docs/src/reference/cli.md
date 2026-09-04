@@ -92,10 +92,11 @@ Both schemas are also published per release at `https://alias2k.github.io/flusso
 
 ## reindex
 
-`POST /reindex?index=<name>` on a running server. Returns immediately with `202`; the server stages a fresh generation and restarts its pipeline to fill it while the current generation keeps serving. Watch `/status` for the index returning to `seeded`. See [Reindex without downtime](../operate/reindex.md).
+`POST /reindex?index=<name>[&sink=<name>]` on a running server. Returns immediately with `202`; each targeted sink engine stages a fresh generation and requests its own snapshot while the current generation keeps serving. Nothing restarts. Watch `/status` for the index returning to `seeded` under that sink. See [Reindex without downtime](../operate/reindex.md).
 
 ```sh
 flusso reindex users --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
+flusso reindex users --sink primary --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
 ```
 
-Same connection flags as `indexes`; the index name is positional.
+Same connection flags as `indexes`; the index name is positional. `--sink` limits the rebuild to one sink; omitted, every sink rebuilds, sharing one pass over the table.
