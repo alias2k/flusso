@@ -1,0 +1,5 @@
+error: field `url` has no default, so it needs `#[adapter(example = …)]` (the example is what the docs and the editor schema show)
+ --> tests/ui/missing_example.rs:9:5
+  |
+9 |     url: String,
+  |     ^^^

@@ -1160,6 +1160,16 @@ dependencies = [
 [[package]]
 name = "flusso-kernel-derive"
 version = "0.15.1"
+dependencies = [
+ "flusso-kernel",
+ "proc-macro2",
+ "quote",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "syn 2.0.117",
+ "trybuild",
+]
 
 [[package]]
 name = "flusso-query"

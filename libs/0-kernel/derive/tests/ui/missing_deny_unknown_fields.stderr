@@ -1,0 +1,5 @@
+error: an adapter config must carry `#[serde(deny_unknown_fields)]` so a misspelled option is rejected instead of ignored
+ --> tests/ui/missing_deny_unknown_fields.rs:7:8
+  |
+7 | struct Lenient {
+  |        ^^^^^^^
