@@ -439,3 +439,25 @@ mod tests {
         assert!(error.contains("expected a map of options"), "{error}");
     }
 }
+
+/// An options map is "any table" to the schema: the adapter's own schema is
+/// what constrains it, spliced in by the composition root per `type`.
+impl schemars::JsonSchema for Options {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Options")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "object" })
+    }
+}
+
+impl schemars::JsonSchema for OptionValue {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("OptionValue")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!(true)
+    }
+}

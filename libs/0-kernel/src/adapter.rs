@@ -112,7 +112,11 @@ pub trait AdapterConfig: JsonSchema + Serialize + DeserializeOwned + Sized {
 
     /// Everything the composition root renders from this declaration.
     fn description() -> AdapterDescription {
-        let schema = schemars::schema_for!(Self);
+        // Draft-07 (`definitions`, no `$defs`): what TOML/YAML editor tooling
+        // supports most widely, and the dialect the assembled config schema uses.
+        let schema = schemars::generate::SchemaSettings::draft07()
+            .into_generator()
+            .into_root_schema_for::<Self>();
         let secrets = secret_paths(&schema);
         AdapterDescription {
             port: Self::PORT,
@@ -124,9 +128,9 @@ pub trait AdapterConfig: JsonSchema + Serialize + DeserializeOwned + Sized {
     }
 }
 
-/// The rendered facts about one adapter's options: the JSON schema (doc
-/// comments as descriptions, serde defaults as defaults), an example, and the
-/// field paths that accept an override variable.
+/// The rendered facts about one adapter's options: the JSON schema (draft-07;
+/// doc comments as descriptions, serde defaults as defaults), an example, and
+/// the field paths that accept an override variable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterDescription {
     /// Which port the adapter implements.

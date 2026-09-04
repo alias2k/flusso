@@ -131,7 +131,9 @@ uuid = { version = "1.*", features = ["serde"] }
 serde_json = { version = "1.*" }
 # Adapter option schemas (`#[derive(AdapterConfig)]` → editor schema, Reference
 # tables, designer forms). The kernel owns the `Secret` schema; adapters derive.
-schemars = { version = "1.2.*" }
+# `preserve_order` keeps struct declaration order in the generated schemas, so
+# the editor schema and the Reference tables read the way the config type does.
+schemars = { version = "1.2.*", features = ["preserve_order"] }
 # Our HTTP client stays on 0.12. The OTLP exporter pulls its own reqwest 0.13
 # transitively; deduping would force a 0.13 TLS-feature migration (rustls-tls →
 # rustls + a crypto provider) that risks colliding with sqlx's rustls provider,

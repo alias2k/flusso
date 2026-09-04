@@ -52,6 +52,7 @@
 
 - [flusso.toml top level](reference/config-toml.md)
 - [Source: Postgres](reference/source-postgres.md)
+- [Stream: channel](reference/stream-channel.md)
 - [Sink: OpenSearch](reference/sink-opensearch.md)
 - [Sink: stdout](reference/sink-stdout.md)
 - [Index entries and on_error](reference/index-and-on-error.md)

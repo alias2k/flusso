@@ -2,10 +2,7 @@
 
 A `[sinks.<name>]` table with `type = "stdout"` writes every operation to standard output as a JSON envelope, for development and for piping into `jq`.
 
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `type` | `"stdout"` | — | Required. |
-| `pretty` | bool | `false` | Pretty-print each envelope instead of one compact line (NDJSON). |
+{{#include generated/sink-stdout.md}}
 
 Logs go to stderr, so stdout stays a clean data stream. When `flusso.toml` defines no sinks at all, `run` uses a stdout sink; `--pretty` then controls its formatting.
 

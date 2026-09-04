@@ -2,16 +2,7 @@
 
 The `[source]` table with `type = "postgres"`: how flusso connects, how it secures the connection, and what the server must provide.
 
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `type` | `"postgres"` | — | Required. |
-| `connection_url` | URL string, `{ env }`, or parts table | — | Required (or supplied by `DATABASE_URL`). See [Connection](#connection). |
-| `manage_publication` | bool | `true` | Let flusso create or extend the publication when the role can. `false` reports gaps and never issues DDL. See [Capture](#capture). |
-| `ssl_mode` | `disable` \| `prefer` \| `require` \| `verify-ca` \| `verify-full` | URL's `sslmode`, else `prefer` | TLS mode, libpq semantics. See [TLS](#tls). |
-| `ssl_root_cert` | path | bundled Mozilla roots | CA bundle PEM for the `verify-*` modes. |
-| `ssl_cert` | path | none | Client certificate PEM for mutual TLS. Pairs with `ssl_key`. |
-| `ssl_key` | path | none | Client key PEM for mutual TLS. Pairs with `ssl_cert`. |
-| `ssl_sni_hostname` | string | connection host | SNI name sent in the handshake. Replication stream only. |
+{{#include generated/source-postgres.md}}
 
 ## Connection
 
@@ -26,7 +17,7 @@ connection_url = "postgresql://user:pass@localhost:5432/mydb"
 **An environment reference**, read where the pipeline runs:
 
 ```toml
-connection_url = { env = "DATABASE_URL" }
+connection_url = { env = "PG_URL" }
 ```
 
 **Individual parts.** `database` is required; the rest default.
@@ -46,7 +37,7 @@ database = "app"
 password = { env = "PGPASSWORD" }
 ```
 
-Whichever shape is written, the reserved variable `DATABASE_URL` overrides it when set. Precedence and the full rule set live in [Environment variables](environment.md#config-values).
+Whichever shape is written, the override variable `SOURCE_POSTGRES_CONNECTION_URL` replaces it when set, and supplies it when `connection_url` is omitted. A parts table's `password` takes `SOURCE_POSTGRES_CONNECTION_URL_PASSWORD`. Precedence and the full rule set live in [Environment variables](environment.md#config-values).
 
 ## TLS
 
@@ -69,7 +60,7 @@ TLS settings come from two surfaces, merged: the URL's libpq parameters (`sslmod
 
 ## Capture
 
-flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are the `--slot` and `--publication` flags of [`run`](cli.md#run).
+flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are the `slot` and `publication` keys above; the `--slot` and `--publication` flags of [`run`](cli.md#run) override them.
 
 - **The slot is created automatically** when missing; that needs only the `REPLICATION` attribute. A slot that had to be created has no memory of earlier changes, which is why a missing slot triggers a rebuild of every seeded index. See [Recover from a dropped slot](../operate/dropped-slot.md).
 - **The publication is managed automatically** when `manage_publication` is on and the role can: flusso derives the full table set from the schemas (root tables plus every joined or aggregated table) and creates or extends it. Creating or extending a publication needs ownership of those tables plus `CREATE` on the database, or superuser. When the role can't, flusso logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION … ADD TABLE` statements and keeps running; `flusso check` prints the same coverage report.
@@ -93,8 +84,9 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 ```toml
 [source]
 type = "postgres"
-connection_url = { env = "DATABASE_URL" }
+connection_url = { env = "PG_URL" }
 manage_publication = false
+slot = "search"
 ssl_mode = "verify-full"
 ssl_root_cert = "/etc/ssl/rds-ca.pem"
 ```

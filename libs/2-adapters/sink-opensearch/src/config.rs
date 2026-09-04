@@ -30,15 +30,14 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 #[adapter(port = sink, kind = "opensearch")]
 pub struct OpensearchConfig {
-    /// Cluster URL, literal or `{ env = "VAR" }`. `<NAME>_OPENSEARCH_URL`
-    /// overrides it at run time.
+    /// Base URL of the cluster, literal or `{ env = "VAR" }`.
     #[adapter(example = "https://search.example.com:9200")]
     pub url: Secret,
-    /// Basic-auth user. `<NAME>_OPENSEARCH_USERNAME` overrides or supplies it.
+    /// HTTP Basic auth user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[adapter(example = "indexer")]
     pub username: Option<Secret>,
-    /// Basic-auth password. `<NAME>_OPENSEARCH_PASSWORD` overrides or supplies it.
+    /// HTTP Basic auth password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[adapter(example = Secret::env("OPENSEARCH_PASSWORD"))]
     pub password: Option<Secret>,

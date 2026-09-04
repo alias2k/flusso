@@ -19,3 +19,20 @@ use nutype::nutype;
     )
 )]
 pub struct SinkName(String);
+
+/// The identifier grammar the newtype validates, for the editor schema (nutype
+/// has no schemars support, so this mirrors its `validate` attributes).
+impl schemars::JsonSchema for SinkName {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("SinkName")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "maxLength": 63,
+            "description": "A sink name: lowercase letters, digits, and underscores, not starting with a digit, at most 63 characters."
+        })
+    }
+}

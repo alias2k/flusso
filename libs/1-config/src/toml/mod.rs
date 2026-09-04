@@ -19,6 +19,7 @@ pub use parser::ParseError;
 /// registered adapters' descriptions; a CLI test fails when it is stale.
 pub const CONFIG_SCHEMA: &str = include_str!("../../config.schema.json");
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -27,38 +28,47 @@ use entities::Server;
 use kernel::PortEntry;
 use kernel::common;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(
+    title = "flusso Config",
+    description = "One flusso deployment: one source, one stream, its sinks, and the indexes to build."
+)]
 pub struct ConfigToml {
     // Field order is the `flusso.toml` serialization order: the `toml` writer
     // floats the scalar globals (prefix, on_error) to the top, then emits tables
     // in declaration order — source, stream, server, sinks, indexes.
-    /// The source port: `type = "…"` plus that adapter's options.
+    /// The database rows come from: `type` selects the source adapter, the
+    /// rest of the table is that adapter's options.
     pub source: PortEntry,
-    /// The stream port. Omitted means the in-process channel with its defaults.
+    /// The stream between the source side and the sinks: `type` selects the
+    /// adapter, the rest is its options. Omitted means the in-process channel
+    /// with its defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<PortEntry>,
-    /// Literal prefix prepended to every index name flusso owns, so several
-    /// deployments can share one OpenSearch cluster without colliding. The
-    /// `--index-prefix` flag / `FLUSSO_INDEX_PREFIX` env var override it at
-    /// runtime (which win); see the [configuration
-    /// reference](https://alias2k.github.io/flusso/reference/config-toml.html#prefix). Empty
-    /// (the default) means no prefix.
+    /// Literal prefix prepended to every index name flusso owns (indexes,
+    /// aliases, and the flusso_meta index), so several deployments can share
+    /// one OpenSearch cluster without colliding: `dev_` gives `dev_users`.
+    /// Include any separator yourself. `--index-prefix` / `FLUSSO_INDEX_PREFIX`
+    /// override it at run time (flag > env > file). The flusso-query consumer
+    /// must apply the same prefix. Empty (the default) means no prefix.
     #[serde(default)]
     pub prefix: String,
-    /// Global item-level rejection policy; per-index overrides live on each
-    /// [`IndexEntry`]. Defaults to [`FailurePolicy::Stop`](kernel::FailurePolicy::Stop).
+    /// What to do when a sink rejects a document at the item level (a mapping
+    /// conflict, a malformed value): stop the run, or skip the document and
+    /// continue. Each `[[index]]` may override it.
     #[serde(default)]
     pub on_error: kernel::FailurePolicy,
-    /// Bind addresses for the operational HTTP surfaces. The binary layers
-    /// `FLUSSO_*` env vars and CLI flags on top (which win); see the
-    /// [`[server]` reference](https://alias2k.github.io/flusso/reference/config-toml.html#server).
-    /// Omitted from serialized output when no address is set.
+    /// Bind addresses for the operational HTTP surfaces. The `FLUSSO_*`
+    /// variables and CLI flags override these (flag > env > file).
     #[serde(default, skip_serializing_if = "Server::is_empty")]
     pub server: Server,
-    /// The sink ports, by name: `type = "…"` plus that adapter's options.
+    /// Named sink destinations. Each key is the sink name; `type` selects the
+    /// adapter and the rest of the table is its options. With no sinks, `run`
+    /// uses a stdout sink.
     #[serde(default)]
     pub sinks: BTreeMap<common::SinkName, PortEntry>,
+    /// One entry per index to build.
     #[serde(default)]
     pub index: Vec<IndexEntry>,
 }

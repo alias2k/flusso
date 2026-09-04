@@ -1,301 +1,541 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "flusso Config",
   "type": "object",
-  "required": ["source"],
   "additionalProperties": false,
-  "definitions": {
-    "pg_identifier": {
-      "type": "string",
-      "pattern": "^[a-z_][a-z0-9_]*$",
-      "maxLength": 63
-    },
-    "env_or_value": {
-      "description": "A literal string value or a reference to an environment variable.",
+  "properties": {
+    "source": {
       "oneOf": [
         {
-          "type": "string"
-        },
+          "$ref": "#/definitions/source_postgres"
+        }
+      ],
+      "description": "The database rows come from: `type` selects the source adapter, the\nrest of the table is that adapter's options."
+    },
+    "stream": {
+      "oneOf": [
         {
-          "type": "object",
-          "required": ["env"],
-          "additionalProperties": false,
-          "properties": {
-            "env": {
-              "type": "string",
-              "description": "Name of the environment variable to read at runtime"
-            }
-          }
+          "$ref": "#/definitions/stream_channel"
+        }
+      ],
+      "description": "The stream between the source side and the sinks: `type` selects the\nadapter, the rest is its options. Omitted means the in-process channel\nwith its defaults."
+    },
+    "prefix": {
+      "type": "string",
+      "description": "Literal prefix prepended to every index name flusso owns (indexes,\naliases, and the flusso_meta index), so several deployments can share\none OpenSearch cluster without colliding: `dev_` gives `dev_users`.\nInclude any separator yourself. `--index-prefix` / `FLUSSO_INDEX_PREFIX`\noverride it at run time (flag > env > file). The flusso-query consumer\nmust apply the same prefix. Empty (the default) means no prefix.",
+      "default": ""
+    },
+    "on_error": {
+      "default": "stop",
+      "description": "What to do when a sink rejects a document at the item level (a mapping\nconflict, a malformed value): stop the run, or skip the document and\ncontinue. Each `[[index]]` may override it.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/FailurePolicy"
         }
       ]
     },
-    "opensearch_sink": {
-      "type": "object",
-      "title": "OpenSearch",
-      "required": ["type", "url"],
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "type": "string",
-          "const": "opensearch"
-        },
-        "url": {
-          "$ref": "#/definitions/env_or_value",
-          "description": "Base URL of the OpenSearch cluster, e.g. https://search.example.com:9200"
-        },
-        "username": {
-          "$ref": "#/definitions/env_or_value",
-          "description": "HTTP Basic Auth username"
-        },
-        "password": {
-          "$ref": "#/definitions/env_or_value",
-          "description": "HTTP Basic Auth password"
-        },
-        "tls_verify": {
-          "type": "boolean",
-          "default": true,
-          "description": "Verify TLS certificates. Set false only for local development."
-        },
-        "batch_size": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 1000,
-          "description": "Maximum number of documents per bulk request chunk"
-        },
-        "max_bytes": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 10485760,
-          "description": "Maximum uncompressed byte size of a bulk request chunk. Defaults to 10 MiB, within OpenSearch's recommended 5–15 MB bulk range."
-        },
-        "timeout_secs": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 30,
-          "description": "HTTP request timeout in seconds"
-        },
-        "max_retries": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 3,
-          "description": "Number of additional retry attempts on transient failures (exponential backoff)"
-        },
-        "pipeline": {
-          "type": "string",
-          "description": "Optional OpenSearch ingest pipeline name to apply on every index operation"
-        },
-        "number_of_shards": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 1,
-          "description": "Primary shards for each created index"
-        },
-        "number_of_replicas": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 1,
-          "description": "Replica shards for each created index"
-        },
-        "refresh_interval": {
-          "type": "string",
-          "default": "10s",
-          "description": "OpenSearch refresh_interval applied to each index after seeding — the steady-state search-visibility ceiling (e.g. \"10s\", \"1s\", or \"-1\" to disable automatic refresh). flusso forces an immediate refresh whenever the pipeline catches up, so this only bounds staleness while a backlog is draining."
-        },
-        "text_analysis": {
-          "enum": ["builtin", "icu"],
-          "default": "builtin",
-          "description": "Analysis backend for the flusso_* analyzers. 'icu' requires the analysis-icu plugin installed on every node."
-        },
-        "auto_subfields": {
-          "type": "boolean",
-          "default": true,
-          "description": "Auto-enrich text/keyword fields with a good analyzer and the keyword/keyword_lowercase/text subfields. A field's explicit mapping always wins."
-        }
-      }
-    },
-    "stdout_sink": {
-      "type": "object",
-      "title": "Stdout",
-      "required": ["type"],
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "type": "string",
-          "const": "stdout"
-        },
-        "pretty": {
-          "type": "boolean",
-          "default": false,
-          "description": "Emit pretty-printed JSON instead of compact NDJSON"
-        }
-      }
-    }
-  },
-  "properties": {
-    "source": {
-      "type": "object",
-      "required": ["type"],
-      "oneOf": [
+    "server": {
+      "description": "Bind addresses for the operational HTTP surfaces. The `FLUSSO_*`\nvariables and CLI flags override these (flag > env > file).",
+      "allOf": [
         {
-          "title": "Postgres",
-          "additionalProperties": false,
-          "required": ["type"],
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "postgres"
-            },
-            "manage_publication": {
-              "type": "boolean",
-              "default": true,
-              "description": "Whether flusso may auto-create/extend the Postgres publication to cover every table the indexes read (when the source role is privileged enough). Set false to only report coverage gaps and never issue publication DDL."
-            },
-            "ssl_mode": {
-              "type": "string",
-              "enum": ["disable", "prefer", "require", "verify-ca", "verify-full"],
-              "description": "TLS mode for the source connection (libpq semantics). Overrides the URL's sslmode parameter; omitted defers to it, then to 'prefer' (try TLS, fall back to plaintext). WARNING: 'require' encrypts but performs NO certificate verification at all — use 'verify-ca' or 'verify-full' (recommended for production) to actually check the server's certificate. Applies to both the replication stream and the SQL connections."
-            },
-            "ssl_root_cert": {
-              "type": "string",
-              "description": "Path to a PEM file of trusted CA certificates for the verify-* modes. Overrides the URL's sslrootcert parameter; omitted falls back to the bundled Mozilla roots."
-            },
-            "ssl_cert": {
-              "type": "string",
-              "description": "Path to the client certificate chain PEM for mutual TLS. Must be paired with ssl_key. Overrides the URL's sslcert parameter."
-            },
-            "ssl_key": {
-              "type": "string",
-              "description": "Path to the client private key PEM for mutual TLS. Must be paired with ssl_cert. Overrides the URL's sslkey parameter."
-            },
-            "ssl_sni_hostname": {
-              "type": "string",
-              "description": "SNI hostname sent during the TLS handshake when it differs from the connection host (connecting by IP, or through a load balancer, while the certificate names the real host). Config-only — no URL parameter — and applies to the replication stream only."
-            },
-            "connection_url": {
-              "description": "How to connect to the source database. Either a full URL or individual connection parts.",
-              "oneOf": [
-                {
-                  "type": "string",
-                  "pattern": "^(postgresql|postgres)://\\S+$",
-                  "description": "Full connection URL, e.g. postgresql://user:pass@localhost:5432/mydb"
-                },
-                {
-                  "type": "object",
-                  "required": ["env"],
-                  "additionalProperties": false,
-                  "description": "Read the full connection URL from an environment variable at runtime",
-                  "properties": {
-                    "env": {
-                      "type": "string",
-                      "description": "Name of the environment variable to read at runtime"
-                    }
-                  }
-                },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["database"],
-                  "description": "Individual connection parts",
-                  "properties": {
-                    "host": {
-                      "type": "string",
-                      "default": "127.0.0.1",
-                      "description": "Database host"
-                    },
-                    "port": {
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 65535,
-                      "default": 5432,
-                      "description": "Database port"
-                    },
-                    "user": {
-                      "type": "string",
-                      "default": "postgres",
-                      "description": "Database user"
-                    },
-                    "password": {
-                      "$ref": "#/definitions/env_or_value",
-                      "description": "Database password"
-                    },
-                    "database": {
-                      "type": "string",
-                      "description": "Database name"
-                    }
-                  }
-                }
-              ]
-            }
-          }
+          "$ref": "#/definitions/Server"
         }
       ]
     },
     "sinks": {
       "type": "object",
-      "description": "Named sink destinations. Each key is the sink name; multiple sinks can be defined.",
-      "propertyNames": {
-        "$ref": "#/definitions/pg_identifier"
-      },
       "additionalProperties": {
         "oneOf": [
-          { "$ref": "#/definitions/opensearch_sink" },
-          { "$ref": "#/definitions/stdout_sink" }
+          {
+            "$ref": "#/definitions/sink_opensearch"
+          },
+          {
+            "$ref": "#/definitions/sink_stdout"
+          }
         ]
+      },
+      "patternProperties": {
+        "^[a-z_][a-z0-9_]*$": {
+          "$ref": "#/definitions/PortEntry"
+        }
+      },
+      "description": "Named sink destinations. Each key is the sink name; `type` selects the\nadapter and the rest of the table is its options. With no sinks, `run`\nuses a stdout sink.",
+      "default": {},
+      "propertyNames": {
+        "$ref": "#/definitions/SinkName"
       }
     },
     "index": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["name", "schema", "enabled"],
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "$ref": "#/definitions/pg_identifier",
-            "description": "Name of the index"
-          },
-          "schema": {
-            "type": "string",
-            "description": "Path to the index schema YAML file starting from the config location",
-            "format": "uri-reference",
-            "pattern": "^[^/][^:]*\\.ya?ml$"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "on_error": {
-            "type": "string",
-            "enum": ["stop", "skip"],
-            "description": "Per-index override of the global on_error policy (stop | skip). Omitted inherits the global default."
-          }
+        "$ref": "#/definitions/IndexEntry"
+      },
+      "description": "One entry per index to build.",
+      "default": []
+    }
+  },
+  "required": [
+    "source"
+  ],
+  "title": "flusso Config",
+  "description": "One flusso deployment: one source, one stream, its sinks, and the indexes to build.",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "SchemaPath": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^[^/][^:]*\\.ya?ml$",
+      "description": "Path to the index schema YAML file, resolved relative to the config file's directory."
+    },
+    "FailurePolicy": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "stop",
+          "description": "Stop the run on the first rejected document. The batch is left\nunconfirmed and redelivered on restart, so a persistently-bad document\nhalts sync until the data is fixed or the policy is changed. The default,\nbecause dropping data should be opt-in."
+        },
+        {
+          "type": "string",
+          "const": "skip",
+          "description": "Quarantine each rejected document (surfaced via metrics/status and logs)\nand continue: the rest of the batch is applied, the slot advances, and\nthe poison is not redelivered — it simply never lands until its source\nrow changes again."
         }
-      }
+      ],
+      "description": "What the pipeline does when a sink **rejects a document at the item level** —\nit accepted the batch but refused a specific document (a mapping conflict, a\nmalformed value). Distinct from a flush-wide failure, which always stops the\nrun. Set globally on the config and overridable per index (both live in the\n`config` crate's `Config`/`Index`, which assemble this policy)."
     },
-    "on_error": {
-      "type": "string",
-      "enum": ["stop", "skip"],
-      "default": "stop",
-      "description": "What to do when a sink rejects a document at the item level (a mapping conflict, a malformed value): stop the run (default) or skip the document and continue. Override per index under [[index]]."
-    },
-    "prefix": {
-      "type": "string",
-      "default": "",
-      "description": "Literal prefix prepended to every index name flusso owns (indexes, aliases, and the flusso_meta index), so several deployments (dev/staging/nightly) can share one OpenSearch cluster without colliding — e.g. \"dev_\" gives dev_users. Include any separator yourself. The --index-prefix flag / FLUSSO_INDEX_PREFIX env var override this (CLI > env > config). The flusso-query consumer must apply the same prefix at runtime. Empty (the default) means no prefix."
-    },
-    "server": {
+    "Server": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Bind addresses for the operational HTTP surfaces. The FLUSSO_* environment variables and CLI flags override these (CLI > env > config).",
       "properties": {
         "public_address": {
-          "type": "string",
-          "description": "Bind address for the public, read-only surface (/healthz, /readyz, /status, /metrics). E.g. 0.0.0.0:9464."
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`),\ne.g. `0.0.0.0:9464`."
         },
         "private_address": {
-          "type": "string",
-          "description": "Bind address for the private, Basic-auth control surface (/indexes, /reindex). E.g. 0.0.0.0:9465."
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Private, Basic-auth control surface (`/indexes`, `/reindex`), e.g.\n`0.0.0.0:9465`."
         }
-      }
+      },
+      "description": "Bind addresses for the two operational HTTP surfaces, from a `flusso.toml`\n`[server]` table. Both are optional — the binary layers `FLUSSO_*` env vars\nand CLI flags on top (which win), falling back to built-in defaults when all\nare absent. Each is a `host:port` socket address, parsed and validated at\nconfig-read time by [`SocketAddr`]'s own deserializer."
+    },
+    "IndexEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The index's logical name; the OpenSearch alias and the `flusso-query`\nbinding use it.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/IndexName"
+            }
+          ]
+        },
+        "schema": {
+          "description": "Path to the index's `*.schema.yml`, relative to the config file.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SchemaPath"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether this run builds and follows the index. A disabled index keeps\nits entry but is neither seeded nor updated."
+        },
+        "on_error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FailurePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-index override of the global [`on_error`](crate::toml::ConfigToml::on_error)\npolicy. Omitted inherits the global default."
+        }
+      },
+      "required": [
+        "name",
+        "schema",
+        "enabled"
+      ],
+      "description": "One `[[index]]` entry: an index to build from a schema file."
+    },
+    "IndexName": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*$",
+      "maxLength": 63,
+      "description": "An index name: lowercase letters, digits, and underscores, not starting with a digit, at most 63 characters."
+    },
+    "source_postgres_Connection": {
+      "description": "A connection URL (literal or `{ env = \"VAR\" }`), or a table of connection parts.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Secret"
+        },
+        {
+          "$ref": "#/definitions/source_postgres_Parts"
+        }
+      ]
+    },
+    "Secret": {
+      "description": "A literal value, or `{ env = \"VAR\" }` to read it from the environment at run time.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "env": {
+              "type": "string",
+              "description": "The environment variable to read."
+            }
+          },
+          "required": [
+            "env"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "x-flusso-secret": true
+    },
+    "source_postgres_Parts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Database host. Default: `localhost`.",
+          "default": "localhost"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Database port. Default: `5432`.",
+          "default": 5432
+        },
+        "user": {
+          "type": "string",
+          "description": "Database role. Default: `postgres`.",
+          "default": "postgres"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The role's password, literal or `{ env = \"VAR\" }`.",
+          "default": null
+        },
+        "database": {
+          "type": "string",
+          "description": "Database name."
+        }
+      },
+      "required": [
+        "database"
+      ],
+      "description": "The parts table, used only to deserialize the `Parts` arm so serde's field\ndefaults and unknown-field rejection apply without re-deriving them by hand."
+    },
+    "source_postgres_SslMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "disable",
+          "description": "Never use TLS."
+        },
+        {
+          "type": "string",
+          "const": "prefer",
+          "description": "Use TLS if the server offers it, without verifying anything."
+        },
+        {
+          "type": "string",
+          "const": "require",
+          "description": "Require TLS, without verifying the certificate."
+        },
+        {
+          "type": "string",
+          "const": "verify-ca",
+          "description": "Require TLS and verify the certificate against the CA bundle."
+        },
+        {
+          "type": "string",
+          "const": "verify-full",
+          "description": "Require TLS, verify the certificate, and check the hostname."
+        }
+      ],
+      "description": "`sslmode` for the source connection, in libpq's terms."
+    },
+    "source_postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "postgres",
+          "description": "Selects the postgres source adapter."
+        },
+        "connection_url": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/source_postgres_Connection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the database is reached: a URL, literal or `{ env = \"VAR\" }`, or a\ntable of parts (`host`, `port`, `user`, `password`, `database`)."
+        },
+        "manage_publication": {
+          "type": "boolean",
+          "description": "Whether flusso may create or extend the publication to cover every table\nthe indexes read, when the source role is privileged enough. `false`\nmakes flusso only report coverage gaps and never issue publication DDL.",
+          "default": true
+        },
+        "slot": {
+          "type": "string",
+          "description": "The logical replication slot flusso consumes. Created on first run.",
+          "default": "flusso"
+        },
+        "publication": {
+          "type": "string",
+          "description": "The publication flusso subscribes to.",
+          "default": "flusso"
+        },
+        "ssl_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/source_postgres_SslMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "TLS mode for the source connection. Overrides the URL's `sslmode`;\nomitted defers to it, then to `prefer`. `require` encrypts but verifies\nnothing; only the `verify-*` modes check the certificate."
+        },
+        "ssl_root_cert": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PEM file of trusted CA certificates for the `verify-*` modes. Overrides\nthe URL's `sslrootcert`."
+        },
+        "ssl_cert": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Client certificate chain PEM for mutual TLS; pairs with `ssl_key`.\nOverrides the URL's `sslcert`."
+        },
+        "ssl_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Client private key PEM for mutual TLS; pairs with `ssl_cert`. Overrides\nthe URL's `sslkey`."
+        },
+        "ssl_sni_hostname": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "SNI hostname sent in the TLS handshake when it differs from the\nconnection host (IP connections, load balancers)."
+        }
+      },
+      "description": "The `[source]` options for `type = \"postgres\"`.",
+      "title": "postgres",
+      "required": [
+        "type"
+      ]
+    },
+    "stream_channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "channel",
+          "description": "Selects the channel stream adapter."
+        },
+        "capacity": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Changes buffered between capture and processing before capture waits.\nA bounded buffer is what makes the slowest sink pace ingest.",
+          "default": 1024
+        }
+      },
+      "description": "The `[stream]` options for `type = \"channel\"`.",
+      "title": "channel",
+      "required": [
+        "type"
+      ]
+    },
+    "sink_opensearch_TextAnalysis": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "builtin",
+          "description": "Built-in OpenSearch components only: works on any cluster with no\nplugins. Accent and case folding via `asciifolding` + `lowercase`."
+        },
+        {
+          "type": "string",
+          "const": "icu",
+          "description": "The `analysis-icu` plugin (`icu_tokenizer` / `icu_folding` /\n`icu_normalizer`) for stronger multilingual handling. Requires the plugin\non every node, or index creation fails."
+        }
+      ],
+      "description": "Which analyzer toolkit the sink wires its `flusso_*` analyzers onto."
+    },
+    "sink_opensearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "opensearch",
+          "description": "Selects the opensearch sink adapter."
+        },
+        "url": {
+          "description": "Base URL of the cluster, literal or `{ env = \"VAR\" }`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ]
+        },
+        "username": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "HTTP Basic auth user."
+        },
+        "password": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "HTTP Basic auth password."
+        },
+        "tls_verify": {
+          "type": "boolean",
+          "description": "Verify TLS certificates. Set `false` for a local cluster with a\nself-signed certificate.",
+          "default": true
+        },
+        "batch_size": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Documents per bulk request.",
+          "default": 1000
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Maximum serialized size of one bulk request, in bytes. A flush is split\nso no request exceeds this, independent of `batch_size`, keeping\nrequests under OpenSearch's `http.max_content_length` (100 MB by\ndefault). A single document larger than this is sent on its own.",
+          "default": 10485760
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Request timeout, in seconds.",
+          "default": 30
+        },
+        "max_retries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Retries for a transient failure of a whole request.",
+          "default": 3
+        },
+        "pipeline": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "An ingest pipeline applied to every indexed document."
+        },
+        "number_of_shards": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Primary shards for each index flusso creates.",
+          "default": 1
+        },
+        "number_of_replicas": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Replica shards for each index flusso creates.",
+          "default": 1
+        },
+        "refresh_interval": {
+          "type": "string",
+          "description": "The `refresh_interval` applied to each index once its backfill completes:\nthe steady-state visibility ceiling (`\"10s\"`, `\"1s\"`, or `\"-1\"` to\ndisable automatic refresh). Indexes are seeded with refresh off and\nhanded this value afterwards; a flush that catches the pipeline up\nforces an immediate refresh, so this only bounds staleness while a\nbacklog drains.",
+          "default": "10s"
+        },
+        "text_analysis": {
+          "default": "builtin",
+          "description": "Which analysis toolkit the built-in `flusso_*` analyzers use.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/sink_opensearch_TextAnalysis"
+            }
+          ]
+        },
+        "auto_subfields": {
+          "type": "boolean",
+          "description": "Whether `text`/`keyword` fields are enriched with a good analyzer and the\n`keyword` / `keyword_lowercase` / `text` subfields. A field's explicit\nmapping always wins.",
+          "default": true
+        }
+      },
+      "required": [
+        "type",
+        "url"
+      ],
+      "description": "The `[sinks.<name>]` options for `type = \"opensearch\"`.",
+      "title": "opensearch"
+    },
+    "sink_stdout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "stdout",
+          "description": "Selects the stdout sink adapter."
+        },
+        "pretty": {
+          "type": "boolean",
+          "description": "Pretty-print each envelope over several lines instead of one compact\nJSON line per operation.",
+          "default": false
+        }
+      },
+      "description": "The `[sinks.<name>]` options for `type = \"stdout\"`.",
+      "title": "stdout",
+      "required": [
+        "type"
+      ]
     }
   }
 }
