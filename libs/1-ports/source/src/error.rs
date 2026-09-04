@@ -25,7 +25,7 @@ pub enum SourceError {
     #[error("setup error: {0}")]
     Setup(String),
 
-    /// A raw change could not be decoded into a [`Change`](crate::cdc::Change).
+    /// A raw change could not be decoded into a [`ChangeEvent`](crate::cdc::ChangeEvent).
     #[error("decode error: {0}")]
     Decode(String),
 

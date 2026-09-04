@@ -35,7 +35,7 @@ pub(crate) const META_INDEX: &str = "flusso_meta";
 
 /// Writes document operations to an OpenSearch cluster using the bulk API.
 ///
-/// Calls to [`upsert`](OpensearchSink::upsert) and [`delete`](OpensearchSink::delete) append to an
+/// Each [`apply`](OpensearchSink::apply) appends the envelope's operation to an
 /// in-memory buffer; [`flush`](OpensearchSink::flush) drains it as one or more bulk
 /// requests. Every index is addressed by its **physical** name — the logical
 /// name plus the schema hash, learned at

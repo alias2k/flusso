@@ -3,9 +3,9 @@
 //! while the others keep going.
 //!
 //! Ordering is what this module exists for. Every sink engine finishes its
-//! first [`SinkEngine::stage`] (ensure indexes, stage stale rebuilds under a
+//! first [`stage`](engine::SinkEngine::stage) (ensure indexes, stage stale rebuilds under a
 //! `Fresh` source, queue its backfill request) **before** the ingest engine
-//! runs [`ChangeCapture::prepare`](source::cdc::ChangeCapture::prepare) and
+//! runs [`ChangeCapture::prepare`] and
 //! starts serving requests. That is the #120 guarantee without a shared engine:
 //! rebuilds are staged before the resume point exists, and the resume point
 //! exists before any snapshot runs.
