@@ -20,19 +20,19 @@ Data in the index has drifted from the source (a bug, a manual edit, rows import
    flusso reindex users --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
    ```
 
-   The server answers `reindex of users queued` with `202`. It stages generation `n+1` behind the same hash alias, restarts its pipeline, and backfills the new generation. Reads keep hitting generation `n` through the alias the whole time. Counters and uptime in `/status` survive the restart.
+   The server answers `reindex of users on every sink queued` with `202`. Each sink engine stages generation `n+1` behind the same hash alias between two batches and requests a snapshot; the ingest engine serves it alongside live changes. Reads keep hitting generation `n` through the alias the whole time, nothing restarts, and the other sinks are untouched. Add `--sink primary` to rebuild on one sink only.
 
-3. **Watch it land.** In `/status`, `users` goes `backfilling`, then `seeded`. At that moment the alias flips to `n+1` and `n` is dropped.
+3. **Watch it land.** In `/status`, `users` goes `backfilling`, then `seeded` under the sink. At that moment the alias flips to `n+1` and `n` is dropped.
 
    ```sh
-   watch -n 5 'curl -s localhost:9464/status | jq .indexes'
+   watch -n 5 'curl -s localhost:9464/status | jq .sinks.primary.indexes'
    ```
 
 4. **Confirm the read side.** `flusso-query` addresses the hash alias, so nothing changes for consumers. Ad-hoc readers on the convenience alias see the new generation too.
 
 ## Options and variations
 
-- **With `curl`.** `curl -u admin:… -X POST 'http://10.0.0.5:9465/reindex?index=users'`. Responses are in [HTTP endpoints](../reference/http.md#post-reindexindexname).
+- **With `curl`.** `curl -u admin:… -X POST 'http://10.0.0.5:9465/reindex?index=users&sink=primary'` (drop `&sink=` for every sink). Responses are in [HTTP endpoints](../reference/http.md#post-reindexindexnamesinkname).
 - **Rebuild one index without the server running.** Delete its generation index (`users_<hash>_<n>`) in OpenSearch. On the next start the seed marker is found to name a missing index, so the marker is retracted and the backfill refills it in place.
 - **Rebuild everything.** Drop the replication slot. Every seeded index is rebuilt into a fresh generation on the next start. See [Recover from a dropped slot](dropped-slot.md).
 - **Live changes during the rebuild** are captured into the new generation as it's built; the slot advances only as documents land, as always.

@@ -263,78 +263,107 @@ never names an adapter, an adapter can never reach the assembled `Config` (it de
 the kernel and its port), and adding an adapter is its crate + one registry entry + the build
 arm in `apps/cli/src/backends.rs`. See "Config layer" below.
 
-### The pipeline (`libs/2-engine/src/pipeline.rs`)
+### The pipeline (`libs/2-engine/src/ingest.rs` + `sink_engine.rs`)
 
 ```text
-ChangeCapture ─▶ queue ─▶ resolve ─▶ build ─▶ Sink ─▶ flush ─▶ ack
+                 ┌─ lane ─▶ SinkEngine(primary) ─▶ apply ─▶ flush ─▶ ack ─┐
+ChangeCapture ─▶ IngestEngine ─┤                                             ├─▶ watermark ─▶ confirm
+  resolve · build once · publish└─ lane ─▶ SinkEngine(audit)   ─▶ apply ─▶ flush ─▶ ack ─┘
+                 ◀─ request lane ─ Backfill { sink, indexes } ─────────────────────
 ```
 
-The engine is the only orchestrator. Everything it drives — `ChangeCapture` (source),
-`DocumentBuilder`, `Sink`, and the queue — is a **trait object**, so backends swap without
-touching the loop. Key invariants to preserve when editing the engine:
+Two generic engines, backend-neutral (ADR 0002/0003, issue #130). The **ingest engine**
+(`IngestEngine`) owns the source side: capture → batch → resolve → dedup → `build_many` once →
+publish one `LaneItem::Batch` of kernel `Envelope`s to every sink's lane; it also drains the
+**request lane** and serves `Request::Backfill { sink, indexes }` as snapshots. One **sink
+engine** per sink (`SinkEngine`): `stage` (ensure indexes, retire stale seeds, request its
+backfill) then recv → `apply` → `flush` → ack. Everything they drive — `ChangeCapture`,
+`DocumentBuilder`, `Stream` (lanes + request lane + watermark), `Sink` — is a **trait object**.
+`FanOutSink` is gone; sinks are independent. Key invariants to preserve when editing the engines:
 
-- **At-least-once via flush-then-confirm.** Source acks for a batch are confirmed *only
-  after* the `Sink::flush` that made its documents durable, so the replication slot
-  advances past a change exactly when its documents have landed. A crash before flush
-  redelivers the whole batch; it's re-applied idempotently (documents rebuilt from the
-  current row, written by deterministic id). The `confirms_no_ack_before_its_flush` test
-  guards this.
-- **Two-step resolve → build, deduped per batch.** A batch buffers changes, resolves each
-  to affected `DocumentId`s, dedups them, then `build_many` assembles each touched
-  document **once** even if several changes hit it. Reordering writes within a batch is
-  safe (keyed, idempotent). `builds_a_repeatedly_touched_document_once_per_batch` guards
-  this.
-- **Backfill is the *sink's* decision.** On start the engine `ensure_index`es every
-  mapping, then (unless `--skip-backfill`) asks each sink `is_seeded`; unseeded indexes get
-  their root tables snapshotted through the same queue→resolve→build→sink path, scoped so a
-  seeded index sharing a table isn't rewritten, then `mark_seeded`.
+- **At-least-once via flush-then-ack and the watermark.** A sink engine acks a lane item *only
+  after* the `Sink::flush` that made its documents durable; acking a positioned batch records
+  that position for the lane, `Stream::watermark()` is the **minimum** over lanes, and the ingest
+  engine hands it to `ChangeCapture::confirm` after each commit (and on a 1 s tick), so the slot
+  advances past a change exactly when *every* sink has landed it. A sink engine that dies before
+  its flush leaves the item unacked; the lane redelivers it to the restarted engine (idempotent
+  rebuild, deterministic id). Guards: `confirms_no_position_before_its_flush`,
+  `redelivers_the_unacked_batch_to_a_restarted_sink_engine`, the channel adapter's
+  `watermark_is_the_minimum_over_lanes`/`several_deliveries_can_be_outstanding_and_ack_independently`,
+  the daemon's `failed_sink_engine_restarts_and_redelivers`.
+- **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
+  resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
+  **once** for all sinks. Snapshot rows go through the same path but are published *without* a
+  position and *only* to the requesting lanes, ending with `LaneItem::SnapshotComplete`; snapshot
+  and live builds are serialized on the one ingest task, so on any lane a later message is the
+  newer state and sinks need no versioning. Guards:
+  `builds_a_repeatedly_touched_document_once_per_batch`, `snapshots_go_only_to_the_requesting_lane`.
+- **Backfill is each *sink's* decision, and requests are at-least-once.** `stage` asks the sink
+  `is_seeded` per index and sends one `Backfill` request for the unseeded set (skipped under
+  `--skip-backfill` or the sink's `backfill = false`, the stateless-sink opt-out); the ingest
+  engine coalesces concurrent requests for the same index into one snapshot fanned to every
+  requester and acks a request only after its `SnapshotComplete` is published (a crash
+  mid-snapshot redelivers it). A seeded sibling sees nothing. The channel adapter therefore keeps
+  a **ticketed in-flight ledger** per lane: several deliveries can be outstanding, each acked by
+  ticket; a nacked or dropped-unacked delivery is redelivered in order. (A single redelivery slot
+  made the coalescing loop receive the same request forever — the OOM behind the first attempts.)
+  Guards: `an_unseeded_sink_requests_a_snapshot_then_marks_seeded`, `a_seeded_sink_requests_nothing`,
+  `backfill_false_makes_a_stateless_sink_live_only`,
+  `concurrent_requests_for_the_same_index_coalesce_into_one_snapshot`, the daemon's
+  `unseeded_sink_is_backfilled_without_touching_its_sibling`.
+- **A live stream that ends still drains queued requests.** The ingest engine returns `Ok` only
+  once the live stream ended *and* no snapshot is active *and* the request consumer is empty, so
+  a sink that staged its backfill before the ingest engine started is still served.
 - **…but a seed is only as good as the stream behind it (issue #120).** Run order is
-  `source.continuity()` → `ensure_index` all → (on `Fresh`) stage rebuilds → `source.prepare()`
-  → backfill → live. `ChangeCapture::continuity` → `Continuity::{Resumed, Fresh}`
-  (`source`) is **read-only** (Postgres: does the slot exist?); `prepare` creates the
-  resume point. On `Fresh` the engine warns and stages `sink.reindex` + `ensure_index` for every
-  index still `is_seeded` (a fresh generation, so rows gone from the source are dropped on the
-  swap; never an in-place reseed), then the normal backfill refills them. **The order is
-  load-bearing twice**: rebuilds are staged *before* `prepare` creates the slot (a crash in
-  between comes back `Fresh` and re-stages, instead of `Resumed` with stale seeds trusted), and
-  `prepare` runs *before* the snapshot (a write between snapshot and first live read is
-  covered). Only *seeded* indexes are staged (an unseeded one is already being rebuilt; staging
-  again would orphan a generation — #121). Under `--skip-backfill` it warns only. Both trait
-  methods are required — a source must state its continuity contract. `FanOutSink` forwards
-  `reindex` (with the no-op default, `is_seeded` would stay `true` and the rebuild would
-  silently never happen). The sink-side half: the OpenSearch `ensure_index` retracts a seeded
-  marker whose generation index is missing (warn + rewrite unseeded, recreate empty), so
-  deleting the generation is a "rebuild on next start" signal. Guarded by the engine's
-  `fresh_source_*` (incl. the `reindex → prepare → snapshot` order)/`resumed_source_*`/
-  `skip_backfill_with_a_fresh_source_*` unit tests, the sink's
+  `source.continuity()` → stage every sink (`ensure_index` all, on `Fresh` `reindex` +
+  `ensure_index` every still-`is_seeded` index, request backfill) → `source.prepare()` (the
+  ingest engine's first act) → serve requests + live. `continuity` is **read-only** (Postgres:
+  does the slot exist?); `prepare` creates the resume point. **The order is load-bearing twice**:
+  rebuilds are staged *before* `prepare` creates the slot (a crash in between comes back `Fresh`
+  and re-stages) and `prepare` runs *before* any snapshot (a write between snapshot and first
+  live read is covered). The daemon enforces it by finishing every sink's first `stage` before
+  spawning the ingest engine. Only *seeded* indexes are staged (#121). Under `--skip-backfill`
+  staging warns only. Both trait methods are required. The sink-side half: the OpenSearch
+  `ensure_index` retracts a seeded marker whose generation index is missing. Guarded by the
+  engine's `fresh_source_*`/`skip_backfill_with_a_fresh_source_*` unit tests, the daemon's
+  `fresh_source_rebuilds_seeded_sinks_before_preparing`, the sink's
   `deleted_generation_is_recreated_and_reported_unseeded` e2e, the Postgres `continuity` e2e,
   and the two `restart_*` cases in `engine`'s `pipeline` e2e.
-- `BatchPolicy` (default 256 changes / 50ms) controls flush grouping; `max_changes: 1`
-  reproduces flush-per-change.
+- **Reindex is an operation on one sink, no restart.** `DaemonControl::reindex(index,
+  Option<SinkName>)` sends `SinkControl::Reindex` to the targeted engines; between two batches
+  each stages `reindex` + `ensure_index` and sends a fresh `Backfill` request. Untargeted sinks
+  are untouched; "all" coalesces into one snapshot. Guards:
+  `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's
+  `reindex_operation_targets_one_sink`.
+- `BatchPolicy` (default 256 changes / 50ms) controls batch grouping; `max_changes: 1`
+  reproduces flush-per-change. The coalescing wait for further requests is `max_delay`.
 - **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:
-  `Err` is flush-wide (transport down, whole request refused) and always stops the run;
-  an `Ok` report instead lists documents the destination *applied the batch but rejected*
-  individually (a mapping conflict, a malformed value). The `FailurePolicies` (a global
-  `FailurePolicy` default + per-index overrides, from config `on_error`, resolved by **logical**
-  index name) decide each rejection in `commit`: `Stop` halts (batch left unconfirmed →
-  redelivered); `Skip` quarantines it (`Observer::on_document_quarantined` → metric/status/log)
-  and acks the batch so the slot advances and the poison isn't redelivered. A single `Stop`
-  rejection halts the whole batch, decided before any quarantine event is emitted. The
-  OpenSearch sink does *not* retry item-level rejections (re-sending re-rejects); it maps each
-  back to its logical index. Guarded by `skip_policy_*`/`stop_policy_*`/`per_index_stop_*` tests.
-- **Observability is a trait, not baked in.** The engine reports lifecycle/progress to an
-  `Observer` (`libs/2-engine/src/observer.rs`) — sync, cheap, no-op by default, set via
-  `with_observer`. It depends only on the trait, never on metrics or a status backend. The
-  `daemon` crate is the one consumer, fanning events to both the `metrics` facade and a live
-  status surface. `reports_lifecycle_and_progress_to_the_observer` guards the emit points.
+  `Err` is flush-wide (transport down, whole request refused) and stops *that sink engine*,
+  which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
+  default 60 s) while the ingest engine and the other sinks keep running — its lane fills, so a
+  stalled sink eventually paces ingest and pins WAL (per-sink lag/in-flight are the alarm). An
+  `Ok` report lists documents the destination *applied the batch but rejected* individually. The
+  `FailurePolicies` (global `FailurePolicy` default + per-index overrides, from config `on_error`,
+  resolved by **logical** index name) decide each in `commit`: `Stop` errors the engine out with
+  the batch unacked (redelivered after restart); `Skip` quarantines it
+  (`Observer::on_document_quarantined`, with the sink) and acks so the poison isn't redelivered.
+  A single `Stop` halts the whole batch before any quarantine event is emitted. The OpenSearch
+  sink does *not* retry item-level rejections. Guarded by `skip_policy_*`/`stop_policy_*`/
+  `per_index_stop_*`.
+- **Observability is a trait, not baked in.** Both engines report to an `Observer`
+  (`libs/2-engine/src/observer.rs`) — sync, cheap, no-op by default, set via `with_observer`;
+  every sink-side event carries the `SinkName`, engine errors an `EngineId`. It depends only on
+  the trait, never on metrics or a status backend. `reports_lifecycle_and_progress_to_the_observer`
+  guards the emit points.
 
 ### The daemon (`libs/3-daemon/src/lib.rs`) — domain only
 
-The daemon owns the **domain**: it assembles the pipeline from a `Config` — but it does
-**not** name concrete backends. Backend construction is a seam: the `Backends` trait
-(`backends.rs`, returning `SourceParts` = capture + document builder, and the `Sink`) is
-supplied to `Daemon::new`, so the daemon depends only on `source`/`sink`, never
-on Postgres/OpenSearch. The CLI is the one place that implements it (see below). A second
+The daemon owns the **domain**: it is the *supervisor* that assembles one deployment from a
+`Config` — but it does **not** name concrete backends. Backend construction is a seam: the
+`Backends` trait (`backends.rs`: `validate`, `source` → `SourceParts` = capture + document
+builder, `stream`, `sinks` → `SinkParts` = name + `Sink` + `SinkOptions`) is supplied to
+`Daemon::new`, so the daemon depends only on `source`/`stream`/`sink`, never on
+Postgres/OpenSearch. The CLI is the one place that implements it (see below). A second
 source-neutral capability lives beside `validate_indexes`: `CaptureProvisioning`
 (`libs/1-ports/source/src/provisioning.rs`) — given the tables an index reads
 (`SourceSpec::all_tables`), a source reports coverage + a privilege verdict (`CoverageReport`)
@@ -351,23 +380,25 @@ columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven to
 from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m
 junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual designer
 (`apps/design`) is its first consumer. The daemon
-wires a `StatusObserver` (`observer.rs`) that updates a
-shared `Status` (`status.rs`), runs the engine, and polls source capture lag out-of-band
-(`lag.rs` over `ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
+wires a `StatusObserver` (`observer.rs`) that updates a shared per-sink `Status` (`status.rs`),
+runs the engines under `supervise.rs` (stage every sink engine → spawn them + the ingest engine
+as independent tasks → restart a failed one with backoff while the others keep going; the
+ingest engine ending cleanly ends the deployment after the lanes drain), exposes the reindex
+*operation* through `DaemonControl`, and polls source capture lag out-of-band (`lag.rs` over
+`ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
 engine's `Observer` trait, not on any metrics backend — and owns **no transport**: no HTTP
 server, no process signals, no metrics *recording* or *exporter*; those are the binary's.
 `Daemon::start()` builds everything and returns a `RunningDaemon` exposing `status()` (an
-`Arc<Status>` a transport can read) and `run(shutdown)`, which runs until the stream ends, an
-error stops it, or the caller's `shutdown` future fires. A binary attaches its own metrics
-observer via `Daemon::with_observer`; the engine drives a `FanOut` (`engine::FanOut`) of the
+`Arc<Status>` a transport can read), `control()` (a `DaemonControl` for `reindex`), and
+`run(shutdown)`, which runs until the live stream ends or the caller's `shutdown` future fires. A binary attaches its own metrics
+observer via `Daemon::with_observer`; the engines drive a `FanOut` (`engine::FanOut`) of the
 status observer plus any attached ones. So the daemon's public contract is *data*: the
 backend-agnostic `Observer` events and the `Status` handle.
 
 The CLI (`apps/cli`) is the **composition root**. It is the single crate that names concrete
 backends: `backends.rs`'s `FlussoBackends` implements the daemon's `Backends` trait, resolving
 the connection (in the running environment) and building the Postgres source + the configured
-sinks (the source-type dispatch and the OpenSearch/stdout/fan-out `match` live here, not in the
-daemon). Adding a backend = a new match arm here plus its crate; the daemon and engine are
+sinks (the source-type dispatch and the OpenSearch/stdout `match` live here, not in the daemon). Adding a backend = a new match arm here plus its crate; the daemon and engine are
 untouched. The composition root is also where `Config` is translated into the backend-facing
 subsets it needs: the Postgres source builder takes a `SourceSpec` (the enabled indexes +
 their schemas, in `kernel` types — `source::SourceSpec`), never the whole `Config`.
@@ -658,26 +689,26 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loop / batching / ack ordering | `libs/2-engine/src/` — `lib.rs` (the `Engine` builder + public API), `pipeline.rs` (the `Pipeline` run machinery: `run_inner`/`backfill`/`pump`/`work`/`commit`/`CaptureGuard`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` |
-| Pipeline observability trait (`Observer`, `BatchStats`, `FanOut`) | `libs/2-engine/src/observer.rs` |
-| Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `backends.rs` (`Backends` trait + `SourceParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, recv → apply → flush → ack, failure policies, `SinkControl::Reindex`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
+| Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |
 | Adapter assembly (build the running source/sinks): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surfaces, auth, signals | `apps/cli/src/` — `telemetry/mod.rs` (traces), `telemetry/metrics.rs` (meter provider + `in_flight` gauge), `telemetry/observer.rs` (`OtelObserver`), `http/mod.rs` (public + private routers + `serve`), `http/auth.rs` (Basic auth), `commands/run.rs` (orchestration + signals) |
 | Config loading + the assembled `Config`/`Index` with `PortEntry` ports (layer 1) | `libs/1-config/src/` — `lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`), `deployment/` (the `Config` family + `From<ConfigToml>` conversion + `resolve_mappings`) |
-| Kernel vocabulary (the shared types — layer 0) | `libs/0-kernel/src/` — `config/` (`IndexSchema`, `FailurePolicy`, `Secret`, …), `common/` (newtypes), `GenericValue`, `options.rs` (`Options`/`OptionValue`), `port_entry.rs`, `adapter.rs` (`AdapterConfig`/`AdapterDescription`/`Port`/`override_var`); the derive in `libs/0-kernel/derive/` |
+| Kernel vocabulary (the shared types — layer 0) | `libs/0-kernel/src/` — `config/` (`IndexSchema`, `FailurePolicy`, `Secret`, …), `common/` (newtypes), `GenericValue`, `envelope.rs` (`Envelope`/`Op`/`Position` — the stream message), `options.rs` (`Options`/`OptionValue`), `port_entry.rs`, `adapter.rs` (`AdapterConfig`/`AdapterDescription`/`Port`/`override_var`); the derive in `libs/0-kernel/derive/` |
 | Adapter config types (one per adapter, `#[derive(AdapterConfig)]`) | `libs/2-adapters/source-postgres/src/config.rs` (`PostgresConfig`, `Connection`, `SslMode`, `Tls`), `stream-channel/src/config.rs`, `sink-opensearch/src/config.rs` (+ `TextAnalysis`), `sink-stdout/src/config.rs` |
 | `flusso.toml` parsing (entities only; conversion is beside `Config`) | `libs/1-config/src/toml/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
 | Source trait abstractions (`ChangeCapture` + `Continuity`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
 | Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
-| `Sink` trait, JSON render, fan-out | `libs/1-ports/sink/src/` |
+| `Sink` trait (`apply`/`flush`/seeding/`reindex`), `SinkOptions`, JSON render | `libs/1-ports/sink/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
-| Stream port / in-process channel adapter | `libs/1-ports/stream/src/`, `libs/2-adapters/stream-channel/src/lib.rs` |
+| Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger, watermark) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
-| CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives the `Daemon::start`/`run` **restart loop**, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
-| On-demand reindex (alias-over-generations + restart trigger) | sink: `libs/2-adapters/sink-opensearch/src/sink.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `CaptureGuard` + daemon `LagGuard` (clean cancel) + `Daemon::with_status`; CLI `commands/run.rs` (restart loop), `http/mod.rs` (`POST /reindex`), `commands/admin.rs` (client). Deferred write-side zero-downtime follow-on: issue #6 |
+| CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
+| On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `sdk/query/src/` |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |

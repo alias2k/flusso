@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Documents are built once on the ingest side; one sink engine per sink

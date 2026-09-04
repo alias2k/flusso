@@ -4,17 +4,17 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 
 | Instrument | Kind | Unit | Labels | Meaning |
 | --- | --- | --- | --- | --- |
-| `flusso.changes.captured` | counter | | | Changes pulled from the source into the queue. |
-| `flusso.changes.committed` | counter | | | Changes whose documents have been flushed and acked. |
-| `flusso.changes.in_flight` | gauge | | | Captured minus committed: the back-pressure signal. Read from status at scrape time, so it stays current while the sink is stalled. |
-| `flusso.documents.built` | counter | | `index` | Documents assembled and written. The unlabeled total is the sum. |
-| `flusso.documents.quarantined` | counter | | `index` | Documents the sink rejected and the engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
-| `flusso.batches` | counter | | | Batches flushed. |
-| `flusso.flush.duration` | histogram | s | | Time per sink flush. Buckets from 1 ms to 10 s. |
-| `flusso.indexes` | gauge | | | Indexes ensured at the sink this run. |
-| `flusso.indexes.seeded` | counter | | `index` | Indexes whose backfill completed this run. |
-| `flusso.replication.slot_lag` | gauge | By | | Bytes the confirmed position trails the WAL head by. Sampled every `--lag-poll-secs`. |
-| `flusso.errors` | counter | | | Errors that stopped the pipeline. |
+| `flusso.changes.captured` | counter | | | Changes the ingest engine pulled from the source. |
+| `flusso.changes.committed` | counter | | `sink` | Changes whose batch that sink flushed and acked. |
+| `flusso.changes.in_flight` | gauge | | `sink` | Captured minus that sink's committed: the back-pressure signal per sink. Read from status at scrape time, so it stays current while a sink is stalled. |
+| `flusso.documents.built` | counter | | `index` | Documents assembled by the ingest engine, once for every sink. The unlabeled total is the sum. |
+| `flusso.documents.quarantined` | counter | | `sink`, `index` | Documents that sink rejected and its engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
+| `flusso.batches` | counter | | `sink` | Batches that sink flushed. |
+| `flusso.flush.duration` | histogram | s | `sink` | Time per flush at that sink. Buckets from 1 ms to 10 s. |
+| `flusso.indexes` | gauge | | `sink` | Indexes ensured at that sink this run. |
+| `flusso.indexes.seeded` | counter | | `sink`, `index` | Indexes whose backfill completed at that sink this run. |
+| `flusso.replication.slot_lag` | gauge | By | | Bytes the confirmed position trails the WAL head by. Sampled every `--lag-poll-secs`. The confirmed position is the slowest sink's. |
+| `flusso.errors` | counter | | `engine` | Errors that stopped an engine: `ingest`, or `sink:<name>`. A sink engine is restarted with backoff; the counter keeps climbing while it fails. |
 
 ## Prometheus names
 
@@ -23,16 +23,16 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | Instrument | Prometheus series |
 | --- | --- |
 | `flusso.changes.captured` | `flusso_changes_captured_total` |
-| `flusso.changes.committed` | `flusso_changes_committed_total` |
-| `flusso.changes.in_flight` | `flusso_changes_in_flight` |
+| `flusso.changes.committed` | `flusso_changes_committed_total{sink}` |
+| `flusso.changes.in_flight` | `flusso_changes_in_flight{sink}` |
 | `flusso.documents.built` | `flusso_documents_built_total{index}` |
-| `flusso.documents.quarantined` | `flusso_documents_quarantined_total{index}` |
-| `flusso.batches` | `flusso_batches_total` |
-| `flusso.flush.duration` | `flusso_flush_duration_seconds_bucket`, `_sum`, `_count` |
-| `flusso.indexes` | `flusso_indexes` |
-| `flusso.indexes.seeded` | `flusso_indexes_seeded_total{index}` |
+| `flusso.documents.quarantined` | `flusso_documents_quarantined_total{sink,index}` |
+| `flusso.batches` | `flusso_batches_total{sink}` |
+| `flusso.flush.duration` | `flusso_flush_duration_seconds_bucket{sink}`, `_sum`, `_count` |
+| `flusso.indexes` | `flusso_indexes{sink}` |
+| `flusso.indexes.seeded` | `flusso_indexes_seeded_total{sink,index}` |
 | `flusso.replication.slot_lag` | `flusso_replication_slot_lag_bytes` |
-| `flusso.errors` | `flusso_errors_total` |
+| `flusso.errors` | `flusso_errors_total{engine}` |
 
 The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is one scope.
 

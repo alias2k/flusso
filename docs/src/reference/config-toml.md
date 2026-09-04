@@ -8,7 +8,7 @@ Every port table (`[source]`, `[stream]`, `[sinks.<name>]`) has the same shape: 
 | --- | --- | --- | --- |
 | `[source]` | table | — | The database rows come from. `type` selects the adapter; only `postgres` exists. See [Source: Postgres](source-postgres.md). |
 | `[stream]` | table | `type = "channel"` | The stream between the source side and the sinks. See [Stream: channel](stream-channel.md). |
-| `[sinks.<name>]` | table per sink | none | Named destinations. `<name>` is a [Postgres identifier](identifiers.md); `type` is `opensearch` or `stdout`. With no sinks, `run` adds a stdout sink named `stdout`. |
+| `[sinks.<name>]` | table per sink | none | Named destinations. `<name>` is a [Postgres identifier](identifiers.md); `type` is `opensearch` or `stdout`; `backfill` is the one universal key (see [Several sinks](#several-sinks)). With no sinks, `run` adds a stdout sink named `stdout`. |
 | `[[index]]` | array of tables | none | One entry per index to build. See [Index entries and on_error](index-and-on-error.md). |
 | `on_error` | `"stop"` \| `"skip"` | `"stop"` | Global item-rejection policy; each `[[index]]` may override it. See [on_error](index-and-on-error.md#on_error). |
 | `prefix` | string | `""` | Literal prefix prepended to every index name flusso owns. See [prefix](#prefix). |
@@ -16,9 +16,13 @@ Every port table (`[source]`, `[stream]`, `[sinks.<name>]`) has the same shape: 
 
 Unknown keys are rejected. Schema paths in `[[index]]` resolve relative to the config file's directory. Loading validates both layers (this file and every referenced `*.schema.yml`) plus every port table against its adapter, and needs no database.
 
-## Fan-out
+## Several sinks
 
-Every document goes to **every** configured sink. Two sinks means two writes per document, in one batch.
+Every document is built once and delivered to **every** configured sink, each over its own lane with its own engine. Sinks are independent: each decides its own backfill (`is_seeded` per index), a [reindex](../operate/reindex.md) targets one sink or all, and one sink's outage stops only that sink while the others keep writing. The slowest sink paces the replication slot, since the source is confirmed only what every sink has made durable.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `backfill` | bool | `true` | Whether this sink is ever backfilled. `false` makes it receive live changes only, never a snapshot: the opt-out for a stateless sink (stdout, a message bus) beside a stateful one, which would otherwise seed it on every start. |
 
 ```toml
 [sinks.primary]
@@ -27,6 +31,7 @@ url = "https://search.internal:9200"
 
 [sinks.audit]
 type = "stdout"
+backfill = false
 ```
 
 ## prefix

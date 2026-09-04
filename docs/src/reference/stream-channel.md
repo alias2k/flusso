@@ -4,7 +4,7 @@ The `[stream]` table with `type = "channel"`: the in-process stream between the 
 
 {{#include generated/stream-channel.md}}
 
-The channel is a bounded buffer. When it is full, capture waits, so the slowest sink paces ingest; a larger `capacity` absorbs bursts at the cost of memory. `--queue-capacity` / `FLUSSO_QUEUE_CAPACITY` override the key at run time.
+The stream is one bounded lane per sink plus a request lane, each holding `capacity` items. A full lane makes the ingest engine wait, so the slowest sink paces ingest and, through the slot watermark, WAL retention; a larger `capacity` absorbs bursts at the cost of memory. Every delivered item stays in flight until the sink engine acks it after its flush, and an unacked item is redelivered to a restarted engine. `--queue-capacity` / `FLUSSO_QUEUE_CAPACITY` override the key at run time.
 
 ## Example
 

@@ -318,6 +318,9 @@ export const it: Record<string, string> = {
   "config.source": "Origine",
   "config.stageIndexesHint": "documenti sincronizzati",
   "config.stageSinksHint": "dove scrivere i documenti",
+  "config.backfill": "Backfill",
+  "config.backfillHint":
+    "Popola gli indici non ancora inizializzati da uno snapshot. Off: solo modifiche live, per una destinazione senza stato.",
   "config.sinks": "Destinazioni",
   "config.sink": "destinazione",
   "config.name": "nome",

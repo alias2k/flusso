@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # The stream owns the slot watermark and carries requests upward
