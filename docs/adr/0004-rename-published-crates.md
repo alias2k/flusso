@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Rename the published crates to the kernel / ports / adapters / engine / daemon vocabulary
@@ -15,4 +15,5 @@ The library crates are renamed on crates.io to match the seams they implement (`
 
 - The layered directory layout becomes `libs/0-kernel`, `libs/1-ports/{source,stream,sink}`, `libs/1-config`, `libs/2-adapters/*`, `libs/2-engine`, `libs/3-daemon`. Consumer-facing libraries (the query crates) move to `sdk/`; the designer stays in `apps/`.
 - Release trains are unchanged in number: libs, cli, query. The version groups in the release configuration and the CI path filters are updated for the new paths.
-- Old crate names get a final README pointing at their successors; nothing else is published under them.
+- The adapter directories are named by port and technology (`libs/2-adapters/source-postgres`, `stream-channel`, `sink-opensearch`, `sink-stdout`) so a reader can tell which port an adapter implements. Extern names are the short vocabulary words (`kernel`, `source`, `stream`, `sink`, `config`, `engine`, `daemon`, `source_postgres`, …); `sink::Sink` and `config::Config` read oddly but only on `use` lines.
+- Old crate names get a final README pointing at their successors, published by `scripts/tombstone-crates.sh` after the rename lands; nothing else is published under them.

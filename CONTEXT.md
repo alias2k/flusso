@@ -7,7 +7,7 @@ flusso keeps a search destination in sync with a relational source from declarat
 ### Shape of the system
 
 **Kernel**:
-The vocabulary every other part trades in: values, validated names, index schemas and mappings, the envelope, the position. It names no adapter and no file format.
+The vocabulary every other part trades in: values, validated names, index schemas and mappings, the envelope, the position, the options tree. It names no adapter and no file format.
 _Avoid_: core, schema-core, common
 
 **Port**:
@@ -17,6 +17,18 @@ _Avoid_: trait crate, abstraction layer, interface crate
 **Adapter**:
 A concrete implementation of one port for one technology (Postgres, an in-process channel, OpenSearch, stdout, NATS). An adapter owns its own configuration.
 _Avoid_: backend, driver, plugin, connector
+
+**Options**:
+The kernel's neutral, ordered value tree that a port entry carries between the config and the adapter that understands it. The config never interprets it; the adapter deserializes it strictly.
+_Avoid_: settings blob, raw config, extra fields
+
+**Adapter description**:
+What an adapter declares about its options from one place: the schema, an example, and the environment variables that override its secrets. The editor schema, the Reference tables, and the designer forms are all rendered from it.
+_Avoid_: metadata, manifest, spec
+
+**Port entry**:
+One configured port in a deployment: its kind (which adapter) and its options. The source and the stream are singletons; sinks are named.
+_Avoid_: backend config, connector block
 
 **Engine**:
 A generic loop that drives ports. There are two: the ingest engine and the sink engine.
@@ -44,9 +56,21 @@ _Avoid_: queue, bus, broker, channel (as the port name)
 One sink's ordered feed inside the stream. A stacked sink's lane is fed by the sink engine ahead of it instead of by the ingest engine.
 _Avoid_: channel, topic, subject, partition
 
+**Batch**:
+The unit a lane carries and a sink engine acknowledges: the envelopes one ingest commit built, in build order, with the position of the last change it covers. A batch with no envelopes still carries its position.
+_Avoid_: chunk, bundle, message group
+
+**Snapshot complete**:
+The lane marker that follows the last batch of a snapshot, telling the sink engine it may record the index as seeded.
+_Avoid_: end marker, EOF, sentinel
+
 **Request lane**:
 The stream's upward feed. It carries backfill and reindex requests from sink engines to the ingest engine, which coalesces requests for the same index.
 _Avoid_: control channel, command bus, callback
+
+**Request**:
+What travels up the request lane: a sink engine asking for a snapshot of one or more indexes into its own lane, for a first seed or a reindex. Acknowledged only once the snapshot is fully published.
+_Avoid_: command, job, ticket
 
 **Sink**:
 The port that applies documents to a destination and reports which it accepted, rejected, or already holds. Each sink has its own engine, its own seeding, its own reindex.
@@ -59,7 +83,7 @@ A source event naming a row that was inserted, updated, or deleted, identified b
 _Avoid_: event, mutation, delta, CDC record
 
 **Position**:
-An opaque, serializable offset in the source's change feed. The source confirms a position once every lane has acknowledged it.
+An opaque, ordered, serializable offset in the source's change feed, assigned by the source and meaningful only to it. The source confirms a position once every lane has acknowledged it. Snapshot batches carry none.
 _Avoid_: LSN, offset, cursor, ack, checkpoint
 
 **Watermark**:
@@ -109,7 +133,7 @@ A sink engine's request for a full snapshot of an index into its own lane, made 
 _Avoid_: initial load, seed (as a verb for the whole process), bootstrap
 
 **Reindex**:
-A forced backfill into a fresh generation of one index on one sink or on all of them. Per sink; it never restarts a sibling.
+A forced backfill into a fresh generation of one index on one sink or on all of them. Per sink; the targeted sink engine stages it between two batches and no sibling is touched.
 _Avoid_: rebuild, resync, full refresh
 
 **Stack**:
