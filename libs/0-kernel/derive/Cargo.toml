@@ -19,3 +19,15 @@ proc-macro = true
 workspace = true
 
 [dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+# The kernel with the derive re-exported: the real consumer surface (a
+# dev-dependency cycle, which Cargo allows).
+kernel = { path = "..", package = "flusso-kernel", features = ["derive"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+trybuild = "1"

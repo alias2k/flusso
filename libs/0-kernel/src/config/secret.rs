@@ -31,6 +31,11 @@ pub enum Secret {
 }
 
 impl Secret {
+    /// A reference to the environment variable `var`, read at resolution time.
+    pub fn env(var: impl Into<String>) -> Self {
+        Secret::Env(var.into())
+    }
+
     /// Read this secret's value from its own source — a literal as-is, an `Env`
     /// from the environment. Does not consult any reserved variable.
     fn read(&self) -> Result<String, ResolveError> {
@@ -82,6 +87,18 @@ impl JsonSchema for Secret {
         });
         schema.insert(SECRET_MARKER.to_owned(), serde_json::Value::Bool(true));
         schema
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(value: &str) -> Self {
+        Secret::Value(value.to_owned())
+    }
+}
+
+impl From<String> for Secret {
+    fn from(value: String) -> Self {
+        Secret::Value(value)
     }
 }
 

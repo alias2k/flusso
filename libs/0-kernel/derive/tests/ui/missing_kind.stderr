@@ -1,0 +1,5 @@
+error: missing `#[adapter(port = …, kind = "…")]`: `kind` is required (the `type = "…"` token in flusso.toml)
+ --> tests/ui/missing_kind.rs:8:8
+  |
+8 | struct NoKind {
+  |        ^^^^^^
