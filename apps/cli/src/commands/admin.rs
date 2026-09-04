@@ -59,6 +59,10 @@ pub(crate) struct ReindexArgs {
     /// The logical index to rebuild from scratch.
     index: String,
 
+    /// Rebuild the index on this sink only. Omitted: on every sink.
+    #[arg(long, env = "FLUSSO_SINK")]
+    sink: Option<String>,
+
     #[command(flatten)]
     connect: ConnectArgs,
 }
@@ -89,7 +93,8 @@ pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
     let resp = args
         .connect
         .request(reqwest::Method::POST, "/reindex")
-        .query(&[("index", &args.index)])
+        .query(&[("index", args.index.as_str())])
+        .query(&args.sink.as_deref().map(|sink| [("sink", sink)]))
         .send()
         .await
         .context("requesting /reindex")?;

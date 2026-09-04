@@ -29,18 +29,19 @@
 //!   attributed rather than taken on faith.
 //! - `change`: one `order_items` change propagated end to end. Resolving it is a
 //!   **multi-hop reverse lookup** (item → order → user) before the complex
-//!   document is reassembled and flushed. Composed by hand because
-//!   [`Engine::run`] is a run-once daemon (backfill, then follow `live` forever)
-//!   and does not fit a per-iteration request/response benchmark.
-//! - `backfill`: the real [`Engine::run`] driving its backfill — `ensure_index`,
-//!   then the source snapshot streamed through the engine's queue → worker →
-//!   resolve → build → sink → flush path, assembling every complex document.
-//!   `live` is stubbed to an empty stream so `run` terminates after seeding;
-//!   that tail is the only thing not exercised, and not what we measure.
+//!   document is reassembled and flushed. Composed by hand because the engines
+//!   are run-once daemons (backfill, then follow `live` forever) and do not fit
+//!   a per-iteration request/response benchmark.
+//! - `backfill`: the real ingest + sink engines driving a backfill —
+//!   `ensure_index`, the sink engine's backfill request, then the source
+//!   snapshot streamed through the ingest engine's resolve → build → lane path
+//!   and the sink engine's apply → flush path, assembling every complex
+//!   document. `live` is stubbed to an empty stream so the run terminates after
+//!   seeding; that tail is the only thing not exercised, and not what we measure.
 //! - `change_burst`: the steady-state path under volume. A burst of changes is
-//!   drained through the real [`Engine::run`] live loop at different
-//!   [`BatchPolicy::max_changes`] values, so the curve shows what the engine's
-//!   flush-batching buys: `max_changes = 1` is the old flush-per-change cost,
+//!   drained through the real engines' live loop at different
+//!   [`BatchPolicy::max_changes`] values, so the curve shows what the ingest
+//!   engine's batching buys: `max_changes = 1` is the old flush-per-change cost,
 //!   larger values collapse the burst into ⌈N / max_changes⌉ bulk flushes. This
 //!   is where the batching win actually shows up (a single change cannot
 //!   benefit from batching — only volume can).
@@ -64,21 +65,23 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use engine::{BatchPolicy, Engine};
-use futures::stream::{self, BoxStream};
+use engine::{BatchPolicy, IngestEngine, SinkControl, SinkEngine, document_id};
+use futures::stream::{self as fstream, BoxStream};
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Direction, Field,
-    FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, IndexMapping,
-    IndexName, IndexSchema, Join, JoinKind, OrderBy, Relation, Secret, SinkName, SoftDelete,
-    SoftDeleteColumn, TableName, Through, Transform, ValueOpFilter,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Direction, Envelope,
+    Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue,
+    IndexMapping, IndexName, IndexSchema, Join, JoinKind, OrderBy, Position, Relation, Secret,
+    SinkName, SoftDelete, SoftDeleteColumn, TableName, Through, Transform, ValueOpFilter,
 };
 use sink::{Result as SinkResult, Sink};
 use sink_opensearch::OpensearchSink;
-use source::cdc::{Ack, AckSink, Change, ChangeCapture, ChangeEvent, Continuity};
-use source::document::{Document, DocumentBuilder, DocumentId};
+use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
+use source::document::{Document, DocumentBuilder};
 use source::{Result as SourceResult, RowKey, SnapshotTable, SourceSpec};
 use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
+use stream::Stream;
+use stream_channel::ChannelStream;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
@@ -108,7 +111,7 @@ const BURST: usize = USER_COUNT;
 const CHANGED_ITEM_ID: i64 = 1000 * 100;
 
 /// Wraps the real [`WalChangeCapture`] but returns an empty `live` stream, so
-/// [`Engine::run`] does `ensure_index` + backfill (both real) and then returns
+/// the run does `ensure_index` + backfill (both real) and then returns
 /// immediately instead of following replication forever. The `snapshot` — the
 /// part the backfill actually measures — is the genuine one.
 #[derive(Debug)]
@@ -126,21 +129,23 @@ impl ChangeCapture for BackfillOnly {
         Ok(())
     }
 
-    async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
-        Ok(Box::pin(stream::empty()))
+    async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<LiveChange>>> {
+        Ok(Box::pin(fstream::empty()))
     }
+
+    fn confirm(&self, _position: Position) {}
 
     async fn snapshot(
         &self,
         tables: &[SnapshotTable],
-    ) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
+    ) -> SourceResult<BoxStream<'static, SourceResult<ChangeEvent>>> {
         self.inner.snapshot(tables).await
     }
 }
 
 /// Wraps the real [`OpensearchSink`] but always reports "not seeded" and never
-/// records seeding — so every `Engine::run` re-runs the backfill rather than
-/// the engine's `mark_seeded` short-circuiting every iteration after the first.
+/// records seeding — so every run re-runs the backfill rather than the sink
+/// engine's `mark_seeded` short-circuiting every iteration after the first.
 /// Writes are forwarded unchanged, so the indexing path is the real one.
 #[derive(Debug)]
 struct AlwaysUnseeded {
@@ -152,11 +157,8 @@ impl Sink for AlwaysUnseeded {
     async fn ensure_index(&self, mapping: &IndexMapping) -> SinkResult<()> {
         self.inner.ensure_index(mapping).await
     }
-    async fn upsert(&self, index: &IndexName, id: &str, document: &GenericValue) -> SinkResult<()> {
-        self.inner.upsert(index, id, document).await
-    }
-    async fn delete(&self, index: &IndexName, id: &str) -> SinkResult<()> {
-        self.inner.delete(index, id).await
+    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
+        self.inner.apply(envelope).await
     }
     async fn flush(&self, caught_up: bool) -> SinkResult<sink::FlushReport> {
         self.inner.flush(caught_up).await
@@ -164,9 +166,9 @@ impl Sink for AlwaysUnseeded {
 }
 
 /// A capture whose `live` stream yields a fixed burst of `count` upsert changes
-/// (one per user, ids `1..=count`) and then ends, so `Engine::run` drains the
-/// burst and returns. This is the steady-state path under volume — exactly where
-/// the engine's flush-batching pays off. `snapshot` keeps the default empty
+/// (one per user, ids `1..=count`) and then ends, so the run drains the burst
+/// and returns. This is the steady-state path under volume — exactly where the
+/// ingest engine's batching pays off. `snapshot` keeps the default empty
 /// stream; the burst bench skips backfill anyway.
 #[derive(Debug)]
 struct BurstCapture {
@@ -183,29 +185,63 @@ impl ChangeCapture for BurstCapture {
         Ok(())
     }
 
-    async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<Change>>> {
-        let ack_sink: Arc<dyn AckSink> = Arc::new(NoopAck);
-        let changes: Vec<SourceResult<Change>> = (1..=self.count as i64)
+    async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<LiveChange>>> {
+        let changes: Vec<SourceResult<LiveChange>> = (1..=self.count as i64)
             .map(|id| {
-                Ok(Change {
-                    event: ChangeEvent::Upsert {
+                Ok((
+                    Position(id as u64),
+                    ChangeEvent::Upsert {
                         table: table("users"),
                         key: row_key(id),
                     },
-                    ack: Ack::new(id as u64, Arc::clone(&ack_sink)),
-                })
+                ))
             })
             .collect();
-        Ok(Box::pin(stream::iter(changes)))
+        Ok(Box::pin(fstream::iter(changes)))
     }
+
+    /// The burst bench measures throughput, not durability.
+    fn confirm(&self, _position: Position) {}
 }
 
-/// A no-op ack endpoint — the burst bench measures throughput, not durability.
-#[derive(Debug)]
-struct NoopAck;
-
-impl AckSink for NoopAck {
-    fn confirm(&self, _seq: u64) {}
+/// One deployment the way the daemon runs it: stage the sink engine, run it
+/// beside the ingest engine until the live stream ends, wait for the lane to
+/// drain, then stop the sink engine.
+async fn run_deployment(
+    capture: Arc<dyn ChangeCapture>,
+    documents: Arc<dyn DocumentBuilder>,
+    sink: Arc<dyn Sink>,
+    batch: BatchPolicy,
+    skip_backfill: bool,
+) {
+    let name = SinkName::try_new("bench").unwrap();
+    let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let mappings = documents.index_mappings().await.unwrap();
+    let sink_engine = SinkEngine::new(
+        name.clone(),
+        sink,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        mappings,
+    )
+    .skip_backfill(skip_backfill);
+    sink_engine.stage(Continuity::Resumed).await.unwrap();
+    let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    let sink_task = tokio::spawn(async move { sink_engine.run(&mut control_rx).await });
+    IngestEngine::new(
+        capture,
+        documents,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![name],
+    )
+    .with_batch(batch)
+    .run()
+    .await
+    .unwrap();
+    while !stream.is_idle() {
+        assert!(!sink_task.is_finished(), "the sink engine stopped early");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    sink_task.abort();
 }
 
 /// Everything held alive for the benchmark's duration.
@@ -216,8 +252,7 @@ struct Services {
     sink: Arc<dyn Sink>,
     /// Raw pool to the same Postgres, for the round-trip baseline.
     pool: sqlx::PgPool,
-    /// Replication config + URL to build a fresh capture each backfill iteration
-    /// (`Engine::run` consumes the engine, and with it the capture).
+    /// Replication config + URL to build a fresh capture each backfill iteration.
     replication: ReplicationConfig,
     url: String,
 }
@@ -390,7 +425,7 @@ async fn setup() -> Services {
     let inner = OpensearchSink::from_config(&os_name, &os_config).unwrap();
     // Create the index from the builder's resolved, fully-typed mapping so the
     // `change` and `baseline` benches (which write before any backfill) land in
-    // a real index. `Engine::run` also calls this — it is idempotent.
+    // a real index. The sink engine also calls this — it is idempotent.
     for mapping in documents.index_mappings().await.unwrap() {
         inner.ensure_index(&mapping).await.unwrap();
     }
@@ -419,28 +454,22 @@ async fn setup() -> Services {
     }
 }
 
-/// Resolve a changed row to its documents, assemble each, and write it to the
-/// sink — the engine's per-change inner loop, composed by hand. Returns without
-/// flushing.
+/// Resolve a changed row to its documents, assemble each, and apply it to the
+/// sink — the two engines' per-change inner loop, composed by hand. Returns
+/// without flushing.
 async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
     let ids = services.documents.resolve(table, key).await.unwrap();
+    let ts = chrono::Utc::now();
     for id in &ids {
-        match services.documents.build(id).await.unwrap() {
+        let envelope = match services.documents.build(id).await.unwrap() {
             Document::Upsert { id, body } => {
-                services
-                    .sink
-                    .upsert(&id.index, &doc_id_string(&id), &body)
-                    .await
-                    .unwrap();
+                Envelope::upsert(id.index.clone(), document_id(&id), body, None, ts)
             }
             Document::Delete { id } => {
-                services
-                    .sink
-                    .delete(&id.index, &doc_id_string(&id))
-                    .await
-                    .unwrap();
+                Envelope::delete(id.index.clone(), document_id(&id), None, ts)
             }
-        }
+        };
+        services.sink.apply(&envelope).await.unwrap();
     }
 }
 
@@ -467,11 +496,14 @@ fn bench(c: &mut Criterion) {
         body.insert("id".to_owned(), GenericValue::BigInt(1));
         let body = GenericValue::Map(body);
         b.to_async(&rt).iter(|| async {
-            services
-                .sink
-                .upsert(&index, "baseline", &body)
-                .await
-                .unwrap();
+            let envelope = Envelope::upsert(
+                index.clone(),
+                "baseline",
+                body.clone(),
+                None,
+                chrono::Utc::now(),
+            );
+            services.sink.apply(&envelope).await.unwrap();
             services.sink.flush(true).await.unwrap();
         });
     });
@@ -504,15 +536,17 @@ fn bench(c: &mut Criterion) {
                     let documents = Arc::clone(&documents);
                     let sink = Arc::clone(&sink);
                     async move {
-                        Engine::new(Arc::new(BurstCapture { count: BURST }), documents, sink)
-                            .with_batch(BatchPolicy {
+                        run_deployment(
+                            Arc::new(BurstCapture { count: BURST }),
+                            documents,
+                            sink,
+                            BatchPolicy {
                                 max_changes,
                                 max_delay: Duration::from_secs(10),
-                            })
-                            .skip_backfill(true)
-                            .run()
-                            .await
-                            .unwrap();
+                            },
+                            true,
+                        )
+                        .await;
                     }
                 });
             },
@@ -529,24 +563,17 @@ fn bench(c: &mut Criterion) {
             let capture = BackfillOnly {
                 inner: WalChangeCapture::new(services.replication.clone(), services.url.clone()),
             };
-            let engine = Engine::new(
+            run_deployment(
                 Arc::new(capture),
                 Arc::clone(&services.documents),
                 Arc::clone(&services.sink),
-            );
-            engine.run().await.unwrap();
+                BatchPolicy::default(),
+                false,
+            )
+            .await;
         });
     });
     group.finish();
-}
-
-/// The document's `_id` for OpenSearch: the string form of its root key value.
-fn doc_id_string(id: &DocumentId) -> String {
-    match id.key.0.first().map(|(_, v)| v) {
-        Some(GenericValue::BigInt(n)) => n.to_string(),
-        Some(GenericValue::String(s)) => s.clone(),
-        other => format!("{other:?}"),
-    }
 }
 
 /// The most complex `users` document the builder supports — see the module docs.

@@ -5,13 +5,11 @@ mod config;
 pub use config::StdoutConfig;
 
 use std::io::Write;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use chrono::{SecondsFormat, Utc};
-use kernel::{GenericValue, IndexName};
-use serde_json::{Value, json};
+use chrono::SecondsFormat;
+use kernel::{Envelope, Op};
+use serde_json::{Map, Value, json};
 use sink::{FlushReport, Result, Sink, SinkError, to_json};
 
 /// Identifies this sink in every envelope's `sink` field.
@@ -24,27 +22,16 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Clone)]
 pub struct StdoutSink {
     pretty: bool,
-    /// Monotonic per-sink counter stamped into each envelope as `seq`. Shared
-    /// across clones so one logical sink yields one continuous sequence.
-    seq: Arc<AtomicU64>,
 }
 
 impl StdoutSink {
     /// Create a sink. `pretty` selects pretty-printed JSON over compact NDJSON.
     pub fn new(pretty: bool) -> Self {
-        Self {
-            pretty,
-            seq: Arc::new(AtomicU64::new(1)),
-        }
+        Self { pretty }
     }
 
     pub fn from_config(config: &StdoutConfig) -> Self {
         Self::new(config.pretty)
-    }
-
-    /// Claim the next sequence number for an emitted envelope, starting at 1.
-    fn next_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
     fn render(&self, envelope: &Value) -> Result<String> {
@@ -70,15 +57,8 @@ impl StdoutSink {
 
 #[async_trait]
 impl Sink for StdoutSink {
-    async fn upsert(&self, index: &IndexName, id: &str, document: &GenericValue) -> Result<()> {
-        let envelope = upsert_envelope(self.next_seq(), &now(), index, id, document);
-        let line = self.render(&envelope)?;
-        self.write_line(&line)
-    }
-
-    async fn delete(&self, index: &IndexName, id: &str) -> Result<()> {
-        let envelope = delete_envelope(self.next_seq(), &now(), index, id);
-        let line = self.render(&envelope)?;
+    async fn apply(&self, envelope: &Envelope) -> Result<()> {
+        let line = self.render(&wire_envelope(envelope))?;
         self.write_line(&line)
     }
 
@@ -94,33 +74,31 @@ impl Sink for StdoutSink {
     }
 }
 
-/// The current instant as an RFC 3339 / ISO 8601 UTC timestamp with millisecond
-/// precision (e.g. `2026-06-03T10:20:30.123Z`).
-fn now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-/// Provenance fields common to every envelope: which sink and version produced
-/// it, when, and in what order.
-fn header(
-    seq: u64,
-    ts: &str,
-    index: &IndexName,
-    op: &str,
-    id: &str,
-) -> serde_json::Map<String, Value> {
-    json!({
-        "sink": SINK_NAME,
-        "version": VERSION,
-        "ts": ts,
-        "seq": seq,
-        "index": index.as_ref(),
-        "op": op,
-        "id": id,
-    })
-    .as_object()
-    .cloned()
-    .unwrap_or_default()
+/// The kernel envelope as this sink writes it: its fields as-is, plus the
+/// emitting sink's name, the flusso version, the position rendered as the
+/// opaque `seq` string, and a `meta` summary of the document.
+fn wire_envelope(envelope: &Envelope) -> Value {
+    let mut out = Map::new();
+    out.insert("sink".to_owned(), json!(SINK_NAME));
+    out.insert("version".to_owned(), json!(VERSION));
+    out.insert(
+        "ts".to_owned(),
+        json!(envelope.ts.to_rfc3339_opts(SecondsFormat::Millis, true)),
+    );
+    if let Some(position) = envelope.position {
+        out.insert("seq".to_owned(), json!(position.to_string()));
+    }
+    out.insert("index".to_owned(), json!(envelope.index.as_ref()));
+    out.insert("op".to_owned(), json!(envelope.op.to_string()));
+    out.insert("id".to_owned(), json!(envelope.id));
+    if envelope.op == Op::Upsert
+        && let Some(document) = &envelope.document
+    {
+        let document = to_json(document);
+        out.insert("meta".to_owned(), document_meta(&document));
+        out.insert("document".to_owned(), document);
+    }
+    Value::Object(out)
 }
 
 /// At-a-glance facts about a serialized document: how many top-level fields it
@@ -130,24 +108,6 @@ fn document_meta(document: &Value) -> Value {
         "fields": document.as_object().map(serde_json::Map::len),
         "bytes": document.to_string().len(),
     })
-}
-
-fn upsert_envelope(
-    seq: u64,
-    ts: &str,
-    index: &IndexName,
-    id: &str,
-    document: &GenericValue,
-) -> Value {
-    let document = to_json(document);
-    let mut envelope = header(seq, ts, index, "upsert", id);
-    envelope.insert("meta".to_owned(), document_meta(&document));
-    envelope.insert("document".to_owned(), document);
-    Value::Object(envelope)
-}
-
-fn delete_envelope(seq: u64, ts: &str, index: &IndexName, id: &str) -> Value {
-    Value::Object(header(seq, ts, index, "delete", id))
 }
 
 #[cfg(test)]

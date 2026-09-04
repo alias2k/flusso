@@ -1,11 +1,10 @@
 use kernel::TableName;
 use source::RowKey;
 
-use super::super::ack::WalAckSink;
 use super::*;
 
-fn state() -> (DecodeState, Arc<AckShared>) {
-    let ack = Arc::new(AckShared::new(0));
+fn state() -> (DecodeState, Arc<Positions>) {
+    let ack = Arc::new(Positions::new(0));
     let decode = DecodeState {
         relations: HashMap::new(),
         open_txn: Vec::new(),
@@ -68,8 +67,10 @@ fn keepalive_waits_for_an_emitted_but_unconfirmed_change() {
     let seq = ack.register(50); // emitted to the engine, not yet flushed
     handle(&mut decode, keepalive(100)).unwrap();
     assert_eq!(ack.confirmed_lsn(), 0, "must not pass the unflushed change");
-    WalAckSink::new(Arc::clone(&ack)).confirm(seq);
-    assert_eq!(ack.confirmed_lsn(), 100);
+    ack.confirm(seq);
+    assert_eq!(ack.confirmed_lsn(), 50);
+    ack.confirm(seq + 1);
+    assert_eq!(ack.confirmed_lsn(), 100, "the queued keepalive follows");
 }
 
 #[test]

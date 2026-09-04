@@ -32,6 +32,7 @@ use kernel::{
     ContentHash, FieldName, GenericValue, IndexMapping, IndexName, Mapping, MappingType,
     ResolvedField,
 };
+use kernel::{Envelope, Position};
 use sink::Sink;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
@@ -155,7 +156,15 @@ async fn index_batch(
     docs: &[(String, GenericValue)],
 ) {
     for (id, doc) in docs {
-        sink.upsert(index, id, doc).await.unwrap();
+        sink.apply(&Envelope::upsert(
+            index.clone(),
+            id,
+            doc.clone(),
+            Some(Position(0)),
+            chrono::Utc::now(),
+        ))
+        .await
+        .unwrap();
     }
     sink.flush(true).await.unwrap();
 }

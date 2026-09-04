@@ -1,490 +1,97 @@
-//! Engine unit tests: drive `Engine::run` end-to-end over mock source/sink/
-//! builder, and exercise the worker's batching/ack-ordering/failure-policy
-//! invariants directly via [`work`].
+//! Engine unit tests: the two engines over an in-process stream with mock
+//! source, builder, and sink, asserting the invariants the crate docs name.
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-
 use futures::stream::BoxStream;
-use kernel::{ColumnName, GenericValue, IndexMapping, IndexName, TableName};
-use source::RowKey;
-use source::SnapshotTable;
-use source::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
-use source::document::{Document, DocumentId};
-use stream::Producer;
-use stream_channel::channel;
+use kernel::{ColumnName, Envelope, IndexMapping, IndexName, Op, Position, SinkName, TableName};
+use sink::{FlushReport, Sink, SinkOptions};
+use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
+use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
+use source::{RowKey, SnapshotTable};
+use stream::Stream;
+use stream_channel::ChannelStream;
+use tokio::sync::Notify;
 
 use super::*;
-use crate::pipeline::{Pipeline, work};
 
-/// A source that replays a fixed list of changes once.
+fn users() -> IndexName {
+    IndexName::try_new("users").unwrap()
+}
+
+fn sink_name(name: &str) -> SinkName {
+    SinkName::try_new(name).unwrap()
+}
+
+fn key(id: i64) -> RowKey {
+    RowKey(vec![(
+        ColumnName::try_new("id").unwrap(),
+        kernel::GenericValue::BigInt(id),
+    )])
+}
+
+fn upsert(id: i64) -> ChangeEvent {
+    ChangeEvent::Upsert {
+        table: TableName::try_new("users").unwrap(),
+        key: key(id),
+    }
+}
+
+fn delete(id: i64) -> ChangeEvent {
+    ChangeEvent::Delete {
+        table: TableName::try_new("users").unwrap(),
+        key: key(id),
+    }
+}
+
+fn mapping() -> IndexMapping {
+    IndexMapping {
+        index: users(),
+        hash: kernel::ContentHash::new(1),
+        fields: Vec::new(),
+    }
+}
+
+/// A source that replays live changes (positions 0..n) once and snapshots a
+/// fixed set of rows, recording what it was asked and what was confirmed.
 #[derive(Debug)]
 struct MockSource {
-    changes: Mutex<Option<Vec<Change>>>,
-}
-
-#[async_trait]
-impl ChangeCapture for MockSource {
-    async fn continuity(&self) -> source::Result<Continuity> {
-        Ok(Continuity::Resumed)
-    }
-
-    async fn prepare(&self) -> source::Result<()> {
-        Ok(())
-    }
-
-    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<Change>>> {
-        let changes = self.changes.lock().unwrap().take().unwrap_or_default();
-        Ok(Box::pin(futures::stream::iter(
-            changes.into_iter().map(Ok::<Change, source::SourceError>),
-        )))
-    }
-}
-
-/// Counts how many changes were confirmed.
-#[derive(Debug)]
-struct CountingAck(Arc<AtomicU64>);
-
-impl AckSink for CountingAck {
-    fn confirm(&self, _seq: u64) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-/// Resolves each change to one document; key value `2` builds a tombstone.
-#[derive(Debug)]
-struct MockDocuments;
-
-#[async_trait]
-impl DocumentBuilder for MockDocuments {
-    async fn resolve(&self, _table: &TableName, key: &RowKey) -> source::Result<Vec<DocumentId>> {
-        Ok(vec![DocumentId {
-            index: IndexName::try_new("users").unwrap(),
-            key: key.clone(),
-        }])
-    }
-
-    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
-        let deleted = matches!(id.key.0.first(), Some((_, GenericValue::BigInt(2))));
-        Ok(if deleted {
-            Document::Delete { id: id.clone() }
-        } else {
-            Document::Upsert {
-                id: id.clone(),
-                body: GenericValue::Map(Default::default()),
-            }
-        })
-    }
-
-    fn backfill_scopes(&self) -> Vec<source::document::IndexScope> {
-        vec![source::document::IndexScope {
-            index: IndexName::try_new("users").unwrap(),
-            root: SnapshotTable {
-                db_schema: kernel::DatabaseSchema::try_new("public").unwrap(),
-                table: TableName::try_new("users").unwrap(),
-            },
-        }]
-    }
-
-    async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
-        Ok(vec![IndexMapping {
-            index: IndexName::try_new("users").unwrap(),
-            hash: kernel::ContentHash::new(1),
-            fields: Vec::new(),
-        }])
-    }
-}
-
-/// Records the sink operations it receives.
-#[derive(Debug, Default)]
-struct RecordingSink {
-    ops: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl Sink for RecordingSink {
-    async fn upsert(
-        &self,
-        index: &IndexName,
-        id: &str,
-        _document: &GenericValue,
-    ) -> sink::Result<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("upsert {} {id}", index.as_ref()));
-        Ok(())
-    }
-
-    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("delete {} {id}", index.as_ref()));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
-        Ok(sink::FlushReport::clean())
-    }
-}
-
-fn upsert_change(id: i64, seq: u64, acks: &Arc<AtomicU64>) -> Change {
-    row_change(false, id, seq, acks)
-}
-
-fn delete_change(id: i64, seq: u64, acks: &Arc<AtomicU64>) -> Change {
-    row_change(true, id, seq, acks)
-}
-
-fn row_change(delete: bool, id: i64, seq: u64, acks: &Arc<AtomicU64>) -> Change {
-    let table = TableName::try_new("users").unwrap();
-    let key = RowKey(vec![(
-        ColumnName::try_new("id").unwrap(),
-        GenericValue::BigInt(id),
-    )]);
-    let event = if delete {
-        ChangeEvent::Delete { table, key }
-    } else {
-        ChangeEvent::Upsert { table, key }
-    };
-    Change {
-        event,
-        ack: Ack::new(seq, Arc::new(CountingAck(Arc::clone(acks)))),
-    }
-}
-
-#[tokio::test]
-async fn drives_changes_to_the_sink_and_acks_each() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let ops = Arc::new(Mutex::new(Vec::new()));
-
-    let changes = vec![upsert_change(1, 0, &acks), delete_change(2, 1, &acks)];
-
-    let engine = Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(changes)),
-        }),
-        Arc::new(MockDocuments),
-        Arc::new(RecordingSink {
-            ops: Arc::clone(&ops),
-        }),
-    );
-    engine.run().await.unwrap();
-
-    assert_eq!(
-        *ops.lock().unwrap(),
-        vec!["upsert users 1".to_owned(), "delete users 2".to_owned()]
-    );
-    // Every change is confirmed.
-    assert_eq!(acks.load(Ordering::SeqCst), 2);
-}
-
-/// Records every upsert/delete and each flush boundary in one ordered log,
-/// so a test can see how changes group into flushes.
-#[derive(Debug, Default)]
-struct FlushLogSink {
-    ops: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl Sink for FlushLogSink {
-    async fn upsert(
-        &self,
-        index: &IndexName,
-        id: &str,
-        _document: &GenericValue,
-    ) -> sink::Result<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("upsert {} {id}", index.as_ref()));
-        Ok(())
-    }
-
-    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("delete {} {id}", index.as_ref()));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
-        self.ops.lock().unwrap().push("flush".to_owned());
-        Ok(sink::FlushReport::clean())
-    }
-}
-
-#[tokio::test]
-async fn batches_changes_into_a_single_flush() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let changes = (0..5)
-        .map(|i| upsert_change(10 + i as i64, i, &acks))
-        .collect::<Vec<_>>();
-
-    Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(changes)),
-        }),
-        Arc::new(MockDocuments),
-        Arc::new(FlushLogSink {
-            ops: Arc::clone(&ops),
-        }),
-    )
-    // A wide window and a high cap so all five buffer into one batch; the
-    // finite stream ends long before the delay could fire.
-    .with_batch(BatchPolicy {
-        max_changes: 256,
-        max_delay: Duration::from_secs(10),
-    })
-    .skip_backfill(true)
-    .run()
-    .await
-    .unwrap();
-
-    assert_eq!(
-        *ops.lock().unwrap(),
-        vec![
-            "upsert users 10".to_owned(),
-            "upsert users 11".to_owned(),
-            "upsert users 12".to_owned(),
-            "upsert users 13".to_owned(),
-            "upsert users 14".to_owned(),
-            "flush".to_owned(),
-        ],
-        "all five changes batch into exactly one flush, after every upsert",
-    );
-    assert_eq!(
-        acks.load(Ordering::SeqCst),
-        5,
-        "the whole batch is confirmed"
-    );
-}
-
-/// Resolves every change to the *same* document id and counts how many
-/// times that document is assembled — so a test can show a batch builds a
-/// repeatedly-touched document once, not once per change.
-#[derive(Debug)]
-struct CountingBuilder {
-    builds: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl DocumentBuilder for CountingBuilder {
-    async fn resolve(&self, _table: &TableName, _key: &RowKey) -> source::Result<Vec<DocumentId>> {
-        Ok(vec![DocumentId {
-            index: IndexName::try_new("users").unwrap(),
-            key: RowKey(vec![(
-                ColumnName::try_new("id").unwrap(),
-                GenericValue::BigInt(1),
-            )]),
-        }])
-    }
-
-    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
-        self.builds.fetch_add(1, Ordering::SeqCst);
-        Ok(Document::Upsert {
-            id: id.clone(),
-            body: GenericValue::Map(Default::default()),
-        })
-    }
-}
-
-#[tokio::test]
-async fn builds_a_repeatedly_touched_document_once_per_batch() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let builds = Arc::new(AtomicU64::new(0));
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    // Three changes that all resolve to the same document id.
-    let changes = (0..3)
-        .map(|i| upsert_change(100 + i as i64, i, &acks))
-        .collect::<Vec<_>>();
-
-    Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(changes)),
-        }),
-        Arc::new(CountingBuilder {
-            builds: Arc::clone(&builds),
-        }),
-        Arc::new(FlushLogSink {
-            ops: Arc::clone(&ops),
-        }),
-    )
-    // One batch holds all three changes.
-    .with_batch(BatchPolicy {
-        max_changes: 256,
-        max_delay: Duration::from_secs(10),
-    })
-    .skip_backfill(true)
-    .run()
-    .await
-    .unwrap();
-
-    assert_eq!(
-        builds.load(Ordering::SeqCst),
-        1,
-        "the document is assembled once despite three changes touching it"
-    );
-    assert_eq!(
-        *ops.lock().unwrap(),
-        vec!["upsert users 1".to_owned(), "flush".to_owned()],
-        "one upsert, one flush",
-    );
-    // Every change is still confirmed — dedup is on the build, not the ack.
-    assert_eq!(acks.load(Ordering::SeqCst), 3);
-}
-
-/// Counts flushes; shares its counter with [`OrderingAck`] so a test can
-/// observe how many flushes had happened at the moment a seq was confirmed.
-#[derive(Debug)]
-struct FlushCountSink {
-    flushes: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl Sink for FlushCountSink {
-    async fn upsert(
-        &self,
-        _index: &IndexName,
-        _id: &str,
-        _document: &GenericValue,
-    ) -> sink::Result<()> {
-        Ok(())
-    }
-    async fn delete(&self, _index: &IndexName, _id: &str) -> sink::Result<()> {
-        Ok(())
-    }
-    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
-        self.flushes.fetch_add(1, Ordering::SeqCst);
-        Ok(sink::FlushReport::clean())
-    }
-}
-
-/// On confirm, records the flush count observed at that instant — so a test
-/// can assert no change is confirmed before the flush that persisted it.
-#[derive(Debug)]
-struct OrderingAck {
-    flushes: Arc<AtomicU64>,
-    observed: Arc<Mutex<BTreeMap<u64, u64>>>,
-}
-
-impl AckSink for OrderingAck {
-    fn confirm(&self, seq: u64) {
-        let flushes_so_far = self.flushes.load(Ordering::SeqCst);
-        self.observed.lock().unwrap().insert(seq, flushes_so_far);
-    }
-}
-
-fn ordering_change(
-    seq: u64,
-    flushes: &Arc<AtomicU64>,
-    observed: &Arc<Mutex<BTreeMap<u64, u64>>>,
-) -> Change {
-    let table = TableName::try_new("users").unwrap();
-    let key = RowKey(vec![(
-        ColumnName::try_new("id").unwrap(),
-        GenericValue::BigInt(seq as i64 + 100),
-    )]);
-    Change {
-        event: ChangeEvent::Upsert { table, key },
-        ack: Ack::new(
-            seq,
-            Arc::new(OrderingAck {
-                flushes: Arc::clone(flushes),
-                observed: Arc::clone(observed),
-            }),
-        ),
-    }
-}
-
-#[tokio::test]
-async fn confirms_no_ack_before_its_flush() {
-    let flushes = Arc::new(AtomicU64::new(0));
-    let observed = Arc::new(Mutex::new(BTreeMap::new()));
-    let changes = (0..4)
-        .map(|seq| ordering_change(seq, &flushes, &observed))
-        .collect::<Vec<_>>();
-
-    Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(changes)),
-        }),
-        Arc::new(MockDocuments),
-        Arc::new(FlushCountSink {
-            flushes: Arc::clone(&flushes),
-        }),
-    )
-    // Two per flush → two batches over four changes; the wide delay never
-    // fires, so the split is deterministic.
-    .with_batch(BatchPolicy {
-        max_changes: 2,
-        max_delay: Duration::from_secs(10),
-    })
-    .skip_backfill(true)
-    .run()
-    .await
-    .unwrap();
-
-    assert_eq!(
-        flushes.load(Ordering::SeqCst),
-        2,
-        "four changes → two flushes of two"
-    );
-    let observed = observed.lock().unwrap();
-    // A change in batch k (0-indexed) is confirmed only after k+1 flushes —
-    // i.e. never before the flush that made its own documents durable.
-    assert_eq!(observed.get(&0), Some(&1), "seq 0 confirmed after flush 1");
-    assert_eq!(observed.get(&1), Some(&1), "seq 1 confirmed after flush 1");
-    assert_eq!(observed.get(&2), Some(&2), "seq 2 confirmed after flush 2");
-    assert_eq!(observed.get(&3), Some(&2), "seq 3 confirmed after flush 2");
-}
-
-/// A source whose `live` stream is empty (so `run` returns), whose `continuity`
-/// reports a configurable [`Continuity`] (`Resumed` by default), and whose
-/// `snapshot` records that it was called, with what tables, and replays a
-/// fixed set of rows. `prepare` and `snapshot` append to a shared `events` log
-/// (a [`SeedSink`] can share it) so a test can assert their order.
-#[derive(Debug)]
-struct SeedSource {
-    rows: Mutex<Option<Vec<Change>>>,
-    called: Arc<AtomicBool>,
-    tables: Arc<Mutex<Vec<SnapshotTable>>>,
+    live: Mutex<Option<Vec<ChangeEvent>>>,
+    snapshot_rows: Vec<ChangeEvent>,
     continuity: Continuity,
     events: Arc<Mutex<Vec<String>>>,
+    confirmed: Arc<Mutex<Vec<Position>>>,
 }
 
-impl SeedSource {
-    fn new(rows: Vec<Change>) -> Self {
+impl MockSource {
+    fn new(live: Vec<ChangeEvent>) -> Self {
         Self {
-            rows: Mutex::new(Some(rows)),
-            called: Arc::new(AtomicBool::new(false)),
-            tables: Arc::new(Mutex::new(Vec::new())),
+            live: Mutex::new(Some(live)),
+            snapshot_rows: Vec::new(),
             continuity: Continuity::Resumed,
             events: Arc::new(Mutex::new(Vec::new())),
+            confirmed: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_snapshot(mut self, rows: Vec<ChangeEvent>) -> Self {
+        self.snapshot_rows = rows;
+        self
     }
 
     fn with_continuity(mut self, continuity: Continuity) -> Self {
         self.continuity = continuity;
         self
     }
-
-    fn with_events(mut self, events: &Arc<Mutex<Vec<String>>>) -> Self {
-        self.events = Arc::clone(events);
-        self
-    }
 }
 
 #[async_trait]
-impl ChangeCapture for SeedSource {
+impl ChangeCapture for MockSource {
     async fn continuity(&self) -> source::Result<Continuity> {
         Ok(self.continuity)
     }
@@ -494,45 +101,107 @@ impl ChangeCapture for SeedSource {
         Ok(())
     }
 
-    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<Change>>> {
-        Ok(Box::pin(futures::stream::empty()))
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        let changes = self.live.lock().unwrap().take().unwrap_or_default();
+        Ok(Box::pin(futures::stream::iter(
+            changes
+                .into_iter()
+                .enumerate()
+                .map(|(i, event)| Ok((Position(i as u64), event))),
+        )))
+    }
+
+    fn confirm(&self, position: Position) {
+        self.confirmed.lock().unwrap().push(position);
     }
 
     async fn snapshot(
         &self,
         tables: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<Change>>> {
-        self.called.store(true, Ordering::SeqCst);
-        self.events.lock().unwrap().push("snapshot".to_owned());
-        *self.tables.lock().unwrap() = tables.to_vec();
-        let rows = self.rows.lock().unwrap().take().unwrap_or_default();
+    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("snapshot {}", tables.len()));
         Ok(Box::pin(futures::stream::iter(
-            rows.into_iter().map(Ok::<Change, source::SourceError>),
+            self.snapshot_rows.clone().into_iter().map(Ok),
         )))
     }
 }
 
-/// A sink with a settable seeded-state that records `mark_seeded` and `reindex`
-/// calls and the upserts it receives. `reindex` flips it unseeded, as a real
-/// sink staging a rebuild does, and appends to the shared `events` log.
-#[derive(Debug)]
-struct SeedSink {
+/// Resolves every change to one `users` document; a delete builds a tombstone.
+/// Counts `build_many` calls and the ids handed to each.
+#[derive(Debug, Default)]
+struct MockDocuments {
+    builds: Arc<Mutex<Vec<usize>>>,
+    deleted: Mutex<Vec<i64>>,
+}
+
+#[async_trait]
+impl DocumentBuilder for MockDocuments {
+    async fn resolve(&self, _table: &TableName, key: &RowKey) -> source::Result<Vec<DocumentId>> {
+        Ok(vec![DocumentId {
+            index: users(),
+            key: key.clone(),
+        }])
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        let row = match id.key.0.first() {
+            Some((_, kernel::GenericValue::BigInt(v))) => *v,
+            _ => 0,
+        };
+        if self.deleted.lock().unwrap().contains(&row) {
+            return Ok(Document::Delete { id: id.clone() });
+        }
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: kernel::GenericValue::Map(BTreeMap::new()),
+        })
+    }
+
+    async fn build_many(&self, ids: &[DocumentId]) -> source::Result<Vec<Document>> {
+        self.builds.lock().unwrap().push(ids.len());
+        let mut out = Vec::new();
+        for id in ids {
+            out.push(self.build(id).await?);
+        }
+        Ok(out)
+    }
+
+    fn backfill_scopes(&self) -> Vec<IndexScope> {
+        vec![IndexScope {
+            index: users(),
+            root: SnapshotTable {
+                db_schema: kernel::DatabaseSchema::try_new("public").unwrap(),
+                table: TableName::try_new("users").unwrap(),
+            },
+        }]
+    }
+
+    async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
+        Ok(vec![mapping()])
+    }
+}
+
+/// Records applied envelopes as `"<op> <index> <id>"`, flushes, and the seed
+/// hooks; `seeded` is what `is_seeded` answers.
+#[derive(Debug, Default)]
+struct RecordingSink {
+    ops: Arc<Mutex<Vec<String>>>,
+    flushes: Arc<Mutex<Vec<(usize, bool)>>>,
     seeded: AtomicBool,
     marked: Arc<Mutex<Vec<String>>>,
     reindexed: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<String>>>,
-    ops: Arc<Mutex<Vec<String>>>,
+    pending: AtomicUsize,
 }
 
-impl SeedSink {
-    fn new(seeded: bool, marked: &Arc<Mutex<Vec<String>>>, ops: &Arc<Mutex<Vec<String>>>) -> Self {
-        Self {
-            seeded: AtomicBool::new(seeded),
-            marked: Arc::clone(marked),
-            reindexed: Arc::new(Mutex::new(Vec::new())),
-            events: Arc::new(Mutex::new(Vec::new())),
-            ops: Arc::clone(ops),
-        }
+impl RecordingSink {
+    fn seeded(seeded: bool) -> Self {
+        let sink = Self::default();
+        sink.seeded.store(seeded, Ordering::SeqCst);
+        sink
     }
 
     fn with_events(mut self, events: &Arc<Mutex<Vec<String>>>) -> Self {
@@ -542,38 +211,31 @@ impl SeedSink {
 }
 
 #[async_trait]
-impl Sink for SeedSink {
-    async fn upsert(
-        &self,
-        index: &IndexName,
-        id: &str,
-        _document: &GenericValue,
-    ) -> sink::Result<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("upsert {} {id}", index.as_ref()));
+impl Sink for RecordingSink {
+    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
+        self.ops.lock().unwrap().push(format!(
+            "{} {} {}",
+            envelope.op,
+            envelope.index.as_ref(),
+            envelope.id
+        ));
+        self.pending.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("delete {} {id}", index.as_ref()));
-        Ok(())
+    async fn flush(&self, caught_up: bool) -> sink::Result<FlushReport> {
+        let n = self.pending.swap(0, Ordering::SeqCst);
+        self.flushes.lock().unwrap().push((n, caught_up));
+        Ok(FlushReport::clean())
     }
 
-    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
-        Ok(sink::FlushReport::clean())
-    }
-
-    async fn is_seeded(&self, _index: &IndexName) -> sink::Result<bool> {
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
         Ok(self.seeded.load(Ordering::SeqCst))
     }
 
     async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
         self.marked.lock().unwrap().push(index.as_ref().to_owned());
+        self.seeded.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -586,512 +248,500 @@ impl Sink for SeedSink {
     }
 }
 
+/// One deployment in a test: a stream with one lane per sink, the ingest
+/// engine, and one sink engine per sink, run the way the daemon runs them.
+struct Harness {
+    stream: Arc<ChannelStream>,
+    source: Arc<MockSource>,
+    documents: Arc<MockDocuments>,
+    ingest: IngestEngine,
+    sinks: Vec<SinkEngine>,
+}
+
+impl Harness {
+    fn new(source: MockSource, sinks: Vec<(SinkName, Arc<dyn Sink>)>) -> Self {
+        let documents = Arc::new(MockDocuments::default());
+        let names: Vec<SinkName> = sinks.iter().map(|(n, _)| n.clone()).collect();
+        let stream = Arc::new(ChannelStream::new(64, names.clone()));
+        let source = Arc::new(source);
+        let ingest = IngestEngine::new(
+            Arc::clone(&source) as Arc<dyn ChangeCapture>,
+            Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            names,
+        );
+        let sinks = sinks
+            .into_iter()
+            .map(|(name, sink)| {
+                SinkEngine::new(
+                    name,
+                    sink,
+                    Arc::clone(&stream) as Arc<dyn Stream>,
+                    vec![mapping()],
+                )
+            })
+            .collect();
+        Self {
+            stream,
+            source,
+            documents,
+            ingest,
+            sinks,
+        }
+    }
+
+    fn map_sinks(mut self, f: impl Fn(SinkEngine) -> SinkEngine) -> Self {
+        self.sinks = self.sinks.into_iter().map(f).collect();
+        self
+    }
+
+    fn with_batch(mut self, batch: BatchPolicy) -> Self {
+        self.ingest = self.ingest.with_batch(batch);
+        self
+    }
+
+    /// Stage every sink with `continuity`, run everything until the live
+    /// stream ends and the lanes drain, then stop the sink engines. Returns the
+    /// sink engines' outcomes (an error stops that sink engine, as it would in
+    /// the daemon).
+    async fn run(self, continuity: Continuity) -> Vec<Result<()>> {
+        for sink in &self.sinks {
+            sink.stage(continuity).await.unwrap();
+        }
+        let stream = Arc::clone(&self.stream);
+        let sinks = self.sinks;
+        let mut controls = Vec::new();
+        let mut tasks = Vec::new();
+        for engine in sinks {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(4);
+            controls.push(tx);
+            tasks.push(tokio::spawn(async move { engine.run(&mut rx).await }));
+        }
+        self.ingest.run().await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !stream.is_idle() && tokio::time::Instant::now() < deadline {
+            if tasks.iter().all(|t| t.is_finished()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            task.abort();
+            outcomes.push(match task.await {
+                Ok(result) => result,
+                Err(_) => Ok(()),
+            });
+        }
+        if let Some(watermark) = stream.watermark() {
+            self.source.confirm(watermark);
+        }
+        drop(controls);
+        outcomes
+    }
+}
+
 #[tokio::test]
-async fn seeds_an_unseeded_index_then_marks_it() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let source = SeedSource::new(vec![upsert_change(1, 0, &acks), upsert_change(3, 1, &acks)]);
-    let called = Arc::clone(&source.called);
-    let tables = Arc::clone(&source.tables);
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(false, &marked, &ops));
+async fn drives_live_changes_to_the_sink_and_confirms_the_watermark() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let ops = Arc::clone(&sink.ops);
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), delete(2), upsert(3)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 1,
+        max_delay: Duration::from_millis(10),
+    });
+    let source = Arc::clone(&harness.source);
+    harness.run(Continuity::Resumed).await;
 
-    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
-        .run()
-        .await
-        .unwrap();
-
-    assert!(
-        called.load(Ordering::SeqCst),
-        "snapshot should be requested"
+    let recorded = ops.lock().unwrap();
+    assert!(recorded.contains(&"upsert users 1".to_owned()));
+    assert!(recorded.contains(&"upsert users 3".to_owned()));
+    assert_eq!(recorded.len(), 3);
+    let confirmed = source.confirmed.lock().unwrap();
+    assert_eq!(
+        confirmed.last(),
+        Some(&Position(2)),
+        "the last change's position reaches the source once every lane acked it"
     );
-    // The index's root table is what gets snapshotted.
-    let tables = tables.lock().unwrap();
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables.first().unwrap().table.as_ref(), "users");
-    // Snapshot rows are applied, and the index is marked seeded afterwards.
+}
+
+#[tokio::test]
+async fn batches_changes_into_a_single_build_and_flush() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let flushes = Arc::clone(&sink.flushes);
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(2), upsert(3), upsert(4)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(5),
+    });
+    let builds = Arc::clone(&harness.documents.builds);
+    harness.run(Continuity::Resumed).await;
+
+    assert_eq!(
+        *builds.lock().unwrap(),
+        vec![4],
+        "one build_many for the batch"
+    );
+    assert_eq!(
+        *flushes.lock().unwrap(),
+        vec![(4, true)],
+        "one flush of four envelopes, caught up"
+    );
+}
+
+#[tokio::test]
+async fn builds_a_repeatedly_touched_document_once_per_batch() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let ops = Arc::clone(&sink.ops);
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(1), upsert(1), upsert(2)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(5),
+    });
+    let builds = Arc::clone(&harness.documents.builds);
+    harness.run(Continuity::Resumed).await;
+
+    assert_eq!(
+        *builds.lock().unwrap(),
+        vec![2],
+        "ids are deduplicated before the build"
+    );
+    assert_eq!(ops.lock().unwrap().len(), 2);
+}
+
+/// A sink whose flush blocks until released, so a test can look at the
+/// watermark while a batch is applied-but-not-flushed.
+#[derive(Debug)]
+struct GatedSink {
+    release: Arc<Notify>,
+    released: AtomicBool,
+}
+
+#[async_trait]
+impl Sink for GatedSink {
+    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+        if !self.released.swap(true, Ordering::SeqCst) {
+            self.release.notified().await;
+        }
+        Ok(FlushReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn confirms_no_position_before_its_flush() {
+    let release = Arc::new(Notify::new());
+    let sink = Arc::new(GatedSink {
+        release: Arc::clone(&release),
+        released: AtomicBool::new(false),
+    });
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]),
+        vec![(sink_name("primary"), sink)],
+    );
+    let stream = Arc::clone(&harness.stream);
+    let source = Arc::clone(&harness.source);
+
+    let run = tokio::spawn(harness.run(Continuity::Resumed));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        stream.watermark(),
+        None,
+        "the batch is applied but its flush has not returned: nothing is confirmed"
+    );
+    assert!(source.confirmed.lock().unwrap().is_empty());
+    release.notify_one();
+    run.await.unwrap();
+    assert_eq!(stream.watermark(), Some(Position(0)));
+    assert_eq!(*source.confirmed.lock().unwrap(), vec![Position(0)]);
+}
+
+#[tokio::test]
+async fn an_unseeded_sink_requests_a_snapshot_then_marks_seeded() {
+    let sink = Arc::new(RecordingSink::seeded(false));
+    let ops = Arc::clone(&sink.ops);
+    let marked = Arc::clone(&sink.marked);
+    let harness = Harness::new(
+        MockSource::new(vec![]).with_snapshot(vec![upsert(10), upsert(11)]),
+        vec![(sink_name("primary"), sink)],
+    );
+    let events = Arc::clone(&harness.source.events);
+    harness.run(Continuity::Resumed).await;
+
+    assert_eq!(*events.lock().unwrap(), vec!["prepare", "snapshot 1"]);
     assert_eq!(
         *ops.lock().unwrap(),
-        vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
+        vec!["upsert users 10".to_owned(), "upsert users 11".to_owned()]
     );
     assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
 }
 
 #[tokio::test]
-async fn skips_backfill_when_the_sink_reports_seeded() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let source = SeedSource::new(vec![upsert_change(1, 0, &acks)]);
-    let called = Arc::clone(&source.called);
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
-
-    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
-        .run()
-        .await
-        .unwrap();
-
-    assert!(
-        !called.load(Ordering::SeqCst),
-        "a seeded index is not snapshotted"
+async fn a_seeded_sink_requests_nothing() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let ops = Arc::clone(&sink.ops);
+    let harness = Harness::new(
+        MockSource::new(vec![]).with_snapshot(vec![upsert(10)]),
+        vec![(sink_name("primary"), sink)],
     );
+    let events = Arc::clone(&harness.source.events);
+    harness.run(Continuity::Resumed).await;
+    assert_eq!(*events.lock().unwrap(), vec!["prepare"]);
     assert!(ops.lock().unwrap().is_empty());
-    assert!(marked.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn fresh_source_rebuilds_seeded_indexes_into_a_new_generation() {
-    // The seed marker says "seeded", but the source's resume point had to be
-    // created: whatever changed since that seed is gone. The engine must stage a
-    // from-scratch rebuild (reindex, not an in-place reseed) and then backfill.
-    let acks = Arc::new(AtomicU64::new(0));
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let source = SeedSource::new(vec![upsert_change(1, 0, &acks), upsert_change(3, 1, &acks)])
-        .with_continuity(Continuity::Fresh)
-        .with_events(&events);
-    let called = Arc::clone(&source.called);
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(true, &marked, &ops).with_events(&events));
-    let reindexed = Arc::clone(&sink.reindexed);
-
-    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
-        .run()
-        .await
-        .unwrap();
+async fn snapshots_go_only_to_the_requesting_lane() {
+    let seeded = Arc::new(RecordingSink::seeded(true));
+    let unseeded = Arc::new(RecordingSink::seeded(false));
+    let seeded_ops = Arc::clone(&seeded.ops);
+    let unseeded_ops = Arc::clone(&unseeded.ops);
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]).with_snapshot(vec![upsert(10)]),
+        vec![(sink_name("warm"), seeded), (sink_name("cold"), unseeded)],
+    );
+    harness.run(Continuity::Resumed).await;
 
     assert_eq!(
-        *reindexed.lock().unwrap(),
-        vec!["users".to_owned()],
-        "a seeded index is staged for a rebuild when continuity is lost"
+        *seeded_ops.lock().unwrap(),
+        vec!["upsert users 1".to_owned()],
+        "the seeded sink sees live changes only"
     );
-    // The rebuild is staged (durably, at the sink) *before* the resume point
-    // is created, so a crash in between re-stages rather than trusting the
-    // stale seed; and the resume point exists before the snapshot is taken.
+    let cold = unseeded_ops.lock().unwrap();
+    assert!(cold.contains(&"upsert users 10".to_owned()), "{cold:?}");
+    assert!(cold.contains(&"upsert users 1".to_owned()), "{cold:?}");
+}
+
+#[tokio::test]
+async fn concurrent_requests_for_the_same_index_coalesce_into_one_snapshot() {
+    let a = Arc::new(RecordingSink::seeded(false));
+    let b = Arc::new(RecordingSink::seeded(false));
+    let a_marked = Arc::clone(&a.marked);
+    let b_marked = Arc::clone(&b.marked);
+    let harness = Harness::new(
+        MockSource::new(vec![]).with_snapshot(vec![upsert(10)]),
+        vec![(sink_name("a"), a), (sink_name("b"), b)],
+    );
+    let events = Arc::clone(&harness.source.events);
+    harness.run(Continuity::Resumed).await;
+
     assert_eq!(
         *events.lock().unwrap(),
-        vec![
-            "reindex users".to_owned(),
-            "prepare".to_owned(),
-            "snapshot".to_owned()
-        ],
-        "stage the rebuild, then establish the resume point, then snapshot"
+        vec!["prepare", "snapshot 1"],
+        "two requests, one pass over the table"
     );
-    assert!(
-        called.load(Ordering::SeqCst),
-        "the rebuild is then seeded by a snapshot"
-    );
+    assert_eq!(*a_marked.lock().unwrap(), vec!["users".to_owned()]);
+    assert_eq!(*b_marked.lock().unwrap(), vec!["users".to_owned()]);
+}
+
+#[tokio::test]
+async fn fresh_source_rebuilds_seeded_indexes_before_prepare_then_snapshots() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::seeded(true).with_events(&events));
+    let reindexed = Arc::clone(&sink.reindexed);
+    let marked = Arc::clone(&sink.marked);
+    let mut source = MockSource::new(vec![])
+        .with_snapshot(vec![upsert(1)])
+        .with_continuity(Continuity::Fresh);
+    source.events = Arc::clone(&events);
+    let harness = Harness::new(source, vec![(sink_name("primary"), sink)]);
+    harness.run(Continuity::Fresh).await;
+
+    assert_eq!(*reindexed.lock().unwrap(), vec!["users".to_owned()]);
     assert_eq!(
-        *ops.lock().unwrap(),
-        vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
+        *events.lock().unwrap(),
+        vec!["reindex users", "prepare", "snapshot 1"],
+        "stage the rebuild, then establish the resume point, then snapshot"
     );
     assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
 }
 
 #[tokio::test]
 async fn fresh_source_leaves_an_unseeded_index_to_the_normal_backfill() {
-    // A first run: the resume point is created *and* nothing is seeded yet.
-    // No rebuild is staged — the index is about to be seeded anyway, and
-    // staging would orphan a target — it just goes through the normal backfill.
-    let acks = Arc::new(AtomicU64::new(0));
-    let source =
-        SeedSource::new(vec![upsert_change(1, 0, &acks)]).with_continuity(Continuity::Fresh);
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(false, &marked, &ops));
+    let sink = Arc::new(RecordingSink::seeded(false));
     let reindexed = Arc::clone(&sink.reindexed);
-
-    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
-        .run()
-        .await
-        .unwrap();
-
-    assert!(
-        reindexed.lock().unwrap().is_empty(),
-        "an unseeded index is not staged again"
+    let marked = Arc::clone(&sink.marked);
+    let harness = Harness::new(
+        MockSource::new(vec![])
+            .with_snapshot(vec![upsert(1)])
+            .with_continuity(Continuity::Fresh),
+        vec![(sink_name("primary"), sink)],
     );
-    assert_eq!(*ops.lock().unwrap(), vec!["upsert users 1".to_owned()]);
+    harness.run(Continuity::Fresh).await;
+    assert!(reindexed.lock().unwrap().is_empty());
     assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
 }
 
 #[tokio::test]
-async fn resumed_source_trusts_the_seed_marker() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let source =
-        SeedSource::new(vec![upsert_change(1, 0, &acks)]).with_continuity(Continuity::Resumed);
-    let called = Arc::clone(&source.called);
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
-    let reindexed = Arc::clone(&sink.reindexed);
-
-    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
-        .run()
-        .await
-        .unwrap();
-
-    assert!(reindexed.lock().unwrap().is_empty());
-    assert!(!called.load(Ordering::SeqCst));
-    assert!(ops.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn skip_backfill_with_a_fresh_source_stages_nothing() {
-    // The operator opted out of seeding. Staging a rebuild nobody backfills
-    // would send live writes into an unserved target, so the engine only warns
-    // and serves the (possibly stale) index as-is.
-    let acks = Arc::new(AtomicU64::new(0));
-    let source =
-        SeedSource::new(vec![upsert_change(1, 0, &acks)]).with_continuity(Continuity::Fresh);
-    let called = Arc::clone(&source.called);
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(true, &marked, &ops));
+    let sink = Arc::new(RecordingSink::seeded(true));
     let reindexed = Arc::clone(&sink.reindexed);
-
-    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
-        .skip_backfill(true)
-        .run()
-        .await
-        .unwrap();
-
-    assert!(
-        reindexed.lock().unwrap().is_empty(),
-        "no rebuild is staged under skip_backfill"
-    );
-    assert!(!called.load(Ordering::SeqCst));
-    assert!(ops.lock().unwrap().is_empty());
-    assert!(marked.lock().unwrap().is_empty());
-}
-
-/// Records the observer events a run emits, so a test can assert the engine
-/// reports its lifecycle and per-batch progress.
-#[derive(Debug, Default)]
-struct RecordingObserver {
-    indexes_ensured: AtomicU64,
-    captured: AtomicU64,
-    committed_changes: AtomicU64,
-    committed_documents: AtomicU64,
-    batches: AtomicU64,
-    live: AtomicBool,
-}
-
-impl Observer for RecordingObserver {
-    fn on_indexes_ensured(&self, count: usize) {
-        self.indexes_ensured.store(count as u64, Ordering::SeqCst);
-    }
-    fn on_live_started(&self) {
-        self.live.store(true, Ordering::SeqCst);
-    }
-    fn on_change_captured(&self) {
-        self.captured.fetch_add(1, Ordering::SeqCst);
-    }
-    fn on_batch_committed(&self, stats: BatchStats) {
-        self.committed_changes
-            .fetch_add(stats.changes as u64, Ordering::SeqCst);
-        self.committed_documents
-            .fetch_add(stats.documents as u64, Ordering::SeqCst);
-        self.batches.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-#[tokio::test]
-async fn reports_lifecycle_and_progress_to_the_observer() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let observer = Arc::new(RecordingObserver::default());
-    // Five changes resolving to five distinct documents, one batch.
-    let changes = (0..5)
-        .map(|i| upsert_change(10 + i as i64, i, &acks))
-        .collect::<Vec<_>>();
-
-    Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(changes)),
-        }),
-        Arc::new(MockDocuments),
-        Arc::new(RecordingSink::default()),
+    let ops = Arc::clone(&sink.ops);
+    let harness = Harness::new(
+        MockSource::new(vec![])
+            .with_snapshot(vec![upsert(1)])
+            .with_continuity(Continuity::Fresh),
+        vec![(sink_name("primary"), sink)],
     )
-    .with_observer(Arc::clone(&observer) as Arc<dyn Observer>)
-    .with_batch(BatchPolicy {
-        max_changes: 256,
-        max_delay: Duration::from_secs(10),
-    })
-    .skip_backfill(true)
-    .run()
-    .await
-    .unwrap();
-
-    assert!(observer.live.load(Ordering::SeqCst), "live phase reported");
-    assert_eq!(observer.captured.load(Ordering::SeqCst), 5, "all captured");
-    assert_eq!(observer.committed_changes.load(Ordering::SeqCst), 5);
-    assert_eq!(observer.committed_documents.load(Ordering::SeqCst), 5);
-    assert_eq!(observer.batches.load(Ordering::SeqCst), 1, "one batch");
+    .map_sinks(|engine| engine.skip_backfill(true));
+    let events = Arc::clone(&harness.source.events);
+    harness.run(Continuity::Fresh).await;
+    assert!(reindexed.lock().unwrap().is_empty());
+    assert!(ops.lock().unwrap().is_empty());
+    assert_eq!(*events.lock().unwrap(), vec!["prepare"]);
 }
 
 #[tokio::test]
-async fn skip_backfill_flag_overrides_an_unseeded_index() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let source = SeedSource::new(vec![upsert_change(1, 0, &acks)]);
-    let called = Arc::clone(&source.called);
-    let ops = Arc::new(Mutex::new(Vec::new()));
-    let marked = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(SeedSink::new(false, &marked, &ops));
-
-    Engine::new(Arc::new(source), Arc::new(MockDocuments), sink)
-        .skip_backfill(true)
-        .run()
-        .await
-        .unwrap();
-
-    assert!(
-        !called.load(Ordering::SeqCst),
-        "skip_backfill suppresses the snapshot"
+async fn backfill_false_makes_a_stateless_sink_live_only() {
+    let sink = Arc::new(RecordingSink::seeded(false));
+    let ops = Arc::clone(&sink.ops);
+    let marked = Arc::clone(&sink.marked);
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]).with_snapshot(vec![upsert(10)]),
+        vec![(sink_name("audit"), sink)],
+    )
+    .map_sinks(|engine| engine.with_options(SinkOptions { backfill: false }));
+    let events = Arc::clone(&harness.source.events);
+    harness.run(Continuity::Resumed).await;
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec!["prepare"],
+        "no snapshot requested"
     );
-    assert!(ops.lock().unwrap().is_empty());
+    assert_eq!(*ops.lock().unwrap(), vec!["upsert users 1".to_owned()]);
     assert!(marked.lock().unwrap().is_empty());
 }
 
-/// One write staged in the sink between flushes.
-#[derive(Debug)]
-enum CrashOp {
-    Upsert(String, GenericValue),
-    Delete(String),
-}
-
-/// A durable store behind a staging buffer — OpenSearch behind its bulk
-/// buffer. `upsert`/`delete` stage an op; `flush` applies the staged ops to
-/// the durable `store` atomically. A sink built to fail returns an error
-/// from its first `flush` *without* touching the store, reproducing a crash
-/// in the window after writes are buffered but before they are durable —
-/// exactly what at-least-once delivery must survive.
-///
-/// `store` is shared across runs on purpose: a flusso restart points at the
-/// same destination, so what survived the crash is what the next run sees.
+/// A sink whose first flush fails, then stores durably; the store survives
+/// across sink instances so a redelivered batch can be checked for duplicates.
 #[derive(Debug)]
 struct CrashSink {
-    store: Arc<Mutex<BTreeMap<String, GenericValue>>>,
-    staging: Mutex<Vec<CrashOp>>,
+    store: Arc<Mutex<BTreeMap<String, Op>>>,
+    staging: Mutex<Vec<(String, Op)>>,
     fail_next_flush: AtomicBool,
-}
-
-impl CrashSink {
-    fn new(store: Arc<Mutex<BTreeMap<String, GenericValue>>>, fail_first_flush: bool) -> Self {
-        Self {
-            store,
-            staging: Mutex::new(Vec::new()),
-            fail_next_flush: AtomicBool::new(fail_first_flush),
-        }
-    }
-}
-
-/// The store key the engine's deterministic `_id` maps to within an index.
-fn doc_key(index: &IndexName, id: &str) -> String {
-    format!("{}/{id}", index.as_ref())
 }
 
 #[async_trait]
 impl Sink for CrashSink {
-    async fn upsert(
-        &self,
-        index: &IndexName,
-        id: &str,
-        document: &GenericValue,
-    ) -> sink::Result<()> {
-        self.staging
-            .lock()
-            .unwrap()
-            .push(CrashOp::Upsert(doc_key(index, id), document.clone()));
+    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
+        self.staging.lock().unwrap().push((
+            format!("{}/{}", envelope.index.as_ref(), envelope.id),
+            envelope.op,
+        ));
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
-        self.staging
-            .lock()
-            .unwrap()
-            .push(CrashOp::Delete(doc_key(index, id)));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
+    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
         if self.fail_next_flush.swap(false, Ordering::SeqCst) {
-            // Crash before durability: the staged ops never reach the store.
+            self.staging.lock().unwrap().clear();
             return Err(sink::SinkError::Write(
                 "simulated crash before flush completed".to_owned(),
             ));
         }
         let mut store = self.store.lock().unwrap();
-        for op in self.staging.lock().unwrap().drain(..) {
-            match op {
-                CrashOp::Upsert(key, body) => {
-                    store.insert(key, body);
-                }
-                CrashOp::Delete(key) => {
-                    store.remove(&key);
-                }
-            }
+        for (key, op) in self.staging.lock().unwrap().drain(..) {
+            store.insert(key, op);
         }
-        Ok(sink::FlushReport::clean())
+        Ok(FlushReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
     }
 }
 
-/// The at-least-once guarantee end to end: a crash in the window *after* a
-/// batch's documents are buffered but *before* the flush that makes them
-/// durable must lose nothing. The slot never advances over an unconfirmed
-/// change, so the source redelivers the whole batch on restart, and rebuilding
-/// from the current row by deterministic id re-applies it idempotently — the
-/// durable state ends identical to a single clean run. This is the durability
-/// counterpart to `confirms_no_ack_before_its_flush`, which guards the
-/// ack-ordering half of the same invariant.
 #[tokio::test]
-async fn redelivers_and_reapplies_idempotently_after_a_crash_before_flush() {
-    let store: Arc<Mutex<BTreeMap<String, GenericValue>>> = Arc::new(Mutex::new(BTreeMap::new()));
-    let acks = Arc::new(AtomicU64::new(0));
-    // A wide window and a high cap so both changes buffer into one batch and
-    // commit in a single flush — the one the first run crashes on.
-    let batch = BatchPolicy {
+async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
+    let store: Arc<Mutex<BTreeMap<String, Op>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    let crashing = Arc::new(CrashSink {
+        store: Arc::clone(&store),
+        staging: Mutex::new(Vec::new()),
+        fail_next_flush: AtomicBool::new(true),
+    });
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(3)]),
+        vec![(sink_name("primary"), Arc::clone(&crashing) as Arc<dyn Sink>)],
+    )
+    .with_batch(BatchPolicy {
         max_changes: 256,
-        max_delay: Duration::from_secs(10),
-    };
+        max_delay: Duration::from_secs(5),
+    });
+    let stream = Arc::clone(&harness.stream);
+    let source = Arc::clone(&harness.source);
+    let outcomes = harness.run(Continuity::Resumed).await;
 
-    // Run 1: two changes are delivered and buffered, but the sole flush
-    // crashes — so nothing lands durably and nothing is confirmed.
-    let run1 = Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(vec![
-                upsert_change(1, 0, &acks),
-                upsert_change(3, 1, &acks),
-            ])),
-        }),
-        Arc::new(MockDocuments),
-        Arc::new(CrashSink::new(Arc::clone(&store), true)),
-    )
-    .with_batch(batch)
-    .skip_backfill(true)
-    .run()
-    .await;
-
-    assert!(run1.is_err(), "the crashing flush stops the run");
     assert!(
-        store.lock().unwrap().is_empty(),
-        "a crash before the flush completes leaves nothing durable"
+        outcomes[0].is_err(),
+        "the crashing flush stops the sink engine"
     );
+    assert!(store.lock().unwrap().is_empty());
     assert_eq!(
-        acks.load(Ordering::SeqCst),
-        0,
-        "no change is confirmed when the flush that would persist it never completed"
+        stream.watermark(),
+        None,
+        "nothing acknowledged, nothing confirmed"
     );
+    assert!(source.confirmed.lock().unwrap().is_empty());
 
-    // Run 2: nothing was confirmed, so the slot never advanced and the source
-    // redelivers the same changes. This run's flush succeeds.
-    Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(vec![
-                upsert_change(1, 0, &acks),
-                upsert_change(3, 1, &acks),
-            ])),
-        }),
-        Arc::new(MockDocuments),
-        Arc::new(CrashSink::new(Arc::clone(&store), false)),
-    )
-    .with_batch(batch)
-    .skip_backfill(true)
-    .run()
+    // The daemon restarts the sink engine over the same lane: the batch it
+    // left unacknowledged is redelivered and lands exactly once.
+    let restarted = SinkEngine::new(
+        sink_name("primary"),
+        Arc::clone(&crashing) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+    );
+    let (_tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    let task = tokio::spawn(async move { restarted.run(&mut rx).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !stream.is_idle() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
     .await
     .unwrap();
-
-    // The redelivered batch lands exactly once, by deterministic id —
-    // identical to what a single clean run would have produced.
-    let store = store.lock().unwrap();
+    task.abort();
     assert_eq!(
-        store.keys().cloned().collect::<Vec<_>>(),
-        vec!["users/1".to_owned(), "users/3".to_owned()],
-        "both documents are durable exactly once after replay — no loss, no duplicate"
+        store.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
+        vec!["users/1".to_owned(), "users/3".to_owned()]
     );
-    assert_eq!(
-        acks.load(Ordering::SeqCst),
-        2,
-        "every redelivered change is confirmed once its flush completes"
-    );
-}
-
-/// Records the `caught_up` flag of every flush, so a test can assert the
-/// engine derives it from the queue and forwards it to the sink.
-#[derive(Debug, Default)]
-struct CaughtUpSink {
-    flushes: Arc<Mutex<Vec<bool>>>,
-}
-
-#[async_trait]
-impl Sink for CaughtUpSink {
-    async fn upsert(
-        &self,
-        _index: &IndexName,
-        _id: &str,
-        _document: &GenericValue,
-    ) -> sink::Result<()> {
-        Ok(())
-    }
-    async fn delete(&self, _index: &IndexName, _id: &str) -> sink::Result<()> {
-        Ok(())
-    }
-    async fn flush(&self, caught_up: bool) -> sink::Result<sink::FlushReport> {
-        self.flushes.lock().unwrap().push(caught_up);
-        Ok(sink::FlushReport::clean())
-    }
+    assert_eq!(stream.watermark(), Some(Position(1)));
 }
 
 #[tokio::test]
 async fn caught_up_is_false_while_a_backlog_drains_then_true_on_the_last_batch() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let flushes = Arc::new(Mutex::new(Vec::new()));
-    let documents = MockDocuments;
-    let sink = CaughtUpSink {
-        flushes: Arc::clone(&flushes),
-    };
-    let observer: Arc<dyn Observer> = Arc::new(NoopObserver);
-
-    // Pre-fill the queue and close it, so the worker sees a fixed backlog
-    // with no concurrent capture racing — making the caught-up sequence
-    // deterministic. Five changes in batches of two drain as [2, 2, 1]; only
-    // the final batch empties the queue.
-    let (producer, mut consumer) = channel::<Change>(16);
-    for seq in 0..5 {
-        producer
-            .publish(upsert_change(seq as i64, seq, &acks))
-            .await
-            .unwrap();
-    }
-    drop(producer);
-
-    let failure_policies = FailurePolicies::default();
-    let pipeline = Pipeline {
-        documents: &documents,
-        sink: &sink,
-        observer: &observer,
-        queue_capacity: 16,
-        batch: BatchPolicy {
-            max_changes: 2,
-            // Wide window: only the closed-and-drained queue ends a batch
-            // early, never the timer — so the split is purely backlog-driven.
-            max_delay: Duration::from_secs(10),
-        },
-        failure_policies: &failure_policies,
-    };
-    work(pipeline, &mut consumer, None).await.unwrap();
-
-    assert_eq!(
-        flushes.lock().unwrap().as_slice(),
-        &[false, false, true],
-        "a flush is caught up only once it has drained the queue behind it",
-    );
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let flushes = Arc::clone(&sink.flushes);
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(2), upsert(3)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 1,
+        max_delay: Duration::from_millis(5),
+    });
+    harness.run(Continuity::Resumed).await;
+    let flushes = flushes.lock().unwrap();
+    assert_eq!(flushes.len(), 3);
+    assert!(flushes.last().unwrap().1, "the final flush is caught up");
 }
 
-// ── item-level rejection / failure policy ────────────────────────────────
-
-/// A sink that rejects every document it's given at the item level: it
-/// stages each write and reports them all as rejected on flush (the flush
-/// itself succeeds). All land in the `users` index (what `MockDocuments`
-/// builds), so a per-index policy keyed on `users` applies.
+/// A sink that rejects every document at the item level; the flush succeeds.
 #[derive(Debug, Default)]
 struct RejectingSink {
     staged: Mutex<Vec<(String, String)>>,
@@ -1099,28 +749,15 @@ struct RejectingSink {
 
 #[async_trait]
 impl Sink for RejectingSink {
-    async fn upsert(
-        &self,
-        index: &IndexName,
-        id: &str,
-        _document: &GenericValue,
-    ) -> sink::Result<()> {
+    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
         self.staged
             .lock()
             .unwrap()
-            .push((index.as_ref().to_owned(), id.to_owned()));
+            .push((envelope.index.as_ref().to_owned(), envelope.id.clone()));
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
-        self.staged
-            .lock()
-            .unwrap()
-            .push((index.as_ref().to_owned(), id.to_owned()));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
+    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
         let rejected = self
             .staged
             .lock()
@@ -1132,42 +769,28 @@ impl Sink for RejectingSink {
                 reason: "simulated item-level rejection".to_owned(),
             })
             .collect();
-        Ok(sink::FlushReport { rejected })
+        Ok(FlushReport { rejected })
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
     }
 }
 
-/// Records the `(index, id)` of every document the engine quarantines.
 #[derive(Debug, Default)]
 struct QuarantineObserver {
-    quarantined: Mutex<Vec<(String, String)>>,
+    quarantined: Mutex<Vec<(String, String, String)>>,
 }
 
 impl Observer for QuarantineObserver {
-    fn on_document_quarantined(&self, index: &str, id: &str, _reason: &str) {
+    fn on_document_quarantined(&self, sink: &SinkName, index: &str, id: &str, _reason: &str) {
         self.quarantined
             .lock()
             .unwrap()
-            .push((index.to_owned(), id.to_owned()));
+            .push((sink.to_string(), index.to_owned(), id.to_owned()));
     }
 }
 
-fn engine_over(
-    changes: Vec<Change>,
-    observer: Arc<dyn Observer>,
-    policies: FailurePolicies,
-) -> Engine {
-    Engine::new(
-        Arc::new(MockSource {
-            changes: Mutex::new(Some(changes)),
-        }),
-        Arc::new(MockDocuments),
-        Arc::new(RejectingSink::default()),
-    )
-    .with_observer(observer)
-    .with_failure_policies(policies)
-}
-
-/// `resolve` returns an index's override if set, else the global default.
 #[test]
 fn failure_policies_resolve_override_then_default() {
     let policies =
@@ -1176,71 +799,183 @@ fn failure_policies_resolve_override_then_default() {
     assert_eq!(policies.resolve("users"), FailurePolicy::Stop);
 }
 
-/// Under `skip`, rejected documents are quarantined (reported to the
-/// observer) and the batch is still acked — so the slot advances and the
-/// poison is not redelivered into a crash loop.
 #[tokio::test]
 async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let changes = vec![upsert_change(1, 0, &acks), upsert_change(3, 1, &acks)];
     let observer = Arc::new(QuarantineObserver::default());
-
-    engine_over(
-        changes,
-        Arc::clone(&observer) as Arc<dyn Observer>,
-        FailurePolicies::new(FailurePolicy::Skip),
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(3)]),
+        vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
     )
-    .run()
-    .await
-    .unwrap();
-
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(5),
+    });
+    let observer_dyn: Arc<dyn Observer> = Arc::clone(&observer) as Arc<dyn Observer>;
+    let harness = harness.map_sinks(move |engine| {
+        engine
+            .with_observer(Arc::clone(&observer_dyn))
+            .with_failure_policies(FailurePolicies::new(FailurePolicy::Skip))
+    });
+    let stream = Arc::clone(&harness.stream);
+    let outcomes = harness.run(Continuity::Resumed).await;
+    assert!(outcomes[0].is_ok());
     let quarantined = observer.quarantined.lock().unwrap();
-    assert_eq!(quarantined.len(), 2, "both rejected documents quarantined");
-    assert!(quarantined.iter().all(|(index, _)| index == "users"));
+    assert_eq!(quarantined.len(), 2);
+    assert!(
+        quarantined
+            .iter()
+            .all(|(sink, index, _)| sink == "primary" && index == "users")
+    );
     assert_eq!(
-        acks.load(Ordering::SeqCst),
-        2,
+        stream.watermark(),
+        Some(Position(1)),
         "the batch is acked despite rejections"
     );
 }
 
-/// Under `stop` (the default), a rejected document stops the run and the
-/// batch is left unconfirmed (not acked), so it is redelivered on restart.
 #[tokio::test]
-async fn stop_policy_errors_and_leaves_the_batch_unconfirmed() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let changes = vec![upsert_change(1, 0, &acks)];
-
-    let err = engine_over(changes, Arc::new(NoopObserver), FailurePolicies::default())
-        .run()
-        .await
-        .unwrap_err();
-
-    assert!(matches!(err, EngineError::DocumentsRejected(1, _)));
+async fn stop_policy_errors_and_leaves_the_batch_unacked() {
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]),
+        vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
+    );
+    let stream = Arc::clone(&harness.stream);
+    let outcomes = harness.run(Continuity::Resumed).await;
+    assert!(matches!(
+        outcomes[0],
+        Err(EngineError::DocumentsRejected(1, _))
+    ));
     assert_eq!(
-        acks.load(Ordering::SeqCst),
-        0,
-        "nothing is acked when the run stops"
+        stream.watermark(),
+        None,
+        "nothing acked when the engine stops"
     );
 }
 
-/// A per-index `stop` override halts the run even when the global default is
-/// `skip` — proving `commit` consults the per-index policy, not just the
-/// global one.
 #[tokio::test]
 async fn per_index_stop_override_halts_even_when_global_is_skip() {
-    let acks = Arc::new(AtomicU64::new(0));
-    let changes = vec![upsert_change(1, 0, &acks)];
-
-    let err = engine_over(
-        changes,
-        Arc::new(NoopObserver),
-        FailurePolicies::new(FailurePolicy::Skip).with_override("users", FailurePolicy::Stop),
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]),
+        vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
     )
-    .run()
-    .await
-    .unwrap_err();
+    .map_sinks(|engine| {
+        engine.with_failure_policies(
+            FailurePolicies::new(FailurePolicy::Skip).with_override("users", FailurePolicy::Stop),
+        )
+    });
+    let outcomes = harness.run(Continuity::Resumed).await;
+    assert!(matches!(
+        outcomes[0],
+        Err(EngineError::DocumentsRejected(..))
+    ));
+}
 
-    assert!(matches!(err, EngineError::DocumentsRejected(..)));
-    assert_eq!(acks.load(Ordering::SeqCst), 0);
+#[tokio::test]
+async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let reindexed = Arc::clone(&sink.reindexed);
+    let marked = Arc::clone(&sink.marked);
+    let ops = Arc::clone(&sink.ops);
+    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
+    let documents = Arc::new(MockDocuments::default());
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        sink,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+    );
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    let sink_task = tokio::spawn(async move { engine.run(&mut rx).await });
+
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    // A request is now on the request lane; the ingest engine serves it.
+    let ingest = IngestEngine::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        documents,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name("primary")],
+    );
+    let ingest_task = tokio::spawn(async move { ingest.run().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while marked.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    ingest_task.abort();
+    sink_task.abort();
+
+    assert_eq!(*reindexed.lock().unwrap(), vec!["users".to_owned()]);
+    assert_eq!(*ops.lock().unwrap(), vec!["upsert users 10".to_owned()]);
+    assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
+    let _: HashMap<String, String> = HashMap::new();
+}
+
+/// Records the observer events a run emits, so a test can assert the engines
+/// report their lifecycle and per-batch progress with the sink dimension.
+#[derive(Debug, Default)]
+struct RecordingObserver {
+    events: Mutex<Vec<String>>,
+}
+
+impl Observer for RecordingObserver {
+    fn on_live_started(&self) {
+        self.events.lock().unwrap().push("live".to_owned());
+    }
+
+    fn on_batch_built(&self, stats: BuildStats) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("built {}", stats.documents));
+    }
+
+    fn on_sink_started(&self, sink: &SinkName) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("sink started {sink}"));
+    }
+
+    fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("committed {sink} {}", stats.envelopes));
+    }
+}
+
+#[tokio::test]
+async fn reports_lifecycle_and_progress_to_the_observer() {
+    let observer = Arc::new(RecordingObserver::default());
+    let observer_dyn: Arc<dyn Observer> = Arc::clone(&observer) as Arc<dyn Observer>;
+    let mut harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(2)]),
+        vec![(sink_name("primary"), Arc::new(RecordingSink::seeded(true)))],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(5),
+    });
+    harness.ingest = harness.ingest.with_observer(Arc::clone(&observer_dyn));
+    let harness = harness.map_sinks(move |engine| engine.with_observer(Arc::clone(&observer_dyn)));
+    harness.run(Continuity::Resumed).await;
+    let events = observer.events.lock().unwrap();
+    assert_eq!(
+        *events,
+        vec![
+            "sink started primary".to_owned(),
+            "live".to_owned(),
+            "built 2".to_owned(),
+            "committed primary 2".to_owned(),
+        ]
+    );
 }

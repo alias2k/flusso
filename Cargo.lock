@@ -1035,6 +1035,7 @@ dependencies = [
  "flusso-sink-stdout",
  "flusso-source",
  "flusso-source-postgres",
+ "flusso-stream",
  "flusso-stream-channel",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1075,9 +1076,12 @@ dependencies = [
  "flusso-kernel",
  "flusso-sink",
  "flusso-source",
+ "flusso-stream",
+ "flusso-stream-channel",
  "futures",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -1123,6 +1127,7 @@ name = "flusso-engine"
 version = "0.15.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "criterion",
  "flusso-kernel",
  "flusso-sink",
@@ -1209,6 +1214,7 @@ dependencies = [
 name = "flusso-query-e2e"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "flusso-kernel",
  "flusso-query",
  "flusso-sink",
@@ -1236,6 +1242,7 @@ name = "flusso-sink-opensearch"
 version = "0.15.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "criterion",
  "flusso-kernel",
  "flusso-sink",
@@ -1308,6 +1315,8 @@ name = "flusso-stream"
 version = "0.15.1"
 dependencies = [
  "async-trait",
+ "flusso-kernel",
+ "serde",
  "thiserror 2.0.18",
 ]
 

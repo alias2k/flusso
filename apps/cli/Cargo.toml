@@ -34,6 +34,7 @@ daemon.workspace = true
 design = { workspace = true, optional = true }
 source.workspace = true
 source-postgres.workspace = true
+stream.workspace = true
 stream-channel.workspace = true
 sink.workspace = true
 sink-stdout.workspace = true

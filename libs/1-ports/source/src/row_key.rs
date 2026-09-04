@@ -6,5 +6,5 @@ use kernel::{ColumnName, GenericValue};
 /// naturally; values reuse [`GenericValue`] from the schema model. Shared
 /// vocabulary: [`cdc`](crate::cdc) names the changed row with it, and
 /// [`document`](crate::document) uses it as a document's root key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RowKey(pub Vec<(ColumnName, GenericValue)>);

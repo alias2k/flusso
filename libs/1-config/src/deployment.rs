@@ -20,6 +20,8 @@ use std::net::SocketAddr;
 use kernel::{FailurePolicy, IndexSchema, PortEntry, common};
 use serde::{Deserialize, Serialize};
 
+use crate::toml::SinkEntry;
+
 /// The stream adapter used when `[stream]` is omitted: the in-process channel.
 pub const DEFAULT_STREAM_KIND: &str = "channel";
 
@@ -37,10 +39,11 @@ pub struct Config {
     /// options when the file omits it.
     #[serde(default = "default_stream")]
     pub stream: PortEntry,
-    /// The sink port entries (`[sinks.<name>]`), by name. Empty means the
-    /// composition root's default sink (stdout).
+    /// The sink entries (`[sinks.<name>]`), by name: each adapter's port entry
+    /// plus the universal sink keys. Empty means the composition root's default
+    /// sink (stdout).
     #[serde(default)]
-    pub sinks: BTreeMap<common::SinkName, PortEntry>,
+    pub sinks: BTreeMap<common::SinkName, SinkEntry>,
     #[serde(default)]
     pub indexes: BTreeMap<common::IndexName, Index>,
     /// What to do when a sink rejects a document at the item level. The default

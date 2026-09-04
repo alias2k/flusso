@@ -15,6 +15,7 @@ workspace = true
 # Everything lives in [dev-dependencies]: the crate has no lib code, only the
 # integration test, so nothing here counts against `unused_crate_dependencies`.
 [dev-dependencies]
+chrono = { workspace = true, features = ["clock"] }
 flusso-query = { path = "../../sdk/query" }
 kernel.workspace = true
 sink.workspace = true

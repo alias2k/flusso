@@ -1,13 +1,14 @@
-//! The operational HTTP surfaces the `flusso` binary serves — two listeners on
-//! two ports, gating by *port* (a physical trust boundary) rather than path:
+//! The two operational HTTP surfaces `flusso run` serves.
 //!
-//! | Surface     | Routes                                      | Auth                 |
-//! | ----------- | ------------------------------------------- | -------------------- |
-//! | **public**  | `/healthz` `/readyz` `/status` `/metrics`   | none (network-gated) |
-//! | **private** | `/indexes` `/reindex`                       | HTTP Basic           |
+//! | Surface | Routes | Auth |
+//! | --- | --- | --- |
+//! | **public** | `/healthz` `/readyz` `/status` `/metrics` | none |
+//! | **private** | `/indexes` `/reindex` | HTTP Basic |
 //!
-//! The daemon owns the *domain* (the [`Status`] these read); the transport lives
-//! here in the binary. A serve-loop error is logged, never fatal to the pipeline.
+//! Both read the daemon's [`Status`]; the private one also holds the daemon's
+//! [`DaemonControl`], the operations handle a reindex goes through. Transport
+//! is the binary's concern: the daemon exposes data and operations, this module
+//! puts them on the wire.
 
 mod auth;
 
@@ -21,25 +22,19 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
-use daemon::{IndexName, Phase, Status};
+use daemon::{ControlError, DaemonControl, IndexName, SinkName, Status};
 use prometheus::{Registry, TextEncoder};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
-/// Shared state for the public handlers. Cheap to clone (an `Arc` and a registry
-/// handle, both internally reference-counted).
+/// What the public surface reads.
 #[derive(Clone, Debug)]
 pub(crate) struct PublicState {
     pub status: Arc<Status>,
-    /// `None` when the Prometheus reader wasn't installed — `/metrics` then
-    /// reports that.
     pub registry: Option<Registry>,
 }
 
-/// Serve `router` over an already-bound `listener`, draining in-flight requests
-/// once `shutdown` resolves (sender signalled or dropped). The listener is bound
-/// by the caller so a bad address fails fast; a serve-loop error here is logged,
-/// never fatal to the pipeline. `surface` names it in logs (`public`/`private`).
+/// Serve `router` on `listener` until `shutdown` fires.
 pub(crate) async fn serve(
     surface: &'static str,
     listener: TcpListener,
@@ -60,8 +55,6 @@ pub(crate) async fn serve(
     }
 }
 
-/// The public, unauthenticated surface: liveness, readiness, the live status
-/// document, and the Prometheus scrape.
 pub(crate) fn public_router(state: PublicState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -71,17 +64,15 @@ pub(crate) fn public_router(state: PublicState) -> Router {
         .with_state(state)
 }
 
-/// Shared state for the private control handlers.
+/// What the private surface reads and drives.
 #[derive(Clone, Debug)]
 pub(crate) struct PrivateState {
     pub status: Arc<Status>,
-    /// Reindex requests go here; the run loop drains them and restarts the
-    /// pipeline to rebuild the named index into a fresh generation.
-    pub reindex: mpsc::Sender<IndexName>,
+    /// The daemon's operations handle: a reindex reaches the targeted sink
+    /// engines through it.
+    pub control: DaemonControl,
 }
 
-/// The private control surface, behind HTTP Basic auth: list indexes and trigger
-/// an on-demand reindex.
 pub(crate) fn private_router(state: PrivateState, basic_auth: Arc<BasicAuth>) -> Router {
     Router::new()
         .route("/indexes", get(indexes))
@@ -93,26 +84,24 @@ pub(crate) fn private_router(state: PrivateState, basic_auth: Arc<BasicAuth>) ->
         .with_state(state)
 }
 
-/// Liveness: the process is running.
 async fn healthz() -> impl IntoResponse {
     StatusCode::OK
 }
 
-/// Readiness: serving once the pipeline is past startup (backfilling or live).
-/// A stopped pipeline is deliberately *not* ready.
+/// Ready when every engine is: the ingest engine follows the source and every
+/// sink engine follows its lane (live or backfilling).
 async fn readyz(State(state): State<PublicState>) -> impl IntoResponse {
-    match state.status.snapshot().phase {
-        Phase::Backfilling | Phase::Live => StatusCode::OK,
-        Phase::Starting | Phase::Stopped => StatusCode::SERVICE_UNAVAILABLE,
+    if state.status.is_ready() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
     }
 }
 
-/// The full live status document.
 async fn status(State(state): State<PublicState>) -> impl IntoResponse {
     Json(state.status.snapshot())
 }
 
-/// Prometheus exposition text, or a note when metrics are disabled.
 async fn metrics(State(state): State<PublicState>) -> impl IntoResponse {
     let Some(registry) = state.registry else {
         return (
@@ -129,17 +118,21 @@ async fn metrics(State(state): State<PublicState>) -> impl IntoResponse {
     }
 }
 
-/// The logical indexes and their current lifecycle state, as JSON
-/// (`{"users": "seeded", …}`), read from the live [`Status`].
+/// Every sink's indexes and their states: `{ "<sink>": { "<index>": state } }`.
 async fn indexes(State(state): State<PrivateState>) -> impl IntoResponse {
-    Json(state.status.snapshot().indexes)
+    let snapshot = state.status.snapshot();
+    let per_sink: HashMap<String, _> = snapshot
+        .sinks
+        .into_iter()
+        .map(|(name, sink)| (name, sink.indexes))
+        .collect();
+    Json(per_sink)
 }
 
-/// Stage an on-demand rebuild of one index (`POST /reindex?index=<name>`).
-/// Validates the name and that the index exists, then queues a reindex request
-/// for the run loop, which restarts the pipeline to rebuild it into a fresh
-/// generation. Returns `202 Accepted` — the rebuild runs asynchronously; watch
-/// `/status` for the index returning to `seeded`.
+/// Rebuild one index (`POST /reindex?index=<name>[&sink=<name>]`) on one sink
+/// or, without `sink`, on every sink. Validates the names, then hands the
+/// operation to the daemon; the targeted sink engines stage a fresh generation
+/// and request their snapshot, no restart involved.
 async fn reindex(
     State(state): State<PrivateState>,
     Query(params): Query<HashMap<String, String>>,
@@ -165,16 +158,33 @@ async fn reindex(
         )
             .into_response();
     }
-    match state.reindex.try_send(index.clone()) {
+    let sink = match params.get("sink") {
+        None => None,
+        Some(raw) => match SinkName::try_new(raw.clone()) {
+            Ok(sink) => Some(sink),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid sink name {raw:?}\n"),
+                )
+                    .into_response();
+            }
+        },
+    };
+    match state.control.reindex(index.clone(), sink.as_ref()) {
         Ok(()) => (
             StatusCode::ACCEPTED,
-            format!("reindex of {} queued\n", index.as_ref()),
+            match &sink {
+                Some(sink) => format!("reindex of {} on {sink} queued\n", index.as_ref()),
+                None => format!("reindex of {} on every sink queued\n", index.as_ref()),
+            },
         )
             .into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "reindex queue is full or closed\n".to_owned(),
-        )
-            .into_response(),
+        Err(ControlError::UnknownSink(name)) => {
+            (StatusCode::NOT_FOUND, format!("unknown sink {name}\n")).into_response()
+        }
+        Err(error @ (ControlError::Busy(_) | ControlError::Closed(_))) => {
+            (StatusCode::SERVICE_UNAVAILABLE, format!("{error}\n")).into_response()
+        }
     }
 }

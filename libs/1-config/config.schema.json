@@ -54,10 +54,10 @@
       },
       "patternProperties": {
         "^[a-z_][a-z0-9_]*$": {
-          "$ref": "#/definitions/PortEntry"
+          "$ref": "#/definitions/SinkEntry"
         }
       },
-      "description": "Named sink destinations. Each key is the sink name; `type` selects the\nadapter and the rest of the table is its options. With no sinks, `run`\nuses a stdout sink.",
+      "description": "Named sink destinations. Each key is the sink name; `type` selects the\nadapter, `backfill` is the one universal key, and the rest of the table\nis the adapter's options. With no sinks, `run` uses a stdout sink.",
       "default": {},
       "propertyNames": {
         "$ref": "#/definitions/SinkName"
@@ -120,6 +120,24 @@
         }
       },
       "description": "Bind addresses for the two operational HTTP surfaces, from a `flusso.toml`\n`[server]` table. Both are optional — the binary layers `FLUSSO_*` env vars\nand CLI flags on top (which win), falling back to built-in defaults when all\nare absent. Each is a `host:port` socket address, parsed and validated at\nconfig-read time by [`SocketAddr`]'s own deserializer."
+    },
+    "SinkEntry": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "The adapter that implements this port."
+        },
+        "backfill": {
+          "type": "boolean",
+          "description": "Whether this sink is ever backfilled. `false` makes it receive live\nchanges only, never a snapshot: the opt-out for a stateless sink beside a\nstateful one, which would otherwise be re-seeded on every restart."
+        }
+      },
+      "additionalProperties": true,
+      "description": "One `[sinks.<name>]` table: the adapter's port entry plus the universal\nsink keys every sink engine honors regardless of adapter."
     },
     "IndexEntry": {
       "type": "object",

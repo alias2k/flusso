@@ -15,6 +15,7 @@ pub use compiled::{
 };
 pub use deployment::{Config, DEFAULT_STREAM_KIND, Index, ServerConfig};
 pub use loader::{LoadError, load};
+pub use toml::SinkEntry;
 
 // Re-export the kernel vocabulary so downstream crates depend only on `config`
 // rather than reaching for `kernel` as well. The assembled `Config` family

@@ -64,11 +64,66 @@ pub struct ConfigToml {
     #[serde(default, skip_serializing_if = "Server::is_empty")]
     pub server: Server,
     /// Named sink destinations. Each key is the sink name; `type` selects the
-    /// adapter and the rest of the table is its options. With no sinks, `run`
-    /// uses a stdout sink.
+    /// adapter, `backfill` is the one universal key, and the rest of the table
+    /// is the adapter's options. With no sinks, `run` uses a stdout sink.
     #[serde(default)]
-    pub sinks: BTreeMap<common::SinkName, PortEntry>,
+    pub sinks: BTreeMap<common::SinkName, SinkEntry>,
     /// One entry per index to build.
     #[serde(default)]
     pub index: Vec<IndexEntry>,
+}
+
+/// One `[sinks.<name>]` table: the adapter's port entry plus the universal
+/// sink keys every sink engine honors regardless of adapter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SinkEntry {
+    /// `type` and the adapter's own options.
+    #[serde(flatten)]
+    pub port: PortEntry,
+    /// Whether this sink is ever backfilled. `false` makes it receive live
+    /// changes only, never a snapshot: the opt-out for a stateless sink beside a
+    /// stateful one, which would otherwise be re-seeded on every restart.
+    #[serde(default = "default_backfill", skip_serializing_if = "is_true")]
+    pub backfill: bool,
+}
+
+fn default_backfill() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+impl SinkEntry {
+    /// A sink of `kind` with no options and backfill on.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            port: PortEntry::new(kind),
+            backfill: true,
+        }
+    }
+}
+
+impl From<PortEntry> for SinkEntry {
+    fn from(port: PortEntry) -> Self {
+        Self {
+            port,
+            backfill: true,
+        }
+    }
+}
+
+impl std::ops::Deref for SinkEntry {
+    type Target = PortEntry;
+
+    fn deref(&self) -> &PortEntry {
+        &self.port
+    }
+}
+
+impl std::ops::DerefMut for SinkEntry {
+    fn deref_mut(&mut self) -> &mut PortEntry {
+        &mut self.port
+    }
 }

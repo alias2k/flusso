@@ -1,72 +1,76 @@
 use super::*;
 
 #[test]
-fn in_order_confirmations_advance_watermark() {
-    let s = AckShared::new(0);
-    let a = s.register(10);
-    let b = s.register(20);
-    assert_eq!(s.confirmed_lsn(), 0);
-    s.confirm(a);
-    assert_eq!(s.confirmed_lsn(), 10);
-    s.confirm(b);
-    assert_eq!(s.confirmed_lsn(), 20);
+fn in_order_confirmations_advance_the_resume_point() {
+    let p = Positions::new(0);
+    let a = p.register(10);
+    let b = p.register(20);
+    assert_eq!(p.confirmed_lsn(), 0);
+    p.confirm(a);
+    assert_eq!(p.confirmed_lsn(), 10);
+    p.confirm(b);
+    assert_eq!(p.confirmed_lsn(), 20);
 }
 
 #[test]
-fn out_of_order_confirmation_holds_until_gap_fills() {
-    let s = AckShared::new(0);
-    let a = s.register(10);
-    let b = s.register(20);
-    let c = s.register(30);
-
-    s.confirm(c); // gap: a and b still open
-    assert_eq!(s.confirmed_lsn(), 0);
-    s.confirm(b); // still gated on a
-    assert_eq!(s.confirmed_lsn(), 0);
-    s.confirm(a); // fills the gap → jumps across b and c
-    assert_eq!(s.confirmed_lsn(), 30);
+fn confirmation_is_cumulative() {
+    let p = Positions::new(0);
+    p.register(10);
+    p.register(20);
+    let c = p.register(30);
+    p.confirm(c);
+    assert_eq!(p.confirmed_lsn(), 30);
+    p.confirm(c);
+    assert_eq!(p.confirmed_lsn(), 30, "re-confirming is harmless");
 }
 
 #[test]
 fn never_regresses_below_start_lsn() {
-    let s = AckShared::new(100);
-    let a = s.register(50); // a commit at a lower LSN than the start point
-    s.confirm(a);
-    assert_eq!(s.confirmed_lsn(), 100);
+    let p = Positions::new(100);
+    let a = p.register(50);
+    p.confirm(a);
+    assert_eq!(p.confirmed_lsn(), 100);
 }
 
 #[test]
 fn register_confirmed_advances_in_place_when_nothing_is_in_flight() {
-    let s = AckShared::new(0);
-    s.register_confirmed(100);
-    assert_eq!(s.confirmed_lsn(), 100);
-    s.register_confirmed(200);
-    assert_eq!(s.confirmed_lsn(), 200);
+    let p = Positions::new(0);
+    p.register_confirmed(100);
+    assert_eq!(p.confirmed_lsn(), 100);
+    p.register_confirmed(200);
+    assert_eq!(p.confirmed_lsn(), 200);
 }
 
 #[test]
 fn register_confirmed_waits_for_in_flight_changes() {
-    let s = AckShared::new(0);
-    let a = s.register(10);
-    s.register_confirmed(100); // keepalive past an unconfirmed change
-    assert_eq!(s.confirmed_lsn(), 0, "must not pass the unflushed change");
-    s.confirm(a); // the gap fills → jumps across the keepalive too
-    assert_eq!(s.confirmed_lsn(), 100);
+    let p = Positions::new(0);
+    let a = p.register(10);
+    p.register_confirmed(100);
+    assert_eq!(p.confirmed_lsn(), 0, "must not pass the unflushed change");
+    p.confirm(a);
+    assert_eq!(
+        p.confirmed_lsn(),
+        10,
+        "the keepalive sits behind the change"
+    );
+    let later = p.register(200);
+    p.confirm(later);
+    assert_eq!(p.confirmed_lsn(), 200);
 }
 
 #[test]
 fn register_confirmed_never_regresses() {
-    let s = AckShared::new(100);
-    s.register_confirmed(50); // a stale/low position
-    assert_eq!(s.confirmed_lsn(), 100);
+    let p = Positions::new(100);
+    p.register_confirmed(50);
+    assert_eq!(p.confirmed_lsn(), 100);
 }
 
 #[test]
-fn changes_after_a_pre_confirmed_position_still_gate_their_own_lsn() {
-    let s = AckShared::new(0);
-    s.register_confirmed(100);
-    let a = s.register(200); // emitted after the keepalive
-    assert_eq!(s.confirmed_lsn(), 100);
-    s.confirm(a);
-    assert_eq!(s.confirmed_lsn(), 200);
+fn a_position_past_a_confirmed_one_still_gates_its_own_lsn() {
+    let p = Positions::new(0);
+    p.register_confirmed(100);
+    let a = p.register(200);
+    assert_eq!(p.confirmed_lsn(), 100);
+    p.confirm(a);
+    assert_eq!(p.confirmed_lsn(), 200);
 }

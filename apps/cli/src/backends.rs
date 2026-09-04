@@ -1,18 +1,20 @@
 //! The composition root's [`Backends`]: assembles the Postgres source, the
-//! configured sinks, and the source-side helpers from a [`Config`].
+//! channel stream, the configured sinks, and the source-side helpers from a
+//! [`Config`].
 //!
 //! This is where each port entry's options become a running adapter. The
 //! adapter *kinds* are resolved in [`crate::adapters`]; this module builds the
 //! instances, resolving connection URLs and credentials in the running
-//! environment. The daemon and the engine never see an adapter's name.
+//! environment. The daemon and the engines never see an adapter's name.
 
 use std::sync::Arc;
 
 use anyhow::Context;
 use async_trait::async_trait;
 use config::Config;
-use daemon::{Backends, DaemonOptions, SourceParts};
-use sink::{FanOutSink, Sink};
+use daemon::{Backends, DaemonOptions, SinkParts, SourceParts};
+use kernel::{AdapterConfig, SinkName};
+use sink::{Sink, SinkOptions};
 use sink_opensearch::OpensearchSink;
 use sink_stdout::{StdoutConfig, StdoutSink};
 use source::cdc::ChangeCapture;
@@ -21,6 +23,8 @@ use source::{CaptureProvisioning, SourceSpec};
 use source_postgres::{
     PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
 };
+use stream::Stream;
+use stream_channel::ChannelStream;
 
 use crate::adapters::{self, SinkConfig};
 
@@ -60,12 +64,16 @@ impl Backends for FlussoBackends {
         Ok(SourceParts { capture, documents })
     }
 
-    async fn sink(
-        &self,
-        config: &Config,
-        _options: &DaemonOptions,
-    ) -> anyhow::Result<Arc<dyn Sink>> {
-        build_sink(config)
+    fn stream(&self, config: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>> {
+        let channel = adapters::stream_config(config)?;
+        Ok(Arc::new(ChannelStream::from_config(
+            &channel,
+            sinks.iter().cloned(),
+        )))
+    }
+
+    async fn sinks(&self, config: &Config) -> anyhow::Result<Vec<SinkParts>> {
+        build_sinks(config)
     }
 }
 
@@ -126,12 +134,12 @@ pub(crate) fn source_spec(config: &Config) -> SourceSpec {
     SourceSpec::new(indexes)
 }
 
-/// Every configured sink, fanned out; with no sink configured, a plain stdout
-/// sink so a first run shows its documents.
-fn build_sink(config: &Config) -> anyhow::Result<Arc<dyn Sink>> {
-    let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
+/// Every configured sink as its own engine's parts; with no sink configured,
+/// a plain stdout sink so a first run shows its documents.
+fn build_sinks(config: &Config) -> anyhow::Result<Vec<SinkParts>> {
+    let mut sinks = Vec::with_capacity(config.sinks.len());
     for (name, entry) in &config.sinks {
-        let built: Arc<dyn Sink> = match adapters::sink_config(name, entry)? {
+        let sink: Arc<dyn Sink> = match adapters::sink_config(name, entry)? {
             SinkConfig::Opensearch(os) => Arc::new(
                 OpensearchSink::from_config(name, &os)
                     .with_context(|| format!("building OpenSearch sink '{name}'"))?
@@ -139,14 +147,20 @@ fn build_sink(config: &Config) -> anyhow::Result<Arc<dyn Sink>> {
             ),
             SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(&s)),
         };
-        sinks.push(built);
+        sinks.push(SinkParts {
+            name: name.clone(),
+            sink,
+            options: SinkOptions {
+                backfill: entry.backfill,
+            },
+        });
     }
-    Ok(match sinks.len() {
-        0 => Arc::new(StdoutSink::from_config(&StdoutConfig::default())),
-        1 => sinks
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| Arc::new(StdoutSink::from_config(&StdoutConfig::default()))),
-        _ => Arc::new(FanOutSink::new(sinks)),
-    })
+    if sinks.is_empty() {
+        sinks.push(SinkParts {
+            name: SinkName::try_new(StdoutConfig::KIND).context("naming the default sink")?,
+            sink: Arc::new(StdoutSink::from_config(&StdoutConfig::default())),
+            options: SinkOptions::default(),
+        });
+    }
+    Ok(sinks)
 }

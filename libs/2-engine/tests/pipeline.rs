@@ -1,6 +1,6 @@
-//! Full-pipeline e2e: real Postgres (logical replication) → the real
-//! [`Engine::run`] → a **real OpenSearch sink**, asserting the *actual indexed
-//! document* after each change. Nothing is mocked.
+//! Full-pipeline e2e: real Postgres (logical replication) → the real ingest
+//! engine → a lane → the real sink engine over a **real OpenSearch sink**,
+//! asserting the *actual indexed document* after each change. Nothing is mocked.
 //!
 //! This is the suite that proves the one thing flusso exists to do — keep an
 //! OpenSearch index in step with Postgres. The sibling `wal.rs` drives a
@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use engine::Engine;
+use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, IndexName,
     IndexSchema, Secret, SinkName, SoftDelete, SoftDeleteColumn, TableName,
@@ -56,9 +56,13 @@ use kernel::{
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
 use source::SourceSpec;
+use source::cdc::ChangeCapture;
+use source::document::DocumentBuilder;
 use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use stream::Stream;
+use stream_channel::ChannelStream;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
@@ -478,12 +482,13 @@ struct Os {
     url: String,
 }
 
-/// A live pipeline: the engine task plus a client for reading the index back.
+/// A live pipeline: the task running both engines plus a client for reading
+/// the index back.
 struct Pipeline {
     engine: tokio::task::JoinHandle<()>,
-    /// How the engine run ended, once it has. Every poll below checks it so a
-    /// run that stopped on an error fails the test immediately, with the error,
-    /// instead of timing out on an assertion that can never become true.
+    /// How the run ended, once it has. Every poll below checks it so a run that
+    /// stopped on an error fails the test immediately, with the error, instead
+    /// of timing out on an assertion that can never become true.
     outcome: Arc<std::sync::Mutex<Option<engine::Result<()>>>>,
     http: reqwest::Client,
     os_url: String,
@@ -706,9 +711,9 @@ async fn start_pipeline(pg: &Pg, os: &Os, spec: SourceSpec, tables: &[&str]) -> 
     spawn_pipeline(pg, os, spec).await
 }
 
-/// A (re)start of the engine against an already-provisioned Postgres: builds a
-/// fresh source, document builder, and sink — as a new `flusso run` does — and
-/// runs the engine. The publication and slot are whatever the database has.
+/// A (re)start against an already-provisioned Postgres: builds a fresh source,
+/// document builder, and sink — as a new `flusso run` does — and runs both
+/// engines. The publication and slot are whatever the database has.
 async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -729,21 +734,40 @@ async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
         "flusso",
     )
     .with_port(pg.port);
-    let engine = Engine::new(
-        Arc::new(WalChangeCapture::new(replication, pg.url.clone())),
-        documents,
-        sink,
-    );
+    let capture: Arc<dyn ChangeCapture> =
+        Arc::new(WalChangeCapture::new(replication, pg.url.clone()));
     let outcome = Arc::new(std::sync::Mutex::new(None));
     let record = Arc::clone(&outcome);
     Pipeline {
         engine: tokio::spawn(async move {
-            let result = engine.run().await;
+            let result = run_deployment(capture, documents, sink).await;
             *record.lock().unwrap() = Some(result);
         }),
         outcome,
         http: reqwest::Client::new(),
         os_url: os.url.clone(),
+    }
+}
+
+/// One deployment the way the daemon runs it: stage the sink engine, then run
+/// it and the ingest engine together until either stops. `Ok` when the live
+/// stream ends; the first engine error otherwise.
+async fn run_deployment(
+    capture: Arc<dyn ChangeCapture>,
+    documents: Arc<dyn DocumentBuilder>,
+    sink: Arc<dyn Sink>,
+) -> engine::Result<()> {
+    let name = SinkName::try_new("e2e").unwrap();
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let continuity = capture.continuity().await?;
+    let mappings = documents.index_mappings().await?;
+    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings);
+    sink_engine.stage(continuity).await?;
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name]);
+    let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    tokio::select! {
+        result = ingest.run() => result,
+        result = sink_engine.run(&mut control_rx) => result,
     }
 }
 

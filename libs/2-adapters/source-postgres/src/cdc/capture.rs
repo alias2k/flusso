@@ -1,17 +1,18 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use kernel::Position;
 use pgwire_replication::{ReplicationClient, ReplicationConfig};
-use source::cdc::{AckSink, Change, ChangeCapture, Continuity};
+use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::{
     CaptureProvisioning, CoverageReport, QualifiedTable, Result, SnapshotTable, SourceError,
 };
 use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
-use super::ack::{AckShared, WalAckSink};
+use super::ack::Positions;
 use super::{backfill, publication, stream};
 
 /// Postgres change capture over logical replication (pgoutput).
@@ -26,9 +27,9 @@ use super::{backfill, publication, stream};
 ///   then creates the slot — after that reconciliation and before any snapshot,
 ///   so a backfill can't miss a write that lands between snapshot and stream.
 /// - [`live`](ChangeCapture::live) connects to the replication slot and streams
-///   committed row changes as thin [`Change`]s. Resume is the slot's: its
-///   `confirmed_flush_lsn` is the durable cursor on the server, advanced as the
-///   engine confirms changes (see [`Ack`](source::cdc::Ack)).
+///   committed row changes as thin, positioned [`ChangeEvent`]s. Resume is the
+///   slot's: its `confirmed_flush_lsn` is the durable cursor on the server,
+///   advanced as far as [`confirm`](ChangeCapture::confirm) has been called.
 /// - [`snapshot`](ChangeCapture::snapshot) reads current rows over an ordinary
 ///   SQL connection for an initial backfill (see the crate-private `backfill`). The engine calls
 ///   it only for tables backing an index the sink reports as unseeded.
@@ -59,6 +60,9 @@ pub struct WalChangeCapture {
     /// Whether to auto-create/extend the publication on [`live`](Self::live).
     /// When false, a coverage gap is only reported, never provisioned.
     manage_publication: bool,
+    /// The position bookkeeping of the open live stream, so `confirm` can reach
+    /// it. Replaced each time `live` opens a stream; `None` before the first.
+    positions: Arc<Mutex<Option<Arc<Positions>>>>,
 }
 
 impl WalChangeCapture {
@@ -75,6 +79,7 @@ impl WalChangeCapture {
             admin_pool: Arc::new(OnceCell::new()),
             required_tables: BTreeSet::new(),
             manage_publication: false,
+            positions: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -172,7 +177,7 @@ impl ChangeCapture for WalChangeCapture {
     /// idempotent) so `live` stays correct for a caller that never ran
     /// [`prepare`](ChangeCapture::prepare).
     #[tracing::instrument(name = "wal.live", skip_all, err)]
-    async fn live(&self) -> Result<BoxStream<'static, Result<Change>>> {
+    async fn live(&self) -> Result<BoxStream<'static, Result<LiveChange>>> {
         self.ensure_slot().await?;
         self.ensure_coverage(&self.required_tables, self.manage_publication)
             .await?;
@@ -181,20 +186,34 @@ impl ChangeCapture for WalChangeCapture {
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
 
-        let ack = Arc::new(AckShared::new(self.config.start_lsn.as_u64()));
-        let sink: Arc<dyn AckSink> = Arc::new(WalAckSink::new(Arc::clone(&ack)));
+        let positions = Arc::new(Positions::new(self.config.start_lsn.as_u64()));
+        *self
+            .positions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&positions));
         tracing::info!(
             start_lsn = self.config.start_lsn.as_u64(),
             "opened replication stream"
         );
-        Ok(stream::build(client, ack, sink))
+        Ok(stream::build(client, positions))
+    }
+
+    fn confirm(&self, position: Position) {
+        if let Some(positions) = self
+            .positions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            positions.confirm(position.0);
+        }
     }
 
     #[tracing::instrument(name = "wal.snapshot", skip_all, fields(tables = tables.len()), err)]
     async fn snapshot(
         &self,
         tables: &[SnapshotTable],
-    ) -> Result<BoxStream<'static, Result<Change>>> {
+    ) -> Result<BoxStream<'static, Result<ChangeEvent>>> {
         tracing::info!(tables = tables.len(), "starting snapshot");
         backfill::snapshot(&self.connection_url, tables).await
     }

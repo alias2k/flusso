@@ -22,14 +22,18 @@ config.workspace = true
 kernel.workspace = true
 engine.workspace = true
 source.workspace = true
+stream.workspace = true
 sink.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
-tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "time", "macros", "sync"] }
 
 [dev-dependencies]
 serde_json.workspace = true
+stream-channel.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

@@ -22,4 +22,8 @@ pub enum QueueError {
     /// Acknowledging or returning a delivery failed.
     #[error("acknowledgement failed: {0}")]
     Ack(String),
+
+    /// No lane exists for this sink: the lane set is fixed when the stream is built.
+    #[error("no lane for sink `{0}`")]
+    UnknownLane(String),
 }

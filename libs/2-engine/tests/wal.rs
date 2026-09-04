@@ -1,6 +1,6 @@
-//! Full WAL pipeline e2e: a real Postgres (logical replication) → the engine →
-//! a recording sink. Inserts and deletes on the source must surface as document
-//! upserts and tombstones.
+//! Full WAL pipeline e2e: a real Postgres (logical replication) → the ingest
+//! engine → a lane → a sink engine over a recording sink. Inserts and deletes
+//! on the source must surface as document upserts and tombstones.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -15,15 +15,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use engine::Engine;
+use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
-    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
-    IndexName, IndexSchema, TableName,
+    Column, ColumnName, DatabaseSchema, Envelope, Field, FieldName, FieldSource, FlussoType,
+    IndexName, IndexSchema, SinkName, TableName,
 };
 use sink::{Result as SinkResult, Sink};
 use source::SourceSpec;
+use source::cdc::ChangeCapture;
+use source::document::DocumentBuilder;
 use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
+use stream::Stream;
+use stream_channel::ChannelStream;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -36,24 +40,13 @@ struct RecordingSink {
 
 #[async_trait]
 impl Sink for RecordingSink {
-    async fn upsert(
-        &self,
-        index: &IndexName,
-        id: &str,
-        _document: &GenericValue,
-    ) -> SinkResult<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("upsert {} {id}", index.as_ref()));
-        Ok(())
-    }
-
-    async fn delete(&self, index: &IndexName, id: &str) -> SinkResult<()> {
-        self.ops
-            .lock()
-            .unwrap()
-            .push(format!("delete {} {id}", index.as_ref()));
+    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
+        self.ops.lock().unwrap().push(format!(
+            "{} {} {}",
+            envelope.op,
+            envelope.index.as_ref(),
+            envelope.id
+        ));
         Ok(())
     }
 
@@ -116,13 +109,11 @@ async fn wal_changes_flow_through_the_engine() {
     let sink = Arc::new(RecordingSink {
         ops: Arc::clone(&recorded),
     });
-    let engine = Engine::new(
+    let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
         sink,
-    );
-
-    let mut engine = tokio::spawn(engine.run());
+    ));
 
     // Changes after slot creation are captured and replayed through the engine.
     sqlx::query("INSERT INTO users (id, email) VALUES (1, 'ada@x.io')")
@@ -193,19 +184,39 @@ async fn backfill_seeds_preexisting_rows() {
     let sink = Arc::new(RecordingSink {
         ops: Arc::clone(&recorded),
     });
-    let engine = Engine::new(
+    let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
         sink,
-    );
-
-    let mut engine = tokio::spawn(engine.run());
+    ));
 
     // Both pre-existing rows are seeded by the backfill.
     expect_op(&mut engine, &recorded, "upsert users 1").await;
     expect_op(&mut engine, &recorded, "upsert users 2").await;
 
     engine.abort();
+}
+
+/// One deployment the way the daemon runs it: stage the sink engine, then run
+/// it and the ingest engine together until either stops. `Ok` when the live
+/// stream ends; the first engine error otherwise.
+async fn run_deployment(
+    capture: Arc<dyn ChangeCapture>,
+    documents: Arc<dyn DocumentBuilder>,
+    sink: Arc<dyn Sink>,
+) -> engine::Result<()> {
+    let name = SinkName::try_new("recording").unwrap();
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let continuity = capture.continuity().await?;
+    let mappings = documents.index_mappings().await?;
+    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings);
+    sink_engine.stage(continuity).await?;
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name]);
+    let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    tokio::select! {
+        result = ingest.run() => result,
+        result = sink_engine.run(&mut control_rx) => result,
+    }
 }
 
 /// Wait until the sink has recorded `op`, surfacing the engine's error if it

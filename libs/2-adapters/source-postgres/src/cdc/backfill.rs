@@ -32,11 +32,10 @@
 //! so memory stays bounded regardless of table size.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
 use kernel::{ColumnName, TableName};
-use source::cdc::{Ack, AckSink, Change, ChangeEvent};
+use source::cdc::ChangeEvent;
 use source::{Result, RowKey, SnapshotTable, SourceError};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPoolOptions, PgRow};
@@ -56,7 +55,7 @@ const FETCH_SQL: &str = "FETCH FORWARD 1024 FROM flusso_backfill_cursor";
 pub(crate) async fn snapshot(
     connection_url: &str,
     tables: &[SnapshotTable],
-) -> Result<BoxStream<'static, Result<Change>>> {
+) -> Result<BoxStream<'static, Result<ChangeEvent>>> {
     // A tiny pool: the snapshot checks out exactly one connection and holds it
     // (its snapshot transaction) for the duration.
     let pool = PgPoolOptions::new()
@@ -69,7 +68,7 @@ pub(crate) async fn snapshot(
 }
 
 /// One table to snapshot, with its identifiers pre-quoted for the cursor's
-/// `SELECT` and the validated names used to build [`Change`]s.
+/// `SELECT` and the validated names used to build [`ChangeEvent`]s.
 struct BackfillTable {
     /// `"schema"."table"`, quoted and ready to interpolate.
     qualified: String,
@@ -133,7 +132,10 @@ async fn primary_key(pool: &PgPool, schema: &str, table: &str) -> Result<Option<
 
 /// Build the snapshot stream: an `Upsert` per existing row across `tables`, then
 /// end. With no tables it ends immediately.
-fn build_stream(pool: PgPool, tables: Vec<BackfillTable>) -> BoxStream<'static, Result<Change>> {
+fn build_stream(
+    pool: PgPool,
+    tables: Vec<BackfillTable>,
+) -> BoxStream<'static, Result<ChangeEvent>> {
     let phase = if tables.is_empty() {
         Phase::Done
     } else {
@@ -172,7 +174,7 @@ enum Phase {
 impl Backfill {
     /// Produce the next item, or `None` once the snapshot is exhausted. Drives
     /// the phase machine, doing one unit of DB work per loop turn between yields.
-    async fn step(&mut self) -> Option<Result<Change>> {
+    async fn step(&mut self) -> Option<Result<ChangeEvent>> {
         loop {
             // Take the phase by value so async work and the reassignment below
             // don't fight over a borrow of `self.phase`.
@@ -262,22 +264,10 @@ impl Backfill {
     }
 }
 
-/// A snapshot row as an [`Upsert`](ChangeEvent::Upsert) change. Its ack is a
-/// no-op: the snapshot is not resumable, so confirming a row moves no cursor.
-fn upsert_change(table: TableName, key: RowKey) -> Change {
-    Change {
-        event: ChangeEvent::Upsert { table, key },
-        ack: Ack::new(0, Arc::new(NoopAck)),
-    }
-}
-
-/// An [`AckSink`] that discards confirmations — for snapshot changes, which have
-/// no durable cursor to advance.
-#[derive(Debug)]
-struct NoopAck;
-
-impl AckSink for NoopAck {
-    fn confirm(&self, _seq: u64) {}
+/// A snapshot row as an [`Upsert`](ChangeEvent::Upsert). Snapshot rows carry no
+/// position: the snapshot is not resumable, a crashed one simply re-runs.
+fn upsert_change(table: TableName, key: RowKey) -> ChangeEvent {
+    ChangeEvent::Upsert { table, key }
 }
 
 /// Open the read-only, single-snapshot transaction the cursors read within.

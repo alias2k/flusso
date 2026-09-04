@@ -1,13 +1,14 @@
-//! Drives the stdout sink with a sample assembled document, exercising the real
+//! Drives the stdout sink with a sample built document, exercising the real
 //! stdout write path.
 //!
-//! Run with: `cargo run -p sinks-stdout --example demo`
+//! Run with: `cargo run -p flusso-sink-stdout --example demo`
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
 use std::collections::BTreeMap;
 
-use kernel::{GenericValue, IndexName};
+use chrono::Utc;
+use kernel::{Envelope, GenericValue, IndexName, Position};
 use sink::Sink;
 use sink_stdout::StdoutSink;
 
@@ -31,8 +32,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]));
 
     futures::executor::block_on(async {
-        sink.upsert(&index, "42", &document).await?;
-        sink.delete(&index, "7").await?;
+        sink.apply(&Envelope::upsert(
+            index.clone(),
+            "42",
+            document,
+            Some(Position(1)),
+            Utc::now(),
+        ))
+        .await?;
+        sink.apply(&Envelope::delete(index, "7", Some(Position(2)), Utc::now()))
+            .await?;
         sink.flush(true).await
     })?;
 

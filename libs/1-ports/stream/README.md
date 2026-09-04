@@ -1,21 +1,23 @@
 # flusso-stream
 
-The stream port: the generic producer/consumer contract between the source side and the sinks, domain-agnostic, so the adapter swaps without touching engine code.
+The stream port: what sits between the ingest engine and the sink engines. One **lane** per sink carries batches of envelopes down; one **request lane** carries backfill requests up; the stream owns the **watermark** that turns every lane's acknowledgements into the one position the source may confirm.
 
 ## Quick reference
 
 | Item | Role |
 | --- | --- |
-| [`Producer`] | Publishes work items |
-| [`Consumer`] | Receives them, one [`Delivery`] at a time |
-| [`Delivery`] | A received item plus its [`AckHandle`] |
-| [`AckHandle`] | Confirms (or returns) a delivery — [`ack`](AckHandle::ack) / `nack` |
+| [`Stream`] | The port: `lane(sink)`, `requests()`, `watermark()` |
+| [`LaneItem`] | What a lane carries: a [`Batch`] of envelopes, or a `SnapshotComplete` marker |
+| [`Request`] | What goes up: `Backfill { sink, indexes }` |
+| [`Producer`] / [`Consumer`] | The generic publish/receive pair both directions are built from |
+| [`Delivery`] / [`AckHandle`] | A received item plus the handle that confirms it; acking a batch moves its lane's watermark |
 
-Generic over the payload `T`, so it depends on neither the source, the sink, nor the engine. Both backends drive the same engine loop: `recv` → process → `ack`.
+## The contract
 
-The point of the abstraction is a swappable *backend*:
+- **Batches, not envelopes.** A lane item is the set of envelopes one ingest commit built, in build order, with the position of the last change it covers. Acknowledging it confirms that position for that lane; contiguity is free because batches are published in order. A live batch with no documents still carries its position. A snapshot batch carries none, and a `SnapshotComplete` marker follows the last one.
+- **The watermark is the minimum over lanes** of each lane's last acknowledged position. The ingest engine reads it after every commit and hands it to the source as confirmation, so the replication slot advances only past what *every* sink holds.
+- **Requests are at-least-once.** The ingest engine acknowledges a `Backfill` only after publishing the `SnapshotComplete` that ends it; a crash in between redelivers the request.
+- **Re-attachable ends.** `lane` and `requests` return fresh ends over the same lane each call. A restarted engine picks up where the last one stopped, including the item it left unacknowledged.
+- **Backpressure is the in-process trade.** With the bounded channel adapter (`stream-channel`), a full lane blocks the ingest engine, so the slowest sink paces ingest. A broker-backed adapter is what removes that.
 
-- **In-process** [`tokio` channels](https://docs.rs/tokio) (see `stream-channel`) for single-node runs. Acking is a no-op there — durability comes from the source (the replication slot), and the bounded channel gives backpressure.
-- **A durable broker** (e.g. NATS JetStream) later, where [`AckHandle::ack`] becomes a real server acknowledgement and the queue itself is the durability boundary for the work pipeline.
-
-> ℹ️ **Info** — because [`AckHandle`] models the ack identically, the engine loop is unchanged whichever backend backs it; only the durability guarantee shifts.
+> ℹ️ **Info** — the port is generic over the payload, so the same `Producer`/`Consumer` pair carries envelopes down and requests up. A broker-backed adapter implements the same three methods; nothing in the engines changes.
