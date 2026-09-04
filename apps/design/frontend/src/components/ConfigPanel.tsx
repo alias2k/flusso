@@ -1,11 +1,13 @@
 import { type ReactNode, useState } from "react";
-import { Copy, Plus, Search, Terminal } from "lucide-react";
-import type { ConfigToml, IndexEntry } from "../api";
+import { Copy, Plug, Plus, Search, Terminal } from "lucide-react";
+import type { AdapterDescription, ConfigToml, IndexEntry } from "../api";
 import { useT } from "../i18n";
 import { LABEL } from "../styles";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Check, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
+import { useAdapters } from "../model/adapters";
+import { AdapterForm, KindBadge, KindToggle } from "./AdapterForm";
+import { Drawer, Field, PanelTitle, RemoveButton, Select, Text } from "./widgets";
 import {
   Dialog,
   DialogContent,
@@ -16,7 +18,19 @@ import {
 } from "@/components/ui/dialog";
 
 type Sink = Record<string, unknown>;
-type Source = Record<string, unknown>;
+
+/// The icon for a sink kind; adapters the designer doesn't know get a plug.
+function kindIcon(kind: string): ReactNode {
+  if (kind === "opensearch") return <Search className="size-3.5" />;
+  if (kind === "stdout") return <Terminal className="size-3.5" />;
+  return <Plug className="size-3.5" />;
+}
+
+/// Split a port entry into its `type` and the adapter's options.
+function splitEntry(entry: Record<string, unknown> | undefined): { kind: string; options: Record<string, unknown> } {
+  const { type, ...options } = entry ?? {};
+  return { kind: typeof type === "string" ? type : "", options };
+}
 
 // Shared column track for the index table header + rows: name · schema file ·
 // on_error · state · duplicate · remove. Every non-flex column is a fixed width
@@ -34,9 +48,17 @@ export function ConfigPanel({
   onDuplicate: (i: number) => void;
 }) {
   const { t } = useT();
+  const adapters = useAdapters() ?? [];
   const index = config.index ?? [];
   const sinks = (config.sinks ?? {}) as Record<string, Sink>;
   const [pendingRemove, setPendingRemove] = useState<number | null>(null);
+  const sourceAdapters = adapters.filter((a) => a.port === "source");
+  const streamAdapters = adapters.filter((a) => a.port === "stream");
+  const sinkAdapters = adapters.filter((a) => a.port === "sink");
+  const source = splitEntry(config.source);
+  const stream = splitEntry(config.stream);
+  const sourceDescription = sourceAdapters.find((a) => a.kind === source.kind);
+  const streamDescription = streamAdapters.find((a) => a.kind === (stream.kind || "channel"));
 
   const setEntry = (i: number, e: IndexEntry) => {
     const next = index.slice();
@@ -103,16 +125,63 @@ export function ConfigPanel({
         </div>
       </div>
 
-      <Stage step={1} tone="bg-kind-root" title={t("config.source")} hint={t("config.stageSourceHint")} lead>
+      <Stage
+        step={1}
+        tone="bg-kind-root"
+        title={t("config.source")}
+        hint={source.kind || t("config.loadingAdapters")}
+        lead
+      >
         <div className="rounded-lg border border-l-2 border-border border-l-kind-root bg-secondary p-3">
-          <ConnectionEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
-          <Check
-            value={config.source?.manage_publication !== false}
-            label="manage_publication"
-            onChange={(v) => onChange({ ...config, source: { ...config.source, manage_publication: v } })}
-          />
-          <TlsEditor source={config.source} onChange={(source) => onChange({ ...config, source })} />
+          <div className="mb-2 flex items-center gap-2">
+            {sourceAdapters.length > 1 ? (
+              <KindToggle
+                kinds={sourceAdapters.map((a) => a.kind)}
+                value={source.kind}
+                onChange={(kind) => onChange({ ...config, source: { type: kind } })}
+                icon={kindIcon}
+              />
+            ) : (
+              <KindBadge kind={source.kind} />
+            )}
+          </div>
+          {sourceDescription && (
+            <AdapterForm
+              description={sourceDescription}
+              value={source.options}
+              onChange={(options) => onChange({ ...config, source: { type: source.kind, ...options } })}
+            />
+          )}
         </div>
+        <Drawer title={t("config.stream")} count={Object.keys(stream.options).length || undefined}>
+          <div className="rounded-lg border border-border bg-secondary p-3">
+            <div className="mb-2 flex items-center gap-2">
+              {streamAdapters.length > 1 ? (
+                <KindToggle
+                  kinds={streamAdapters.map((a) => a.kind)}
+                  value={stream.kind || "channel"}
+                  onChange={(kind) => onChange({ ...config, stream: { type: kind } })}
+                  icon={kindIcon}
+                />
+              ) : (
+                <KindBadge kind={stream.kind || "channel"} />
+              )}
+              <span className="text-2xs text-muted-foreground">{t("config.streamHint")}</span>
+            </div>
+            {streamDescription && (
+              <AdapterForm
+                description={streamDescription}
+                value={stream.options}
+                onChange={(options) =>
+                  onChange({
+                    ...config,
+                    stream: Object.keys(options).length ? { type: streamDescription.kind, ...options } : undefined,
+                  })
+                }
+              />
+            )}
+          </div>
+        </Drawer>
       </Stage>
 
       <Stage step={2} tone="bg-accent2" title={t("sidebar.indexes")} hint={t("config.stageIndexesHint")}>
@@ -196,6 +265,7 @@ export function ConfigPanel({
             key={name}
             name={name}
             sink={sink}
+            adapters={sinkAdapters}
             taken={Object.keys(sinks).filter((n) => n !== name)}
             onChange={(s) => setSink(name, s)}
             onRename={(to) => renameSink(name, to)}
@@ -204,9 +274,10 @@ export function ConfigPanel({
         ))}
         <AddDashed
           label={t("config.sink")}
-          onClick={() =>
-            setSink(`sink${Object.keys(sinks).length + 1}`, { type: "opensearch", url: "http://127.0.0.1:9200" })
-          }
+          onClick={() => {
+            const first = sinkAdapters[0];
+            setSink(`sink${Object.keys(sinks).length + 1}`, first ? { type: first.kind, ...first.example } : {});
+          }}
         />
       </Stage>
 
@@ -285,165 +356,12 @@ function Stage({
   );
 }
 
-/// The source connection in any of its three forms: a plain URL, an env ref
-/// (`{ env = "VAR" }`), or host/port/user/password/database parts.
-function ConnectionEditor({ source, onChange }: { source: Source; onChange: (s: Source) => void }) {
-  const { t } = useT();
-  const cu = source.connection_url;
-  const isObj = !!cu && typeof cu === "object";
-  const obj = (cu ?? {}) as Record<string, unknown>;
-  const mode: "url" | "env" | "parts" =
-    typeof cu === "string" ? "url" : isObj && "env" in obj ? "env" : isObj && "host" in obj ? "parts" : "url";
-  const setCu = (v: unknown) => onChange({ ...source, connection_url: v });
-
-  return (
-    <div className="connection-editor">
-      <Field label={t("config.connection")}>
-        <Select
-          value={mode}
-          options={["url", "env", "parts"]}
-          onChange={(m) => {
-            if (m === "url") setCu("postgres://user:pass@127.0.0.1:5432/db");
-            else if (m === "env") setCu({ env: "DATABASE_URL" });
-            else setCu({ host: "127.0.0.1", port: 5432, user: "postgres", password: "", database: "postgres" });
-          }}
-        />
-      </Field>
-      {mode === "url" && (
-        <Field label="url">
-          <Text
-            value={typeof cu === "string" ? cu : ""}
-            onChange={setCu}
-            placeholder="postgres://user:pass@host:5432/db"
-          />
-        </Field>
-      )}
-      {mode === "env" && (
-        <Field label={t("config.envVar")}>
-          <Text value={(obj.env as string) ?? ""} onChange={(v) => setCu({ env: v })} placeholder="DATABASE_URL" />
-        </Field>
-      )}
-      {mode === "parts" && (
-        <>
-          <div className="flex flex-wrap gap-3">
-            <Field label={t("config.host")}>
-              <Text value={(obj.host as string) ?? ""} onChange={(v) => setCu({ ...obj, host: v })} />
-            </Field>
-            <Field label={t("config.port")}>
-              <Num
-                value={typeof obj.port === "number" ? obj.port : undefined}
-                onChange={(v) => setCu({ ...obj, port: v })}
-              />
-            </Field>
-          </div>
-          <Field label={t("config.user")}>
-            <Text value={(obj.user as string) ?? ""} onChange={(v) => setCu({ ...obj, user: v })} />
-          </Field>
-          <Field label={t("config.password")}>
-            <Text
-              value={typeof obj.password === "string" ? obj.password : ""}
-              onChange={(v) => setCu({ ...obj, password: v || undefined })}
-            />
-          </Field>
-          <Field label={t("config.database")}>
-            <Text value={(obj.database as string) ?? ""} onChange={(v) => setCu({ ...obj, database: v })} />
-          </Field>
-        </>
-      )}
-    </div>
-  );
-}
-
-/// The source's TLS keys, collapsed by default (most deployments say nothing
-/// and get the `prefer` default). Config keys override the URL's own `ssl*`
-/// parameters; an empty field removes its key so the emitted TOML stays clean.
-function TlsEditor({ source, onChange }: { source: Source; onChange: (s: Source) => void }) {
-  const { t } = useT();
-  const str = (key: string) => {
-    const value = source[key];
-    return typeof value === "string" ? value : "";
-  };
-  const set = (key: string, value: string) => onChange({ ...source, [key]: value || undefined });
-  const mode = str("ssl_mode");
-  const count = ["ssl_mode", "ssl_root_cert", "ssl_cert", "ssl_key", "ssl_sni_hostname"].filter(
-    (k) => str(k) !== "",
-  ).length;
-
-  return (
-    <Drawer title={t("config.tls")} count={count || undefined}>
-      <Field label="ssl_mode">
-        <Select
-          value={mode || "default"}
-          options={[
-            { value: "default", label: "default · prefer" },
-            { value: "disable", label: "disable" },
-            { value: "prefer", label: "prefer" },
-            { value: "require", label: "require" },
-            { value: "verify-ca", label: "verify-ca" },
-            { value: "verify-full", label: "verify-full" },
-          ]}
-          onChange={(v) => set("ssl_mode", v === "default" ? "" : v)}
-        />
-      </Field>
-      {mode === "require" && <div className="mb-1.5 text-2xs text-warn">{t("config.sslRequireWarn")}</div>}
-      <Field label="ssl_root_cert">
-        <Text value={str("ssl_root_cert")} onChange={(v) => set("ssl_root_cert", v)} placeholder="/etc/ssl/ca.pem" />
-      </Field>
-      <div className="flex flex-wrap gap-3">
-        <Field label="ssl_cert">
-          <Text value={str("ssl_cert")} onChange={(v) => set("ssl_cert", v)} placeholder="/etc/ssl/client.pem" />
-        </Field>
-        <Field label="ssl_key">
-          <Text value={str("ssl_key")} onChange={(v) => set("ssl_key", v)} placeholder="/etc/ssl/client.key" />
-        </Field>
-      </div>
-      <Field label="ssl_sni_hostname">
-        <Text
-          value={str("ssl_sni_hostname")}
-          onChange={(v) => set("ssl_sni_hostname", v)}
-          placeholder="db.internal.example.com"
-        />
-      </Field>
-    </Drawer>
-  );
-}
-
-/// The sink kind picker: a two-option segmented toggle (OpenSearch / stdout)
-/// with icons — sized to content, so it never stretches the header the way a
-/// full-width select did.
-function SinkTypeToggle({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const opts = [
-    { v: "opensearch", label: "OpenSearch", Icon: Search },
-    { v: "stdout", label: "stdout", Icon: Terminal },
-  ];
-  return (
-    <div className="inline-flex rounded-md border border-border bg-background p-0.5">
-      {opts.map(({ v, label, Icon }) => (
-        <button
-          key={v}
-          type="button"
-          onClick={() => onChange(v)}
-          aria-pressed={value === v}
-          className={cn(
-            "inline-flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-2xs font-medium transition-colors",
-            value === v ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          <Icon className="size-3.5" />
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/// Edits one sink. Common fields are typed inputs; everything else round-trips
-/// untouched (the sink object is preserved and only the edited keys change).
-/// OpenSearch's rarely-touched index knobs live in a collapsed "tuning" drawer;
-/// stdout has only `pretty`, so its card stays a single row.
+/// Edits one sink: its name, its kind (one toggle per registered sink adapter),
+/// and that adapter's options, rendered from the adapter's own declaration.
 function SinkEditor({
   name,
   sink,
+  adapters,
   taken,
   onChange,
   onRename,
@@ -451,18 +369,15 @@ function SinkEditor({
 }: {
   name: string;
   sink: Sink;
+  adapters: AdapterDescription[];
   taken: string[];
   onChange: (s: Sink) => void;
   onRename: (to: string) => void;
   onRemove: () => void;
 }) {
   const { t } = useT();
-  const type = (sink.type as string) ?? "opensearch";
-  const os = type === "opensearch";
-  const set = (key: string, value: unknown) => onChange({ ...sink, [key]: value });
-  const str = (key: string) => (typeof sink[key] === "string" ? sink[key] : "");
-  const num = (key: string) => (typeof sink[key] === "number" ? sink[key] : undefined);
-  const bool = (key: string) => sink[key] === true;
+  const { kind, options } = splitEntry(sink);
+  const description = adapters.find((a) => a.kind === kind);
 
   // Local draft so a half-typed name doesn't rename the config-map key on every
   // keystroke (which would remount this card and drop focus). Commit on blur /
@@ -478,7 +393,7 @@ function SinkEditor({
     <div
       className={cn(
         "sink-editor my-1.5 rounded-lg border border-l-2 border-border bg-secondary p-2.5",
-        os ? "border-l-primary" : "border-l-slate",
+        description ? "border-l-primary" : "border-l-slate",
       )}
     >
       <div className="sink-head flex items-center gap-2.5">
@@ -491,45 +406,29 @@ function SinkEditor({
           placeholder={t("config.name")}
           className="w-40 font-semibold"
         />
-        <SinkTypeToggle value={type} onChange={(ty) => set("type", ty)} />
+        <KindToggle
+          kinds={adapters.map((a) => a.kind)}
+          value={kind}
+          onChange={(next) => {
+            const target = adapters.find((a) => a.kind === next);
+            onChange({ type: next, ...(target?.example ?? {}) });
+          }}
+          icon={kindIcon}
+        />
         <div className="flex-1" />
         <RemoveButton label={t("common.remove")} onClick={onRemove} />
       </div>
-      {os ? (
-        <div className="mt-2">
-          <Field label="url">
-            <Text value={str("url")} onChange={(v) => set("url", v)} placeholder="http://127.0.0.1:9200" />
-          </Field>
-          <Field label="username">
-            <Text value={str("username")} onChange={(v) => set("username", v || undefined)} />
-          </Field>
-          <Check value={bool("tls_verify")} label="tls_verify" onChange={(v) => set("tls_verify", v)} />
-          <Drawer title={t("config.indexTuning")}>
-            <div className="flex flex-wrap gap-3">
-              <Field label="batch_size">
-                <Num value={num("batch_size")} onChange={(v) => set("batch_size", v)} />
-              </Field>
-              <Field label="shards">
-                <Num value={num("number_of_shards")} onChange={(v) => set("number_of_shards", v)} />
-              </Field>
-              <Field label="replicas">
-                <Num value={num("number_of_replicas")} onChange={(v) => set("number_of_replicas", v)} />
-              </Field>
-            </div>
-            <Field label="refresh_interval">
-              <Text
-                value={str("refresh_interval")}
-                onChange={(v) => set("refresh_interval", v || undefined)}
-                placeholder="1s"
-              />
-            </Field>
-          </Drawer>
-        </div>
-      ) : (
-        <div className="mt-2">
-          <Check value={bool("pretty")} label="pretty" onChange={(v) => set("pretty", v)} />
-        </div>
-      )}
+      <div className="mt-2">
+        {description ? (
+          <AdapterForm
+            description={description}
+            value={options}
+            onChange={(next) => onChange({ type: kind, ...next })}
+          />
+        ) : (
+          <span className="text-2xs text-warn">{t("config.unknownAdapter", { kind })}</span>
+        )}
+      </div>
     </div>
   );
 }

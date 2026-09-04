@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Args;
-use design::DesignOptions;
+use design::{ConfigValidator, DesignOptions};
 
 use crate::DEFAULT_CONFIG;
 
@@ -40,6 +40,8 @@ pub(crate) async fn execute(args: DesignArgs) -> anyhow::Result<()> {
         config_path: args.config,
         address: args.address,
         open_browser: !args.no_open,
+        adapters: crate::adapters::descriptions().to_vec(),
+        validate: ConfigValidator::new(crate::adapters::validate),
     })
     .await
     .context("running the designer")

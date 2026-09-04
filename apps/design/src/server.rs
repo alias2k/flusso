@@ -6,6 +6,7 @@
 //! being edited — the file is the source of truth, re-read per request, so the
 //! server holds no model of its own.
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,12 +17,15 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use config::Config;
+use kernel::AdapterDescription;
 use tokio::net::TcpListener;
 
 use crate::api;
 use crate::assets;
 
-/// How to run the designer: which config to edit and where to listen.
+/// How to run the designer: which config to edit, where to listen, and what
+/// the composition root knows about the adapters.
 #[derive(Debug, Clone)]
 pub struct DesignOptions {
     /// Path to the `flusso.toml` the designer reads and writes.
@@ -30,17 +34,52 @@ pub struct DesignOptions {
     pub address: SocketAddr,
     /// Open the designer URL in the default browser once the listener is bound.
     pub open_browser: bool,
+    /// What each registered adapter declares about its options. The designer
+    /// renders its source/stream/sink forms from these and never names an
+    /// adapter itself; the composition root supplies them.
+    pub adapters: Vec<AdapterDescription>,
+    /// The composition root's config validation: every port entry against its
+    /// adapter. Run before any connection attempt.
+    pub validate: ConfigValidator,
+}
+
+/// The composition root's validation function, boxed for the state.
+type ValidateFn = dyn Fn(&Config) -> Result<()> + Send + Sync;
+
+/// A config validator handed in by the composition root.
+#[derive(Clone)]
+pub struct ConfigValidator(Arc<ValidateFn>);
+
+impl ConfigValidator {
+    pub fn new(validate: impl Fn(&Config) -> Result<()> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(validate))
+    }
+
+    /// Validate `config` against the registered adapters.
+    pub fn check(&self, config: &Config) -> Result<()> {
+        (self.0)(config)
+    }
+}
+
+impl fmt::Debug for ConfigValidator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ConfigValidator")
+    }
 }
 
 #[derive(Clone)]
 struct AppState {
     config_path: Arc<PathBuf>,
+    adapters: Arc<Vec<AdapterDescription>>,
+    validate: ConfigValidator,
 }
 
 /// Bind `options.address` and serve the designer until the listener closes.
 pub async fn serve(options: DesignOptions) -> Result<()> {
     let state = AppState {
         config_path: Arc::new(options.config_path),
+        adapters: Arc::new(options.adapters),
+        validate: options.validate,
     };
     let app = router(state);
 
@@ -92,6 +131,7 @@ async fn shutdown_signal() {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/project", get(project))
+        .route("/api/adapters", get(adapters))
         .route("/api/catalog", get(catalog))
         .route("/api/test-connection", post(test_connection))
         .route("/api/parse", post(parse))
@@ -110,6 +150,10 @@ async fn project(State(state): State<AppState>) -> Result<Response, ApiError> {
     Ok(Json(project).into_response())
 }
 
+async fn adapters(State(state): State<AppState>) -> Response {
+    Json(state.adapters.as_ref()).into_response()
+}
+
 async fn catalog(State(state): State<AppState>) -> Response {
     Json(api::introspect(&state.config_path).await).into_response()
 }
@@ -118,8 +162,11 @@ async fn dirs(State(state): State<AppState>) -> Response {
     Json(api::list_dirs(&state.config_path)).into_response()
 }
 
-async fn test_connection(Json(config): Json<config::toml::ConfigToml>) -> Response {
-    Json(api::test_connection(config).await).into_response()
+async fn test_connection(
+    State(state): State<AppState>,
+    Json(config): Json<config::toml::ConfigToml>,
+) -> Response {
+    Json(api::test_connection(config, &state.validate).await).into_response()
 }
 
 async fn parse(Json(request): Json<api::ParseRequest>) -> Response {
@@ -131,8 +178,11 @@ async fn preview(Json(request): Json<api::PreviewRequest>) -> Result<Response, A
     Ok(Json(response).into_response())
 }
 
-async fn validate(Json(request): Json<api::ValidateRequest>) -> Response {
-    Json(api::validate(request).await).into_response()
+async fn validate(
+    State(state): State<AppState>,
+    Json(request): Json<api::ValidateRequest>,
+) -> Response {
+    Json(api::validate(request, &state.validate).await).into_response()
 }
 
 async fn sample(Json(request): Json<api::SampleRequest>) -> Response {
