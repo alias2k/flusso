@@ -18,11 +18,11 @@ name = "engine"
 workspace = true
 
 [dependencies]
-sources-core.workspace = true
-sinks-core.workspace = true
-queue-core.workspace = true
-queue-channel.workspace = true
-schema-core.workspace = true
+source.workspace = true
+sink.workspace = true
+stream.workspace = true
+stream-channel.workspace = true
+kernel.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -33,8 +33,8 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 # Concrete source + sink, exercised together only here — the engine is the one
 # component that legitimately spans both halves of the pipeline.
-sources-postgres.workspace = true
-sinks-opensearch.workspace = true
+source-postgres.workspace = true
+sink-opensearch.workspace = true
 sqlx.workspace = true
 rust_decimal.workspace = true
 testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }

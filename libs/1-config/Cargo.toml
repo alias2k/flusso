@@ -1,0 +1,29 @@
+[package]
+name = "flusso-config"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "flusso configuration: parses flusso.toml and *.schema.yml, assembles the validated Config, and compiles the deterministic flusso.lock."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database", "parser-implementations"]
+readme.workspace = true
+
+[lib]
+name = "config"
+
+[lints]
+workspace = true
+
+[dependencies]
+kernel.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+rust_decimal.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

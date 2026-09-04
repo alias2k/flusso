@@ -9,15 +9,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream;
+
 use futures::stream::BoxStream;
-use queue_channel::channel;
-use queue_core::Producer;
-use schema_core::{ColumnName, GenericValue, IndexMapping, IndexName, TableName};
-use sources_core::RowKey;
-use sources_core::SnapshotTable;
-use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
-use sources_core::document::{Document, DocumentId};
+use kernel::{ColumnName, GenericValue, IndexMapping, IndexName, TableName};
+use source::RowKey;
+use source::SnapshotTable;
+use source::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
+use source::document::{Document, DocumentId};
+use stream::Producer;
+use stream_channel::channel;
 
 use super::*;
 use crate::pipeline::{Pipeline, work};
@@ -30,20 +30,18 @@ struct MockSource {
 
 #[async_trait]
 impl ChangeCapture for MockSource {
-    async fn continuity(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> source::Result<Continuity> {
         Ok(Continuity::Resumed)
     }
 
-    async fn prepare(&self) -> sources_core::Result<()> {
+    async fn prepare(&self) -> source::Result<()> {
         Ok(())
     }
 
-    async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<Change>>> {
         let changes = self.changes.lock().unwrap().take().unwrap_or_default();
-        Ok(Box::pin(stream::iter(
-            changes
-                .into_iter()
-                .map(Ok::<Change, sources_core::SourceError>),
+        Ok(Box::pin(futures::stream::iter(
+            changes.into_iter().map(Ok::<Change, source::SourceError>),
         )))
     }
 }
@@ -64,18 +62,14 @@ struct MockDocuments;
 
 #[async_trait]
 impl DocumentBuilder for MockDocuments {
-    async fn resolve(
-        &self,
-        _table: &TableName,
-        key: &RowKey,
-    ) -> sources_core::Result<Vec<DocumentId>> {
+    async fn resolve(&self, _table: &TableName, key: &RowKey) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: IndexName::try_new("users").unwrap(),
             key: key.clone(),
         }])
     }
 
-    async fn build(&self, id: &DocumentId) -> sources_core::Result<Document> {
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
         let deleted = matches!(id.key.0.first(), Some((_, GenericValue::BigInt(2))));
         Ok(if deleted {
             Document::Delete { id: id.clone() }
@@ -87,20 +81,20 @@ impl DocumentBuilder for MockDocuments {
         })
     }
 
-    fn backfill_scopes(&self) -> Vec<sources_core::document::IndexScope> {
-        vec![sources_core::document::IndexScope {
+    fn backfill_scopes(&self) -> Vec<source::document::IndexScope> {
+        vec![source::document::IndexScope {
             index: IndexName::try_new("users").unwrap(),
             root: SnapshotTable {
-                db_schema: schema_core::DatabaseSchema::try_new("public").unwrap(),
+                db_schema: kernel::DatabaseSchema::try_new("public").unwrap(),
                 table: TableName::try_new("users").unwrap(),
             },
         }]
     }
 
-    async fn index_mappings(&self) -> sources_core::Result<Vec<IndexMapping>> {
+    async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
         Ok(vec![IndexMapping {
             index: IndexName::try_new("users").unwrap(),
-            hash: schema_core::ContentHash::new(1),
+            hash: kernel::ContentHash::new(1),
             fields: Vec::new(),
         }])
     }
@@ -119,7 +113,7 @@ impl Sink for RecordingSink {
         index: &IndexName,
         id: &str,
         _document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -127,7 +121,7 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -135,8 +129,8 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
-        Ok(sinks_core::FlushReport::clean())
+    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
+        Ok(sink::FlushReport::clean())
     }
 }
 
@@ -205,7 +199,7 @@ impl Sink for FlushLogSink {
         index: &IndexName,
         id: &str,
         _document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -213,7 +207,7 @@ impl Sink for FlushLogSink {
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -221,9 +215,9 @@ impl Sink for FlushLogSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
         self.ops.lock().unwrap().push("flush".to_owned());
-        Ok(sinks_core::FlushReport::clean())
+        Ok(sink::FlushReport::clean())
     }
 }
 
@@ -284,11 +278,7 @@ struct CountingBuilder {
 
 #[async_trait]
 impl DocumentBuilder for CountingBuilder {
-    async fn resolve(
-        &self,
-        _table: &TableName,
-        _key: &RowKey,
-    ) -> sources_core::Result<Vec<DocumentId>> {
+    async fn resolve(&self, _table: &TableName, _key: &RowKey) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: IndexName::try_new("users").unwrap(),
             key: RowKey(vec![(
@@ -298,7 +288,7 @@ impl DocumentBuilder for CountingBuilder {
         }])
     }
 
-    async fn build(&self, id: &DocumentId) -> sources_core::Result<Document> {
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
         self.builds.fetch_add(1, Ordering::SeqCst);
         Ok(Document::Upsert {
             id: id.clone(),
@@ -366,15 +356,15 @@ impl Sink for FlushCountSink {
         _index: &IndexName,
         _id: &str,
         _document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         Ok(())
     }
-    async fn delete(&self, _index: &IndexName, _id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, _index: &IndexName, _id: &str) -> sink::Result<()> {
         Ok(())
     }
-    async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
         self.flushes.fetch_add(1, Ordering::SeqCst);
-        Ok(sinks_core::FlushReport::clean())
+        Ok(sink::FlushReport::clean())
     }
 }
 
@@ -495,30 +485,29 @@ impl SeedSource {
 
 #[async_trait]
 impl ChangeCapture for SeedSource {
-    async fn continuity(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> source::Result<Continuity> {
         Ok(self.continuity)
     }
 
-    async fn prepare(&self) -> sources_core::Result<()> {
+    async fn prepare(&self) -> source::Result<()> {
         self.events.lock().unwrap().push("prepare".to_owned());
         Ok(())
     }
 
-    async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
-        Ok(Box::pin(stream::empty()))
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<Change>>> {
+        Ok(Box::pin(futures::stream::empty()))
     }
 
     async fn snapshot(
         &self,
         tables: &[SnapshotTable],
-    ) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
+    ) -> source::Result<BoxStream<'static, source::Result<Change>>> {
         self.called.store(true, Ordering::SeqCst);
         self.events.lock().unwrap().push("snapshot".to_owned());
         *self.tables.lock().unwrap() = tables.to_vec();
         let rows = self.rows.lock().unwrap().take().unwrap_or_default();
-        Ok(Box::pin(stream::iter(
-            rows.into_iter()
-                .map(Ok::<Change, sources_core::SourceError>),
+        Ok(Box::pin(futures::stream::iter(
+            rows.into_iter().map(Ok::<Change, source::SourceError>),
         )))
     }
 }
@@ -559,7 +548,7 @@ impl Sink for SeedSink {
         index: &IndexName,
         id: &str,
         _document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -567,7 +556,7 @@ impl Sink for SeedSink {
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -575,20 +564,20 @@ impl Sink for SeedSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
-        Ok(sinks_core::FlushReport::clean())
+    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
+        Ok(sink::FlushReport::clean())
     }
 
-    async fn is_seeded(&self, _index: &IndexName) -> sinks_core::Result<bool> {
+    async fn is_seeded(&self, _index: &IndexName) -> sink::Result<bool> {
         Ok(self.seeded.load(Ordering::SeqCst))
     }
 
-    async fn mark_seeded(&self, index: &IndexName) -> sinks_core::Result<()> {
+    async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
         self.marked.lock().unwrap().push(index.as_ref().to_owned());
         Ok(())
     }
 
-    async fn reindex(&self, mapping: &IndexMapping) -> sinks_core::Result<()> {
+    async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
         let index = mapping.index.as_ref().to_owned();
         self.events.lock().unwrap().push(format!("reindex {index}"));
         self.reindexed.lock().unwrap().push(index);
@@ -907,7 +896,7 @@ impl Sink for CrashSink {
         index: &IndexName,
         id: &str,
         document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         self.staging
             .lock()
             .unwrap()
@@ -915,7 +904,7 @@ impl Sink for CrashSink {
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
         self.staging
             .lock()
             .unwrap()
@@ -923,10 +912,10 @@ impl Sink for CrashSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
         if self.fail_next_flush.swap(false, Ordering::SeqCst) {
             // Crash before durability: the staged ops never reach the store.
-            return Err(sinks_core::SinkError::Write(
+            return Err(sink::SinkError::Write(
                 "simulated crash before flush completed".to_owned(),
             ));
         }
@@ -941,7 +930,7 @@ impl Sink for CrashSink {
                 }
             }
         }
-        Ok(sinks_core::FlushReport::clean())
+        Ok(sink::FlushReport::clean())
     }
 }
 
@@ -1039,15 +1028,15 @@ impl Sink for CaughtUpSink {
         _index: &IndexName,
         _id: &str,
         _document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         Ok(())
     }
-    async fn delete(&self, _index: &IndexName, _id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, _index: &IndexName, _id: &str) -> sink::Result<()> {
         Ok(())
     }
-    async fn flush(&self, caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+    async fn flush(&self, caught_up: bool) -> sink::Result<sink::FlushReport> {
         self.flushes.lock().unwrap().push(caught_up);
-        Ok(sinks_core::FlushReport::clean())
+        Ok(sink::FlushReport::clean())
     }
 }
 
@@ -1115,7 +1104,7 @@ impl Sink for RejectingSink {
         index: &IndexName,
         id: &str,
         _document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         self.staged
             .lock()
             .unwrap()
@@ -1123,7 +1112,7 @@ impl Sink for RejectingSink {
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
         self.staged
             .lock()
             .unwrap()
@@ -1131,19 +1120,19 @@ impl Sink for RejectingSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> sinks_core::Result<sinks_core::FlushReport> {
+    async fn flush(&self, _caught_up: bool) -> sink::Result<sink::FlushReport> {
         let rejected = self
             .staged
             .lock()
             .unwrap()
             .drain(..)
-            .map(|(index, id)| sinks_core::RejectedDocument {
+            .map(|(index, id)| sink::RejectedDocument {
                 index,
                 id,
                 reason: "simulated item-level rejection".to_owned(),
             })
             .collect();
-        Ok(sinks_core::FlushReport { rejected })
+        Ok(sink::FlushReport { rejected })
     }
 }
 

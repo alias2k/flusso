@@ -1,0 +1,28 @@
+[package]
+name = "flusso-source"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Change-capture and document-builder abstractions for flusso sources."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "source"
+
+[lints]
+workspace = true
+
+[dependencies]
+kernel.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

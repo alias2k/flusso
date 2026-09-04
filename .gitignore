@@ -15,10 +15,10 @@ target/
 node_modules/
 *.tsbuildinfo
 
-# cargo-fuzz workspace (libs/1-sources/1-postgres/fuzz): its own workspace, so its
+# cargo-fuzz workspace (libs/2-adapters/source-postgres/fuzz): its own workspace, so its
 # generated Cargo.lock is not committed — the main workspace's Cargo.lock IS committed,
 # hence this rule is path-anchored rather than a global `Cargo.lock`.
-/libs/1-sources/1-postgres/fuzz/corpus/
-/libs/1-sources/1-postgres/fuzz/artifacts/
-/libs/1-sources/1-postgres/fuzz/coverage/
-/libs/1-sources/1-postgres/fuzz/Cargo.lock
+/libs/2-adapters/source-postgres/fuzz/corpus/
+/libs/2-adapters/source-postgres/fuzz/artifacts/
+/libs/2-adapters/source-postgres/fuzz/coverage/
+/libs/2-adapters/source-postgres/fuzz/Cargo.lock

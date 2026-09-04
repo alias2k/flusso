@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use engine::Engine;
-use schema_core::{
+use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
     IndexName, IndexSchema, TableName,
 };
-use sinks_core::{Result as SinkResult, Sink};
-use sources_core::SourceSpec;
-use sources_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
+use sink::{Result as SinkResult, Sink};
+use source::SourceSpec;
+use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
@@ -57,8 +57,8 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> SinkResult<sinks_core::FlushReport> {
-        Ok(sinks_core::FlushReport::clean())
+    async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
+        Ok(sink::FlushReport::clean())
     }
 }
 

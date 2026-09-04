@@ -52,7 +52,7 @@ Push the branch (an empty commit is fine), then `gh pr create --draft`. Body, in
 - `Closes #<issue>`.
 - A `## To implement` checklist, `- [ ]` per line. Each box names the concrete change **and where it
   lands** — the crate or file, and the function or type when it helps. `- [ ] Core: add
-  \`Column.enum_order\` + project to \`Mapping.enum_order\` (libs/0-core)`, never `- [ ] core
+  \`Column.enum_order\` + project to \`Mapping.enum_order\` (libs/0-kernel)`, never `- [ ] core
   changes`. Order them so ticking top-to-bottom is a valid build order. This list is the resume
   point.
 - A `## Follow-ups (out of scope)` list, with issues filed and linked.

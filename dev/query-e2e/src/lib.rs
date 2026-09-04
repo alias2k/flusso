@@ -3,7 +3,7 @@
 //! The one test here (`tests/combined_search.rs`) drives the **real
 //! OpenSearch sink** and queries back through `flusso-query`, guarding the
 //! sink↔query naming contract end to end. It lives in this unpublished
-//! crate — not in `apps/query/tests/` — so the published `flusso-query` has
+//! crate — not in `sdk/query/tests/` — so the published `flusso-query` has
 //! **zero** flusso lib dependencies (not even dev-deps): the query release
 //! train can never be dragged into a release by a libs version bump.
 //!

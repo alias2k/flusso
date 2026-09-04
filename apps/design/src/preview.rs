@@ -9,7 +9,7 @@
 //! example document from those declared types — the fallback the sample preview
 //! shows when the root table has no rows to sample.
 
-use schema_core::{IndexMapping, IndexName, IndexSchema, Mapping, MappingType, ResolvedField};
+use kernel::{IndexMapping, IndexName, IndexSchema, Mapping, MappingType, ResolvedField};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -89,8 +89,8 @@ fn example_value(field: &ResolvedField) -> Value {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use schema_core::ParseFrom;
-    use schema_index_yaml::SchemaYaml;
+    use config::yaml::SchemaYaml;
+    use kernel::ParseFrom;
 
     use super::*;
 

@@ -1,5 +1,5 @@
 // Types mirroring flusso's validated vocabulary as it serializes to JSON, plus
-// the designer's API client. The shapes match `schema_core::IndexSchema` and
+// the designer's API client. The shapes match `kernel::IndexSchema` and
 // `schema_config_toml::ConfigToml` exactly — externally-tagged enums become
 // `{ variant: payload }`, unit variants become bare strings — so what the UI
 // builds round-trips through the Rust parser unchanged.
@@ -120,7 +120,7 @@ export interface Field {
   source: FieldSource;
 }
 
-// Mirrors schema-core's serde exactly: `Filter` is an externally-tagged enum
+// Mirrors kernel's serde exactly: `Filter` is an externally-tagged enum
 // (`raw`/`null_check`/`value_op`) wrapping a struct, and `FilterValue` is itself
 // tagged (`single`/`list`/`range`). The wire shape must match or the strict
 // backend rejects it.
@@ -131,7 +131,7 @@ export type Filter =
   | { null_check: { column: string; op: "is_null" | "is_not_null" } }
   | { value_op: { column: string; op: FilterOp; value: FilterValue } };
 
-// Externally-tagged enum over struct payloads (matches schema-core's serde):
+// Externally-tagged enum over struct payloads (matches kernel's serde):
 // `{ field: { field, when? } }` or `{ column: { column, when? } }`.
 export interface SoftDeleteField {
   field: string;

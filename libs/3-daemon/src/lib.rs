@@ -10,19 +10,19 @@ pub use observer::StatusObserver;
 pub use status::{IndexState, Phase, Status, StatusSnapshot};
 
 // Re-exported so a binary can attach its own observer (e.g. a metrics recorder)
-// without depending on `engine`/`schema-core` directly — these are part of the
+// without depending on `engine`/`kernel` directly — these are part of the
 // daemon's observe-the-pipeline surface.
 pub use engine::{BatchStats, Observer};
-pub use schema_core::IndexName;
+pub use kernel::IndexName;
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use config::Config;
 use engine::{Engine, FailurePolicies, FanOut};
-use schema::Config;
-use sources_core::cdc::ChangeCapture;
+use source::cdc::ChangeCapture;
 
 /// How a [`Daemon`] run is parameterized — the pipeline knobs the CLI exposes as
 /// flags. Transport settings (HTTP address, …) are the binary's concern, not the

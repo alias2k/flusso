@@ -89,17 +89,24 @@ jobs:
       - name: Assemble versioned schema site from release tags
         run: |
           set -euo pipefail
-          idx=libs/2-schema/1-index-yaml/index.schema.yml
-          cfg=libs/2-schema/1-config-toml/config.schema.json
           mkdir -p site/schemas
           latest=""
-          # Versions come from the index-yaml tags; the config-toml tag at the
-          # same version is its sibling (all crates share one version). Ascending
-          # order, so a minor alias ends on its highest patch and the final tag
-          # overall is `latest`.
-          for tag in $(git tag --list 'flusso-schema-index-yaml-v[0-9]*.[0-9]*.[0-9]*' --sort=version:refname); do
+          # Versions come from the config crate's tags (both schema files live
+          # in it since 0.16; before that they were split across the two parser
+          # crates whose tags are also listed). Ascending order, so a minor alias
+          # ends on its highest patch and the final tag overall is `latest`.
+          for tag in $(git tag --list 'flusso-schema-index-yaml-v[0-9]*.[0-9]*.[0-9]*' 'flusso-config-v[0-9]*.[0-9]*.[0-9]*' --sort=version:refname); do
             ver="${tag##*-v}"
-            cfg_tag="flusso-schema-config-toml-v${ver}"
+            case "$tag" in
+              flusso-config-v*)
+                cfg_tag="$tag"
+                idx=libs/1-config/index.schema.yml
+                cfg=libs/1-config/config.schema.json ;;
+              *)
+                cfg_tag="flusso-schema-config-toml-v${ver}"
+                idx=libs/2-schema/1-index-yaml/index.schema.yml
+                cfg=libs/2-schema/1-config-toml/config.schema.json ;;
+            esac
             # Skip versions predating the in-crate schema layout (files moved/renamed
             # since, so `git show` at the current path would fail for old tags).
             git cat-file -e "${tag}:${idx}" 2>/dev/null || continue
@@ -116,8 +123,8 @@ jobs:
             exit 1
           fi
           mkdir -p site/schemas/latest
-          git show "flusso-schema-index-yaml-v${latest}:${idx}"  > site/schemas/latest/index.schema.yml
-          git show "flusso-schema-config-toml-v${latest}:${cfg}" > site/schemas/latest/config.schema.json
+          git show "${tag}:${idx}"     > site/schemas/latest/index.schema.yml
+          git show "${cfg_tag}:${cfg}" > site/schemas/latest/config.schema.json
           {
             echo "<!doctype html><meta charset=utf-8><title>flusso editor schemas</title>"
             echo "<h1>flusso editor-assist schemas</h1>"

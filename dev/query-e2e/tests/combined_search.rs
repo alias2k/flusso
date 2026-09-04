@@ -14,7 +14,7 @@
 //! [`flusso_query::MultiSearch`], every hit missed dispatch and the search
 //! failed with `UnexpectedIndex`.
 //!
-//! It lives in this unpublished crate (not `apps/query/tests/`) so the
+//! It lives in this unpublished crate (not `sdk/query/tests/`) so the
 //! published `flusso-query` carries no flusso lib dependencies — the query
 //! release train can't be dragged into a release by a libs bump.
 //!
@@ -35,12 +35,12 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use flusso_query::{Client, FlussoMultiDocument, FlussoRoot, FlussoScope, Result, Segment};
-use schema_core::{
+use kernel::{
     ContentHash, FieldName, GenericValue, IndexMapping, IndexName, Mapping, MappingType,
     ResolvedField,
 };
-use sinks_core::Sink;
-use sinks_opensearch::OpensearchSink;
+use sink::Sink;
+use sink_opensearch::OpensearchSink;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -233,8 +233,8 @@ fn document(field: &str, value: &str) -> GenericValue {
 }
 
 fn sink(base_url: &str) -> OpensearchSink {
-    let config = schema_core::OpensearchSink {
-        url: schema_core::Secret::Value(base_url.to_owned()),
+    let config = kernel::OpensearchSink {
+        url: kernel::Secret::Value(base_url.to_owned()),
         username: None,
         password: None,
         tls_verify: false,
@@ -246,10 +246,10 @@ fn sink(base_url: &str) -> OpensearchSink {
         number_of_shards: 1,
         number_of_replicas: 0,
         refresh_interval: "1s".to_owned(),
-        text_analysis: schema_core::TextAnalysis::Builtin,
+        text_analysis: kernel::TextAnalysis::Builtin,
         auto_subfields: true,
     };
-    let name = schema_core::SinkName::try_new("e2e").unwrap();
+    let name = kernel::SinkName::try_new("e2e").unwrap();
     OpensearchSink::from_config(&name, &config).unwrap()
 }
 

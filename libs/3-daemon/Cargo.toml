@@ -18,11 +18,11 @@ name = "daemon"
 workspace = true
 
 [dependencies]
-schema.workspace = true
-schema-core.workspace = true
+config.workspace = true
+kernel.workspace = true
 engine.workspace = true
-sources-core.workspace = true
-sinks-core.workspace = true
+source.workspace = true
+sink.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tracing.workspace = true

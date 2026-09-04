@@ -13,17 +13,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use schema::Config;
-use schema_config_toml::ConfigToml;
-use schema_core::common::IndexName;
-use schema_core::{IndexSchema, ParseFrom};
-use schema_index_yaml::SchemaYaml;
+use config::Config;
+use config::toml::ConfigToml;
+use config::yaml::SchemaYaml;
+use kernel::common::IndexName;
+use kernel::{IndexSchema, ParseFrom};
 use serde::{Deserialize, Serialize};
-use sources_core::{
+use source::{
     Diagnostic, JunctionCandidate, RelationalCatalog, SchemaIntrospection, Severity, SourceSpec,
     junction_candidates, validate_indexes,
 };
-use sources_postgres::{
+use source_postgres::{
     PgDocumentBuilder, WalChangeCapture, replication_config, sql_connection_url,
 };
 
@@ -157,7 +157,7 @@ impl ParseResponse {
 /// Parse a schema buffer into the validated model — the Code editor's live
 /// YAML → document sync.
 pub fn parse_index(request: &ParseRequest) -> ParseResponse {
-    use schema_index_yaml::ParseError;
+    use config::yaml::ParseError;
 
     let entity = match SchemaYaml::try_parse(&request.yaml) {
         Ok(entity) => entity,
@@ -619,7 +619,7 @@ async fn introspect_inner(
     config_path: &Path,
 ) -> Result<(RelationalCatalog, Vec<JunctionCandidate>)> {
     let config =
-        schema::load(config_path).with_context(|| format!("loading {}", config_path.display()))?;
+        config::load(config_path).with_context(|| format!("loading {}", config_path.display()))?;
     introspect_with(&config).await
 }
 
@@ -852,7 +852,7 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
         .await
         .context("building a sample document")?
     {
-        return Ok(SampleOutcome::Document(sinks_core::to_json(&body)));
+        return Ok(SampleOutcome::Document(sink::to_json(&body)));
     }
 
     // No live row — synthesize example data from the schema's declared types.

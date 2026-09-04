@@ -1,0 +1,41 @@
+[package]
+name = "flusso-sink-opensearch"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenSearch sink for flusso: bulk writes, mappings, seeding, and reindex."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "sink_opensearch"
+
+[lints]
+workspace = true
+
+[dependencies]
+sink.workspace = true
+kernel.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+kernel.workspace = true
+sink.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+testcontainers-modules = { workspace = true, features = ["http_wait"] }
+criterion.workspace = true
+
+# Real-service benchmark: bulk indexing throughput against a live OpenSearch.
+# Spins up OpenSearch in a container, so requires Docker. Run with `cargo bench`.
+[[bench]]
+name = "opensearch"
+harness = false
+

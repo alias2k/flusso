@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-pub use schema_core::FailurePolicy;
+pub use kernel::FailurePolicy;
 
 /// How the worker groups changes into one sink flush.
 ///

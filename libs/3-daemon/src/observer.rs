@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use engine::{BatchStats, Observer};
-use schema_core::IndexName;
+use kernel::IndexName;
 
 use crate::status::{Phase, Status};
 

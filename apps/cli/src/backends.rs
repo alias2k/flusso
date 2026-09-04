@@ -13,15 +13,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
+use config::{Config, Sink as SinkConfig, SourceType};
 use daemon::{Backends, DaemonOptions, SourceParts};
-use schema::{Config, Sink as SinkConfig, SourceType};
-use sinks_core::{FanOutSink, Sink};
-use sinks_opensearch::OpensearchSink;
-use sinks_stdout::StdoutSink;
-use sources_core::cdc::ChangeCapture;
-use sources_core::document::DocumentBuilder;
-use sources_core::{CaptureProvisioning, SourceSpec};
-use sources_postgres::{
+use sink::{FanOutSink, Sink};
+use sink_opensearch::OpensearchSink;
+use sink_stdout::StdoutSink;
+use source::cdc::ChangeCapture;
+use source::document::DocumentBuilder;
+use source::{CaptureProvisioning, SourceSpec};
+use source_postgres::{
     PgDocumentBuilder, WalChangeCapture, replication_config, sql_connection_url,
 };
 

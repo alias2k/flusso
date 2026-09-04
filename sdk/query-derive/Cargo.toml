@@ -1,0 +1,33 @@
+[package]
+name = "flusso-query-derive"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macro generating a typed, compile-time-validated query surface for flusso indexes."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+config = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+# The runtime, with the derive re-exported — the real consumer surface. (A
+# dev-dependency cycle, which Cargo allows.)
+flusso-query = { path = "../query", features = ["derive", "uuid", "decimal"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+trybuild = "1"

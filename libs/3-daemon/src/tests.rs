@@ -6,14 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use config::{Source, SourceType};
 use engine::BatchStats;
 use futures::stream::{self, BoxStream};
-use schema::{Source, SourceType};
-use schema_core::{ColumnName, DatabaseSchema, GenericValue, IndexName, TableName};
-use sinks_core::{FlushReport, Sink};
-use sources_core::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
-use sources_core::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use sources_core::{RowKey, SnapshotTable};
+use kernel::{ColumnName, DatabaseSchema, GenericValue, IndexName, TableName};
+use sink::{FlushReport, Sink};
+use source::cdc::{Ack, AckSink, Change, ChangeEvent, Continuity};
+use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
+use source::{RowKey, SnapshotTable};
 use tokio::sync::Notify;
 
 use crate::observer::StatusObserver;
@@ -104,19 +104,19 @@ struct LaggySource(Option<u64>);
 
 #[async_trait]
 impl ChangeCapture for LaggySource {
-    async fn continuity(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> source::Result<Continuity> {
         Ok(Continuity::Resumed)
     }
 
-    async fn prepare(&self) -> sources_core::Result<()> {
+    async fn prepare(&self) -> source::Result<()> {
         Ok(())
     }
 
-    async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<Change>>> {
         Ok(Box::pin(stream::empty()))
     }
 
-    async fn lag(&self) -> sources_core::Result<Option<u64>> {
+    async fn lag(&self) -> source::Result<Option<u64>> {
         Ok(self.0)
     }
 }
@@ -208,24 +208,22 @@ struct ScriptedSource {
 
 #[async_trait]
 impl ChangeCapture for ScriptedSource {
-    async fn continuity(&self) -> sources_core::Result<Continuity> {
+    async fn continuity(&self) -> source::Result<Continuity> {
         Ok(Continuity::Resumed)
     }
 
-    async fn prepare(&self) -> sources_core::Result<()> {
+    async fn prepare(&self) -> source::Result<()> {
         Ok(())
     }
 
-    async fn live(&self) -> sources_core::Result<BoxStream<'static, sources_core::Result<Change>>> {
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<Change>>> {
         let changes = self.changes.lock().unwrap().take().unwrap_or_default();
         Ok(Box::pin(stream::iter(
-            changes
-                .into_iter()
-                .map(Ok::<Change, sources_core::SourceError>),
+            changes.into_iter().map(Ok::<Change, source::SourceError>),
         )))
     }
 
-    async fn lag(&self) -> sources_core::Result<Option<u64>> {
+    async fn lag(&self) -> source::Result<Option<u64>> {
         Ok(None)
     }
 }
@@ -236,18 +234,14 @@ struct ScriptedDocuments;
 
 #[async_trait]
 impl DocumentBuilder for ScriptedDocuments {
-    async fn resolve(
-        &self,
-        _table: &TableName,
-        key: &RowKey,
-    ) -> sources_core::Result<Vec<DocumentId>> {
+    async fn resolve(&self, _table: &TableName, key: &RowKey) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: users(),
             key: key.clone(),
         }])
     }
 
-    async fn build(&self, id: &DocumentId) -> sources_core::Result<Document> {
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
         let deleted = matches!(id.key.0.first(), Some((_, GenericValue::BigInt(2))));
         Ok(if deleted {
             Document::Delete { id: id.clone() }
@@ -283,7 +277,7 @@ impl Sink for RecordingSink {
         index: &IndexName,
         id: &str,
         _document: &GenericValue,
-    ) -> sinks_core::Result<()> {
+    ) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -291,7 +285,7 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
-    async fn delete(&self, index: &IndexName, id: &str) -> sinks_core::Result<()> {
+    async fn delete(&self, index: &IndexName, id: &str) -> sink::Result<()> {
         self.ops
             .lock()
             .unwrap()
@@ -299,7 +293,7 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
-    async fn flush(&self, _caught_up: bool) -> sinks_core::Result<FlushReport> {
+    async fn flush(&self, _caught_up: bool) -> sink::Result<FlushReport> {
         Ok(FlushReport::clean())
     }
 }

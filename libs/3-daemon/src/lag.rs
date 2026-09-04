@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::Observer;
-use sources_core::cdc::ChangeCapture;
+use source::cdc::ChangeCapture;
 use tokio::time::{MissedTickBehavior, interval};
 
 /// Poll `source.lag()` every `period`, reporting each known value to `observer`,

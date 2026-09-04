@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use schema_core::IndexName;
+use kernel::IndexName;
 use serde::Serialize;
 
 /// Recover a poisoned mutex rather than panicking — a writer that panicked

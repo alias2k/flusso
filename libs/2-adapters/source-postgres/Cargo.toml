@@ -1,0 +1,55 @@
+[package]
+name = "flusso-source-postgres"
+version = "0.15.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Postgres logical-replication source for flusso: WAL capture, backfill, and document building."
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database"]
+readme.workspace = true
+
+[lib]
+name = "source_postgres"
+
+[lints]
+workspace = true
+
+[features]
+# Exposes a public entry point into the otherwise-internal pgoutput decoder for
+# the `fuzz/` cargo-fuzz crate. Off by default; not part of the stable API.
+fuzzing = []
+
+[dependencies]
+source.workspace = true
+kernel.workspace = true
+pgwire-replication.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tracing.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+url.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+source.workspace = true
+kernel.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+testcontainers-modules = { workspace = true, features = ["postgres"] }
+criterion.workspace = true
+proptest.workspace = true
+
+# Real-service benchmark: document assembly against a live Postgres.
+# Spins up Postgres in a container, so requires Docker. Run with `cargo bench`.
+[[bench]]
+name = "postgres"
+harness = false
