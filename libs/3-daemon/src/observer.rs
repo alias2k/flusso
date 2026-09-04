@@ -65,7 +65,7 @@ impl Observer for StatusObserver {
     fn on_engine_error(&self, engine: &EngineId, error: &str) {
         self.status.record_error(error);
         match engine {
-            EngineId::Ingest => self.status.set_phase(Phase::Stopped),
+            EngineId::Ingest => self.status.mark_ingest_failed(),
             EngineId::Sink(sink) => self.status.mark_sink_failed(sink),
         }
     }

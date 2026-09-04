@@ -25,10 +25,15 @@ struct Inner {
 }
 
 impl Positions {
-    pub(crate) fn new(start_lsn: u64) -> Self {
+    /// A map confirmed up to `start_lsn`, assigning positions from
+    /// `first_seq`. A reopened stream continues from the previous map's
+    /// [`next_seq`](Self::next_seq): positions stay monotonic for the life of
+    /// the capture, so a watermark the lanes still hold from before the reopen
+    /// can never name a change of the new stream.
+    pub(crate) fn new(start_lsn: u64, first_seq: u64) -> Self {
         Self {
             inner: Mutex::new(Inner {
-                next_seq: 0,
+                next_seq: first_seq,
                 lsn_by_seq: BTreeMap::new(),
                 confirmed_lsn: start_lsn,
             }),
@@ -46,6 +51,11 @@ impl Positions {
         inner.next_seq += 1;
         inner.lsn_by_seq.insert(seq, lsn);
         seq
+    }
+
+    /// The position the next registered change will get.
+    pub(crate) fn next_seq(&self) -> u64 {
+        self.lock().next_seq
     }
 
     /// The LSN the slot may be advanced to.

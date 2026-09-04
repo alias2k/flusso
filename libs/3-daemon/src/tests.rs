@@ -159,6 +159,35 @@ fn status_tracks_each_sink_separately() {
     assert!(!status.is_ready(), "a failed sink engine is not ready");
 
     observer.on_engine_error(&EngineId::Ingest, "source gone");
+    let snap = status.snapshot();
+    assert_eq!(
+        snap.phase,
+        Phase::Starting,
+        "the daemon is restarting the ingest engine"
+    );
+    assert_eq!(snap.errors, 2);
+    assert!(!status.is_ready());
+
+    observer.on_live_started();
+    assert_eq!(
+        status.snapshot().phase,
+        Phase::Live,
+        "recovered; not stuck on the error"
+    );
+    assert!(
+        !status.is_ready(),
+        "the failed sink still holds readiness back"
+    );
+    observer.on_sink_started(&primary());
+    assert!(status.is_ready());
+
+    observer.on_engine_stopped(&EngineId::Ingest);
+    assert_eq!(
+        status.snapshot().phase,
+        Phase::Stopped,
+        "a clean end is final"
+    );
+    observer.on_live_started();
     assert_eq!(status.snapshot().phase, Phase::Stopped);
 }
 
@@ -358,6 +387,46 @@ impl ChangeCapture for ScriptedSource {
         Ok(Box::pin(stream::iter(
             [row_event(false, 10), row_event(false, 11)].map(Ok),
         )))
+    }
+}
+
+/// A source whose first live stream yields one change and then fails. The
+/// reopened stream behaves as the Postgres adapter does: the unconfirmed change
+/// is redelivered under a *new* position (numbering continues across streams),
+/// then the next change follows and the stream ends. Records what was confirmed.
+#[derive(Debug)]
+struct FlakySource {
+    opened: AtomicU64,
+    confirmed: Arc<Mutex<Vec<Position>>>,
+}
+
+#[async_trait]
+impl ChangeCapture for FlakySource {
+    async fn continuity(&self) -> source::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> source::Result<()> {
+        Ok(())
+    }
+
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        let opened = self.opened.fetch_add(1, Ordering::SeqCst);
+        Ok(if opened == 0 {
+            Box::pin(stream::iter([
+                Ok((Position(0), row_event(false, 1))),
+                Err(source::SourceError::Connection("simulated drop".to_owned())),
+            ]))
+        } else {
+            Box::pin(stream::iter([
+                Ok((Position(1), row_event(false, 1))),
+                Ok((Position(2), row_event(false, 3))),
+            ]))
+        })
+    }
+
+    fn confirm(&self, position: Position) {
+        self.confirmed.lock().unwrap().push(position);
     }
 }
 
@@ -843,4 +912,50 @@ async fn shutdown_future_stops_an_open_run() {
         .unwrap()
         .unwrap();
     assert_eq!(status.snapshot().phase, Phase::Stopped);
+}
+
+/// The ingest engine is restarted with backoff when its live stream fails: the
+/// change the failed stream never committed is redelivered and reaches the sink
+/// with the change after it, the error is counted, and the source is confirmed
+/// only positions the sink acked.
+#[tokio::test]
+async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
+    let sink = Arc::new(RecordingSink::seeded());
+    let confirmed = Arc::new(Mutex::new(Vec::new()));
+    let backends = Arc::new(MockBackends {
+        capture: Arc::new(FlakySource {
+            opened: AtomicU64::new(0),
+            confirmed: Arc::clone(&confirmed),
+        }),
+        documents: Arc::new(ScriptedDocuments),
+        sinks: vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+        built: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    let running = Daemon::new(backendless_config(), backends)
+        .with_options(fast_restarts())
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    running.run(std::future::pending::<()>()).await.unwrap();
+
+    assert_eq!(
+        *sink.ops.lock().unwrap(),
+        vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
+    );
+    let confirmed = confirmed.lock().unwrap();
+    assert_eq!(confirmed.last(), Some(&Position(2)));
+    assert!(
+        !confirmed.contains(&Position(0)),
+        "the change the failed stream never committed is not confirmed"
+    );
+    let snap = status.snapshot();
+    assert_eq!(snap.errors, 1);
+    assert_eq!(snap.sinks["primary"].changes_committed, 2);
+    assert_eq!(snap.phase, Phase::Stopped);
 }

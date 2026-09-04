@@ -186,11 +186,14 @@ impl ChangeCapture for WalChangeCapture {
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
 
-        let positions = Arc::new(Positions::new(self.config.start_lsn.as_u64()));
-        *self
+        let mut slot = self
             .positions
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&positions));
+            .unwrap_or_else(PoisonError::into_inner);
+        let first_seq = slot.as_ref().map_or(0, |previous| previous.next_seq());
+        let positions = Arc::new(Positions::new(self.config.start_lsn.as_u64(), first_seq));
+        *slot = Some(Arc::clone(&positions));
+        drop(slot);
         tracing::info!(
             start_lsn = self.config.start_lsn.as_u64(),
             "opened replication stream"

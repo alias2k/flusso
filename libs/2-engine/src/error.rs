@@ -17,13 +17,9 @@ pub enum EngineError {
     #[error(transparent)]
     Sink(#[from] sink::SinkError),
 
-    /// From the work queue.
+    /// From the stream: a lane or the request lane.
     #[error(transparent)]
     Stream(#[from] stream::QueueError),
-
-    /// A spawned task failed to join (panicked).
-    #[error("task failed: {0}")]
-    Task(String),
 
     /// The sink rejected one or more documents at the item level and the
     /// failure policy is [`Stop`](crate::FailurePolicy::Stop). Switch to

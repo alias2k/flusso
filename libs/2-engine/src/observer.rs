@@ -15,9 +15,13 @@ use kernel::{IndexName, SinkName};
 /// documents it built (deduplicated), per index, and how long the build took.
 #[derive(Debug, Clone)]
 pub struct BuildStats {
+    /// Source changes the batch covered; `0` for a snapshot batch.
     pub changes: usize,
+    /// Documents built, after deduplication.
     pub documents: usize,
+    /// Documents built per index.
     pub documents_by_index: Vec<(IndexName, usize)>,
+    /// How long resolving and building took.
     pub build: Duration,
 }
 
@@ -25,15 +29,20 @@ pub struct BuildStats {
 /// how many source changes that batch covered, and the flush duration.
 #[derive(Debug, Clone)]
 pub struct CommitStats {
+    /// Envelopes applied to the sink in this batch.
     pub envelopes: usize,
+    /// Source changes the batch covered; `0` for a snapshot batch.
     pub changes: usize,
+    /// How long the flush took.
     pub flush: Duration,
 }
 
 /// The engine an event or error belongs to: the ingest engine, or one sink's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineId {
+    /// The one ingest engine.
     Ingest,
+    /// The sink engine of the named sink.
     Sink(SinkName),
 }
 
@@ -128,6 +137,7 @@ pub struct FanOut {
 }
 
 impl FanOut {
+    /// Forward to `observers`, in this order.
     pub fn new(observers: Vec<Arc<dyn Observer>>) -> Self {
         Self { observers }
     }

@@ -225,8 +225,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         private_rx,
     ));
 
-    // The daemon supervises its engines itself; a reindex reaches the targeted
-    // sink engine through the control handle the private surface holds.
     let result = running.run(shutdown_signal()).await;
 
     let _ = public_shutdown.send(());

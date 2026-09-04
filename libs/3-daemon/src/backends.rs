@@ -39,8 +39,11 @@ pub struct SourceParts {
 /// sink keys.
 #[derive(Debug)]
 pub struct SinkParts {
+    /// The sink's name in the config: its lane, its status entry, its metric label.
     pub name: SinkName,
+    /// The adapter.
     pub sink: Arc<dyn Sink>,
+    /// The universal sink keys (`backfill`).
     pub options: SinkOptions,
 }
 

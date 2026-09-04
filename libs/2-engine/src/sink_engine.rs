@@ -17,7 +17,8 @@
 //! reindex arrives as a control message and is staged between two batches:
 //! `reindex` + `ensure_index` on the sink, then a fresh `Backfill` request.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use kernel::{IndexMapping, IndexName, SinkName};
 use sink::{Sink, SinkOptions};
@@ -49,6 +50,10 @@ pub struct SinkEngine {
     observer: Arc<dyn Observer>,
     failure_policies: FailurePolicies,
     skip_backfill: bool,
+    /// Indexes with a `Backfill` request published and no `SnapshotComplete`
+    /// received yet. Survives a restart of this engine's run, so re-staging
+    /// doesn't ask for a snapshot the ingest engine is already serving.
+    outstanding: Mutex<BTreeSet<IndexName>>,
 }
 
 impl SinkEngine {
@@ -69,24 +74,29 @@ impl SinkEngine {
             observer: Arc::new(NoopObserver),
             failure_policies: FailurePolicies::default(),
             skip_backfill: false,
+            outstanding: Mutex::new(BTreeSet::new()),
         }
     }
 
+    /// The universal sink keys (`backfill`).
     pub fn with_options(mut self, options: SinkOptions) -> Self {
         self.options = options;
         self
     }
 
+    /// Report lifecycle and progress to `observer`.
     pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
         self.observer = observer;
         self
     }
 
+    /// How item-level rejections are decided, per index.
     pub fn with_failure_policies(mut self, policies: FailurePolicies) -> Self {
         self.failure_policies = policies;
         self
     }
 
+    /// Never request a backfill (`--skip-backfill`): unseeded indexes stay so.
     pub fn skip_backfill(mut self, skip: bool) -> Self {
         self.skip_backfill = skip;
         self
@@ -125,6 +135,8 @@ impl SinkEngine {
                 unseeded.push(mapping.index.clone());
             }
         }
+        let already_requested = self.outstanding();
+        unseeded.retain(|index| !already_requested.contains(index));
         if self.skip_backfill {
             if !unseeded.is_empty() {
                 tracing::warn!(
@@ -187,8 +199,19 @@ impl SinkEngine {
                 indexes: indexes.clone(),
             })
             .await?;
+        self.lock_outstanding().extend(indexes.iter().cloned());
         self.observer.on_backfill_requested(&self.name, &indexes);
         Ok(())
+    }
+
+    fn outstanding(&self) -> BTreeSet<IndexName> {
+        self.lock_outstanding().clone()
+    }
+
+    fn lock_outstanding(&self) -> std::sync::MutexGuard<'_, BTreeSet<IndexName>> {
+        self.outstanding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Follow the lane until it closes (`Ok`) or a sink, stream, or `stop`
@@ -221,13 +244,20 @@ impl SinkEngine {
                     Some(delivery) => {
                         let (item, handle) = delivery.into_parts();
                         match item {
-                            LaneItem::Batch(batch) => {
+                            LaneItem::Batch(mut batch) => {
+                                for envelope in &mut batch.envelopes {
+                                    envelope.sink = Some(self.name.clone());
+                                }
                                 self.commit(&batch, lane.is_empty()).await?;
                             }
                             LaneItem::SnapshotComplete { indexes } => {
                                 for index in &indexes {
                                     self.sink.mark_seeded(index).await?;
                                     self.observer.on_index_seeded(&self.name, index);
+                                }
+                                let mut outstanding = self.lock_outstanding();
+                                for index in &indexes {
+                                    outstanding.remove(index);
                                 }
                                 tracing::info!(indexes = indexes.len(), "backfill complete");
                             }
@@ -299,13 +329,24 @@ impl SinkEngine {
 
     /// Stage a rebuild of `indexes` and request their snapshot. The current
     /// generation keeps serving until the snapshot completes and the sink swaps.
+    /// A sink with `backfill = false` has nothing to rebuild; an index whose
+    /// snapshot is still outstanding is left to that snapshot.
     async fn reindex(&self, indexes: Vec<IndexName>) -> Result<()> {
+        if !self.options.backfill {
+            tracing::warn!("reindex requested, but backfill is disabled for this sink; ignoring");
+            return Ok(());
+        }
+        let outstanding = self.outstanding();
         let mut staged = Vec::new();
         for index in indexes {
             let Some(mapping) = self.mappings.iter().find(|m| m.index == index) else {
                 tracing::warn!(%index, "reindex requested for an index this sink does not maintain; ignoring");
                 continue;
             };
+            if outstanding.contains(&index) {
+                tracing::warn!(%index, "reindex requested while its snapshot is still outstanding; ignoring");
+                continue;
+            }
             tracing::info!(%index, "reindex requested; staging a fresh generation");
             self.sink.reindex(mapping).await?;
             self.sink.ensure_index(mapping).await?;

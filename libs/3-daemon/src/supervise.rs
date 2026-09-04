@@ -43,22 +43,29 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct DaemonControl {
     senders: Arc<BTreeMap<SinkName, mpsc::Sender<SinkControl>>>,
-    receivers: Arc<std::sync::Mutex<BTreeMap<SinkName, mpsc::Receiver<SinkControl>>>>,
 }
+
+/// The receiving end of each sink engine's control channel, by sink.
+pub(crate) type ControlReceivers = BTreeMap<SinkName, mpsc::Receiver<SinkControl>>;
 
 /// Why an operation was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {
+    /// No sink of that name is configured.
     #[error("unknown sink `{0}`")]
     UnknownSink(String),
+    /// The sink's engine ended for good, so nothing would act on the operation.
     #[error("sink `{0}` is not accepting operations (its engine has stopped for good)")]
     Closed(String),
+    /// The sink's operation queue is full; the engine is busy between batches.
     #[error("too many operations queued for sink `{0}`; retry shortly")]
     Busy(String),
 }
 
 impl DaemonControl {
-    pub(crate) fn new(sinks: &[SinkName]) -> Self {
+    /// One control channel per sink: the handle keeps the senders, the
+    /// supervisor hands each receiver to its sink engine.
+    pub(crate) fn new(sinks: &[SinkName]) -> (Self, ControlReceivers) {
         let mut senders = BTreeMap::new();
         let mut receivers = BTreeMap::new();
         for sink in sinks {
@@ -66,10 +73,12 @@ impl DaemonControl {
             senders.insert(sink.clone(), tx);
             receivers.insert(sink.clone(), rx);
         }
-        Self {
-            senders: Arc::new(senders),
-            receivers: Arc::new(std::sync::Mutex::new(receivers)),
-        }
+        (
+            Self {
+                senders: Arc::new(senders),
+            },
+            receivers,
+        )
     }
 
     /// The sinks that accept operations.
@@ -103,13 +112,6 @@ impl DaemonControl {
         }
         Ok(())
     }
-
-    fn take_receiver(&self, sink: &SinkName) -> Option<mpsc::Receiver<SinkControl>> {
-        self.receivers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(sink)
-    }
 }
 
 /// Stage every sink, then run everything supervised until the ingest engine
@@ -117,7 +119,7 @@ impl DaemonControl {
 pub(crate) async fn run_all(
     ingest: IngestEngine,
     sink_engines: Vec<SinkEngine>,
-    control: DaemonControl,
+    mut control: ControlReceivers,
     continuity: Continuity,
     source: &Arc<dyn ChangeCapture>,
     stream: &Arc<dyn Stream>,
@@ -136,7 +138,7 @@ pub(crate) async fn run_all(
 
     let mut tasks = JoinSet::new();
     for engine in sink_engines {
-        let Some(mut receiver) = control.take_receiver(engine.name()) else {
+        let Some(mut receiver) = control.remove(engine.name()) else {
             anyhow::bail!("no control channel for sink `{}`", engine.name());
         };
         tasks.spawn(async move {
@@ -164,36 +166,35 @@ pub(crate) async fn run_all(
             }
         }
     };
+    let mut ingest_task = std::pin::pin!(ingest_task);
 
-    tokio::select! {
-        result = ingest_task => {
-            // The source stream ended: let the sinks finish what is already on
-            // their lanes, confirm the final watermark, then stop them.
-            let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
-                while !stream.is_idle() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+    loop {
+        tokio::select! {
+            result = &mut ingest_task => {
+                // The source stream ended: let the sinks finish what is already on
+                // their lanes, confirm the final watermark, then stop them.
+                let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
+                    while !stream.is_idle() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                if drained.is_err() {
+                    tracing::warn!("sinks did not drain their lanes in time; stopping them");
                 }
-            })
-            .await;
-            if drained.is_err() {
-                tracing::warn!("sinks did not drain their lanes in time; stopping them");
-            }
-            if let Some(watermark) = stream.watermark() {
-                source.confirm(watermark);
-            }
-            tasks.abort_all();
-            result
-        }
-        joined = tasks.join_next(), if !tasks.is_empty() => {
-            match joined {
-                Some(Ok(Ok(()))) | None => {
-                    // A sink engine's lane closed for good; the others and the
-                    // ingest engine carry on.
-                    Ok(())
+                if let Some(watermark) = stream.watermark() {
+                    source.confirm(watermark);
                 }
-                Some(Ok(Err(error))) => Err(error),
-                Some(Err(join)) => Err(anyhow::anyhow!("sink engine task failed: {join}")),
+                tasks.abort_all();
+                return result;
             }
+            joined = tasks.join_next(), if !tasks.is_empty() => match joined {
+                // A sink engine's lane closed for good; the ingest engine and
+                // the other sinks carry on.
+                Some(Ok(Ok(()))) | None => {}
+                Some(Ok(Err(error))) => return Err(error),
+                Some(Err(join)) => return Err(anyhow::anyhow!("sink engine task failed: {join}")),
+            },
         }
     }
 }

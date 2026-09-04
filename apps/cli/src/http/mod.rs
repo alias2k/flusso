@@ -14,7 +14,7 @@ mod auth;
 
 pub(crate) use auth::{BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -121,7 +121,7 @@ async fn metrics(State(state): State<PublicState>) -> impl IntoResponse {
 /// Every sink's indexes and their states: `{ "<sink>": { "<index>": state } }`.
 async fn indexes(State(state): State<PrivateState>) -> impl IntoResponse {
     let snapshot = state.status.snapshot();
-    let per_sink: HashMap<String, _> = snapshot
+    let per_sink: BTreeMap<String, _> = snapshot
         .sinks
         .into_iter()
         .map(|(name, sink)| (name, sink.indexes))

@@ -2,7 +2,8 @@ use super::*;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use kernel::{GenericValue, IndexName, Position};
+use kernel::{ENVELOPE_VERSION, GenericValue, IndexName, Position, SinkName};
+use serde_json::json;
 
 fn index() -> IndexName {
     IndexName::try_new("users").unwrap()
@@ -25,15 +26,16 @@ fn ts() -> DateTime<Utc> {
 
 #[test]
 fn upsert_is_compact_ndjson_with_provenance_and_meta() {
-    let envelope = Envelope::upsert(index(), "42", document(), Some(Position(1)), ts());
+    let mut envelope = Envelope::upsert(index(), "42", document(), Some(Position(1)), ts());
+    envelope.sink = Some(SinkName::try_new("audit").unwrap());
     let line = StdoutSink::new(false)
         .render(&wire_envelope(&envelope))
         .unwrap();
     assert!(!line.contains('\n'));
 
     let value: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(value["sink"], "stdout");
-    assert_eq!(value["version"], VERSION);
+    assert_eq!(value["sink"], "audit", "the name the sink engine stamped");
+    assert_eq!(value["version"], ENVELOPE_VERSION);
     assert_eq!(value["ts"], TS);
     assert_eq!(value["seq"], "1");
     assert_eq!(value["index"], "users");
@@ -43,6 +45,13 @@ fn upsert_is_compact_ndjson_with_provenance_and_meta() {
     // `{"email":"ada@x.io"}` is one field, 20 bytes compact.
     assert_eq!(value["meta"]["fields"], 1);
     assert_eq!(value["meta"]["bytes"], 20);
+
+    let back: Envelope<Value> = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        back,
+        wire_envelope(&envelope),
+        "a consumer reads the same type back"
+    );
 }
 
 #[test]
@@ -55,7 +64,10 @@ fn delete_carries_provenance_but_no_document_or_meta() {
     assert_eq!(value["op"], "delete");
     assert_eq!(value["id"], "7");
     assert_eq!(value["seq"], "7");
-    assert_eq!(value["sink"], "stdout");
+    assert!(
+        value.get("sink").is_none(),
+        "unstamped until a sink engine owns it"
+    );
     assert!(value.get("document").is_none());
     assert!(value.get("meta").is_none());
 }
@@ -63,16 +75,16 @@ fn delete_carries_provenance_but_no_document_or_meta() {
 #[test]
 fn snapshot_rows_carry_no_seq() {
     let envelope = Envelope::upsert(index(), "1", document(), None, ts());
-    let value = wire_envelope(&envelope);
+    let value = serde_json::to_value(wire_envelope(&envelope)).unwrap();
     assert!(value.get("seq").is_none());
 }
 
 #[test]
 fn document_meta_reports_null_fields_for_non_objects() {
     let meta = document_meta(&json!("scalar"));
-    assert!(meta["fields"].is_null());
+    assert_eq!(meta.fields, None);
     // `"scalar"` is 8 bytes once serialized (with quotes).
-    assert_eq!(meta["bytes"], 8);
+    assert_eq!(meta.bytes, 8);
 }
 
 #[test]

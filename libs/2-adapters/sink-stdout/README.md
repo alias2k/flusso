@@ -11,19 +11,23 @@ A [`Sink`] that writes each document operation to stdout as a JSON envelope — 
 | **Config** | [`StdoutConfig`]: `pretty` — default `false` |
 
 **Envelope fields:** `op` (`upsert`/`delete`), `id`, `index`, `document`,
-`sink`, `version`, `ts`, `seq` (order), `meta` (`fields` count + serialized
-`bytes`).
+`sink` (the configured sink name), `version` (envelope format), `ts`, `seq`
+(the source position, absent on snapshot rows), `meta` (`fields` count +
+serialized `bytes`).
 
 ## What it does
 
 Every operation becomes a self-describing JSON envelope — one NDJSON line by
 default, pretty-printed when `pretty` is set — easy to watch or pipe into `jq`.
-Alongside the operation, each envelope carries provenance and bookkeeping: which
-sink and version produced it (`sink`, `version`), when (`ts`), in what order
-(`seq`), and a quick `meta` summary of the document (top-level field count and
-serialized byte size).
+It is the kernel `Envelope` as-is — the document translated to JSON — so a
+consumer deserializes the same type. Alongside the operation, each envelope
+carries provenance and bookkeeping: which sink emitted it (`sink`, the name in
+`flusso.toml`) and which envelope format (`version`), when it was built (`ts`),
+the source position of the change (`seq`, an opaque string; absent on a row a
+backfill or reindex snapshot produced), and a quick `meta` summary of the
+document (top-level field count and serialized byte size).
 
 ```text
-{"document":{"email":"ada@x.io"},"id":"42","index":"users","meta":{"bytes":20,"fields":1},"op":"upsert","seq":1,"sink":"stdout","ts":"2026-06-03T10:20:30.123Z","version":"0.1.0"}
-{"id":"7","index":"users","op":"delete","seq":2,"sink":"stdout","ts":"2026-06-03T10:20:30.124Z","version":"0.1.0"}
+{"sink":"audit","version":1,"ts":"2026-06-03T10:20:30.123Z","seq":"1","index":"users","op":"upsert","id":"42","meta":{"fields":1,"bytes":20},"document":{"email":"ada@x.io"}}
+{"sink":"audit","version":1,"ts":"2026-06-03T10:20:30.124Z","seq":"2","index":"users","op":"delete","id":"7"}
 ```

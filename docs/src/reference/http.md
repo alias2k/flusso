@@ -23,7 +23,7 @@ The live status document as JSON: the deployment, then one block per sink.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `phase` | `starting` \| `backfilling` \| `live` \| `stopped` | Where the deployment is: `backfilling` while any sink still seeds, `stopped` once the ingest engine ended. |
+| `phase` | `starting` \| `backfilling` \| `live` \| `stopped` | Where the deployment is: `starting` until the ingest engine follows the source and every sink has staged (and again while a failed ingest engine restarts), `backfilling` while any sink still seeds, `stopped` once the source stream ended. |
 | `uptime_seconds` | int | Since the daemon started. A reindex does not restart anything. |
 | `indexes` | map of name to `pending` \| `backfilling` \| `seeded` | Per-index state across sinks: the least advanced sink's state. |
 | `changes_captured` | int | Changes the ingest engine pulled from the source. |
@@ -81,7 +81,7 @@ Stage a from-scratch rebuild of one index into a fresh generation on one sink, o
 
 | Response | When |
 | --- | --- |
-| `202 Accepted` | Queued. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. Watch `/status` for the index leaving and returning to `seeded` under that sink. |
+| `202 Accepted` | Queued. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Watch `/status` for the index leaving and returning to `seeded` under that sink. |
 | `400` | Missing `index` parameter, or `index`/`sink` is not a valid name. |
 | `404` | Not a configured index, or not a configured sink. |
 | `503` | That sink's operation queue is full, or its engine has stopped for good. |

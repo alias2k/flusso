@@ -67,6 +67,7 @@ pub enum IndexState {
 pub struct Status {
     started_at: Instant,
     phase: Mutex<Phase>,
+    ingest_live: AtomicBool,
     changes_captured: AtomicU64,
     documents_built: AtomicU64,
     slot_lag_bytes: AtomicU64,
@@ -136,6 +137,7 @@ impl Status {
         Self {
             started_at: now,
             phase: Mutex::new(Phase::Starting),
+            ingest_live: AtomicBool::new(false),
             changes_captured: AtomicU64::new(0),
             documents_built: AtomicU64::new(0),
             slot_lag_bytes: AtomicU64::new(0),
@@ -158,14 +160,22 @@ impl Status {
         *lock(&self.phase) = phase;
     }
 
-    /// The overall phase, derived from the sinks: live only when every sink is.
+    /// The overall phase: `stopped` is final; otherwise `starting` until the
+    /// ingest engine follows the source and every sink engine has staged, then
+    /// `backfilling` while any sink still seeds, else `live`. A failed sink
+    /// leaves the phase alone (the deployment keeps running) but is not ready.
     fn recompute_phase(&self) {
         let mut phase = lock(&self.phase);
         if *phase == Phase::Stopped {
             return;
         }
+        if !self.ingest_live.load(Ordering::Relaxed) {
+            *phase = Phase::Starting;
+            return;
+        }
         let sink_phases: Vec<SinkPhase> = self.sinks.values().map(|s| *lock(&s.phase)).collect();
         if sink_phases.contains(&SinkPhase::Starting) {
+            *phase = Phase::Starting;
             return;
         }
         *phase = if sink_phases.contains(&SinkPhase::Backfilling) {
@@ -176,11 +186,15 @@ impl Status {
     }
 
     pub(crate) fn mark_ingest_live(&self) {
+        self.ingest_live.store(true, Ordering::Relaxed);
         self.recompute_phase();
-        let mut phase = lock(&self.phase);
-        if *phase == Phase::Starting {
-            *phase = Phase::Live;
-        }
+    }
+
+    /// The ingest engine stopped on an error and the daemon is restarting it:
+    /// not ready until it follows the source again.
+    pub(crate) fn mark_ingest_failed(&self) {
+        self.ingest_live.store(false, Ordering::Relaxed);
+        self.recompute_phase();
     }
 
     pub(crate) fn mark_sink_started(&self, sink: &SinkName) {
@@ -365,17 +379,25 @@ impl Status {
 /// The `/status` document.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusSnapshot {
+    /// Where the deployment as a whole is.
     pub phase: Phase,
+    /// Seconds since the daemon started.
     pub uptime_seconds: u64,
     /// Each index's state across sinks: backfilling if any sink is seeding it,
     /// seeded when every sink holds it.
     pub indexes: BTreeMap<String, IndexState>,
+    /// Changes the ingest engine pulled from the source.
     pub changes_captured: u64,
     /// Captured but not yet committed by the slowest sink.
+    /// Captured minus committed by the slowest sink (per sink: by that sink).
     pub changes_in_flight: u64,
+    /// Documents the ingest engine built, once for every sink.
     pub documents_built: u64,
+    /// Bytes the confirmed position trails the source head by; `None` until sampled.
     pub slot_lag_bytes: Option<u64>,
+    /// Engine errors, ingest and sink.
     pub errors: u64,
+    /// The most recent engine error.
     pub last_error: Option<String>,
     pub sinks: BTreeMap<String, SinkSnapshot>,
 }
@@ -383,12 +405,19 @@ pub struct StatusSnapshot {
 /// One sink's slice of the `/status` document.
 #[derive(Debug, Clone, Serialize)]
 pub struct SinkSnapshot {
+    /// Where this sink engine is.
     pub phase: SinkPhase,
     pub indexes: BTreeMap<String, IndexState>,
+    /// Changes whose batch this sink flushed and acknowledged.
     pub changes_committed: u64,
+    /// Captured minus committed by the slowest sink (per sink: by that sink).
     pub changes_in_flight: u64,
+    /// Documents written to this sink.
     pub envelopes_applied: u64,
+    /// Batches this sink flushed.
     pub batches: u64,
+    /// Documents this sink rejected and its engine skipped.
     pub documents_quarantined: u64,
+    /// Duration of the most recent flush, in microseconds.
     pub last_flush_micros: u64,
 }

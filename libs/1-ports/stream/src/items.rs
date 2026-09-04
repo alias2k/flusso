@@ -1,3 +1,17 @@
+//! What travels on the stream: [`LaneItem`]s down each sink's lane,
+//! [`Request`]s up the request lane, and the [`Stream`] port that hands out
+//! their ends and owns the watermark.
+//!
+//! ```
+//! use kernel::Position;
+//! use stream::{Batch, LaneItem};
+//!
+//! let live = LaneItem::Batch(Batch { position: Some(Position(7)), changes: 3, envelopes: Vec::new() });
+//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new() });
+//! assert_eq!(live.position(), Some(Position(7)));
+//! assert_eq!(snapshot.position(), None, "snapshot rows never move the watermark");
+//! ```
+
 use kernel::{Envelope, IndexName, Position, SinkName};
 use serde::{Deserialize, Serialize};
 

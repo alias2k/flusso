@@ -287,10 +287,15 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   engine hands it to `ChangeCapture::confirm` after each commit (and on a 1 s tick), so the slot
   advances past a change exactly when *every* sink has landed it. A sink engine that dies before
   its flush leaves the item unacked; the lane redelivers it to the restarted engine (idempotent
-  rebuild, deterministic id). Guards: `confirms_no_position_before_its_flush`,
+  rebuild, deterministic id). Positions are monotonic for the life of the source across
+  reopened streams (`Positions::new(start_lsn, first_seq)` continues from the previous map), so
+  the watermark the lanes hold across an ingest-engine restart never names a new-stream change.
+  Guards: `confirms_no_position_before_its_flush`,
   `redelivers_the_unacked_batch_to_a_restarted_sink_engine`, the channel adapter's
   `watermark_is_the_minimum_over_lanes`/`several_deliveries_can_be_outstanding_and_ack_independently`,
-  the daemon's `failed_sink_engine_restarts_and_redelivers`.
+  the daemon's `failed_sink_engine_restarts_and_redelivers` /
+  `failed_ingest_engine_restarts_and_resumes_the_stream`, the Postgres adapter's
+  `a_reopened_stream_continues_the_numbering`.
 - **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
   **once** for all sinks. Snapshot rows go through the same path but are published *without* a
@@ -301,9 +306,11 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
 - **Backfill is each *sink's* decision, and requests are at-least-once.** `stage` asks the sink
   `is_seeded` per index and sends one `Backfill` request for the unseeded set (skipped under
   `--skip-backfill` or the sink's `backfill = false`, the stateless-sink opt-out); the ingest
-  engine coalesces concurrent requests for the same index into one snapshot fanned to every
-  requester and acks a request only after its `SnapshotComplete` is published (a crash
-  mid-snapshot redelivers it). A seeded sibling sees nothing. The channel adapter therefore keeps
+  engine coalesces requests arriving within `REQUEST_COALESCE_WINDOW` (1 s) into one snapshot
+  fanned to every requester and acks a request only after its `SnapshotComplete` is published (a
+  crash mid-snapshot redelivers it); the sink engine keeps an `outstanding` set of requested,
+  not-yet-complete indexes so re-staging after its own restart (and a reindex control for the
+  same index) doesn't ask twice. A seeded sibling sees nothing. The channel adapter therefore keeps
   a **ticketed in-flight ledger** per lane: several deliveries can be outstanding, each acked by
   ticket; a nacked or dropped-unacked delivery is redelivered in order. (A single redelivery slot
   made the coalescing loop receive the same request forever — the OOM behind the first attempts.)
@@ -332,7 +339,11 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
 - **Reindex is an operation on one sink, no restart.** `DaemonControl::reindex(index,
   Option<SinkName>)` sends `SinkControl::Reindex` to the targeted engines; between two batches
   each stages `reindex` + `ensure_index` and sends a fresh `Backfill` request. Untargeted sinks
-  are untouched; "all" coalesces into one snapshot. Guards:
+  are untouched; "all" coalesces into one snapshot; a `backfill = false` sink ignores it. The
+  `Envelope` a sink receives is stamped with its `SinkName` by the sink engine (`sink` on the
+  wire), `position` serializes as the opaque `seq` string, and `Envelope<D = GenericValue>` is
+  generic over the document so a consumer deserializes an emitting sink's output as the same
+  type. Guards:
   `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's
   `reindex_operation_targets_one_sink`.
 - `BatchPolicy` (default 256 changes / 50ms) controls batch grouping; `max_changes: 1`
@@ -353,7 +364,9 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
 - **Observability is a trait, not baked in.** Both engines report to an `Observer`
   (`libs/2-engine/src/observer.rs`) — sync, cheap, no-op by default, set via `with_observer`;
   every sink-side event carries the `SinkName`, engine errors an `EngineId`. It depends only on
-  the trait, never on metrics or a status backend. `reports_lifecycle_and_progress_to_the_observer`
+  the trait, never on metrics or a status backend. The daemon's `Status` phase falls back to
+  `Starting` on an ingest error (the supervisor restarts it); only a clean
+  `on_engine_stopped(Ingest)` is the final `Stopped`. `reports_lifecycle_and_progress_to_the_observer`
   guards the emit points.
 
 ### The daemon (`libs/3-daemon/src/lib.rs`) — domain only
