@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use futures::StreamExt;
+use futures::future::try_join_all;
 use futures::stream::BoxStream;
 use kernel::{Envelope, GenericValue, IndexName, Position, SinkName};
 use source::cdc::{ChangeCapture, ChangeEvent};
@@ -226,8 +227,9 @@ impl IngestEngine {
     }
 
     /// Build the batch's documents once and publish them to every lane with
-    /// the batch's position. A batch that resolved to no document is still
-    /// published (empty), so the lanes acknowledge its position.
+    /// the batch's position, concurrently, so a full lane delays only its own
+    /// copy. A batch that resolved to no document is still published (empty),
+    /// so the lanes acknowledge its position.
     #[tracing::instrument(name = "ingest.commit", level = "debug", skip_all, fields(changes = pending.count, documents = pending.ids.len()))]
     async fn commit_live(&self, pending: &mut PendingBatch, lanes: &Lanes) -> Result<()> {
         if pending.count == 0 {
@@ -246,9 +248,12 @@ impl IngestEngine {
             changes: pending.count,
             envelopes,
         });
-        for producer in lanes.values() {
-            producer.publish(item.clone()).await?;
-        }
+        try_join_all(
+            lanes
+                .values()
+                .map(|producer| producer.publish(item.clone())),
+        )
+        .await?;
         pending.clear();
         self.observer.on_batch_built(stats);
         tracing::debug!("batch built and published");
@@ -366,6 +371,7 @@ impl IngestEngine {
         }
         let started = Instant::now();
         let (envelopes, by_index) = self.build(&snapshot.batch.ids, None).await?;
+        let mut publishes = Vec::with_capacity(snapshot.requested.len());
         for (sink, indexes) in &snapshot.requested {
             let slice: Vec<Envelope> = envelopes
                 .iter()
@@ -379,14 +385,13 @@ impl IngestEngine {
                 tracing::warn!(%sink, "snapshot requested by a sink with no lane; dropping its slice");
                 continue;
             };
-            producer
-                .publish(LaneItem::Batch(Batch {
-                    position: None,
-                    changes: 0,
-                    envelopes: slice,
-                }))
-                .await?;
+            publishes.push(producer.publish(LaneItem::Batch(Batch {
+                position: None,
+                changes: 0,
+                envelopes: slice,
+            })));
         }
+        try_join_all(publishes).await?;
         self.observer.on_batch_built(BuildStats {
             changes: 0,
             documents: envelopes.len(),
@@ -400,16 +405,14 @@ impl IngestEngine {
     /// Publish `SnapshotComplete` to every requesting lane, then acknowledge
     /// the requests: a crash before this point redelivers them.
     async fn finish_snapshot(&self, snapshot: &mut Snapshot, lanes: &Lanes) -> Result<()> {
-        for (sink, indexes) in &snapshot.requested {
-            let Some(producer) = lanes.get(sink) else {
-                continue;
-            };
-            producer
-                .publish(LaneItem::SnapshotComplete {
+        let markers = snapshot.requested.iter().filter_map(|(sink, indexes)| {
+            lanes.get(sink).map(|producer| {
+                producer.publish(LaneItem::SnapshotComplete {
                     indexes: indexes.iter().cloned().collect(),
                 })
-                .await?;
-        }
+            })
+        });
+        try_join_all(markers).await?;
         for handle in snapshot.handles.drain(..) {
             handle.ack().await?;
         }

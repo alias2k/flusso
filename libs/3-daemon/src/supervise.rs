@@ -1,6 +1,7 @@
 //! The supervisor: stage every sink engine, then run the ingest engine and the
-//! sink engines as independent tasks, restarting a failed one with backoff
-//! while the others keep going.
+//! sink engines as independent `tokio` tasks, restarting a failed one with
+//! backoff while the others keep going. The supervisor itself only waits on
+//! join handles, so no engine's loop can stall it.
 //!
 //! Ordering is what this module exists for. Every sink engine finishes its
 //! first [`stage`](engine::SinkEngine::stage) (ensure indexes, stage stale rebuilds under a
@@ -157,7 +158,7 @@ pub(crate) async fn run_all(
         });
     }
 
-    let ingest_task = async move {
+    let mut ingest_task = AbortOnDrop(tokio::spawn(async move {
         let mut backoff = Backoff::new(max_backoff);
         loop {
             match ingest.run().await {
@@ -165,12 +166,15 @@ pub(crate) async fn run_all(
                 Err(_) => backoff.wait().await,
             }
         }
-    };
-    let mut ingest_task = std::pin::pin!(ingest_task);
+    }));
 
     loop {
         tokio::select! {
-            result = &mut ingest_task => {
+            joined = &mut ingest_task.0 => {
+                let result = match joined {
+                    Ok(result) => result,
+                    Err(join) => Err(anyhow::anyhow!("ingest engine task failed: {join}")),
+                };
                 // The source stream ended: let the sinks finish what is already on
                 // their lanes, confirm the final watermark, then stop them.
                 let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
@@ -196,6 +200,17 @@ pub(crate) async fn run_all(
                 Some(Err(join)) => return Err(anyhow::anyhow!("sink engine task failed: {join}")),
             },
         }
+    }
+}
+
+/// A spawned engine task that is cancelled with its supervisor: dropping the
+/// supervisor's future (a shutdown) must not leave the engine running.
+#[derive(Debug)]
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
