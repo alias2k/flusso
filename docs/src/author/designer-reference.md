@@ -54,7 +54,7 @@ Two rules are steered, not forced. A `NOT NULL` column is required by default an
 
 ## Deployment panel
 
-Source: connection as URL, env var, or host/port/user/password/database parts; TLS mode with the `require`-verifies-nothing warning. Sinks: per-sink connection and index tuning. Indexes: name, schema file path (a subfolder creates directories on save), enabled, `on_error`, duplicate, remove (the schema file stays on disk). Plus the index prefix and the server addresses.
+Source, stream, and sinks are edited from each adapter's own declaration: a kind picker (one button per registered adapter of that port), the required options and secrets inline (a secret is a literal or an `env var` reference; a connection can also be a `parts` table), and every option with a default folded into an **options** drawer that counts what is set. The stream sits under the source as a drawer and is omitted from the file when left at its defaults. Indexes: name, schema file path (a subfolder creates directories on save), enabled, `on_error`, duplicate, remove (the schema file stays on disk). Plus the index prefix and the server addresses. A config whose options its adapter rejects fails **Validate** and **Test connection** with the adapter's message before any connection is attempted.
 
 ## Code mode
 

@@ -10,4 +10,4 @@ pub mod codegen;
 pub mod preview;
 pub mod server;
 
-pub use server::{DesignOptions, serve};
+pub use server::{ConfigValidator, DesignOptions, serve};

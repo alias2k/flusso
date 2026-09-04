@@ -206,6 +206,7 @@ export interface IndexEntry {
 
 export interface ConfigToml {
   source: Record<string, unknown>;
+  stream?: Record<string, unknown>;
   sinks?: Record<string, unknown>;
   index?: IndexEntry[];
   prefix?: string;
@@ -339,8 +340,23 @@ export interface ParseResponse {
 const stripIds = (config: ConfigToml): ConfigToml =>
   config.index ? { ...config, index: config.index.map((e) => ({ ...e, id: undefined })) } : config;
 
+/// What one registered adapter declares about its options (mirrors
+/// `kernel::AdapterDescription`): the designer renders its forms from these.
+export interface AdapterDescription {
+  port: "source" | "stream" | "sink";
+  kind: string;
+  /// A draft-07 JSON schema of the options table (`type` excluded).
+  schema: Record<string, unknown>;
+  /// A complete example of the options.
+  example: Record<string, unknown>;
+  /// `.`-joined paths of the options that take an override variable.
+  secrets: string[];
+}
+
 export const api = {
   project: () => fetch("/api/project").then((r) => json<Project>(r)),
+  /// The registered adapters and their option schemas.
+  adapters: () => fetch("/api/adapters").then((r) => json<AdapterDescription[]>(r)),
   /// Parse a raw schema buffer into the validated model (Code mode's live sync).
   parse: (yaml: string) =>
     fetch("/api/parse", {

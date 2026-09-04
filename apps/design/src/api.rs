@@ -626,8 +626,18 @@ async fn introspect_inner(
 
 /// Introspect the source described by an *edited* (unsaved) config, so the UI
 /// can test a connection URL before it's written to disk.
-pub async fn test_connection(config: ConfigToml) -> CatalogResponse {
-    match introspect_with(&Config::from(config)).await {
+pub async fn test_connection(
+    config: ConfigToml,
+    validator: &crate::server::ConfigValidator,
+) -> CatalogResponse {
+    let config = Config::from(config);
+    if let Err(e) = validator.check(&config) {
+        return CatalogResponse {
+            error: Some(format!("invalid configuration: {e:#}")),
+            ..Default::default()
+        };
+    }
+    match introspect_with(&config).await {
         Ok((catalog, junctions)) => CatalogResponse {
             catalog,
             junctions,
@@ -701,7 +711,10 @@ pub struct DiagnosticDto {
 /// schema↔DB mismatch comes back as a per-field [`DiagnosticDto`] (an unknown
 /// column is one of these now, not a hard error), and any residual query failure
 /// is reported with `db_reachable: true` — never mislabelled as unreachable.
-pub async fn validate(request: ValidateRequest) -> ValidateResponse {
+pub async fn validate(
+    request: ValidateRequest,
+    validator: &crate::server::ConfigValidator,
+) -> ValidateResponse {
     let unreachable = |context: &str, e: String| ValidateResponse {
         db_reachable: false,
         error: Some(format!("{context}: {e}")),
@@ -709,6 +722,9 @@ pub async fn validate(request: ValidateRequest) -> ValidateResponse {
     };
 
     let config = Config::from(request.config);
+    if let Err(e) = validator.check(&config) {
+        return unreachable("invalid configuration", format!("{e:#}"));
+    }
     let postgres = match postgres_config(&config) {
         Ok(postgres) => postgres,
         Err(e) => return unreachable("reading the source configuration", format!("{e:#}")),
