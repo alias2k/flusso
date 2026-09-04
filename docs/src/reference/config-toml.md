@@ -1,17 +1,20 @@
 # flusso.toml top level
 
-One `flusso.toml` describes a deployment: one source, any number of sinks, the indexes to build, and two operational knobs. Only `[source]` is required.
+One `flusso.toml` describes a deployment: one source, one stream, any number of sinks, the indexes to build, and two operational knobs. Only `[source]` is required.
+
+Every port table (`[source]`, `[stream]`, `[sinks.<name>]`) has the same shape: `type` names the adapter, and every other key is that adapter's own option, documented on the adapter's page. Unknown keys are rejected there.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `[source]` | table | — | The database rows come from. `type` selects the kind; only `postgres` exists. See [Source: Postgres](source-postgres.md). |
-| `[sinks.<name>]` | table per sink | none | Named destinations. `<name>` is a [Postgres identifier](identifiers.md); `type` is `opensearch` or `stdout`. With no sinks, `run` falls back to a stdout sink. |
+| `[source]` | table | — | The database rows come from. `type` selects the adapter; only `postgres` exists. See [Source: Postgres](source-postgres.md). |
+| `[stream]` | table | `type = "channel"` | The stream between the source side and the sinks. See [Stream: channel](stream-channel.md). |
+| `[sinks.<name>]` | table per sink | none | Named destinations. `<name>` is a [Postgres identifier](identifiers.md); `type` is `opensearch` or `stdout`. With no sinks, `run` adds a stdout sink named `stdout`. |
 | `[[index]]` | array of tables | none | One entry per index to build. See [Index entries and on_error](index-and-on-error.md). |
 | `on_error` | `"stop"` \| `"skip"` | `"stop"` | Global item-rejection policy; each `[[index]]` may override it. See [on_error](index-and-on-error.md#on_error). |
 | `prefix` | string | `""` | Literal prefix prepended to every index name flusso owns. See [prefix](#prefix). |
 | `[server]` | table | none | Bind addresses for the two HTTP surfaces. See [server](#server). |
 
-Unknown keys are rejected. Schema paths in `[[index]]` resolve relative to the config file's directory. Loading validates both layers (this file and every referenced `*.schema.yml`) and needs no database.
+Unknown keys are rejected. Schema paths in `[[index]]` resolve relative to the config file's directory. Loading validates both layers (this file and every referenced `*.schema.yml`) plus every port table against its adapter, and needs no database.
 
 ## Fan-out
 
@@ -53,7 +56,7 @@ prefix = "prod_"
 
 [source]
 type = "postgres"
-connection_url = { env = "DATABASE_URL" }
+connection_url = { env = "PG_URL" }
 ssl_mode = "verify-full"
 
 [sinks.primary]

@@ -79,3 +79,23 @@ mod tests {
         assert_eq!(again, text);
     }
 }
+
+/// The uninterpreted shape: a `type` plus any table. The composition root
+/// replaces this with one alternative per registered adapter when it assembles
+/// the editor schema.
+impl schemars::JsonSchema for PortEntry {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("PortEntry")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": { "type": "string", "description": "The adapter that implements this port." }
+            },
+            "additionalProperties": true
+        })
+    }
+}

@@ -2,23 +2,7 @@
 
 A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk options, and how the sink names, maps, refreshes, and seeds the indexes it owns.
 
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `type` | `"opensearch"` | — | Required. |
-| `url` | string or `{ env }` | — | Required (or supplied by `<NAME>_OPENSEARCH_URL`). Base URL of the cluster. |
-| `username` | string or `{ env }` | none | HTTP Basic auth user. `<NAME>_OPENSEARCH_USERNAME` overrides. |
-| `password` | string or `{ env }` | none | HTTP Basic auth password. `<NAME>_OPENSEARCH_PASSWORD` overrides. |
-| `tls_verify` | bool | `true` | Verify TLS certificates. `false` only for a self-signed dev cluster. |
-| `batch_size` | int ≥ 1 | `1000` | Maximum documents per bulk chunk. |
-| `max_bytes` | int ≥ 1 | `10485760` (10 MiB) | Maximum bytes per bulk chunk. A single larger document is sent alone. |
-| `timeout_secs` | int ≥ 1 | `30` | HTTP request timeout. |
-| `max_retries` | int ≥ 0 | `3` | Extra attempts on transient failures, exponential backoff. Item-level rejections are never retried. |
-| `pipeline` | string | none | Ingest pipeline applied to every index operation. |
-| `number_of_shards` | int ≥ 1 | `1` | Primary shards per created index. |
-| `number_of_replicas` | int ≥ 0 | `1` | Replica shards per created index. |
-| `refresh_interval` | string | `"10s"` | Steady-state `refresh_interval` applied after seeding. `"-1"` disables auto-refresh. See [Refresh](#refresh). |
-| `text_analysis` | `builtin` \| `icu` | `builtin` | Analyzer toolkit. `icu` needs the `analysis-icu` plugin on every node. |
-| `auto_subfields` | bool | `true` | Enrich `text`/`keyword` fields with an analyzer and subfields. See [Analysis and subfields](#analysis-and-subfields). |
+{{#include generated/sink-opensearch.md}}
 
 `<NAME>` in the override variables is the uppercased sink name: `[sinks.primary]` reads `PRIMARY_OPENSEARCH_URL`. Precedence is in [Environment variables](environment.md#config-values).
 

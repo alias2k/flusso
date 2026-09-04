@@ -41,8 +41,7 @@ use crate::connection_url::ConnectionUrl;
 #[adapter(port = source, kind = "postgres")]
 pub struct PostgresConfig {
     /// How the database is reached: a URL, literal or `{ env = "VAR" }`, or a
-    /// table of parts (`host`, `port`, `user`, `password`, `database`). May be
-    /// omitted when `SOURCE_POSTGRES_CONNECTION_URL` supplies it at run time.
+    /// table of parts (`host`, `port`, `user`, `password`, `database`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[adapter(example = Connection::Url(Secret::env("PG_URL")))]
     pub connection_url: Option<Connection>,

@@ -13,16 +13,17 @@ password = { env = "OS_PASSWORD" }
 
 A reference is **deferred**: a compiled `flusso.lock` carries the variable's name, never its value, and an unset variable fails at run time, not at build time. Any variable name works.
 
-A few **reserved names** act as a deployment override layer, so one file runs unedited across environments. When set, the override is logged at startup.
+Every secret-valued option also has an **override variable**, so one file runs unedited across environments. The name follows one rule for every adapter: `<ENTRY>_<TYPE>_<KEY>`, uppercased, where `<ENTRY>` is the table (`SOURCE`, `STREAM`, or the sink's name) and nested keys join with `_`.
 
 | Variable | Fills or overrides |
 | --- | --- |
-| `DATABASE_URL` | the source `connection_url` |
+| `SOURCE_POSTGRES_CONNECTION_URL` | the source `connection_url` (any shape, or omitted) |
+| `SOURCE_POSTGRES_CONNECTION_URL_PASSWORD` | the `password` of a parts-table `connection_url` |
 | `<NAME>_OPENSEARCH_URL` | the `url` of `[sinks.<name>]` |
 | `<NAME>_OPENSEARCH_USERNAME` | that sink's `username` |
 | `<NAME>_OPENSEARCH_PASSWORD` | that sink's `password` |
 
-`<NAME>` is the uppercased sink name, so several OpenSearch sinks never collide.
+`<NAME>` is the uppercased sink name, so several OpenSearch sinks never collide. Each adapter's Reference page lists its variables beside the option they override.
 
 **Precedence**, highest first:
 
@@ -84,7 +85,7 @@ With no OTLP endpoint set, no exporter is installed and telemetry costs nothing.
 
 ```sh
 # secrets and connections, resolved at run time
-DATABASE_URL=postgres://user:pass@host:5432/db
+SOURCE_POSTGRES_CONNECTION_URL=postgres://user:pass@host:5432/db
 PRIMARY_OPENSEARCH_URL=https://opensearch:9200
 PRIMARY_OPENSEARCH_USERNAME=flusso
 PRIMARY_OPENSEARCH_PASSWORD=…

@@ -29,6 +29,7 @@ design = ["dep:design"]
 [dependencies]
 config.workspace = true
 kernel.workspace = true
+schemars.workspace = true
 daemon.workspace = true
 design = { workspace = true, optional = true }
 source.workspace = true

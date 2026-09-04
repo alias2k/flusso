@@ -152,6 +152,13 @@ install:
 build-lock:
     cargo run -- build --config {{config}}
 
+# Regenerate the artifacts rendered from the adapters' config declarations: the
+# flusso.toml editor schema (libs/1-config/config.schema.json) and the Reference
+# option tables (docs/src/reference/generated/). A CLI test fails when they drift.
+schema-gen:
+    cargo run -q -p flusso-cli -- schema config > libs/1-config/config.schema.json
+    cargo run -q -p flusso-cli -- schema docs --out docs/src/reference/generated
+
 # ── quality (mirrors CI) ───────────────────────────────────────────────────────
 
 # Fast tests: unit + parse/convert, no external deps.

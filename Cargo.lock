@@ -1042,6 +1042,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prometheus",
  "reqwest 0.12.28",
+ "schemars 1.2.1",
  "serde_json",
  "tokio",
  "tracing",
@@ -1055,6 +1056,7 @@ version = "0.15.1"
 dependencies = [
  "flusso-kernel",
  "rust_decimal",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3498,6 +3500,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",

@@ -21,6 +21,7 @@ workspace = true
 kernel.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+schemars.workspace = true
 serde_yaml.workspace = true
 toml.workspace = true
 rust_decimal.workspace = true

@@ -32,7 +32,9 @@ use crate::common;
 /// malformed value). Distinct from a flush-wide failure, which always stops the
 /// run. Set globally on the config and overridable per index (both live in the
 /// `config` crate's `Config`/`Index`, which assemble this policy).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FailurePolicy {
     /// Stop the run on the first rejected document. The batch is left

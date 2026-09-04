@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Bind addresses for the two operational HTTP surfaces, from a `flusso.toml`
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// and CLI flags on top (which win), falling back to built-in defaults when all
 /// are absent. Each is a `host:port` socket address, parsed and validated at
 /// config-read time by [`SocketAddr`]'s own deserializer.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
     /// Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`),
