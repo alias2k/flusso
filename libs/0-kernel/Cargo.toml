@@ -4,7 +4,7 @@ version = "0.15.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared domain vocabulary for flusso: values, validated newtypes, and index mappings."
+description = "The flusso kernel: the shared vocabulary every layer trades in (values, validated newtypes, index schemas and mappings, adapter options)."
 authors.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -14,11 +14,18 @@ readme.workspace = true
 [lib]
 name = "kernel"
 
+[features]
+# `#[derive(AdapterConfig)]`, re-exported from the kernel the serde way.
+derive = ["dep:kernel-derive"]
+
 [lints]
 workspace = true
 
 [dependencies]
+kernel-derive = { workspace = true, optional = true }
 serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
 nutype.workspace = true
 regex.workspace = true
 bon.workspace = true
@@ -26,3 +33,6 @@ rust_decimal.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

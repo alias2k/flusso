@@ -71,7 +71,7 @@ fn legacy_binary_lock_is_diagnosed() {
 #[test]
 fn future_format_version_is_rejected() {
     let golden = std::fs::read_to_string(golden_dir().join("flusso.lock")).unwrap();
-    let text = golden.replace("format_version = 2", "format_version = 200");
+    let text = golden.replace("format_version = 3", "format_version = 200");
     let err = config::from_bytes(text.as_bytes()).unwrap_err();
     match err {
         config::CompileError::VersionMismatch { got, expected } => {
