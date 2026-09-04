@@ -26,7 +26,7 @@ lives in `skills/flusso-query/migration.md` and not in a skill of its own.
 ## Self-containment
 
 An external install has **no flusso checkout and no `mattpocock-skills`**. So nothing under
-`plugin/` may point at `CLAUDE.md`, `docs/src/`, or `/grilling` as a load-bearing target. Where a
+`plugin/` may point at `CLAUDE.md`, `docs/src/`, or `/grill-with-docs` as a load-bearing target. Where a
 pointer is the right answer anyway (the repo owns the meaning), it carries one line saying the
 target needs a checkout, and the skill still states what a reader without one can do.
 

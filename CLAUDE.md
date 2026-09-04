@@ -632,6 +632,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (ADRs 0001–0004 record the #130 reshuffle, `status: proposed` until it lands; the tree above describes the layout **before** #130) |
 
 ## Conventions
 
@@ -704,7 +705,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   meaning has exactly one home and everything else points at it. **This file owns the definition of
   done** (the designer + i18n + dist rule, the editor JSON schemas, the CI order, the engine
   invariants); a skill or command restating any of it is the defect, so point here instead. The
-  internal commands point at the `mattpocock-skills` collection (`/grilling`, `/code-review`), which
+  internal commands point at the `mattpocock-skills` collection (`/grill-with-docs`, `/code-review`), which
   `.claude/settings.json` declares so any checkout has it. `apps/cli/tests/agent_docs_paths.rs`
   fails the build on a dangling repo path in either tree.
 - `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor

@@ -20,8 +20,10 @@ know how to solve it. Don't assume.
 
 ## 2. Grill on the solution
 
-Run **`/grilling`**. It is the interview primitive: work the design tree in rounds, ask the whole
-frontier at once with a recommendation per question, and find facts yourself instead of asking.
+Run **`/grill-with-docs`**. It is the interview primitive plus the domain-modeling discipline: work
+the design tree in rounds, ask the whole frontier at once with a recommendation per question, find
+facts yourself instead of asking, and as terms and decisions settle, record them in `CONTEXT.md`
+(glossary only) and `docs/adr/` (only for hard-to-reverse, surprising, real-trade-off decisions).
 
 Two flusso-specific additions to what it pushes on: the engine's at-least-once and dedup invariants,
 and the crate layering. A proposal that violates either is wrong regardless of how good it looks.

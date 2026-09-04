@@ -9,9 +9,11 @@ solution. Follow this flow:
 
 ## 1. Understand the problem (do this first — do NOT create the issue yet)
 
-Investigate in the codebase first so your questions are informed, then run **`/grilling`** aimed at
+Investigate in the codebase first so your questions are informed, then run **`/grill-with-docs`** aimed at
 the **problem**, not a solution: what triggers it, scope, who is affected, expected versus actual,
-constraints, edge cases, why it matters.
+constraints, edge cases, why it matters. Its domain-modeling half sharpens the terms as you go: a
+term the problem forces you to name goes into `CONTEXT.md`; an ADR is written only when the issue
+itself settles a hard-to-reverse decision, which a problem-only issue rarely does.
 
 Keep going until the problem is unambiguous. Resolve every "it depends" before drafting.
 
