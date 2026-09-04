@@ -153,8 +153,10 @@ So: value comes from a lowercase Postgres column, lands under a document key you
 ## Secrets and connection values
 
 Anywhere `flusso.toml` expects a secret or URL, use a literal **or** `{ env = "VAR" }`. Env refs
-resolve at run time, so a compiled `flusso.lock` carries no baked secret. `DATABASE_URL` and
-`<SINK>_OPENSEARCH_URL` are reserved and override the config.
+resolve at run time, so a compiled `flusso.lock` carries no baked secret. Every secret-valued
+option also has an override variable named `<ENTRY>_<TYPE>_<KEY>` (`SOURCE_POSTGRES_CONNECTION_URL`,
+`<SINK>_OPENSEARCH_URL`) that replaces or supplies it. Every key besides `type` in a `[source]`,
+`[stream]`, or `[sinks.<name>]` table belongs to that adapter and is listed on its Reference page.
 
 ## Before you call it done
 

@@ -109,7 +109,7 @@ lives in the engine, not here; see the `flusso-engine` docs.
 
 ## Module layout
 
-This file holds the [`OpensearchSink`] type, its constructor, and the few
+This file holds the [`OpensearchSink`] type, its constructor (from an [`OpensearchConfig`], the adapter's own `[sinks.<name>]` declaration), and the few
 shared helpers (`maybe_auth`, `physical`). The rest is split by concern:
 
 - `transport` — the HTTP plumbing: the bulk request, the small request

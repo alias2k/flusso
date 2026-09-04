@@ -33,7 +33,7 @@ flusso is going into a container. Two things get "compiled" and conflating them 
 
    ```sh
    docker run --rm -p 9464:9464 \
-     -e DATABASE_URL=… -e PRIMARY_OPENSEARCH_URL=… -e OS_PASSWORD=… \
+     -e SOURCE_POSTGRES_CONNECTION_URL=… -e PRIMARY_OPENSEARCH_URL=… -e OS_PASSWORD=… \
      myorg/search:1.0
    ```
 

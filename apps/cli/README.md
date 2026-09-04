@@ -40,8 +40,8 @@ Common `run` flags:
 | `--config` / `-c` | `FLUSSO_CONFIG` | `flusso.toml` | Source config; presence triggers a recompile. |
 | `--lock` | `FLUSSO_LOCK` | `flusso.lock` | Compiled artifact path (rewritten each start). |
 | `--locked` | `FLUSSO_LOCKED` | off | Run the lock as-is, skip recompile. |
-| `--slot` | `FLUSSO_SLOT` | `flusso` | Replication slot name. |
-| `--publication` | `FLUSSO_PUBLICATION` | `flusso` | Publication name. |
+| `--slot` | `FLUSSO_SLOT` | `[source] slot`, else `flusso` | Replication slot name. |
+| `--publication` | `FLUSSO_PUBLICATION` | `[source] publication`, else `flusso` | Publication name. |
 | `--skip-backfill` | `FLUSSO_SKIP_BACKFILL` | off | Resume live capture only. |
 | `--public-address` | `FLUSSO_PUBLIC_ADDRESS` | — | Bind the public HTTP surface. |
 | `--private-address` | `FLUSSO_PRIVATE_ADDRESS` | — | Bind the private control surface. |
@@ -64,8 +64,8 @@ flusso run    --skip-backfill                       # resume live capture only
 
 **Every flag also reads a `FLUSSO_*` env var** (clap's `env` feature; the flag wins when
 both are set) — so the binary configures cleanly from a container or Helm chart. This is
-separate from the config's reserved connection/secret variables (`DATABASE_URL`,
-`<SINK>_OPENSEARCH_URL`, …), all centralized in
+separate from the config's override variables (`SOURCE_POSTGRES_CONNECTION_URL`,
+`<SINK>_OPENSEARCH_URL`, …: one `<ENTRY>_<TYPE>_<KEY>` rule for every adapter), all centralized in
 [Environment variables](https://alias2k.github.io/flusso/reference/environment.html).
 
 ## HTTP surfaces

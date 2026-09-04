@@ -8,7 +8,7 @@ A [`Sink`] that writes each document operation to stdout as a JSON envelope — 
 | --- | --- |
 | **Output** | one JSON envelope per operation |
 | **Format** | compact NDJSON (default), or pretty-printed |
-| **Config key** | `pretty` — default `false` |
+| **Config** | [`StdoutConfig`]: `pretty` — default `false` |
 
 **Envelope fields:** `op` (`upsert`/`delete`), `id`, `index`, `document`,
 `sink`, `version`, `ts`, `seq` (order), `meta` (`fields` count + serialized

@@ -4,17 +4,23 @@ The Postgres logical-replication **source** for flusso: capture row changes over
 
 ## At a glance
 
-| Trait (`sources-core`) | Role |
+| Trait (`source` port) | Role |
 | --- | --- |
 | `ChangeCapture` | streams thin per-row changes (table + primary key) from a replication slot; confirms progress via an LSN watermark |
 | `DocumentBuilder` | resolves which documents a changed row affects, then assembles each one. Also implements `Catalog` (a column's SQL type + nullability, for index validation) |
 | `CaptureProvisioning` | reports stream coverage + a privilege verdict for an index's tables, and provisions the gap (create/extend a publication) when allowed |
 
+**Configuration**: [`PostgresConfig`] is the `[source]` table with `type = "postgres"`,
+declared once with `#[derive(AdapterConfig)]`: the connection (a URL, `{ env = "VAR" }`,
+or a parts table), `manage_publication`, `slot`, `publication`, and the `ssl_*` keys.
+[`PostgresConfig::resolve_connection_url`] applies the `SOURCE_POSTGRES_CONNECTION_URL`
+override in the running environment.
+
 **Re-exports** (so callers build a capture without depending on `pgwire-replication`
-directly): `Lsn`, `ReplicationConfig`, `SslMode`, `TlsConfig`.
+directly): `Lsn`, `ReplicationConfig`, `TlsConfig`.
 
 **Connection helpers**: `replication_config` translates a connection URL + the
-deployment's declared TLS settings (`kernel::SourceTls`) into a
+declared TLS settings ([`Tls`], from [`PostgresConfig::tls`]) into a
 `ReplicationConfig` — merging the config keys over the URL's libpq `ssl*`
 parameters (config wins; no mode anywhere means `prefer`) — and
 `sql_connection_url` projects the same decision onto the URL handed to the SQL

@@ -1,6 +1,6 @@
 # flusso-stream-channel
 
-An in-process work queue over a bounded `tokio` mpsc channel.
+The in-process stream adapter: a work queue over a bounded `tokio` mpsc channel, configured by the `[stream]` table with `type = "channel"` ([`ChannelConfig`], one option: `capacity`).
 
 ## At a glance
 

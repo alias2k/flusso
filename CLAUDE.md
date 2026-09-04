@@ -11,9 +11,11 @@ for the full picture. The user manual is an mdBook under `docs/`, published to G
 (`alias2k.github.io/flusso/`; the versioned editor schemas sit beside it under `/schemas/`).
 `docs/src/SUMMARY.md` is the page tree: seven parts (Start here, Author, Deploy, Operate,
 Query, Reference, Contribute) under one rule, **one fact, one home**. Every `*.schema.yml`
-key, `flusso.toml` key, source/sink option, env var, CLI flag, Helm value, metric, and HTTP
+key, `flusso.toml` key, adapter option, env var, CLI flag, Helm value, metric, and HTTP
 endpoint is documented once, on a page under `docs/src/reference/`, and the how-to parts link
-there instead of restating it. Docker recipes are `docs/src/deploy/docker.md`, the query
+there instead of restating it. Adapter option tables are **generated** (`just schema-gen` →
+`docs/src/reference/generated/`) and included by the adapter pages; edit the doc comment on the
+adapter's config struct, never the table. Docker recipes are `docs/src/deploy/docker.md`, the query
 manual is the twelve chapters under `docs/src/query/`, the designer is
 `docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing
 architecture tour is `docs/src/contribute/` (this file stays the agent-facing index). Page
@@ -77,23 +79,33 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   the `GenericValue` variant; see `cdc/pgoutput.rs::typed_value` vs
   `document/value.rs::decode_column`). `.config/nextest.toml` caps their concurrency and
   retries them — they're legitimately slow/flaky.
-- **The file formats are frozen for the major** (issue #109): any `flusso.toml`,
-  `*.schema.yml`, or `flusso.lock` a release in the major accepts must keep loading on every
-  later one (backwards only — `deny_unknown_fields` stays; deprecate, don't remove). The lock
-  is **deterministic TOML** (format 2; `libs/1-config/src/compiled.rs`, no `flusso_version`
-  field — byte-stable across flusso upgrades; pre-freeze MessagePack locks are rejected with a
-  regenerate hint). Two guards in `libs/1-config/tests/`: `golden_lock.rs` byte-pins the
-  serialized shape against a maximal fixture (`tests/fixtures/golden/`; re-bless with
+- **The file formats are frozen for the major** (issue #109): any `flusso.toml` or
+  `*.schema.yml` a release in the major accepts must keep loading on every later one, and so
+  must any `flusso.lock` from 0.16 on (backwards only — `deny_unknown_fields` stays; deprecate,
+  don't remove). The lock is **deterministic TOML** (format 3; `libs/1-config/src/compiled.rs`, no
+  `flusso_version` field — byte-stable across flusso upgrades; each port entry is written as its
+  `type` plus its options with sorted keys). Format 2 (kernel-typed adapter settings, before
+  0.16) and the pre-freeze MessagePack are rejected with a regenerate hint, version checked
+  before the body (ADR 0005). Two guards in `libs/1-config/tests/`: `golden_lock.rs` byte-pins
+  the serialized shape against a maximal fixture (`tests/fixtures/golden/`; re-bless with
   `FLUSSO_BLESS=1` after reviewing the diff) and `compat.rs` walks the immutable per-release
-  corpus `tests/compat/` (see its README; never edit a snapshot — fix the change instead).
+  corpus `tests/compat/` (see its README; never edit a snapshot — fix the change instead; `v0.15`
+  keeps only its user-authored files, the lock guarantee starts at `v0.16`).
+- **Generated artifacts are drift-guarded.** `libs/1-config/config.schema.json` (the complete
+  `flusso.toml` editor schema) and `docs/src/reference/generated/*.md` (one option table per
+  adapter) are rendered from the adapters' `#[derive(AdapterConfig)]` declarations by
+  `flusso schema config` / `flusso schema docs`; a unit test in `apps/cli/src/commands/schema_cmd.rs`
+  fails when the committed copies differ. `just schema-gen` refreshes both. The derive's error
+  messages are pinned with trybuild in `libs/0-kernel/derive/tests/ui/`.
 - `apps/cli/tests/agent_docs_paths.rs` asserts every repo path named in `plugin/**` and
   `.claude/commands/**` exists — the moved-file guard for those pointer-heavy trees. Ordinary test,
   caught by the nextest step.
-- **The `schema` crate's config env-var tests must run single-threaded**: the
-  `flusso.toml` parse/convert tests (`libs/1-config/tests/config_toml.rs`) mutate process-wide
-  env (`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`). nextest gives each test its own process so it's
-  fine there; under plain `cargo test` use `cargo test -p schema -- --test-threads=1`.
-  Intermittent `MissingConnectionUrl` / wrong-override failures are this race, not a regression.
+- **Env-var tests live in the adapters.** `libs/2-adapters/source-postgres/tests/config_env.rs`
+  and `libs/2-adapters/sink-opensearch/tests/config_env.rs` mutate the override variables
+  (`SOURCE_POSTGRES_CONNECTION_URL`, `<SINK>_OPENSEARCH_*`). nextest gives each test its own
+  process; the Postgres one is a single sequential test and each OpenSearch test uses its own
+  sink name, so plain `cargo test` is safe too. An intermittent failure there is an env race
+  from a new test sharing a variable, not a regression.
 - CI's `test` job runs, in order: `cargo fmt --all --check` → `cargo clippy --workspace` →
   `cargo check --workspace --all-targets` (compiles benches + examples, which clippy and nextest
   skip — clippy omits `--all-targets`, nextest only builds test targets) → `cargo check -p
@@ -180,7 +192,7 @@ layer the demo override on the base the Docker way:
 `docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build`. The override
 (`docker-compose.demo.yml`) just *adds* a `flusso` service built from the `Dockerfile`'s
 `demo` target (release binary + a baked `flusso.lock`), pointed at the in-network services via
-`DATABASE_URL` / `PRIMARY_OPENSEARCH_URL`. It publishes `9464`, so the base Prometheus scrapes
+`SOURCE_POSTGRES_CONNECTION_URL` / `PRIMARY_OPENSEARCH_URL`. It publishes `9464`, so the base Prometheus scrapes
 it via the same `host.docker.internal:9464` it uses for a host-run flusso — one config, both
 modes. Same project as the base, so it shares its volumes; don't run a host `cargo run` flusso
 and the container at once (same replication slot).
@@ -198,7 +210,8 @@ editor-assist JSON Schema: `schema config` or `schema index`; no DB). See `dev/R
 `FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.
 `FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_PUBLIC_ADDRESS` — so the binary configures cleanly from
 the environment (Helm/compose). This is separate from the config's own reserved env vars
-(`DATABASE_URL`, `<SINK>_OPENSEARCH_URL`) and `{ env = "VAR" }` secret refs.
+(`SOURCE_POSTGRES_CONNECTION_URL`, `<SINK>_OPENSEARCH_URL`: one `<ENTRY>_<TYPE>_<KEY>` rule) and
+`{ env = "VAR" }` secret refs.
 
 A **Helm chart** lives at `deploy/helm/flusso/` — a single-instance Deployment (one
 replication slot → `replicas: 1`, enforced; `Recreate` strategy), config via ConfigMap
@@ -226,22 +239,29 @@ time uses `#![cfg_attr(test, allow(unused_crate_dependencies))]` (see `libs/2-en
 
 ### Crate layering
 
-Crates live under `libs/` and `apps/`; the **numeric prefix is the dependency layer** — a
-crate only depends on lower-numbered ones (`0-core` → `1-{queue,sources,sinks}` →
-`2-{engine,schema}` → `3-daemon` → `apps`). Within a layer, `0-core` holds the abstraction/domain
-types and higher numbers are concrete backends. Keep this acyclic when adding crates.
+Crates live under `libs/`, `apps/`, and `sdk/`; the **numeric prefix is the dependency layer** —
+a crate only depends on lower-numbered ones (`0-kernel` → `1-{ports/*, config}` →
+`2-{adapters/*, engine}` → `3-daemon` → `apps`, `sdk`). The five seams are named in `CONTEXT.md`:
+**kernel** (the shared vocabulary), **ports** (source, stream, sink: the contracts the engine
+drives), **adapters** (one implementation of one port for one technology, at
+`libs/2-adapters/<port>-<technology>`), **engine** (the generic loop), **daemon** (the
+supervisor that assembles a deployment). Keep this acyclic when adding crates; `libs/README.md`
+is the crate table.
 
-Layer 0 is a single crate, `kernel` (`libs/0-kernel`): the **cross-cutting vocabulary**
-every layer trades in — `GenericValue`, the newtypes, `IndexMapping`, `IndexSchema`,
-`Field`/`Filter`, `FailurePolicy`, the per-sink configs. Everything that turns config *files*
-into that vocabulary lives a layer up, in the `2-schema` group (crate name `schema`): the two
-file *parsers* (`schema-config-toml`/`schema-index-yaml`, nested at
-`libs/1-config/src/{toml,yaml}`, which produce neutral entities), the **assembled
-`Config`** (plus `Index`/`Source`/the `Sink` enum), the `Config`→entity conversion, and the
-loader. Keeping the parsers out of layer 0 is deliberate — it's the one place a layer-1
-backend *could* otherwise reach config-loading machinery; with them at layer 2 the backends
-depend only on the layer-0 vocabulary and *cannot* see the assembled `Config` or the file
-parsers. See "Config layer" below.
+Layer 0 is the `kernel` (`libs/0-kernel`, plus its proc-macro `libs/0-kernel/derive`): the
+**cross-cutting vocabulary** every layer trades in — `GenericValue`, the newtypes, `IndexMapping`,
+`IndexSchema`, `Field`/`Filter`, `FailurePolicy`, `Secret`, the `Options` tree, `PortEntry`, and
+the `AdapterConfig` trait. It names no adapter and no file format. Everything that turns config
+*files* into that vocabulary lives a layer up in the `config` crate (`libs/1-config`): the two
+file *parsers* as modules (`toml`, `yaml`), the **assembled `Config`** (source/stream/sinks as
+`PortEntry`s + `Index`), the conversion, the loader, and the lock. **Adapters own their
+configuration** (ADR 0001): each adapter crate declares its config struct with
+`#[derive(AdapterConfig)]` (`source_postgres::PostgresConfig`, `stream_channel::ChannelConfig`,
+`sink_opensearch::OpensearchConfig`, `sink_stdout::StdoutConfig`), and the CLI's registry
+(`apps/cli/src/adapters.rs`) is the one place that maps a `type` to it. So the config crate
+never names an adapter, an adapter can never reach the assembled `Config` (it depends only on
+the kernel and its port), and adding an adapter is its crate + one registry entry + the build
+arm in `apps/cli/src/backends.rs`. See "Config layer" below.
 
 ### The pipeline (`libs/2-engine/src/pipeline.rs`)
 
@@ -374,26 +394,52 @@ and the instruments cost nothing — which is why the daemon tests run with no s
 assume milliseconds). The Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened
 admin pool (`WalChangeCapture::admin_pool`) so periodic lag probes reuse connections.
 
-### Config layer — two-stage parse then convert
+### Config layer — two-stage parse then convert, then adapter validation
 
-`schema::load(path)` is the front door (in `libs/1-config`, layer 2): it reads `flusso.toml`,
-resolves+parses every referenced `*.schema.yml`, and returns one validated `Config`. Downstream
-crates that legitimately compose a deployment (the daemon, the CLI) depend on `schema` and reach
-the vocabulary via its re-export of `kernel`. Each file *parser* (`schema-config-toml`,
-`schema-index-yaml`, both in the `2-schema` group) works in two stages:
+`config::load(path)` is the front door (`libs/1-config`, layer 1): it reads `flusso.toml`,
+resolves+parses every referenced `*.schema.yml`, and returns one `Config`. Downstream crates that
+legitimately compose a deployment (the daemon, the CLI, the designer, the query derive) depend on
+`config` and reach the vocabulary via its re-export of `kernel`. Each file *parser* (the `toml`
+and `yaml` modules) works in two stages:
 
 1. **Parse** — `serde` deserializes into permissive *entity* types that mirror the file
-   1:1; unknown fields are rejected. This is all the parser crates do.
+   1:1; unknown top-level fields are rejected. A port table (`[source]`, `[stream]`,
+   `[sinks.<name>]`) parses into `kernel::PortEntry`: `type` + every other key as an
+   uninterpreted `Options` tree (`kernel::options`, sorted keys, serde + `IntoDeserializer`).
 2. **Convert** — entities are lifted into the model and rules the format can't express are
    applied (identifier validation, join/aggregate arity, declared-type placement, filter
-   shapes). For `*.schema.yml` → `IndexSchema` (a `kernel` vocabulary type) this lives in
-   `schema-index-yaml`. For `flusso.toml` → the assembled `Config` the conversion is a
-   *composition* step, so it lives in the `schema` crate (`libs/1-config/src/deployment/conversion.rs`,
-   the `From<ConfigToml>` impl), next to `Config` — the toml parser stays free of `Config`.
+   shapes). For `*.schema.yml` → `IndexSchema` this lives in the `yaml` module. For
+   `flusso.toml` → the assembled `Config` the conversion is a *composition* step
+   (`libs/1-config/src/deployment/conversion.rs`, the `From<ConfigToml>` impl); port entries
+   pass through and an omitted `[stream]` becomes `channel` with defaults.
+3. **Validate against the adapters** — in the composition root, not the config crate:
+   `adapters::validate(&Config)` (`apps/cli/src/adapters.rs`, also the daemon's
+   `Backends::validate`) deserializes every entry's options into its adapter's
+   `#[derive(AdapterConfig)]` struct with `deny_unknown_fields`. `build`, `check` (incl.
+   `--offline`), `run`, and the designer call it right after load, so a typo in a sink option
+   fails before any network call or lock write. `load` alone therefore does **not** mean
+   "fully validated".
+
+**Adapter knobs that are flags** (`--slot`, `--publication`, `--manage-publication`, `--pretty`,
+`--queue-capacity`) are laid over the file's entries by `adapters::apply_overrides` before
+validation (flag > env > file); `DaemonOptions` carries nothing adapter-specific. A deployment
+with no sink gets a `stdout` entry there.
 
 **Secrets are deferred, never resolved at parse/convert time.** A `{ env = "VAR" }`
-reference becomes a `Secret` and is read in the environment that *runs* the pipeline — so a
-compiled `flusso.lock` carries no secret it wasn't given literally.
+reference is a `kernel::Secret` (serialized exactly as written: a string or `{ env = "VAR" }`)
+and is read by the adapter's config type in the environment that *runs* the pipeline — so a
+compiled `flusso.lock` carries no secret it wasn't given literally. **One override rule for
+every adapter**: `kernel::override_var(entry, kind, field)` = `<ENTRY>_<TYPE>_<KEY>`
+(`PRIMARY_OPENSEARCH_URL`, `SOURCE_POSTGRES_CONNECTION_URL`, nested keys joined with `_`),
+applied to `Secret` fields; an explicit `{ env }` beats it. `DATABASE_URL` no longer exists.
+
+**One declaration renders everything.** `AdapterConfig::description()` yields the adapter's
+draft-07 schema (doc comments → descriptions, serde defaults → defaults), its example, and its
+secret paths (found by the `x-flusso-secret` marker `Secret`'s `JsonSchema` plants). The CLI
+renders the complete `flusso.toml` editor schema (`flusso schema config`), the Reference option
+tables (`flusso schema docs`), and hands the descriptions to the designer (`GET /api/adapters`),
+whose forms are schema-driven (`apps/design/frontend/src/components/AdapterForm.tsx`). Adding an
+option to an adapter = edit the struct, run `just schema-gen`, commit.
 
 ### Schema YAML is type-first
 
@@ -595,9 +641,12 @@ belongs in the linked docs.
 The visual designer (`apps/design`) is part of the product surface, not an optional extra:
 a feature isn't done until the designer can author it **and** its UI is fully translated.
 When a change adds or alters something a user authors — a `*.schema.yml`/`flusso.toml` key,
-a field type tag/sibling, an enum token, a sink option, a source/sink capability — align the
-designer in the **same** change: model/codegen/preview (`apps/design/`), the canvas/inspector
-controls (`apps/design/frontend/`), and the introspection/source-steer if the source informs it.
+a field type tag/sibling, an enum token, a source/sink capability — align the designer in the
+**same** change: model/codegen/preview (`apps/design/`), the canvas/inspector controls
+(`apps/design/frontend/`), and the introspection/source-steer if the source informs it. The one
+exception is an **adapter option**: the designer's source/stream/sink forms render from the
+adapters' `#[derive(AdapterConfig)]` descriptions (`AdapterForm.tsx`), so a new option or a new
+adapter needs no designer edit beyond `just schema-gen`.
 And any user-facing string goes through `t("ns.key")` with the key added to **every** locale
 catalog in `apps/design/frontend/src/locales/` (English `en.ts` is the base; translate the rest).
 Two CI guards in the `designer-frontend` job enforce this and will fail the build otherwise: the
@@ -612,18 +661,21 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | The sync loop / batching / ack ordering | `libs/2-engine/src/` — `lib.rs` (the `Engine` builder + public API), `pipeline.rs` (the `Pipeline` run machinery: `run_inner`/`backfill`/`pump`/`work`/`commit`/`CaptureGuard`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` |
 | Pipeline observability trait (`Observer`, `BatchStats`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Daemon (domain): pipeline wiring, `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `backends.rs` (`Backends` trait + `SourceParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
-| Backend assembly (which concrete source/sink): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
+| Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |
+| Adapter assembly (build the running source/sinks): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surfaces, auth, signals | `apps/cli/src/` — `telemetry/mod.rs` (traces), `telemetry/metrics.rs` (meter provider + `in_flight` gauge), `telemetry/observer.rs` (`OtelObserver`), `http/mod.rs` (public + private routers + `serve`), `http/auth.rs` (Basic auth), `commands/run.rs` (orchestration + signals) |
-| Config loading + the assembled `Config`/`Index`/`Source`/`Sink` (layer 2) | `libs/1-config/src/` — `lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`), `deployment/` (the `Config` family + `From<ConfigToml>` conversion + `resolve_mappings`) |
-| Validated domain model / vocabulary (the shared types — the sole layer-0 crate) | `libs/0-kernel/src/` — `config/` (`IndexSchema`, `FailurePolicy`, per-sink configs, …), `common/` (newtypes), `GenericValue` |
-| `flusso.toml` parsing (entities only; conversion is in the `schema` loader) | `libs/1-config/1-config-toml/src/` (`entities/`) |
+| Config loading + the assembled `Config`/`Index` with `PortEntry` ports (layer 1) | `libs/1-config/src/` — `lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`), `deployment/` (the `Config` family + `From<ConfigToml>` conversion + `resolve_mappings`) |
+| Kernel vocabulary (the shared types — layer 0) | `libs/0-kernel/src/` — `config/` (`IndexSchema`, `FailurePolicy`, `Secret`, …), `common/` (newtypes), `GenericValue`, `options.rs` (`Options`/`OptionValue`), `port_entry.rs`, `adapter.rs` (`AdapterConfig`/`AdapterDescription`/`Port`/`override_var`); the derive in `libs/0-kernel/derive/` |
+| Adapter config types (one per adapter, `#[derive(AdapterConfig)]`) | `libs/2-adapters/source-postgres/src/config.rs` (`PostgresConfig`, `Connection`, `SslMode`, `Tls`), `stream-channel/src/config.rs`, `sink-opensearch/src/config.rs` (+ `TextAnalysis`), `sink-stdout/src/config.rs` |
+| `flusso.toml` parsing (entities only; conversion is beside `Config`) | `libs/1-config/src/toml/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
 | Source trait abstractions (`ChangeCapture` + `Continuity`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
 | Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
 | `Sink` trait, JSON render, fan-out | `libs/1-ports/sink/src/` |
-| OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
-| Queue abstraction / in-process channel | `libs/1-ports/stream/src/`, `libs/2-adapters/stream-channel/src/lib.rs` |
+| OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
+| Stream port / in-process channel adapter | `libs/1-ports/stream/src/`, `libs/2-adapters/stream-channel/src/lib.rs` |
+| Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives the `Daemon::start`/`run` **restart loop**, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations + restart trigger) | sink: `libs/2-adapters/sink-opensearch/src/sink.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `CaptureGuard` + daemon `LagGuard` (clean cancel) + `Daemon::with_status`; CLI `commands/run.rs` (restart loop), `http/mod.rs` (`POST /reindex`), `commands/admin.rs` (client). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `sdk/query/src/` |
@@ -632,7 +684,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
-| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (ADRs 0001–0004 record the #130 reshuffle, `status: proposed` until it lands; the tree above describes the layout **before** #130) |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
 
@@ -679,7 +731,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   (`flusso-dev-search-api`) and `dev/query-e2e` (`flusso-query-e2e`) — both `publish = false`
   (a runnable example and a live-e2e guard, not shipping code). The
   catch: a crate's published **package name** (`flusso-engine`, `flusso-kernel`, …) differs
-  from the **extern name** code uses (`engine`, `schema_core`, …). Two mechanisms keep that split
+  from the **extern name** code uses (`engine`, `kernel`, `source_postgres`, …). Two mechanisms keep that split
   so the rename needs **no source change**: each lib sets `[lib] name = "<extern>"`, and each
   `[workspace.dependencies]` entry keeps its short key plus `package = "flusso-…"` + `version`.
   So `use kernel::…`, `package(flusso-source-postgres)` in `.config/nextest.toml`, and the
@@ -697,9 +749,12 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   fix reaches the docker/dist binaries only via a cli-train release: land a `fix(cli): adopt …`
   commit appending to `apps/cli/ADOPTIONS.md` (the binaries build in-tree from the tag, so they
   always carry main-tip libs). **Publish order within a train is still bottom-up** (a dep must be
-  on crates.io before its dependents): `flusso-kernel` → parsers →
-  `flusso-schema` → `flusso-engine`/sinks/sources/queue → `flusso-daemon`, then apps on top
-  (`flusso-design` → `flusso-cli`; `flusso-query-derive` → `flusso-query`).
+  on crates.io before its dependents): `flusso-kernel` → `flusso-kernel-derive` → the ports
+  (`flusso-source`/`flusso-stream`/`flusso-sink`) → `flusso-config` → the adapters →
+  `flusso-engine` → `flusso-daemon`, then apps on top (`flusso-design` → `flusso-cli`;
+  `flusso-query-derive` → `flusso-query`). The pre-0.16 names (`flusso-schema-core`, …) stay on
+  crates.io at their last release; `scripts/tombstone-crates.sh` publishes a final pointer README
+  under each (manual, needs a token; ADR 0004).
 - **Agent-facing docs follow `writing-for-agents`, not `docs/STYLE.md`.** `plugin/**` and
   `.claude/commands/**` are consumed by an agent, so `plugin/ARCHITECTURE.md` is the standard: each
   meaning has exactly one home and everything else points at it. **This file owns the definition of
@@ -708,24 +763,21 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   internal commands point at the `mattpocock-skills` collection (`/grill-with-docs`, `/code-review`), which
   `.claude/settings.json` declares so any checkout has it. `apps/cli/tests/agent_docs_paths.rs`
   fails the build on a dangling repo path in either tree.
-- `dev/` is a runnable example, not shipping code; the hand-curated JSON Schemas for editor
-  completion live **inside the parser crate that owns each** (so they ship in the published
-  `.crate`): `config::CONFIG_SCHEMA`
-  (`libs/1-config/config.schema.json`) and `config::INDEX_SCHEMA`
-  (`libs/1-config/index.schema.yml`), each embedded via a crate-local
-  `include_str!`, both re-exported from `schema` and emitted by `flusso schema config|index`.
-  They sit in-crate (not bare at the repo root) because `cargo package` only bundles files under the
-  crate dir — an out-of-crate `include_str!` would break the published crate. On each release the
-  `.github/workflows/pages.yml` workflow publishes copies of these files to GitHub Pages under an
-  immutable per-version path
-  (`https://alias2k.github.io/flusso/schemas/v<version>/{index.schema.yml,config.schema.json}`, plus
-  `v<minor>` and `latest` aliases), triggered by the schema crates' release tags
-  (`flusso-schema-{index-yaml,config-toml}-v*`, which move together since both sit in the `libs`
-  version group);
-  editor `# yaml-language-server: $schema=…` modelines point at that versioned URL, while in-repo files
-  (`dev/*.schema.yml`, the parser test fixtures) use a relative path to the in-crate `schemas/`.
-  `libs/1-config/tests/schema_drift.rs` guards their enumerable sets — field type tags, field
-  siblings, enum tokens, sink fields — against the parsers (reading the embedded consts), so
-  adding a tag/sibling/variant fails CI until the schema matches. It does **not** check
-  descriptions, defaults, the permissive `field` union, or the identifier `pattern`s (which
-  can't model the newtypes' trim/lowercase sanitization).
+- `dev/` is a runnable example, not shipping code; the two editor-assist schemas live **inside
+  the `config` crate** (so they ship in the published `.crate`): `config::CONFIG_SCHEMA`
+  (`libs/1-config/config.schema.json`, **generated** by `flusso schema config` from the adapters'
+  descriptions, drift-guarded by a CLI test) and `config::INDEX_SCHEMA`
+  (`libs/1-config/index.schema.yml`, hand-curated), each embedded via a crate-local
+  `include_str!` and emitted by `flusso schema config|index`. They sit in-crate (not bare at the
+  repo root) because `cargo package` only bundles files under the crate dir. On each release the
+  `.github/workflows/pages.yml` workflow publishes copies to GitHub Pages under an immutable
+  per-version path (`https://alias2k.github.io/flusso/schemas/v<version>/{index.schema.yml,config.schema.json}`,
+  plus `v<minor>` and `latest` aliases), triggered by the `flusso-config-v*` release tags (the
+  pre-0.16 `flusso-schema-{index-yaml,config-toml}-v*` tags are still read at their old paths);
+  editor `# yaml-language-server: $schema=…` modelines point at that versioned URL, while in-repo
+  files (`dev/*.schema.yml`, the test fixtures) use a relative path to the in-crate files.
+  `libs/1-config/tests/schema_drift.rs` guards the index schema's enumerable sets — field type
+  tags, field siblings, enum tokens — against the parser (reading the embedded const), so adding
+  a tag/sibling/variant fails CI until the schema matches. It does **not** check descriptions,
+  defaults, the permissive `field` union, or the identifier `pattern`s (which can't model the
+  newtypes' trim/lowercase sanitization). The config schema needs no such test: it is generated.

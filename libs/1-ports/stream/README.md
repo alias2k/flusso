@@ -1,6 +1,6 @@
 # flusso-stream
 
-A generic work-queue abstraction for the sync pipeline — domain-agnostic, so the backend swaps without touching pipeline code.
+The stream port: the generic producer/consumer contract between the source side and the sinks, domain-agnostic, so the adapter swaps without touching engine code.
 
 ## Quick reference
 
@@ -15,7 +15,7 @@ Generic over the payload `T`, so it depends on neither the source, the sink, nor
 
 The point of the abstraction is a swappable *backend*:
 
-- **In-process** [`tokio` channels](https://docs.rs/tokio) (see `queue-channel`) for single-node runs. Acking is a no-op there — durability comes from the source (the replication slot), and the bounded channel gives backpressure.
+- **In-process** [`tokio` channels](https://docs.rs/tokio) (see `stream-channel`) for single-node runs. Acking is a no-op there — durability comes from the source (the replication slot), and the bounded channel gives backpressure.
 - **A durable broker** (e.g. NATS JetStream) later, where [`AckHandle::ack`] becomes a real server acknowledgement and the queue itself is the durability boundary for the work pipeline.
 
 > ℹ️ **Info** — because [`AckHandle`] models the ack identically, the engine loop is unchanged whichever backend backs it; only the durability guarantee shifts.

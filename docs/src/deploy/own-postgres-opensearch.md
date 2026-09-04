@@ -51,17 +51,17 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
 6. **Run `check` against both.**
 
    ```sh
-   DATABASE_URL=… PRIMARY_OPENSEARCH_URL=… flusso check --config flusso.toml
+   SOURCE_POSTGRES_CONNECTION_URL=… PRIMARY_OPENSEARCH_URL=… flusso check --config flusso.toml
    ```
 
    A passing check means the files load, every declared type matches a live column, and the publication covers every table.
 
 ## Options and variations
 
-- **TLS to Postgres.** A managed provider's `DATABASE_URL=…?sslmode=require` works as pasted, but `require` doesn't verify the server. Set `ssl_mode = "verify-full"` and `ssl_root_cert` for production. See [TLS](../reference/source-postgres.md#tls).
+- **TLS to Postgres.** A managed provider's `…?sslmode=require` URL works as pasted, but `require` doesn't verify the server. Set `ssl_mode = "verify-full"` and `ssl_root_cert` for production. See [TLS](../reference/source-postgres.md#tls).
 - **Self-signed OpenSearch.** `tls_verify = false` on the sink, for development only.
 - **WAL retention.** Postgres keeps WAL until the slot confirms it. A flusso that stays down for days grows the WAL. Drop the slot when retiring a deployment: `SELECT pg_drop_replication_slot('flusso');`.
-- **Slot and publication names** are the `--slot` and `--publication` flags; see [CLI](../reference/cli.md#run).
+- **Slot and publication names** are the `slot` and `publication` keys of `[source]`; the `--slot` and `--publication` flags override them. See [Source: Postgres](../reference/source-postgres.md#capture).
 
 ## Related
 

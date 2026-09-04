@@ -11,7 +11,7 @@ cargo nextest run -E 'test(name_substr)'            # one test
 cargo test --doc --workspace                        # doctests; nextest doesn't run them
 cargo clippy --workspace                            # lint, deliberately not --all-targets
 cargo bench                                         # Criterion: engine, opensearch, postgres
-cargo +nightly fuzz run pgoutput_decode             # from libs/1-sources/1-postgres
+cargo +nightly fuzz run pgoutput_decode             # from libs/2-adapters/source-postgres
 ```
 
 `default-members = ["apps/cli"]`, so a bare `cargo nextest run` tests only the CLI. Always pass `--workspace`. The `justfile` wraps these: `just test`, `just test-all`, `just doc`, `just lint`, `just ci`.
@@ -40,21 +40,22 @@ The `#[ignore]`d suites spin up containers with `testcontainers`. They're legiti
 
 | Crate | Binary | Proves |
 | --- | --- | --- |
-| `sources-postgres` | `integration`, `config_coverage`, `publication`, `introspection` | capture, coverage reports, publication management, catalog enumeration |
-| `sources-postgres` | `tls` | a hostssl-only PG 16 honors `sslmode` on both the stream and the SQL pool |
-| `sources-postgres` | `wal_idle` | the slot advances from keepalives while watched tables are idle |
-| `sources-postgres` | `continuity` | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |
+| `source-postgres` | `integration`, `config_coverage`, `publication`, `introspection` | capture, coverage reports, publication management, catalog enumeration |
+| `source-postgres` | `tls` | a hostssl-only PG 16 honors `sslmode` on both the stream and the SQL pool |
+| `source-postgres` | `wal_idle` | the slot advances from keepalives while watched tables are idle |
+| `source-postgres` | `continuity` | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |
 | `engine` | `wal` | which op the engine emits per change, against a recording sink |
 | `engine` | `pipeline` | the full source to OpenSearch path, reading the index back over HTTP: live insert/update/delete across key types, soft-delete tombstoning, backfill, and the two seed-marker contradictions |
-| `sinks-opensearch` | `reindex` | generations, alias swap, retracted markers |
+| `sink-opensearch` | `reindex` | generations, alias swap, retracted markers |
 | `flusso-query-e2e` | `combined_search` | generation-suffix normalization against a real cluster |
 
 The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf source must not dev-depend on the engine or it can't be published first.
 
 ## Special guards
 
-- **Env-var tests are process-isolated.** The `schema` crate's config tests mutate `DATABASE_URL` and `<SINK>_OPENSEARCH_URL`; nextest gives each test a process. Under plain `cargo test` use `--test-threads=1`.
+- **Env-var tests are process-isolated.** The adapters' `config_env` tests mutate the override variables (`SOURCE_POSTGRES_CONNECTION_URL`, `<SINK>_OPENSEARCH_*`); nextest gives each test a process, and each test touches only variables named after its own sink. Under plain `cargo test` the Postgres one is a single sequential test for that reason.
 - **Format freeze.** `golden_lock.rs` and `compat.rs`; see [The config layer](config-layer.md#the-freeze).
+- **Generated artifacts.** A CLI unit test regenerates the `flusso.toml` editor schema and the adapters' Reference tables and fails when the committed copies differ; `just schema-gen` refreshes them. The derive's own error messages are pinned with trybuild in `libs/0-kernel/derive/tests/ui/`.
 - **Fuzzing.** The one target drives the crate-private pgoutput decoder through the `fuzzing` feature. Contract: never panic on arbitrary bytes; `Err` is correct. Needs nightly and `cargo-fuzz`.
 - **Agent docs paths.** `apps/cli/tests/agent_docs_paths.rs` asserts every repo path named under `plugin/**` and `.claude/commands/**` exists.
 - **Designer.** A proptest round-trip (`apps/design/tests/roundtrip.rs`: random `IndexSchema` through codegen, parse, convert, identity) plus the CI job: Prettier, type-aware ESLint, an i18n completeness check, and a dist-drift guard that the committed SPA matches a fresh build.
