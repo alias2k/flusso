@@ -10,7 +10,7 @@ cargo nextest run --workspace --run-ignored all     # + Postgres/OpenSearch e2e 
 cargo nextest run -E 'test(name_substr)'            # one test
 cargo test --doc --workspace                        # doctests; nextest doesn't run them
 cargo clippy --workspace                            # lint, deliberately not --all-targets
-cargo bench                                         # Criterion: engine, opensearch, postgres
+just bench                                          # in-process benches; see Benchmarks
 cargo +nightly fuzz run pgoutput_decode             # from libs/2-adapters/source-postgres
 ```
 
@@ -28,7 +28,7 @@ Match this before assuming green:
 6. `cargo test --workspace --doc`
 7. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
 
-A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it.
+A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md).
 
 ## Why clippy runs without --all-targets
 
@@ -44,6 +44,7 @@ The `#[ignore]`d suites spin up containers with `testcontainers`. They're legiti
 | `source-postgres` | `tls` | a hostssl-only PG 16 honors `sslmode` on both the stream and the SQL pool |
 | `source-postgres` | `wal_idle` | the slot advances from keepalives while watched tables are idle |
 | `source-postgres` | `continuity` | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |
+| `source-postgres` | `record_pgoutput` | not a test: re-records the decode bench's fixture from a real Postgres (see [Benchmarks](benchmarks.md#re-recording-the-pgoutput-fixture)) |
 | `engine` | `wal` | which op the engine emits per change, against a recording sink |
 | `engine` | `pipeline` | the full source to OpenSearch path, reading the index back over HTTP: live insert/update/delete across key types, soft-delete tombstoning, backfill, and the two seed-marker contradictions |
 | `sink-opensearch` | `reindex` | generations, alias swap, retracted markers |
@@ -64,3 +65,4 @@ The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf sou
 ## Where this shows up
 
 - [Releasing](releasing.md) for what a green build feeds.
+- [Benchmarks](benchmarks.md) for the performance suite that runs beside these.

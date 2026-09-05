@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Every `alias2k.github.io/flusso/<path>` URL in the repo's markdown and Rust
 # sources must resolve to a page in the freshly built book (docs/book), and a
-# `#fragment` must be an element id on that page. The `/schemas/` tree is
-# assembled from release tags by pages.yml, not by mdbook, so it is skipped.
+# `#fragment` must be an element id on that page. The `/schemas/` tree (from
+# release tags) and `/bench/` (from the `benchmarks` data branch) are assembled
+# by pages.yml, not by mdbook, so they are skipped.
 #
 # Usage: .github/scripts/check-manual-links.sh [book-dir]   (default docs/book)
 set -euo pipefail
@@ -17,7 +18,7 @@ while IFS= read -r line; do
   url="${url%.}"
   path="${url#https://alias2k.github.io/flusso}"
   path="${path#/}"
-  case "$path" in schemas/*) continue ;; esac
+  case "$path" in schemas/*|bench|bench/*) continue ;; esac
   fragment=""
   case "$path" in *'#'*) fragment="${path#*#}"; path="${path%%#*}" ;; esac
   case "$path" in ""|*/) path="${path}index.html" ;; esac
