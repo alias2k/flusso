@@ -75,8 +75,8 @@ pub const ENVELOPE_VERSION: u8 = 1;
 /// the sink side and absent inside the pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Envelope<D = GenericValue> {
-    /// The sink this copy is for; stamped by the sink engine before the sink
-    /// sees it, so an emitting sink forwards its own name.
+    /// The emitting sink's name, filled by that sink as it writes the envelope
+    /// out; absent inside the pipeline, where one batch is shared by every sink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sink: Option<SinkName>,
     /// [`ENVELOPE_VERSION`] at the time of writing.

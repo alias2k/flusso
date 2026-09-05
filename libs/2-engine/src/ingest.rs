@@ -239,7 +239,7 @@ impl IngestEngine {
         let item = LaneItem::Batch(Batch {
             position: pending.position,
             changes: pending.count,
-            envelopes,
+            envelopes: envelopes.into(),
         });
         try_join_all(
             lanes
@@ -422,7 +422,7 @@ impl IngestEngine {
             publishes.push(producer.publish(LaneItem::Batch(Batch {
                 position: None,
                 changes: 0,
-                envelopes: slice,
+                envelopes: slice.into(),
             })));
         }
         try_join_all(publishes).await?;

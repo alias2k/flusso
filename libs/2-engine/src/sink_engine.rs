@@ -244,10 +244,7 @@ impl SinkEngine {
                     Some(delivery) => {
                         let (item, handle) = delivery.into_parts();
                         match item {
-                            LaneItem::Batch(mut batch) => {
-                                for envelope in &mut batch.envelopes {
-                                    envelope.sink = Some(self.name.clone());
-                                }
+                            LaneItem::Batch(batch) => {
                                 self.commit(&batch, lane.is_empty()).await?;
                             }
                             LaneItem::SnapshotComplete { indexes } => {
@@ -280,7 +277,7 @@ impl SinkEngine {
     /// unacknowledged.
     #[tracing::instrument(name = "sink.commit", level = "debug", skip_all, fields(envelopes = batch.envelopes.len(), caught_up))]
     async fn commit(&self, batch: &stream::Batch, caught_up: bool) -> Result<()> {
-        for envelope in &batch.envelopes {
+        for envelope in batch.envelopes.iter() {
             self.sink.apply(envelope).await?;
         }
         let flush_start = Instant::now();
