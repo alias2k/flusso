@@ -49,9 +49,14 @@ serde_json.workspace = true
 # the index it left behind.
 tracing-subscriber.workspace = true
 
-# Full pipeline benchmark: real Postgres -> the engine -> real OpenSearch.
-# The backfill scenario drives the real `Engine::run()`. Spins up both
-# containers, so requires Docker. Run with `cargo bench`.
+# In-process component bench: both engines over the real channel stream with
+# mocked source/builder/sink. No Docker; this is the PR-gating bench.
+[[bench]]
+name = "engine"
+harness = false
+
+# Full pipeline component bench: real Postgres -> the engines -> real OpenSearch,
+# for attribution. Spins up both containers, so requires Docker.
 [[bench]]
 name = "pipeline"
 harness = false

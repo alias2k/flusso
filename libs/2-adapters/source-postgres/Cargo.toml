@@ -21,6 +21,9 @@ workspace = true
 # Exposes a public entry point into the otherwise-internal pgoutput decoder for
 # the `fuzz/` cargo-fuzz crate. Off by default; not part of the stable API.
 fuzzing = []
+# Exposes the pgoutput decoder to the in-process `pgoutput` bench. Off by
+# default; not part of the stable API.
+bench = []
 
 [dependencies]
 source.workspace = true
@@ -54,8 +57,16 @@ testcontainers-modules = { workspace = true, features = ["postgres"] }
 criterion.workspace = true
 proptest.workspace = true
 
-# Real-service benchmark: document assembly against a live Postgres.
-# Spins up Postgres in a container, so requires Docker. Run with `cargo bench`.
+# Component bench: document assembly against a live Postgres, for attribution.
+# Spins up Postgres in a container, so requires Docker.
 [[bench]]
 name = "postgres"
 harness = false
+
+# In-process component bench: the pgoutput decoder over a recorded WAL fixture
+# (`benches/fixtures/pgoutput.bin`, re-recorded by `tests/record_pgoutput.rs`).
+# No Docker; this is a PR-gating bench. Needs `--features bench`.
+[[bench]]
+name = "pgoutput"
+harness = false
+required-features = ["bench"]

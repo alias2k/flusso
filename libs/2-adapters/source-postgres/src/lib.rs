@@ -28,3 +28,12 @@ pub use pgwire_replication::{Lsn, ReplicationConfig, TlsConfig};
 pub fn fuzz_pgoutput_decode(data: &[u8]) {
     cdc::fuzz_decode(data);
 }
+
+/// Benchmark entry point for the pgoutput decoder: decodes one raw message and
+/// reports whether it was a message this source acts on. Used by the
+/// `pgoutput` bench; gated behind the `bench` feature and not part of the
+/// stable API.
+#[cfg(feature = "bench")]
+pub fn bench_pgoutput_decode(data: &[u8]) -> bool {
+    cdc::bench_decode(data)
+}
