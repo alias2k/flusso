@@ -550,6 +550,96 @@ async fn concurrent_requests_for_the_same_index_coalesce_into_one_snapshot() {
     assert_eq!(*b_marked.lock().unwrap(), vec!["users".to_owned()]);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_backfill_with_every_lane_asking_starts_without_waiting() {
+    let sink = Arc::new(RecordingSink::seeded(false));
+    let marked = Arc::clone(&sink.marked);
+    let harness = Harness::new(
+        MockSource::new(vec![]).with_snapshot(vec![upsert(10)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(60),
+    });
+    let started = tokio::time::Instant::now();
+    harness.run(Continuity::Resumed).await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "the snapshot waited {:?} although every lane had already asked",
+        started.elapsed()
+    );
+    assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
+    let a = Arc::new(RecordingSink::seeded(true));
+    let b = Arc::new(RecordingSink::seeded(true));
+    let a_marked = Arc::clone(&a.marked);
+    let b_marked = Arc::clone(&b.marked);
+    let stream = Arc::new(ChannelStream::new(64, [sink_name("a"), sink_name("b")]));
+    let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
+    let events = Arc::clone(&source.events);
+    let mut controls = Vec::new();
+    let mut sink_tasks = Vec::new();
+    for (name, sink) in [
+        (sink_name("a"), a as Arc<dyn Sink>),
+        (sink_name("b"), b as Arc<dyn Sink>),
+    ] {
+        let engine = SinkEngine::new(
+            name,
+            sink,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            vec![mapping()],
+        );
+        engine.stage(Continuity::Resumed).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+        controls.push(tx);
+        sink_tasks.push(tokio::spawn(async move { engine.run(&mut rx).await }));
+    }
+    let reindex = || SinkControl::Reindex {
+        indexes: vec![users()],
+    };
+    // `a` asks before the ingest engine starts (so the engine has a request to
+    // serve); `b` asks a second later, inside the straggler window.
+    controls[0].send(reindex()).await.unwrap();
+    let ingest = IngestEngine::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(MockDocuments::default()),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name("a"), sink_name("b")],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(60),
+    });
+    let ingest_task = tokio::spawn(async move { ingest.run().await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    controls[1].send(reindex()).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while a_marked.lock().unwrap().is_empty() || b_marked.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    ingest_task.abort();
+    for task in sink_tasks {
+        task.abort();
+    }
+
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec!["prepare", "snapshot 1"],
+        "the straggler joined the first request's snapshot"
+    );
+    assert_eq!(*a_marked.lock().unwrap(), vec!["users".to_owned()]);
+    assert_eq!(*b_marked.lock().unwrap(), vec!["users".to_owned()]);
+}
+
 #[tokio::test]
 async fn fresh_source_rebuilds_seeded_indexes_before_prepare_then_snapshots() {
     let events = Arc::new(Mutex::new(Vec::new()));
