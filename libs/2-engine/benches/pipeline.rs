@@ -1,10 +1,13 @@
-//! Full-pipeline benchmark: real Postgres → the engine → real OpenSearch, on
-//! the *most complex document the builder supports*.
+//! Full-pipeline component bench: real Postgres → the engines → real
+//! OpenSearch, on the *most complex document the builder supports*.
 //!
 //! This lives in the `engine` crate because the engine is the one component
 //! that legitimately spans both halves of the pipeline (a source crate has no
-//! business depending on a specific sink). It stands up a Postgres 17 and an
-//! OpenSearch 2 container and exercises the real path. Nothing is mocked.
+//! business depending on a specific sink). It stands up a Postgres and an
+//! OpenSearch 2 container and exercises the real path. Nothing is mocked. It is
+//! an attribution bench: the headline numbers come from the `flusso-bench`
+//! scenarios (`dev/bench`), which run the real binary; this one says which
+//! stage moved.
 //!
 //! ## The document
 //!
@@ -32,12 +35,6 @@
 //!   document is reassembled and flushed. Composed by hand because the engines
 //!   are run-once daemons (backfill, then follow `live` forever) and do not fit
 //!   a per-iteration request/response benchmark.
-//! - `backfill`: the real ingest + sink engines driving a backfill —
-//!   `ensure_index`, the sink engine's backfill request, then the source
-//!   snapshot streamed through the ingest engine's resolve → build → lane path
-//!   and the sink engine's apply → flush path, assembling every complex
-//!   document. `live` is stubbed to an empty stream so the run terminates after
-//!   seeding; that tail is the only thing not exercised, and not what we measure.
 //! - `change_burst`: the steady-state path under volume. A burst of changes is
 //!   drained through the real engines' live loop at different
 //!   [`BatchPolicy::max_changes`] values, so the curve shows what the ingest
@@ -46,10 +43,13 @@
 //!   is where the batching win actually shows up (a single change cannot
 //!   benefit from batching — only volume can).
 //!
+//! Backfill is deliberately *not* measured here: the `flusso-bench` scenarios
+//! measure it on the real binary.
+//!
 //! Requires Docker. Run with:
 //!
 //! ```text
-//! cargo bench -p engine --bench pipeline
+//! cargo bench -p flusso-engine --bench pipeline
 //! ```
 
 #![allow(
@@ -77,8 +77,8 @@ use sink::{Result as SinkResult, Sink};
 use sink_opensearch::OpensearchSink;
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder};
-use source::{Result as SourceResult, RowKey, SnapshotTable, SourceSpec};
-use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
+use source::{Result as SourceResult, RowKey, SourceSpec};
+use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use stream::Stream;
 use stream_channel::ChannelStream;
@@ -110,42 +110,8 @@ const BURST: usize = USER_COUNT;
 /// order of user 1 is `1 * 1000 + 0`.
 const CHANGED_ITEM_ID: i64 = 1000 * 100;
 
-/// Wraps the real [`WalChangeCapture`] but returns an empty `live` stream, so
-/// the run does `ensure_index` + backfill (both real) and then returns
-/// immediately instead of following replication forever. The `snapshot` — the
-/// part the backfill actually measures — is the genuine one.
-#[derive(Debug)]
-struct BackfillOnly {
-    inner: WalChangeCapture,
-}
-
-#[async_trait]
-impl ChangeCapture for BackfillOnly {
-    async fn continuity(&self) -> SourceResult<Continuity> {
-        Ok(Continuity::Resumed)
-    }
-
-    async fn prepare(&self) -> SourceResult<()> {
-        Ok(())
-    }
-
-    async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<LiveChange>>> {
-        Ok(Box::pin(fstream::empty()))
-    }
-
-    fn confirm(&self, _position: Position) {}
-
-    async fn snapshot(
-        &self,
-        tables: &[SnapshotTable],
-    ) -> SourceResult<BoxStream<'static, SourceResult<ChangeEvent>>> {
-        self.inner.snapshot(tables).await
-    }
-}
-
-/// Wraps the real [`OpensearchSink`] but always reports "not seeded" and never
-/// records seeding — so every run re-runs the backfill rather than the sink
-/// engine's `mark_seeded` short-circuiting every iteration after the first.
+/// Wraps the real [`OpensearchSink`] but never reads or records seeding, so
+/// the burst deployments (which skip backfill) touch no `flusso_meta` state.
 /// Writes are forwarded unchanged, so the indexing path is the real one.
 #[derive(Debug)]
 struct AlwaysUnseeded {
@@ -204,15 +170,14 @@ impl ChangeCapture for BurstCapture {
     fn confirm(&self, _position: Position) {}
 }
 
-/// One deployment the way the daemon runs it: stage the sink engine, run it
-/// beside the ingest engine until the live stream ends, wait for the lane to
-/// drain, then stop the sink engine.
+/// One live-only deployment the way the daemon runs it: stage the sink engine
+/// (backfill skipped), run it beside the ingest engine until the live stream
+/// ends, wait for the lane to drain, then stop the sink engine.
 async fn run_deployment(
     capture: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
     batch: BatchPolicy,
-    skip_backfill: bool,
 ) {
     let name = SinkName::try_new("bench").unwrap();
     let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
@@ -223,7 +188,7 @@ async fn run_deployment(
         Arc::clone(&stream) as Arc<dyn Stream>,
         mappings,
     )
-    .skip_backfill(skip_backfill);
+    .skip_backfill(true);
     sink_engine.stage(Continuity::Resumed).await.unwrap();
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     let sink_task = tokio::spawn(async move { sink_engine.run(&mut control_rx).await });
@@ -252,9 +217,6 @@ struct Services {
     sink: Arc<dyn Sink>,
     /// Raw pool to the same Postgres, for the round-trip baseline.
     pool: sqlx::PgPool,
-    /// Replication config + URL to build a fresh capture each backfill iteration.
-    replication: ReplicationConfig,
-    url: String,
 }
 
 fn runtime() -> Runtime {
@@ -431,26 +393,12 @@ async fn setup() -> Services {
     }
     let sink: Arc<dyn Sink> = Arc::new(AlwaysUnseeded { inner });
 
-    // Used only to build a fresh `BackfillOnly` capture per backfill iteration;
-    // `live` is stubbed, so these replication values are never connected with.
-    let replication = ReplicationConfig::new(
-        "127.0.0.1",
-        "postgres",
-        "postgres",
-        "postgres",
-        "flusso",
-        "flusso",
-    )
-    .with_port(pg_port);
-
     Services {
         _postgres: postgres,
         _opensearch: opensearch,
         documents,
         sink,
         pool,
-        replication,
-        url,
     }
 }
 
@@ -523,7 +471,7 @@ fn bench(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("change_burst");
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(25));
+    group.measurement_time(Duration::from_secs(15));
     group.throughput(Throughput::Elements(BURST as u64));
     for &max_changes in &[1usize, 16, 256] {
         group.bench_with_input(
@@ -544,7 +492,6 @@ fn bench(c: &mut Criterion) {
                                 max_changes,
                                 max_delay: Duration::from_secs(10),
                             },
-                            true,
                         )
                         .await;
                     }
@@ -552,27 +499,6 @@ fn bench(c: &mut Criterion) {
             },
         );
     }
-    group.finish();
-
-    let mut group = c.benchmark_group("backfill");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(30));
-    group.throughput(Throughput::Elements(USER_COUNT as u64));
-    group.bench_function("engine_run", |b| {
-        b.to_async(&rt).iter(|| async {
-            let capture = BackfillOnly {
-                inner: WalChangeCapture::new(services.replication.clone(), services.url.clone()),
-            };
-            run_deployment(
-                Arc::new(capture),
-                Arc::clone(&services.documents),
-                Arc::clone(&services.sink),
-                BatchPolicy::default(),
-                false,
-            )
-            .await;
-        });
-    });
     group.finish();
 }
 

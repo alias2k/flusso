@@ -1,4 +1,4 @@
-//! Real-service benchmarks for the Postgres document builder.
+//! Real-service component benches for the Postgres document builder, for attribution.
 //!
 //! These run against a genuine Postgres 17 in a container — the same
 //! server-side assembly SQL (`json_build_object` + `json_agg` over a join) and
@@ -15,7 +15,7 @@
 //! Requires Docker. Run with:
 //!
 //! ```text
-//! cargo bench -p sources-postgres --bench postgres
+//! cargo bench -p flusso-source-postgres --bench postgres
 //! ```
 
 #![allow(
