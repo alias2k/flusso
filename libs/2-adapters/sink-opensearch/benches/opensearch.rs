@@ -1,8 +1,9 @@
-//! Real-service benchmarks for the OpenSearch sink.
+//! Real-service component benches for the OpenSearch sink, for attribution.
 //!
 //! These start a genuine OpenSearch 2 cluster in a container and measure the
 //! bulk-indexing path end to end — JSON serialization, the in-memory buffer,
 //! and the HTTP bulk round-trip — against a live server. Nothing is mocked.
+//! The serialization half alone is the in-process `render` bench.
 //!
 //! Two dimensions are measured:
 //!
@@ -14,7 +15,7 @@
 //! Requires Docker. Run with:
 //!
 //! ```text
-//! cargo bench -p sinks-opensearch
+//! cargo bench -p flusso-sink-opensearch --bench opensearch
 //! ```
 
 #![allow(
@@ -186,8 +187,8 @@ fn bench(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("bulk_index");
     group.sample_size(20);
-    group.warm_up_time(Duration::from_secs(5));
-    group.measurement_time(Duration::from_secs(15));
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(8));
     for &n in &[1usize, 100, 1_000, 5_000] {
         let docs: Vec<(String, GenericValue)> =
             (0..n).map(|i| (i.to_string(), document(i))).collect();
@@ -201,8 +202,8 @@ fn bench(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("batch_size");
     group.sample_size(20);
-    group.warm_up_time(Duration::from_secs(5));
-    group.measurement_time(Duration::from_secs(20));
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(10));
     let docs: Vec<(String, GenericValue)> = (0..5_000usize)
         .map(|i| (i.to_string(), document(i)))
         .collect();
