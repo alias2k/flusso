@@ -223,3 +223,9 @@ SELECT 2000 + (g.n - 100) * 2 + r.k,
        timestamptz '2023-06-01 00:00+00' + ((g.n + r.k) % 200) * interval '1 day'
 FROM generate_series(100, 149) AS g(n)
 CROSS JOIN LATERAL generate_series(0, g.n % 2) AS r(k);
+
+-- `updated_at` defaults to now(); pin it to each row's own timestamp so the seed
+-- stays byte-for-byte reproducible.
+UPDATE users    SET updated_at = created_at;
+UPDATE products SET updated_at = created_at;
+UPDATE orders   SET updated_at = placed_at;

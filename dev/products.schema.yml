@@ -35,6 +35,9 @@ fields:
     required: true
     options:
       format: "strict_date_optional_time||epoch_millis"
+  - timestamp: updatedAt # when this row last changed
+    column: updated_at
+    required: true
 
   # A group + a custom type: `amount` reads the numeric `price` column but is
   # mapped to an OpenSearch `scaled_float`, with `scaling_factor` via options.
