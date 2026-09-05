@@ -18,7 +18,12 @@
 //!
 //! Requests are at-least-once too: a `Backfill` is acknowledged only after its
 //! `SnapshotComplete` is published, and concurrent requests for the same index
-//! coalesce into one snapshot fanned to every requesting lane.
+//! coalesce into one snapshot fanned to every requesting lane. Coalescing costs
+//! no wait when every lane has asked (the startup case: the daemon stages every
+//! sink before this engine runs, so their requests are already queued); only
+//! while some lane is still silent does the engine hold the snapshot for up to
+//! [`BatchPolicy::max_delay`] so a reindex fanned to every sink, each answering
+//! between its own batches, is one pass over the table.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -32,7 +37,7 @@ use source::cdc::{ChangeCapture, ChangeEvent};
 use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{SnapshotTable, SourceError};
 use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
-use tokio::time::{Duration, Instant, sleep_until, timeout};
+use tokio::time::{Duration, Instant, sleep_until, timeout_at};
 
 use crate::error::{EngineError, Result};
 use crate::observer::{BuildStats, EngineId, NoopObserver, Observer};
@@ -41,11 +46,6 @@ use crate::policy::BatchPolicy;
 /// How often the watermark is confirmed to the source while no commit happens,
 /// so acknowledgements that arrive during a quiet period still advance it.
 const CONFIRM_TICK: Duration = Duration::from_secs(1);
-
-/// How long the engine keeps collecting requests after the first one before
-/// it starts the snapshot, so a reindex fanned to every sink (each answering
-/// between its own batches) becomes one pass over the table.
-const REQUEST_COALESCE_WINDOW: Duration = Duration::from_secs(1);
 
 /// The producing end of every sink's lane, by sink name.
 type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;
@@ -191,14 +191,7 @@ impl IngestEngine {
                         requests = Box::new(ClosedConsumer);
                     }
                     Some(first) => {
-                        let mut deliveries = vec![first];
-                        loop {
-                            match timeout(REQUEST_COALESCE_WINDOW, requests.recv()).await {
-                                Ok(Ok(Some(more))) => deliveries.push(more),
-                                Ok(Ok(None)) | Err(_) => break,
-                                Ok(Err(error)) => return Err(error.into()),
-                            }
-                        }
+                        let deliveries = self.collect_requests(first, &mut requests, &lanes).await?;
                         snapshot = self.start_snapshot(deliveries, &scopes, &lanes).await?;
                     }
                 },
@@ -282,6 +275,47 @@ impl IngestEngine {
             });
         }
         Ok((envelopes, by_index))
+    }
+
+    /// Gather the requests one snapshot will serve: everything already queued
+    /// behind `first`, then, only while some lane has not asked yet, stragglers
+    /// for up to `max_delay`. Returns as soon as every lane has asked, so a
+    /// single-sink backfill starts at once; a lane that never asks (a seeded
+    /// sibling) costs one `max_delay`. A straggler past the window simply gets
+    /// its own snapshot.
+    async fn collect_requests(
+        &self,
+        first: stream::Delivery<Request>,
+        requests: &mut Box<dyn Consumer<Request>>,
+        lanes: &Lanes,
+    ) -> Result<Vec<stream::Delivery<Request>>> {
+        let mut deliveries = vec![first];
+        let deadline = Instant::now() + self.batch.max_delay;
+        loop {
+            let asked: HashSet<&SinkName> = deliveries
+                .iter()
+                .map(|delivery| {
+                    let Request::Backfill { sink, .. } = delivery.item();
+                    sink
+                })
+                .collect();
+            if lanes.keys().all(|lane| asked.contains(lane)) {
+                break;
+            }
+            let next = if requests.is_empty() {
+                match timeout_at(deadline, requests.recv()).await {
+                    Ok(received) => received?,
+                    Err(_) => break,
+                }
+            } else {
+                requests.recv().await?
+            };
+            match next {
+                Some(more) => deliveries.push(more),
+                None => break,
+            }
+        }
+        Ok(deliveries)
     }
 
     /// Hand the stream's watermark to the source when it moved.

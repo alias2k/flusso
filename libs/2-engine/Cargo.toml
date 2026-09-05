@@ -31,7 +31,7 @@ tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 
 [dev-dependencies]
 stream-channel.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }
 # Concrete source + sink, exercised together only here — the engine is the one
 # component that legitimately spans both halves of the pipeline.
 source-postgres.workspace = true

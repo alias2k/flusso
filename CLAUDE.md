@@ -306,9 +306,12 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
 - **Backfill is each *sink's* decision, and requests are at-least-once.** `stage` asks the sink
   `is_seeded` per index and sends one `Backfill` request for the unseeded set (skipped under
   `--skip-backfill` or the sink's `backfill = false`, the stateless-sink opt-out); the ingest
-  engine coalesces requests arriving within `REQUEST_COALESCE_WINDOW` (1 s) into one snapshot
-  fanned to every requester and acks a request only after its `SnapshotComplete` is published (a
-  crash mid-snapshot redelivers it); the sink engine keeps an `outstanding` set of requested,
+  engine coalesces requests into one snapshot fanned to every requester — it drains what is
+  already queued with no wait (every startup request is, since the daemon stages every sink
+  first) and holds for stragglers only while some lane has not asked, for at most
+  `BatchPolicy::max_delay` (a seeded sibling that never asks costs one `max_delay`; a straggler
+  past it gets its own snapshot) — and acks a request only after its `SnapshotComplete` is
+  published (a crash mid-snapshot redelivers it); the sink engine keeps an `outstanding` set of requested,
   not-yet-complete indexes so re-staging after its own restart (and a reindex control for the
   same index) doesn't ask twice. A seeded sibling sees nothing. The channel adapter therefore keeps
   a **ticketed in-flight ledger** per lane: several deliveries can be outstanding, each acked by
@@ -316,7 +319,9 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   made the coalescing loop receive the same request forever — the OOM behind the first attempts.)
   Guards: `an_unseeded_sink_requests_a_snapshot_then_marks_seeded`, `a_seeded_sink_requests_nothing`,
   `backfill_false_makes_a_stateless_sink_live_only`,
-  `concurrent_requests_for_the_same_index_coalesce_into_one_snapshot`, the daemon's
+  `concurrent_requests_for_the_same_index_coalesce_into_one_snapshot`,
+  `a_backfill_with_every_lane_asking_starts_without_waiting`,
+  `a_straggling_reindex_request_within_max_delay_joins_the_snapshot`, the daemon's
   `unseeded_sink_is_backfilled_without_touching_its_sibling`.
 - **A live stream that ends still drains queued requests.** The ingest engine returns `Ok` only
   once the live stream ended *and* no snapshot is active *and* the request consumer is empty, so
