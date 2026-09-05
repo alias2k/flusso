@@ -26,7 +26,7 @@ Only when the release PR is merged, never on an ordinary push to main. release-p
 
 ## Publish order
 
-Bottom-up within a train, a dependency before its dependents: `flusso-kernel`, `flusso-kernel-derive`, the ports (`flusso-source`, `flusso-stream`, `flusso-sink`), `flusso-config`, the adapters, then `flusso-engine`, then `flusso-daemon`; apps on top (`flusso-design` before `flusso-cli`; `flusso-query-derive` before `flusso-query`). The pre-0.16 names (`flusso-schema-core` and the rest) stay on crates.io at their last release; `scripts/tombstone-crates.sh` publishes a final pointer README under each. `dev/search-api` and `dev/query-e2e` are `publish = false`.
+Bottom-up within a train, a dependency before its dependents: `flusso-kernel`, `flusso-kernel-derive`, the ports (`flusso-source`, `flusso-stream`, `flusso-sink`), `flusso-config`, the adapters, then `flusso-engine`, then `flusso-daemon`; apps on top (`flusso-design` before `flusso-cli`; `flusso-query-derive` before `flusso-query`). The pre-0.16 names (`flusso-schema-core` and the rest) stay on crates.io at their last release; `scripts/tombstone-crates.sh` publishes a final pointer README under each. `dev/search-api`, `dev/query-e2e`, and `dev/bench` are `publish = false`.
 
 ## Commit conventions
 

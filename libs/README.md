@@ -21,7 +21,7 @@ Every library crate, its layer, and what it holds. The numeric prefix on each di
 | 2 | engine | `engine` | [`2-engine`](2-engine) | The two generic loops that drive the ports: the ingest engine (capture → resolve → build once → publish) and one sink engine per sink (receive → apply → flush → ack); batched, deduplicated, at-least-once. |
 | 3 | daemon | `daemon` | [`3-daemon`](3-daemon) | Supervises one deployment from a `Config` through the `Backends` seam: stages every sink engine, runs the engines as independent tasks with restart backoff, exposes per-sink `Status` and the reindex operation. Knows no adapter name. |
 
-The `flusso` binary and the designer live under [`apps/`](https://github.com/alias2k/flusso/tree/main/apps); the consumer-facing query crates under [`sdk/`](https://github.com/alias2k/flusso/tree/main/sdk).
+The `flusso` binary and the designer live under [`apps/`](https://github.com/alias2k/flusso/tree/main/apps); the consumer-facing query crates under [`sdk/`](https://github.com/alias2k/flusso/tree/main/sdk); the unpublished example, live e2e, and benchmark harness under [`dev/`](https://github.com/alias2k/flusso/tree/main/dev).
 
 ## Read next
 

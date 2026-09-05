@@ -20,7 +20,8 @@ Wrapped in the [`justfile`](../justfile) (`cargo install just --locked`). Each p
 | `just api` / `just dev` | the example search API / engine + API together |
 | `just status` / `just metrics` / `just eta` | live status / raw Prometheus exposition / backlog drain ETA |
 | `just grafana` | open the dashboard |
-| `just bench` | production-like load for N users |
+| `just bench` / `just bench-components` / `just bench-scenario` | the benchmarks: in-process, Docker-backed components, a scenario on the real binary ([Benchmarks](https://alias2k.github.io/flusso/contribute/benchmarks.html)) |
+| `just load` | soak: production-like load for N users that you watch; not a benchmark |
 | `just test` / `just test-all` / `just doc` / `just lint` / `just ci` | the quality gate, mirroring CI |
 
 ## Two ways to run
@@ -30,7 +31,7 @@ Wrapped in the [`justfile`](../justfile) (`cargo install just --locked`). Each p
 
 ## Layout
 
-A small store (users, profiles, addresses, categories, products, tags, orders, items, reviews) feeding three indexes that between them exercise every feature: all scalar types including a `custom` scaled_float, objects, every join verb, three levels of nesting, every aggregate, filters, ordered enums, and soft-delete.
+A small store (users, profiles, addresses, categories, products, tags, orders, items, reviews; the three root tables carry `updated_at`, the benchmark's latency marker) feeding three indexes that between them exercise every feature: all scalar types including a `custom` scaled_float, objects, every join verb, three levels of nesting, every aggregate, filters, ordered enums, and soft-delete.
 
 ```text
 docker-compose.yml          Postgres + OpenSearch + Dashboards + Prometheus + Grafana
@@ -47,6 +48,7 @@ dev/
   grafana/provisioning/     datasource + the flusso dashboard
   search-api/               an axum consumer of flusso-query (`flusso-dev-search-api`, unpublished)
   query-e2e/                the combined-search live e2e (`flusso-query-e2e`, unpublished)
+  bench/                    the scenario harness (`flusso-bench`, unpublished): the real binary under load
 ```
 
 ## Useful commands

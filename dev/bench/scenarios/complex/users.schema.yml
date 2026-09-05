@@ -1,0 +1,115 @@
+# yaml-language-server: $schema=../../../../libs/1-config/index.schema.yml
+# The `complex` scenario's document: every assembly feature in one `users`
+# document, so the server-side SQL is a worst-case-shaped query. A 1:1 join, a
+# 1:N join with a nested 1:N inside it (three relation levels), an M:N join
+# through a junction, seven aggregates (one filtered, one through the junction),
+# an object, transforms, a default, a constant, and soft-delete.
+
+version: 1
+table: users
+primary_key: id
+
+soft_delete:
+  column: archived
+
+fields:
+  - integer: id
+    required: false
+  - text: name
+    required: false
+  - text: bio
+    required: false
+    default: "(no bio)"
+  - timestamp: updatedAt # when this row last changed
+    column: updated_at
+    required: true
+
+  - object: contact
+    fields:
+      - keyword: email
+        required: false
+        transforms: [trim, lowercase]
+      - constant: source
+        value: seed
+
+  - has_one: profile
+    table: profiles
+    foreign_key: user_id
+    primary_key: id
+    fields:
+      - keyword: headline
+        required: false
+
+  - has_many: orders
+    table: orders
+    foreign_key: user_id
+    primary_key: id
+    order_by:
+      - { column: placed_at, direction: desc }
+    fields:
+      - integer: id
+        required: true
+      - keyword: status
+        required: true
+      - decimal: total
+        required: true
+      - has_many: items
+        table: order_items
+        foreign_key: order_id
+        primary_key: id
+        order_by:
+          - { column: sku, direction: asc }
+        fields:
+          - keyword: sku
+            required: true
+          - integer: qty
+            required: true
+          - decimal: price
+            required: true
+
+  - many_to_many: tags
+    table: tags
+    through:
+      table: user_tags
+      left_key: user_id
+      right_key: tag_id
+    primary_key: id
+    order_by:
+      - { column: label, direction: asc }
+    fields:
+      - keyword: label
+        required: true
+
+  - count: orderCount
+    table: orders
+    foreign_key: user_id
+  - sum: totalSpent
+    table: orders
+    column: total
+    value_type: decimal
+    foreign_key: user_id
+  - avg: avgOrder
+    table: orders
+    column: total
+    foreign_key: user_id
+  - min: minOrder
+    table: orders
+    column: total
+    value_type: decimal
+    foreign_key: user_id
+  - max: maxOrder
+    table: orders
+    column: total
+    value_type: decimal
+    foreign_key: user_id
+  - count: fulfilledOrders
+    table: orders
+    foreign_key: user_id
+    filters:
+      - { column: status, op: eq, value: fulfilled }
+  - count: tagCount
+    table: tags
+    through:
+      table: user_tags
+      left_key: user_id
+      right_key: tag_id
