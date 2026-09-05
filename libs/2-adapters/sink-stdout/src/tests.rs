@@ -9,6 +9,10 @@ fn index() -> IndexName {
     IndexName::try_new("users").unwrap()
 }
 
+fn audit() -> StdoutSink {
+    StdoutSink::new(SinkName::try_new("audit").unwrap(), false)
+}
+
 fn document() -> GenericValue {
     GenericValue::Map(BTreeMap::from([(
         "email".to_owned(),
@@ -26,15 +30,13 @@ fn ts() -> DateTime<Utc> {
 
 #[test]
 fn upsert_is_compact_ndjson_with_provenance_and_meta() {
-    let mut envelope = Envelope::upsert(index(), "42", document(), Some(Position(1)), ts());
-    envelope.sink = Some(SinkName::try_new("audit").unwrap());
-    let line = StdoutSink::new(false)
-        .render(&wire_envelope(&envelope))
-        .unwrap();
+    let envelope = Envelope::upsert(index(), "42", document(), Some(Position(1)), ts());
+    let sink = audit();
+    let line = sink.render(&sink.wire_envelope(&envelope)).unwrap();
     assert!(!line.contains('\n'));
 
     let value: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(value["sink"], "audit", "the name the sink engine stamped");
+    assert_eq!(value["sink"], "audit", "the sink stamps its own name");
     assert_eq!(value["version"], ENVELOPE_VERSION);
     assert_eq!(value["ts"], TS);
     assert_eq!(value["seq"], "1");
@@ -49,7 +51,7 @@ fn upsert_is_compact_ndjson_with_provenance_and_meta() {
     let back: Envelope<Value> = serde_json::from_str(&line).unwrap();
     assert_eq!(
         back,
-        wire_envelope(&envelope),
+        sink.wire_envelope(&envelope),
         "a consumer reads the same type back"
     );
 }
@@ -57,17 +59,13 @@ fn upsert_is_compact_ndjson_with_provenance_and_meta() {
 #[test]
 fn delete_carries_provenance_but_no_document_or_meta() {
     let envelope = Envelope::delete(index(), "7", Some(Position(7)), ts());
-    let line = StdoutSink::new(false)
-        .render(&wire_envelope(&envelope))
-        .unwrap();
+    let sink = audit();
+    let line = sink.render(&sink.wire_envelope(&envelope)).unwrap();
     let value: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(value["op"], "delete");
     assert_eq!(value["id"], "7");
     assert_eq!(value["seq"], "7");
-    assert!(
-        value.get("sink").is_none(),
-        "unstamped until a sink engine owns it"
-    );
+    assert_eq!(value["sink"], "audit");
     assert!(value.get("document").is_none());
     assert!(value.get("meta").is_none());
 }
@@ -75,7 +73,7 @@ fn delete_carries_provenance_but_no_document_or_meta() {
 #[test]
 fn snapshot_rows_carry_no_seq() {
     let envelope = Envelope::upsert(index(), "1", document(), None, ts());
-    let value = serde_json::to_value(wire_envelope(&envelope)).unwrap();
+    let value = serde_json::to_value(audit().wire_envelope(&envelope)).unwrap();
     assert!(value.get("seq").is_none());
 }
 
@@ -90,14 +88,13 @@ fn document_meta_reports_null_fields_for_non_objects() {
 #[test]
 fn pretty_is_multiline() {
     let envelope = Envelope::delete(index(), "7", Some(Position(1)), ts());
-    let line = StdoutSink::new(true)
-        .render(&wire_envelope(&envelope))
-        .unwrap();
+    let sink = StdoutSink::new(SinkName::try_new("audit").unwrap(), true);
+    let line = sink.render(&sink.wire_envelope(&envelope)).unwrap();
     assert!(line.contains('\n'));
     assert!(line.contains("\"op\": \"delete\""));
 }
 
 #[test]
 fn flush_runs_via_an_executor() {
-    futures::executor::block_on(StdoutSink::new(false).flush(true)).unwrap();
+    futures::executor::block_on(audit().flush(true)).unwrap();
 }

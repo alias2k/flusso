@@ -145,7 +145,7 @@ fn build_sinks(config: &Config) -> anyhow::Result<Vec<SinkParts>> {
                     .with_context(|| format!("building OpenSearch sink '{name}'"))?
                     .with_index_prefix(&config.prefix),
             ),
-            SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(&s)),
+            SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(name, &s)),
         };
         sinks.push(SinkParts {
             name: name.clone(),
@@ -156,9 +156,10 @@ fn build_sinks(config: &Config) -> anyhow::Result<Vec<SinkParts>> {
         });
     }
     if sinks.is_empty() {
+        let name = SinkName::try_new(StdoutConfig::KIND).context("naming the default sink")?;
         sinks.push(SinkParts {
-            name: SinkName::try_new(StdoutConfig::KIND).context("naming the default sink")?,
-            sink: Arc::new(StdoutSink::from_config(&StdoutConfig::default())),
+            sink: Arc::new(StdoutSink::from_config(&name, &StdoutConfig::default())),
+            name,
             options: SinkOptions::default(),
         });
     }

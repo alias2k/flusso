@@ -345,8 +345,10 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   Option<SinkName>)` sends `SinkControl::Reindex` to the targeted engines; between two batches
   each stages `reindex` + `ensure_index` and sends a fresh `Backfill` request. Untargeted sinks
   are untouched; "all" coalesces into one snapshot; a `backfill = false` sink ignores it. The
-  `Envelope` a sink receives is stamped with its `SinkName` by the sink engine (`sink` on the
-  wire), `position` serializes as the opaque `seq` string, and `Envelope<D = GenericValue>` is
+  `Envelope` a sink receives is the ingest engine's one build, shared: `Batch.envelopes` is an
+  `Arc<[Envelope]>`, so publishing to every lane and the channel's redelivery ledger copy no
+  documents, and nothing downstream mutates it — an emitting sink stamps its own `SinkName`
+  as it writes (`sink` on the wire; the stdout sink takes its name at construction), `position` serializes as the opaque `seq` string, and `Envelope<D = GenericValue>` is
   generic over the document so a consumer deserializes an emitting sink's output as the same
   type. Guards:
   `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's

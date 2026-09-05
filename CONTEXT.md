@@ -95,7 +95,7 @@ One denormalized, typed search record built from a root row and its joins and ag
 _Avoid_: record, row, entity, payload
 
 **Envelope**:
-The message a lane carries: the index, the operation, the document id, the document, the position (`seq` on the wire), plus, stamped on the sink side, the emitting sink's name and a `meta` summary. Emitting sinks forward it as-is; a consumer deserializes the same type over its own document type.
+The message a lane carries: the index, the operation, the document id, the document, the position (`seq` on the wire), plus, filled in by the emitting sink as it writes, that sink's name and a `meta` summary. Emitting sinks forward it as-is; a consumer deserializes the same type over its own document type.
 _Avoid_: message, event, wrapper, frame
 
 **Rejected document**:

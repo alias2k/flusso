@@ -7,24 +7,27 @@ pub use config::StdoutConfig;
 use std::io::Write;
 
 use async_trait::async_trait;
-use kernel::{Envelope, EnvelopeMeta, Op};
+use kernel::{Envelope, EnvelopeMeta, Op, SinkName};
 use serde_json::{Map, Value};
 use sink::{FlushReport, Result, Sink, SinkError, to_json};
 
-/// Writes each document operation to stdout as a JSON envelope.
+/// Writes each document operation to stdout as a JSON envelope, stamped with
+/// this sink's configured name.
 #[derive(Debug, Clone)]
 pub struct StdoutSink {
+    name: SinkName,
     pretty: bool,
 }
 
 impl StdoutSink {
-    /// Create a sink. `pretty` selects pretty-printed JSON over compact NDJSON.
-    pub fn new(pretty: bool) -> Self {
-        Self { pretty }
+    /// Create a sink emitting as `name`. `pretty` selects pretty-printed JSON
+    /// over compact NDJSON.
+    pub fn new(name: SinkName, pretty: bool) -> Self {
+        Self { name, pretty }
     }
 
-    pub fn from_config(config: &StdoutConfig) -> Self {
-        Self::new(config.pretty)
+    pub fn from_config(name: &SinkName, config: &StdoutConfig) -> Self {
+        Self::new(name.clone(), config.pretty)
     }
 
     fn render(&self, envelope: &Envelope<Value>) -> Result<String> {
@@ -46,12 +49,26 @@ impl StdoutSink {
             .and_then(|()| handle.write_all(b"\n"))
             .map_err(|e| SinkError::Write(e.to_string()))
     }
+
+    /// The kernel envelope as this sink writes it: the same shape, stamped with
+    /// this sink's name, the document translated to JSON, and the `meta`
+    /// summary filled in.
+    fn wire_envelope(&self, envelope: &Envelope) -> Envelope<Value> {
+        let mut wire = envelope.clone().map_document(|document| to_json(&document));
+        wire.sink = Some(self.name.clone());
+        if wire.op == Op::Upsert
+            && let Some(document) = &wire.document
+        {
+            wire.meta = Some(document_meta(document));
+        }
+        wire
+    }
 }
 
 #[async_trait]
 impl Sink for StdoutSink {
     async fn apply(&self, envelope: &Envelope) -> Result<()> {
-        let line = self.render(&wire_envelope(envelope))?;
+        let line = self.render(&self.wire_envelope(envelope))?;
         self.write_line(&line)
     }
 
@@ -65,19 +82,6 @@ impl Sink for StdoutSink {
             .map_err(|e| SinkError::Write(e.to_string()))?;
         Ok(FlushReport::clean())
     }
-}
-
-/// The kernel envelope as this sink writes it: the same shape, with the
-/// document translated to JSON and the `meta` summary filled in. `sink` is
-/// already stamped by the sink engine.
-fn wire_envelope(envelope: &Envelope) -> Envelope<Value> {
-    let mut wire = envelope.clone().map_document(|document| to_json(&document));
-    if wire.op == Op::Upsert
-        && let Some(document) = &wire.document
-    {
-        wire.meta = Some(document_meta(document));
-    }
-    wire
 }
 
 /// At-a-glance facts about a serialized document: how many top-level fields it

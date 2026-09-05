@@ -9,7 +9,7 @@ fn batch(position: u64) -> LaneItem {
     LaneItem::Batch(Batch {
         position: Some(Position(position)),
         changes: 1,
-        envelopes: Vec::new(),
+        envelopes: Vec::new().into(),
     })
 }
 
@@ -17,8 +17,15 @@ fn snapshot_batch() -> LaneItem {
     LaneItem::Batch(Batch {
         position: None,
         changes: 0,
-        envelopes: Vec::new(),
+        envelopes: Vec::new().into(),
     })
+}
+
+fn envelopes_of(item: &LaneItem) -> &Arc<[kernel::Envelope]> {
+    match item {
+        LaneItem::Batch(batch) => &batch.envelopes,
+        LaneItem::SnapshotComplete { .. } => panic!("expected a batch"),
+    }
 }
 
 #[tokio::test]
@@ -75,6 +82,24 @@ async fn snapshot_batches_do_not_move_the_watermark() {
     let (_, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
     handle.ack().await.unwrap();
     assert_eq!(stream.watermark(), Some(Position(3)));
+}
+
+/// The lane and its redelivery ledger hold the ingest engine's one build, not
+/// copies of it: the documents are never duplicated on the way to a sink.
+#[tokio::test]
+async fn a_delivery_and_its_redelivery_share_the_published_envelopes() {
+    let published = batch(1);
+    let envelopes = Arc::clone(envelopes_of(&published));
+    let stream = ChannelStream::new(8, [sink("a")]);
+    let lane = stream.lane(&sink("a")).unwrap();
+    lane.producer.publish(published).await.unwrap();
+
+    let mut consumer = lane.consumer;
+    let delivery = consumer.recv().await.unwrap().unwrap();
+    assert!(Arc::ptr_eq(&envelopes, envelopes_of(delivery.item())));
+    delivery.nack().await.unwrap();
+    let (redelivered, _) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert!(Arc::ptr_eq(&envelopes, envelopes_of(&redelivered)));
 }
 
 #[tokio::test]

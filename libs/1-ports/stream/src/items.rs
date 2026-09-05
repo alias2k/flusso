@@ -6,11 +6,13 @@
 //! use kernel::Position;
 //! use stream::{Batch, LaneItem};
 //!
-//! let live = LaneItem::Batch(Batch { position: Some(Position(7)), changes: 3, envelopes: Vec::new() });
-//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new() });
+//! let live = LaneItem::Batch(Batch { position: Some(Position(7)), changes: 3, envelopes: Vec::new().into() });
+//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into() });
 //! assert_eq!(live.position(), Some(Position(7)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows never move the watermark");
 //! ```
+
+use std::sync::Arc;
 
 use kernel::{Envelope, IndexName, Position, SinkName};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,10 @@ pub enum LaneItem {
 /// the last change the batch covers. A live batch with no envelopes (every
 /// change resolved to nothing this sink indexes) still carries its position,
 /// so acknowledging it moves the watermark. A snapshot batch carries none.
+///
+/// The envelopes are shared, not owned: one build is published to every lane
+/// and held for redelivery without copying the documents, so a batch is
+/// immutable once built — a sink stamps nothing into it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     /// The position of the last change in the batch; `None` for snapshot rows.
@@ -40,7 +46,7 @@ pub struct Batch {
     #[serde(default)]
     pub changes: usize,
     /// The documents, in build order.
-    pub envelopes: Vec<Envelope>,
+    pub envelopes: Arc<[Envelope]>,
 }
 
 impl LaneItem {
