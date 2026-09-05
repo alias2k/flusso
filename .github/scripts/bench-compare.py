@@ -42,8 +42,10 @@ def main() -> int:
         change = (c - b) / b * 100 if b else 0.0
         rows.append((rel, b, c, change))
     if not rows:
-        print(f"nothing to compare: no bench has both `{base}` and `{cand}` under {root}", file=sys.stderr)
-        return 1
+        # A base that predates the benches leaves nothing to gate against; the
+        # candidate's own bench step already proved it runs.
+        print(f"::warning::nothing to compare: no bench has both `{base}` and `{cand}` under {root}")
+        return 0
     regressed = [r for r in rows if r[3] > limit]
     lines = [
         f"| bench | {base} | {cand} | change |",

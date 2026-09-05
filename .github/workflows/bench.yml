@@ -47,14 +47,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Criterion keeps every saved baseline under target/criterion, so both
-      # sides of the comparison survive the checkout switch.
+      # sides of the comparison survive the checkout switch. The runner script
+      # is taken from the PR, since the base may predate it; a base without
+      # these bench targets yields no baseline, and the compare step then
+      # reports that instead of failing (nothing to gate against yet).
       - name: Bench the base (baseline `base`)
         run: |
           set -euo pipefail
           head=$(git rev-parse HEAD)
           echo "head=$head" >> "$GITHUB_ENV"
+          cp .github/scripts/bench-in-process.sh /tmp/bench-in-process.sh
           git checkout --quiet ${{ github.event.pull_request.base.sha }}
-          .github/scripts/bench-in-process.sh base
+          /tmp/bench-in-process.sh base || echo "::warning::the base has no in-process benches; no baseline to compare against"
 
       - name: Bench the PR (baseline `pr`)
         run: |
