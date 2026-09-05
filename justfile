@@ -188,10 +188,46 @@ fmt-check:
 # Full local CI gate: lint → e2e tests → doctests.
 ci: lint test-all doc
 
+# ── benchmarks (docs/src/contribute/benchmarks.md) ─────────────────────────────
+
+# The in-process component benches (engine loop, pgoutput decode, sink render):
+# no Docker, under two minutes. This is what gates a PR. Pass a name to save the
+# results as a Criterion baseline for `just bench-compare`.
+bench baseline="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{baseline}}" ]; then
+      .github/scripts/bench-in-process.sh "{{baseline}}"
+    else
+      cargo bench -p flusso-engine --bench engine
+      cargo bench -p flusso-source-postgres --bench pgoutput --features bench
+      cargo bench -p flusso-sink-opensearch --bench render --features bench
+    fi
+
+# Compare two saved in-process baselines; fails past 10% slower (what CI does
+# with `base` vs `pr`). E.g. `just bench main` on main, `just bench pr` on the
+# branch, then `just bench-compare main pr`.
+bench-compare base cand:
+    python3 .github/scripts/bench-compare.py target/criterion {{base}} {{cand}} 10
+
+# The Docker-backed component benches (postgres build/resolve, opensearch bulk,
+# the full pipeline) — attribution, a few minutes each.
+bench-components:
+    cargo bench -p flusso-source-postgres --bench postgres
+    cargo bench -p flusso-sink-opensearch --bench opensearch
+    cargo bench -p flusso-engine --bench pipeline
+
+# A scenario on the real binary: `just bench-scenario [reference|complex] [ci|default]`.
+# Starts its own Postgres + OpenSearch containers (or uses BENCH_PG_URL /
+# BENCH_OS_URL), builds a release flusso, writes target/bench/<scenario>-<scale>/.
+bench-scenario scenario="reference" scale="ci":
+    cargo run -p flusso-bench -- --scenario {{scenario}} --scale {{scale}} --out target/bench
+
 # ── load & observability ───────────────────────────────────────────────────────
 
-# Production-like load benchmark for N users (default 20000); needs `just run` going too.
-bench users="20000": up
+# Soak: production-like load for N users (default 20000) that you watch live;
+# needs `just run` going too. Not a benchmark — it produces no comparable number.
+load users="20000": up
     ./scripts/bench-users.sh {{users}}
 
 # Live pipeline status (phase, in-flight, slot lag, counters).

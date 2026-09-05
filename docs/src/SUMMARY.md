@@ -77,5 +77,6 @@
 - [The pipeline](contribute/pipeline.md)
 - [The config layer](contribute/config-layer.md)
 - [Testing](contribute/testing.md)
+- [Benchmarks](contribute/benchmarks.md)
 - [Releasing](contribute/releasing.md)
 - [Writing docs](contribute/writing-docs.md)

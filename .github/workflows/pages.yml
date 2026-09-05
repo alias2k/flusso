@@ -4,6 +4,7 @@ name: pages
 #
 #   /            the mdBook user manual (built from docs/), single `latest`, tracks main
 #   /schemas/    the editor-assist JSON Schemas, one immutable directory per release
+#   /bench/      the benchmark history dashboards, from the `benchmarks` data branch
 #
 # The manual is rebuilt on every push to `main` (and on schema-release tags) so it
 # tracks the current code; the schema tree is rebuilt from EVERY release tag on every
@@ -31,6 +32,9 @@ on:
   push:
     branches:
       - main
+      # The bench workflow pushes each main run's data points here; redeploy so
+      # /bench/ shows them.
+      - benchmarks
     tags:
       - 'flusso-schema-index-yaml-v[0-9]+.[0-9]+.[0-9]+'
       - 'flusso-schema-config-toml-v[0-9]+.[0-9]+.[0-9]+'
@@ -85,6 +89,28 @@ jobs:
           stub guides/configuration.html     ../../deploy/flusso-toml.html
           stub guides/querying.html          ../../query/overview.html
           stub guides/deploying.html         ../../deploy/docker.html
+
+      # The `benchmarks` branch is written by .github/workflows/bench.yml
+      # (github-action-benchmark): `smaller/` and `bigger/` each hold a
+      # dashboard `index.html` plus `data.js`. Absent until the first main run.
+      - name: Fold in the benchmark history
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet origin/benchmarks >/dev/null; then
+            echo "no benchmarks branch yet; skipping /bench/" >&2
+            exit 0
+          fi
+          mkdir -p site/bench
+          git archive origin/benchmarks | tar -x -C site/bench
+          {
+            echo "<!doctype html><meta charset=utf-8><title>flusso benchmarks</title>"
+            echo "<h1>flusso benchmark history</h1>"
+            echo "<p>One data point per push to <code>main</code>. What each series means, and what counts as a regression, is in the manual's"
+            echo "<a href=\"../contribute/benchmarks.html\">Benchmarks</a> chapter.</p><ul>"
+            echo "<li><a href=\"smaller/\">Smaller is better</a>: latencies, resource cost, component bench times</li>"
+            echo "<li><a href=\"bigger/\">Bigger is better</a>: backfill and drain throughput</li>"
+            echo "</ul>"
+          } > site/bench/index.html
 
       - name: Assemble versioned schema site from release tags
         run: |

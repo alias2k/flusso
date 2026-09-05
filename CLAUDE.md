@@ -31,7 +31,7 @@ page (`.github/scripts/check-manual-links.sh`).
 ## Commands
 
 Common workflows are wrapped in a `justfile` — run `just` to list them (e.g. `just up`,
-`just run`, `just check`, `just test`, `just lint`, `just bench`, `just status`). It needs
+`just run`, `just check`, `just test`, `just lint`, `just bench`, `just load`, `just status`). It needs
 [`just`](https://just.systems) (`cargo install just --locked`). The raw commands it wraps
 are below.
 
@@ -43,7 +43,9 @@ cargo nextest run --run-ignored all        # + Postgres e2e (needs a running Doc
 cargo nextest run -E 'test(name_substr)'   # a single test by name
 cargo test --doc                           # doctests — nextest does NOT run these
 cargo clippy --workspace                   # lint (NOT --all-targets; see below)
-cargo bench                                # Criterion benches (engine, opensearch, postgres)
+just bench                                 # in-process benches (engine loop, pgoutput decode, sink render); no Docker
+just bench-components                      # Docker-backed Criterion benches (postgres, opensearch, engine pipeline)
+just bench-scenario reference ci           # a scenario on the real binary (dev/bench); see docs/src/contribute/benchmarks.md
 cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-adapters/source-postgres)
 ```
 
@@ -53,6 +55,28 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   via the `source-postgres` `fuzzing` feature (`fuzz_pgoutput_decode`). Contract: the
   decoder must never panic on arbitrary bytes — an `Err` is the correct outcome. Run from the
   crate dir; a crash lands in `fuzz/artifacts/`.
+- **Benchmarks are three layers** (ADR 0006; the vocabulary — benchmark, component bench,
+  scenario, headline metric, baseline, regression, soak — is `CONTEXT.md`'s Measuring section; the
+  chapter is `docs/src/contribute/benchmarks.md`). (1) **Scenarios** (`dev/bench`, `flusso-bench`,
+  unpublished) run the real release `flusso` binary as a child process against testcontainers
+  (or `BENCH_PG_URL`/`BENCH_OS_URL`) through `reference` (the dev store, three indexes) and
+  `complex` (the worst-case document) at a `ci` or `default` scale, and report the headline
+  metrics: visible latency p50/p99 (commit → searchable, via the `updated_at`/`updatedAt` stamp on
+  the dev root tables), drain throughput of a burst, backfill throughput, peak RSS + CPU (sampled
+  with `ps`), plus flush p50/p99 from `/metrics` for attribution. (2) **Docker-backed component
+  benches** (`postgres`, `opensearch`, `engine`'s `pipeline` — attribution only; its backfill group
+  is gone). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
+  over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
+  `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
+  nextest `docker` group, re-records it), `sink-opensearch`'s `render`. The last two sit behind each
+  crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
+  `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
+  on a PR, `in-process` runs the three benches on the base then the PR (same runner) and fails past
+  10% slower (`bench-compare.py`); on a `main` push, `scenarios` runs everything and stores the
+  points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
+  `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
+  calls a regression only on two consecutive points past 25% (20% RSS), image-tag change restarts
+  the window, one self-maintained issue. `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, and `continuity` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
@@ -107,8 +131,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   sink name, so plain `cargo test` is safe too. An intermittent failure there is an env race
   from a new test sharing a variable, not a regression.
 - CI's `test` job runs, in order: `cargo fmt --all --check` → `cargo clippy --workspace` →
-  `cargo check --workspace --all-targets` (compiles benches + examples, which clippy and nextest
-  skip — clippy omits `--all-targets`, nextest only builds test targets) → `cargo check -p
+  `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`
+  (compiles benches + examples, which clippy and nextest skip — clippy omits `--all-targets`,
+  nextest only builds test targets; the features unlock the two in-process bench targets) → `cargo check -p
   flusso-cli --no-default-features` (the server-only image build) → `cargo nextest run
   --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
@@ -732,10 +757,11 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Query client (`flusso-query`) | `sdk/query/src/` |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
+| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
-| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
 
@@ -779,8 +805,8 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`
-  (`flusso-dev-search-api`) and `dev/query-e2e` (`flusso-query-e2e`) — both `publish = false`
-  (a runnable example and a live-e2e guard, not shipping code). The
+  (`flusso-dev-search-api`), `dev/query-e2e` (`flusso-query-e2e`), and `dev/bench` (`flusso-bench`) —
+  all `publish = false` (a runnable example, a live-e2e guard, and the benchmark harness, not shipping code). The
   catch: a crate's published **package name** (`flusso-engine`, `flusso-kernel`, …) differs
   from the **extern name** code uses (`engine`, `kernel`, `source_postgres`, …). Two mechanisms keep that split
   so the rename needs **no source change**: each lib sets `[lib] name = "<extern>"`, and each

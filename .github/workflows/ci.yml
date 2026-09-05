@@ -46,8 +46,10 @@ jobs:
       # would slip through. A plain `cargo check --all-targets` compiles them too;
       # it's rustc (not clippy), so the `unwrap_used` clippy lint doesn't fire on
       # the test/bench `.unwrap()`s.
+      # The `bench` features expose the crate-private decoder/renderer to the
+      # in-process benches; without them those two bench targets are skipped.
       - name: Check all targets (benches, examples)
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench
 
       # The Docker runtime image builds the CLI without the designer; make sure
       # that server-only configuration keeps compiling.

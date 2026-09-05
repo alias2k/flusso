@@ -1,0 +1,187 @@
+name: bench
+
+# Two jobs, two purposes (docs/src/contribute/benchmarks.md; ADR 0006):
+#
+#   in-process   PR gate. The three no-Docker Criterion benches (engine loop,
+#                pgoutput decode, sink render) run twice on the same runner —
+#                the PR's base, then the PR — and the job fails when any bench
+#                is more than 10% slower. Same runner, so no cross-run noise.
+#
+#   scenarios    History. On every push to main: the in-process benches, the
+#                three Docker-backed component benches, and the two flusso-bench
+#                scenarios at CI scale on the real binary. Every result becomes
+#                a data point on the `benchmarks` branch (rendered under
+#                /bench/ on the Pages site), and the regression script calls a
+#                regression only when two consecutive points cross the
+#                threshold against the rolling median.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  # Supersede in-flight PR runs; never drop a main data point.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  in-process:
+    name: in-process (A/B vs base)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Criterion keeps every saved baseline under target/criterion, so both
+      # sides of the comparison survive the checkout switch.
+      - name: Bench the base (baseline `base`)
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          echo "head=$head" >> "$GITHUB_ENV"
+          git checkout --quiet ${{ github.event.pull_request.base.sha }}
+          .github/scripts/bench-in-process.sh base
+
+      - name: Bench the PR (baseline `pr`)
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$head"
+          .github/scripts/bench-in-process.sh pr
+
+      - name: Compare (fail past 10% slower)
+        run: python3 .github/scripts/bench-compare.py target/criterion base pr 10
+
+  scenarios:
+    name: scenarios + components (history)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The storage action pushes to this branch; make sure it exists as an
+      # orphan the first time, before anything else touches the tree.
+      - name: Ensure the `benchmarks` data branch exists
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin benchmarks >/dev/null 2>&1; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git worktree add --detach /tmp/benchmarks
+          git -C /tmp/benchmarks checkout --orphan benchmarks
+          git -C /tmp/benchmarks rm -rfq .
+          git -C /tmp/benchmarks commit --allow-empty -m "benchmark history"
+          git -C /tmp/benchmarks push origin benchmarks
+          git worktree remove --force /tmp/benchmarks
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build flusso (release, no designer — the image configuration)
+        run: cargo build --release -p flusso-cli --no-default-features
+
+      - name: In-process benches
+        run: |
+          .github/scripts/bench-in-process.sh main
+          python3 .github/scripts/bench-criterion-to-json.py target/criterion main inprocess bench-out/inprocess.json
+
+      - name: Component benches (Docker)
+        run: |
+          set -euo pipefail
+          cargo bench -p flusso-source-postgres --bench postgres -- --save-baseline components
+          cargo bench -p flusso-sink-opensearch --bench opensearch -- --save-baseline components
+          cargo bench -p flusso-engine --bench pipeline -- --save-baseline components
+          python3 .github/scripts/bench-criterion-to-json.py target/criterion components components bench-out/components.json
+
+      - name: Scenario `reference` (CI scale)
+        env:
+          FLUSSO_BIN: ${{ github.workspace }}/target/release/flusso
+        run: cargo run -p flusso-bench -- --scenario reference --scale ci --out bench-out/scenarios
+
+      - name: Scenario `complex` (CI scale)
+        env:
+          FLUSSO_BIN: ${{ github.workspace }}/target/release/flusso
+        run: cargo run -p flusso-bench -- --scenario complex --scale ci --out bench-out/scenarios
+
+      - name: Merge the data points
+        run: |
+          set -euo pipefail
+          jq -s 'add' bench-out/inprocess.json bench-out/components.json bench-out/scenarios/*/smaller.json > bench-out/smaller.json
+          jq -s 'add' bench-out/scenarios/*/bigger.json > bench-out/bigger.json
+          jq length bench-out/smaller.json bench-out/bigger.json
+
+      - name: Upload the raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-out
+          path: bench-out
+          if-no-files-found: ignore
+
+      # Storage + dashboard only. Its own alerting is off (threshold far out of
+      # reach): the regression rule lives in bench-regression.py.
+      - name: Store (smaller is better)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: flusso (smaller is better)
+          tool: customSmallerIsBetter
+          output-file-path: bench-out/smaller.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-pages-branch: benchmarks
+          benchmark-data-dir-path: smaller
+          auto-push: true
+          alert-threshold: "10000%"
+          comment-on-alert: false
+          fail-on-alert: false
+          max-items-in-chart: 200
+
+      - name: Store (bigger is better)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: flusso (bigger is better)
+          tool: customBiggerIsBetter
+          output-file-path: bench-out/bigger.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-pages-branch: benchmarks
+          benchmark-data-dir-path: bigger
+          auto-push: true
+          alert-threshold: "10000%"
+          comment-on-alert: false
+          fail-on-alert: false
+          max-items-in-chart: 200
+
+      # Two consecutive main points past 25% (20% for RSS) against the rolling
+      # median of the previous five → one issue, kept current, self-closing.
+      - name: Regression check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin benchmarks
+          git show origin/benchmarks:smaller/data.js > /tmp/smaller.js
+          git show origin/benchmarks:bigger/data.js > /tmp/bigger.js
+          python3 .github/scripts/bench-regression.py 25 --rss-threshold 20 --issue /tmp/smaller.js /tmp/bigger.js
