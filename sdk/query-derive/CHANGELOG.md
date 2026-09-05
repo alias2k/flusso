@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.15.1...flusso-query-derive-v0.16.0) - 2026-09-05
+
+### Added
+
+- *(config)* [**breaking**] adapters own their configuration; port entries are type + options
+
+### Other
+
+- *(arch)* [**breaking**] lay out kernel / ports / adapters / engine / daemon and sdk/
+- root README as a pitch, flusso-query README as a landing; track the Start here pages
+- the lock is deterministic TOML; formats frozen for the major
+- source TLS — configuration guide section, README, crate README, plugin skills
+
 ## [0.15.1](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.15.0...flusso-query-derive-v0.15.1) - 2026-08-17
 
 ### Fixed

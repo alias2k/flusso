@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.15.1...flusso-cli-v0.16.0) - 2026-09-05
+
+### Added
+
+- *(engine)* [**breaking**] build-once ingest engine and one sink engine per sink over a bidirectional stream
+- *(design)* render source, stream, and sink forms from adapter descriptions
+- *(cli)* generate the editor schema and Reference tables from adapter descriptions
+- *(config)* [**breaking**] adapters own their configuration; port entries are type + options
+- *(cli)* flusso run skips the lock rewrite when nothing changed
+- *(cli,design)* wire source TLS through both composition roots
+
+### Fixed
+
+- *(engine)* [**breaking**] review fixes — positions monotonic across streams, per-sink envelope stamping, supervisor loop
+
+### Other
+
+- *(engine)* share published envelopes via Arc, sink stamps own nam
+- describe the kernel / ports / adapters layout and adapter-owned config
+- *(arch)* [**breaking**] lay out kernel / ports / adapters / engine / daemon and sdk/
+- READMEs as landings, repoint every deep link, serve the book at the Pages root, add the docs CI job
+- root README as a pitch, flusso-query README as a landing; track the Start here pages
+- *(cli)* guard the agent docs against dangling repo paths
+- *(release)* [**breaking**] three release trains — per-crate versions + version groups
+- the lock is deterministic TOML; formats frozen for the major
+- source TLS — configuration guide section, README, crate README, plugin skills
+
 ## [0.14.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.13.0...flusso-cli-v0.14.0) - 2026-08-14
 
 ### Added
