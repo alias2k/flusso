@@ -16,6 +16,7 @@ CREATE TABLE users (
     tier       text         NOT NULL DEFAULT 'free', -- free | pro | enterprise
     country    char(2),                              -- ISO-3166 alpha-2
     created_at timestamptz  NOT NULL DEFAULT now(),
+    updated_at timestamptz  NOT NULL DEFAULT now(),  -- bumped by every write; the benchmark's latency marker
     deleted    boolean      NOT NULL DEFAULT false   -- soft-delete flag
 );
 
@@ -58,7 +59,8 @@ CREATE TABLE products (
     currency    char(3)       NOT NULL DEFAULT 'USD',
     in_stock    boolean       NOT NULL DEFAULT true,
     category_id int           REFERENCES categories (id),
-    created_at  timestamptz   NOT NULL DEFAULT now()
+    created_at  timestamptz   NOT NULL DEFAULT now(),
+    updated_at  timestamptz   NOT NULL DEFAULT now()
 );
 
 CREATE TABLE tags (
@@ -81,7 +83,8 @@ CREATE TABLE orders (
     status     text          NOT NULL DEFAULT 'pending', -- pending|paid|shipped|delivered|cancelled
     total      numeric(12, 2) NOT NULL DEFAULT 0,
     placed_at  timestamptz   NOT NULL DEFAULT now(),
-    shipped_at timestamptz                                -- null until shipped
+    shipped_at timestamptz,                               -- null until shipped
+    updated_at timestamptz   NOT NULL DEFAULT now()
 );
 
 -- One-to-many under orders; each line references a product.

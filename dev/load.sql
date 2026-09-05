@@ -54,7 +54,8 @@ BEGIN
             IF op = 0 THEN
                 -- read→modify→save a user → rebuilds its `users` doc
                 UPDATE users
-                   SET tier = (ARRAY['free', 'pro', 'enterprise'])[1 + floor(random() * 3)::int]
+                   SET tier = (ARRAY['free', 'pro', 'enterprise'])[1 + floor(random() * 3)::int],
+                       updated_at = now()
                  WHERE id = (SELECT id FROM users WHERE NOT deleted ORDER BY random() LIMIT 1);
 
             ELSIF op = 1 THEN
@@ -62,7 +63,8 @@ BEGIN
                 -- (cast random() to numeric: there's no numeric * double operator)
                 UPDATE products
                    SET price = round(price * (0.95 + random()::numeric * 0.10), 2),
-                       in_stock = (random() < 0.9)
+                       in_stock = (random() < 0.9),
+                       updated_at = now()
                  WHERE id = (SELECT id FROM products ORDER BY random() LIMIT 1);
 
             ELSIF op = 2 THEN
@@ -74,7 +76,8 @@ BEGIN
                                     WHEN 'shipped' THEN 'delivered'
                                     ELSE 'pending'
                                 END,
-                       shipped_at = CASE WHEN status = 'paid' THEN now() ELSE shipped_at END
+                       shipped_at = CASE WHEN status = 'paid' THEN now() ELSE shipped_at END,
+                       updated_at = now()
                  WHERE id = (SELECT id FROM orders ORDER BY random() LIMIT 1);
 
             ELSIF op = 3 THEN
@@ -115,7 +118,7 @@ BEGIN
             ELSE
                 -- toggle a soft-delete → a user leaves / re-enters its index
                 UPDATE users
-                   SET deleted = NOT deleted
+                   SET deleted = NOT deleted, updated_at = now()
                  WHERE id = (SELECT id FROM users ORDER BY random() LIMIT 1);
             END IF;
 

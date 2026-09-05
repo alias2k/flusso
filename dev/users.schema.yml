@@ -22,6 +22,9 @@ fields:
   - text: fullName # natural-language full text
     column: full_name
     required: false
+  - timestamp: updatedAt # when this row last changed
+    column: updated_at
+    required: true
 
   # A group: reshape same-row scalar columns into a nested object.
   - object: account

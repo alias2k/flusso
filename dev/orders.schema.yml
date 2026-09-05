@@ -26,6 +26,9 @@ fields:
       - cancelled
   - decimal: total
     required: true
+  - timestamp: updatedAt # when this row last changed
+    column: updated_at
+    required: true
 
   # A group: the order's timeline. `shippedAt` is null until the order ships.
   - object: timeline
