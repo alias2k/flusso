@@ -153,3 +153,33 @@ _Avoid_: operation, step, hook
 **Transport**:
 How the outside world reaches the daemon: HTTP surfaces, process signals, telemetry export. Owned by the binary, never by the daemon.
 _Avoid_: API layer, server, interface
+
+### Measuring
+
+**Benchmark**:
+A measured run whose result is comparable across commits. If two runs of it cannot be put side by side, it is not a benchmark.
+_Avoid_: test, load test, perf check
+
+**Component bench**:
+A benchmark of one stage in isolation: decoding, resolving, building, rendering, flushing. Explains a movement in a headline metric; is not itself one.
+_Avoid_: microbenchmark, unit bench
+
+**Scenario**:
+A named reference workload run end to end against the real binary: a fixed dataset, a fixed change mix, a fixed size. `reference` is the mid-complexity everyday shape; `complex` is the worst-case document.
+_Avoid_: suite, profile, workload (alone)
+
+**Headline metric**:
+One of the numbers a scenario reports and that is watched across commits: visible latency, drain throughput, backfill throughput, resource cost.
+_Avoid_: KPI, stat, measurement
+
+**Baseline**:
+The stored headline metrics and component bench results for the main branch, the thing a new run is compared to.
+_Avoid_: reference (taken by the scenario name), golden, snapshot
+
+**Regression**:
+A headline metric crossing its threshold against the baseline on two consecutive runs of main. One bad run is noise until the next confirms it.
+_Avoid_: slowdown, degradation, alert (that is the notification, not the fact)
+
+**Soak**:
+An interactive load tool watched by a person. It answers "does it keep up right now", produces no comparable number, and is not a benchmark.
+_Avoid_: bench, load benchmark, stress test
