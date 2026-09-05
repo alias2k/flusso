@@ -17,6 +17,11 @@ name = "sink_opensearch"
 [lints]
 workspace = true
 
+[features]
+# Exposes the document → bulk-body rendering to the in-process `render` bench.
+# Off by default; not part of the stable API.
+bench = []
+
 [dependencies]
 sink.workspace = true
 kernel = { workspace = true, features = ["derive"] }
@@ -37,9 +42,17 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 testcontainers-modules = { workspace = true, features = ["http_wait"] }
 criterion.workspace = true
 
-# Real-service benchmark: bulk indexing throughput against a live OpenSearch.
-# Spins up OpenSearch in a container, so requires Docker. Run with `cargo bench`.
+# Component bench: bulk indexing throughput against a live OpenSearch, for
+# attribution. Spins up OpenSearch in a container, so requires Docker.
 [[bench]]
 name = "opensearch"
 harness = false
+
+# In-process component bench: rendering envelopes to the NDJSON bulk body —
+# the serialization work `apply` + `flush` do before any byte hits the wire.
+# No Docker; this is a PR-gating bench. Needs `--features bench`.
+[[bench]]
+name = "render"
+harness = false
+required-features = ["bench"]
 

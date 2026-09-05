@@ -41,3 +41,13 @@ pub use capture::WalChangeCapture;
 pub(crate) fn fuzz_decode(data: &[u8]) {
     let _ = pgoutput::decode(data);
 }
+
+/// Decode one message for the `pgoutput` bench; `true` for a message the
+/// source acts on (relation, insert, update, delete, truncate).
+#[cfg(feature = "bench")]
+pub(crate) fn bench_decode(data: &[u8]) -> bool {
+    !matches!(
+        pgoutput::decode(data),
+        Ok(pgoutput::Decoded::Other) | Err(_)
+    )
+}

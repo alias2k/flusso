@@ -13,6 +13,36 @@ mod transport;
 
 pub use config::{OpensearchConfig, TextAnalysis};
 
+/// Benchmark entry point: render `envelopes` into the NDJSON bulk body exactly
+/// as `apply` (document → JSON) and `flush` (action → fragment) would, without
+/// a cluster. Used by the `render` bench; gated behind the `bench` feature and
+/// not part of the stable API.
+#[cfg(feature = "bench")]
+pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
+    let mut body = String::new();
+    for envelope in envelopes {
+        let action = match (envelope.op, &envelope.document) {
+            (kernel::Op::Upsert, Some(document)) => BulkAction::Index {
+                index: envelope.index.to_string(),
+                id: envelope.id.clone(),
+                doc: sink::to_json(document),
+            },
+            (kernel::Op::Upsert, None) => {
+                return Err(SinkError::Write(format!(
+                    "upsert of {}/{} carries no document",
+                    envelope.index, envelope.id
+                )));
+            }
+            (kernel::Op::Delete, _) => BulkAction::Delete {
+                index: envelope.index.to_string(),
+                id: envelope.id.clone(),
+            },
+        };
+        body.push_str(&bulk::bulk_action_fragment(&action)?);
+    }
+    Ok(body)
+}
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
 use std::time::Duration;
