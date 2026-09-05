@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-cli"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-config"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "flusso-kernel",
  "rust_decimal",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-daemon"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-design"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-engine"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-kernel"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "chrono",
  "flusso-kernel-derive",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-kernel-derive"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "flusso-kernel",
  "proc-macro2",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-query"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "chrono",
  "flusso-query-derive",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-query-derive"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "flusso-config",
  "flusso-query",
@@ -1247,7 +1247,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sink"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "flusso-kernel",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sink-opensearch"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-sink-stdout"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-source"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "flusso-kernel",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-source-postgres"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "bon",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-stream"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "flusso-kernel",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "flusso-stream-channel"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "flusso-kernel",

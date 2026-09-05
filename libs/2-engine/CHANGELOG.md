@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.15.1...flusso-engine-v0.16.0) - 2026-09-05
+
+### Added
+
+- *(bench)* in-process PR-gating benches — engine loop over mocks, pgoutput decode over a recorded fixture, sink render
+- *(engine)* [**breaking**] build-once ingest engine and one sink engine per sink over a bidirectional stream
+- *(config)* [**breaking**] adapters own their configuration; port entries are type + options
+- *(sources,engine)* report source continuity and rebuild seeds it invalidates
+
+### Fixed
+
+- *(engine)* coalesce backfill requests by lane, not a fixed window
+- *(engine)* [**breaking**] review fixes — positions monotonic across streams, per-sink envelope stamping, supervisor loop
+- *(engine)* stage stale-seed rebuilds before the resume point exists
+
+### Other
+
+- *(bench)* pipeline bench is attribution only — drop its backfill group, trim the Docker-backed timings
+- *(engine)* share published envelopes via Arc, sink stamps own nam
+- *(daemon)* run the ingest engine on its own task; publish to lanes concurrently
+- *(libs)* describe the two engines and the ticketed channel ledger in the crate docs
+- *(arch)* [**breaking**] lay out kernel / ports / adapters / engine / daemon and sdk/
+- root README as a pitch, flusso-query README as a landing; track the Start here pages
+- *(engine)* restart reseeds a deleted generation and rebuilds after a dropped slot
+- a seed is only as good as the stream behind it
+- *(release)* [**breaking**] three release trains — per-crate versions + version groups
+- the lock is deterministic TOML; formats frozen for the major
+- source TLS — configuration guide section, README, crate README, plugin skills
+
 ## [0.14.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.13.0...flusso-engine-v0.14.0) - 2026-08-14
 
 ### Added

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.15.1...flusso-daemon-v0.16.0) - 2026-09-05
+
+### Added
+
+- *(engine)* [**breaking**] build-once ingest engine and one sink engine per sink over a bidirectional stream
+- *(config)* [**breaking**] adapters own their configuration; port entries are type + options
+- *(sources,engine)* report source continuity and rebuild seeds it invalidates
+
+### Fixed
+
+- *(engine)* [**breaking**] review fixes — positions monotonic across streams, per-sink envelope stamping, supervisor loop
+- *(engine)* stage stale-seed rebuilds before the resume point exists
+
+### Other
+
+- *(daemon)* run the ingest engine on its own task; publish to lanes concurrently
+- *(libs)* describe the two engines and the ticketed channel ledger in the crate docs
+- *(arch)* [**breaking**] lay out kernel / ports / adapters / engine / daemon and sdk/
+- root README as a pitch, flusso-query README as a landing; track the Start here pages
+- *(release)* [**breaking**] three release trains — per-crate versions + version groups
+- the lock is deterministic TOML; formats frozen for the major
+- *(daemon)* carry the new Source.tls field in the backendless config
+- source TLS — configuration guide section, README, crate README, plugin skills
+
 ## [0.14.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.13.0...flusso-daemon-v0.14.0) - 2026-08-14
 
 ### Added
