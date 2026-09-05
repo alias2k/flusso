@@ -1,0 +1,17 @@
+# The `complex` scenario: one worst-case `users` document behind one OpenSearch
+# sink. The harness points the source and sink at its containers through
+# SOURCE_POSTGRES_CONNECTION_URL / PRIMARY_OPENSEARCH_URL.
+
+[source]
+type = "postgres"
+connection_url = "postgres://postgres:postgres@127.0.0.1:5432/flusso"
+
+[sinks.primary]
+type = "opensearch"
+url = "http://127.0.0.1:9200"
+tls_verify = false
+
+[[index]]
+name = "users"
+schema = "users.schema.yml"
+enabled = true

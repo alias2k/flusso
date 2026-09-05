@@ -16,6 +16,7 @@ members = [
   "apps/*",
   "dev/search-api",
   "dev/query-e2e",
+  "dev/bench",
 ]
 default-members = ["apps/cli"]
 resolver = "3"

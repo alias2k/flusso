@@ -1,0 +1,32 @@
+[package]
+name = "flusso-bench"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The flusso benchmark harness: runs the real `flusso` binary through a scenario against Postgres + OpenSearch containers and reports the headline metrics. Not published — a measuring tool, not shipping code."
+# A measuring tool (like dev/search-api and dev/query-e2e), not shipping code.
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "flusso-bench"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+clap.workspace = true
+rand = "0.9"
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx.workspace = true
+tempfile = "3"
+testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "sync", "signal", "net"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
