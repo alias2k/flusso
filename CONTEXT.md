@@ -90,6 +90,14 @@ _Avoid_: LSN, offset, cursor, ack, checkpoint
 The lowest position every lane has acknowledged. The stream owns it; the ingest engine forwards it to the source as confirmation.
 _Avoid_: low-water mark, min ack, commit point
 
+**Quiet stream**:
+The live stream having no change ready right now. A change arriving on a quiet stream has nothing to batch with.
+_Avoid_: idle, empty, drained (that is the lanes)
+
+**Fence**:
+A wait until the watermark has passed a caller-supplied position, after which every sink reflects everything up to it, related-table rebuilds included. What a client uses to read its own writes.
+_Avoid_: barrier, sync point, flush wait
+
 **Document**:
 One denormalized, typed search record built from a root row and its joins and aggregates, keyed by a deterministic id. Built once, on the ingest side.
 _Avoid_: record, row, entity, payload
