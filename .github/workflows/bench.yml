@@ -77,6 +77,7 @@ jobs:
     permissions:
       contents: write
       issues: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -189,3 +190,12 @@ jobs:
           git show origin/benchmarks:smaller/data.js > /tmp/smaller.js
           git show origin/benchmarks:bigger/data.js > /tmp/bigger.js
           python3 .github/scripts/bench-regression.py 25 --rss-threshold 20 --issue /tmp/smaller.js /tmp/bigger.js
+
+      # The storage action pushed with the workflow token, and GitHub does not
+      # start workflows from such pushes — so the `benchmarks` push trigger in
+      # pages.yml never fires from here. Dispatch the deploy explicitly so
+      # /bench/ shows this run's points.
+      - name: Redeploy the Pages site with the new points
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main

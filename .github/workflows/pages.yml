@@ -32,8 +32,9 @@ on:
   push:
     branches:
       - main
-      # The bench workflow pushes each main run's data points here; redeploy so
-      # /bench/ shows them.
+      # The bench workflow pushes each main run's data points here. A push made
+      # with the workflow token does not fire this trigger, so bench.yml also
+      # dispatches this workflow explicitly; the trigger covers manual pushes.
       - benchmarks
     tags:
       - 'flusso-schema-index-yaml-v[0-9]+.[0-9]+.[0-9]+'
