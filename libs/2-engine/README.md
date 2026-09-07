@@ -30,10 +30,12 @@ ChangeCapture ─▶ IngestEngine ─┤                                        
 
 ## The ingest engine
 
-[`IngestEngine`] owns the source side. It buffers live changes per
-[`BatchPolicy`] ([`max_changes`](BatchPolicy::max_changes) or
-[`max_delay`](BatchPolicy::max_delay), whichever first), resolves each to the
-documents it touches, deduplicates, builds them once, and publishes one
+[`IngestEngine`] owns the source side. It buffers every live change the stream
+has ready and commits the moment the stream would block — a lone change on a
+quiet stream is built at once — or once [`max_changes`](BatchPolicy::max_changes)
+have accumulated, with [`max_delay`](BatchPolicy::max_delay) as the cap while
+changes keep arriving ([`BatchPolicy`]). Each change is resolved to the
+documents it touches, deduplicated, built once, and published as one
 `Batch` — the envelopes plus the position of the last change — to every lane.
 Snapshot rows for a backfill flow through the same resolve → build path but
 are published only to the lanes that requested them, without a position, and

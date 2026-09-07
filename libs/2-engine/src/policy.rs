@@ -7,22 +7,28 @@ use std::time::Duration;
 
 pub use kernel::FailurePolicy;
 
-/// How the worker groups changes into one sink flush.
+/// How the ingest engine groups live changes into one batch.
 ///
-/// Batching trades a little latency for far fewer round-trips: up to
-/// `max_changes` changes (or whatever has arrived after `max_delay`, whichever
-/// comes first) are buffered and flushed together. `max_changes: 1` reproduces
-/// the original flush-per-change behavior.
+/// A batch takes every change the stream has ready and is committed the
+/// moment the stream would block: a lone change on a quiet stream is built at
+/// once, and a burst — which keeps the stream ready — fills batches to
+/// `max_changes`, trading nothing in latency for far fewer round-trips.
+/// `max_changes: 1` reproduces flush-per-change.
 ///
 /// Acks respect the batch boundary — see the [module docs](crate). The source
 /// ack for a change is confirmed only after the flush that made its documents
 /// durable, so at-least-once delivery holds regardless of batch size.
+///
+/// `flusso.toml`'s `[batch]` table sets both fields; an omitted field keeps
+/// the default here.
 #[derive(Debug, Clone, Copy)]
 pub struct BatchPolicy {
-    /// Flush once this many changes have accumulated. Clamped to at least 1.
+    /// Commit once this many changes have accumulated. Clamped to at least 1.
     pub max_changes: usize,
-    /// Flush a partial batch this long after its first change, so a trickle of
-    /// changes still lands promptly instead of waiting for a full batch.
+    /// The cap on how long a batch stays open after its first change while
+    /// changes keep arriving. Also the window the ingest engine holds a
+    /// backfill snapshot for straggling requests so a reindex fanned to every
+    /// sink is one pass over the table.
     pub max_delay: Duration,
 }
 

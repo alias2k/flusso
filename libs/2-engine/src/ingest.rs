@@ -1,8 +1,11 @@
 //! The ingest engine: capture → batch → resolve → build once → publish to every
 //! lane, plus the request lane it serves snapshots from.
 //!
-//! One task, one build path. Live changes are buffered per [`BatchPolicy`],
-//! resolved to the documents they touch (deduplicated), built once with
+//! One task, one build path. Live changes are buffered per [`BatchPolicy`] —
+//! every change the stream has ready, committed the moment the stream would
+//! block or [`BatchPolicy::max_changes`] is reached, so a lone change on a
+//! quiet stream never waits out [`BatchPolicy::max_delay`] — resolved to the
+//! documents they touch (deduplicated), built once with
 //! [`DocumentBuilder::build_many`], and published as one [`Batch`] to every
 //! lane, carrying the position of the last change. Snapshot rows for a
 //! backfill flow through the same resolve → build path but are published only
