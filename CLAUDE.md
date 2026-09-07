@@ -383,11 +383,12 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   laid over the defaults by the daemon; `--batch-max-changes`/`--batch-max-delay-ms` +
   `FLUSSO_BATCH_*` override at run time, never baked into the lock) controls batch grouping:
   after the live arm buffers a change, `IngestEngine::drain_ready` buffers every change the
-  stream has ready (`now_or_never`) and the engine commits the moment the stream would block or
-  the batch is full, so a burst fills batches while a trickle never waits out `max_delay`. The
-  `sleep_until` deadline arm stays as the cap. `max_changes: 1` reproduces flush-per-change. The
-  coalescing wait for further requests is `max_delay`. Guard:
-  `a_lone_change_on_a_quiet_stream_commits_without_waiting` (a channel-fed `MockSource::fed`
+  stream has ready (`now_or_never`) while the batch `is_open` (not full, deadline not passed), and
+  the engine commits the moment the stream would block, so a burst fills batches for at most
+  `max_delay` while a trickle never waits it out. The `sleep_until` deadline arm stays. `max_changes:
+  1` reproduces flush-per-change. The coalescing wait for further requests is `max_delay`. Guards:
+  `a_lone_change_on_a_quiet_stream_commits_without_waiting`,
+  `max_delay_caps_a_batch_while_changes_keep_arriving` (both on a channel-fed `MockSource::fed`
   whose live stream stays open and pending).
 - **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:
   `Err` is flush-wide (transport down, whole request refused) and stops *that sink engine*,
