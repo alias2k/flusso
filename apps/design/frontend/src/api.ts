@@ -211,6 +211,7 @@ export interface ConfigToml {
   index?: IndexEntry[];
   prefix?: string;
   on_error?: unknown;
+  batch?: { max_changes?: number; max_delay_ms?: number };
   server?: Record<string, unknown>;
 }
 
