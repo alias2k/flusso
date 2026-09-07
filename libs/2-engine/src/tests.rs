@@ -59,9 +59,14 @@ fn mapping() -> IndexMapping {
 
 /// A source that replays live changes (positions 0..n) once and snapshots a
 /// fixed set of rows, recording what it was asked and what was confirmed.
+///
+/// [`MockSource::fed`] instead hands out a live stream fed through a channel:
+/// it stays open and pending while nothing is sent — a *quiet* stream — and
+/// ends when the sender is dropped.
 #[derive(Debug)]
 struct MockSource {
     live: Mutex<Option<Vec<ChangeEvent>>>,
+    feed: Mutex<Option<tokio::sync::mpsc::Receiver<ChangeEvent>>>,
     snapshot_rows: Vec<ChangeEvent>,
     continuity: Continuity,
     events: Arc<Mutex<Vec<String>>>,
@@ -72,11 +77,21 @@ impl MockSource {
     fn new(live: Vec<ChangeEvent>) -> Self {
         Self {
             live: Mutex::new(Some(live)),
+            feed: Mutex::new(None),
             snapshot_rows: Vec::new(),
             continuity: Continuity::Resumed,
             events: Arc::new(Mutex::new(Vec::new())),
             confirmed: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// A source whose live stream is whatever is sent on the returned channel,
+    /// numbered from position 0, ending when the sender is dropped.
+    fn fed() -> (Self, tokio::sync::mpsc::Sender<ChangeEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let mut source = Self::new(Vec::new());
+        source.feed = Mutex::new(Some(rx));
+        (source, tx)
     }
 
     fn with_snapshot(mut self, rows: Vec<ChangeEvent>) -> Self {
@@ -102,6 +117,15 @@ impl ChangeCapture for MockSource {
     }
 
     async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        if let Some(feed) = self.feed.lock().unwrap().take() {
+            return Ok(Box::pin(futures::stream::unfold(
+                (feed, 0u64),
+                |(mut feed, next)| async move {
+                    let event = feed.recv().await?;
+                    Some((Ok((Position(next), event)), (feed, next + 1)))
+                },
+            )));
+        }
         let changes = self.live.lock().unwrap().take().unwrap_or_default();
         Ok(Box::pin(futures::stream::iter(
             changes
@@ -366,6 +390,43 @@ async fn drives_live_changes_to_the_sink_and_confirms_the_watermark() {
         Some(&Position(2)),
         "the last change's position reaches the source once every lane acked it"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lone_change_on_a_quiet_stream_commits_without_waiting() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let flushes = Arc::clone(&sink.flushes);
+    let (source, feed) = MockSource::fed();
+    let max_delay = Duration::from_secs(60);
+    let harness =
+        Harness::new(source, vec![(sink_name("primary"), sink)]).with_batch(BatchPolicy {
+            max_changes: 256,
+            max_delay,
+        });
+    let started = tokio::time::Instant::now();
+    let feeder = async {
+        feed.send(upsert(1)).await.unwrap();
+        let landed = tokio::time::timeout(max_delay / 2, async {
+            while flushes.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        let waited = started.elapsed();
+        drop(feed);
+        (landed, waited)
+    };
+    let (_, (landed, waited)) = tokio::join!(harness.run(Continuity::Resumed), feeder);
+
+    assert!(
+        landed.is_ok(),
+        "a lone change on a quiet stream sat out the batching delay ({max_delay:?}) instead of being committed at once"
+    );
+    assert!(
+        waited < Duration::from_secs(1),
+        "the lone change took {waited:?} to land"
+    );
+    assert_eq!(*flushes.lock().unwrap(), vec![(1, true)]);
 }
 
 #[tokio::test]
