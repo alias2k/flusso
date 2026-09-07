@@ -32,6 +32,14 @@
         }
       ]
     },
+    "batch": {
+      "description": "How the ingest engine groups live changes into a batch. Omitted keys\nkeep the engine defaults; `--batch-max-changes` / `--batch-max-delay-ms`\nand their `FLUSSO_*` variables override them (flag > env > file).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Batch"
+        }
+      ]
+    },
     "server": {
       "description": "Bind addresses for the operational HTTP surfaces. The `FLUSSO_*`\nvariables and CLI flags override these (flag > env > file).",
       "allOf": [
@@ -99,6 +107,31 @@
         }
       ],
       "description": "What the pipeline does when a sink **rejects a document at the item level** —\nit accepted the batch but refused a specific document (a mapping conflict, a\nmalformed value). Distinct from a flush-wide failure, which always stops the\nrun. Set globally on the config and overridable per index (both live in the\n`config` crate's `Config`/`Index`, which assemble this policy)."
+    },
+    "Batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_changes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0,
+          "description": "Commit a batch once this many changes have accumulated (default 256).\nA batch is also committed the moment the live stream has nothing more\nready, so a lone change never waits for a full batch; this caps a\nburst. `1` flushes per change."
+        },
+        "max_delay_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The longest a batch stays open after its first change while changes\nkeep arriving, in milliseconds (default 50). Also the window a backfill\nsnapshot waits for straggling requests from other sinks."
+        }
+      },
+      "description": "How live changes are grouped into one batch, from a `flusso.toml` `[batch]`\ntable. Both keys are optional; an omitted key keeps the engine's default.\n`--batch-max-changes` / `--batch-max-delay-ms` (and their `FLUSSO_*` env\nvars) override them at run time (flag > env > file)."
     },
     "Server": {
       "type": "object",

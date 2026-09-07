@@ -4,6 +4,10 @@
 prefix = "staging_"
 on_error = "skip"
 
+[batch]
+max_changes = 64
+max_delay_ms = 10
+
 [server]
 public_address = "0.0.0.0:9464"
 private_address = "127.0.0.1:9465"

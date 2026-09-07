@@ -4,8 +4,10 @@
 //! kernel's [`PortEntry`](kernel::PortEntry): a `type` plus uninterpreted
 //! options.
 
+mod batch;
 mod index_entry;
 mod server;
 
+pub use batch::*;
 pub use index_entry::*;
 pub use server::*;

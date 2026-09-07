@@ -121,6 +121,7 @@ fn compiled_artifact_keeps_env_secret_unresolved() {
         sinks: Default::default(),
         indexes: Default::default(),
         on_error: Default::default(),
+        batch: Default::default(),
         server: Default::default(),
         prefix: String::new(),
     };

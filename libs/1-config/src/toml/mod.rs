@@ -23,6 +23,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use entities::Batch;
 use entities::IndexEntry;
 use entities::Server;
 use kernel::PortEntry;
@@ -37,7 +38,7 @@ use kernel::common;
 pub struct ConfigToml {
     // Field order is the `flusso.toml` serialization order: the `toml` writer
     // floats the scalar globals (prefix, on_error) to the top, then emits tables
-    // in declaration order — source, stream, server, sinks, indexes.
+    // in declaration order — source, stream, batch, server, sinks, indexes.
     /// The database rows come from: `type` selects the source adapter, the
     /// rest of the table is that adapter's options.
     pub source: PortEntry,
@@ -59,6 +60,11 @@ pub struct ConfigToml {
     /// continue. Each `[[index]]` may override it.
     #[serde(default)]
     pub on_error: kernel::FailurePolicy,
+    /// How the ingest engine groups live changes into a batch. Omitted keys
+    /// keep the engine defaults; `--batch-max-changes` / `--batch-max-delay-ms`
+    /// and their `FLUSSO_*` variables override them (flag > env > file).
+    #[serde(default, skip_serializing_if = "Batch::is_empty")]
+    pub batch: Batch,
     /// Bind addresses for the operational HTTP surfaces. The `FLUSSO_*`
     /// variables and CLI flags override these (flag > env > file).
     #[serde(default, skip_serializing_if = "Server::is_empty")]

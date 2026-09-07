@@ -578,6 +578,7 @@ fn backendless_config() -> Config {
             },
         )]),
         on_error: Default::default(),
+        batch: Default::default(),
         server: Default::default(),
         prefix: String::new(),
     }

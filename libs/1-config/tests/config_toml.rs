@@ -253,6 +253,47 @@ fn server_section_is_optional_and_strict() {
 }
 
 #[test]
+fn batch_section_converts_and_is_optional_and_strict() {
+    let config = convert("[source]\ntype = \"postgres\"\n");
+    assert!(config.batch.is_empty(), "no [batch] means engine defaults");
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+
+        [batch]
+        max_changes = 64
+        max_delay_ms = 10
+        "#,
+    );
+    assert_eq!(config.batch.max_changes, Some(64));
+    assert_eq!(config.batch.max_delay_ms, Some(10));
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+
+        [batch]
+        max_changes = 1
+        "#,
+    );
+    assert_eq!(config.batch.max_changes, Some(1));
+    assert_eq!(config.batch.max_delay_ms, None);
+    let error = parse(
+        r#"
+        [source]
+        type = "postgres"
+
+        [batch]
+        max_delay = 10
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("max_delay"), "{error}");
+}
+
+#[test]
 fn index_prefix_converts_and_defaults_to_empty() {
     assert_eq!(convert("[source]\ntype = \"postgres\"\n").prefix, "");
     assert_eq!(
