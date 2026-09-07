@@ -130,7 +130,7 @@ pub(crate) struct RunArgs {
     /// `[batch].max_changes` from config; defaults to 256. A lone change on a
     /// quiet stream is committed at once regardless.
     #[arg(long, env = "FLUSSO_BATCH_MAX_CHANGES")]
-    batch_max_changes: Option<usize>,
+    batch_max_changes: Option<std::num::NonZeroUsize>,
 
     /// The longest a batch stays open while changes keep arriving, in
     /// milliseconds. Overrides `[batch].max_delay_ms` from config; defaults

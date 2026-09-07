@@ -106,7 +106,7 @@ export function ConfigPanel({
           </Field>
         </div>
         <div className="w-28">
-          <Field label="max_changes">
+          <Field label="batch.max_changes">
             <Num
               value={config.batch?.max_changes}
               onChange={(v) => onChange({ ...config, batch: { ...config.batch, max_changes: v } })}
@@ -115,7 +115,7 @@ export function ConfigPanel({
           </Field>
         </div>
         <div className="w-28">
-          <Field label="max_delay_ms">
+          <Field label="batch.max_delay_ms">
             <Num
               value={config.batch?.max_delay_ms}
               onChange={(v) => onChange({ ...config, batch: { ...config.batch, max_delay_ms: v } })}

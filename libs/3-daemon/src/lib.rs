@@ -17,6 +17,7 @@ pub use engine::{BuildStats, CommitStats, EngineId, Observer};
 pub use kernel::{IndexName, SinkName};
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,7 +59,10 @@ impl Default for DaemonOptions {
 fn batch_policy(config: &Config) -> BatchPolicy {
     let defaults = BatchPolicy::default();
     BatchPolicy {
-        max_changes: config.batch.max_changes.unwrap_or(defaults.max_changes),
+        max_changes: config
+            .batch
+            .max_changes
+            .map_or(defaults.max_changes, NonZeroUsize::get),
         max_delay: config
             .batch
             .max_delay_ms

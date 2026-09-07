@@ -1,5 +1,7 @@
 //! The `[batch]` table: how the ingest engine groups live changes.
 
+use std::num::NonZeroUsize;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +17,7 @@ pub struct Batch {
     /// ready, so a lone change never waits for a full batch; this caps a
     /// burst. `1` flushes per change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_changes: Option<usize>,
+    pub max_changes: Option<NonZeroUsize>,
     /// The longest a batch stays open after its first change while changes
     /// keep arriving, in milliseconds (default 50). Also the window a backfill
     /// snapshot waits for straggling requests from other sinks.
