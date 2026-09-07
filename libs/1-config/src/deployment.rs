@@ -50,6 +50,11 @@ pub struct Config {
     /// for every index; override per index with [`Index::on_error`].
     #[serde(default)]
     pub on_error: FailurePolicy,
+    /// How the ingest engine groups live changes into a batch (`[batch]`). An
+    /// unset field keeps the engine's default; the binary layers the
+    /// `--batch-*` flags / `FLUSSO_BATCH_*` env vars on top (which win).
+    #[serde(default, skip_serializing_if = "BatchConfig::is_empty")]
+    pub batch: BatchConfig,
     /// Bind addresses for the operational HTTP surfaces. Read by the binary, not
     /// the daemon — transport is the binary's concern. Env/flag overrides win;
     /// see [`ServerConfig`].
@@ -83,6 +88,29 @@ pub struct ServerConfig {
     /// Private, Basic-auth control surface (`/indexes`, `/reindex`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_address: Option<SocketAddr>,
+}
+
+/// The live-change batching knobs from `flusso.toml`'s `[batch]` table. Every
+/// field is optional so the engine's defaults have one home (its
+/// `BatchPolicy`) and an unset key serializes to nothing — a lock compiled
+/// from a config without `[batch]` is byte-identical to before the table
+/// existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchConfig {
+    /// Commit a batch once this many changes have accumulated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_changes: Option<usize>,
+    /// The cap on how long a batch stays open while changes keep arriving, in
+    /// milliseconds; also the backfill request-coalescing window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_delay_ms: Option<u64>,
+}
+
+impl BatchConfig {
+    /// True when no key is set.
+    pub fn is_empty(&self) -> bool {
+        self.max_changes.is_none() && self.max_delay_ms.is_none()
+    }
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

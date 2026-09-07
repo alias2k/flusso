@@ -547,6 +547,10 @@ field = "docSource"
 [config.indexes.catalog.schema.fields.source.constant]
 String = "catalog"
 
+[config.batch]
+max_changes = 64
+max_delay_ms = 10
+
 [config.server]
 public_address = "0.0.0.0:9464"
 private_address = "127.0.0.1:9465"
