@@ -1,6 +1,6 @@
 # flusso.toml top level
 
-One `flusso.toml` describes a deployment: one source, one stream, any number of sinks, the indexes to build, and two operational knobs. Only `[source]` is required.
+One `flusso.toml` describes a deployment: one source, one stream, any number of sinks, the indexes to build, and a few operational knobs. Only `[source]` is required.
 
 Every port table (`[source]`, `[stream]`, `[sinks.<name>]`) has the same shape: `type` names the adapter, and every other key is that adapter's own option, documented on the adapter's page. Unknown keys are rejected there.
 
@@ -12,6 +12,7 @@ Every port table (`[source]`, `[stream]`, `[sinks.<name>]`) has the same shape: 
 | `[[index]]` | array of tables | none | One entry per index to build. See [Index entries and on_error](index-and-on-error.md). |
 | `on_error` | `"stop"` \| `"skip"` | `"stop"` | Global item-rejection policy; each `[[index]]` may override it. See [on_error](index-and-on-error.md#on_error). |
 | `prefix` | string | `""` | Literal prefix prepended to every index name flusso owns. See [prefix](#prefix). |
+| `[batch]` | table | none | How live changes are grouped into a batch. See [batch](#batch). |
 | `[server]` | table | none | Bind addresses for the two HTTP surfaces. See [server](#server). |
 
 Unknown keys are rejected. Schema paths in `[[index]]` resolve relative to the config file's directory. Loading validates both layers (this file and every referenced `*.schema.yml`) plus every port table against its adapter, and needs no database.
@@ -43,6 +44,17 @@ backfill = false
 - **Runtime overrides win.** `--index-prefix` beats `FLUSSO_INDEX_PREFIX` beats this key. See [CLI](cli.md#run).
 - **Read side must match.** A `flusso-query` client sets the same prefix at runtime. See [Binding to the schema](../query/binding.md#reading-a-prefixed-deployment).
 - **Changing it re-roots everything.** New names mean a full reseed; the old indexes and aliases are left behind and must be deleted by hand.
+
+## batch
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `max_changes` | integer ≥ 1 | `256` | Commit a batch once this many live changes have accumulated. `1` commits per change. |
+| `max_delay_ms` | integer | `50` | The longest a batch stays open after its first change while changes keep arriving, in milliseconds. Also the window a backfill snapshot waits for straggling requests from other sinks, so a reindex fanned to every sink is one pass over the table. |
+
+A batch takes every change the stream has ready and is committed the moment the stream would block, so a lone change on a quiet stream is built at once and never waits for `max_delay_ms`; only a burst, which keeps the stream ready, fills batches to `max_changes`. Fewer changes per batch means more, smaller bulk requests; more means fewer round-trips under load. The defaults suit most deployments — tune only with a measured reason (see [Metrics](metrics.md)).
+
+Precedence is flag (`--batch-max-changes` / `--batch-max-delay-ms`), then `FLUSSO_BATCH_MAX_CHANGES` / `FLUSSO_BATCH_MAX_DELAY_MS`, then this table, then the default. Runtime overrides are never written to the lock. See [CLI](cli.md#run).
 
 ## server
 

@@ -42,6 +42,8 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--admin-password <pw>` | `flusso` | Basic-auth password. A loud warning is logged on every start while it's the default. |
 | `--lag-poll-secs <n>` | `15` | How often to sample slot lag. |
 | `--index-prefix <prefix>` | `prefix` from config, else none | Prefix every owned index name. |
+| `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
+| `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving. |
 
 The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
 
