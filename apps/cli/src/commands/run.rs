@@ -125,6 +125,18 @@ pub(crate) struct RunArgs {
     /// to no prefix. The `flusso-query` consumer must be given the same prefix.
     #[arg(long, env = "FLUSSO_INDEX_PREFIX")]
     index_prefix: Option<String>,
+
+    /// Commit a batch once this many live changes have accumulated. Overrides
+    /// `[batch].max_changes` from config; defaults to 256. A lone change on a
+    /// quiet stream is committed at once regardless.
+    #[arg(long, env = "FLUSSO_BATCH_MAX_CHANGES")]
+    batch_max_changes: Option<usize>,
+
+    /// The longest a batch stays open while changes keep arriving, in
+    /// milliseconds. Overrides `[batch].max_delay_ms` from config; defaults
+    /// to 50.
+    #[arg(long, env = "FLUSSO_BATCH_MAX_DELAY_MS")]
+    batch_max_delay_ms: Option<u64>,
 }
 
 pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
@@ -140,6 +152,12 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
     config::validate_index_prefix(&config.prefix)
         .map_err(|reason| anyhow::anyhow!("invalid index prefix: {reason}"))?;
+    if let Some(max_changes) = args.batch_max_changes {
+        config.batch.max_changes = Some(max_changes);
+    }
+    if let Some(max_delay_ms) = args.batch_max_delay_ms {
+        config.batch.max_delay_ms = Some(max_delay_ms);
+    }
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
     // every entry is validated against its adapter before anything connects.

@@ -960,3 +960,22 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
     assert_eq!(snap.sinks["primary"].changes_committed, 2);
     assert_eq!(snap.phase, Phase::Stopped);
 }
+
+#[test]
+fn batch_policy_lays_the_config_over_the_engine_defaults() {
+    let defaults = engine::BatchPolicy::default();
+    let mut config = backendless_config();
+    assert_eq!(batch_policy(&config).max_changes, defaults.max_changes);
+    assert_eq!(batch_policy(&config).max_delay, defaults.max_delay);
+
+    config.batch.max_changes = Some(64);
+    let policy = batch_policy(&config);
+    assert_eq!(policy.max_changes, 64);
+    assert_eq!(
+        policy.max_delay, defaults.max_delay,
+        "unset keys keep the default"
+    );
+
+    config.batch.max_delay_ms = Some(10);
+    assert_eq!(batch_policy(&config).max_delay, Duration::from_millis(10));
+}

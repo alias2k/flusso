@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use config::Config;
-use engine::{FailurePolicies, FanOut, IngestEngine, SinkEngine};
+use engine::{BatchPolicy, FailurePolicies, FanOut, IngestEngine, SinkEngine};
 use kernel::IndexMapping;
 use source::cdc::{ChangeCapture, Continuity};
 use stream::Stream;
@@ -50,6 +50,19 @@ impl Default for DaemonOptions {
             lag_poll_interval: Duration::from_secs(15),
             max_restart_backoff: Duration::from_secs(60),
         }
+    }
+}
+
+/// The engine's batch policy: the defaults with whatever `[batch]` set laid
+/// over them.
+fn batch_policy(config: &Config) -> BatchPolicy {
+    let defaults = BatchPolicy::default();
+    BatchPolicy {
+        max_changes: config.batch.max_changes.unwrap_or(defaults.max_changes),
+        max_delay: config
+            .batch
+            .max_delay_ms
+            .map_or(defaults.max_delay, Duration::from_millis),
     }
 }
 
@@ -151,6 +164,7 @@ impl Daemon {
             Arc::clone(&stream),
             sink_names.clone(),
         )
+        .with_batch(batch_policy(&config))
         .with_observer(Arc::clone(&observer));
 
         let sink_engines: Vec<SinkEngine> = sinks
