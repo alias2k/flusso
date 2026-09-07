@@ -16,6 +16,7 @@ mod projection;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 
 use kernel::{FailurePolicy, IndexSchema, PortEntry, common};
 use serde::{Deserialize, Serialize};
@@ -99,7 +100,7 @@ pub struct ServerConfig {
 pub struct BatchConfig {
     /// Commit a batch once this many changes have accumulated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_changes: Option<usize>,
+    pub max_changes: Option<NonZeroUsize>,
     /// The cap on how long a batch stays open while changes keep arriving, in
     /// milliseconds; also the backfill request-coalescing window.
     #[serde(default, skip_serializing_if = "Option::is_none")]

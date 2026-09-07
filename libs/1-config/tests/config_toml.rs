@@ -266,7 +266,7 @@ fn batch_section_converts_and_is_optional_and_strict() {
         max_delay_ms = 10
         "#,
     );
-    assert_eq!(config.batch.max_changes, Some(64));
+    assert_eq!(config.batch.max_changes, std::num::NonZeroUsize::new(64));
     assert_eq!(config.batch.max_delay_ms, Some(10));
     let config = convert(
         r#"
@@ -277,8 +277,23 @@ fn batch_section_converts_and_is_optional_and_strict() {
         max_changes = 1
         "#,
     );
-    assert_eq!(config.batch.max_changes, Some(1));
+    assert_eq!(config.batch.max_changes, std::num::NonZeroUsize::new(1));
     assert_eq!(config.batch.max_delay_ms, None);
+    let error = parse(
+        r#"
+        [source]
+        type = "postgres"
+
+        [batch]
+        max_changes = 0
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("max_changes") || error.contains("zero"),
+        "{error}"
+    );
     let error = parse(
         r#"
         [source]

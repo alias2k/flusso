@@ -968,7 +968,7 @@ fn batch_policy_lays_the_config_over_the_engine_defaults() {
     assert_eq!(batch_policy(&config).max_changes, defaults.max_changes);
     assert_eq!(batch_policy(&config).max_delay, defaults.max_delay);
 
-    config.batch.max_changes = Some(64);
+    config.batch.max_changes = std::num::NonZeroUsize::new(64);
     let policy = batch_policy(&config);
     assert_eq!(policy.max_changes, 64);
     assert_eq!(

@@ -429,6 +429,29 @@ async fn a_lone_change_on_a_quiet_stream_commits_without_waiting() {
     assert_eq!(*flushes.lock().unwrap(), vec![(1, true)]);
 }
 
+#[tokio::test(start_paused = true)]
+async fn max_delay_caps_a_batch_while_changes_keep_arriving() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let flushes = Arc::clone(&sink.flushes);
+    let (source, feed) = MockSource::fed();
+    for id in 1..=4 {
+        feed.send(upsert(id)).await.unwrap();
+    }
+    drop(feed);
+    let harness =
+        Harness::new(source, vec![(sink_name("primary"), sink)]).with_batch(BatchPolicy {
+            max_changes: 256,
+            max_delay: Duration::ZERO,
+        });
+    harness.run(Continuity::Resumed).await;
+
+    assert_eq!(
+        flushes.lock().unwrap().len(),
+        4,
+        "an already-expired deadline closes the batch after every change even though more are ready"
+    );
+}
+
 #[tokio::test]
 async fn batches_changes_into_a_single_build_and_flush() {
     let sink = Arc::new(RecordingSink::seeded(true));

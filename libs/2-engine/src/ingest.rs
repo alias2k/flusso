@@ -206,13 +206,13 @@ impl IngestEngine {
     }
 
     /// Buffer every change the live stream has ready *right now*, stopping at
-    /// a full batch or the moment the stream would block. Returns whether the
-    /// stream ended. The caller commits on return either way: a change on a
-    /// quiet stream has nothing to batch with, so waiting out `max_delay`
-    /// would only add latency, while a burst keeps the stream ready and fills
-    /// the batch.
+    /// a full batch, the batch's deadline, or the moment the stream would
+    /// block. Returns whether the stream ended. The caller commits on return
+    /// either way: a change on a quiet stream has nothing to batch with, so
+    /// waiting out `max_delay` would only add latency, while a burst keeps the
+    /// stream ready and fills the batch — for at most `max_delay`.
     async fn drain_ready(&self, live: &mut LiveStream, pending: &mut PendingBatch) -> Result<bool> {
-        while !pending.is_full() {
+        while pending.is_open() {
             match live.next().now_or_never() {
                 None => return Ok(false),
                 Some(None) => return Ok(true),
@@ -519,6 +519,14 @@ impl PendingBatch {
 
     fn is_full(&self) -> bool {
         self.count >= self.capacity
+    }
+
+    /// Still accepting changes: neither full nor past its deadline.
+    fn is_open(&self) -> bool {
+        !self.is_full()
+            && self
+                .deadline
+                .is_none_or(|deadline| Instant::now() < deadline)
     }
 
     fn clear(&mut self) {
