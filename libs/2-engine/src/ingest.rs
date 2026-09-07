@@ -29,11 +29,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::Utc;
-use futures::StreamExt;
 use futures::future::try_join_all;
 use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt};
 use kernel::{Envelope, GenericValue, IndexName, Position, SinkName};
-use source::cdc::{ChangeCapture, ChangeEvent};
+use source::cdc::{ChangeCapture, ChangeEvent, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{SnapshotTable, SourceError};
 use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
@@ -49,6 +49,9 @@ const CONFIRM_TICK: Duration = Duration::from_secs(1);
 
 /// The producing end of every sink's lane, by sink name.
 type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;
+
+/// The source's live change stream.
+type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
 
 /// The ingest engine over one source, one document builder, and one stream.
 #[derive(Debug)]
@@ -132,7 +135,7 @@ impl IngestEngine {
             .map(|scope| (scope.index, scope.root))
             .collect();
 
-        let mut live = self.source.live().await?;
+        let mut live: LiveStream = self.source.live().await?;
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
@@ -158,10 +161,9 @@ impl IngestEngine {
                     Some(Err(error)) => return Err(error.into()),
                     Some(Ok((position, event))) => {
                         self.buffer_live(&mut pending, position, event).await?;
-                        if pending.is_full() {
-                            self.commit_live(&mut pending, &lanes).await?;
-                            self.confirm(&mut last_confirmed);
-                        }
+                        live_ended = self.drain_ready(&mut live, &mut pending).await?;
+                        self.commit_live(&mut pending, &lanes).await?;
+                        self.confirm(&mut last_confirmed);
                     }
                 },
                 () = sleep_until(deadline), if pending.deadline.is_some() => {
@@ -198,6 +200,26 @@ impl IngestEngine {
                 _ = confirm_tick.tick() => self.confirm(&mut last_confirmed),
             }
         }
+    }
+
+    /// Buffer every change the live stream has ready *right now*, stopping at
+    /// a full batch or the moment the stream would block. Returns whether the
+    /// stream ended. The caller commits on return either way: a change on a
+    /// quiet stream has nothing to batch with, so waiting out `max_delay`
+    /// would only add latency, while a burst keeps the stream ready and fills
+    /// the batch.
+    async fn drain_ready(&self, live: &mut LiveStream, pending: &mut PendingBatch) -> Result<bool> {
+        while !pending.is_full() {
+            match live.next().now_or_never() {
+                None => return Ok(false),
+                Some(None) => return Ok(true),
+                Some(Some(Err(error))) => return Err(error.into()),
+                Some(Some(Ok((position, event)))) => {
+                    self.buffer_live(pending, position, event).await?;
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Resolve one live change into the batch: the documents it touches,
