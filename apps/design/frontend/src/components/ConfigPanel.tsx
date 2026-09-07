@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAdapters } from "../model/adapters";
 import { AdapterForm, KindBadge, KindToggle } from "./AdapterForm";
-import { Check, Drawer, Field, PanelTitle, RemoveButton, Select, Text } from "./widgets";
+import { Check, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
 import {
   Dialog,
   DialogContent,
@@ -102,6 +102,24 @@ export function ConfigPanel({
               value={((config.on_error as string) ?? "stop") as "stop" | "skip"}
               options={["stop", "skip"]}
               onChange={(v) => onChange({ ...config, on_error: v })}
+            />
+          </Field>
+        </div>
+        <div className="w-28">
+          <Field label="max_changes">
+            <Num
+              value={config.batch?.max_changes}
+              onChange={(v) => onChange({ ...config, batch: { ...config.batch, max_changes: v } })}
+              placeholder="256"
+            />
+          </Field>
+        </div>
+        <div className="w-28">
+          <Field label="max_delay_ms">
+            <Num
+              value={config.batch?.max_delay_ms}
+              onChange={(v) => onChange({ ...config, batch: { ...config.batch, max_delay_ms: v } })}
+              placeholder="50"
             />
           </Field>
         </div>
