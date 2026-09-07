@@ -54,6 +54,8 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_ADMIN_PASSWORD` | `--admin-password` | `run`, `indexes`, `reindex` |
 | `FLUSSO_LAG_POLL_SECS` | `--lag-poll-secs` | `run` |
 | `FLUSSO_INDEX_PREFIX` | `--index-prefix` | `run` |
+| `FLUSSO_BATCH_MAX_CHANGES` | `--batch-max-changes` | `run` |
+| `FLUSSO_BATCH_MAX_DELAY_MS` | `--batch-max-delay-ms` | `run` |
 | `FLUSSO_SERVER` | `--server` | `indexes`, `reindex` |
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
 | `FLUSSO_FORMAT` | `--format` | `check` |

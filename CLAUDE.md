@@ -378,8 +378,17 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   type. Guards:
   `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's
   `reindex_operation_targets_one_sink`.
-- `BatchPolicy` (default 256 changes / 50ms) controls batch grouping; `max_changes: 1`
-  reproduces flush-per-change. The coalescing wait for further requests is `max_delay`.
+- **A lone change on a quiet stream is committed at once (issue #135).** `BatchPolicy`
+  (default 256 changes / 50 ms; `flusso.toml`'s `[batch]` table `max_changes`/`max_delay_ms`,
+  laid over the defaults by the daemon; `--batch-max-changes`/`--batch-max-delay-ms` +
+  `FLUSSO_BATCH_*` override at run time, never baked into the lock) controls batch grouping:
+  after the live arm buffers a change, `IngestEngine::drain_ready` buffers every change the
+  stream has ready (`now_or_never`) and the engine commits the moment the stream would block or
+  the batch is full, so a burst fills batches while a trickle never waits out `max_delay`. The
+  `sleep_until` deadline arm stays as the cap. `max_changes: 1` reproduces flush-per-change. The
+  coalescing wait for further requests is `max_delay`. Guard:
+  `a_lone_change_on_a_quiet_stream_commits_without_waiting` (a channel-fed `MockSource::fed`
+  whose live stream stays open and pending).
 - **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:
   `Err` is flush-wide (transport down, whole request refused) and stops *that sink engine*,
   which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
