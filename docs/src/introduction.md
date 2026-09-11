@@ -47,4 +47,4 @@ fields:
 
 > ℹ️ **Info** — Every key, flag, environment variable, metric, and endpoint has exactly one home in the **Reference** part. The other parts link there instead of repeating it, so a reference table is never stale relative to a how-to.
 
-The source is on [GitHub](https://github.com/alias2k/flusso); the binary installs with `cargo install flusso-cli` or ships as the `alias2k/flusso` container image.
+The source is on [GitHub](https://github.com/alias2k/flusso); the binary installs with `cargo binstall flusso-cli` (prebuilt) or `cargo install flusso-cli` (from source), or ships as the `alias2k/flusso` container image.

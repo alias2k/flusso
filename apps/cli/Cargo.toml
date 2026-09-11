@@ -15,6 +15,20 @@ readme.workspace = true
 name = "flusso"
 path = "src/main.rs"
 
+# cargo-binstall reads this from the crate as published on crates.io, so it
+# only takes effect for versions released after it lands. It mirrors what
+# dist (dist-workspace.toml + release.yml) uploads onto the `flusso-cli-v*`
+# GitHub Release: `.tar.xz` archives that nest the binary in a
+# `flusso-cli-<target>/` folder, and a flat `.zip` for Windows.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/flusso-cli-v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "txz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
+
 [lints]
 workspace = true
 

@@ -4,8 +4,12 @@ The `flusso` binary: compile a deployment, validate it, run the sync engine, dri
 running server's control surface.
 
 ```sh
-cargo install flusso-cli
+cargo binstall flusso-cli   # prebuilt from the GitHub Release (cargo-binstall; 0.16+)
+cargo install flusso-cli    # or build from source
 ```
+
+Both put a `flusso` binary on your `PATH`. The [GitHub Releases](https://github.com/alias2k/flusso/releases)
+also carry a shell installer and per-platform archives.
 
 flusso keeps OpenSearch in sync with Postgres from declarative config. For the full
 story — the two config files, the pipeline, deploying — see the

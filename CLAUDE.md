@@ -813,7 +813,10 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   own representation at its boundary (`sink::to_json` is the OpenSearch JSON translation,
   where e.g. `bytea`→base64 lives) — core picks no wire format.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
-- **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
+- **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works; `cargo binstall
+  flusso-cli` fetches the dist archive instead via `[package.metadata.binstall]` in `apps/cli/Cargo.toml`,
+  which must keep matching dist's tag/archive/folder naming — binstall reads it from the *published*
+  crate, so it takes effect from the first cli release after it lands, never retroactively), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`
   (`flusso-dev-search-api`), `dev/query-e2e` (`flusso-query-e2e`), and `dev/bench` (`flusso-bench`) —
   all `publish = false` (a runnable example, a live-e2e guard, and the benchmark harness, not shipping code). The

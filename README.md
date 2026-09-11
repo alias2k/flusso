@@ -78,7 +78,8 @@ Everything else lives at **[alias2k.github.io/flusso](https://alias2k.github.io/
 ## Install
 
 ```sh
-cargo install flusso-cli                # the binary
+cargo binstall flusso-cli               # the binary, prebuilt (cargo-binstall; 0.16+)
+cargo install flusso-cli                # the binary, built from source
 docker pull alias2k/flusso:latest       # the image (ghcr.io/alias2k/flusso mirrors it)
 ```
 
