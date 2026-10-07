@@ -31,6 +31,12 @@
 //!   the replication slot that fed it is gone. Either way a restart must refill
 //!   the index rather than trust the marker; the slot case must also drop rows
 //!   that no longer exist at the source, which only a fresh generation can do.
+//! - [`deleted_and_reparented_children_leave_their_old_parent`] — a hard-deleted
+//!   `has_many` child, a child moved to another parent, and a row deleted three
+//!   relations deep (`belongs_to → has_many → has_many`) all rebuild the
+//!   document they used to sit in, traced through the WAL pre-image (issue #140,
+//!   ADR 0007). The child and root tables run under `REPLICA IDENTITY FULL`, so
+//!   the same test proves a `FULL` root keeps its plain `_id`.
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -51,7 +57,8 @@ use std::time::{Duration, Instant};
 use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, IndexName,
-    IndexSchema, Secret, SinkName, SoftDelete, SoftDeleteColumn, TableName,
+    IndexSchema, Join, JoinKind, Relation, Secret, SinkName, SoftDelete, SoftDeleteColumn,
+    TableName,
 };
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
@@ -343,6 +350,155 @@ async fn backfill_indexes_active_rows_and_skips_soft_deleted() {
 /// Seed a `things` index from `rows` (SQL `VALUES` tuples) and stop the engine
 /// cleanly, returning the spec to restart with and the generation index that
 /// served the seed.
+// ─────────────────── test 6: deleted and re-parented children ───────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn deleted_and_reparented_children_leave_their_old_parent() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+
+    for ddl in [
+        "CREATE TABLE parent (id int PRIMARY KEY, name text)",
+        "CREATE TABLE child (id int PRIMARY KEY, parent_id int NOT NULL REFERENCES parent(id), label text)",
+        "CREATE TABLE customers (id int PRIMARY KEY, name text)",
+        "CREATE TABLE orders (id int PRIMARY KEY, name text, customer_id int NOT NULL REFERENCES customers(id))",
+        "CREATE TABLE addresses (id int PRIMARY KEY, customer_id int NOT NULL REFERENCES customers(id), name text)",
+        "CREATE TABLE lines (id int PRIMARY KEY, address_id int NOT NULL REFERENCES addresses(id), label text)",
+        "ALTER TABLE parent REPLICA IDENTITY FULL",
+        "ALTER TABLE child REPLICA IDENTITY FULL",
+        "ALTER TABLE addresses REPLICA IDENTITY FULL",
+        "ALTER TABLE lines REPLICA IDENTITY FULL",
+    ] {
+        create_table(&pg.pool, ddl).await;
+    }
+
+    let mut parents = simple_schema("parent", None);
+    parents.fields.push(join_field(
+        "children",
+        "child",
+        JoinKind::HasMany {
+            foreign_key: column("parent_id"),
+        },
+        vec![column_field("label", "label")],
+    ));
+    let mut orders = simple_schema("orders", None);
+    orders.fields.push(join_field(
+        "customer",
+        "customers",
+        JoinKind::BelongsTo {
+            column: column("customer_id"),
+        },
+        vec![
+            column_field("name", "name"),
+            join_field(
+                "addresses",
+                "addresses",
+                JoinKind::HasMany {
+                    foreign_key: column("customer_id"),
+                },
+                vec![
+                    column_field("name", "name"),
+                    join_field(
+                        "lines",
+                        "lines",
+                        JoinKind::HasMany {
+                            foreign_key: column("address_id"),
+                        },
+                        vec![column_field("label", "label")],
+                    ),
+                ],
+            ),
+        ],
+    ));
+    let spec = SourceSpec::new(BTreeMap::from([
+        (index_name("parent"), parents),
+        (index_name("orders"), orders),
+    ]));
+    let live = start_pipeline(
+        &pg,
+        &os,
+        spec,
+        &[
+            "parent",
+            "child",
+            "customers",
+            "orders",
+            "addresses",
+            "lines",
+        ],
+    )
+    .await;
+    live.await_seeded(2).await;
+
+    let children = |doc: &serde_json::Value| labels(doc.pointer("/children"));
+    let lines = |doc: &serde_json::Value| {
+        let mut out = Vec::new();
+        for address in doc
+            .pointer("/customer/addresses")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            out.extend(labels(address.get("lines")));
+        }
+        out.sort();
+        out
+    };
+
+    // A FULL root keeps a plain `_id`, and the child shows up under its parent.
+    for sql in [
+        "INSERT INTO parent VALUES (1, 'p1'), (3, 'p3')",
+        "INSERT INTO child VALUES (10, 1, 'kept'), (11, 1, 'deleted'), (12, 1, 'moved')",
+    ] {
+        exec(&pg.pool, sql).await;
+    }
+    live.assert_doc_eventually("parent", "1", &children, &["deleted", "kept", "moved"])
+        .await;
+
+    // DELETE a child → its old parent drops it.
+    exec(&pg.pool, "DELETE FROM child WHERE id = 11").await;
+    live.assert_doc_eventually("parent", "1", &children, &["kept", "moved"])
+        .await;
+
+    // Re-parent a child → it leaves the old parent and joins the new one.
+    exec(&pg.pool, "UPDATE child SET parent_id = 3 WHERE id = 12").await;
+    live.assert_doc_eventually("parent", "1", &children, &["kept"])
+        .await;
+    live.assert_doc_eventually("parent", "3", &children, &["moved"])
+        .await;
+
+    // Three relations deep: only the first hop reads the pre-image.
+    for sql in [
+        "INSERT INTO customers VALUES (5, 'c5')",
+        "INSERT INTO orders VALUES (50, 'o50', 5)",
+        "INSERT INTO addresses VALUES (500, 5, 'home')",
+        "INSERT INTO lines VALUES (5000, 500, 'kept'), (5001, 500, 'deleted')",
+    ] {
+        exec(&pg.pool, sql).await;
+    }
+    live.assert_doc_eventually("orders", "50", &lines, &["deleted", "kept"])
+        .await;
+    exec(&pg.pool, "DELETE FROM lines WHERE id = 5001").await;
+    live.assert_doc_eventually("orders", "50", &lines, &["kept"])
+        .await;
+
+    live.shutdown();
+}
+
+/// The sorted `label`s of a nested array, empty when absent.
+fn labels(array: Option<&serde_json::Value>) -> Vec<String> {
+    let mut out: Vec<String> = array
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("label").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    out.sort();
+    out
+}
+
 async fn seed_things_then_stop(pg: &Pg, os: &Os, rows: &str) -> (SourceSpec, String) {
     create_table(
         &pg.pool,
@@ -573,6 +729,48 @@ impl Pipeline {
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
+    }
+
+    /// Poll `{index}/_doc/{id}` until `project` of its `_source` equals
+    /// `expected`; panics with the last observation at the deadline.
+    async fn assert_doc_eventually(
+        &self,
+        index: &str,
+        id: &str,
+        project: &dyn Fn(&serde_json::Value) -> Vec<String>,
+        expected: &[&str],
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            self.fail_if_stopped();
+            let observed = self.fetch_source(index, id).await.map(|doc| project(&doc));
+            if observed.as_deref().is_some_and(|got| got == expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "[{index}/{id}] want {expected:?}, saw {observed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
+    /// Realtime `GET {index}/_doc/{id}`'s `_source`, `None` if absent.
+    async fn fetch_source(&self, index: &str, id: &str) -> Option<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/{index}/_doc/{id}", self.os_url))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: serde_json::Value = resp.json().await.ok()?;
+        if body.get("found").and_then(serde_json::Value::as_bool) != Some(true) {
+            return None;
+        }
+        body.get("_source").cloned()
     }
 
     /// Realtime `GET {index}/_doc/{id}` (reads the translog — no refresh wait).
@@ -864,6 +1062,24 @@ fn simple_schema(table_name: &str, soft_delete: Option<SoftDelete>) -> IndexSche
         soft_delete,
         filters: None,
         fields: vec![column_field("id", "id"), column_field("name", "name")],
+    }
+}
+
+/// A join field `name` over `table` (keyed by `id`), projecting `fields`.
+fn join_field(name: &str, table_name: &str, kind: JoinKind, fields: Vec<Field>) -> Field {
+    Field {
+        field: field(name),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: table(table_name),
+            kind,
+            primary_key: column("id"),
+            nullable: true,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields,
+        })),
     }
 }
 
