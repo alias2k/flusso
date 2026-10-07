@@ -121,7 +121,7 @@ impl WalChangeCapture {
         }
         match self.inspect_pre_image(&self.pre_image_columns).await {
             Ok(report) => {
-                for (gap, remediation) in report.gaps.iter().zip(&report.remediation) {
+                for gap in &report.gaps {
                     let missing = gap
                         .missing
                         .iter()
@@ -131,7 +131,7 @@ impl WalChangeCapture {
                     tracing::warn!(
                         table = %gap.table,
                         missing = %missing,
-                        remediation = %remediation,
+                        remediation = %gap.remediation,
                         "replica identity does not carry the parent link: a deleted or \
                          re-parented row will leave its old parent's document stale; run the \
                          printed SQL",

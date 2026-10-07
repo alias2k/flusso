@@ -138,8 +138,8 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     "gaps": p.gaps.iter().map(|gap| serde_json::json!({
                         "table": gap.table.to_string(),
                         "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                        "remediation": gap.remediation,
                     })).collect::<Vec<_>>(),
-                    "remediation": p.remediation,
                 })),
             });
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;

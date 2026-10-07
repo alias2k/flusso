@@ -60,20 +60,29 @@ pub(crate) struct Relation {
     /// The table's primary-key columns, from the catalog. Empty until looked
     /// up, and for a table without one — then the identity columns key it.
     pub(crate) primary_key: Vec<ColumnName>,
-    /// The columns resolution needs from this table's pre-image (its link to
-    /// a parent). Empty when no index embeds it as a child.
-    pub(crate) pre_image_links: Vec<ColumnName>,
-    /// Whether a change missing those columns has already been warned about.
-    pub(crate) warned_untraceable: bool,
 }
 
 impl Relation {
+    /// Whether `column` keys a change. The primary key does, as long as the
+    /// replica identity carries all of it — an old tuple holds only identity
+    /// columns, and a key read from absent cells would be all nulls. Otherwise
+    /// (no primary key, or `USING INDEX` on an index that leaves it out) the
+    /// identity columns key it, for old and new tuples alike.
     fn is_key(&self, column: &Column) -> bool {
-        if self.primary_key.is_empty() {
-            column.is_key
-        } else {
+        if self.primary_key_is_carried() {
             self.primary_key.contains(&column.name)
+        } else {
+            column.is_key
         }
+    }
+
+    fn primary_key_is_carried(&self) -> bool {
+        !self.primary_key.is_empty()
+            && self.primary_key.iter().all(|pk| {
+                self.columns
+                    .iter()
+                    .any(|column| column.is_key && column.name == *pk)
+            })
     }
 }
 
@@ -298,8 +307,6 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
         table,
         columns,
         primary_key: Vec::new(),
-        pre_image_links: Vec::new(),
-        warned_untraceable: false,
     }))
 }
 

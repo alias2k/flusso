@@ -20,6 +20,8 @@ use kernel::ColumnName;
 use source::{PreImageColumns, PreImageGap, PreImageReport, Result, SourceError};
 use sqlx::{PgPool, Row};
 
+use super::quote_ident;
+
 /// The identity setting and the columns it puts in an old tuple (for `d`, the
 /// primary key; for `i`, the identity index). `None` when the table is absent.
 const IDENTITY_SQL: &str = "SELECT c.relreplident::text AS identity, \
@@ -50,33 +52,57 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
         let carried: Vec<String> = row
             .try_get("columns")
             .map_err(|e| SourceError::Query(e.to_string()))?;
-        let missing = uncarried(&identity, &carried, columns);
+        let missing = uncarried(ReplicaIdentity::from_code(&identity), &carried, columns);
         if !missing.is_empty() {
-            report
-                .remediation
-                .push(alter_sql(table.schema.as_ref(), table.table.as_ref()));
             report.gaps.push(PreImageGap {
                 table: table.clone(),
                 missing,
+                remediation: alter_sql(table.schema.as_ref(), table.table.as_ref()),
             });
         }
     }
     Ok(report)
 }
 
+/// A table's `pg_class.relreplident`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplicaIdentity {
+    /// `d`: the primary key.
+    Default,
+    /// `i`: the columns of the identity index.
+    Index,
+    /// `f`: every column.
+    Full,
+    /// `n`, or a code this version doesn't know: nothing.
+    Nothing,
+}
+
+impl ReplicaIdentity {
+    pub(crate) fn from_code(code: &str) -> Self {
+        match code {
+            "d" => Self::Default,
+            "i" => Self::Index,
+            "f" => Self::Full,
+            _ => Self::Nothing,
+        }
+    }
+}
+
 /// The `required` columns an old tuple under `identity` (with the identity's
 /// own `carried` columns) does not hold.
 pub(crate) fn uncarried(
-    identity: &str,
+    identity: ReplicaIdentity,
     carried: &[String],
     required: &[ColumnName],
 ) -> Vec<ColumnName> {
     required
         .iter()
         .filter(|column| match identity {
-            "f" => false,
-            "d" | "i" => !carried.iter().any(|name| name == column.as_ref()),
-            _ => true,
+            ReplicaIdentity::Full => false,
+            ReplicaIdentity::Default | ReplicaIdentity::Index => {
+                !carried.iter().any(|name| name == column.as_ref())
+            }
+            ReplicaIdentity::Nothing => true,
         })
         .cloned()
         .collect()
@@ -89,10 +115,6 @@ pub(crate) fn alter_sql(schema: &str, table: &str) -> String {
         quote_ident(schema),
         quote_ident(table)
     )
-}
-
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 #[cfg(test)]

@@ -62,14 +62,11 @@ pub struct CoverageReport {
 /// pre-image columns of every table that needs them.
 ///
 /// A gap means a delete or re-parent of that table's rows leaves the old
-/// parent's document stale. `remediation` is opaque, meant to be shown
-/// verbatim (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`).
+/// parent's document stale.
 #[derive(Debug, Clone, Default)]
 pub struct PreImageReport {
     /// Tables whose pre-image misses a required column.
     pub gaps: Vec<PreImageGap>,
-    /// Backend-specific steps that would close every gap. Empty when none.
-    pub remediation: Vec<String>,
 }
 
 impl PreImageReport {
@@ -82,9 +79,13 @@ impl PreImageReport {
 /// One table whose pre-image misses columns resolution needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreImageGap {
+    /// The table whose pre-image falls short.
     pub table: QualifiedTable,
     /// The required columns the pre-image does not carry.
     pub missing: Vec<ColumnName>,
+    /// The backend-specific step that closes this gap — opaque, shown verbatim
+    /// (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`). Never applied.
+    pub remediation: String,
 }
 
 /// A source's ability to report and provision the prerequisites for streaming a

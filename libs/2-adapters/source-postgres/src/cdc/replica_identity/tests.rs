@@ -13,13 +13,17 @@ fn carried(names: &[&str]) -> Vec<String> {
 
 #[test]
 fn full_identity_carries_every_column() {
-    assert!(uncarried("f", &[], &columns(&["parent_id"])).is_empty());
+    assert!(uncarried(ReplicaIdentity::Full, &[], &columns(&["parent_id"])).is_empty());
 }
 
 #[test]
 fn default_identity_carries_only_the_primary_key() {
     assert_eq!(
-        uncarried("d", &carried(&["id"]), &columns(&["parent_id"])),
+        uncarried(
+            ReplicaIdentity::Default,
+            &carried(&["id"]),
+            &columns(&["parent_id"])
+        ),
         columns(&["parent_id"])
     );
 }
@@ -28,7 +32,7 @@ fn default_identity_carries_only_the_primary_key() {
 fn a_composite_primary_key_holding_the_link_needs_nothing() {
     assert!(
         uncarried(
-            "d",
+            ReplicaIdentity::Default,
             &carried(&["user_id", "tag_id"]),
             &columns(&["user_id"])
         )
@@ -40,7 +44,7 @@ fn a_composite_primary_key_holding_the_link_needs_nothing() {
 fn an_identity_index_covering_the_link_is_enough() {
     assert!(
         uncarried(
-            "i",
+            ReplicaIdentity::Index,
             &carried(&["id", "parent_id"]),
             &columns(&["parent_id"])
         )
@@ -51,7 +55,7 @@ fn an_identity_index_covering_the_link_is_enough() {
 #[test]
 fn nothing_identity_carries_nothing() {
     assert_eq!(
-        uncarried("n", &[], &columns(&["parent_id"])),
+        uncarried(ReplicaIdentity::Nothing, &[], &columns(&["parent_id"])),
         columns(&["parent_id"])
     );
 }

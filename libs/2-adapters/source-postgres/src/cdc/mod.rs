@@ -32,6 +32,11 @@ mod stream;
 
 pub use capture::WalChangeCapture;
 
+/// Double-quote an SQL identifier, escaping embedded quotes.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
 /// Run the pgoutput decoder over arbitrary bytes, discarding the result.
 ///
 /// The decoder must never panic on malformed input (an `Err` is the correct

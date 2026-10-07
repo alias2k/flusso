@@ -41,6 +41,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres};
 
+use super::quote_ident;
 use crate::document::value;
 
 /// Name of the single server-side cursor reused across tables. The snapshot owns
@@ -321,11 +322,6 @@ async fn commit(conn: &mut PoolConnection<Postgres>) -> Result<()> {
         .await
         .map_err(query_err)?;
     Ok(())
-}
-
-/// Double-quote an SQL identifier, escaping embedded quotes.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 fn query_err(error: sqlx::Error) -> SourceError {

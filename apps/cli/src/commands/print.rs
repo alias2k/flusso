@@ -186,8 +186,8 @@ pub(crate) fn pre_image(out: &mut impl Write, pen: Pen, report: &PreImageReport)
     )?;
 
     section(out, pen, "Run to trace deleted and re-parented rows")?;
-    for sql in &report.remediation {
-        writeln!(out, "  {sql}")?;
+    for gap in &report.gaps {
+        writeln!(out, "  {}", gap.remediation)?;
     }
     Ok(())
 }

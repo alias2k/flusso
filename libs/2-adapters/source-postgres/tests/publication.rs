@@ -205,17 +205,16 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
 
     let gaps: Vec<String> = report.gaps.iter().map(|g| g.table.to_string()).collect();
     assert_eq!(gaps, ["public.by_default"]);
+    let remediation = report.gaps.first().unwrap().remediation.clone();
     assert_eq!(
-        report.remediation,
-        ["ALTER TABLE \"public\".\"by_default\" REPLICA IDENTITY FULL;"]
+        remediation,
+        "ALTER TABLE \"public\".\"by_default\" REPLICA IDENTITY FULL;"
     );
 
-    sqlx::query(sqlx::AssertSqlSafe(
-        report.remediation.first().unwrap().clone(),
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(remediation))
+        .execute(&pool)
+        .await
+        .unwrap();
     let fixed = cap
         .inspect_pre_image(&links(&[("by_default", "user_id")]))
         .await

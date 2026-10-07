@@ -20,5 +20,5 @@ The fix: a change carries the source's **pre-image** (the old row, as far as the
 
 - `ChangeEvent` gains `before: Option<RowImage>`; `DocumentBuilder::resolve` takes it. Documents are still built from the current row only.
 - A change's key is the table's catalog primary key, not the replica-identity columns: under `FULL` every column is an identity column, which would have turned a document id into every column joined by `:`.
-- `CoverageReport` grows a pre-image gap list beside the publication gap; it is reported, never provisioned.
+- `CaptureProvisioning` gains a read-only `inspect_pre_image` returning a `PreImageReport` (each gap with its own remediation) beside the publication's `CoverageReport`; it is reported, never provisioned.
 - Without the replica identity, a child delete or re-parent is still missed, but no longer silently.

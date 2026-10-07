@@ -1,6 +1,8 @@
 use kernel::{GenericValue, TableName};
 use source::RowKey;
 
+use std::collections::HashSet;
+
 use super::*;
 
 fn state() -> (DecodeState, Arc<Positions>) {
@@ -9,6 +11,8 @@ fn state() -> (DecodeState, Arc<Positions>) {
         relations: HashMap::new(),
         unkeyed: Vec::new(),
         pre_image_links: Default::default(),
+        untraceable: HashMap::new(),
+        warned: HashSet::new(),
         open_txn: Vec::new(),
         pending: VecDeque::new(),
         ack: Arc::clone(&ack),
@@ -106,16 +110,17 @@ fn non_empty_commit_queues_changes_without_advancing() {
     );
 }
 
-/// A pgoutput `Relation` for `public.child(id PK int4, parent_id int4)` under
-/// `REPLICA IDENTITY FULL` — both columns flagged.
-fn full_child_relation() -> Vec<u8> {
+/// A pgoutput `Relation` for `public.child(id PK int4, parent_id int4)`:
+/// under `REPLICA IDENTITY FULL` both columns are flagged, under `DEFAULT`
+/// only `id`.
+fn child_relation(identity: u8) -> Vec<u8> {
     let mut m = vec![b'R'];
     m.extend_from_slice(&16385u32.to_be_bytes());
     m.extend_from_slice(b"public\0child\0");
-    m.push(b'f');
+    m.push(identity);
     m.extend_from_slice(&2i16.to_be_bytes());
     for name in ["id", "parent_id"] {
-        m.push(1);
+        m.push(u8::from(name == "id" || identity == b'f'));
         m.extend_from_slice(name.as_bytes());
         m.push(0);
         m.extend_from_slice(&23u32.to_be_bytes());
@@ -131,9 +136,10 @@ fn text(value: &str) -> Vec<u8> {
     c
 }
 
-/// Announce the child relation and key it by `id`, as the stream loop does.
-fn announce_child(decode: &mut DecodeState) {
-    handle_xlog(decode, &full_child_relation()).unwrap();
+/// Announce the child relation under `identity` and key it by `id`, as the
+/// stream loop does.
+fn announce_child(decode: &mut DecodeState, identity: u8) {
+    handle_xlog(decode, &child_relation(identity)).unwrap();
     assert_eq!(decode.unkeyed, vec![16385]);
     decode.unkeyed.clear();
     decode.relations.get_mut(&16385).unwrap().primary_key =
@@ -147,7 +153,7 @@ fn column(name: &str) -> kernel::ColumnName {
 #[test]
 fn a_full_identity_delete_is_keyed_by_id_and_carries_the_old_parent() {
     let (mut decode, _) = state();
-    announce_child(&mut decode);
+    announce_child(&mut decode, b'f');
 
     let mut delete = vec![b'D'];
     delete.extend_from_slice(&16385u32.to_be_bytes());
@@ -170,7 +176,7 @@ fn a_full_identity_delete_is_keyed_by_id_and_carries_the_old_parent() {
 #[test]
 fn a_full_identity_reparent_is_one_upsert_carrying_the_old_parent() {
     let (mut decode, _) = state();
-    announce_child(&mut decode);
+    announce_child(&mut decode, b'f');
 
     let mut update = vec![b'U'];
     update.extend_from_slice(&16385u32.to_be_bytes());
@@ -194,19 +200,6 @@ fn a_full_identity_reparent_is_one_upsert_carrying_the_old_parent() {
     );
 }
 
-fn delete_child(decode: &mut DecodeState, marker: u8, parent: Option<&str>) {
-    let mut delete = vec![b'D'];
-    delete.extend_from_slice(&16385u32.to_be_bytes());
-    delete.push(marker);
-    delete.extend_from_slice(&2i16.to_be_bytes());
-    delete.extend(text("7"));
-    match parent {
-        Some(parent) => delete.extend(text(parent)),
-        None => delete.push(b'n'),
-    }
-    handle_xlog(decode, &delete).unwrap();
-}
-
 fn needs_parent_link(decode: &mut DecodeState) {
     decode.pre_image_links.insert(
         source::QualifiedTable::new(
@@ -217,32 +210,76 @@ fn needs_parent_link(decode: &mut DecodeState) {
     );
 }
 
-#[test]
-fn a_delete_carrying_the_parent_link_is_traceable() {
-    let (mut decode, _) = state();
-    needs_parent_link(&mut decode);
-    announce_child(&mut decode);
-    delete_child(&mut decode, b'O', Some("1"));
-    assert!(!decode.relations[&16385].warned_untraceable);
+fn delete_child(decode: &mut DecodeState) {
+    let mut delete = vec![b'D'];
+    delete.extend_from_slice(&16385u32.to_be_bytes());
+    delete.push(b'K');
+    delete.extend_from_slice(&2i16.to_be_bytes());
+    delete.extend(text("7"));
+    delete.push(b'n');
+    handle_xlog(decode, &delete).unwrap();
 }
 
 #[test]
-fn a_delete_without_the_parent_link_is_flagged_once() {
+fn an_identity_carrying_the_parent_link_is_traceable() {
     let (mut decode, _) = state();
     needs_parent_link(&mut decode);
-    announce_child(&mut decode);
-    // The identity no longer carries `parent_id`: a key-only old tuple.
-    decode
-        .relations
-        .get_mut(&16385)
-        .unwrap()
-        .columns
-        .iter_mut()
-        .for_each(|c| c.is_key = c.name.as_ref() == "id");
-    delete_child(&mut decode, b'K', None);
-    assert!(decode.relations[&16385].warned_untraceable);
+    announce_child(&mut decode, b'f');
+    assert!(decode.untraceable.is_empty());
+}
+
+#[test]
+fn a_change_on_an_identity_missing_the_parent_link_is_flagged_once() {
+    let (mut decode, _) = state();
+    needs_parent_link(&mut decode);
+    announce_child(&mut decode, b'd');
+    assert_eq!(decode.untraceable[&16385], vec![column("parent_id")]);
+
+    delete_child(&mut decode);
+    delete_child(&mut decode);
+    assert_eq!(decode.warned, HashSet::from([16385]));
     assert!(matches!(
         decode.open_txn.as_slice(),
-        [ChangeEvent::Delete { before: None, .. }]
+        [
+            ChangeEvent::Delete { before: None, .. },
+            ChangeEvent::Delete { before: None, .. }
+        ]
     ));
+}
+
+#[test]
+fn an_identity_index_without_the_primary_key_keys_by_its_own_columns() {
+    let (mut decode, _) = state();
+    // `USING INDEX` on `parent_id` alone: the old tuple carries no `id`.
+    handle_xlog(&mut decode, &child_relation(b'i')).unwrap();
+    let relation = decode.relations.get_mut(&16385).unwrap();
+    relation.primary_key = vec![column("id")];
+    relation
+        .columns
+        .iter_mut()
+        .for_each(|c| c.is_key = c.name.as_ref() == "parent_id");
+
+    let mut update = vec![b'U'];
+    update.extend_from_slice(&16385u32.to_be_bytes());
+    update.push(b'K');
+    update.extend_from_slice(&2i16.to_be_bytes());
+    update.push(b'n');
+    update.extend(text("1"));
+    update.push(b'N');
+    update.extend_from_slice(&2i16.to_be_bytes());
+    update.extend(text("7"));
+    update.extend(text("3"));
+    handle_xlog(&mut decode, &update).unwrap();
+
+    // The parent link changed, but both keys come from the identity columns:
+    // no delete keyed by a null `id`.
+    assert!(
+        decode.open_txn.iter().all(|change| change
+            .key()
+            .0
+            .iter()
+            .all(|(_, v)| *v != GenericValue::Null)),
+        "{:?}",
+        decode.open_txn
+    );
 }

@@ -19,17 +19,12 @@
 use std::collections::{BTreeSet, HashSet};
 
 use source::{CoverageReport, QualifiedTable, Result, SourceError};
+
+use super::quote_ident;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 
 fn query_err(e: sqlx::Error) -> SourceError {
     SourceError::Query(e.to_string())
-}
-
-/// Quote a SQL identifier (double-quote, doubling any embedded quote). The
-/// identifiers here are `nutype`-validated (lowercase `[a-z0-9_]`), so this is
-/// belt-and-braces, but it keeps the generated DDL unambiguous.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 /// `"schema"."table"` — a qualified table reference for a `FOR TABLE` list.
