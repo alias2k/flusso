@@ -16,7 +16,7 @@ use config::{Config, IndexMapping, ResolvedField, SoftDelete};
 use kernel::{OptionValue, Port, PortEntry};
 
 use crate::adapters;
-use source::{CoverageReport, Diagnostic, Severity};
+use source::{CoverageReport, Diagnostic, PreImageReport, Severity};
 
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
 /// threaded by value through the render functions.
@@ -142,6 +142,52 @@ pub(crate) fn coverage(
         for sql in &report.remediation {
             writeln!(out, "  {sql}")?;
         }
+    }
+    Ok(())
+}
+
+/// Report whether every child table's replica identity carries its parent
+/// link, so a delete or re-parent rebuilds the old parent's document. A gap is
+/// printed with its SQL; flusso never runs it.
+pub(crate) fn pre_image(out: &mut impl Write, pen: Pen, report: &PreImageReport) -> Result<()> {
+    section(out, pen, "Replica identity")?;
+
+    if report.satisfied() {
+        writeln!(
+            out,
+            "  {} every child table's changes carry the link to their parent",
+            pen.green("✓"),
+        )?;
+        return Ok(());
+    }
+
+    writeln!(
+        out,
+        "  {} {} table(s) don't log their parent link on delete or update:",
+        pen.yellow("!"),
+        report.gaps.len(),
+    )?;
+    for gap in &report.gaps {
+        let missing = gap
+            .missing
+            .iter()
+            .map(|column| column.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(out, "    {} {} ({})", pen.dim("•"), gap.table, missing)?;
+    }
+    writeln!(
+        out,
+        "  {}",
+        pen.yellow(
+            "→ deleting or re-parenting their rows leaves the old parent's document stale; \
+             flusso will NOT change this automatically",
+        ),
+    )?;
+
+    section(out, pen, "Run to trace deleted and re-parented rows")?;
+    for sql in &report.remediation {
+        writeln!(out, "  {sql}")?;
     }
     Ok(())
 }

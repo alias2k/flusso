@@ -88,17 +88,20 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         )
     };
 
-    let coverage = if args.offline {
-        None
+    let (coverage, pre_image) = if args.offline {
+        (None, None)
     } else {
         let provisioning = crate::backends::build_provisioning(&config, &postgres.publication)?;
-        let required = source_spec(&config).all_tables();
-        Some(
-            provisioning
-                .inspect_coverage(&required)
-                .await
-                .context("inspecting publication coverage")?,
-        )
+        let spec = source_spec(&config);
+        let coverage = provisioning
+            .inspect_coverage(&spec.all_tables())
+            .await
+            .context("inspecting publication coverage")?;
+        let pre_image = provisioning
+            .inspect_pre_image(&spec.pre_image_columns())
+            .await
+            .context("inspecting replica identities")?;
+        (Some(coverage), Some(pre_image))
     };
     let manage = postgres.manage_publication;
 
@@ -130,6 +133,14 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     "blockers": c.blockers,
                     "remediation": c.remediation,
                 })),
+                "pre_image": pre_image.as_ref().map(|p| serde_json::json!({
+                    "satisfied": p.satisfied(),
+                    "gaps": p.gaps.iter().map(|gap| serde_json::json!({
+                        "table": gap.table.to_string(),
+                        "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                    "remediation": p.remediation,
+                })),
             });
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         }
@@ -155,6 +166,9 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     print::diagnostics(&mut out, pen, diagnostics)?;
                     if let Some(coverage) = &coverage {
                         print::coverage(&mut out, pen, coverage, manage)?;
+                    }
+                    if let Some(pre_image) = &pre_image {
+                        print::pre_image(&mut out, pen, pre_image)?;
                     }
                     writeln!(out)?;
                     if has_errors {
