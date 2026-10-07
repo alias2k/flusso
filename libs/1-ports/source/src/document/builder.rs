@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kernel::{GenericValue, IndexMapping, IndexName, TableName};
 
-use crate::{Result, RowKey, SnapshotTable};
+use crate::{Result, RowImage, RowKey, SnapshotTable};
 
 /// Addresses one document in a target index: which index, and the root row's
 /// key within it. The same source row can map to documents in several indexes,
@@ -59,14 +59,23 @@ pub struct IndexScope {
 /// document is often touched by several changes in one transaction), and builds
 /// each unique id once.
 ///
-/// Note that `resolve` takes the table and key as plain values rather than a
-/// capture event: document construction is independent of how the change was
+/// Note that `resolve` takes the table, key, and pre-image as plain values
+/// rather than a capture event: document construction is independent of how the change was
 /// captured.
 #[async_trait]
 pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
     /// The documents the changed row affects. Empty if it touches nothing any
     /// index cares about.
-    async fn resolve(&self, table: &TableName, key: &RowKey) -> Result<Vec<DocumentId>>;
+    ///
+    /// `before` is the row's pre-image, when the change carried one: resolve
+    /// must also return the documents that embedded the row's old version, so
+    /// a deleted or re-parented child leaves its old parent.
+    async fn resolve(
+        &self,
+        table: &TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+    ) -> Result<Vec<DocumentId>>;
 
     /// Assemble one document, or report it deleted if its root row is absent.
     async fn build(&self, id: &DocumentId) -> Result<Document>;

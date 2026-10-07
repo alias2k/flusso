@@ -267,7 +267,11 @@ impl Backfill {
 /// A snapshot row as an [`Upsert`](ChangeEvent::Upsert). Snapshot rows carry no
 /// position: the snapshot is not resumable, a crashed one simply re-runs.
 fn upsert_change(table: TableName, key: RowKey) -> ChangeEvent {
-    ChangeEvent::Upsert { table, key }
+    ChangeEvent::Upsert {
+        table,
+        key,
+        before: None,
+    }
 }
 
 /// Open the read-only, single-snapshot transaction the cursors read within.

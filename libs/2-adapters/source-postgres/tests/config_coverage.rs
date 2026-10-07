@@ -752,34 +752,43 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
 
     // Root table: the key is the document id.
     assert_eq!(
-        builder.resolve(&table("users"), &key(1)).await.unwrap(),
+        builder
+            .resolve(&table("users"), &key(1), None)
+            .await
+            .unwrap(),
         vec![doc(1)],
     );
 
     // Direct FK: an order change resolves to its owning user.
     assert_eq!(
-        builder.resolve(&table("orders"), &key(10)).await.unwrap(),
+        builder
+            .resolve(&table("orders"), &key(10), None)
+            .await
+            .unwrap(),
         vec![doc(1)],
     );
 
     // One-to-one direct FK: a profile change resolves to its user.
     assert_eq!(
         builder
-            .resolve(&table("profiles"), &row_key("id", 100))
+            .resolve(&table("profiles"), &row_key("id", 100), None)
             .await
             .unwrap(),
         vec![doc(1)],
     );
 
     // Through, far side: tag 1 is held by users 1 and 2.
-    let mut roots = builder.resolve(&table("tags"), &key(1)).await.unwrap();
+    let mut roots = builder
+        .resolve(&table("tags"), &key(1), None)
+        .await
+        .unwrap();
     roots.sort_by_key(id_of);
     assert_eq!(roots, vec![doc(1), doc(2)]);
 
     // Through, junction side: a user_tags row carrying user_id resolves directly.
     assert_eq!(
         builder
-            .resolve(&table("user_tags"), &row_key("user_id", 1))
+            .resolve(&table("user_tags"), &row_key("user_id", 1), None)
             .await
             .unwrap(),
         vec![doc(1)],
@@ -788,7 +797,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // Multi-hop: an item change walks order_items → orders → users.
     assert_eq!(
         builder
-            .resolve(&table("order_items"), &key(1002))
+            .resolve(&table("order_items"), &key(1002), None)
             .await
             .unwrap(),
         vec![doc(1)],
@@ -797,7 +806,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // A table the schema never references resolves to nothing.
     assert!(
         builder
-            .resolve(&table("tags"), &key(999))
+            .resolve(&table("tags"), &key(999), None)
             .await
             .unwrap()
             .is_empty()
@@ -874,14 +883,20 @@ async fn belongs_to_assembles_and_reverse_resolves() {
 
     // Reverse: a user change re-emits every order pointing at it — found on
     // the parent table itself (`WHERE user_id = 1`).
-    let mut roots = builder.resolve(&table("users"), &key(1)).await.unwrap();
+    let mut roots = builder
+        .resolve(&table("users"), &key(1), None)
+        .await
+        .unwrap();
     roots.sort_by_key(id_of);
     assert_eq!(roots, vec![doc(10), doc(11), doc(12)]);
 
     // Reverse, deleted/absent target: the referrers are alive and still
     // resolve — they rebuild with a null object instead of going stale.
     assert_eq!(
-        builder.resolve(&table("users"), &key(999)).await.unwrap(),
+        builder
+            .resolve(&table("users"), &key(999), None)
+            .await
+            .unwrap(),
         vec![doc(30)],
     );
 }

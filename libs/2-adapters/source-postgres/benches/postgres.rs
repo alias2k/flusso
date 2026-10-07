@@ -117,7 +117,7 @@ fn bench(c: &mut Criterion) {
     rt.block_on(async {
         builder.build(&document_id(4)).await.unwrap();
         builder
-            .resolve(&table("orders"), &row_key(4000))
+            .resolve(&table("orders"), &row_key(4000), None)
             .await
             .unwrap();
     });
@@ -138,7 +138,10 @@ fn bench(c: &mut Criterion) {
     group.bench_function("resolve_unrelated", |b| {
         let key = row_key(1);
         b.to_async(&rt).iter(|| async {
-            builder.resolve(&table("products"), &key).await.unwrap();
+            builder
+                .resolve(&table("products"), &key, None)
+                .await
+                .unwrap();
         });
     });
     group.finish();
@@ -163,13 +166,13 @@ fn bench(c: &mut Criterion) {
     group.bench_function("root_table", |b| {
         let key = row_key(4);
         b.to_async(&rt).iter(|| async {
-            builder.resolve(&table("users"), &key).await.unwrap();
+            builder.resolve(&table("users"), &key, None).await.unwrap();
         });
     });
     group.bench_function("related_table", |b| {
         let key = row_key(4000);
         b.to_async(&rt).iter(|| async {
-            builder.resolve(&table("orders"), &key).await.unwrap();
+            builder.resolve(&table("orders"), &key, None).await.unwrap();
         });
     });
     group.finish();

@@ -16,7 +16,7 @@ use kernel::{
 use sink::{FlushReport, Sink, SinkError, SinkOptions};
 use source::cdc::{ChangeEvent, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowKey, SnapshotTable};
+use source::{RowImage, RowKey, SnapshotTable};
 use stream_channel::ChannelStream;
 use tokio::sync::{Notify, oneshot};
 
@@ -436,7 +436,12 @@ struct ScriptedDocuments;
 
 #[async_trait]
 impl DocumentBuilder for ScriptedDocuments {
-    async fn resolve(&self, _table: &TableName, key: &RowKey) -> source::Result<Vec<DocumentId>> {
+    async fn resolve(
+        &self,
+        _table: &TableName,
+        key: &RowKey,
+        _before: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: users(),
             key: key.clone(),
@@ -546,9 +551,17 @@ fn row_event(delete: bool, id: i64) -> ChangeEvent {
         GenericValue::BigInt(id),
     )]);
     if delete {
-        ChangeEvent::Delete { table, key }
+        ChangeEvent::Delete {
+            table,
+            key,
+            before: None,
+        }
     } else {
-        ChangeEvent::Upsert { table, key }
+        ChangeEvent::Upsert {
+            table,
+            key,
+            before: None,
+        }
     }
 }
 

@@ -234,7 +234,10 @@ impl IngestEngine {
         event: ChangeEvent,
     ) -> Result<()> {
         self.observer.on_change_captured();
-        let affected = self.documents.resolve(event.table(), event.key()).await?;
+        let affected = self
+            .documents
+            .resolve(event.table(), event.key(), event.before())
+            .await?;
         tracing::trace!(documents = affected.len(), "change resolved to documents");
         pending.add(affected);
         pending.position = Some(position);
@@ -414,7 +417,10 @@ impl IngestEngine {
     }
 
     async fn buffer_snapshot(&self, snapshot: &mut Snapshot, event: ChangeEvent) -> Result<()> {
-        let affected = self.documents.resolve(event.table(), event.key()).await?;
+        let affected = self
+            .documents
+            .resolve(event.table(), event.key(), event.before())
+            .await?;
         let requested = affected
             .into_iter()
             .filter(|id| snapshot.indexes.contains(&id.index));

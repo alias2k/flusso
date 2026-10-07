@@ -35,6 +35,7 @@ fn upsert() -> ChangeEvent {
     ChangeEvent::Upsert {
         table: TableName::try_new("users").unwrap(),
         key: RowKey(Vec::new()),
+        before: None,
     }
 }
 

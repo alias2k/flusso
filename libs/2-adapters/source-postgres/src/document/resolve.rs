@@ -1,24 +1,35 @@
 //! Reverse resolution: given a changed row, find the keys of the root documents
 //! it affects by walking relation paths back up to the root.
+//!
+//! Every hop reads the **current** database, except one input to the first: when
+//! the changed row itself holds the link to its parent (a `has_one`/`has_many`
+//! child's `foreign_key`, a junction's `left_key`), the parent is also read from
+//! the change's pre-image. That is how a deleted child — whose row is gone — and
+//! a re-parented one — whose row names the new parent — still rebuild the
+//! document they used to sit in. Without a pre-image (a table whose replica
+//! identity doesn't carry the link column) only the current parent is found.
 
 use std::collections::{HashMap, HashSet};
 
 use kernel::{
     ColumnName, DatabaseSchema, GenericValue, IndexSchema, Relation, RelationKey, TableName,
 };
-use source::{Result, RowKey, SourceError};
+use source::{Result, RowImage, RowKey, SourceError};
 
 use super::fields::relation_target;
 use super::{PgDocumentBuilder, query, query_err, value};
 
 impl PgDocumentBuilder {
     /// Resolve one path (root → … → changed table) back to root key values, by
-    /// walking the relations from the changed table up to the root.
+    /// walking the relations from the changed table up to the root. `before`
+    /// feeds only the first hop: rows further up are matched by their current
+    /// state.
     pub(super) async fn resolve_path(
         &self,
         schema: &IndexSchema,
         changed_table: &TableName,
         change_key: &RowKey,
+        before: Option<&RowImage>,
         path: &[&Relation],
     ) -> Result<Vec<GenericValue>> {
         let mut current_keys = vec![change_key.clone()];
@@ -48,6 +59,9 @@ impl PgDocumentBuilder {
                     .await?
             };
 
+            let old_link = before
+                .filter(|_| depth + 1 == path.len())
+                .zip(link_on_row(relation, &current_table));
             let mut next = Vec::new();
             let mut seen = HashSet::new();
             for key in &current_keys {
@@ -60,7 +74,11 @@ impl PgDocumentBuilder {
                         &parent_pk,
                         key,
                     )
-                    .await?
+                    .await
+                    .map(|parents| match old_link {
+                        Some((image, link)) => with_old_parent(parents, image, link),
+                        None => parents,
+                    })?
                 {
                     if seen.insert(value.clone()) {
                         next.push(RowKey(vec![(parent_pk.clone(), value)]));
@@ -139,7 +157,8 @@ impl PgDocumentBuilder {
     }
 
     /// Direct foreign key: the child row holds the parent key in `foreign_key`.
-    /// A child *delete* finds nothing — its row is already gone.
+    /// A child *delete* finds nothing here — its row is already gone; the old
+    /// parent comes from the pre-image instead (see [`with_old_parent`]).
     async fn reverse_direct(
         &self,
         schema: &DatabaseSchema,
@@ -235,6 +254,33 @@ impl PgDocumentBuilder {
     }
 }
 
+/// The column on `row_table` that names its parent across `relation`, when the
+/// link lives on that row: a direct child's `foreign_key`, or a junction's
+/// `left_key` when the junction itself changed.
+fn link_on_row<'a>(relation: &'a Relation, row_table: &TableName) -> Option<&'a ColumnName> {
+    match relation_target(relation).1 {
+        RelationKey::Direct(foreign_key) => Some(foreign_key),
+        RelationKey::Through(through) if *row_table == through.table => Some(&through.left_key),
+        RelationKey::Through(_) | RelationKey::Local(_) => None,
+    }
+}
+
+/// The parents found in the current database, plus the one the pre-image's
+/// `link` column named, if it carried a non-null one not already found.
+fn with_old_parent(
+    mut parents: Vec<GenericValue>,
+    before: &RowImage,
+    link: &ColumnName,
+) -> Vec<GenericValue> {
+    if let Some(old) = before.get(link)
+        && !matches!(old, GenericValue::Null)
+        && !parents.contains(old)
+    {
+        parents.push(old.clone());
+    }
+    parents
+}
+
 /// The changed target row's primary-key value, for matching a `belongs_to`
 /// parent's `column`. Prefer the entry named by the join's declared
 /// `primary_key`; a single-column key is used as-is.
@@ -262,3 +308,7 @@ fn single_far_key(key: &RowKey) -> Result<&GenericValue> {
         )),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;

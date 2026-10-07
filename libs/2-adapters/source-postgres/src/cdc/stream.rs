@@ -156,7 +156,11 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
             let relation = lookup_relation(state, rel)?;
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &new)?;
-            state.open_txn.push(ChangeEvent::Upsert { table, key });
+            state.open_txn.push(ChangeEvent::Upsert {
+                table,
+                key,
+                before: None,
+            });
         }
         Decoded::Update { rel, old, new } => {
             let relation = lookup_relation(state, rel)?;
@@ -174,18 +178,24 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 state.open_txn.push(ChangeEvent::Delete {
                     table: table.clone(),
                     key: old_key,
+                    before: None,
                 });
             }
             state.open_txn.push(ChangeEvent::Upsert {
                 table,
                 key: new_key,
+                before: None,
             });
         }
         Decoded::Delete { rel, old } => {
             let relation = lookup_relation(state, rel)?;
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &old)?;
-            state.open_txn.push(ChangeEvent::Delete { table, key });
+            state.open_txn.push(ChangeEvent::Delete {
+                table,
+                key,
+                before: None,
+            });
         }
         Decoded::Truncate { rels } => {
             for oid in rels {
