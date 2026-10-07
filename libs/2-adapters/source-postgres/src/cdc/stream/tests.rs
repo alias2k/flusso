@@ -8,6 +8,7 @@ fn state() -> (DecodeState, Arc<Positions>) {
     let decode = DecodeState {
         relations: HashMap::new(),
         unkeyed: Vec::new(),
+        pre_image_links: Default::default(),
         open_txn: Vec::new(),
         pending: VecDeque::new(),
         ack: Arc::clone(&ack),
@@ -191,4 +192,57 @@ fn a_full_identity_reparent_is_one_upsert_carrying_the_old_parent() {
         before.as_ref().unwrap().get(&column("parent_id")),
         Some(&GenericValue::Int(1))
     );
+}
+
+fn delete_child(decode: &mut DecodeState, marker: u8, parent: Option<&str>) {
+    let mut delete = vec![b'D'];
+    delete.extend_from_slice(&16385u32.to_be_bytes());
+    delete.push(marker);
+    delete.extend_from_slice(&2i16.to_be_bytes());
+    delete.extend(text("7"));
+    match parent {
+        Some(parent) => delete.extend(text(parent)),
+        None => delete.push(b'n'),
+    }
+    handle_xlog(decode, &delete).unwrap();
+}
+
+fn needs_parent_link(decode: &mut DecodeState) {
+    decode.pre_image_links.insert(
+        source::QualifiedTable::new(
+            kernel::DatabaseSchema::try_new("public").unwrap(),
+            TableName::try_new("child").unwrap(),
+        ),
+        vec![column("parent_id")],
+    );
+}
+
+#[test]
+fn a_delete_carrying_the_parent_link_is_traceable() {
+    let (mut decode, _) = state();
+    needs_parent_link(&mut decode);
+    announce_child(&mut decode);
+    delete_child(&mut decode, b'O', Some("1"));
+    assert!(!decode.relations[&16385].warned_untraceable);
+}
+
+#[test]
+fn a_delete_without_the_parent_link_is_flagged_once() {
+    let (mut decode, _) = state();
+    needs_parent_link(&mut decode);
+    announce_child(&mut decode);
+    // The identity no longer carries `parent_id`: a key-only old tuple.
+    decode
+        .relations
+        .get_mut(&16385)
+        .unwrap()
+        .columns
+        .iter_mut()
+        .for_each(|c| c.is_key = c.name.as_ref() == "id");
+    delete_child(&mut decode, b'K', None);
+    assert!(decode.relations[&16385].warned_untraceable);
+    assert!(matches!(
+        decode.open_txn.as_slice(),
+        [ChangeEvent::Delete { before: None, .. }]
+    ));
 }

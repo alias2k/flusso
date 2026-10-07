@@ -21,7 +21,7 @@ use kernel::ColumnName;
 use kernel::Position;
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
-use source::{Result, SourceError};
+use source::{PreImageColumns, Result, RowImage, SourceError};
 use sqlx::PgPool;
 
 use super::ack::Positions;
@@ -43,6 +43,8 @@ struct DecodeState {
     relations: HashMap<u32, Relation>,
     /// Relations whose primary key has not been looked up yet.
     unkeyed: Vec<u32>,
+    /// Per table, the columns resolution needs from a pre-image.
+    pre_image_links: PreImageColumns,
     /// Row changes of the currently open transaction, awaiting its `Commit`.
     open_txn: Vec<ChangeEvent>,
     /// Changes ready to emit, each with the commit LSN to acknowledge at.
@@ -66,6 +68,7 @@ struct DecodeState {
 pub(crate) fn build(
     client: ReplicationClient,
     catalog: PgPool,
+    pre_image_links: PreImageColumns,
     ack: Arc<Positions>,
 ) -> BoxStream<'static, Result<LiveChange>> {
     let state = State {
@@ -74,6 +77,7 @@ pub(crate) fn build(
         decode: DecodeState {
             relations: HashMap::new(),
             unkeyed: Vec::new(),
+            pre_image_links,
             open_txn: Vec::new(),
             pending: VecDeque::new(),
             ack,
@@ -201,7 +205,15 @@ fn handle(
 
 fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), SourceError> {
     match pgoutput::decode(data)? {
-        Decoded::Relation(relation) => {
+        Decoded::Relation(mut relation) => {
+            relation.pre_image_links = state
+                .pre_image_links
+                .iter()
+                .find(|(table, _)| {
+                    table.schema.as_ref() == relation.namespace && table.table == relation.table
+                })
+                .map(|(_, links)| links.clone())
+                .unwrap_or_default();
             state.unkeyed.push(relation.oid);
             state.relations.insert(relation.oid, relation);
         }
@@ -228,6 +240,7 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
             let before = old
                 .as_ref()
                 .and_then(|old| pgoutput::pre_image(relation, old));
+            let traceable = traces_old_parent(relation, before.as_ref());
             if let Some(old_key) = old_key
                 && old_key.0 != new_key.0
             {
@@ -242,15 +255,22 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 key: new_key,
                 before,
             });
+            if !traceable {
+                warn_untraceable(state, rel);
+            }
         }
         Decoded::Delete { rel, old } => {
             let relation = lookup_relation(state, rel)?;
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &old)?;
             let before = pgoutput::pre_image(relation, &old);
+            let traceable = traces_old_parent(relation, before.as_ref());
             state
                 .open_txn
                 .push(ChangeEvent::Delete { table, key, before });
+            if !traceable {
+                warn_untraceable(state, rel);
+            }
         }
         Decoded::Truncate { rels } => {
             for oid in rels {
@@ -267,6 +287,39 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
         Decoded::Other => {}
     }
     Ok(())
+}
+
+/// Whether `before` names this row's old parent wherever an index needs it.
+fn traces_old_parent(relation: &Relation, before: Option<&RowImage>) -> bool {
+    relation
+        .pre_image_links
+        .iter()
+        .all(|link| before.is_some_and(|image| image.get(link).is_some()))
+}
+
+/// Warn, once per relation, that an update or delete carried no pre-image of
+/// its parent link — so a delete or re-parent leaves the old parent stale.
+fn warn_untraceable(state: &mut DecodeState, oid: u32) {
+    let Some(relation) = state.relations.get_mut(&oid) else {
+        return;
+    };
+    if relation.warned_untraceable {
+        return;
+    }
+    relation.warned_untraceable = true;
+    let links = relation
+        .pre_image_links
+        .iter()
+        .map(|link| link.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::warn!(
+        table = %format!("{}.{}", relation.namespace, relation.table),
+        missing = %links,
+        remediation = %super::replica_identity::alter_sql(&relation.namespace, relation.table.as_ref()),
+        "a change carried no pre-image of its parent link: if the row was deleted or moved to \
+         another parent, the old parent's document keeps a stale copy; run the printed SQL",
+    );
 }
 
 /// Look up a relation by OID. A missing one means a DML message arrived before

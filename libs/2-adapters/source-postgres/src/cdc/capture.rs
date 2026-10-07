@@ -7,13 +7,14 @@ use kernel::Position;
 use pgwire_replication::{ReplicationClient, ReplicationConfig};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::{
-    CaptureProvisioning, CoverageReport, QualifiedTable, Result, SnapshotTable, SourceError,
+    CaptureProvisioning, CoverageReport, PreImageColumns, PreImageReport, QualifiedTable, Result,
+    SnapshotTable, SourceError,
 };
 use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
 use super::ack::Positions;
-use super::{backfill, publication, stream};
+use super::{backfill, publication, replica_identity, stream};
 
 /// Postgres change capture over logical replication (pgoutput).
 ///
@@ -60,6 +61,10 @@ pub struct WalChangeCapture {
     /// Whether to auto-create/extend the publication on [`live`](Self::live).
     /// When false, a coverage gap is only reported, never provisioned.
     manage_publication: bool,
+    /// Per table, the columns resolution needs from a pre-image. Checked (and
+    /// warned about) on [`live`](Self::live); set via
+    /// [`with_pre_image_columns`](Self::with_pre_image_columns).
+    pre_image_columns: PreImageColumns,
     /// The position bookkeeping of the open live stream, so `confirm` can reach
     /// it. Replaced each time `live` opens a stream; `None` before the first.
     positions: Arc<Mutex<Option<Arc<Positions>>>>,
@@ -79,6 +84,7 @@ impl WalChangeCapture {
             admin_pool: Arc::new(OnceCell::new()),
             required_tables: BTreeSet::new(),
             manage_publication: false,
+            pre_image_columns: PreImageColumns::new(),
             positions: Arc::new(Mutex::new(None)),
         }
     }
@@ -95,6 +101,45 @@ impl WalChangeCapture {
         self.required_tables = required;
         self.manage_publication = manage;
         self
+    }
+
+    /// Declare the columns resolution needs from each table's pre-image —
+    /// typically [`SourceSpec::pre_image_columns`](source::SourceSpec::pre_image_columns).
+    /// [`live`](Self::live) warns about every table whose replica identity
+    /// doesn't carry them, and the stream warns once per table when a change
+    /// arrives without them. Never provisioned.
+    pub fn with_pre_image_columns(mut self, columns: PreImageColumns) -> Self {
+        self.pre_image_columns = columns;
+        self
+    }
+
+    /// Warn about every table whose replica identity misses a pre-image column.
+    /// Advisory: a failed inspection is logged, not fatal.
+    async fn warn_pre_image_gaps(&self) {
+        if self.pre_image_columns.is_empty() {
+            return;
+        }
+        match self.inspect_pre_image(&self.pre_image_columns).await {
+            Ok(report) => {
+                for (gap, remediation) in report.gaps.iter().zip(&report.remediation) {
+                    let missing = gap
+                        .missing
+                        .iter()
+                        .map(|column| column.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    tracing::warn!(
+                        table = %gap.table,
+                        missing = %missing,
+                        remediation = %remediation,
+                        "replica identity does not carry the parent link: a deleted or \
+                         re-parented row will leave its old parent's document stale; run the \
+                         printed SQL",
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(%error, "could not inspect replica identities"),
+        }
     }
 
     /// The shared admin pool, opened on first call and reused thereafter. Kept
@@ -181,6 +226,7 @@ impl ChangeCapture for WalChangeCapture {
         self.ensure_slot().await?;
         self.ensure_coverage(&self.required_tables, self.manage_publication)
             .await?;
+        self.warn_pre_image_gaps().await;
 
         let catalog = self.admin_pool().await?.clone();
         let client = ReplicationClient::connect(self.config.clone())
@@ -199,7 +245,12 @@ impl ChangeCapture for WalChangeCapture {
             start_lsn = self.config.start_lsn.as_u64(),
             "opened replication stream"
         );
-        Ok(stream::build(client, catalog, positions))
+        Ok(stream::build(
+            client,
+            catalog,
+            self.pre_image_columns.clone(),
+            positions,
+        ))
     }
 
     fn confirm(&self, position: Position) {
@@ -315,5 +366,9 @@ impl CaptureProvisioning for WalChangeCapture {
         }
 
         Ok(report)
+    }
+
+    async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport> {
+        replica_identity::inspect(self.admin_pool().await?, required).await
     }
 }

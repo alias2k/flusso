@@ -60,6 +60,11 @@ pub(crate) struct Relation {
     /// The table's primary-key columns, from the catalog. Empty until looked
     /// up, and for a table without one — then the identity columns key it.
     pub(crate) primary_key: Vec<ColumnName>,
+    /// The columns resolution needs from this table's pre-image (its link to
+    /// a parent). Empty when no index embeds it as a child.
+    pub(crate) pre_image_links: Vec<ColumnName>,
+    /// Whether a change missing those columns has already been warned about.
+    pub(crate) warned_untraceable: bool,
 }
 
 impl Relation {
@@ -293,6 +298,8 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
         table,
         columns,
         primary_key: Vec::new(),
+        pre_image_links: Vec::new(),
+        warned_untraceable: false,
     }))
 }
 
