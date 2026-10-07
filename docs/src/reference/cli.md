@@ -49,7 +49,7 @@ The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--pretty`
 
 ## check
 
-Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also confirms every declared type and nullability against the live columns and prints the publication coverage report with the exact SQL for any gap. `check` never mutates the database.
+Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also confirms every declared type and nullability against the live columns and prints the publication coverage report and the child tables whose replica identity misses their parent link (see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)), each with the exact SQL for the gap. `check` never mutates the database.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

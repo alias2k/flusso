@@ -47,11 +47,12 @@ A publication is the server-side allowlist of tables whose changes are decoded. 
 
 `REPLICA IDENTITY` decides what *old* row data the WAL sends on UPDATE/DELETE:
 
-- **default** (primary key) — the PK columns of the old row. Enough for flusso to identify and rebuild the document in the common case.
-- **FULL** — the entire old row. Needed when flusso must see the *pre-image* of a non-PK column — e.g. a foreign key that **moves a row from one parent to another**: to fix up *both* the old and new parent documents, flusso needs the old FK value, which only `FULL` carries.
+- **default** (primary key) — the PK columns of the old row. Enough for a root table.
+- **FULL** — the entire old row. flusso still keys the change by the primary key (not by every column), and reads the old row's *link column* from it.
+- **USING INDEX** — the columns of a unique index; one over `(id, parent_id)` carries the link with less WAL than `FULL`.
 - **NOTHING / keyless** — no identity; the table can't be addressed (see the table above).
 
-Rule of thumb: a PK is enough until a join keys off a *mutable* foreign key; if rows re-parent, give that child table `REPLICA IDENTITY FULL`.
+**Child tables need their parent link in it.** A `has_one`/`has_many` target (its `foreign_key`) or a junction (its `left_key`, unless that's in its PK): once such a row is **deleted** or **moved to another parent**, only the WAL pre-image still names the old parent, so the old parent's document is rebuilt only if the identity carries that column. Without it the old document silently keeps a stale copy. `flusso check` prints a **Replica identity** section listing each gap with `ALTER TABLE … REPLICA IDENTITY FULL;`, and `flusso run` warns at startup and once per table on such a change. flusso never runs the `ALTER` itself. `belongs_to` targets and the far side of a many-to-many need nothing. Owned meaning: the [Postgres source reference](https://alias2k.github.io/flusso/reference/source-postgres.html#deleted-and-re-parented-rows).
 
 ## How relational structure becomes a document
 
@@ -82,5 +83,5 @@ Full reference: the [Postgres source reference, TLS section](https://alias2k.git
 1. `wal_level = logical`? (`SHOW wal_level;` — needs a restart if you just changed it.)
 2. Is the changed table **in the publication**? (New join target? `flusso check` shows coverage.)
 3. Does the table have a **key** (PK or `REPLICA IDENTITY`)? Keyless = skipped/errored.
-4. Re-parenting rows but the old parent's doc is stale? → `REPLICA IDENTITY FULL` on the child.
+4. Deleted or re-parented child rows still in the old parent's doc? → the child table's replica identity misses its link column; `flusso check` prints the `ALTER TABLE … REPLICA IDENTITY FULL`.
 5. Is another flusso (or a leftover slot) consuming the same slot? One slot, one consumer.

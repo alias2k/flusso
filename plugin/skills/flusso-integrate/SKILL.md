@@ -79,7 +79,8 @@ flusso check --config flusso.toml --offline  # format and rules only, skip the D
 ```
 
 Against a live DB this also confirms each declared type and nullability against the real columns,
-and prints the publication coverage report. Fix every error here before running.
+and prints the publication coverage report plus any child table whose replica identity misses its
+parent link (see **flusso-postgres**). Fix every error here before running.
 
 ### 4. Run
 

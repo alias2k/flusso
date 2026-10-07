@@ -17,7 +17,7 @@ The source abstractions for `flusso` — split into two independent halves, *wha
 
 The two responsibilities each get their own module. Neither references the other; the engine is the only thing that bridges them. Mix any change mechanism with any document builder, and test or replace either without touching the other.
 
-[`cdc`] yields thin [`ChangeEvent`](cdc::ChangeEvent)s — table and key, each tagged with a [`Position`](kernel::Position) — and the engine hands positions back through [`confirm`](cdc::ChangeCapture::confirm) once every sink has made the documents durable. Both halves of that contract are plain data, so a change can cross a process boundary. Logical replication (WAL) is the first mechanism; polling or triggers can follow.
+[`cdc`] yields thin [`ChangeEvent`](cdc::ChangeEvent)s — table and key (plus an optional pre-image, used only to find the documents a deleted or re-parented row used to sit in), each tagged with a [`Position`](kernel::Position) — and the engine hands positions back through [`confirm`](cdc::ChangeCapture::confirm) once every sink has made the documents durable. Both halves of that contract are plain data, so a change can cross a process boundary. Logical replication (WAL) is the first mechanism; polling or triggers can follow.
 
 [`validate_indexes`] leans on the fact that a self-describing schema states its own types, so the mapping derives without a database. A reachable database is used only to confirm the declared types and nullability match the real columns.
 

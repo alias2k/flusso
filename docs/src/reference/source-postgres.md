@@ -74,10 +74,37 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 | Postgres 14 or newer | |
 | `wal_level = logical` | Restart-required server setting. |
 | `max_wal_senders`, `max_replication_slots` | Room for flusso plus any other consumer. |
-| Row identity on every replicated table | A single-column primary key (the default `REPLICA IDENTITY` then carries it), or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change. `REPLICA IDENTITY FULL` is not needed: documents are rebuilt from the current row, not from the WAL image. |
+| Row identity on every replicated table | A single-column primary key (the default `REPLICA IDENTITY` then carries it), or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change. A change is always keyed by the primary key, whatever the replica identity. |
+| The parent link in every child table's replica identity | See [Deleted and re-parented rows](#deleted-and-re-parented-rows). Without it, deleting or re-parenting a child row leaves its old parent's document stale. |
 | A role with `REPLICATION` and `SELECT` on the read tables | Enough to stream and create the slot. Publication management needs the stronger grant above. |
 
 > ⚠️ **Warning** — Postgres retains WAL until the slot confirms it. A flusso that stays down for days means WAL piling up on the server. Drop the slot when retiring a deployment.
+
+## Deleted and re-parented rows
+
+Documents are rebuilt from the current rows. A child row that holds its parent's key is the exception: once it's deleted, or moved to another parent, the current table no longer says which parent it left. flusso reads that from the WAL **pre-image**, the old row Postgres logs for an update or delete, so the child table's `REPLICA IDENTITY` has to carry the link column.
+
+| Table | Link column |
+| --- | --- |
+| `has_one` / `has_many` target, direct aggregate | its `foreign_key` |
+| `many_to_many` junction | its `left_key` (already carried when it's part of the junction's primary key) |
+
+`belongs_to` targets and the far side of a `many_to_many` need nothing: the rows that point at them are still there.
+
+| `REPLICA IDENTITY` | Carries the link? |
+| --- | --- |
+| `DEFAULT` | Only when the link is in the primary key. |
+| `FULL` | Yes. Logs the whole old row, so the table's WAL grows. |
+| `USING INDEX` on a unique index that includes the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`. The index's columns must be `NOT NULL`. |
+| `NOTHING` | No. |
+
+`flusso check` lists every child table that misses its link, with the statement to run:
+
+```sql
+ALTER TABLE "public"."order_items" REPLICA IDENTITY FULL;
+```
+
+flusso never runs it: it takes a lock and changes how much the table logs. `flusso run` warns about each gap at startup, and once per table when such a delete or update arrives.
 
 ## Example
 

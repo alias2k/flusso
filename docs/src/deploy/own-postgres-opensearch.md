@@ -34,6 +34,8 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
 
    An empty result means every table has a primary key.
 
+   Child tables (the target of a `has_one`/`has_many`, a junction) also need their parent link in the WAL, or deleting a child row leaves its old parent's document stale. `flusso check` lists the ones that don't, with the `ALTER TABLE … REPLICA IDENTITY FULL` to run; see [Deleted and re-parented rows](../reference/source-postgres.md#deleted-and-re-parented-rows).
+
 4. **Create the publication, or let flusso.** With a privileged role, `flusso run` creates and extends it. To do it yourself, take the table list from `flusso check`'s coverage report:
 
    ```sql
