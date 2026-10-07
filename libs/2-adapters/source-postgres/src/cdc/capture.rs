@@ -182,6 +182,7 @@ impl ChangeCapture for WalChangeCapture {
         self.ensure_coverage(&self.required_tables, self.manage_publication)
             .await?;
 
+        let catalog = self.admin_pool().await?.clone();
         let client = ReplicationClient::connect(self.config.clone())
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
@@ -198,7 +199,7 @@ impl ChangeCapture for WalChangeCapture {
             start_lsn = self.config.start_lsn.as_u64(),
             "opened replication stream"
         );
-        Ok(stream::build(client, positions))
+        Ok(stream::build(client, catalog, positions))
     }
 
     fn confirm(&self, position: Position) {

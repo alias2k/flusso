@@ -5,16 +5,24 @@
 //! arrives, tagged with the commit LSN. That gives every change a clean,
 //! commit-aligned position to acknowledge against, and matches logical
 //! decoding's "whole transactions only" model. Because events are thin (a table
-//! name and primary key), buffering even a large transaction is cheap.
+//! name, primary key, and at most a pre-image), buffering even a large
+//! transaction is cheap.
+//!
+//! Each `Relation` message is followed by a catalog lookup of the table's
+//! primary key, before the next replication event is read: a change is keyed by
+//! its primary key, not by the replica-identity columns pgoutput flags (all of
+//! them, under `REPLICA IDENTITY FULL`). See [`pgoutput`](super::pgoutput).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
+use kernel::ColumnName;
 use kernel::Position;
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
 use source::{Result, SourceError};
+use sqlx::PgPool;
 
 use super::ack::Positions;
 use super::pgoutput::{self, Decoded, Relation};
@@ -22,6 +30,8 @@ use super::pgoutput::{self, Decoded, Relation};
 /// Everything the unfold loop carries between polls.
 struct State {
     client: ReplicationClient,
+    /// Catalog connection for the per-relation primary-key lookup.
+    catalog: PgPool,
     decode: DecodeState,
 }
 
@@ -31,6 +41,8 @@ struct State {
 struct DecodeState {
     /// Relation metadata by OID, accumulated from `Relation` messages.
     relations: HashMap<u32, Relation>,
+    /// Relations whose primary key has not been looked up yet.
+    unkeyed: Vec<u32>,
     /// Row changes of the currently open transaction, awaiting its `Commit`.
     open_txn: Vec<ChangeEvent>,
     /// Changes ready to emit, each with the commit LSN to acknowledge at.
@@ -53,12 +65,15 @@ struct DecodeState {
 /// traffic.
 pub(crate) fn build(
     client: ReplicationClient,
+    catalog: PgPool,
     ack: Arc<Positions>,
 ) -> BoxStream<'static, Result<LiveChange>> {
     let state = State {
         client,
+        catalog,
         decode: DecodeState {
             relations: HashMap::new(),
+            unkeyed: Vec::new(),
             open_txn: Vec::new(),
             pending: VecDeque::new(),
             ack,
@@ -85,7 +100,11 @@ pub(crate) fn build(
 
             match state.client.recv().await {
                 Ok(Some(event)) => {
-                    if let Err(e) = handle(&mut state.decode, event) {
+                    let handled = match handle(&mut state.decode, event) {
+                        Ok(()) => key_relations(&state.catalog, &mut state.decode).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = handled {
                         state.decode.done = true;
                         return Some((Err(e), state));
                     }
@@ -98,6 +117,39 @@ pub(crate) fn build(
             }
         }
     }))
+}
+
+/// Look up the catalog primary key of every relation announced since the last
+/// event. A table without one keeps an empty key and is keyed by its replica
+/// identity instead.
+async fn key_relations(
+    catalog: &PgPool,
+    state: &mut DecodeState,
+) -> std::result::Result<(), SourceError> {
+    for oid in std::mem::take(&mut state.unkeyed) {
+        let Some(relation) = state.relations.get_mut(&oid) else {
+            continue;
+        };
+        let qualified = format!(
+            "{}.{}",
+            quote_ident(&relation.namespace),
+            quote_ident(relation.table.as_ref())
+        );
+        relation.primary_key = crate::document::primary_key_column_names(catalog, qualified)
+            .await?
+            .into_iter()
+            .map(|name| {
+                ColumnName::try_new(name.clone()).map_err(|e| {
+                    SourceError::Decode(format!("invalid primary key column {name:?}: {e}"))
+                })
+            })
+            .collect::<std::result::Result<_, _>>()?;
+    }
+    Ok(())
+}
+
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 /// Fold one replication event into the state, possibly queueing changes.
@@ -150,6 +202,7 @@ fn handle(
 fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), SourceError> {
     match pgoutput::decode(data)? {
         Decoded::Relation(relation) => {
+            state.unkeyed.push(relation.oid);
             state.relations.insert(relation.oid, relation);
         }
         Decoded::Insert { rel, new } => {
@@ -172,30 +225,32 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 Some(old) => Some(pgoutput::row_key(relation, old)?),
                 None => None,
             };
+            let before = old
+                .as_ref()
+                .and_then(|old| pgoutput::pre_image(relation, old));
             if let Some(old_key) = old_key
                 && old_key.0 != new_key.0
             {
                 state.open_txn.push(ChangeEvent::Delete {
                     table: table.clone(),
                     key: old_key,
-                    before: None,
+                    before: before.clone(),
                 });
             }
             state.open_txn.push(ChangeEvent::Upsert {
                 table,
                 key: new_key,
-                before: None,
+                before,
             });
         }
         Decoded::Delete { rel, old } => {
             let relation = lookup_relation(state, rel)?;
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &old)?;
-            state.open_txn.push(ChangeEvent::Delete {
-                table,
-                key,
-                before: None,
-            });
+            let before = pgoutput::pre_image(relation, &old);
+            state
+                .open_txn
+                .push(ChangeEvent::Delete { table, key, before });
         }
         Decoded::Truncate { rels } => {
             for oid in rels {
