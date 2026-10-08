@@ -52,7 +52,7 @@ A publication is the server-side allowlist of tables whose changes are decoded. 
 - **USING INDEX** — the columns of a unique index; one over `(id, parent_id)` carries the link with less WAL than `FULL`.
 - **NOTHING / keyless** — no identity; the table can't be addressed (see the table above).
 
-**Child tables need their parent link in it.** A `has_one`/`has_many` target (its `foreign_key`) or a junction (its `left_key`, unless that's in its PK): once such a row is **deleted** or **moved to another parent**, only the WAL pre-image still names the old parent, so the old parent's document is rebuilt only if the identity carries that column. Without it the old document silently keeps a stale copy. `flusso check` prints a **Replica identity** section listing each gap with `ALTER TABLE … REPLICA IDENTITY FULL;`, and `flusso run` warns at startup and once per table on such a change. flusso never runs the `ALTER` itself. `belongs_to` targets and the far side of a many-to-many need nothing. Owned meaning: the [Postgres source reference](https://alias2k.github.io/flusso/reference/source-postgres.html#deleted-and-re-parented-rows).
+**Child tables need their parent link in it.** A `has_one`/`has_many` target (its `foreign_key`) or a junction (its `left_key`, unless that's in its PK): once such a row is **deleted** or **moved to another parent**, only the WAL pre-image still names the old parent, so the old parent's document is rebuilt only if the identity carries that column. Without it the old document silently keeps a stale copy. **flusso sets it itself:** with `manage_replica_identity = true` (the default) and a role that owns the table, `flusso run` issues `ALTER TABLE … REPLICA IDENTITY FULL;` at startup (under a short `lock_timeout`). When it can't (not the owner, or opted out with `manage_replica_identity = false` / `--manage-replica-identity false`), it logs the SQL and warns once per table on such a change; `flusso check` prints a **Replica identity** section saying, per table, whether the next run will set it. Changes made before it was set stay stale until `flusso reindex`. `belongs_to` targets and the far side of a many-to-many need nothing. Owned meaning: the [Postgres source reference](https://alias2k.github.io/flusso/reference/source-postgres.html#deleted-and-re-parented-rows).
 
 ## How relational structure becomes a document
 
@@ -66,6 +66,7 @@ into the publication.
 
 - **Stream + create the slot:** a role with `REPLICATION` + `SELECT` on the published tables. That's the floor.
 - **Also manage the publication:** the role must additionally **own** those tables and hold `CREATE` on the database (or be superuser). Short of that, flusso prints the SQL and you run it as someone who can.
+- **Also set child tables' replica identity:** ownership of those tables (or superuser). Same fallback: flusso prints the `ALTER TABLE … REPLICA IDENTITY FULL`.
 
 ## TLS — managed Postgres, internal PKI, mTLS
 
@@ -83,5 +84,5 @@ Full reference: the [Postgres source reference, TLS section](https://alias2k.git
 1. `wal_level = logical`? (`SHOW wal_level;` — needs a restart if you just changed it.)
 2. Is the changed table **in the publication**? (New join target? `flusso check` shows coverage.)
 3. Does the table have a **key** (PK or `REPLICA IDENTITY`)? Keyless = skipped/errored.
-4. Deleted or re-parented child rows still in the old parent's doc? → the child table's replica identity misses its link column; `flusso check` prints the `ALTER TABLE … REPLICA IDENTITY FULL`.
+4. Deleted or re-parented child rows still in the old parent's doc? → the child table's replica identity misses its link column and flusso couldn't set it (not the owner, or `manage_replica_identity = false`); `flusso check` says which and prints the `ALTER TABLE … REPLICA IDENTITY FULL`. Then `flusso reindex` to repair what went stale.
 5. Is another flusso (or a leftover slot) consuming the same slot? One slot, one consumer.

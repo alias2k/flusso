@@ -66,7 +66,7 @@ Only some rows of the root table belong in the index; rows are retired by a flag
 ## Options and variations
 
 - **Hard deletes of root rows need no configuration.** A WAL `DELETE` on a table with a primary key already produces a tombstone. What the table needs is row identity; see [Source: Postgres](../reference/source-postgres.md#server-requirements).
-- **Hard deletes of joined rows need the parent link in the WAL.** Deleting (or re-parenting) a `has_one`/`has_many` row, or a junction row, rebuilds the old parent's document only when the child table's replica identity carries the link column. `flusso check` names the tables that don't; see [Deleted and re-parented rows](../reference/source-postgres.md#deleted-and-re-parented-rows).
+- **Hard deletes of joined rows need the parent link in the WAL.** Deleting (or re-parenting) a `has_one`/`has_many` row, or a junction row, rebuilds the old parent's document only when the child table's replica identity carries the link column. flusso sets that itself when the role owns the table, and `flusso check` names any it can't; see [Deleted and re-parented rows](../reference/source-postgres.md#deleted-and-re-parented-rows).
 - **The marker is read from the current row**, so a boolean flag and a nullable `deleted_at` both work (`{ column: deleted_at, op: is_not_null }` in a root filter, or a `soft_delete` on the column).
 - **Filters are `AND`ed.** For `OR`, use `in`, or a raw filter.
 - **A filtered-out row during backfill** costs a no-op delete, nothing more.

@@ -437,8 +437,9 @@ Option<RowImage>`, passed to `DocumentBuilder::resolve` and read only on the fir
 with the current-DB lookup), so each child table's replica identity must carry its link column
 (`SourceSpec::pre_image_columns`: `has_one`/`has_many` `foreign_key`, junction `left_key`).
 Postgres answers from `relreplident` (`cdc/replica_identity.rs`); `check` prints a Replica
-identity section, `run` warns at `live()` and the stream warns once per table — the `ALTER TABLE …
-REPLICA IDENTITY FULL` is never run. The WAL decoder keys a change by the table's **catalog
+identity section (read-only); `run` **sets** `REPLICA IDENTITY FULL` at `live()` via
+`ensure_pre_image` when `manage_replica_identity` (default on) and the role owns the table — under
+a 5 s `lock_timeout`; an unclosable gap is warned with the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
 which mark every column under `FULL`. A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers
@@ -519,7 +520,8 @@ and `yaml` modules) works in two stages:
    fails before any network call or lock write. `load` alone therefore does **not** mean
    "fully validated".
 
-**Adapter knobs that are flags** (`--slot`, `--publication`, `--manage-publication`, `--pretty`,
+**Adapter knobs that are flags** (`--slot`, `--publication`, `--manage-publication`,
+`--manage-replica-identity`, `--pretty`,
 `--queue-capacity`) are laid over the file's entries by `adapters::apply_overrides` before
 validation (flag > env > file); `DaemonOptions` carries nothing adapter-specific. A deployment
 with no sink gets a `stdout` entry there.

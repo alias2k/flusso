@@ -33,6 +33,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--slot <name>` | `[source] slot`, else `flusso` | Replication slot to consume. Created when missing. |
 | `--publication <name>` | `[source] publication`, else `flusso` | Publication to subscribe to. Created or extended when allowed. |
 | `--manage-publication <bool>` | `[source] manage_publication`, else `true` | Whether flusso may issue publication DDL. |
+| `--manage-replica-identity <bool>` | `[source] manage_replica_identity`, else `true` | Whether flusso may set `REPLICA IDENTITY FULL` on child tables that need it. |
 | `--skip-backfill` | off | Resume live capture only. A fresh slot then only warns instead of rebuilding. |
 | `--pretty` | off | Pretty-print every stdout sink's output (the default sink included). |
 | `--queue-capacity <n>` | `[stream] capacity`, else `1024` | Changes buffered between capture and processing. |
@@ -45,11 +46,11 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
 | `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving. |
 
-The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
+The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-replica-identity`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
 
 ## check
 
-Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also confirms every declared type and nullability against the live columns and prints the publication coverage report and the child tables whose replica identity misses their parent link (see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)), each with the exact SQL for the gap. `check` never mutates the database.
+Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also confirms every declared type and nullability against the live columns and prints the publication coverage report and the child tables whose replica identity misses their parent link (see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)), each saying whether `run` will fix it or giving the exact SQL. `check` never mutates the database.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -57,6 +58,7 @@ Loads and validates the config and every schema, validates every port table agai
 | `--offline` | off | Files only; skip the database and the coverage report. |
 | `--publication <name>` | `[source] publication`, else `flusso` | Publication whose coverage to report. |
 | `--manage-publication <bool>` | config, else `true` | Affects the report's phrasing only. |
+| `--manage-replica-identity <bool>` | config, else `true` | Affects the replica-identity report's phrasing only. |
 | `--format <human\|json>` | `human` | `json` prints one machine-readable document. |
 
 Exit status is non-zero when validation fails or the schema disagrees with the database.

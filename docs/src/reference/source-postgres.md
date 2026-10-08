@@ -64,6 +64,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 
 - **The slot is created automatically** when missing; that needs only the `REPLICATION` attribute. A slot that had to be created has no memory of earlier changes, which is why a missing slot triggers a rebuild of every seeded index. See [Recover from a dropped slot](../operate/dropped-slot.md).
 - **The publication is managed automatically** when `manage_publication` is on and the role can: flusso derives the full table set from the schemas (root tables plus every joined or aggregated table) and creates or extends it. Creating or extending a publication needs ownership of those tables plus `CREATE` on the database, or superuser. When the role can't, flusso logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION … ADD TABLE` statements and keeps running; `flusso check` prints the same coverage report.
+- **Child tables' replica identity is managed automatically** when `manage_replica_identity` is on and the role owns them. See [Deleted and re-parented rows](#deleted-and-re-parented-rows).
 - **Idle tables don't pin WAL.** A running flusso advances the slot from server keepalives even while the watched tables are quiet, so writes to unrelated tables aren't retained on its behalf.
 - **Backfill** snapshots the root tables of unseeded indexes before live capture. `--skip-backfill` skips it.
 
@@ -75,7 +76,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 | `wal_level = logical` | Restart-required server setting. |
 | `max_wal_senders`, `max_replication_slots` | Room for flusso plus any other consumer. |
 | Row identity on every replicated table | A single-column primary key (the default `REPLICA IDENTITY` then carries it), or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change. A change is always keyed by the primary key, whatever the replica identity. |
-| The parent link in every child table's replica identity | See [Deleted and re-parented rows](#deleted-and-re-parented-rows). Without it, deleting or re-parenting a child row leaves its old parent's document stale. |
+| The parent link in every child table's replica identity | Set by flusso when the role owns the table; see [Deleted and re-parented rows](#deleted-and-re-parented-rows). Without it, deleting or re-parenting a child row leaves its old parent's document stale. |
 | A role with `REPLICATION` and `SELECT` on the read tables | Enough to stream and create the slot. Publication management needs the stronger grant above. |
 
 > ⚠️ **Warning** — Postgres retains WAL until the slot confirms it. A flusso that stays down for days means WAL piling up on the server. Drop the slot when retiring a deployment.
@@ -98,13 +99,17 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 | `USING INDEX` on a unique index that includes the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`. The index's columns must be `NOT NULL`. |
 | `NOTHING` | No. |
 
-`flusso check` lists every child table that misses its link, with the statement to run:
+**flusso sets it itself** when `manage_replica_identity` is on (the default) and the role owns the table, the same grant publication management needs. On startup `flusso run` issues, per child table missing its link:
 
 ```sql
 ALTER TABLE "public"."order_items" REPLICA IDENTITY FULL;
 ```
 
-flusso never runs it: it takes a lock and changes how much the table logs. `flusso run` warns about each gap at startup, and once per table when such a delete or update arrives.
+- The statement takes a brief exclusive lock, so it runs under a 5-second `lock_timeout` and never queues behind a long transaction. A timeout is retried on the next start.
+- The table then logs whole old rows on update and delete, so its WAL grows.
+- When the role can't (not the owner), or `manage_replica_identity = false`, flusso logs the statement and keeps running. It also warns once per table when such a delete or update arrives.
+- `flusso check` reports each child table read-only: whether the next `run` will set it, or the statement to run by hand.
+- A delete or re-parent that happened *before* the identity was set left its old parent stale; [`flusso reindex`](cli.md#reindex) the index to repair it.
 
 ## Example
 
