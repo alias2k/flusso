@@ -128,6 +128,18 @@ _Avoid_: collection, table, type
 The declarative description of an index: its root table, fields, joins, aggregates, and filters.
 _Avoid_: definition, spec, config (for the index file)
 
+**Junction**:
+The table a `through` relation reads to connect a parent to its target rows: `left_key` names the parent, `right_key` the target. It may be a real entity (an order line) with its own columns.
+_Avoid_: link table, bridge, pivot
+
+**Junction filter**:
+A filter inside `through` that narrows the junction rows, as opposed to the relation's own filters, which narrow the target rows.
+_Avoid_: join filter, through condition
+
+**Distinct (over a junction)**:
+An aggregate over a junction that counts each target row once, keyed by the target's primary key, instead of once per junction row (the default).
+_Avoid_: unique, dedup, SUM DISTINCT (which dedups by value)
+
 **Mapping**:
 The typed destination layout derived from a schema.
 _Avoid_: index template, layout, projection

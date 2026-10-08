@@ -554,7 +554,14 @@ split by relationship verb, which names where the key lives: `belongs_to` (this 
 (the related table's `foreign_key`), `many_to_many` (`through` a junction). Aggregates
 split by op (`count`/`sum`/`avg`/`min`/`max`, plus `ids` — a flat scalar array of the
 related table's primary keys, typed by an explicit `element_type`; `ResolvedField.array`
-flags it). A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
+flags it). Over `through` an aggregate counts once per junction row (inner-joined to the
+target, so a dangling junction row never counts); `distinct: true` (`Aggregate.distinct`,
+rejected on `foreign_key`) counts each target row once via a `pk IN (SELECT right_key …)`
+semi-join, and `through.filters` (`Through.filters`, also on `many_to_many`) narrow the
+junction rows while the relation's `filters` narrow the target. Both new fields have
+hand-written `Hash` impls that skip them when unset, so the content hash (the physical index
+name) of a schema that doesn't opt in is unchanged; `a_through_schema_keeps_its_content_hash`
+pins it. Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
 `json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
 injected into options (so runtime keys stay searchable); the resolved `Mapping.map_values`
 carries the value kind, which is the only thing distinguishing a `map` from a plain
