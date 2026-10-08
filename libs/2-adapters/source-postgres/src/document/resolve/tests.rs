@@ -17,6 +17,7 @@ fn count(on: &str, key: AggregateKey) -> Relation {
         key,
         value_type: None,
         filters: None,
+        distinct: false,
     })
 }
 
@@ -25,6 +26,7 @@ fn through() -> AggregateKey {
         table: table("user_tags"),
         left_key: column("user_id"),
         right_key: column("tag_id"),
+        filters: None,
     })
 }
 

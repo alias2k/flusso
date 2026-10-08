@@ -256,6 +256,7 @@ fn aggregate_count() {
             key: AggregateKey::Direct(c("user_id")),
             value_type: None,
             filters: None,
+            distinct: false,
         })),
     };
     let schema = index(Some("id"), None, vec![count]);
@@ -285,6 +286,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
             key: AggregateKey::Direct(c("user_id")),
             value_type: None,
             filters: None,
+            distinct: false,
         })),
     };
     let schema = index(Some("id"), None, vec![ids]);
@@ -317,9 +319,11 @@ fn aggregate_ids_through_collects_off_the_junction() {
                 table: t("post_tags"),
                 left_key: c("post_id"),
                 right_key: c("tag_id"),
+                filters: None,
             }),
             value_type: None,
             filters: None,
+            distinct: false,
         })),
     };
     let schema = index(Some("id"), None, vec![ids]);

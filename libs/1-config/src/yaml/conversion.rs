@@ -329,6 +329,7 @@ fn join_kind(
                     table: t.table,
                     left_key: t.left_key,
                     right_key: t.right_key,
+                    filters: None,
                 },
                 None => {
                     return Err(ConversionError::MissingJoinKey {
@@ -384,6 +385,7 @@ fn convert_aggregate_field(
         key,
         value_type,
         filters: convert_filters_opt(body.filters)?,
+        distinct: false,
     };
     Ok(Field {
         field: body.field,
@@ -450,6 +452,7 @@ fn aggregate_key(
             table: t.table,
             left_key: t.left_key,
             right_key: t.right_key,
+            filters: None,
         })),
         _ => Err(ConversionError::InvalidAggregateKey),
     }

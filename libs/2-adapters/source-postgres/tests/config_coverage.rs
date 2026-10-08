@@ -190,6 +190,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
+                    filters: None,
                 },
             },
             filters: None,
@@ -292,9 +293,11 @@ async fn aggregates_cover_every_op_and_through() {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
+                    filters: None,
                 }),
                 value_type: None,
                 filters: None,
+                distinct: false,
             },
         ),
     ];
@@ -738,6 +741,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                         table: table("user_tags"),
                         left_key: column("user_id"),
                         right_key: column("tag_id"),
+                        filters: None,
                     },
                 },
                 filters: None,
@@ -1013,6 +1017,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         key: AggregateKey::Direct(column("user_id")),
         value_type: None,
         filters,
+        distinct: false,
     }
 }
 

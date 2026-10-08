@@ -171,6 +171,7 @@ fn through() -> impl Strategy<Value = Through> {
         table,
         left_key,
         right_key,
+        filters: None,
     })
 }
 
@@ -205,6 +206,7 @@ fn aggregate() -> impl Strategy<Value = Aggregate> {
             key,
             value_type: None,
             filters,
+            distinct: false,
         })
 }
 

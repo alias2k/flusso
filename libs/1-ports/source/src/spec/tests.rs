@@ -98,6 +98,7 @@ fn books() -> IndexSchema {
                     table: TableName::try_new("book_tags").unwrap(),
                     left_key: kernel::ColumnName::try_new("book_id").unwrap(),
                     right_key: kernel::ColumnName::try_new("tag_id").unwrap(),
+                    filters: None,
                 },
             },
             primary_key: kernel::ColumnName::try_new("id").unwrap(),

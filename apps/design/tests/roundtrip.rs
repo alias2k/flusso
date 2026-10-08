@@ -63,6 +63,7 @@ fn through() -> impl Strategy<Value = Through> {
         table,
         left_key,
         right_key,
+        filters: None,
     })
 }
 fn agg_key() -> impl Strategy<Value = AggregateKey> {
@@ -172,6 +173,7 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
                 key,
                 value_type,
                 filters: None,
+                distinct: false,
             }))
         };
     prop_oneof![
