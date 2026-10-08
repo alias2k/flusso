@@ -118,6 +118,8 @@ pub(crate) struct Overrides {
     pub(crate) publication: Option<String>,
     /// `--manage-publication` → `[source] manage_publication` (Postgres).
     pub(crate) manage_publication: Option<bool>,
+    /// `--manage-replica-identity` → `[source] manage_replica_identity` (Postgres).
+    pub(crate) manage_replica_identity: Option<bool>,
     /// `--pretty` → `pretty = true` on every stdout sink (and the default one).
     pub(crate) pretty: bool,
     /// `--queue-capacity` → `[stream] capacity` (channel).
@@ -139,6 +141,12 @@ pub(crate) fn apply_overrides(config: &mut Config, overrides: &Overrides) {
         }
         if let Some(manage) = overrides.manage_publication {
             config.source.options.insert("manage_publication", manage);
+        }
+        if let Some(manage) = overrides.manage_replica_identity {
+            config
+                .source
+                .options
+                .insert("manage_replica_identity", manage);
         }
     }
     if config.stream.kind == ChannelConfig::KIND
@@ -249,6 +257,7 @@ mod tests {
                 slot: Some("search".into()),
                 publication: None,
                 manage_publication: Some(false),
+                manage_replica_identity: Some(false),
                 pretty: true,
                 queue_capacity: Some(64),
             },
@@ -257,6 +266,7 @@ mod tests {
         assert_eq!(postgres.slot, "search");
         assert_eq!(postgres.publication, "flusso");
         assert!(!postgres.manage_publication);
+        assert!(!postgres.manage_replica_identity);
         assert_eq!(stream_config(&cfg).unwrap().capacity, 64);
         let (name, entry) = cfg.sinks.iter().next().unwrap();
         assert_eq!(name.as_ref(), "stdout");

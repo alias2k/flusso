@@ -8,6 +8,15 @@
 //! source can **inspect** whether they're covered and, when it has the privilege,
 //! **ensure** they are.
 //!
+//! The same surface covers a second prerequisite: whether the change feed
+//! carries the **pre-image** columns reverse resolution needs to trace a deleted
+//! or re-parented row to its old parent
+//! ([`SourceSpec::pre_image_columns`](crate::SourceSpec::pre_image_columns)).
+//! It follows the same inspect / ensure split, per table:
+//! [`inspect_pre_image`](CaptureProvisioning::inspect_pre_image) reports,
+//! [`ensure_pre_image`](CaptureProvisioning::ensure_pre_image) closes each gap
+//! the source is allowed to.
+//!
 //! The contract is deliberately mechanism-neutral — the trait and the
 //! [`CoverageReport`] never name "publication". A backend that *can* provision
 //! the gap describes how to in [`CoverageReport::remediation`] (Postgres puts the
@@ -18,8 +27,9 @@
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
+use kernel::ColumnName;
 
-use crate::{QualifiedTable, Result};
+use crate::{PreImageColumns, QualifiedTable, Result};
 
 /// What a source found when asked whether it can stream a set of tables.
 ///
@@ -49,6 +59,47 @@ pub struct CoverageReport {
     pub remediation: Vec<String>,
 }
 
+/// What a source found when asked whether its change feed carries the
+/// pre-image columns of every table that needs them.
+///
+/// A gap means a delete or re-parent of that table's rows leaves the old
+/// parent's document stale.
+#[derive(Debug, Clone, Default)]
+pub struct PreImageReport {
+    /// Tables whose pre-image misses a required column.
+    pub gaps: Vec<PreImageGap>,
+}
+
+impl PreImageGap {
+    /// Whether a source told to `manage` will close this gap itself.
+    pub fn will_manage(&self, manage: bool) -> bool {
+        manage && self.manageable
+    }
+}
+
+impl PreImageReport {
+    /// Every table's pre-image carries what resolution needs.
+    pub fn satisfied(&self) -> bool {
+        self.gaps.is_empty()
+    }
+}
+
+/// One table whose pre-image misses columns resolution needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreImageGap {
+    /// The table whose pre-image falls short.
+    pub table: QualifiedTable,
+    /// The required columns the pre-image does not carry.
+    pub missing: Vec<ColumnName>,
+    /// Whether this source, with its current credentials, can close the gap.
+    pub manageable: bool,
+    /// Why `manageable` is false (e.g. "role does not own table public.orders").
+    pub blockers: Vec<String>,
+    /// The backend-specific step that closes this gap — opaque, shown verbatim
+    /// (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`).
+    pub remediation: String,
+}
+
 /// A source's ability to report and provision the prerequisites for streaming a
 /// set of tables. Implemented per mechanism (Postgres backs it with a
 /// publication); consumed by the CLI (`check` reports, `run` ensures) only
@@ -69,4 +120,18 @@ pub trait CaptureProvisioning: Send + Sync {
         required: &BTreeSet<QualifiedTable>,
         manage: bool,
     ) -> Result<CoverageReport>;
+
+    /// Read-only: report which `required` tables' pre-images miss a column.
+    /// A table the source can't find is skipped — coverage reports it.
+    async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport>;
+
+    /// Close every manageable gap when `manage` is set, and report (log) the
+    /// rest. Returns the report as observed *before* acting, so a gap it just
+    /// closed is still listed — re-inspect for the current state. A gap that
+    /// can't be closed degrades resolution; it doesn't stop capture.
+    async fn ensure_pre_image(
+        &self,
+        required: &PreImageColumns,
+        manage: bool,
+    ) -> Result<PreImageReport>;
 }

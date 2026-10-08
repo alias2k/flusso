@@ -4,14 +4,23 @@
 //! (`Begin`, `Commit`, `Message`) and hands every other message to us as raw
 //! bytes inside [`ReplicationEvent::XLogData`]. This module decodes the ones we
 //! care about — `Relation`, `Insert`, `Update`, `Delete`, `Truncate` — far
-//! enough to recover a row's primary key. Column *values* are not needed:
-//! events are thin (see [`source::cdc::ChangeEvent`]), so we only extract the
-//! key columns the [`Relation`] marks.
+//! enough to recover a row's primary key and, for an update or delete, its
+//! pre-image. Events are thin (see [`source::cdc::ChangeEvent`]): a document is
+//! always rebuilt from the current row, so only these two are extracted.
+//!
+//! ## Key vs replica identity
+//!
+//! The `Relation` message flags the *replica identity* columns, not the primary
+//! key. Under `REPLICA IDENTITY FULL` every column is flagged, so keying by the
+//! flags would make a document id out of the whole row. The key therefore comes
+//! from [`Relation::primary_key`], which the stream fills from the catalog; the
+//! flags are the fallback for a table without a primary key, and they decide
+//! which old-tuple columns carry real values for the pre-image.
 //!
 //! [`ReplicationEvent::XLogData`]: pgwire_replication::ReplicationEvent::XLogData
 
-use kernel::{ColumnName, GenericValue, TableName};
-use source::{RowKey, SourceError};
+use kernel::{ColumnName, DatabaseSchema, GenericValue, TableName};
+use source::{RowImage, RowKey, SourceError};
 
 /// A decoded pgoutput message — only the variants this source acts on.
 #[derive(Debug)]
@@ -44,14 +53,44 @@ pub(crate) enum Decoded {
 #[derive(Debug, Clone)]
 pub(crate) struct Relation {
     pub(crate) oid: u32,
+    /// The table's schema (`public`, …).
+    pub(crate) namespace: DatabaseSchema,
     pub(crate) table: TableName,
     pub(crate) columns: Vec<Column>,
+    /// The table's primary-key columns, from the catalog. Empty until looked
+    /// up, and for a table without one — then the identity columns key it.
+    pub(crate) primary_key: Vec<ColumnName>,
+}
+
+impl Relation {
+    /// Whether `column` keys a change. The primary key does, as long as the
+    /// replica identity carries all of it — an old tuple holds only identity
+    /// columns, and a key read from absent cells would be all nulls. Otherwise
+    /// (no primary key, or `USING INDEX` on an index that leaves it out) the
+    /// identity columns key it, for old and new tuples alike.
+    fn is_key(&self, column: &Column) -> bool {
+        if self.primary_key_is_carried() {
+            self.primary_key.contains(&column.name)
+        } else {
+            column.is_key
+        }
+    }
+
+    fn primary_key_is_carried(&self) -> bool {
+        !self.primary_key.is_empty()
+            && self.primary_key.iter().all(|pk| {
+                self.columns
+                    .iter()
+                    .any(|column| column.is_key && column.name == *pk)
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Column {
     pub(crate) name: ColumnName,
-    /// Part of the replica-identity key (the `flags & 1` bit).
+    /// Part of the replica identity (the `flags & 1` bit) — every column under
+    /// `REPLICA IDENTITY FULL`.
     pub(crate) is_key: bool,
     /// The column's Postgres type OID, used to type its (text-encoded) value.
     pub(crate) type_oid: u32,
@@ -71,7 +110,7 @@ pub(crate) enum Cell {
     Text(String),
 }
 
-/// Build a [`RowKey`] from a relation's key columns and a tuple.
+/// Build a [`RowKey`] from a relation's primary-key columns and a tuple.
 ///
 /// pgoutput sends every value as text; we type each key value by its column's
 /// OID (integer, boolean, …) so it binds against the real column type when the
@@ -84,7 +123,7 @@ pub(crate) enum Cell {
 pub(crate) fn row_key(rel: &Relation, tuple: &Tuple) -> Result<RowKey, SourceError> {
     let mut pairs = Vec::new();
     for (col, cell) in rel.columns.iter().zip(tuple.iter()) {
-        if col.is_key {
+        if rel.is_key(col) {
             let value = match cell {
                 Cell::Text(text) => typed_value(text, col.type_oid),
                 Cell::Null | Cell::Unchanged => GenericValue::Null,
@@ -99,6 +138,29 @@ pub(crate) fn row_key(rel: &Relation, tuple: &Tuple) -> Result<RowKey, SourceErr
         )));
     }
     Ok(RowKey(pairs))
+}
+
+/// The pre-image an old tuple carries: its replica-identity columns, typed.
+///
+/// Only identity columns hold real values in an old tuple (the rest are sent
+/// as null); an unchanged TOASTed value (`'u'`) is skipped. `None` when the
+/// image would add nothing to the key — the `DEFAULT` identity case.
+pub(crate) fn pre_image(rel: &Relation, old: &Tuple) -> Option<RowImage> {
+    let mut pairs = Vec::new();
+    let mut beyond_key = false;
+    for (col, cell) in rel.columns.iter().zip(old.iter()) {
+        if !col.is_key {
+            continue;
+        }
+        let value = match cell {
+            Cell::Text(text) => typed_value(text, col.type_oid),
+            Cell::Null => GenericValue::Null,
+            Cell::Unchanged => continue,
+        };
+        beyond_key |= !rel.is_key(col);
+        pairs.push((col.name.clone(), value));
+    }
+    beyond_key.then_some(RowImage(pairs))
 }
 
 /// Interpret a pgoutput text value by its Postgres type OID.
@@ -215,7 +277,12 @@ pub(crate) fn decode(data: &[u8]) -> Result<Decoded, SourceError> {
 
 fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
     let oid = cur.u32()?;
-    let _namespace = cur.cstring()?;
+    let nspname = cur.cstring()?;
+    let namespace = DatabaseSchema::try_new(nspname.clone()).map_err(|e| {
+        SourceError::Decode(format!(
+            "pgoutput relation: invalid schema {nspname:?}: {e}"
+        ))
+    })?;
     let relname = cur.cstring()?;
     let table = TableName::try_new(relname.clone()).map_err(|e| {
         SourceError::Decode(format!("pgoutput relation: invalid table {relname:?}: {e}"))
@@ -241,8 +308,10 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
     }
     Ok(Decoded::Relation(Relation {
         oid,
+        namespace,
         table,
         columns,
+        primary_key: Vec::new(),
     }))
 }
 

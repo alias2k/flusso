@@ -159,6 +159,7 @@ impl ChangeCapture for BurstCapture {
                     ChangeEvent::Upsert {
                         table: table("users"),
                         key: row_key(id),
+                        before: None,
                     },
                 ))
             })
@@ -406,7 +407,7 @@ async fn setup() -> Services {
 /// sink — the two engines' per-change inner loop, composed by hand. Returns
 /// without flushing.
 async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
-    let ids = services.documents.resolve(table, key).await.unwrap();
+    let ids = services.documents.resolve(table, key, None).await.unwrap();
     let ts = chrono::Utc::now();
     for id in &ids {
         let envelope = match services.documents.build(id).await.unwrap() {

@@ -41,6 +41,12 @@ pub(crate) struct CheckArgs {
     #[arg(long, env = "FLUSSO_MANAGE_PUBLICATION")]
     manage_publication: Option<bool>,
 
+    /// Whether `flusso run` would set `REPLICA IDENTITY FULL` where needed.
+    /// Controls the replica-identity report's phrasing only (check never
+    /// mutates). Overrides the `[source] manage_replica_identity` config option.
+    #[arg(long, env = "FLUSSO_MANAGE_REPLICA_IDENTITY")]
+    manage_replica_identity: Option<bool>,
+
     /// Output format: a human-readable report, or JSON for piping.
     #[arg(long, env = "FLUSSO_FORMAT", value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
@@ -62,6 +68,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         &adapters::Overrides {
             publication: args.publication.clone(),
             manage_publication: args.manage_publication,
+            manage_replica_identity: args.manage_replica_identity,
             ..adapters::Overrides::default()
         },
     );
@@ -88,17 +95,20 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         )
     };
 
-    let coverage = if args.offline {
-        None
+    let (coverage, pre_image) = if args.offline {
+        (None, None)
     } else {
         let provisioning = crate::backends::build_provisioning(&config, &postgres.publication)?;
-        let required = source_spec(&config).all_tables();
-        Some(
-            provisioning
-                .inspect_coverage(&required)
-                .await
-                .context("inspecting publication coverage")?,
-        )
+        let spec = source_spec(&config);
+        let coverage = provisioning
+            .inspect_coverage(&spec.all_tables())
+            .await
+            .context("inspecting publication coverage")?;
+        let pre_image = provisioning
+            .inspect_pre_image(&spec.pre_image_columns())
+            .await
+            .context("inspecting replica identities")?;
+        (Some(coverage), Some(pre_image))
     };
     let manage = postgres.manage_publication;
 
@@ -130,6 +140,17 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     "blockers": c.blockers,
                     "remediation": c.remediation,
                 })),
+                "pre_image": pre_image.as_ref().map(|p| serde_json::json!({
+                    "satisfied": p.satisfied(),
+                    "gaps": p.gaps.iter().map(|gap| serde_json::json!({
+                        "table": gap.table.to_string(),
+                        "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                        "manageable": gap.manageable,
+                        "will_manage": gap.will_manage(postgres.manage_replica_identity),
+                        "blockers": gap.blockers,
+                        "remediation": gap.remediation,
+                    })).collect::<Vec<_>>(),
+                })),
             });
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         }
@@ -155,6 +176,14 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     print::diagnostics(&mut out, pen, diagnostics)?;
                     if let Some(coverage) = &coverage {
                         print::coverage(&mut out, pen, coverage, manage)?;
+                    }
+                    if let Some(pre_image) = &pre_image {
+                        print::pre_image(
+                            &mut out,
+                            pen,
+                            pre_image,
+                            postgres.manage_replica_identity,
+                        )?;
                     }
                     writeln!(out)?;
                     if has_errors {

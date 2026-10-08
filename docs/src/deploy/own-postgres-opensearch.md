@@ -22,7 +22,7 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
    GRANT SELECT ON ALL TABLES IN SCHEMA public TO flusso;
    ```
 
-   To let flusso manage the publication too, the role must own those tables and hold `CREATE` on the database. Otherwise flusso prints the SQL and you run it as a privileged role.
+   To let flusso manage the publication and the child tables' replica identity too, the role must own those tables (and hold `CREATE` on the database, for the publication). Otherwise flusso prints the SQL and you run it as a privileged role.
 
 3. **Confirm row identity.** Every replicated table needs a single-column primary key or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change.
 
@@ -33,6 +33,8 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
    ```
 
    An empty result means every table has a primary key.
+
+   Child tables (the target of a `has_one`/`has_many`, a junction) also need their parent link in the WAL, or deleting a child row leaves its old parent's document stale. flusso sets `REPLICA IDENTITY FULL` on them itself when the role owns them; otherwise `flusso check` lists them with the `ALTER TABLE` to run. See [Deleted and re-parented rows](../reference/source-postgres.md#deleted-and-re-parented-rows).
 
 4. **Create the publication, or let flusso.** With a privileged role, `flusso run` creates and extends it. To do it yourself, take the table list from `flusso check`'s coverage report:
 

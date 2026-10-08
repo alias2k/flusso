@@ -53,11 +53,14 @@ impl Backends for FlussoBackends {
         let sql_url = sql_connection_url(&connection_url, &tls)
             .context("applying the source TLS settings to the connection URL")?;
 
+        let spec = source_spec(&config);
         let capture: Arc<dyn ChangeCapture> = Arc::new(
-            WalChangeCapture::new(replication, sql_url.clone()).with_publication_management(
-                source_spec(&config).all_tables(),
-                postgres.manage_publication,
-            ),
+            WalChangeCapture::new(replication, sql_url.clone())
+                .with_publication_management(spec.all_tables(), postgres.manage_publication)
+                .with_pre_image_management(
+                    spec.pre_image_columns(),
+                    postgres.manage_replica_identity,
+                ),
         );
         let documents = build_documents(&sql_url, &config).await?;
 

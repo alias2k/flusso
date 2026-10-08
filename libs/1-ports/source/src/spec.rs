@@ -17,7 +17,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use kernel::{DatabaseSchema, Field, IndexMapping, IndexName, IndexSchema, RelationKey, TableName};
+use kernel::{
+    ColumnName, DatabaseSchema, Field, IndexMapping, IndexName, IndexSchema, RelationKey, TableName,
+};
 
 /// A schema-qualified table, the unit a source needs to reason about coverage
 /// (which tables it must be able to stream). Ordered by `(schema, table)` so a
@@ -53,6 +55,11 @@ impl Ord for QualifiedTable {
             .cmp(&(other.schema.as_ref(), other.table.as_ref()))
     }
 }
+
+/// Per table, the columns a change's pre-image must carry so a deleted or
+/// re-parented row can be traced to its old parent (see
+/// [`SourceSpec::pre_image_columns`]).
+pub type PreImageColumns = BTreeMap<QualifiedTable, Vec<ColumnName>>;
 
 /// The enabled indexes a source must build, each paired with its schema.
 ///
@@ -109,6 +116,43 @@ impl SourceSpec {
             collect_relation_tables(&schema.fields, &schema.db_schema, &mut tables);
         }
         tables
+    }
+
+    /// Every table whose rows hold the link to their parent, with that link
+    /// column: a `has_one`/`has_many` (or direct aggregate) child's
+    /// `foreign_key`, and a junction's `left_key`.
+    ///
+    /// Once such a row is deleted or re-parented, only its pre-image still names
+    /// the old parent, so these are the columns the source's change feed must
+    /// carry in it. What [`CaptureProvisioning::inspect_pre_image`](crate::CaptureProvisioning::inspect_pre_image)
+    /// checks.
+    pub fn pre_image_columns(&self) -> PreImageColumns {
+        let mut columns = PreImageColumns::new();
+        for schema in self.indexes.values() {
+            collect_link_columns(&schema.fields, &schema.db_schema, &mut columns);
+        }
+        columns
+    }
+}
+
+/// Walk the field tree, adding each relation's row-held link column under
+/// `db_schema` to `out`.
+fn collect_link_columns(fields: &[Field], db_schema: &DatabaseSchema, out: &mut PreImageColumns) {
+    for field in fields {
+        let link = field.relation().and_then(|relation| match relation.key() {
+            RelationKey::Direct(foreign_key) => Some((relation.table(), foreign_key)),
+            RelationKey::Through(through) => Some((&through.table, &through.left_key)),
+            RelationKey::Local(_) => None,
+        });
+        if let Some((table, column)) = link {
+            let columns = out
+                .entry(QualifiedTable::new(db_schema.clone(), table.clone()))
+                .or_default();
+            if !columns.contains(column) {
+                columns.push(column.clone());
+            }
+        }
+        collect_link_columns(field.children(), db_schema, out);
     }
 }
 

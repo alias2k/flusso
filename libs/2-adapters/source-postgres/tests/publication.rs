@@ -1,7 +1,10 @@
 //! End-to-end tests for publication management (the [`CaptureProvisioning`]
 //! impl) against a real Postgres in a container. These exercise the coverage
 //! inspection, the privilege verdict, and the actual `CREATE`/`ALTER PUBLICATION`
-//! provisioning that unit tests can only check by generated-string assertion.
+//! provisioning that unit tests can only check by generated-string assertion —
+//! plus the replica-identity half: the report (`inspect_pre_image`) across
+//! `DEFAULT`, `FULL`, `USING INDEX`, and a composite-key junction, and
+//! `ensure_pre_image` setting `FULL` when privileged and refusing when not.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -13,8 +16,8 @@
 
 use std::collections::BTreeSet;
 
-use kernel::{DatabaseSchema, TableName};
-use source::{CaptureProvisioning, QualifiedTable};
+use kernel::{ColumnName, DatabaseSchema, TableName};
+use source::{CaptureProvisioning, PreImageColumns, QualifiedTable};
 use source_postgres::{ReplicationConfig, WalChangeCapture};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -124,6 +127,7 @@ async fn read_only_role_reports_gap_without_creating() {
     let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
     for statement in [
         "CREATE TABLE users (id int PRIMARY KEY)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL)",
         // A least-privilege streaming role: can read, but owns nothing and
         // cannot create publications.
         "CREATE ROLE reader LOGIN PASSWORD 'reader'",
@@ -153,4 +157,120 @@ async fn read_only_role_reports_gap_without_creating() {
         published_tables(&pool).await.is_empty(),
         "nothing should have been created"
     );
+
+    // Nor may it set a replica identity on a table it doesn't own.
+    let child = links(&[("orders", "user_id")]);
+    let report = cap.ensure_pre_image(&child, true).await.unwrap();
+    let gap = report.gaps.first().unwrap();
+    assert!(!gap.manageable);
+    assert!(gap.blockers.iter().any(|b| b.contains("does not own")));
+    assert!(!cap.inspect_pre_image(&child).await.unwrap().satisfied());
+}
+
+/// `table → [link columns]` under `public`, as `SourceSpec::pre_image_columns`
+/// would name them.
+fn links(entries: &[(&str, &str)]) -> PreImageColumns {
+    entries
+        .iter()
+        .map(|(table, column)| {
+            (
+                required(&[table]).into_iter().next().unwrap(),
+                vec![ColumnName::try_new(*column).unwrap()],
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn pre_image_gaps_follow_each_tables_replica_identity() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY)",
+        "CREATE TABLE by_default (id int PRIMARY KEY, user_id int NOT NULL)",
+        "CREATE TABLE by_full (id int PRIMARY KEY, user_id int NOT NULL)",
+        "ALTER TABLE by_full REPLICA IDENTITY FULL",
+        "CREATE TABLE by_index (id int PRIMARY KEY, user_id int NOT NULL)",
+        "CREATE UNIQUE INDEX by_index_identity ON by_index (id, user_id)",
+        "ALTER TABLE by_index REPLICA IDENTITY USING INDEX by_index_identity",
+        // An identity index on the link alone: changes key by it, so the
+        // pre-image never carries more than the key — still a gap.
+        "CREATE TABLE by_link_index (id int PRIMARY KEY, user_id int NOT NULL)",
+        "CREATE UNIQUE INDEX by_link_index_identity ON by_link_index (user_id)",
+        "ALTER TABLE by_link_index REPLICA IDENTITY USING INDEX by_link_index_identity",
+        "CREATE TABLE junction (user_id int, tag_id int, PRIMARY KEY (user_id, tag_id))",
+        "CREATE TABLE parted (id int, user_id int NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id)",
+        "CREATE TABLE parted_low PARTITION OF parted FOR VALUES FROM (0) TO (1000)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let cap = capture(port, "postgres", "postgres", "postgres");
+    let report = cap
+        .inspect_pre_image(&links(&[
+            ("by_default", "user_id"),
+            ("by_full", "user_id"),
+            ("by_index", "user_id"),
+            ("by_link_index", "user_id"),
+            ("junction", "user_id"),
+            ("missing_table", "user_id"),
+        ]))
+        .await
+        .unwrap();
+
+    let gaps: Vec<String> = report.gaps.iter().map(|g| g.table.to_string()).collect();
+    assert_eq!(gaps, ["public.by_default", "public.by_link_index"]);
+    let remediation = report.gaps.first().unwrap().remediation.clone();
+    assert_eq!(
+        remediation,
+        "ALTER TABLE \"public\".\"by_default\" REPLICA IDENTITY FULL;"
+    );
+
+    assert!(
+        report.gaps.first().unwrap().manageable,
+        "superuser can set it"
+    );
+
+    // Opted out: reported, left alone.
+    let default_only = links(&[("by_default", "user_id")]);
+    cap.ensure_pre_image(&default_only, false).await.unwrap();
+    assert!(
+        !cap.inspect_pre_image(&default_only)
+            .await
+            .unwrap()
+            .satisfied()
+    );
+
+    // Managed: flusso sets REPLICA IDENTITY FULL itself.
+    let before = cap.ensure_pre_image(&default_only, true).await.unwrap();
+    assert!(!before.satisfied(), "ensure returns what it found");
+    assert!(
+        cap.inspect_pre_image(&default_only)
+            .await
+            .unwrap()
+            .satisfied()
+    );
+    let identity: String =
+        sqlx::query_scalar("SELECT relreplident::text FROM pg_class WHERE relname = 'by_default'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(identity, "f");
+
+    // A partitioned table is reported, never altered: its partitions stream
+    // under their own names.
+    let parted = links(&[("parted", "user_id")]);
+    let report = cap.ensure_pre_image(&parted, true).await.unwrap();
+    let gap = report.gaps.first().unwrap();
+    assert!(!gap.manageable);
+    assert!(gap.blockers.iter().any(|b| b.contains("partitioned")));
+    let parent_identity: String =
+        sqlx::query_scalar("SELECT relreplident::text FROM pg_class WHERE relname = 'parted'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(parent_identity, "d");
 }

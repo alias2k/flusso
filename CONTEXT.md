@@ -79,8 +79,12 @@ _Avoid_: destination, target, output, writer
 ### What flows
 
 **Change**:
-A source event naming a row that was inserted, updated, or deleted, identified by table and key only. Never carries row contents.
+A source event naming a row that was inserted, updated, or deleted, identified by table and key. Documents are always rebuilt from the current row; the only row contents a change may carry are its pre-image.
 _Avoid_: event, mutation, delta, CDC record
+
+**Pre-image**:
+The changed row as it was before an update or delete, as far as the source's change feed carries it. Used only to find the documents that embedded the row's old version (a deleted or re-parented child); never to build a document. Postgres sends it according to the table's `REPLICA IDENTITY`.
+_Avoid_: old row, before image, old tuple
 
 **Position**:
 An opaque, ordered, serializable offset in the source's change feed, assigned by the source and meaningful only to it. The source confirms a position once every lane has acknowledged it. Snapshot batches carry none.

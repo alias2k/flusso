@@ -35,11 +35,16 @@
 //! from the Postgres catalog and cached (see [`PgDocumentBuilder::table_primary_key`]).
 //! The index's own root key comes from its declared `primary_key`.
 //!
+//! ## Deleted and re-parented children
+//!
+//! A child row that holds its parent's key (`has_one`/`has_many`, or a junction
+//! row) is traced to its *old* parent through the change's pre-image — the
+//! current row is gone or names the new parent. That needs the table's replica
+//! identity to carry the link column; see [`resolve`].
+//!
 //! ## Remaining limits
 //!
-//! A child-row *delete* on a related table can't be reverse-resolved from a
-//! key-only change (the row is already gone); this follows from the thin-event
-//! CDC design. Multi-hop reverse resolution issues one query per hop.
+//! Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
 mod query;
@@ -54,7 +59,9 @@ use kernel::{
     ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete, TableName,
 };
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{Catalog, ColumnInfo, Result, RowKey, SnapshotTable, SourceError, SourceSpec};
+use source::{
+    Catalog, ColumnInfo, Result, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
+};
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
@@ -379,7 +386,12 @@ impl DocumentBuilder for PgDocumentBuilder {
         fields(table = table.as_ref()),
         err,
     )]
-    async fn resolve(&self, table: &TableName, key: &RowKey) -> Result<Vec<DocumentId>> {
+    async fn resolve(
+        &self,
+        table: &TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+    ) -> Result<Vec<DocumentId>> {
         let mut ids = Vec::new();
         for (name, schema) in self.spec.indexes() {
             if schema.table == *table {
@@ -406,7 +418,7 @@ impl DocumentBuilder for PgDocumentBuilder {
 
             let mut seen = HashSet::new();
             for path in &paths {
-                for root in self.resolve_path(schema, table, key, path).await? {
+                for root in self.resolve_path(schema, table, key, before, path).await? {
                     if seen.insert(root.clone()) {
                         ids.push(DocumentId {
                             index: name.clone(),

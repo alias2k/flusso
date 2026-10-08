@@ -96,7 +96,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   set→removed, cleared→restored), backfill (active rows seeded, soft-deleted skipped), and the
   two seed-marker contradictions (restart after the generation index was deleted → reseeded in
   place; restart after the slot was dropped + data changed → rebuilt into a new generation, stale
-  rows gone, old generation dropped). New e2e binaries must be added to the filtersets in
+  rows gone, old generation dropped), and `deleted_and_reparented_children_leave_their_old_parent`
+  (a hard-deleted / re-parented `has_many` child and a row three relations deep leave their old
+  parent's document, traced through the WAL pre-image; tables under `REPLICA IDENTITY FULL`, which
+  also proves a `FULL` root keeps a plain `_id` — issue #140). New e2e binaries must be added to the filtersets in
   `.config/nextest.toml` (both profiles) to get the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
@@ -427,7 +430,20 @@ and, when allowed, provisions the gap. Postgres backs it with a **publication**
 WalChangeCapture`): `run` auto-creates/extends it on `live` (after `ensure_slot`) when the role
 is privileged enough and `manage_publication` isn't opted out, else warns with the exact SQL;
 `check` inspects read-only and prints the same. The trait/report never name "publication", so
-the daemon/CLI/printer stay backend-neutral. A third source-neutral capability is
+the daemon/CLI/printer stay backend-neutral. The same trait's read-only `inspect_pre_image`
+reports a second prerequisite (issue #140, ADR 0007): reverse resolution traces a deleted or
+re-parented child to its old parent through the change's **pre-image** (`ChangeEvent.before:
+Option<RowImage>`, passed to `DocumentBuilder::resolve` and read only on the first hop, unioned
+with the current-DB lookup), so each child table's replica identity must carry its link column
+(`SourceSpec::pre_image_columns`: `has_one`/`has_many` `foreign_key`, junction `left_key`).
+Postgres answers from `relreplident` (`cdc/replica_identity.rs`); `check` prints a Replica
+identity section (read-only); `run` **sets** `REPLICA IDENTITY FULL` in `prepare()`, **before
+the slot** (a change logged in between would decode with the old identity), via `ensure_pre_image`
+when `manage_replica_identity` (default on) and the role owns the table — under a 5 s
+`lock_timeout`; partitioned tables are reported, never altered; an unclosable gap is warned with
+the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
+primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
+which mark every column under `FULL`. A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers
 "the type of *this* column" and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
@@ -506,7 +522,8 @@ and `yaml` modules) works in two stages:
    fails before any network call or lock write. `load` alone therefore does **not** mean
    "fully validated".
 
-**Adapter knobs that are flags** (`--slot`, `--publication`, `--manage-publication`, `--pretty`,
+**Adapter knobs that are flags** (`--slot`, `--publication`, `--manage-publication`,
+`--manage-replica-identity`, `--pretty`,
 `--queue-capacity`) are laid over the file's entries by `adapters::apply_overrides` before
 validation (flag > env > file); `DaemonOptions` carries nothing adapter-specific. A deployment
 with no sink gets a `stdout` entry there.
@@ -755,8 +772,8 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Adapter config types (one per adapter, `#[derive(AdapterConfig)]`) | `libs/2-adapters/source-postgres/src/config.rs` (`PostgresConfig`, `Connection`, `SslMode`, `Tls`), `stream-channel/src/config.rs`, `sink-opensearch/src/config.rs` (+ `TextAnalysis`), `sink-stdout/src/config.rs` |
 | `flusso.toml` parsing (entities only; conversion is beside `Config`) | `libs/1-config/src/toml/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
-| Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`), `document/` |
-| Source trait abstractions (`ChangeCapture` + `Continuity`, `DocumentBuilder`, `SourceSpec` + `all_tables`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
+| Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`, `replica_identity.rs`), `document/` (`resolve.rs`: reverse resolution + the first-hop pre-image union) |
+| Source trait abstractions (`ChangeCapture` + `Continuity`, `ChangeEvent` + `RowImage` pre-image, `DocumentBuilder`, `SourceSpec` + `all_tables`/`pre_image_columns`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`/`PreImageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
 | Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits, plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
 | `Sink` trait (`apply`/`flush`/seeding/`reindex`), `SinkOptions`, JSON render | `libs/1-ports/sink/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
@@ -771,7 +788,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
-| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use kernel::{
-    Column, DatabaseSchema, Field, FieldSource, FlussoType, IndexName, IndexSchema, Join, JoinKind,
-    Relation, TableName, Through,
+    Column, ColumnName, DatabaseSchema, Field, FieldSource, FlussoType, IndexName, IndexSchema,
+    Join, JoinKind, Relation, TableName, Through,
 };
 
 use super::{QualifiedTable, SourceSpec};
@@ -68,10 +68,9 @@ fn accessors_expose_indexes_in_name_order() {
     assert_eq!(mappings.first().unwrap().index.as_ref(), "a");
 }
 
-#[test]
-fn all_tables_collects_roots_relations_and_junctions() {
-    // `books` over public.books with a has_many join to `reviews` and a
-    // many_to_many to `tags` through the `book_tags` junction.
+/// `books` over public.books with a has_many join to `reviews` and a
+/// many_to_many to `tags` through the `book_tags` junction.
+fn books() -> IndexSchema {
     let mut books = schema("books");
     books.fields.push(Field {
         field: kernel::FieldName::try_new("reviews").unwrap(),
@@ -109,9 +108,13 @@ fn all_tables_collects_roots_relations_and_junctions() {
             fields: vec![column_field("name")],
         })),
     });
+    books
+}
 
+#[test]
+fn all_tables_collects_roots_relations_and_junctions() {
     let mut indexes = BTreeMap::new();
-    indexes.insert(index_name("books"), books);
+    indexes.insert(index_name("books"), books());
     // A second index sharing no tables, to prove the set spans all indexes.
     indexes.insert(index_name("ants"), schema("ants"));
     let spec = SourceSpec::new(indexes);
@@ -131,5 +134,22 @@ fn all_tables_collects_roots_relations_and_junctions() {
         ]
         .into_iter()
         .collect()
+    );
+}
+
+#[test]
+fn pre_image_columns_are_child_foreign_keys_and_junction_left_keys() {
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("books"), books())]));
+    let public = DatabaseSchema::try_new("public").unwrap();
+    let entry = |table: &str, column: &str| {
+        (
+            QualifiedTable::new(public.clone(), TableName::try_new(table).unwrap()),
+            vec![ColumnName::try_new(column).unwrap()],
+        )
+    };
+
+    assert_eq!(
+        spec.pre_image_columns(),
+        BTreeMap::from([entry("book_tags", "book_id"), entry("reviews", "book_id")])
     );
 }

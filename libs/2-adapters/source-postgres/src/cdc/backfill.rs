@@ -41,6 +41,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres};
 
+use super::quote_ident;
 use crate::document::value;
 
 /// Name of the single server-side cursor reused across tables. The snapshot owns
@@ -267,7 +268,11 @@ impl Backfill {
 /// A snapshot row as an [`Upsert`](ChangeEvent::Upsert). Snapshot rows carry no
 /// position: the snapshot is not resumable, a crashed one simply re-runs.
 fn upsert_change(table: TableName, key: RowKey) -> ChangeEvent {
-    ChangeEvent::Upsert { table, key }
+    ChangeEvent::Upsert {
+        table,
+        key,
+        before: None,
+    }
 }
 
 /// Open the read-only, single-snapshot transaction the cursors read within.
@@ -317,11 +322,6 @@ async fn commit(conn: &mut PoolConnection<Postgres>) -> Result<()> {
         .await
         .map_err(query_err)?;
     Ok(())
-}
-
-/// Double-quote an SQL identifier, escaping embedded quotes.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 fn query_err(error: sqlx::Error) -> SourceError {

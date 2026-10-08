@@ -42,7 +42,7 @@ use kernel::{
 use sink::{FlushReport, Sink};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{Result as SourceResult, RowKey, SnapshotTable};
+use source::{Result as SourceResult, RowImage, RowKey, SnapshotTable};
 use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::runtime::Runtime;
@@ -96,6 +96,7 @@ impl ChangeCapture for MockCapture {
                 ChangeEvent::Upsert {
                     table: table(),
                     key: key((i % DOCUMENTS) as i64),
+                    before: None,
                 },
             ))
         }))))
@@ -112,6 +113,7 @@ impl ChangeCapture for MockCapture {
             Ok(ChangeEvent::Upsert {
                 table: table(),
                 key: key(i as i64),
+                before: None,
             })
         }))))
     }
@@ -154,7 +156,12 @@ fn body(id: i64) -> GenericValue {
 
 #[async_trait]
 impl DocumentBuilder for MockDocuments {
-    async fn resolve(&self, _table: &TableName, key: &RowKey) -> SourceResult<Vec<DocumentId>> {
+    async fn resolve(
+        &self,
+        _table: &TableName,
+        key: &RowKey,
+        _before: Option<&RowImage>,
+    ) -> SourceResult<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: index(),
             key: key.clone(),

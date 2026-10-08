@@ -13,7 +13,7 @@ use kernel::{ColumnName, Envelope, IndexMapping, IndexName, Op, Position, SinkNa
 use sink::{FlushReport, Sink, SinkOptions};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowKey, SnapshotTable};
+use source::{RowImage, RowKey, SnapshotTable};
 use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::sync::Notify;
@@ -39,6 +39,7 @@ fn upsert(id: i64) -> ChangeEvent {
     ChangeEvent::Upsert {
         table: TableName::try_new("users").unwrap(),
         key: key(id),
+        before: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn delete(id: i64) -> ChangeEvent {
     ChangeEvent::Delete {
         table: TableName::try_new("users").unwrap(),
         key: key(id),
+        before: None,
     }
 }
 
@@ -163,7 +165,12 @@ struct MockDocuments {
 
 #[async_trait]
 impl DocumentBuilder for MockDocuments {
-    async fn resolve(&self, _table: &TableName, key: &RowKey) -> source::Result<Vec<DocumentId>> {
+    async fn resolve(
+        &self,
+        _table: &TableName,
+        key: &RowKey,
+        _before: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: users(),
             key: key.clone(),

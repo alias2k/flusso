@@ -1,14 +1,18 @@
 use kernel::TableName;
 
-use crate::RowKey;
+use crate::{RowImage, RowKey};
 
-/// What happened to a row, identified only by its table and primary key.
+/// What happened to a row, identified by its table and primary key.
 ///
 /// Events are deliberately *thin*: they name the row, not its contents. The
 /// ingest engine re-reads the current row — and resolves the document's joins
 /// and aggregates — at build time. This keeps every mechanism (WAL, polling, …)
-/// identical from the engine's point of view and avoids depending on a table's
-/// `REPLICA IDENTITY` to carry old or new values.
+/// identical from the engine's point of view.
+///
+/// The one exception is the optional [`RowImage`] pre-image (`before`). It
+/// never builds a document; resolution reads it to find the documents that
+/// embedded the row's *old* version — a deleted or re-parented child whose
+/// link to its parent no longer exists in the source.
 ///
 /// The mechanism reports *raw per-table* changes. Mapping a change in a joined
 /// or junction table back to the parent documents that must be rebuilt is the
@@ -23,10 +27,22 @@ use crate::RowKey;
 #[serde(rename_all = "snake_case")]
 pub enum ChangeEvent {
     /// A row was inserted or updated.
-    Upsert { table: TableName, key: RowKey },
+    Upsert {
+        table: TableName,
+        key: RowKey,
+        /// The row before an update, when the change feed carried it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<RowImage>,
+    },
 
     /// A row was deleted.
-    Delete { table: TableName, key: RowKey },
+    Delete {
+        table: TableName,
+        key: RowKey,
+        /// The deleted row, when the change feed carried more than its key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<RowImage>,
+    },
 }
 
 impl ChangeEvent {
@@ -41,6 +57,15 @@ impl ChangeEvent {
     pub fn key(&self) -> &RowKey {
         match self {
             ChangeEvent::Upsert { key, .. } | ChangeEvent::Delete { key, .. } => key,
+        }
+    }
+
+    /// The row's pre-image, when the change feed carried one.
+    pub fn before(&self) -> Option<&RowImage> {
+        match self {
+            ChangeEvent::Upsert { before, .. } | ChangeEvent::Delete { before, .. } => {
+                before.as_ref()
+            }
         }
     }
 }

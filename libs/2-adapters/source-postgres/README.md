@@ -6,9 +6,9 @@ The Postgres logical-replication **source** for flusso: capture row changes over
 
 | Trait (`source` port) | Role |
 | --- | --- |
-| `ChangeCapture` | streams thin per-row changes (table + primary key) from a replication slot; confirms progress via an LSN watermark |
+| `ChangeCapture` | streams thin per-row changes (table + primary key, plus the pre-image an update or delete logs) from a replication slot; confirms progress via an LSN watermark |
 | `DocumentBuilder` | resolves which documents a changed row affects, then assembles each one. Also implements `Catalog` (a column's SQL type + nullability, for index validation) |
-| `CaptureProvisioning` | reports stream coverage + a privilege verdict for an index's tables, and provisions the gap (create/extend a publication) when allowed |
+| `CaptureProvisioning` | reports stream coverage + a privilege verdict for an index's tables, and provisions the gap (create/extend a publication) when allowed; does the same for child tables whose replica identity misses their parent link (`REPLICA IDENTITY FULL`) |
 
 **Configuration**: [`PostgresConfig`] is the `[source]` table with `type = "postgres"`,
 declared once with `#[derive(AdapterConfig)]`: the connection (a URL, `{ env = "VAR" }`,
@@ -33,7 +33,11 @@ TLS.
 ## The traits
 
 - **`ChangeCapture`** streams thin per-row changes (table + primary key) from a
-  replication slot and confirms progress via an LSN watermark. The slot advances
+  replication slot and confirms progress via an LSN watermark. The key is the
+  table's catalog primary key, not the replica-identity columns (all of them
+  under `REPLICA IDENTITY FULL`); an update or delete also carries the old row's
+  identity columns as its pre-image, which is how a deleted or re-parented child
+  is traced to its old parent. The slot advances
   only as far as the engine has durably written — at-least-once. While the
   watched tables are idle it still advances from the server's keepalives, so
   unrelated write traffic never pins WAL retention. `continuity` reports,

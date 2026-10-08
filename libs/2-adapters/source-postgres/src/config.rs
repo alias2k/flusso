@@ -23,6 +23,7 @@
 //! assert_eq!(config.slot, "search");
 //! assert_eq!(config.publication, "flusso");
 //! assert!(config.manage_publication);
+//! assert!(config.manage_replica_identity);
 //! ```
 
 use std::fmt;
@@ -50,6 +51,12 @@ pub struct PostgresConfig {
     /// makes flusso only report coverage gaps and never issue publication DDL.
     #[serde(default = "default_true")]
     pub manage_publication: bool,
+    /// Whether flusso may set `REPLICA IDENTITY FULL` on a child table whose
+    /// replica identity doesn't carry its parent link, so a deleted or
+    /// re-parented row rebuilds its old parent. Needs ownership of the table.
+    /// `false` makes flusso only report the gap and never issue the `ALTER`.
+    #[serde(default = "default_true")]
+    pub manage_replica_identity: bool,
     /// The logical replication slot flusso consumes. Created on first run.
     #[serde(default = "default_flusso")]
     pub slot: String,

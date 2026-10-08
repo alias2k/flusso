@@ -27,9 +27,15 @@ mod capture;
 mod introspection;
 mod pgoutput;
 mod publication;
+mod replica_identity;
 mod stream;
 
 pub use capture::WalChangeCapture;
+
+/// Double-quote an SQL identifier, escaping embedded quotes.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
 
 /// Run the pgoutput decoder over arbitrary bytes, discarding the result.
 ///

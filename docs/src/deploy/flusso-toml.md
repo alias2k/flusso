@@ -61,6 +61,7 @@ You're standing up flusso against a database and a cluster, or adding a sink or 
 - **Share one cluster across environments** with `prefix = "staging_"`. The read side must use the same prefix. See [prefix](../reference/config-toml.md#prefix).
 - **Add a stdout sink** during development to see every document as it's written: a `[sinks.audit]` table with `type = "stdout"` and `backfill = false` (it needs no seeding, and the OpenSearch sink is not re-seeded because of it). Every sink receives every document over its own lane.
 - **Hand-manage the publication** with `manage_publication = false` when the source role can't own the tables. `check` prints the SQL.
+- **Hand-manage child tables' replica identity** with `manage_replica_identity = false`, for the same reason. `check` prints the SQL; see [Deleted and re-parented rows](../reference/source-postgres.md#deleted-and-re-parented-rows).
 - **Editor completion.** `flusso schema config > config.schema.json`, or point a `.taplo.toml` rule at `https://alias2k.github.io/flusso/schemas/latest/config.schema.json`.
 
 ## Related

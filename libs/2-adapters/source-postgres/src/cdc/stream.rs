@@ -5,23 +5,34 @@
 //! arrives, tagged with the commit LSN. That gives every change a clean,
 //! commit-aligned position to acknowledge against, and matches logical
 //! decoding's "whole transactions only" model. Because events are thin (a table
-//! name and primary key), buffering even a large transaction is cheap.
+//! name, primary key, and at most a pre-image), buffering even a large
+//! transaction is cheap.
+//!
+//! Each `Relation` message is followed by a catalog lookup of the table's
+//! primary key, before the next replication event is read: a change is keyed by
+//! its primary key, not by the replica-identity columns pgoutput flags (all of
+//! them, under `REPLICA IDENTITY FULL`). See [`pgoutput`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
+use kernel::ColumnName;
 use kernel::Position;
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
-use source::{Result, SourceError};
+use source::{PreImageColumns, QualifiedTable, Result, SourceError};
+use sqlx::PgPool;
 
 use super::ack::Positions;
 use super::pgoutput::{self, Decoded, Relation};
+use super::replica_identity;
 
 /// Everything the unfold loop carries between polls.
 struct State {
     client: ReplicationClient,
+    /// Catalog connection for the per-relation primary-key lookup.
+    catalog: PgPool,
     decode: DecodeState,
 }
 
@@ -31,6 +42,15 @@ struct State {
 struct DecodeState {
     /// Relation metadata by OID, accumulated from `Relation` messages.
     relations: HashMap<u32, Relation>,
+    /// Relations whose primary key has not been looked up yet.
+    unkeyed: Vec<u32>,
+    /// Per table, the columns resolution needs from a pre-image.
+    pre_image_links: PreImageColumns,
+    /// Per relation, the needed pre-image columns its replica identity does not
+    /// carry — set when its `Relation` arrives.
+    untraceable: HashMap<u32, Vec<ColumnName>>,
+    /// Relations already warned about as untraceable.
+    warned: HashSet<u32>,
     /// Row changes of the currently open transaction, awaiting its `Commit`.
     open_txn: Vec<ChangeEvent>,
     /// Changes ready to emit, each with the commit LSN to acknowledge at.
@@ -53,12 +73,19 @@ struct DecodeState {
 /// traffic.
 pub(crate) fn build(
     client: ReplicationClient,
+    catalog: PgPool,
+    pre_image_links: PreImageColumns,
     ack: Arc<Positions>,
 ) -> BoxStream<'static, Result<LiveChange>> {
     let state = State {
         client,
+        catalog,
         decode: DecodeState {
             relations: HashMap::new(),
+            unkeyed: Vec::new(),
+            pre_image_links,
+            untraceable: HashMap::new(),
+            warned: HashSet::new(),
             open_txn: Vec::new(),
             pending: VecDeque::new(),
             ack,
@@ -85,7 +112,11 @@ pub(crate) fn build(
 
             match state.client.recv().await {
                 Ok(Some(event)) => {
-                    if let Err(e) = handle(&mut state.decode, event) {
+                    let handled = match handle(&mut state.decode, event) {
+                        Ok(()) => key_relations(&state.catalog, &mut state.decode).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = handled {
                         state.decode.done = true;
                         return Some((Err(e), state));
                     }
@@ -98,6 +129,37 @@ pub(crate) fn build(
             }
         }
     }))
+}
+
+/// Look up the catalog primary key of every relation announced since the last
+/// event, then which parent links its identity can't deliver (that depends on
+/// the key). A table without one keeps an empty key and is keyed by its
+/// replica identity instead.
+async fn key_relations(
+    catalog: &PgPool,
+    state: &mut DecodeState,
+) -> std::result::Result<(), SourceError> {
+    for oid in std::mem::take(&mut state.unkeyed) {
+        let Some(relation) = state.relations.get_mut(&oid) else {
+            continue;
+        };
+        let qualified = format!(
+            "{}.{}",
+            super::quote_ident(relation.namespace.as_ref()),
+            super::quote_ident(relation.table.as_ref())
+        );
+        relation.primary_key = crate::document::primary_key_column_names(catalog, qualified)
+            .await?
+            .into_iter()
+            .map(|name| {
+                ColumnName::try_new(name.clone()).map_err(|e| {
+                    SourceError::Decode(format!("invalid primary key column {name:?}: {e}"))
+                })
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        record_untraceable(state, oid);
+    }
+    Ok(())
 }
 
 /// Fold one replication event into the state, possibly queueing changes.
@@ -150,13 +212,18 @@ fn handle(
 fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), SourceError> {
     match pgoutput::decode(data)? {
         Decoded::Relation(relation) => {
+            state.unkeyed.push(relation.oid);
             state.relations.insert(relation.oid, relation);
         }
         Decoded::Insert { rel, new } => {
             let relation = lookup_relation(state, rel)?;
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &new)?;
-            state.open_txn.push(ChangeEvent::Upsert { table, key });
+            state.open_txn.push(ChangeEvent::Upsert {
+                table,
+                key,
+                before: None,
+            });
         }
         Decoded::Update { rel, old, new } => {
             let relation = lookup_relation(state, rel)?;
@@ -168,24 +235,34 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 Some(old) => Some(pgoutput::row_key(relation, old)?),
                 None => None,
             };
+            let before = old
+                .as_ref()
+                .and_then(|old| pgoutput::pre_image(relation, old));
             if let Some(old_key) = old_key
                 && old_key.0 != new_key.0
             {
                 state.open_txn.push(ChangeEvent::Delete {
                     table: table.clone(),
                     key: old_key,
+                    before: before.clone(),
                 });
             }
             state.open_txn.push(ChangeEvent::Upsert {
                 table,
                 key: new_key,
+                before,
             });
+            warn_untraceable(state, rel);
         }
         Decoded::Delete { rel, old } => {
             let relation = lookup_relation(state, rel)?;
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &old)?;
-            state.open_txn.push(ChangeEvent::Delete { table, key });
+            let before = pgoutput::pre_image(relation, &old);
+            state
+                .open_txn
+                .push(ChangeEvent::Delete { table, key, before });
+            warn_untraceable(state, rel);
         }
         Decoded::Truncate { rels } => {
             for oid in rels {
@@ -202,6 +279,53 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
         Decoded::Other => {}
     }
     Ok(())
+}
+
+/// Record which pre-image columns relation `oid` needs but can't deliver —
+/// what an update or delete on it can't trace to the old parent.
+fn record_untraceable(state: &mut DecodeState, oid: u32) {
+    let Some(relation) = state.relations.get(&oid) else {
+        return;
+    };
+    let table = QualifiedTable::new(relation.namespace.clone(), relation.table.clone());
+    let required = state
+        .pre_image_links
+        .get(&table)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let carries = |name: &str| {
+        relation
+            .columns
+            .iter()
+            .any(|column| column.is_key && column.name.as_ref() == name)
+    };
+    let uncarried = replica_identity::uncarried(carries, &relation.primary_key, required);
+    if uncarried.is_empty() {
+        state.untraceable.remove(&oid);
+    } else {
+        state.untraceable.insert(oid, uncarried);
+    }
+}
+
+/// Warn, once per relation, about an update or delete on a table whose replica
+/// identity doesn't carry its parent link — so a delete or re-parent leaves
+/// the old parent's document stale.
+fn warn_untraceable(state: &mut DecodeState, oid: u32) {
+    let (Some(uncarried), Some(relation)) =
+        (state.untraceable.get(&oid), state.relations.get(&oid))
+    else {
+        return;
+    };
+    if !state.warned.insert(oid) {
+        return;
+    }
+    let table = QualifiedTable::new(relation.namespace.clone(), relation.table.clone());
+    replica_identity::warn_untraceable(
+        &table,
+        uncarried,
+        "an update or delete arrived without it",
+        &replica_identity::alter_sql(relation.namespace.as_ref(), relation.table.as_ref()),
+    );
 }
 
 /// Look up a relation by OID. A missing one means a DML message arrived before

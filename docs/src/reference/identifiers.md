@@ -31,4 +31,4 @@ Loading a `flusso.toml` and its schemas fails with a specific error when any of 
 
 ## What check adds with a database
 
-`flusso check` without `--offline` also confirms, per declared field, that the column exists, that its SQL type is accepted by the declared type key, and that its `NOT NULL` agrees with `required`. It then reports publication coverage. A disagreement fails the check with the field named.
+`flusso check` without `--offline` also confirms, per declared field, that the column exists, that its SQL type is accepted by the declared type key, and that its `NOT NULL` agrees with `required`. It then reports publication coverage and the replica identity of every child table. A disagreement fails the check with the field named.

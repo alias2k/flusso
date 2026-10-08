@@ -45,6 +45,7 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_SLOT` | `--slot` | `run` |
 | `FLUSSO_PUBLICATION` | `--publication` | `run`, `check` |
 | `FLUSSO_MANAGE_PUBLICATION` | `--manage-publication` | `run`, `check` |
+| `FLUSSO_MANAGE_REPLICA_IDENTITY` | `--manage-replica-identity` | `run`, `check` |
 | `FLUSSO_SKIP_BACKFILL` | `--skip-backfill` | `run` |
 | `FLUSSO_PRETTY` | `--pretty` | `run` |
 | `FLUSSO_QUEUE_CAPACITY` | `--queue-capacity` | `run` |
