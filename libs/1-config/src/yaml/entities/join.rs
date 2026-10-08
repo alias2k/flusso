@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use kernel::common;
 
+use super::Filter;
+
 /// The relationship verb of a join — written as the field's type key
 /// (`belongs_to:` / `has_one:` / `has_many:` / `many_to_many:`). The verb names
 /// which side carries the key: `belongs_to` follows a column on *this* table;
@@ -28,13 +30,16 @@ impl JoinVerb {
     }
 }
 
-/// A junction table for a `many_to_many` join.
+/// A junction table for a `many_to_many` join or an aggregate. Its `filters`
+/// narrow the junction rows; the relation's own `filters` narrow the target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Through {
     pub table: common::TableName,
     pub left_key: common::ColumnName,
     pub right_key: common::ColumnName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Vec<Filter>>,
 }
 
 /// One `order_by` entry for a to-many join.

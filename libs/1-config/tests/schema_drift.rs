@@ -265,6 +265,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             element_type: _,
             foreign_key: _,
             through: _,
+            distinct: _,
             filters: _,
             options: _,
         } = a;
@@ -291,6 +292,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "limit",        // join
         "value_type",   // aggregate (sum/min/max)
         "element_type", // aggregate (ids)
+        "distinct",     // aggregate (over through)
         "values",       // map (value leaf type)
         "value",        // constant
     ])
@@ -412,5 +414,22 @@ fn index_order_by_directions_match_parser() {
         ),
         tokens(&all_directions()),
         "order_by directions drifted",
+    );
+}
+
+#[test]
+fn index_through_keys_match_parser() {
+    fn _guard(t: config::yaml::Through) {
+        let config::yaml::Through {
+            table: _,
+            left_key: _,
+            right_key: _,
+            filters: _,
+        } = t;
+    }
+    assert_eq!(
+        schema_keys(&index_schema(), "/definitions/through/properties"),
+        strs(&["table", "left_key", "right_key", "filters"]),
+        "`through` keys drifted",
     );
 }

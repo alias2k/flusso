@@ -175,7 +175,7 @@ pub struct JoinBody {
 
 /// An aggregate field (its op is the type key). `value_type` is required for
 /// `sum`/`min`/`max`; `element_type` is required for `ids` (and forbidden on the
-/// other ops).
+/// other ops); `distinct` is only valid with `through`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateBody {
@@ -191,6 +191,8 @@ pub struct AggregateBody {
     pub foreign_key: Option<common::ColumnName>,
     #[serde(default)]
     pub through: Option<Through>,
+    #[serde(default)]
+    pub distinct: bool,
     #[serde(default)]
     pub filters: Option<Vec<Filter>>,
     #[serde(default)]

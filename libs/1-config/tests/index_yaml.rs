@@ -9,7 +9,7 @@
 
 use config::yaml::{ConversionError, ParseError, SchemaYaml};
 use kernel::{
-    AggregateKey, AggregateOp, Column, Field, FieldSource, FilterValue, FlussoType, Geo,
+    AggregateKey, AggregateOp, Column, Field, FieldSource, Filter, FilterValue, FlussoType, Geo,
     IndexSchema, JoinKind, ParseFrom, Relation,
 };
 
@@ -704,4 +704,73 @@ fn geo_with_only_one_coordinate_is_an_error() {
     )
     .unwrap_err();
     assert!(matches!(err, ConversionError::InvalidGeoSource));
+}
+
+const ORDER_WEIGHT: &str = "version: 1\ntable: orders\nfields:\n  - sum: totalWeight\n    table: products\n    column: weight\n    value_type: double\n    through:\n      table: order_items\n      left_key: order_id\n      right_key: product_id\n";
+
+#[test]
+fn aggregate_over_through_defaults_to_one_value_per_junction_row() {
+    let schema = convert(ORDER_WEIGHT).unwrap();
+    match &field(&schema, "totalWeight").source {
+        FieldSource::Relation(Relation::Aggregate(a)) => {
+            assert!(!a.distinct);
+            assert!(matches!(&a.key, AggregateKey::Through(t) if t.filters.is_none()));
+        }
+        other => panic!("expected an aggregate, got {other:?}"),
+    }
+}
+
+#[test]
+fn aggregate_over_through_takes_distinct_and_junction_filters() {
+    let schema = convert(&format!(
+        "{ORDER_WEIGHT}      filters:\n        - {{ column: status, op: neq, value: cancelled }}\n    distinct: true\n    filters:\n      - {{ column: active, op: eq, value: 'true' }}\n"
+    ))
+    .unwrap();
+    match &field(&schema, "totalWeight").source {
+        FieldSource::Relation(Relation::Aggregate(a)) => {
+            assert!(a.distinct);
+            let AggregateKey::Through(through) = &a.key else {
+                panic!("expected a through key");
+            };
+            let junction = through.filters.as_deref().unwrap();
+            assert!(matches!(
+                junction,
+                [Filter::ValueOp(f)] if f.column.as_ref() == "status"
+            ));
+            assert!(matches!(
+                a.filters.as_deref().unwrap(),
+                [Filter::ValueOp(f)] if f.column.as_ref() == "active"
+            ));
+        }
+        other => panic!("expected an aggregate, got {other:?}"),
+    }
+}
+
+#[test]
+fn distinct_is_rejected_on_a_foreign_key_aggregate() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - count: orderCount\n    table: orders\n    foreign_key: user_id\n    distinct: true",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::DistinctWithoutThrough));
+}
+
+#[test]
+fn many_to_many_join_takes_junction_filters() {
+    let schema = convert(
+        "version: 1\ntable: posts\nfields:\n  - many_to_many: tags\n    table: tags\n    primary_key: id\n    through:\n      table: post_tags\n      left_key: post_id\n      right_key: tag_id\n      filters:\n        - { column: removed_at, op: is_null }\n    fields:\n      - keyword: name\n        required: true",
+    )
+    .unwrap();
+    match &field(&schema, "tags").source {
+        FieldSource::Relation(Relation::Join(j)) => {
+            let JoinKind::ManyToMany { through } = &j.kind else {
+                panic!("expected many_to_many");
+            };
+            assert!(matches!(
+                through.filters.as_deref(),
+                Some([Filter::NullCheck(f)]) if f.column.as_ref() == "removed_at"
+            ));
+        }
+        other => panic!("expected a join, got {other:?}"),
+    }
 }

@@ -201,6 +201,11 @@ definitions:
       # aggregate (ids element type — the scalar type of each collected key):
       element_type:
         $ref: "#/definitions/flusso_type"
+      # aggregate over `through`: count each target row once, not once per
+      # junction row:
+      distinct:
+        type: boolean
+        default: false
       # map (the shared leaf type of every dynamic-key value — must be a leaf
       # kind: text/keyword or a number/date type, enforced at conversion):
       values:
@@ -297,3 +302,8 @@ definitions:
         $ref: "#/definitions/pg_identifier"
       right_key:
         $ref: "#/definitions/pg_identifier"
+      filters:
+        description: >-
+          Conditions on the junction rows (e.g. skip cancelled order lines).
+          The relation's own `filters` apply to the target table.
+        $ref: "#/definitions/filters"
