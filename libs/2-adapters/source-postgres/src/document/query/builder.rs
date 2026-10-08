@@ -186,8 +186,10 @@ impl Builder<'_> {
                 let far_alias = self.alias();
                 let junction_alias = self.alias();
                 let filters = self.filters(join.filters.as_deref(), &far_alias, far)?;
+                let junction_filters =
+                    self.filters(through.filters.as_deref(), &junction_alias, &through.table)?;
                 let inner_sql = format!(
-                    "SELECT {fa}.* FROM {} AS {fa} JOIN {} AS {ja} ON {} = {} WHERE {} = {}{filters}{}{}",
+                    "SELECT {fa}.* FROM {} AS {fa} JOIN {} AS {ja} ON {} = {} WHERE {} = {}{filters}{junction_filters}{}{}",
                     qtable(self.db, far),
                     qtable(self.db, &through.table),
                     qcol(&junction_alias, &through.right_key),
@@ -235,38 +237,36 @@ impl Builder<'_> {
                     qcol(parent_alias, parent_pk),
                 ))
             }
-            // `ids` over a junction needs no far-table join: the junction's
-            // `right_key` already holds the far table's primary-key values, so
-            // collect them straight off the junction.
-            AggregateKey::Through(through) if is_ids => {
-                let junction_alias = self.alias();
-                let function = ids_agg(&junction_alias, &through.right_key);
-                Ok(format!(
-                    "(SELECT {function} FROM {} AS {ja} WHERE {} = {})",
-                    qtable(self.db, &through.table),
-                    qcol(&junction_alias, &through.left_key),
-                    qcol(parent_alias, parent_pk),
-                    ja = qident(&junction_alias),
-                ))
-            }
             AggregateKey::Through(through) => {
                 let far_pk = self.pk_of(&aggregate.table)?;
                 let alias = self.alias();
                 let junction_alias = self.alias();
-                let function = agg_function(&aggregate.op, &alias);
+                let function = if is_ids {
+                    ids_agg(&alias, &far_pk)
+                } else {
+                    agg_function(&aggregate.op, &alias)
+                };
+                let junction_filters =
+                    self.filters(through.filters.as_deref(), &junction_alias, &through.table)?;
                 let filters =
                     self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
-                Ok(format!(
-                    "(SELECT {function} FROM {} AS {fa} JOIN {} AS {ja} ON {} = {} WHERE {} = {}{filters})",
-                    qtable(self.db, &aggregate.table),
-                    qtable(self.db, &through.table),
-                    qcol(&junction_alias, &through.right_key),
-                    qcol(&alias, &far_pk),
-                    qcol(&junction_alias, &through.left_key),
-                    qcol(parent_alias, parent_pk),
-                    fa = qident(&alias),
-                    ja = qident(&junction_alias),
-                ))
+                let far = qtable(self.db, &aggregate.table);
+                let junction = qtable(self.db, &through.table);
+                let right_key = qcol(&junction_alias, &through.right_key);
+                let left_key = qcol(&junction_alias, &through.left_key);
+                let far_key = qcol(&alias, &far_pk);
+                let parent_key = qcol(parent_alias, parent_pk);
+                let fa = qident(&alias);
+                let ja = qident(&junction_alias);
+                Ok(if aggregate.distinct {
+                    format!(
+                        "(SELECT {function} FROM {far} AS {fa} WHERE {far_key} IN (SELECT {right_key} FROM {junction} AS {ja} WHERE {left_key} = {parent_key}{junction_filters}){filters})"
+                    )
+                } else {
+                    format!(
+                        "(SELECT {function} FROM {far} AS {fa} JOIN {junction} AS {ja} ON {right_key} = {far_key} WHERE {left_key} = {parent_key}{filters}{junction_filters})"
+                    )
+                })
             }
         }
     }

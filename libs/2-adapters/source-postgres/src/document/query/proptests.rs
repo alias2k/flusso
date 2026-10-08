@@ -167,12 +167,14 @@ fn order_by_opt() -> impl Strategy<Value = Option<Vec<OrderBy>>> {
 }
 
 fn through() -> impl Strategy<Value = Through> {
-    (table(), column(), column()).prop_map(|(table, left_key, right_key)| Through {
-        table,
-        left_key,
-        right_key,
-        filters: None,
-    })
+    (table(), column(), column(), filters_opt()).prop_map(
+        |(table, left_key, right_key, filters)| Through {
+            table,
+            left_key,
+            right_key,
+            filters,
+        },
+    )
 }
 
 fn join_kind() -> impl Strategy<Value = JoinKind> {
@@ -193,20 +195,24 @@ fn aggregate() -> impl Strategy<Value = Aggregate> {
             column().prop_map(AggregateOp::Avg),
             column().prop_map(AggregateOp::Min),
             column().prop_map(AggregateOp::Max),
+            Just(AggregateOp::Ids {
+                element_type: FlussoType::Long
+            }),
         ],
         prop_oneof![
             column().prop_map(AggregateKey::Direct),
             through().prop_map(AggregateKey::Through),
         ],
         filters_opt(),
+        any::<bool>(),
     )
-        .prop_map(|(table, op, key, filters)| Aggregate {
+        .prop_map(|(table, op, key, filters, distinct)| Aggregate {
+            distinct: distinct && matches!(key, AggregateKey::Through(_)),
             table,
             op,
             key,
             value_type: None,
             filters,
-            distinct: false,
         })
 }
 
