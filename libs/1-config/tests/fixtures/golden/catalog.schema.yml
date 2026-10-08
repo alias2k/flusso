@@ -137,6 +137,8 @@ fields:
       table: product_tags
       left_key: product_id
       right_key: tag_id
+      filters:
+        - { column: removed_at, op: is_null }
     primary_key: id
     order_by:
       - { column: label, direction: asc }
@@ -175,6 +177,15 @@ fields:
     table: reviews
     foreign_key: product_id
     element_type: long
+  - count: distinctTagCount
+    table: tags
+    distinct: true
+    through:
+      table: product_tags
+      left_key: product_id
+      right_key: tag_id
+      filters:
+        - { column: removed_at, op: is_null }
 
   - constant: docSource
     value: catalog
