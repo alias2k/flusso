@@ -144,6 +144,7 @@ fn announce_child(decode: &mut DecodeState, identity: u8) {
     decode.unkeyed.clear();
     decode.relations.get_mut(&16385).unwrap().primary_key =
         vec![kernel::ColumnName::try_new("id").unwrap()];
+    record_untraceable(decode, 16385);
 }
 
 fn column(name: &str) -> kernel::ColumnName {
@@ -282,4 +283,21 @@ fn an_identity_index_without_the_primary_key_keys_by_its_own_columns() {
         "{:?}",
         decode.open_txn
     );
+}
+
+#[test]
+fn an_identity_index_without_the_primary_key_is_untraceable() {
+    let (mut decode, _) = state();
+    needs_parent_link(&mut decode);
+    // `USING INDEX` on `parent_id` alone: the link is an identity column, but
+    // changes are keyed by it, so the pre-image never carries anything more.
+    handle_xlog(&mut decode, &child_relation(b'i')).unwrap();
+    let relation = decode.relations.get_mut(&16385).unwrap();
+    relation.primary_key = vec![column("id")];
+    relation
+        .columns
+        .iter_mut()
+        .for_each(|c| c.is_key = c.name.as_ref() == "parent_id");
+    record_untraceable(&mut decode, 16385);
+    assert_eq!(decode.untraceable[&16385], vec![column("parent_id")]);
 }

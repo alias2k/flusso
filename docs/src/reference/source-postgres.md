@@ -96,7 +96,8 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 | --- | --- |
 | `DEFAULT` | Only when the link is in the primary key. |
 | `FULL` | Yes. Logs the whole old row, so the table's WAL grows. |
-| `USING INDEX` on a unique index that includes the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`. The index's columns must be `NOT NULL`. |
+| `USING INDEX` on a unique index that includes the primary key and the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`. The index's columns must be `NOT NULL`. |
+| `USING INDEX` on an index without the primary key (e.g. `UNIQUE (parent_id)`) | No: changes are then keyed by the index columns, so the old row adds nothing beyond its key. |
 | `NOTHING` | No. |
 
 **flusso sets it itself** when `manage_replica_identity` is on (the default) and the role owns the table, the same grant publication management needs. When the ingest engine starts, before the replication slot is created, `flusso run` issues, per child table missing its link:

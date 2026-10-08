@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
+use kernel::ColumnName;
 use kernel::Position;
-use kernel::{ColumnName, DatabaseSchema};
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
 use source::{PreImageColumns, QualifiedTable, Result, SourceError};
@@ -26,6 +26,7 @@ use sqlx::PgPool;
 
 use super::ack::Positions;
 use super::pgoutput::{self, Decoded, Relation};
+use super::replica_identity;
 
 /// Everything the unfold loop carries between polls.
 struct State {
@@ -131,8 +132,9 @@ pub(crate) fn build(
 }
 
 /// Look up the catalog primary key of every relation announced since the last
-/// event. A table without one keeps an empty key and is keyed by its replica
-/// identity instead.
+/// event, then which parent links its identity can't deliver (that depends on
+/// the key). A table without one keeps an empty key and is keyed by its
+/// replica identity instead.
 async fn key_relations(
     catalog: &PgPool,
     state: &mut DecodeState,
@@ -143,7 +145,7 @@ async fn key_relations(
         };
         let qualified = format!(
             "{}.{}",
-            super::quote_ident(&relation.namespace),
+            super::quote_ident(relation.namespace.as_ref()),
             super::quote_ident(relation.table.as_ref())
         );
         relation.primary_key = crate::document::primary_key_column_names(catalog, qualified)
@@ -155,6 +157,7 @@ async fn key_relations(
                 })
             })
             .collect::<std::result::Result<_, _>>()?;
+        record_untraceable(state, oid);
     }
     Ok(())
 }
@@ -209,12 +212,6 @@ fn handle(
 fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), SourceError> {
     match pgoutput::decode(data)? {
         Decoded::Relation(relation) => {
-            let uncarried = uncarried_links(&state.pre_image_links, &relation);
-            if uncarried.is_empty() {
-                state.untraceable.remove(&relation.oid);
-            } else {
-                state.untraceable.insert(relation.oid, uncarried);
-            }
             state.unkeyed.push(relation.oid);
             state.relations.insert(relation.oid, relation);
         }
@@ -284,25 +281,30 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
     Ok(())
 }
 
-/// The pre-image columns `relation` must carry that its replica identity
-/// doesn't — what an update or delete on it can't trace to the old parent.
-fn uncarried_links(links: &PreImageColumns, relation: &Relation) -> Vec<ColumnName> {
-    let Ok(schema) = DatabaseSchema::try_new(relation.namespace.clone()) else {
-        return Vec::new();
+/// Record which pre-image columns relation `oid` needs but can't deliver —
+/// what an update or delete on it can't trace to the old parent.
+fn record_untraceable(state: &mut DecodeState, oid: u32) {
+    let Some(relation) = state.relations.get(&oid) else {
+        return;
     };
-    let table = QualifiedTable::new(schema, relation.table.clone());
-    links
+    let table = QualifiedTable::new(relation.namespace.clone(), relation.table.clone());
+    let required = state
+        .pre_image_links
         .get(&table)
-        .into_iter()
-        .flatten()
-        .filter(|link| {
-            !relation
-                .columns
-                .iter()
-                .any(|column| column.is_key && column.name == **link)
-        })
-        .cloned()
-        .collect()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let carries = |name: &str| {
+        relation
+            .columns
+            .iter()
+            .any(|column| column.is_key && column.name.as_ref() == name)
+    };
+    let uncarried = replica_identity::uncarried(carries, &relation.primary_key, required);
+    if uncarried.is_empty() {
+        state.untraceable.remove(&oid);
+    } else {
+        state.untraceable.insert(oid, uncarried);
+    }
 }
 
 /// Warn, once per relation, about an update or delete on a table whose replica
@@ -317,17 +319,12 @@ fn warn_untraceable(state: &mut DecodeState, oid: u32) {
     if !state.warned.insert(oid) {
         return;
     }
-    let links = uncarried
-        .iter()
-        .map(|link| link.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    tracing::warn!(
-        table = %format!("{}.{}", relation.namespace, relation.table),
-        missing = %links,
-        remediation = %super::replica_identity::alter_sql(&relation.namespace, relation.table.as_ref()),
-        "replica identity does not carry the parent link: if this row was deleted or moved to \
-         another parent, the old parent's document keeps a stale copy; run the printed SQL",
+    let table = QualifiedTable::new(relation.namespace.clone(), relation.table.clone());
+    replica_identity::warn_untraceable(
+        &table,
+        uncarried,
+        "an update or delete arrived without it",
+        &replica_identity::alter_sql(relation.namespace.as_ref(), relation.table.as_ref()),
     );
 }
 

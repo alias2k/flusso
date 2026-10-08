@@ -196,6 +196,11 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         "CREATE TABLE by_index (id int PRIMARY KEY, user_id int NOT NULL)",
         "CREATE UNIQUE INDEX by_index_identity ON by_index (id, user_id)",
         "ALTER TABLE by_index REPLICA IDENTITY USING INDEX by_index_identity",
+        // An identity index on the link alone: changes key by it, so the
+        // pre-image never carries more than the key — still a gap.
+        "CREATE TABLE by_link_index (id int PRIMARY KEY, user_id int NOT NULL)",
+        "CREATE UNIQUE INDEX by_link_index_identity ON by_link_index (user_id)",
+        "ALTER TABLE by_link_index REPLICA IDENTITY USING INDEX by_link_index_identity",
         "CREATE TABLE junction (user_id int, tag_id int, PRIMARY KEY (user_id, tag_id))",
         "CREATE TABLE parted (id int, user_id int NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id)",
         "CREATE TABLE parted_low PARTITION OF parted FOR VALUES FROM (0) TO (1000)",
@@ -209,6 +214,7 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
             ("by_default", "user_id"),
             ("by_full", "user_id"),
             ("by_index", "user_id"),
+            ("by_link_index", "user_id"),
             ("junction", "user_id"),
             ("missing_table", "user_id"),
         ]))
@@ -216,7 +222,7 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         .unwrap();
 
     let gaps: Vec<String> = report.gaps.iter().map(|g| g.table.to_string()).collect();
-    assert_eq!(gaps, ["public.by_default"]);
+    assert_eq!(gaps, ["public.by_default", "public.by_link_index"]);
     let remediation = report.gaps.first().unwrap().remediation.clone();
     assert_eq!(
         remediation,

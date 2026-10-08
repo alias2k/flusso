@@ -19,7 +19,7 @@
 //!
 //! [`ReplicationEvent::XLogData`]: pgwire_replication::ReplicationEvent::XLogData
 
-use kernel::{ColumnName, GenericValue, TableName};
+use kernel::{ColumnName, DatabaseSchema, GenericValue, TableName};
 use source::{RowImage, RowKey, SourceError};
 
 /// A decoded pgoutput message — only the variants this source acts on.
@@ -53,8 +53,8 @@ pub(crate) enum Decoded {
 #[derive(Debug, Clone)]
 pub(crate) struct Relation {
     pub(crate) oid: u32,
-    /// The table's schema (`public`, …), for the catalog primary-key lookup.
-    pub(crate) namespace: String,
+    /// The table's schema (`public`, …).
+    pub(crate) namespace: DatabaseSchema,
     pub(crate) table: TableName,
     pub(crate) columns: Vec<Column>,
     /// The table's primary-key columns, from the catalog. Empty until looked
@@ -277,7 +277,12 @@ pub(crate) fn decode(data: &[u8]) -> Result<Decoded, SourceError> {
 
 fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
     let oid = cur.u32()?;
-    let namespace = cur.cstring()?;
+    let nspname = cur.cstring()?;
+    let namespace = DatabaseSchema::try_new(nspname.clone()).map_err(|e| {
+        SourceError::Decode(format!(
+            "pgoutput relation: invalid schema {nspname:?}: {e}"
+        ))
+    })?;
     let relname = cur.cstring()?;
     let table = TableName::try_new(relname.clone()).map_err(|e| {
         SourceError::Decode(format!("pgoutput relation: invalid table {relname:?}: {e}"))

@@ -31,14 +31,19 @@ use sqlx::{PgPool, Row};
 
 use super::quote_ident;
 
-/// The identity setting and the columns it puts in an old tuple (for `d`, the
-/// primary key; for `i`, the identity index). `None` when the table is absent.
+/// The identity setting, the columns it puts in an old tuple (for `d`, the
+/// primary key; for `i`, the identity index), and the primary key itself.
+/// `None` when the table is absent.
 const IDENTITY_SQL: &str = "SELECT c.relreplident::text AS identity, \
        ARRAY(SELECT a.attname::text FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
              WHERE i.indrelid = c.oid \
                AND CASE WHEN c.relreplident = 'i' THEN i.indisreplident ELSE i.indisprimary END \
        ) AS columns, \
+       ARRAY(SELECT a.attname::text FROM pg_index i \
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+             WHERE i.indrelid = c.oid AND i.indisprimary \
+       ) AS primary_key, \
        pg_has_role(current_user, c.relowner, 'USAGE') AS owned, \
        c.relkind = 'p' AS partitioned \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -69,7 +74,18 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
         let partitioned: bool = row
             .try_get("partitioned")
             .map_err(|e| SourceError::Query(e.to_string()))?;
-        let missing = uncarried(ReplicaIdentity::from_code(&identity), &carried, columns);
+        let primary_key: Vec<String> = row
+            .try_get("primary_key")
+            .map_err(|e| SourceError::Query(e.to_string()))?;
+        let identity = ReplicaIdentity::from_code(&identity);
+        let carries = |column: &str| match identity {
+            ReplicaIdentity::Full => true,
+            ReplicaIdentity::Default | ReplicaIdentity::Index => {
+                carried.iter().any(|name| name == column)
+            }
+            ReplicaIdentity::Nothing => false,
+        };
+        let missing = uncarried(carries, &primary_key, columns);
         if missing.is_empty() {
             continue;
         }
@@ -146,24 +162,52 @@ impl ReplicaIdentity {
     }
 }
 
-/// The `required` columns an old tuple under `identity` (with the identity's
-/// own `carried` columns) does not hold.
+/// The `required` link columns an old tuple can't deliver — the one rule the
+/// catalog report and the WAL decoder share.
+///
+/// A column is delivered when the identity `carries` it, but only while the
+/// identity also carries the whole (non-empty) primary key: otherwise the
+/// decoder keys changes by the identity columns themselves, and a pre-image
+/// that adds nothing beyond that key is dropped.
 pub(crate) fn uncarried(
-    identity: ReplicaIdentity,
-    carried: &[String],
+    carries: impl Fn(&str) -> bool,
+    primary_key: &[impl AsRef<str>],
     required: &[ColumnName],
 ) -> Vec<ColumnName> {
+    let keyed_by_primary_key =
+        !primary_key.is_empty() && primary_key.iter().all(|pk| carries(pk.as_ref()));
     required
         .iter()
-        .filter(|column| match identity {
-            ReplicaIdentity::Full => false,
-            ReplicaIdentity::Default | ReplicaIdentity::Index => {
-                !carried.iter().any(|name| name == column.as_ref())
-            }
-            ReplicaIdentity::Nothing => true,
-        })
+        .filter(|column| !keyed_by_primary_key || !carries(column.as_ref()))
         .cloned()
         .collect()
+}
+
+/// `columns` as a comma-separated list, for log fields.
+pub(crate) fn join_columns(columns: &[ColumnName]) -> String {
+    columns
+        .iter()
+        .map(ColumnName::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Warn that `table`'s replica identity drops its parent `missing` link and
+/// flusso won't fix it, for `reason`. Shared by startup and the stream.
+pub(crate) fn warn_untraceable(
+    table: &dyn std::fmt::Display,
+    missing: &[ColumnName],
+    reason: &str,
+    remediation: &str,
+) {
+    tracing::warn!(
+        table = %table,
+        missing = %join_columns(missing),
+        reason = %reason,
+        remediation = %remediation,
+        "replica identity does not carry the parent link: a deleted or re-parented row leaves \
+         its old parent's document stale; run the printed SQL",
+    );
 }
 
 /// The statement that makes `schema.table`'s pre-image carry every column.

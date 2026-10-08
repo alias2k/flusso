@@ -75,15 +75,6 @@ impl PreImageGap {
     pub fn will_manage(&self, manage: bool) -> bool {
         manage && self.manageable
     }
-
-    /// The missing columns as a comma-separated list, for messages.
-    pub fn missing_columns(&self) -> String {
-        self.missing
-            .iter()
-            .map(ColumnName::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 }
 
 impl PreImageReport {

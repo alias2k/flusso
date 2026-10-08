@@ -374,7 +374,6 @@ impl CaptureProvisioning for WalChangeCapture {
         let pool = self.admin_pool().await?;
         let report = replica_identity::inspect(pool, required).await?;
         for gap in &report.gaps {
-            let missing = gap.missing_columns();
             let reason = if !manage {
                 "automatic replica identity management is disabled".to_owned()
             } else if !gap.manageable {
@@ -384,7 +383,7 @@ impl CaptureProvisioning for WalChangeCapture {
                     Ok(()) => {
                         tracing::info!(
                             table = %gap.table,
-                            missing = %missing,
+                            missing = %replica_identity::join_columns(&gap.missing),
                             "set REPLICA IDENTITY FULL so deleted and re-parented rows reach \
                              their old parent's document",
                         );
@@ -393,15 +392,7 @@ impl CaptureProvisioning for WalChangeCapture {
                     Err(error) => error.to_string(),
                 }
             };
-            tracing::warn!(
-                table = %gap.table,
-                missing = %missing,
-                reason = %reason,
-                remediation = %gap.remediation,
-                "replica identity does not carry the parent link and flusso will not set it: a \
-                 deleted or re-parented row will leave its old parent's document stale; run the \
-                 printed SQL",
-            );
+            replica_identity::warn_untraceable(&gap.table, &gap.missing, &reason, &gap.remediation);
         }
         Ok(report)
     }

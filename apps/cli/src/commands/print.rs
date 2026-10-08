@@ -174,7 +174,12 @@ pub(crate) fn pre_image(
         report.gaps.len(),
     )?;
     for gap in &report.gaps {
-        let missing = gap.missing_columns();
+        let missing = gap
+            .missing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let verdict = if gap.will_manage(manage) {
             pen.green("→ will be set automatically on the next `flusso run`")
         } else if gap.manageable {
