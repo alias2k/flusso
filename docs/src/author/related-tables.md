@@ -80,7 +80,7 @@ A search document needs more than its root row: a user with their orders, a prod
        - { column: status, op: eq, value: paid }
    ```
 
-   An aggregate can also go `through` a junction, e.g. an order's weight summed over its lines' products. By default each junction row counts; `distinct: true` counts each product once. `through.filters` skip junction rows such as cancelled lines. The rules are in [Aggregates](../reference/aggregates.md#over-a-junction).
+   An aggregate can also go `through` a junction, e.g. an order's weight summed over its lines' products, skipping cancelled lines. What it counts, and the `distinct` opt-in, are in [Aggregates](../reference/aggregates.md#over-a-junction).
 
    ```yaml
    - sum: totalWeight

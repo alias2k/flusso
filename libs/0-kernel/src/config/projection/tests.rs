@@ -219,6 +219,23 @@ fn a_through_schema_keeps_its_content_hash() {
 }
 
 #[test]
+fn an_empty_junction_filter_list_keeps_the_content_hash() {
+    let base = through_schema()
+        .resolve(IndexName::try_new("orders").unwrap())
+        .hash;
+    let mut empty = through_schema();
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut empty.fields[0].source
+        && let AggregateKey::Through(through) = &mut aggregate.key
+    {
+        through.filters = Some(vec![]);
+    }
+    assert_eq!(
+        base,
+        empty.resolve(IndexName::try_new("orders").unwrap()).hash
+    );
+}
+
+#[test]
 fn opting_into_distinct_or_junction_filters_changes_the_content_hash() {
     let base = through_schema()
         .resolve(IndexName::try_new("orders").unwrap())

@@ -79,14 +79,20 @@ pub struct Through {
     pub filters: Option<Vec<Filter>>,
 }
 
-/// Hashes `filters` only when set, so a schema that never opts in keeps the
-/// content hash (and so the physical index) it had before the field existed.
+/// Hashes `filters` only when non-empty, so a schema that never opts in keeps
+/// the content hash (and so the physical index) it had before the field existed.
 impl Hash for Through {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.table.hash(state);
-        self.left_key.hash(state);
-        self.right_key.hash(state);
-        if let Some(filters) = &self.filters {
+        let Self {
+            table,
+            left_key,
+            right_key,
+            filters,
+        } = self;
+        table.hash(state);
+        left_key.hash(state);
+        right_key.hash(state);
+        if let Some(filters) = filters.as_deref().filter(|f| !f.is_empty()) {
             filters.hash(state);
         }
     }

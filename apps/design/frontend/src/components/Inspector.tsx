@@ -1185,7 +1185,6 @@ function AggregateKeyEditor({
   );
 }
 
-/// The junction's own row filters, separate from the relation's target filters.
 function JunctionFilters({ through, onChange }: { through: Through; onChange: (t: Through) => void }) {
   const { t } = useT();
   const { columnsFor } = useDesign();
@@ -1222,7 +1221,9 @@ function ThroughEditor({
           value={through.table}
           tables={tables}
           junctions={junctions}
-          onChange={(table) => onChange({ ...through, table })}
+          onChange={(table) =>
+            onChange({ ...through, table, filters: table === through.table ? through.filters : undefined })
+          }
         />
       </Row>
       <Row label="left_key">

@@ -31,13 +31,21 @@ pub struct Aggregate {
 /// content hash (and so the physical index) it had before the field existed.
 impl Hash for Aggregate {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.table.hash(state);
-        self.op.hash(state);
-        self.key.hash(state);
-        self.value_type.hash(state);
-        self.filters.hash(state);
-        if self.distinct {
-            self.distinct.hash(state);
+        let Self {
+            table,
+            op,
+            key,
+            value_type,
+            filters,
+            distinct,
+        } = self;
+        table.hash(state);
+        op.hash(state);
+        key.hash(state);
+        value_type.hash(state);
+        filters.hash(state);
+        if *distinct {
+            distinct.hash(state);
         }
     }
 }

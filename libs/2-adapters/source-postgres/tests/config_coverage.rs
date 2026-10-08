@@ -386,6 +386,10 @@ async fn aggregates_over_a_junction_entity_honour_distinct_and_both_filter_sets(
         ),
         agg_field("product_ids", purchases_agg(ids(), false, None, None)),
         agg_field(
+            "distinct_product_ids",
+            purchases_agg(ids(), true, None, None),
+        ),
+        agg_field(
             "active_product_ids",
             purchases_agg(ids(), true, None, active()),
         ),
@@ -401,6 +405,7 @@ async fn aggregates_over_a_junction_entity_honour_distinct_and_both_filter_sets(
     assert_eq!(int_of(body.get("live_active_weight").unwrap()), 2);
     assert_eq!(int_of(body.get("distinct_count").unwrap()), 3);
     assert_eq!(ids_of(&body, "product_ids"), vec![1, 1, 2, 3]);
+    assert_eq!(ids_of(&body, "distinct_product_ids"), vec![1, 2, 3]);
     assert_eq!(ids_of(&body, "active_product_ids"), vec![1, 2]);
 
     // A junction row's own column changing resolves to its parent, and the
