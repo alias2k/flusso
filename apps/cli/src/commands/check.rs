@@ -41,6 +41,12 @@ pub(crate) struct CheckArgs {
     #[arg(long, env = "FLUSSO_MANAGE_PUBLICATION")]
     manage_publication: Option<bool>,
 
+    /// Whether `flusso run` would set `REPLICA IDENTITY FULL` where needed.
+    /// Controls the replica-identity report's phrasing only (check never
+    /// mutates). Overrides the `[source] manage_replica_identity` config option.
+    #[arg(long, env = "FLUSSO_MANAGE_REPLICA_IDENTITY")]
+    manage_replica_identity: Option<bool>,
+
     /// Output format: a human-readable report, or JSON for piping.
     #[arg(long, env = "FLUSSO_FORMAT", value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
@@ -62,6 +68,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         &adapters::Overrides {
             publication: args.publication.clone(),
             manage_publication: args.manage_publication,
+            manage_replica_identity: args.manage_replica_identity,
             ..adapters::Overrides::default()
         },
     );

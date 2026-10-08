@@ -79,6 +79,13 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_MANAGE_PUBLICATION")]
     manage_publication: Option<bool>,
 
+    /// Whether flusso may set `REPLICA IDENTITY FULL` on child tables that
+    /// need it. Overrides the `[source] manage_replica_identity` config option;
+    /// defaults to that, then to enabled. Set `false` to keep flusso from ever
+    /// issuing the `ALTER` (it then only warns about the gap).
+    #[arg(long, env = "FLUSSO_MANAGE_REPLICA_IDENTITY")]
+    manage_replica_identity: Option<bool>,
+
     /// Skip the initial backfill and resume live capture only. Use after the
     /// index has already been seeded, to avoid re-reading every existing row.
     #[arg(long, env = "FLUSSO_SKIP_BACKFILL")]
@@ -167,6 +174,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
             slot: args.slot.clone(),
             publication: args.publication.clone(),
             manage_publication: args.manage_publication,
+            manage_replica_identity: args.manage_replica_identity,
             pretty: args.pretty,
             queue_capacity: args.queue_capacity,
         },

@@ -4,6 +4,7 @@
 | `type` | `"postgres"` | — | Required. Selects this adapter for `[source]`. |
 | `connection_url` | string or `{ env }` or table | none | How the database is reached: a URL, literal or `{ env = "VAR" }`, or a table of parts (`host`, `port`, `user`, `password`, `database`). `SOURCE_POSTGRES_CONNECTION_URL` overrides or supplies it. |
 | `manage_publication` | bool | `true` | Whether flusso may create or extend the publication to cover every table the indexes read, when the source role is privileged enough. `false` makes flusso only report coverage gaps and never issue publication DDL. |
+| `manage_replica_identity` | bool | `true` | Whether flusso may set `REPLICA IDENTITY FULL` on a child table whose replica identity doesn't carry its parent link, so a deleted or re-parented row rebuilds its old parent. Needs ownership of the table. `false` makes flusso only report the gap and never issue the `ALTER`. |
 | `slot` | string | `"flusso"` | The logical replication slot flusso consumes. Created on first run. |
 | `publication` | string | `"flusso"` | The publication flusso subscribes to. |
 | `ssl_mode` | `disable` \| `prefer` \| `require` \| `verify-ca` \| `verify-full` | none | TLS mode for the source connection. Overrides the URL's `sslmode`; omitted defers to it, then to `prefer`. `require` encrypts but verifies nothing; only the `verify-*` modes check the certificate. |

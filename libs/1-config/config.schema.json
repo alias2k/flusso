@@ -353,6 +353,11 @@
           "description": "Whether flusso may create or extend the publication to cover every table\nthe indexes read, when the source role is privileged enough. `false`\nmakes flusso only report coverage gaps and never issue publication DDL.",
           "default": true
         },
+        "manage_replica_identity": {
+          "type": "boolean",
+          "description": "Whether flusso may set `REPLICA IDENTITY FULL` on a child table whose\nreplica identity doesn't carry its parent link, so a deleted or\nre-parented row rebuilds its old parent. Needs ownership of the table.\n`false` makes flusso only report the gap and never issue the `ALTER`.",
+          "default": true
+        },
         "slot": {
           "type": "string",
           "description": "The logical replication slot flusso consumes. Created on first run.",
