@@ -437,9 +437,11 @@ Option<RowImage>`, passed to `DocumentBuilder::resolve` and read only on the fir
 with the current-DB lookup), so each child table's replica identity must carry its link column
 (`SourceSpec::pre_image_columns`: `has_one`/`has_many` `foreign_key`, junction `left_key`).
 Postgres answers from `relreplident` (`cdc/replica_identity.rs`); `check` prints a Replica
-identity section (read-only); `run` **sets** `REPLICA IDENTITY FULL` at `live()` via
-`ensure_pre_image` when `manage_replica_identity` (default on) and the role owns the table — under
-a 5 s `lock_timeout`; an unclosable gap is warned with the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
+identity section (read-only); `run` **sets** `REPLICA IDENTITY FULL` in `prepare()`, **before
+the slot** (a change logged in between would decode with the old identity), via `ensure_pre_image`
+when `manage_replica_identity` (default on) and the role owns the table — under a 5 s
+`lock_timeout`; partitioned tables are reported, never altered; an unclosable gap is warned with
+the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
 which mark every column under `FULL`. A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers

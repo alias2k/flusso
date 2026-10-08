@@ -174,13 +174,8 @@ pub(crate) fn pre_image(
         report.gaps.len(),
     )?;
     for gap in &report.gaps {
-        let missing = gap
-            .missing
-            .iter()
-            .map(|column| column.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let verdict = if gap.manageable && manage {
+        let missing = gap.missing_columns();
+        let verdict = if gap.will_manage(manage) {
             pen.green("→ will be set automatically on the next `flusso run`")
         } else if gap.manageable {
             pen.yellow("→ the role CAN set it, but manage_replica_identity = false")
@@ -203,7 +198,7 @@ pub(crate) fn pre_image(
     let manual: Vec<_> = report
         .gaps
         .iter()
-        .filter(|gap| !(gap.manageable && manage))
+        .filter(|gap| !gap.will_manage(manage))
         .collect();
     if !manual.is_empty() {
         writeln!(

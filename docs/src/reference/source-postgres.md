@@ -99,13 +99,14 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 | `USING INDEX` on a unique index that includes the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`. The index's columns must be `NOT NULL`. |
 | `NOTHING` | No. |
 
-**flusso sets it itself** when `manage_replica_identity` is on (the default) and the role owns the table, the same grant publication management needs. On startup `flusso run` issues, per child table missing its link:
+**flusso sets it itself** when `manage_replica_identity` is on (the default) and the role owns the table, the same grant publication management needs. When the ingest engine starts, before the replication slot is created, `flusso run` issues, per child table missing its link:
 
 ```sql
 ALTER TABLE "public"."order_items" REPLICA IDENTITY FULL;
 ```
 
-- The statement takes a brief exclusive lock, so it runs under a 5-second `lock_timeout` and never queues behind a long transaction. A timeout is retried on the next start.
+- The statement needs an `ACCESS EXCLUSIVE` lock. It waits at most 5 seconds for it (`lock_timeout`), blocking that table's readers while it waits, then gives up rather than sit behind a long transaction. A timeout is retried whenever the ingest engine (re)starts.
+- A partitioned table is reported but never altered: its partitions stream under their own names, so the parent's identity doesn't help.
 - The table then logs whole old rows on update and delete, so its WAL grows.
 - When the role can't (not the owner), or `manage_replica_identity = false`, flusso logs the statement and keeps running. It also warns once per table when such a delete or update arrives.
 - `flusso check` reports each child table read-only: whether the next `run` will set it, or the statement to run by hand.

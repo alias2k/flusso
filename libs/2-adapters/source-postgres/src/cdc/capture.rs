@@ -61,12 +61,12 @@ pub struct WalChangeCapture {
     /// Whether to auto-create/extend the publication on [`live`](Self::live).
     /// When false, a coverage gap is only reported, never provisioned.
     manage_publication: bool,
-    /// Per table, the columns resolution needs from a pre-image. Ensured on
-    /// [`live`](Self::live); set via
+    /// Per table, the columns resolution needs from a pre-image. Ensured by
+    /// [`prepare`](ChangeCapture::prepare); set via
     /// [`with_pre_image_management`](Self::with_pre_image_management).
     pre_image_columns: PreImageColumns,
-    /// Whether to set the replica identity of tables that need it on
-    /// [`live`](Self::live). When false, a gap is only reported.
+    /// Whether [`prepare`](ChangeCapture::prepare) sets the replica identity of
+    /// tables that need it. When false, a gap is only reported.
     manage_replica_identity: bool,
     /// The position bookkeeping of the open live stream, so `confirm` can reach
     /// it. Replaced each time `live` opens a stream; `None` before the first.
@@ -110,12 +110,27 @@ impl WalChangeCapture {
     /// Declare the columns resolution needs from each table's pre-image —
     /// typically [`SourceSpec::pre_image_columns`](source::SourceSpec::pre_image_columns) —
     /// and whether to set `REPLICA IDENTITY FULL` where they're missing.
-    /// [`live`](Self::live) ensures them (or warns, when not allowed), and the
-    /// stream warns once per table when a change arrives without them.
+    /// [`prepare`](ChangeCapture::prepare) ensures them before the slot (or
+    /// warns, when not allowed), and the stream warns once per table when a
+    /// change arrives without them.
     pub fn with_pre_image_management(mut self, columns: PreImageColumns, manage: bool) -> Self {
         self.pre_image_columns = columns;
         self.manage_replica_identity = manage;
         self
+    }
+
+    /// Ensure the declared pre-image columns. Advisory: a failure degrades
+    /// reverse resolution, it doesn't stop capture, so it is logged.
+    async fn ensure_pre_images(&self) {
+        if self.pre_image_columns.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .ensure_pre_image(&self.pre_image_columns, self.manage_replica_identity)
+            .await
+        {
+            tracing::warn!(%error, "could not ensure replica identities");
+        }
     }
 
     /// The shared admin pool, opened on first call and reused thereafter. Kept
@@ -191,6 +206,9 @@ impl ChangeCapture for WalChangeCapture {
 
     #[tracing::instrument(name = "wal.prepare", skip_all, err)]
     async fn prepare(&self) -> Result<()> {
+        // Before the slot: a change logged after the slot exists but before the
+        // ALTER would decode with the old identity and miss its old parent.
+        self.ensure_pre_images().await;
         self.ensure_slot().await
     }
 
@@ -202,13 +220,6 @@ impl ChangeCapture for WalChangeCapture {
         self.ensure_slot().await?;
         self.ensure_coverage(&self.required_tables, self.manage_publication)
             .await?;
-        if !self.pre_image_columns.is_empty()
-            && let Err(error) = self
-                .ensure_pre_image(&self.pre_image_columns, self.manage_replica_identity)
-                .await
-        {
-            tracing::warn!(%error, "could not inspect replica identities");
-        }
 
         let catalog = self.admin_pool().await?.clone();
         let client = ReplicationClient::connect(self.config.clone())
@@ -363,12 +374,7 @@ impl CaptureProvisioning for WalChangeCapture {
         let pool = self.admin_pool().await?;
         let report = replica_identity::inspect(pool, required).await?;
         for gap in &report.gaps {
-            let missing = gap
-                .missing
-                .iter()
-                .map(|column| column.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let missing = gap.missing_columns();
             let reason = if !manage {
                 "automatic replica identity management is disabled".to_owned()
             } else if !gap.manageable {

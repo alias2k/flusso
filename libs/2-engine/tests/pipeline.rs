@@ -366,8 +366,6 @@ async fn deleted_and_reparented_children_leave_their_old_parent() {
         "CREATE TABLE orders (id int PRIMARY KEY, name text, customer_id int NOT NULL REFERENCES customers(id))",
         "CREATE TABLE addresses (id int PRIMARY KEY, customer_id int NOT NULL REFERENCES customers(id), name text)",
         "CREATE TABLE lines (id int PRIMARY KEY, address_id int NOT NULL REFERENCES addresses(id), label text)",
-        // The root on FULL by hand, to prove a FULL root keeps a plain `_id`.
-        // The child tables are left on DEFAULT: the capture sets them.
         "ALTER TABLE parent REPLICA IDENTITY FULL",
     ] {
         create_table(&pg.pool, ddl).await;

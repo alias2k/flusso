@@ -197,6 +197,8 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         "CREATE UNIQUE INDEX by_index_identity ON by_index (id, user_id)",
         "ALTER TABLE by_index REPLICA IDENTITY USING INDEX by_index_identity",
         "CREATE TABLE junction (user_id int, tag_id int, PRIMARY KEY (user_id, tag_id))",
+        "CREATE TABLE parted (id int, user_id int NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id)",
+        "CREATE TABLE parted_low PARTITION OF parted FOR VALUES FROM (0) TO (1000)",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -251,4 +253,18 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
             .await
             .unwrap();
     assert_eq!(identity, "f");
+
+    // A partitioned table is reported, never altered: its partitions stream
+    // under their own names.
+    let parted = links(&[("parted", "user_id")]);
+    let report = cap.ensure_pre_image(&parted, true).await.unwrap();
+    let gap = report.gaps.first().unwrap();
+    assert!(!gap.manageable);
+    assert!(gap.blockers.iter().any(|b| b.contains("partitioned")));
+    let parent_identity: String =
+        sqlx::query_scalar("SELECT relreplident::text FROM pg_class WHERE relname = 'parted'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(parent_identity, "d");
 }

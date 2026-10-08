@@ -146,7 +146,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                         "table": gap.table.to_string(),
                         "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
                         "manageable": gap.manageable,
-                        "will_manage": gap.manageable && postgres.manage_replica_identity,
+                        "will_manage": gap.will_manage(postgres.manage_replica_identity),
                         "blockers": gap.blockers,
                         "remediation": gap.remediation,
                     })).collect::<Vec<_>>(),

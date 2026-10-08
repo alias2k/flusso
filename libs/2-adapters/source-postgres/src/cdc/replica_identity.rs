@@ -19,6 +19,11 @@
 //! takes an `ACCESS EXCLUSIVE` lock, so it runs under a short `lock_timeout`
 //! rather than queueing behind a long transaction. The table then logs whole old
 //! rows on update and delete.
+//!
+//! A **partitioned** table is reported but never altered: Postgres streams its
+//! leaf partitions under their own names and doesn't pass an identity down from
+//! the parent, so setting it on the parent would claim a fix that changes
+//! nothing.
 
 use kernel::ColumnName;
 use source::{PreImageColumns, PreImageGap, PreImageReport, Result, SourceError};
@@ -34,7 +39,8 @@ const IDENTITY_SQL: &str = "SELECT c.relreplident::text AS identity, \
              WHERE i.indrelid = c.oid \
                AND CASE WHEN c.relreplident = 'i' THEN i.indisreplident ELSE i.indisprimary END \
        ) AS columns, \
-       pg_has_role(current_user, c.relowner, 'USAGE') AS owned \
+       pg_has_role(current_user, c.relowner, 'USAGE') AS owned, \
+       c.relkind = 'p' AS partitioned \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')";
 
@@ -60,20 +66,29 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
         let owned: bool = row
             .try_get("owned")
             .map_err(|e| SourceError::Query(e.to_string()))?;
+        let partitioned: bool = row
+            .try_get("partitioned")
+            .map_err(|e| SourceError::Query(e.to_string()))?;
         let missing = uncarried(ReplicaIdentity::from_code(&identity), &carried, columns);
-        if !missing.is_empty() {
-            report.gaps.push(PreImageGap {
-                table: table.clone(),
-                missing,
-                manageable: owned,
-                blockers: if owned {
-                    Vec::new()
-                } else {
-                    vec![format!("role does not own table {table}")]
-                },
-                remediation: alter_sql(table.schema.as_ref(), table.table.as_ref()),
-            });
+        if missing.is_empty() {
+            continue;
         }
+        let mut blockers = Vec::new();
+        if partitioned {
+            blockers.push(format!(
+                "{table} is partitioned; its partitions stream under their own names and \
+                 need their own replica identity"
+            ));
+        } else if !owned {
+            blockers.push(format!("role does not own table {table}"));
+        }
+        report.gaps.push(PreImageGap {
+            table: table.clone(),
+            missing,
+            manageable: blockers.is_empty(),
+            blockers,
+            remediation: alter_sql(table.schema.as_ref(), table.table.as_ref()),
+        });
     }
     Ok(report)
 }

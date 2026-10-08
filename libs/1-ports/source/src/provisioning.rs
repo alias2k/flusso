@@ -70,6 +70,22 @@ pub struct PreImageReport {
     pub gaps: Vec<PreImageGap>,
 }
 
+impl PreImageGap {
+    /// Whether a source told to `manage` will close this gap itself.
+    pub fn will_manage(&self, manage: bool) -> bool {
+        manage && self.manageable
+    }
+
+    /// The missing columns as a comma-separated list, for messages.
+    pub fn missing_columns(&self) -> String {
+        self.missing
+            .iter()
+            .map(ColumnName::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 impl PreImageReport {
     /// Every table's pre-image carries what resolution needs.
     pub fn satisfied(&self) -> bool {
@@ -118,10 +134,10 @@ pub trait CaptureProvisioning: Send + Sync {
     /// A table the source can't find is skipped — coverage reports it.
     async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport>;
 
-    /// Close every manageable gap when `manage` is set; otherwise a no-op.
-    /// Returns the report as observed *before* acting. A gap that can't be
-    /// closed (not manageable, or the attempt failed) is left for the caller
-    /// to report — it degrades resolution, it doesn't stop capture.
+    /// Close every manageable gap when `manage` is set, and report (log) the
+    /// rest. Returns the report as observed *before* acting, so a gap it just
+    /// closed is still listed — re-inspect for the current state. A gap that
+    /// can't be closed degrades resolution; it doesn't stop capture.
     async fn ensure_pre_image(
         &self,
         required: &PreImageColumns,
