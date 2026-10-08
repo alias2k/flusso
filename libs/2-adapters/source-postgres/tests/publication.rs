@@ -2,8 +2,9 @@
 //! impl) against a real Postgres in a container. These exercise the coverage
 //! inspection, the privilege verdict, and the actual `CREATE`/`ALTER PUBLICATION`
 //! provisioning that unit tests can only check by generated-string assertion —
-//! plus the read-only replica-identity report (`inspect_pre_image`) across
-//! `DEFAULT`, `FULL`, `USING INDEX`, and a composite-key junction.
+//! plus the replica-identity half: the report (`inspect_pre_image`) across
+//! `DEFAULT`, `FULL`, `USING INDEX`, and a composite-key junction, and
+//! `ensure_pre_image` setting `FULL` when privileged and refusing when not.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -126,6 +127,7 @@ async fn read_only_role_reports_gap_without_creating() {
     let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
     for statement in [
         "CREATE TABLE users (id int PRIMARY KEY)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL)",
         // A least-privilege streaming role: can read, but owns nothing and
         // cannot create publications.
         "CREATE ROLE reader LOGIN PASSWORD 'reader'",
@@ -155,6 +157,14 @@ async fn read_only_role_reports_gap_without_creating() {
         published_tables(&pool).await.is_empty(),
         "nothing should have been created"
     );
+
+    // Nor may it set a replica identity on a table it doesn't own.
+    let child = links(&[("orders", "user_id")]);
+    let report = cap.ensure_pre_image(&child, true).await.unwrap();
+    let gap = report.gaps.first().unwrap();
+    assert!(!gap.manageable);
+    assert!(gap.blockers.iter().any(|b| b.contains("does not own")));
+    assert!(!cap.inspect_pre_image(&child).await.unwrap().satisfied());
 }
 
 /// `table → [link columns]` under `public`, as `SourceSpec::pre_image_columns`
@@ -211,13 +221,34 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         "ALTER TABLE \"public\".\"by_default\" REPLICA IDENTITY FULL;"
     );
 
-    sqlx::query(sqlx::AssertSqlSafe(remediation))
-        .execute(&pool)
-        .await
-        .unwrap();
-    let fixed = cap
-        .inspect_pre_image(&links(&[("by_default", "user_id")]))
-        .await
-        .unwrap();
-    assert!(fixed.satisfied());
+    assert!(
+        report.gaps.first().unwrap().manageable,
+        "superuser can set it"
+    );
+
+    // Opted out: reported, left alone.
+    let default_only = links(&[("by_default", "user_id")]);
+    cap.ensure_pre_image(&default_only, false).await.unwrap();
+    assert!(
+        !cap.inspect_pre_image(&default_only)
+            .await
+            .unwrap()
+            .satisfied()
+    );
+
+    // Managed: flusso sets REPLICA IDENTITY FULL itself.
+    let before = cap.ensure_pre_image(&default_only, true).await.unwrap();
+    assert!(!before.satisfied(), "ensure returns what it found");
+    assert!(
+        cap.inspect_pre_image(&default_only)
+            .await
+            .unwrap()
+            .satisfied()
+    );
+    let identity: String =
+        sqlx::query_scalar("SELECT relreplident::text FROM pg_class WHERE relname = 'by_default'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(identity, "f");
 }

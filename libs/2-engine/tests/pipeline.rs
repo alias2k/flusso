@@ -35,8 +35,9 @@
 //!   `has_many` child, a child moved to another parent, and a row deleted three
 //!   relations deep (`belongs_to → has_many → has_many`) all rebuild the
 //!   document they used to sit in, traced through the WAL pre-image (issue #140,
-//!   ADR 0007). The child and root tables run under `REPLICA IDENTITY FULL`, so
-//!   the same test proves a `FULL` root keeps its plain `_id`.
+//!   ADR 0007). The child tables start on `DEFAULT` and the capture sets them
+//!   to `FULL` itself (`manage_replica_identity`); the root is set to `FULL` by
+//!   hand, so the same test proves a `FULL` root keeps its plain `_id`.
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -365,10 +366,9 @@ async fn deleted_and_reparented_children_leave_their_old_parent() {
         "CREATE TABLE orders (id int PRIMARY KEY, name text, customer_id int NOT NULL REFERENCES customers(id))",
         "CREATE TABLE addresses (id int PRIMARY KEY, customer_id int NOT NULL REFERENCES customers(id), name text)",
         "CREATE TABLE lines (id int PRIMARY KEY, address_id int NOT NULL REFERENCES addresses(id), label text)",
+        // The root on FULL by hand, to prove a FULL root keeps a plain `_id`.
+        // The child tables are left on DEFAULT: the capture sets them.
         "ALTER TABLE parent REPLICA IDENTITY FULL",
-        "ALTER TABLE child REPLICA IDENTITY FULL",
-        "ALTER TABLE addresses REPLICA IDENTITY FULL",
-        "ALTER TABLE lines REPLICA IDENTITY FULL",
     ] {
         create_table(&pg.pool, ddl).await;
     }
@@ -917,6 +917,7 @@ async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
+    let pre_image_columns = spec.pre_image_columns();
     let documents = Arc::new(
         PgDocumentBuilder::connect(&pg.url, Arc::new(spec))
             .await
@@ -932,8 +933,10 @@ async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
         "flusso",
     )
     .with_port(pg.port);
-    let capture: Arc<dyn ChangeCapture> =
-        Arc::new(WalChangeCapture::new(replication, pg.url.clone()));
+    let capture: Arc<dyn ChangeCapture> = Arc::new(
+        WalChangeCapture::new(replication, pg.url.clone())
+            .with_pre_image_management(pre_image_columns, true),
+    );
     let outcome = Arc::new(std::sync::Mutex::new(None));
     let record = Arc::clone(&outcome);
     Pipeline {
