@@ -147,9 +147,15 @@ pub(crate) fn coverage(
 }
 
 /// Report whether every child table's replica identity carries its parent
-/// link, so a delete or re-parent rebuilds the old parent's document. A gap is
-/// printed with its SQL; flusso never runs it.
-pub(crate) fn pre_image(out: &mut impl Write, pen: Pen, report: &PreImageReport) -> Result<()> {
+/// link, so a delete or re-parent rebuilds the old parent's document. Each gap
+/// says whether `flusso run` will set it (`manage` is the effective
+/// `manage_replica_identity`); the SQL is printed for the ones it won't.
+pub(crate) fn pre_image(
+    out: &mut impl Write,
+    pen: Pen,
+    report: &PreImageReport,
+    manage: bool,
+) -> Result<()> {
     section(out, pen, "Replica identity")?;
 
     if report.satisfied() {
@@ -174,20 +180,44 @@ pub(crate) fn pre_image(out: &mut impl Write, pen: Pen, report: &PreImageReport)
             .map(|column| column.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        writeln!(out, "    {} {} ({})", pen.dim("•"), gap.table, missing)?;
+        let verdict = if gap.manageable && manage {
+            pen.green("→ will be set automatically on the next `flusso run`")
+        } else if gap.manageable {
+            pen.yellow("→ the role CAN set it, but manage_replica_identity = false")
+        } else {
+            pen.yellow(&format!(
+                "→ flusso will NOT set it: {}",
+                gap.blockers.join("; ")
+            ))
+        };
+        writeln!(
+            out,
+            "    {} {} ({})  {}",
+            pen.dim("•"),
+            gap.table,
+            missing,
+            verdict
+        )?;
     }
-    writeln!(
-        out,
-        "  {}",
-        pen.yellow(
-            "→ deleting or re-parenting their rows leaves the old parent's document stale; \
-             flusso will NOT change this automatically",
-        ),
-    )?;
 
-    section(out, pen, "Run to trace deleted and re-parented rows")?;
-    for gap in &report.gaps {
-        writeln!(out, "  {}", gap.remediation)?;
+    let manual: Vec<_> = report
+        .gaps
+        .iter()
+        .filter(|gap| !(gap.manageable && manage))
+        .collect();
+    if !manual.is_empty() {
+        writeln!(
+            out,
+            "  {}",
+            pen.yellow(
+                "→ until set, deleting or re-parenting their rows leaves the old parent's \
+                 document stale",
+            ),
+        )?;
+        section(out, pen, "Run to trace deleted and re-parented rows")?;
+        for gap in manual {
+            writeln!(out, "  {}", gap.remediation)?;
+        }
     }
     Ok(())
 }

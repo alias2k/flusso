@@ -145,6 +145,9 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     "gaps": p.gaps.iter().map(|gap| serde_json::json!({
                         "table": gap.table.to_string(),
                         "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                        "manageable": gap.manageable,
+                        "will_manage": gap.manageable && postgres.manage_replica_identity,
+                        "blockers": gap.blockers,
                         "remediation": gap.remediation,
                     })).collect::<Vec<_>>(),
                 })),
@@ -175,7 +178,12 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                         print::coverage(&mut out, pen, coverage, manage)?;
                     }
                     if let Some(pre_image) = &pre_image {
-                        print::pre_image(&mut out, pen, pre_image)?;
+                        print::pre_image(
+                            &mut out,
+                            pen,
+                            pre_image,
+                            postgres.manage_replica_identity,
+                        )?;
                     }
                     writeln!(out)?;
                     if has_errors {

@@ -8,13 +8,14 @@
 //! source can **inspect** whether they're covered and, when it has the privilege,
 //! **ensure** they are.
 //!
-//! The same surface reports a second prerequisite, read-only: whether the change
-//! feed carries the **pre-image** columns reverse resolution needs to trace a
-//! deleted or re-parented row to its old parent
+//! The same surface covers a second prerequisite: whether the change feed
+//! carries the **pre-image** columns reverse resolution needs to trace a deleted
+//! or re-parented row to its old parent
 //! ([`SourceSpec::pre_image_columns`](crate::SourceSpec::pre_image_columns)).
-//! That one is never provisioned — closing it changes how much the source's own
-//! tables log, which is the operator's call — so there is only
-//! [`inspect_pre_image`](CaptureProvisioning::inspect_pre_image).
+//! It follows the same inspect / ensure split, per table:
+//! [`inspect_pre_image`](CaptureProvisioning::inspect_pre_image) reports,
+//! [`ensure_pre_image`](CaptureProvisioning::ensure_pre_image) closes each gap
+//! the source is allowed to.
 //!
 //! The contract is deliberately mechanism-neutral — the trait and the
 //! [`CoverageReport`] never name "publication". A backend that *can* provision
@@ -83,8 +84,12 @@ pub struct PreImageGap {
     pub table: QualifiedTable,
     /// The required columns the pre-image does not carry.
     pub missing: Vec<ColumnName>,
+    /// Whether this source, with its current credentials, can close the gap.
+    pub manageable: bool,
+    /// Why `manageable` is false (e.g. "role does not own table public.orders").
+    pub blockers: Vec<String>,
     /// The backend-specific step that closes this gap — opaque, shown verbatim
-    /// (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`). Never applied.
+    /// (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`).
     pub remediation: String,
 }
 
@@ -112,4 +117,14 @@ pub trait CaptureProvisioning: Send + Sync {
     /// Read-only: report which `required` tables' pre-images miss a column.
     /// A table the source can't find is skipped — coverage reports it.
     async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport>;
+
+    /// Close every manageable gap when `manage` is set; otherwise a no-op.
+    /// Returns the report as observed *before* acting. A gap that can't be
+    /// closed (not manageable, or the attempt failed) is left for the caller
+    /// to report — it degrades resolution, it doesn't stop capture.
+    async fn ensure_pre_image(
+        &self,
+        required: &PreImageColumns,
+        manage: bool,
+    ) -> Result<PreImageReport>;
 }

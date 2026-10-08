@@ -61,10 +61,13 @@ pub struct WalChangeCapture {
     /// Whether to auto-create/extend the publication on [`live`](Self::live).
     /// When false, a coverage gap is only reported, never provisioned.
     manage_publication: bool,
-    /// Per table, the columns resolution needs from a pre-image. Checked (and
-    /// warned about) on [`live`](Self::live); set via
-    /// [`with_pre_image_columns`](Self::with_pre_image_columns).
+    /// Per table, the columns resolution needs from a pre-image. Ensured on
+    /// [`live`](Self::live); set via
+    /// [`with_pre_image_management`](Self::with_pre_image_management).
     pre_image_columns: PreImageColumns,
+    /// Whether to set the replica identity of tables that need it on
+    /// [`live`](Self::live). When false, a gap is only reported.
+    manage_replica_identity: bool,
     /// The position bookkeeping of the open live stream, so `confirm` can reach
     /// it. Replaced each time `live` opens a stream; `None` before the first.
     positions: Arc<Mutex<Option<Arc<Positions>>>>,
@@ -85,6 +88,7 @@ impl WalChangeCapture {
             required_tables: BTreeSet::new(),
             manage_publication: false,
             pre_image_columns: PreImageColumns::new(),
+            manage_replica_identity: false,
             positions: Arc::new(Mutex::new(None)),
         }
     }
@@ -104,42 +108,14 @@ impl WalChangeCapture {
     }
 
     /// Declare the columns resolution needs from each table's pre-image —
-    /// typically [`SourceSpec::pre_image_columns`](source::SourceSpec::pre_image_columns).
-    /// [`live`](Self::live) warns about every table whose replica identity
-    /// doesn't carry them, and the stream warns once per table when a change
-    /// arrives without them. Never provisioned.
-    pub fn with_pre_image_columns(mut self, columns: PreImageColumns) -> Self {
+    /// typically [`SourceSpec::pre_image_columns`](source::SourceSpec::pre_image_columns) —
+    /// and whether to set `REPLICA IDENTITY FULL` where they're missing.
+    /// [`live`](Self::live) ensures them (or warns, when not allowed), and the
+    /// stream warns once per table when a change arrives without them.
+    pub fn with_pre_image_management(mut self, columns: PreImageColumns, manage: bool) -> Self {
         self.pre_image_columns = columns;
+        self.manage_replica_identity = manage;
         self
-    }
-
-    /// Warn about every table whose replica identity misses a pre-image column.
-    /// Advisory: a failed inspection is logged, not fatal.
-    async fn warn_pre_image_gaps(&self) {
-        if self.pre_image_columns.is_empty() {
-            return;
-        }
-        match self.inspect_pre_image(&self.pre_image_columns).await {
-            Ok(report) => {
-                for gap in &report.gaps {
-                    let missing = gap
-                        .missing
-                        .iter()
-                        .map(|column| column.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    tracing::warn!(
-                        table = %gap.table,
-                        missing = %missing,
-                        remediation = %gap.remediation,
-                        "replica identity does not carry the parent link: a deleted or \
-                         re-parented row will leave its old parent's document stale; run the \
-                         printed SQL",
-                    );
-                }
-            }
-            Err(error) => tracing::warn!(%error, "could not inspect replica identities"),
-        }
     }
 
     /// The shared admin pool, opened on first call and reused thereafter. Kept
@@ -226,7 +202,13 @@ impl ChangeCapture for WalChangeCapture {
         self.ensure_slot().await?;
         self.ensure_coverage(&self.required_tables, self.manage_publication)
             .await?;
-        self.warn_pre_image_gaps().await;
+        if !self.pre_image_columns.is_empty()
+            && let Err(error) = self
+                .ensure_pre_image(&self.pre_image_columns, self.manage_replica_identity)
+                .await
+        {
+            tracing::warn!(%error, "could not inspect replica identities");
+        }
 
         let catalog = self.admin_pool().await?.clone();
         let client = ReplicationClient::connect(self.config.clone())
@@ -370,5 +352,51 @@ impl CaptureProvisioning for WalChangeCapture {
 
     async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport> {
         replica_identity::inspect(self.admin_pool().await?, required).await
+    }
+
+    #[tracing::instrument(name = "wal.ensure_pre_image", skip_all, err)]
+    async fn ensure_pre_image(
+        &self,
+        required: &PreImageColumns,
+        manage: bool,
+    ) -> Result<PreImageReport> {
+        let pool = self.admin_pool().await?;
+        let report = replica_identity::inspect(pool, required).await?;
+        for gap in &report.gaps {
+            let missing = gap
+                .missing
+                .iter()
+                .map(|column| column.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let reason = if !manage {
+                "automatic replica identity management is disabled".to_owned()
+            } else if !gap.manageable {
+                gap.blockers.join("; ")
+            } else {
+                match replica_identity::apply(pool, gap).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            table = %gap.table,
+                            missing = %missing,
+                            "set REPLICA IDENTITY FULL so deleted and re-parented rows reach \
+                             their old parent's document",
+                        );
+                        continue;
+                    }
+                    Err(error) => error.to_string(),
+                }
+            };
+            tracing::warn!(
+                table = %gap.table,
+                missing = %missing,
+                reason = %reason,
+                remediation = %gap.remediation,
+                "replica identity does not carry the parent link and flusso will not set it: a \
+                 deleted or re-parented row will leave its old parent's document stale; run the \
+                 printed SQL",
+            );
+        }
+        Ok(report)
     }
 }
