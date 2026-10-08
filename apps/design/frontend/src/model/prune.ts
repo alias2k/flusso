@@ -5,31 +5,50 @@
 // incomplete pieces so the preview shows everything that *is* valid; it runs
 // only for preview, the edited doc keeps the in-progress work untouched.
 
-import type { Field, Filter, IndexSchema, SoftDelete } from "../api";
+import type { Aggregate, Field, Filter, IndexSchema, SoftDelete, Through } from "../api";
 import { aggregateIncomplete, joinIncomplete } from "./complete";
 
 const filterOk = (f: Filter): boolean =>
   "raw" in f ? !!f.raw.raw : "null_check" in f ? !!f.null_check.column : !!f.value_op.column;
 
+const prunedFilters = (filters: Filter[] | undefined): Filter[] | undefined => {
+  const kept = (filters ?? []).filter(filterOk);
+  return kept.length ? kept : undefined;
+};
+
+const prunedThrough = (through: Through): Through => ({ ...through, filters: prunedFilters(through.filters) });
+
+function prunedAggregate(agg: Aggregate): Aggregate {
+  const key = "through" in agg.key ? { through: prunedThrough(agg.key.through) } : agg.key;
+  return { ...agg, key, filters: prunedFilters(agg.filters) };
+}
+
 function prunedField(field: Field): Field | null {
   const s = field.source;
   if ("relation" in s) {
-    if ("aggregate" in s.relation) return aggregateIncomplete(field) ? null : field;
+    if ("aggregate" in s.relation) {
+      if (aggregateIncomplete(field)) return null;
+      return { ...field, source: { relation: { aggregate: prunedAggregate(s.relation.aggregate) } } };
+    }
     if ("join" in s.relation) {
       if (joinIncomplete(field)) return null;
       const join = s.relation.join;
       const fields = join.fields.map(prunedField).filter((x): x is Field => x !== null);
       const order_by = (join.order_by ?? []).filter((o) => o.column);
-      const filters = (join.filters ?? []).filter(filterOk);
+      const kind =
+        "many_to_many" in join.kind
+          ? { many_to_many: { through: prunedThrough(join.kind.many_to_many.through) } }
+          : join.kind;
       return {
         ...field,
         source: {
           relation: {
             join: {
               ...join,
+              kind,
               fields,
               order_by: order_by.length ? order_by : undefined,
-              filters: filters.length ? filters : undefined,
+              filters: prunedFilters(join.filters),
             },
           },
         },

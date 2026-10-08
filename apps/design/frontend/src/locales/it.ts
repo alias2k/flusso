@@ -231,6 +231,13 @@ export const it: Record<string, string> = {
   "inspector.relatedTable": "tabella correlata",
   "inspector.aggColumn": "colonna (da aggregare)",
   "inspector.junctionTable": "tabella di giunzione",
+  "inspector.junctionFilters": "Filtri di giunzione",
+  "inspector.junctionFiltersHint":
+    "Restringono le righe della giunzione (es. escludere le righe annullate). I filtri sopra si applicano alla tabella di destinazione.",
+  "inspector.distinct": "Conta ogni riga di destinazione una volta",
+  "inspector.distinctOn":
+    "Ogni riga di destinazione conta una volta, indipendentemente da quante righe di giunzione la collegano.",
+  "inspector.distinctOff": "Un valore per riga di giunzione: una destinazione collegata due volte conta due volte.",
   "inspector.softDelete": "eliminazione logica",
   "inspector.documentField": "campo del documento",
 

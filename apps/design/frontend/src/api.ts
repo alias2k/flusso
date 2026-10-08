@@ -67,6 +67,8 @@ export interface Through {
   table: string;
   left_key: string;
   right_key: string;
+  // Conditions on the junction rows; the relation's own `filters` apply to its target.
+  filters?: Filter[];
 }
 
 export type JoinKind =
@@ -107,6 +109,8 @@ export interface Aggregate {
   key: AggregateKey;
   value_type?: FlussoType;
   filters?: Filter[];
+  // Over `through` only: count each target row once instead of once per junction row.
+  distinct?: boolean;
 }
 
 export type Relation = { join: Join } | { aggregate: Aggregate };

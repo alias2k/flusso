@@ -14,6 +14,7 @@ import {
   type Join,
   type JoinKind,
   type SoftDelete,
+  type Through,
 } from "../api";
 import { KIND_HELP, LEAF_TYPES } from "../fields";
 import { useT, type Translate } from "../i18n";
@@ -466,6 +467,12 @@ function NodeInspector({ path }: { path: number[] }) {
           onChange={(filters) => setJoin({ ...join, filters })}
         />
       </Drawer>
+      {"many_to_many" in join.kind && (
+        <JunctionFilters
+          through={join.kind.many_to_many.through}
+          onChange={(through) => setJoin({ ...join, kind: { many_to_many: { through } } })}
+        />
+      )}
     </div>
   );
 }
@@ -1072,8 +1079,18 @@ function AggregateBody({
           tables={tables}
           junctions={junctions}
           columns={aggColShapes}
-          onChange={(key) => setAgg({ ...agg, key })}
+          onChange={(key) => setAgg({ ...agg, key, distinct: "through" in key ? agg.distinct : undefined })}
         />
+        {"through" in agg.key && (
+          <>
+            <Check
+              value={agg.distinct ?? false}
+              label={t("inspector.distinct")}
+              onChange={(distinct) => setAgg({ ...agg, distinct: distinct || undefined })}
+            />
+            <p className="hint">{agg.distinct ? t("inspector.distinctOn") : t("inspector.distinctOff")}</p>
+          </>
+        )}
       </Block>
       <Block variant="doc" title={t("inspector.inDoc")}>
         <NameField field={field} set={set} />
@@ -1104,6 +1121,9 @@ function AggregateBody({
           onChange={(filters) => setAgg({ ...agg, filters })}
         />
       </Drawer>
+      {"through" in agg.key && (
+        <JunctionFilters through={agg.key.through} onChange={(through) => setAgg({ ...agg, key: { through } })} />
+      )}
     </>
   );
 }
@@ -1165,16 +1185,32 @@ function AggregateKeyEditor({
   );
 }
 
+/// The junction's own row filters, separate from the relation's target filters.
+function JunctionFilters({ through, onChange }: { through: Through; onChange: (t: Through) => void }) {
+  const { t } = useT();
+  const { columnsFor } = useDesign();
+  return (
+    <Drawer title={t("inspector.junctionFilters")} count={(through.filters ?? []).length}>
+      <p className="hint">{t("inspector.junctionFiltersHint")}</p>
+      <Filters
+        value={through.filters ?? []}
+        columns={columnsFor(through.table)}
+        onChange={(filters) => onChange({ ...through, filters })}
+      />
+    </Drawer>
+  );
+}
+
 function ThroughEditor({
   through,
   tables,
   junctions,
   onChange,
 }: {
-  through: { table: string; left_key: string; right_key: string };
+  through: Through;
   tables: string[];
   junctions?: ReadonlySet<string>;
-  onChange: (t: { table: string; left_key: string; right_key: string }) => void;
+  onChange: (t: Through) => void;
 }) {
   const { t } = useT();
   const { columnsFor } = useDesign();
