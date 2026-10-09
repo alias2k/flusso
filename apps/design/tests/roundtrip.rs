@@ -10,7 +10,8 @@
 //!  - `identifier` is excluded (conversion injects an `analyzer` option),
 //!  - `map` fields carry the `dynamic` option the conversion injects,
 //!  - to-many joins are `nullable` (the parser forbids `required` there),
-//!  - `belongs_to` takes no `order_by`/`limit`, `has_one` no `limit`.
+//!  - `belongs_to` takes no `order_by`/`limit`, `has_one` no `limit`,
+//!  - `distinct` only on an aggregate over `through`.
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
@@ -20,8 +21,8 @@ use config::yaml::SchemaYaml;
 use kernel::common::ColumnName;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, DatabaseSchema, Field, FieldName, FieldSource,
-    FlussoType, GenericValue, Geo, IndexSchema, Join, JoinKind, OrderBy, ParseFrom, Relation,
-    TableName, Through, Transform,
+    Filter, FlussoType, GenericValue, Geo, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp,
+    OrderBy, ParseFrom, Relation, TableName, Through, Transform,
 };
 use proptest::prelude::*;
 
@@ -58,11 +59,26 @@ fn transforms() -> impl Strategy<Value = Vec<Transform>> {
     ]
 }
 
+fn junction_filters() -> impl Strategy<Value = Option<Vec<Filter>>> {
+    prop::option::of(
+        col()
+            .prop_map(|column| {
+                Filter::NullCheck(NullCheckFilter {
+                    column,
+                    op: NullOp::IsNull,
+                })
+            })
+            .prop_map(|filter| vec![filter]),
+    )
+}
 fn through() -> impl Strategy<Value = Through> {
-    (table(), col(), col()).prop_map(|(table, left_key, right_key)| Through {
-        table,
-        left_key,
-        right_key,
+    (table(), col(), col(), junction_filters()).prop_map(|(table, left_key, right_key, filters)| {
+        Through {
+            table,
+            left_key,
+            right_key,
+            filters,
+        }
     })
 }
 fn agg_key() -> impl Strategy<Value = AggregateKey> {
@@ -172,9 +188,10 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
                 key,
                 value_type,
                 filters: None,
+                distinct: false,
             }))
         };
-    prop_oneof![
+    let ops = prop_oneof![
         (table(), agg_key()).prop_map(move |(t, k)| mk(t, AggregateOp::Count, k, None)),
         (table(), col(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
             t,
@@ -201,8 +218,15 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
             k,
             None
         )),
-    ]
-    .boxed()
+    ];
+    (ops, any::<bool>())
+        .prop_map(|(mut source, distinct)| {
+            if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut source {
+                aggregate.distinct = distinct && matches!(aggregate.key, AggregateKey::Through(_));
+            }
+            source
+        })
+        .boxed()
 }
 
 fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {

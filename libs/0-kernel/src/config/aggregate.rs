@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
 use crate::common;
@@ -5,8 +7,9 @@ use crate::common;
 use super::{AggregateKey, Filter, FlussoType};
 
 /// Reduces rows from a related `table` to a single value — a count, sum, or
-/// extreme. The `key` connects the tables; `filters` restrict which rows count.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+/// extreme. The `key` connects the tables; `filters` restrict which rows of
+/// `table` count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Aggregate {
     pub table: common::TableName,
     pub op: AggregateOp,
@@ -18,6 +21,33 @@ pub struct Aggregate {
     pub value_type: Option<FlussoType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<Vec<Filter>>,
+    /// Over a junction: count each target row once instead of once per
+    /// junction row. Only valid with an [`AggregateKey::Through`] key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub distinct: bool,
+}
+
+/// Hashes `distinct` only when set, so a schema that never opts in keeps the
+/// content hash (and so the physical index) it had before the field existed.
+impl Hash for Aggregate {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self {
+            table,
+            op,
+            key,
+            value_type,
+            filters,
+            distinct,
+        } = self;
+        table.hash(state);
+        op.hash(state);
+        key.hash(state);
+        value_type.hash(state);
+        filters.hash(state);
+        if *distinct {
+            distinct.hash(state);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]

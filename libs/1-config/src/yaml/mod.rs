@@ -55,6 +55,10 @@ pub enum ConversionError {
     },
     #[error("aggregate must specify either `foreign_key` or `through`, not both or neither")]
     InvalidAggregateKey,
+    #[error(
+        "aggregate `distinct` only applies over a `through` junction (a `foreign_key` aggregate already sees each row once)"
+    )]
+    DistinctWithoutThrough,
     #[error("aggregate op '{op}' requires a `column`")]
     MissingAggregateColumn { op: &'static str },
     #[error("filter op '{op}' requires a value")]

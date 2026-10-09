@@ -31,6 +31,9 @@ A join folds rows from a related table into the document. The relationship verb 
 | `table` | The junction table. |
 | `left_key` | Junction column pointing at the parent. |
 | `right_key` | Junction column pointing at the related table. |
+| `filters` | Narrow the junction rows, e.g. skip a removed membership. The join's own `filters` narrow the related table. See [Filters](filters-and-soft-delete.md). |
+
+The same `through` shape keys an aggregate; see [Aggregates](aggregates.md#over-a-junction) for what a junction aggregate counts.
 
 ## What a related change rebuilds
 

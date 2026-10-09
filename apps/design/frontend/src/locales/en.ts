@@ -224,6 +224,12 @@ export const en: Record<string, string> = {
   "inspector.relatedTable": "related table",
   "inspector.aggColumn": "column (to aggregate)",
   "inspector.junctionTable": "junction table",
+  "inspector.junctionFilters": "Junction filters",
+  "inspector.junctionFiltersHint":
+    "Narrow the junction rows (e.g. skip cancelled lines). The filters above apply to the target table.",
+  "inspector.distinct": "Count each target row once",
+  "inspector.distinctOn": "Each target row counts once, however many junction rows point at it.",
+  "inspector.distinctOff": "One value per junction row: a target linked twice counts twice.",
   "inspector.softDelete": "soft delete",
   "inspector.documentField": "document field",
 

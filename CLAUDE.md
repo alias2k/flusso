@@ -554,7 +554,11 @@ split by relationship verb, which names where the key lives: `belongs_to` (this 
 (the related table's `foreign_key`), `many_to_many` (`through` a junction). Aggregates
 split by op (`count`/`sum`/`avg`/`min`/`max`, plus `ids` — a flat scalar array of the
 related table's primary keys, typed by an explicit `element_type`; `ResolvedField.array`
-flags it). A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
+flags it). What an aggregate over `through` counts (`distinct`, `through.filters`) is owned
+by the Aggregates reference. **The content hash is the physical index name**, so `Aggregate`
+and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters` when
+unset — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
+pins it. Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
 `json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
 injected into options (so runtime keys stay searchable); the resolved `Mapping.map_values`
 carries the value kind, which is the only thing distinguishing a `map` from a plain

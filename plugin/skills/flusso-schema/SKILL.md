@@ -109,7 +109,7 @@ An `enum` takes an optional `variants:` list — its values in rank order (`vari
 | `belongs_to` | **this** table | `column` (defaults to field name) | object, nullable |
 | `has_one` | the **related** table | `foreign_key` | object, nullable |
 | `has_many` | the **related** table | `foreign_key` | array, never null |
-| `many_to_many` | a junction | `through: {table,left_key,right_key}` | array, never null |
+| `many_to_many` | a junction | `through: {table,left_key,right_key[,filters]}` | array, never null |
 
 **Key arity is strict:** a join takes *exactly* the key sibling its verb implies — nothing else. Every join also needs `table`, `primary_key`, and `fields` (the projection). `order_by`/`limit` apply to `has_many`/`many_to_many` (not `belongs_to`). See `examples/join.schema.yml`.
 
@@ -120,6 +120,9 @@ An `enum` takes an optional `variants:` list — its values in rank order (`vari
 - `count` → non-null `long`; `avg` → nullable `double` → neither takes `column`/`value_type`.
 - `sum`/`min`/`max` → **must** declare both `column` and `value_type` (it mirrors the column).
 - `ids` → a **flat array of the related table's primary keys** (never null; `[]` when empty), not a nested body. **Must** declare `element_type` (the scalar type of each key, e.g. `long` for integer PKs, `keyword` for uuid/string PKs); takes **no** `column`/`value_type` — the key column is the related table's PK. Works over `foreign_key` (one-to-many) or `through` (many-to-many).
+
+- Over `through`, an aggregate counts **once per junction row** (a product on two order lines counts twice). `distinct: true` counts each target row once; it's rejected on `foreign_key` aggregates. A junction row whose target is missing never counts.
+- Two filter lists, scoped by position: the aggregate's `filters` narrow the **target** table; `through.filters` narrow the **junction** rows (e.g. skip cancelled lines). Owned meaning: the [Aggregates reference](https://alias2k.github.io/flusso/reference/aggregates.html#over-a-junction).
 
 See `examples/aggregate.schema.yml`.
 

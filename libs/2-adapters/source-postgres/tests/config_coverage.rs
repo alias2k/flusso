@@ -190,6 +190,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
+                    filters: None,
                 },
             },
             filters: None,
@@ -292,9 +293,11 @@ async fn aggregates_cover_every_op_and_through() {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
+                    filters: None,
                 }),
                 value_type: None,
                 filters: None,
+                distinct: false,
             },
         ),
     ];
@@ -310,6 +313,114 @@ async fn aggregates_cover_every_op_and_through() {
     assert!((num_of(body.get("max_order").unwrap()) - 100.00).abs() < 1e-6);
     assert_eq!(int_of(body.get("fulfilled_orders").unwrap()), 2);
     assert_eq!(int_of(body.get("tag_count").unwrap()), 3);
+}
+
+/// A junction that is a real entity: `purchases` has its own key, can hold
+/// the same product twice, carries a `status`, and one row points at a product
+/// that doesn't exist.
+const PURCHASES: &[&str] = &[
+    "CREATE TABLE products (id int PRIMARY KEY, weight int NOT NULL, archived boolean NOT NULL)",
+    "CREATE TABLE purchases (id int PRIMARY KEY, user_id int NOT NULL, product_id int NOT NULL, status text NOT NULL)",
+    "INSERT INTO products (id, weight, archived) VALUES (1, 2, false), (2, 3, false), (3, 7, true)",
+    "INSERT INTO purchases (id, user_id, product_id, status) VALUES
+        (1, 1, 1, 'ok'), (2, 1, 1, 'ok'), (3, 1, 2, 'cancelled'), (4, 1, 3, 'ok'), (5, 1, 99, 'ok')",
+];
+
+fn purchases_agg(
+    op: AggregateOp,
+    distinct: bool,
+    junction_filters: Option<Vec<Filter>>,
+    filters: Option<Vec<Filter>>,
+) -> Aggregate {
+    Aggregate {
+        table: table("products"),
+        op,
+        key: AggregateKey::Through(Through {
+            table: table("purchases"),
+            left_key: column("user_id"),
+            right_key: column("product_id"),
+            filters: junction_filters,
+        }),
+        value_type: Some(FlussoType::Long),
+        filters,
+        distinct,
+    }
+}
+
+fn ids_of(map: &BTreeMap<String, GenericValue>, key: &str) -> Vec<i64> {
+    let mut ids: Vec<i64> = arr_of(map, key).iter().map(int_of).collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn aggregates_over_a_junction_entity_honour_distinct_and_both_filter_sets() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in PURCHASES {
+        sqlx::query(*statement).execute(&pool).await.unwrap();
+    }
+
+    let weight = || AggregateOp::Sum(column("weight"));
+    let ids = || AggregateOp::Ids {
+        element_type: FlussoType::Long,
+    };
+    let not_cancelled = || Some(vec![value_op("status", FilterOp::Neq, single("cancelled"))]);
+    let active = || Some(vec![eq("archived", "false")]);
+    let fields = vec![
+        col("id", "id"),
+        agg_field("line_weight", purchases_agg(weight(), false, None, None)),
+        agg_field("distinct_weight", purchases_agg(weight(), true, None, None)),
+        agg_field(
+            "live_line_weight",
+            purchases_agg(weight(), false, not_cancelled(), None),
+        ),
+        agg_field(
+            "live_active_weight",
+            purchases_agg(weight(), true, not_cancelled(), active()),
+        ),
+        agg_field(
+            "distinct_count",
+            purchases_agg(AggregateOp::Count, true, None, None),
+        ),
+        agg_field("product_ids", purchases_agg(ids(), false, None, None)),
+        agg_field(
+            "distinct_product_ids",
+            purchases_agg(ids(), true, None, None),
+        ),
+        agg_field(
+            "active_product_ids",
+            purchases_agg(ids(), true, None, active()),
+        ),
+    ];
+    let builder = builder(&url, users_schema(fields, None)).await;
+    let body = upsert(&builder, 1).await;
+
+    // Purchases 1–4 reach products 1, 1, 2, 3; purchase 5 targets a missing
+    // product and never counts.
+    assert_eq!(int_of(body.get("line_weight").unwrap()), 2 + 2 + 3 + 7);
+    assert_eq!(int_of(body.get("distinct_weight").unwrap()), 2 + 3 + 7);
+    assert_eq!(int_of(body.get("live_line_weight").unwrap()), 2 + 2 + 7);
+    assert_eq!(int_of(body.get("live_active_weight").unwrap()), 2);
+    assert_eq!(int_of(body.get("distinct_count").unwrap()), 3);
+    assert_eq!(ids_of(&body, "product_ids"), vec![1, 1, 2, 3]);
+    assert_eq!(ids_of(&body, "distinct_product_ids"), vec![1, 2, 3]);
+    assert_eq!(ids_of(&body, "active_product_ids"), vec![1, 2]);
+
+    // A junction row's own column changing resolves to its parent, and the
+    // rebuilt document sees the junction filter flip.
+    let parents = builder
+        .resolve(&table("purchases"), &row_key("id", 3), None)
+        .await
+        .unwrap();
+    assert_eq!(parents.iter().map(id_of).collect::<Vec<_>>(), vec![1]);
+    sqlx::query("UPDATE purchases SET status = 'ok' WHERE id = 3")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let body = upsert(&builder, 1).await;
+    assert_eq!(int_of(body.get("live_line_weight").unwrap()), 2 + 2 + 3 + 7);
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +849,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                         table: table("user_tags"),
                         left_key: column("user_id"),
                         right_key: column("tag_id"),
+                        filters: None,
                     },
                 },
                 filters: None,
@@ -1013,6 +1125,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         key: AggregateKey::Direct(column("user_id")),
         value_type: None,
         filters,
+        distinct: false,
     }
 }
 

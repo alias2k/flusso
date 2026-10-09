@@ -325,11 +325,7 @@ fn join_kind(
         },
         JoinVerb::ManyToMany => JoinKind::ManyToMany {
             through: match body.through.clone() {
-                Some(t) => Through {
-                    table: t.table,
-                    left_key: t.left_key,
-                    right_key: t.right_key,
-                },
+                Some(t) => convert_through(t)?,
                 None => {
                     return Err(ConversionError::MissingJoinKey {
                         verb: verb.as_str(),
@@ -378,12 +374,16 @@ fn convert_aggregate_field(
 ) -> Result<Field, ConversionError> {
     let (op, value_type) = convert_aggregate_op(op, &body)?;
     let key = aggregate_key(body.foreign_key, body.through)?;
+    if body.distinct && matches!(key, AggregateKey::Direct(_)) {
+        return Err(ConversionError::DistinctWithoutThrough);
+    }
     let aggregate = Aggregate {
         table: body.table,
         op,
         key,
         value_type,
         filters: convert_filters_opt(body.filters)?,
+        distinct: body.distinct,
     };
     Ok(Field {
         field: body.field,
@@ -446,13 +446,18 @@ fn aggregate_key(
 ) -> Result<AggregateKey, ConversionError> {
     match (foreign_key, through) {
         (Some(fk), None) => Ok(AggregateKey::Direct(fk)),
-        (None, Some(t)) => Ok(AggregateKey::Through(Through {
-            table: t.table,
-            left_key: t.left_key,
-            right_key: t.right_key,
-        })),
+        (None, Some(t)) => Ok(AggregateKey::Through(convert_through(t)?)),
         _ => Err(ConversionError::InvalidAggregateKey),
     }
+}
+
+fn convert_through(through: entities::Through) -> Result<Through, ConversionError> {
+    Ok(Through {
+        table: through.table,
+        left_key: through.left_key,
+        right_key: through.right_key,
+        filters: convert_filters_opt(through.filters)?,
+    })
 }
 
 fn convert_options(options: BTreeMap<String, serde_yaml::Value>) -> BTreeMap<String, GenericValue> {

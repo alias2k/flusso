@@ -24,6 +24,7 @@ fn ids_schema(element_type: FlussoType) -> IndexSchema {
                 key: AggregateKey::Direct(crate::common::ColumnName::try_new("user_id").unwrap()),
                 value_type: None,
                 filters: None,
+                distinct: false,
             })),
         }],
     }
@@ -160,4 +161,106 @@ fn ids_projects_to_a_non_null_element_typed_array() {
     assert_eq!(field.mapping.mapping_type, MappingType::Keyword);
     assert!(field.array);
     assert!(!field.nullable);
+}
+
+fn through() -> crate::config::Through {
+    crate::config::Through {
+        table: TableName::try_new("order_items").unwrap(),
+        left_key: ColumnName::try_new("order_id").unwrap(),
+        right_key: ColumnName::try_new("product_id").unwrap(),
+        filters: None,
+    }
+}
+
+fn through_schema() -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: TableName::try_new("orders").unwrap(),
+        db_schema: DatabaseSchema::default(),
+        primary_key: None,
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            Field {
+                field: FieldName::try_new("totalWeight").unwrap(),
+                options: Default::default(),
+                source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+                    table: TableName::try_new("products").unwrap(),
+                    op: AggregateOp::Sum(ColumnName::try_new("weight").unwrap()),
+                    key: AggregateKey::Through(through()),
+                    value_type: Some(FlussoType::Double),
+                    filters: None,
+                    distinct: false,
+                })),
+            },
+            Field {
+                field: FieldName::try_new("products").unwrap(),
+                options: Default::default(),
+                source: FieldSource::Relation(Relation::Join(Join {
+                    table: TableName::try_new("products").unwrap(),
+                    kind: JoinKind::ManyToMany { through: through() },
+                    primary_key: ColumnName::try_new("id").unwrap(),
+                    nullable: false,
+                    filters: None,
+                    order_by: None,
+                    limit: None,
+                    fields: vec![],
+                })),
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_through_schema_keeps_its_content_hash() {
+    let mapping = through_schema().resolve(IndexName::try_new("orders").unwrap());
+    assert_eq!(mapping.hash.to_string(), "af5b97ca");
+}
+
+#[test]
+fn an_empty_junction_filter_list_keeps_the_content_hash() {
+    let base = through_schema()
+        .resolve(IndexName::try_new("orders").unwrap())
+        .hash;
+    let mut empty = through_schema();
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut empty.fields[0].source
+        && let AggregateKey::Through(through) = &mut aggregate.key
+    {
+        through.filters = Some(vec![]);
+    }
+    assert_eq!(
+        base,
+        empty.resolve(IndexName::try_new("orders").unwrap()).hash
+    );
+}
+
+#[test]
+fn opting_into_distinct_or_junction_filters_changes_the_content_hash() {
+    let base = through_schema()
+        .resolve(IndexName::try_new("orders").unwrap())
+        .hash;
+
+    let mut distinct = through_schema();
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut distinct.fields[0].source {
+        aggregate.distinct = true;
+    }
+    let distinct = distinct.resolve(IndexName::try_new("orders").unwrap()).hash;
+
+    let mut filtered = through_schema();
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut filtered.fields[0].source
+        && let AggregateKey::Through(through) = &mut aggregate.key
+    {
+        through.filters = Some(vec![crate::config::Filter::NullCheck(
+            crate::config::NullCheckFilter {
+                column: ColumnName::try_new("cancelled_at").unwrap(),
+                op: crate::config::NullOp::IsNull,
+            },
+        )]);
+    }
+    let filtered = filtered.resolve(IndexName::try_new("orders").unwrap()).hash;
+
+    assert_ne!(base, distinct);
+    assert_ne!(base, filtered);
+    assert_ne!(distinct, filtered);
 }

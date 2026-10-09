@@ -9,24 +9,36 @@ pub(super) fn relation_target(relation: &Relation) -> (&TableName, RelationKey<'
 }
 
 /// Collect every `(table, column)` a value filter compares against, at any
-/// depth. A relation's filters run against its own target table, so each
-/// [`ValueOpFilter`](kernel::ValueOpFilter)'s column is paired with the
-/// relation's table — the document query later casts the operand to that
-/// column's real type. Null-check and raw filters carry no typed operand and
-/// are skipped.
+/// depth. A relation's filters run against its own target table and a
+/// junction's filters against the junction, so each
+/// [`ValueOpFilter`](kernel::ValueOpFilter)'s column is paired with the table
+/// it runs on — the document query later casts the operand to that column's
+/// real type. Null-check and raw filters carry no typed operand and are
+/// skipped.
 pub(super) fn collect_filter_columns<'a>(
     fields: &'a [Field],
     out: &mut Vec<(&'a TableName, &'a ColumnName)>,
 ) {
     for field in fields {
         if let Some(relation) = field.relation() {
-            for filter in relation.filters().unwrap_or_default() {
-                if let Filter::ValueOp(value_op) = filter {
-                    out.push((relation.table(), &value_op.column));
-                }
+            push_value_ops(relation.table(), relation.filters(), out);
+            if let RelationKey::Through(through) = relation.key() {
+                push_value_ops(&through.table, through.filters.as_deref(), out);
             }
         }
         collect_filter_columns(field.children(), out);
+    }
+}
+
+fn push_value_ops<'a>(
+    table: &'a TableName,
+    filters: Option<&'a [Filter]>,
+    out: &mut Vec<(&'a TableName, &'a ColumnName)>,
+) {
+    for filter in filters.unwrap_or_default() {
+        if let Filter::ValueOp(value_op) = filter {
+            out.push((table, &value_op.column));
+        }
     }
 }
 

@@ -567,6 +567,7 @@ fn spec() -> SourceSpec {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
+                    filters: None,
                 },
             },
             filters: None,
@@ -639,9 +640,11 @@ fn spec() -> SourceSpec {
                     table: table("user_tags"),
                     left_key: column("user_id"),
                     right_key: column("tag_id"),
+                    filters: None,
                 }),
                 value_type: None,
                 filters: None,
+                distinct: false,
             },
         ),
     ];
@@ -725,6 +728,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         key: AggregateKey::Direct(column("user_id")),
         value_type: None,
         filters,
+        distinct: false,
     }
 }
 

@@ -437,6 +437,12 @@ table = "product_tags"
 left_key = "product_id"
 right_key = "tag_id"
 
+[[config.indexes.catalog.schema.fields.source.relation.join.kind.many_to_many.through.filters]]
+
+[config.indexes.catalog.schema.fields.source.relation.join.kind.many_to_many.through.filters.null_check]
+column = "removed_at"
+op = "is_null"
+
 [[config.indexes.catalog.schema.fields.source.relation.join.order_by]]
 column = "label"
 direction = "asc"
@@ -540,6 +546,25 @@ element_type = "long"
 
 [config.indexes.catalog.schema.fields.source.relation.aggregate.key]
 direct = "product_id"
+
+[[config.indexes.catalog.schema.fields]]
+field = "distinctTagCount"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate]
+table = "tags"
+op = "count"
+distinct = true
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.key.through]
+table = "product_tags"
+left_key = "product_id"
+right_key = "tag_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.key.through.filters]]
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.key.through.filters.null_check]
+column = "removed_at"
+op = "is_null"
 
 [[config.indexes.catalog.schema.fields]]
 field = "docSource"

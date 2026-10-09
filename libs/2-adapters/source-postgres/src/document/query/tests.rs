@@ -256,6 +256,7 @@ fn aggregate_count() {
             key: AggregateKey::Direct(c("user_id")),
             value_type: None,
             filters: None,
+            distinct: false,
         })),
     };
     let schema = index(Some("id"), None, vec![count]);
@@ -285,6 +286,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
             key: AggregateKey::Direct(c("user_id")),
             value_type: None,
             filters: None,
+            distinct: false,
         })),
     };
     let schema = index(Some("id"), None, vec![ids]);
@@ -303,26 +305,145 @@ fn aggregate_ids_direct_collects_the_related_pk() {
     );
 }
 
-#[test]
-fn aggregate_ids_through_collects_off_the_junction() {
-    let ids = Field {
-        field: f("tag_ids"),
+fn null_check(column: &str) -> Filter {
+    Filter::NullCheck(kernel::NullCheckFilter {
+        column: c(column),
+        op: kernel::NullOp::IsNull,
+    })
+}
+
+/// An `orders` document aggregating `products` through `order_items`.
+fn through_aggregate_sql(
+    op: AggregateOp,
+    distinct: bool,
+    junction_filters: Option<Vec<Filter>>,
+    filters: Option<Vec<Filter>>,
+) -> String {
+    let aggregate = Field {
+        field: f("agg"),
         options: Default::default(),
         source: FieldSource::Relation(Relation::Aggregate(Aggregate {
-            table: t("tags"),
-            op: AggregateOp::Ids {
-                element_type: kernel::FlussoType::Long,
-            },
+            table: t("products"),
+            op,
             key: AggregateKey::Through(kernel::Through {
-                table: t("post_tags"),
-                left_key: c("post_id"),
-                right_key: c("tag_id"),
+                table: t("order_items"),
+                left_key: c("order_id"),
+                right_key: c("product_id"),
+                filters: junction_filters,
             }),
             value_type: None,
-            filters: None,
+            filters,
+            distinct,
         })),
     };
-    let schema = index(Some("id"), None, vec![ids]);
+    let schema = index(Some("id"), None, vec![aggregate]);
+    let mut pks = HashMap::new();
+    pks.insert("products".to_owned(), c("id"));
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(1))],
+        &pks,
+        &types(&[("users", "id", "bigint"), ("order_items", "status", "text")]),
+    )
+    .unwrap();
+    sql.as_str().to_owned()
+}
+
+fn wrap(aggregate: &str) -> String {
+    format!(
+        r#"SELECT json_build_object('agg', {aggregate}) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+    )
+}
+
+#[test]
+fn aggregate_through_counts_once_per_junction_row() {
+    assert_eq!(
+        through_aggregate_sql(
+            AggregateOp::Sum(c("weight")),
+            false,
+            Some(vec![null_check("cancelled_at")]),
+            Some(vec![null_check("archived_at")]),
+        ),
+        wrap(
+            r#"(SELECT sum("rel1"."weight") FROM "public"."products" AS "rel1" JOIN "public"."order_items" AS "rel2" ON "rel2"."product_id" = "rel1"."id" WHERE "rel2"."order_id" = "root"."id" AND ("rel1"."archived_at" IS NULL) AND ("rel2"."cancelled_at" IS NULL))"#
+        ),
+    );
+}
+
+#[test]
+fn distinct_aggregate_through_counts_each_target_row_once() {
+    assert_eq!(
+        through_aggregate_sql(
+            AggregateOp::Sum(c("weight")),
+            true,
+            Some(vec![null_check("cancelled_at")]),
+            Some(vec![null_check("archived_at")]),
+        ),
+        wrap(
+            r#"(SELECT sum("rel1"."weight") FROM "public"."products" AS "rel1" WHERE "rel1"."id" IN (SELECT "rel2"."product_id" FROM "public"."order_items" AS "rel2" WHERE "rel2"."order_id" = "root"."id" AND ("rel2"."cancelled_at" IS NULL)) AND ("rel1"."archived_at" IS NULL))"#
+        ),
+    );
+}
+
+#[test]
+fn aggregate_ids_through_joins_the_target_and_honours_filters() {
+    assert_eq!(
+        through_aggregate_sql(
+            AggregateOp::Ids {
+                element_type: kernel::FlussoType::Long,
+            },
+            false,
+            None,
+            Some(vec![null_check("archived_at")]),
+        ),
+        wrap(
+            r#"(SELECT coalesce(json_agg("rel1"."id"), '[]'::json) FROM "public"."products" AS "rel1" JOIN "public"."order_items" AS "rel2" ON "rel2"."product_id" = "rel1"."id" WHERE "rel2"."order_id" = "root"."id" AND ("rel1"."archived_at" IS NULL))"#
+        ),
+    );
+}
+
+#[test]
+fn junction_filter_value_casts_to_the_junction_column_type() {
+    let sql = through_aggregate_sql(
+        AggregateOp::Count,
+        false,
+        Some(vec![Filter::ValueOp(ValueOpFilter {
+            column: c("status"),
+            op: FilterOp::Neq,
+            value: FilterValue::Single("cancelled".to_owned()),
+        })]),
+        None,
+    );
+    assert!(
+        sql.contains(r#"AND ("rel2"."status" <> $1::text)"#),
+        "{sql}"
+    );
+}
+
+#[test]
+fn many_to_many_join_applies_junction_filters() {
+    let tags = Field {
+        field: f("tags"),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: t("tags"),
+            kind: JoinKind::ManyToMany {
+                through: kernel::Through {
+                    table: t("post_tags"),
+                    left_key: c("post_id"),
+                    right_key: c("tag_id"),
+                    filters: Some(vec![null_check("removed_at")]),
+                },
+            },
+            primary_key: c("id"),
+            nullable: false,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![col_field("name", "name")],
+        })),
+    };
+    let schema = index(Some("id"), None, vec![tags]);
     let mut pks = HashMap::new();
     pks.insert("tags".to_owned(), c("id"));
     let (sql, _) = document_query(
@@ -332,10 +453,11 @@ fn aggregate_ids_through_collects_off_the_junction() {
         &id_types(),
     )
     .unwrap();
-    // The junction's right_key already holds the far PK, so no join to `tags`.
-    assert_eq!(
-        sql.as_str(),
-        r#"SELECT json_build_object('tag_ids', (SELECT coalesce(json_agg("rel1"."tag_id"), '[]'::json) FROM "public"."post_tags" AS "rel1" WHERE "rel1"."post_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+    assert!(
+        sql.as_str()
+            .contains(r#"WHERE "rel3"."post_id" = "root"."id" AND ("rel3"."removed_at" IS NULL)"#),
+        "{}",
+        sql.as_str()
     );
 }
 

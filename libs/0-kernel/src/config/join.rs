@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Field, common};
@@ -66,11 +68,34 @@ pub enum AggregateKey {
 }
 
 /// A junction table linking two sides of a many-to-many relation.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Through {
     pub table: common::TableName,
     pub left_key: common::ColumnName,
     pub right_key: common::ColumnName,
+    /// Conditions on the junction rows themselves (e.g. skip cancelled order
+    /// lines), as opposed to the relation's own `filters` on the target table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Vec<Filter>>,
+}
+
+/// Hashes `filters` only when non-empty, so a schema that never opts in keeps
+/// the content hash (and so the physical index) it had before the field existed.
+impl Hash for Through {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self {
+            table,
+            left_key,
+            right_key,
+            filters,
+        } = self;
+        table.hash(state);
+        left_key.hash(state);
+        right_key.hash(state);
+        if let Some(filters) = filters.as_deref().filter(|f| !f.is_empty()) {
+            filters.hash(state);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]

@@ -168,7 +168,7 @@ fn join_field(join: &Join, body: &mut Mapping) -> Result<&'static str> {
             ("has_many", true)
         }
         JoinKind::ManyToMany { through } => {
-            body.insert(Value::from("through"), through_value(through));
+            body.insert(Value::from("through"), through_value(through)?);
             ("many_to_many", true)
         }
     };
@@ -227,8 +227,11 @@ fn aggregate_field(agg: &Aggregate, body: &mut Mapping) -> Result<&'static str> 
             body.insert(Value::from("foreign_key"), Value::from(fk.as_ref()));
         }
         AggregateKey::Through(through) => {
-            body.insert(Value::from("through"), through_value(through));
+            body.insert(Value::from("through"), through_value(through)?);
         }
+    }
+    if agg.distinct {
+        body.insert(Value::from("distinct"), Value::from(true));
     }
     if let Some(filters) = &agg.filters {
         body.insert(Value::from("filters"), filters_value(filters)?);
@@ -236,7 +239,7 @@ fn aggregate_field(agg: &Aggregate, body: &mut Mapping) -> Result<&'static str> 
     Ok(tag)
 }
 
-fn through_value(through: &Through) -> Value {
+fn through_value(through: &Through) -> Result<Value> {
     let mut map = Mapping::new();
     map.insert(Value::from("table"), Value::from(through.table.as_ref()));
     map.insert(
@@ -247,7 +250,10 @@ fn through_value(through: &Through) -> Value {
         Value::from("right_key"),
         Value::from(through.right_key.as_ref()),
     );
-    Value::Mapping(map)
+    if let Some(filters) = &through.filters {
+        map.insert(Value::from("filters"), filters_value(filters)?);
+    }
+    Ok(Value::Mapping(map))
 }
 
 fn order_by_value(order_by: &[OrderBy]) -> Value {
