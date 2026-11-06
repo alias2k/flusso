@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.15.1...flusso-engine-v0.16.0) - 2026-10-09
+
+### Added
+
+- *(kernel)* distinct on aggregates and filters on a through junction
+- *(source)* carry the pre-image on a change and resolve the old parent from it
+- *(engine)* commit a lone change on a quiet stream without waiting out max_delay
+- *(bench)* in-process PR-gating benches — engine loop over mocks, pgoutput decode over a recorded fixture, sink render
+- *(engine)* [**breaking**] build-once ingest engine and one sink engine per sink over a bidirectional stream
+- *(config)* [**breaking**] adapters own their configuration; port entries are type + options
+- *(sources,engine)* report source continuity and rebuild seeds it invalidates
+
+### Fixed
+
+- *(source-postgres)* set replica identity before the slot; never alter a partitioned table
+- *(engine)* max_delay caps a burst inside the drain; max_changes is non-zero
+- *(engine)* coalesce backfill requests by lane, not a fixed window
+- *(engine)* [**breaking**] review fixes — positions monotonic across streams, per-sink envelope stamping, supervisor loop
+- *(engine)* stage stale-seed rebuilds before the resume point exists
+
+### Other
+
+- e2e for ensure_pre_image and an auto-managed pipeline
+- e2e for deleted and re-parented children and replica-identity gaps
+- *(engine)* describe quiet-stream batching and max_delay's remaining roles
+- *(engine)* a lone change on a quiet stream commits without waiting
+- *(bench)* pipeline bench is attribution only — drop its backfill group, trim the Docker-backed timings
+- *(engine)* share published envelopes via Arc, sink stamps own nam
+- *(daemon)* run the ingest engine on its own task; publish to lanes concurrently
+- *(libs)* describe the two engines and the ticketed channel ledger in the crate docs
+- *(arch)* [**breaking**] lay out kernel / ports / adapters / engine / daemon and sdk/
+- root README as a pitch, flusso-query README as a landing; track the Start here pages
+- *(engine)* restart reseeds a deleted generation and rebuilds after a dropped slot
+- a seed is only as good as the stream behind it
+- *(release)* [**breaking**] three release trains — per-crate versions + version groups
+- the lock is deterministic TOML; formats frozen for the major
+- source TLS — configuration guide section, README, crate README, plugin skills
+
 ## [0.14.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.13.0...flusso-engine-v0.14.0) - 2026-08-14
 
 ### Added

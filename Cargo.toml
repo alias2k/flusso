@@ -162,18 +162,18 @@ opentelemetry-prometheus = { version = "0.32.*" }
 tracing-opentelemetry = { version = "0.33.*" }
 prometheus = { version = "0.14.*" }
 
-kernel = { path = "libs/0-kernel", version = "0.15", package = "flusso-kernel" }
-kernel-derive = { path = "libs/0-kernel/derive", version = "0.15", package = "flusso-kernel-derive" }
-source = { path = "libs/1-ports/source", version = "0.15", package = "flusso-source" }
-stream = { path = "libs/1-ports/stream", version = "0.15", package = "flusso-stream" }
-sink = { path = "libs/1-ports/sink", version = "0.15", package = "flusso-sink" }
-config = { path = "libs/1-config", version = "0.15", package = "flusso-config" }
+kernel = { path = "libs/0-kernel", version = "0.16", package = "flusso-kernel" }
+kernel-derive = { path = "libs/0-kernel/derive", version = "0.16", package = "flusso-kernel-derive" }
+source = { path = "libs/1-ports/source", version = "0.16", package = "flusso-source" }
+stream = { path = "libs/1-ports/stream", version = "0.16", package = "flusso-stream" }
+sink = { path = "libs/1-ports/sink", version = "0.16", package = "flusso-sink" }
+config = { path = "libs/1-config", version = "0.16", package = "flusso-config" }
 
-source-postgres = { path = "libs/2-adapters/source-postgres", version = "0.15", package = "flusso-source-postgres" }
-stream-channel = { path = "libs/2-adapters/stream-channel", version = "0.15", package = "flusso-stream-channel" }
-sink-opensearch = { path = "libs/2-adapters/sink-opensearch", version = "0.15", package = "flusso-sink-opensearch" }
-sink-stdout = { path = "libs/2-adapters/sink-stdout", version = "0.15", package = "flusso-sink-stdout" }
+source-postgres = { path = "libs/2-adapters/source-postgres", version = "0.16", package = "flusso-source-postgres" }
+stream-channel = { path = "libs/2-adapters/stream-channel", version = "0.16", package = "flusso-stream-channel" }
+sink-opensearch = { path = "libs/2-adapters/sink-opensearch", version = "0.16", package = "flusso-sink-opensearch" }
+sink-stdout = { path = "libs/2-adapters/sink-stdout", version = "0.16", package = "flusso-sink-stdout" }
 
-engine = { path = "libs/2-engine", version = "0.15", package = "flusso-engine" }
-daemon = { path = "libs/3-daemon", version = "0.15", package = "flusso-daemon" }
-design = { path = "apps/design", version = "0.15", package = "flusso-design" }
+engine = { path = "libs/2-engine", version = "0.16", package = "flusso-engine" }
+daemon = { path = "libs/3-daemon", version = "0.16", package = "flusso-daemon" }
+design = { path = "apps/design", version = "0.16", package = "flusso-design" }
