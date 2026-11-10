@@ -8,8 +8,13 @@
 // (scalars, geo, map, custom, constant, aggregates) are the node's leaf rows;
 // its container fields become child nodes. A node's path is the list of field
 // indices from the root (`[]` = root, `[2,0]` = `fields[2].…fields[0]`).
+// Paths address edits; a node's *id* is its container's stable `uid`
+// (`model/ids.ts`), so view state survives a sibling being removed.
 
 import type { Field, FlussoType, IndexSchema, Join, JoinKind } from "../api";
+import { childFields, withChildFields } from "./containers";
+
+export { childFields, withChildFields };
 
 export type NodeKind = "root" | "object" | "belongs_to" | "has_one" | "has_many" | "many_to_many";
 
@@ -22,6 +27,7 @@ export interface LeafField {
 }
 
 export interface DocNode {
+  /// The stable node id: `"root"`, or the container field's `uid`.
   id: string;
   path: number[];
   parentId: string | null;
@@ -41,22 +47,15 @@ export interface Graph {
   edges: { id: string; source: string; target: string; label: string }[];
 }
 
+/// The positional id of `path` — the node id before stable uids, kept to
+/// translate view state stored under it.
 export const pathId = (path: number[]): string => (path.length ? `root.${path.join(".")}` : "root");
 
-export function childFields(field: Field): Field[] | null {
-  const s = field.source;
-  if ("group" in s) return s.group;
-  if ("relation" in s && "join" in s.relation) return s.relation.join.fields;
-  return null;
-}
+const nodeId = (path: number[], field: Field | null): string => field?.uid ?? pathId(path);
 
-function setChildFields(field: Field, fields: Field[]): Field {
-  const s = field.source;
-  if ("group" in s) return { ...field, source: { group: fields } };
-  if ("relation" in s && "join" in s.relation) {
-    return { ...field, source: { relation: { join: { ...s.relation.join, fields } } } };
-  }
-  return field;
+/// The canvas node id of the container at `path`.
+export function nodeIdAt(schema: IndexSchema, path: number[]): string {
+  return nodeId(path, fieldAtPath(schema, path));
 }
 
 function joinVerb(kind: JoinKind): NodeKind {
@@ -92,8 +91,8 @@ export function withNodeFields(schema: IndexSchema, path: number[], next: Field[
     const field = fields[idx];
     const updated =
       depth === path.length - 1
-        ? setChildFields(field, next)
-        : setChildFields(field, rebuild(childFields(field) ?? [], depth + 1));
+        ? withChildFields(field, next)
+        : withChildFields(field, rebuild(childFields(field) ?? [], depth + 1));
     const copy = fields.slice();
     copy[idx] = updated;
     return copy;
@@ -108,11 +107,18 @@ export function fieldAtPath(schema: IndexSchema, path: number[]): Field | null {
   return parent[path[path.length - 1]] ?? null;
 }
 
+/// A container `next` keeps `prev`'s uid when it has none of its own, so
+/// replacing a field (a verb or kind change) keeps its node's view state.
+export function carryUid(prev: Field | undefined, next: Field): Field {
+  return prev?.uid && !next.uid && childFields(next) !== null ? { ...next, uid: prev.uid } : next;
+}
+
 /// Replace the container field that is the node at `path`.
 export function setNodeField(schema: IndexSchema, path: number[], field: Field): IndexSchema {
   const parentPath = path.slice(0, -1);
   const parent = nodeFields(schema, parentPath).slice();
-  parent[path[path.length - 1]] = field;
+  const i = path[path.length - 1];
+  parent[i] = carryUid(parent[i], field);
   return withNodeFields(schema, parentPath, parent);
 }
 
@@ -155,9 +161,9 @@ export function projectGraph(schema: IndexSchema): Graph {
   const edges: Graph["edges"] = [];
 
   const visit = (path: number[], parentId: string | null, depth: number) => {
-    const id = pathId(path);
     const fields = nodeFields(schema, path);
     const field = fieldAtPath(schema, path);
+    const id = nodeId(path, field);
     const kind: NodeKind = field ? nodeKind(field) : "root";
 
     nodes.push({
@@ -175,10 +181,11 @@ export function projectGraph(schema: IndexSchema): Graph {
     fields.forEach((child, i) => {
       if (childFields(child) !== null) {
         const childPath = [...path, i];
+        const childId = nodeId(childPath, child);
         edges.push({
-          id: `${id}->${pathId(childPath)}`,
+          id: `${id}->${childId}`,
           source: id,
-          target: pathId(childPath),
+          target: childId,
           label: nodeKind(child),
         });
         visit(childPath, id, depth + 1);

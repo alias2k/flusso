@@ -23,7 +23,7 @@ export interface DesignCtx {
   columnsFor: (table: string) => ColumnShape[];
   /// Live DB-validation diagnostics for the active index, keyed by field name.
   diagnostics: DiagnosticDto[];
-  /// Node ids (path ids) the user has collapsed to just their header.
+  /// Stable node ids (see `model/ids.ts`) the user has collapsed to just their header.
   collapsed: Set<string>;
   toggleCollapsed: (id: string) => void;
 }

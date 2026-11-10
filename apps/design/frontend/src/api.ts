@@ -4,6 +4,8 @@
 // `{ variant: payload }`, unit variants become bare strings — so what the UI
 // builds round-trips through the Rust parser unchanged.
 
+import { stripUids } from "./model/ids";
+
 export type FlussoType =
   | "text"
   | "identifier"
@@ -122,6 +124,10 @@ export interface Field {
   field: string;
   options?: Record<string, unknown>;
   source: FieldSource;
+  /// Client-only stable id of a container field (object group or join): the
+  /// canvas node id that collapse state and manual positions key on, so they
+  /// survive re-indexing. Stamped by `model/ids.ts`, stripped before any request.
+  uid?: string;
 }
 
 // Mirrors kernel's serde exactly: `Filter` is an externally-tagged enum
@@ -339,6 +345,9 @@ export interface ParseResponse {
   type_tag?: string;
 }
 
+/// Drop the client-only container uids (`model/ids.ts`) from a file op's schema.
+const stripOpUids = (op: FileOp): FileOp => (op.schema ? { ...op, schema: stripUids(op.schema) } : op);
+
 /// Drop the session-local index ids before a config crosses to the backend —
 /// they're a client-only correlation handle and the strict parser rejects
 /// unknown fields. (`undefined` values are omitted by JSON.stringify.)
@@ -382,30 +391,33 @@ export const api = {
     fetch("/api/preview", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ index, schema }),
+      body: JSON.stringify({ index, schema: stripUids(schema) }),
     }).then((r) => json<PreviewResponse>(r)),
   validate: (config: ConfigToml, indexes: { name: string; schema: IndexSchema }[]) =>
     fetch("/api/validate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), indexes }),
+      body: JSON.stringify({
+        config: stripIds(config),
+        indexes: indexes.map((i) => ({ ...i, schema: stripUids(i.schema) })),
+      }),
     }).then((r) => json<ValidateResponse>(r)),
   sample: (config: ConfigToml, name: string, schema: IndexSchema) =>
     fetch("/api/sample", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), name, schema }),
+      body: JSON.stringify({ config: stripIds(config), name, schema: stripUids(schema) }),
     }).then((r) => json<SampleResponse>(r)),
   diff: (config: ConfigToml, ops: FileOp[]) =>
     fetch("/api/diff", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops }),
+      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids) }),
     }).then((r) => json<OpDiff[]>(r)),
   save: (config: ConfigToml, ops: FileOp[], skip: string[] = []) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops, skip }),
+      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), skip }),
     }).then((r) => json<SaveResult>(r)),
 };

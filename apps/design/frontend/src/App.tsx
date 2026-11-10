@@ -69,6 +69,7 @@ import { LANGS, useT, type Translate } from "./i18n";
 // the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
 import type { ParseErrorInfo } from "./model/anchors";
 import { removeAt, removeFields, removeNode } from "./model/edit";
+import { adoptIds, stripUids } from "./model/ids";
 import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
@@ -387,7 +388,8 @@ export default function App() {
           const parsed = res.schema;
           if (!parsed) return;
           const current = useDesignStore.getState().doc?.schemas[active];
-          if (JSON.stringify(parsed) !== JSON.stringify(current)) apply(() => parsed);
+          if (!current || JSON.stringify(parsed) !== JSON.stringify(stripUids(current)))
+            apply((prev) => adoptIds(prev, parsed));
         })
         .catch(() => setCodeProblem(null));
     }, 300);

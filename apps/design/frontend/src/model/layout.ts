@@ -2,7 +2,7 @@
 // its own vertical band sized to that subtree's *estimated* height, so tall
 // nodes (lots of columns + a footer) never overlap their siblings. Positions
 // aren't schema data, so a manual drag is remembered per-index in localStorage
-// and overlaid on the auto-layout.
+// (keyed by the stable node id) and overlaid on the auto-layout.
 
 import type { DocNode } from "./tree";
 
@@ -106,12 +106,15 @@ export function clearOverrides(index: string) {
   }
 }
 
-export function saveOverride(index: string, id: string, x: number, y: number) {
-  const all = loadOverrides(index);
-  all[id] = { x, y };
+/// Replace every manual position stored for `index`.
+export function saveOverrides(index: string, all: Positions) {
   try {
     localStorage.setItem(key(index), JSON.stringify(all));
   } catch {
     /* storage full / disabled — layout just won't persist */
   }
+}
+
+export function saveOverride(index: string, id: string, x: number, y: number) {
+  saveOverrides(index, { ...loadOverrides(index), [id]: { x, y } });
 }
