@@ -166,6 +166,9 @@ async fn map_keys_query_like_plain_fields() {
     );
     assert_eq!(ids(&client, title.contains("excav")).await, ["1"]);
     assert_eq!(ids(&client, title.contains("lan")).await, ["3"]);
+    assert_eq!(ids(&client, title.contains("ela")).await, ["3"]);
+    assert_eq!(ids(&client, title.contains("CAFE")).await, ["1"]);
+    assert_eq!(ids(&client, title.contains("")).await, Vec::<String>::new());
     assert_eq!(
         ids(
             &client,
