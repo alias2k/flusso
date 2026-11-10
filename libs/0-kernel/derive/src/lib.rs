@@ -13,11 +13,16 @@ use syn::{
 
 /// Derive `kernel::AdapterConfig` for an adapter's configuration struct.
 ///
-/// Struct attribute (both keys required):
+/// Struct attribute (`port` and `kind` required):
 ///
 /// ```ignore
 /// #[adapter(port = sink, kind = "opensearch")]
+/// #[adapter(port = sink, kind = "opensearch", index_options = OpensearchIndexConfig)]
 /// ```
+///
+/// `index_options` (sink adapters only) names the type of the options the sink
+/// takes per index, under an `[[index]]` entry's `sinks.<name>` table; it must
+/// derive `schemars::JsonSchema`.
 ///
 /// The struct must also carry `#[serde(deny_unknown_fields)]` (a typo in a
 /// user's options must fail, not vanish) and derive `Serialize`,
@@ -49,7 +54,11 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let ContainerAttrs { port, kind } = container_attrs(&input)?;
+    let ContainerAttrs {
+        port,
+        kind,
+        index_options,
+    } = container_attrs(&input)?;
     if !has_serde_flag(&input.attrs, "deny_unknown_fields") {
         return Err(syn::Error::new(
             input.ident.span(),
@@ -80,6 +89,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         initializers.push(quote! { #ident: #value });
     }
 
+    let is_sink = port == "sink";
     let port = match port.to_string().as_str() {
         "source" => quote!(::kernel::Port::Source),
         "stream" => quote!(::kernel::Port::Stream),
@@ -92,6 +102,21 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    let index_schema = match index_options {
+        Some(ty) if !is_sink => {
+            return Err(syn::Error::new(
+                ty.span(),
+                "`index_options` is only for sink adapters (`port = sink`)",
+            ));
+        }
+        Some(ty) => quote! {
+            fn index_schema() -> ::core::option::Option<::kernel::AdapterSchema> {
+                ::core::option::Option::Some(::kernel::schema_for::<#ty>())
+            }
+        },
+        None => quote!(),
+    };
+
     Ok(quote! {
         impl #impl_generics ::kernel::AdapterConfig for #name #ty_generics #where_clause {
             const PORT: ::kernel::Port = #port;
@@ -100,6 +125,8 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             fn example() -> Self {
                 Self { #(#initializers,)* }
             }
+
+            #index_schema
         }
     })
 }
@@ -107,11 +134,13 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 struct ContainerAttrs {
     port: Ident,
     kind: LitStr,
+    index_options: Option<Type>,
 }
 
 fn container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
     let mut port = None;
     let mut kind = None;
+    let mut index_options = None;
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("adapter")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("port") {
@@ -122,8 +151,13 @@ fn container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let value = meta.value()?;
                 kind = Some(value.parse::<LitStr>()?);
                 Ok(())
+            } else if meta.path.is_ident("index_options") {
+                let value = meta.value()?;
+                index_options = Some(value.parse::<Type>()?);
+                Ok(())
             } else {
-                Err(meta.error("unknown `adapter` key; expected `port` or `kind`"))
+                Err(meta
+                    .error("unknown `adapter` key; expected `port`, `kind`, or `index_options`"))
             }
         })?;
     }
@@ -142,7 +176,11 @@ fn container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
     if kind.value().is_empty() {
         return Err(syn::Error::new(kind.span(), "`kind` must not be empty"));
     }
-    Ok(ContainerAttrs { port, kind })
+    Ok(ContainerAttrs {
+        port,
+        kind,
+        index_options,
+    })
 }
 
 /// The expression that initializes one field of the example.
