@@ -53,9 +53,11 @@ A key is a setting name, with or without the `index.` prefix (`"mapping.total_fi
 3. The sink-wide `index_settings`.
 4. The typed `number_of_shards` and `number_of_replicas` options.
 
-A higher layer replaces the same key and any key nested under or above it. They also reject a key given twice (`mapping.x` and `index.mapping.x`), a key that is both a value and a table, an empty table, and `null`. Values pass through to OpenSearch as written; one it refuses fails index creation.
+A higher layer replaces the same key and any key nested under or above it. They also reject a key given twice (`mapping.x` and `index.mapping.x`), a key that is both a value and a table, an empty table, and `null`. That is all flusso checks: an unknown key, a wrong case, or a bad value passes through as written and fails index creation.
 
-**When settings apply.** Settings are read when a generation is **created**: the first seed, a schema change, or a [reindex](../operate/reindex.md). Changing them never updates a live index and never triggers a rebuild on its own, because they are not part of the content hash. To apply a change, run `flusso reindex <index>`: the new generation is created with the new settings and the alias flips to it.
+> **Warning:** some settings flusso leaves open weaken its guarantees. `index.translog.durability = "async"` lets OpenSearch acknowledge a bulk before it is durable, and flusso then confirms the replication slot past it. `index.mapping.ignore_malformed` and `index.mapping.coerce` drop or reshape values that `on_error` would otherwise see as rejections.
+
+**When settings apply.** Settings are read when a generation is **created**: the first seed, a schema change, or a [reindex](../operate/reindex.md). Changing them never updates a live index and never triggers a rebuild on its own, because they are not part of the content hash. The sink reads its settings once, at startup, so a reindex against a running flusso still uses the old ones. To apply a change, restart (or redeploy) flusso with the new config, then run `flusso reindex <index>`: the new generation is created with the new settings and the alias flips to it.
 
 ```toml
 [sinks.primary]

@@ -1,9 +1,10 @@
 //! User-supplied index settings: the `index_settings` table on a sink, and the
 //! same table per index under `[[index]]`'s `sinks.<name>`.
 //!
-//! [`IndexSettings`] is a flat map of dotted OpenSearch setting keys. It is
-//! normalized and checked as it deserializes, so a bad table fails at
-//! `build`/`check`/`run`, never at index creation:
+//! [`IndexSettings`] is a flat map of dotted OpenSearch setting keys. Its
+//! structure and the keys flusso owns are checked as it deserializes, so those
+//! mistakes fail at `build`/`check`/`run`. Nothing else is: an unknown key, a
+//! wrong case, or a bad value passes through and fails at index creation.
 //!
 //! - nested tables flatten to dotted keys (`mapping = { total_fields = { limit
 //!   = 5000 } }` is `index.mapping.total_fields.limit`);

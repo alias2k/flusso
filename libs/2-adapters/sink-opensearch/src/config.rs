@@ -89,12 +89,9 @@ pub struct OpensearchConfig {
     #[serde(default = "default_auto_subfields")]
     pub auto_subfields: bool,
     /// Extra OpenSearch index settings for every index this sink creates, e.g.
-    /// `{ "mapping.total_fields.limit" = 5000 }`. Keys may omit the `index.`
-    /// prefix; nested tables are flattened. They override `number_of_shards`
-    /// and `number_of_replicas`, and an `[[index]]` entry's own
-    /// `index_settings` override them. `refresh_interval`, `analysis`,
-    /// `blocks`, and `hidden` are flusso's and rejected. Applied when an index
-    /// generation is created.
+    /// `{ "mapping.total_fields.limit" = 5000 }`. Applied when an index
+    /// generation is created. Keys, precedence, and the keys flusso owns are in
+    /// the Sink: OpenSearch reference, under Index settings.
     #[serde(default, skip_serializing_if = "IndexSettings::is_empty")]
     #[adapter(example = example_index_settings())]
     pub index_settings: IndexSettings,
