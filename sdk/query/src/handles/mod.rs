@@ -12,7 +12,7 @@
 //!
 //! - `string` — [`Keyword`], [`Text`], and the cross-field [`multi_match`].
 //! - `scalar` — [`Bool`], [`Number`], [`Date`] (exact/range value fields).
-//! - `map` — [`TextMap`]/[`KeywordMap`] dynamic-key objects, [`MapSearch`] and [`MapContains`].
+//! - `map` — [`TextMap`]/[`KeywordMap`]/[`NumberMap`]/[`DateMap`] dynamic-key objects and their cross-key builders ([`MapMatch`], [`MapTerm`], [`MapRange`], …).
 //! - `nested` — [`Nested`] arrays and their [`NestedProjection`].
 //! - `object` — [`Object`] sub-documents and the opaque [`Binary`]/[`Json`] fields.
 //! - `geo` — [`Geo`] points and [`GeoPoint`].
@@ -51,7 +51,10 @@ pub use extra::{
     simple_query_string,
 };
 pub use geo::{Distance, DistanceUnit, Geo, GeoDistanceQuery, GeoPoint};
-pub use map::{DateMap, KeywordMap, MapContains, MapSearch, NumberMap, TextMap};
+pub use map::{
+    DateMap, KeywordMap, MapContains, MapFuzzy, MapMatch, MapPrefix, MapRange, MapRegexp, MapTerm,
+    MapWildcard, NumberMap, TextMap,
+};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
 pub use params::{

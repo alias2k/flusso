@@ -51,22 +51,52 @@ Product::prices().key("usd").gte(9.99)                          // number range
 **Presence** is `Product::title().has_key("it")` (that key non-null) or `Product::title().exists()`
 (any key).
 
-**Cross-key full-text**, `TextMap` only:
+**Every key**: the map handle has the operators of the plain handle of its value kind, same
+names and arguments, matching a document when any key matches. Outside the analyzed family that
+is the same hits as an `or` of the operator on each key; the analyzed family also reaches the
+keys' subfields (below), so it can find a little more:
 
 ```rust
-Product::title().search("ciao").prefer("it", 3.0).prefer("en", 2.0)
+Product::title().matches("ciao").prefer("it", 3.0).prefer("en", 2.0)  // TextMap, multi_match
+Product::title().match_phrase("ciao mondo").prefer("it", 1.0).only_preferred()
+Product::prices().between(10, 50)                                     // NumberMap, any currency
+Product::codes().keyword_lowercase().eq("sale")                       // case-insensitive, any key
 ```
 
-One `multi_match` over the preferred keys (each `key^weight`) plus a `title.*` fallback,
-`best_fields` by default so the best-scoring key wins; `.match_type(MultiMatchType::BoolPrefix)` for
-search-as-you-type. `.only_preferred()` drops the fallback. `operator` / `fuzziness` /
-`minimum_should_match` behave as on `matches`. Exact-match maps have no `search`; use
-`key(..).eq(..)`.
+| Handle | Cross-key operators |
+| --- | --- |
+| `TextMap` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy`; with subfields `any_of`, views `keyword()` / `keyword_lowercase()` |
+| `KeywordMap` without subfields | `eq` `any_of` `prefix` `wildcard` `regexp` `fuzzy` |
+| `KeywordMap` with subfields | views `text()` / `keyword_lowercase()` only |
+| `NumberMap<K>` / `DateMap` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` |
+
+- `prefer(key, weight)` weights a key; `only_preferred()` drops the `path.*` fallback. Both exist on
+  every cross-key query; on a filter (`between`, `eq`) `prefer` is accepted but scores nothing.
+  `only_preferred()` with no `prefer` matches nothing (`match_none`).
+- The analyzed family is a `multi_match` over `path.*`, which also reaches each key's subfields:
+  an exact whole-value hit scores higher, by design. Everything else is a `query_string` over one
+  pattern, value escaped (a leading `AND` / `OR` / `NOT` too; a `wildcard` keeps `\x` escapes).
+- `match_phrase_prefix` runs `lenient`, skipping the keys' keyword subfields (no exact-value
+  boost). `fuzziness` on a phrase operator compiles but OpenSearch rejects it. A cluster with
+  `indices.query.query_string.allowLeadingWildcard=false` refuses a cross-key pattern starting with
+  `*` / `?` (every `contains`).
+- **A `KeywordMap` with subfields has no cross-key `eq`** (or `any_of` / `prefix` / `wildcard` /
+  `regexp` / `fuzzy`): `codes.*` also hits each key's `.text` and `.keyword_lowercase`, so it would
+  match `"big sale"` for `eq("sale")`. Calling one is a compile error, not a bug to work around.
+  Reach for `codes().keyword_lowercase().eq(..)` (case-insensitive, any key) or
+  `codes().key(k).eq(..)` (exact, one key).
+- Options a cross-key query type can't carry (`case_insensitive`, regex `flags`, range `format` /
+  `relation`) are absent; use `.key(k)`.
+
+**Upgrading from `search`**: `TextMap::search` / `MapSearch` were removed in `flusso-query` 0.17.
+`search(q)` → `matches(q)`; `search(q).match_type(MultiMatchType::BoolPrefix)` →
+`match_bool_prefix(q)`; `PhrasePrefix` → `match_phrase_prefix(q)`. `prefer` / `only_preferred` and
+the `multi_match` options carry over.
 
 **Part of a word, any key**, `TextMap` and `KeywordMap` with subfields:
 `Product::title().contains("excav")` is a case- and accent-insensitive substring match (a
 `query_string` of the escaped `*excav*` over `title.*.keyword_lowercase`); `prefer` /
-`only_preferred` as on `search`.
+`only_preferred` as above.
 
 **Sort by key with fallback** is `Product::title().sort_key("it").or("en")`. The rules live in the
 skill's `## Sorting` section. Two things to keep straight:

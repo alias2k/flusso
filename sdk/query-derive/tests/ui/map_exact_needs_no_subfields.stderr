@@ -1,0 +1,17 @@
+error[E0599]: `KeywordMap` is not an iterator
+  --> tests/ui/map_exact_needs_no_subfields.rs:16:30
+   |
+16 |       let _ = Product::codes().eq("0049");
+   |                                ^^ `KeywordMap` is not an iterator
+   |
+  ::: $WORKSPACE/sdk/query/src/handles/map.rs
+   |
+   | /         pub struct $Name<S = Root, Sub = WithSubfields> {
+   | |             keys: MapPath,
+   | |             _marker: PhantomData<fn() -> (S, Sub)>,
+   | |         }
+   | |_________- doesn't satisfy `KeywordMap: Iterator`
+   |
+   = note: the following trait bounds were not satisfied:
+           `KeywordMap: Iterator`
+           which is required by `&mut KeywordMap: Iterator`

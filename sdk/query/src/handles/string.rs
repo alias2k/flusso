@@ -24,7 +24,7 @@ use crate::query::{AsQuery, Query, Root};
 /// in the document. `String`/`&str` pass straight through; the non-string
 /// fallback only fires for a hand-written [`trait@FlussoValue`] impl that breaks the
 /// "serializes to a string" contract the derive enforces.
-fn keyword_term(value: &impl serde::Serialize) -> Value {
+pub(super) fn keyword_term(value: &impl serde::Serialize) -> Value {
     match serde_json::to_value(value) {
         Ok(Value::String(string)) => Value::String(string),
         Ok(other) => Value::String(other.to_string()),

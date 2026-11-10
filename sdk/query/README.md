@@ -57,7 +57,7 @@ async fn busy_ada(client: &Client) -> anyhow::Result<()> {
 | object namespace | chains: `User::account().tier()` |
 | `Nested<S, T>` | `any`/`all` to filter parents, `matching` to shape the array |
 | `Geo` | `within`, `within_box`, `within_polygon`, distance sorts |
-| `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` | `key(k)` → the plain-field handle of the value kind; `search` across keys on text maps; `contains` (part of a value, any key) on string maps |
+| `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` | `key(k)` → the plain-field handle of the value kind; the same operators across every key (`matches`, `eq`, `between`, …) with `prefer(key, weight)` / `only_preferred()`; `contains` (part of a value, any key) on string maps |
 
 Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, never a float on an integer), and a `#[derive(FlussoValue)]` newtype or enum queries with no cast. Subfield accessors (`.keyword()`, `.keyword_lowercase()`, `.text()`) exist only where the sink provisioned the subfield.
 

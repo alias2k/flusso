@@ -25,4 +25,5 @@ fn ui_no_subfields() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui_no_subfields/subfields_gated.rs");
     t.compile_fail("tests/ui_no_subfields/map_key_not_sortable.rs");
+    t.compile_fail("tests/ui_no_subfields/map_cross_key_gated.rs");
 }
