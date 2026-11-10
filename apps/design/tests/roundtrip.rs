@@ -11,7 +11,9 @@
 //!  - `map` fields carry the `dynamic` option the conversion injects,
 //!  - to-many joins are `nullable` (the parser forbids `required` there),
 //!  - `belongs_to` takes no `order_by`/`limit`, `has_one` no `limit`,
-//!  - `distinct` only on an aggregate over `through`.
+//!  - `distinct` only on an aggregate over `through`,
+//!  - `subfields: false` only on `text`/`keyword`/`uuid`, `indexed: false` only
+//!    on `json` and joins (none of which get generated `options`).
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
@@ -117,25 +119,33 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
         any::<bool>(),
         transforms(),
         enum_variants(),
+        any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(ty, column, nullable, transforms, variants)| {
-            // A declared order only rides an `enum`; every other type has none.
-            let enum_order = if matches!(ty, FlussoType::Enum) {
-                variants
-            } else {
-                Vec::new()
-            };
-            FieldSource::Column(Column {
-                column,
-                ty,
-                nullable,
-                transforms,
-                default: None,
-                enum_order,
-                subfields: true,
-                indexed: true,
-            })
-        })
+        .prop_map(
+            |(ty, column, nullable, transforms, variants, bare, stored)| {
+                // A declared order only rides an `enum`; every other type has none.
+                let enum_order = if matches!(ty, FlussoType::Enum) {
+                    variants
+                } else {
+                    Vec::new()
+                };
+                FieldSource::Column(Column {
+                    column,
+                    nullable,
+                    transforms,
+                    default: None,
+                    enum_order,
+                    subfields: !(bare
+                        && matches!(
+                            ty,
+                            FlussoType::Text | FlussoType::Keyword | FlussoType::Uuid
+                        )),
+                    indexed: !(stored && matches!(ty, FlussoType::Json)),
+                    ty,
+                })
+            },
+        )
         .boxed()
 }
 fn geo_source() -> BoxedStrategy<FieldSource> {
@@ -236,6 +246,17 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
 }
 
 fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {
+    (join_shape(depth), any::<bool>())
+        .prop_map(|(mut source, indexed)| {
+            if let FieldSource::Relation(Relation::Join(join)) = &mut source {
+                join.indexed = indexed;
+            }
+            source
+        })
+        .boxed()
+}
+
+fn join_shape(depth: u32) -> BoxedStrategy<FieldSource> {
     let mk = |table: TableName,
               kind: JoinKind,
               primary_key: ColumnName,

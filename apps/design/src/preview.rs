@@ -35,6 +35,10 @@ pub struct DocumentNode {
     pub nullable: bool,
     /// Whether the field is an array (an `ids` aggregate).
     pub array: bool,
+    /// Whether the field is indexed; `false` for a stored-only `json` or join.
+    /// Serialized only when `false`.
+    #[serde(skip_serializing_if = "is_indexed")]
+    pub indexed: bool,
     /// Nested fields (objects, nested join children).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<DocumentNode>,
@@ -154,6 +158,35 @@ mod tests {
         assert!(title["values"].get("analyzer").is_some());
         assert_eq!(preview.document[1].type_label, "map<text>");
     }
+
+    #[test]
+    fn an_unindexed_field_previews_as_stored_with_its_shape() {
+        let schema = schema(
+            "version: 1\n\
+             table: t\n\
+             primary_key: id\n\
+             fields:\n\
+             \x20 - integer: id\n\
+             \x20   required: true\n\
+             \x20 - has_many: lines\n\
+             \x20   table: lines\n\
+             \x20   primary_key: id\n\
+             \x20   foreign_key: t_id\n\
+             \x20   indexed: false\n\
+             \x20   fields:\n\
+             \x20     - text: note\n\
+             \x20       required: false\n",
+        );
+        let index = IndexName::try_new("t").expect("index name");
+
+        let preview = preview(&schema, &index);
+        let document = serde_json::to_value(&preview.document).expect("serialize");
+        assert!(document[0].get("indexed").is_none());
+        assert_eq!(document[1]["indexed"], json!(false));
+        assert_eq!(document[1]["children"][0]["name"], json!("note"));
+        let mapping = serde_json::to_value(&preview.mapping).expect("serialize");
+        assert_eq!(mapping["fields"][1]["mapping"]["indexed"], json!(false));
+    }
 }
 
 fn example_scalar(mapping_type: &MappingType) -> Value {
@@ -176,12 +209,18 @@ fn example_scalar(mapping_type: &MappingType) -> Value {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_indexed(indexed: &bool) -> bool {
+    *indexed
+}
+
 fn node(field: &ResolvedField) -> DocumentNode {
     DocumentNode {
         name: field.name.as_ref().to_owned(),
         type_label: type_label(&field.mapping),
         nullable: field.nullable,
         array: field.array,
+        indexed: field.mapping.indexed,
         children: field.children.iter().map(node).collect(),
     }
 }

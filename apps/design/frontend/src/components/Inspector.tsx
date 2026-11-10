@@ -459,6 +459,11 @@ function NodeInspector({ path }: { path: number[] }) {
             <Num value={join.limit} onChange={(limit) => setJoin({ ...join, limit })} />
           </Row>
         )}
+        <IndexedOptOut
+          value={join.indexed ?? true}
+          hasOptions={Object.keys(field.options ?? {}).length > 0}
+          onChange={(on) => setJoin({ ...join, indexed: on ? undefined : false })}
+        />
       </Block>
       <Drawer title={t("inspector.filters")} count={(join.filters ?? []).length}>
         <Filters
@@ -613,7 +618,7 @@ function ScalarBody({
           <Select
             value={column.ty as string}
             options={scalarTypeOptions(t)}
-            onChange={(ty) => setCol({ ...column, ty: ty as FlussoType })}
+            onChange={(ty) => setCol(retypeColumn(column, ty as FlussoType))}
             className={`font-mono ${typeClass(column.ty as string)}`}
           />
         </Row>
@@ -640,8 +645,86 @@ function ScalarBody({
           <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
         </div>
         {column.ty === "enum" && <VariantsEditor column={column} setCol={setCol} />}
+        {SUBFIELD_TYPES.includes(column.ty) && (
+          <OptOut
+            value={column.subfields ?? true}
+            label={t("inspector.subfields")}
+            on={t("inspector.subfieldsOn")}
+            off={t("inspector.subfieldsOff")}
+            onChange={(on) => setCol({ ...column, subfields: on ? undefined : false })}
+          />
+        )}
+        {column.ty === "json" && (
+          <IndexedOptOut
+            value={column.indexed ?? true}
+            hasOptions={Object.keys(field.options ?? {}).length > 0}
+            onChange={(on) => setCol({ ...column, indexed: on ? undefined : false })}
+          />
+        )}
         <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
       </Block>
+    </>
+  );
+}
+
+/// The scalar types whose sink adds automatic subfields a field may turn off.
+const SUBFIELD_TYPES: FlussoType[] = ["text", "keyword", "uuid"];
+
+/// A new type drops the opt-outs it no longer takes, so a retyped field never
+/// carries a sibling the schema would reject.
+function retypeColumn(column: Column, ty: FlussoType): Column {
+  const next: Column = { ...column, ty };
+  if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
+  if (ty !== "json") delete next.indexed;
+  return next;
+}
+
+/// A checkbox for an on-by-default flag, with a hint naming what each state means.
+function OptOut({
+  value,
+  label,
+  on,
+  off,
+  onChange,
+}: {
+  value: boolean;
+  label: string;
+  on: string;
+  off: string;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <>
+      <Check value={value} label={label} onChange={onChange} />
+      <p className="hint">{value ? on : off}</p>
+    </>
+  );
+}
+
+/// The `indexed` toggle shared by a `json` field and a join. A field that is not
+/// indexed cannot take mapping `options`, so it says so when both are set.
+function IndexedOptOut({
+  value,
+  hasOptions,
+  onChange,
+}: {
+  value: boolean;
+  hasOptions: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  const { t } = useT();
+  return (
+    <>
+      <OptOut
+        value={value}
+        label={t("inspector.indexed")}
+        on={t("inspector.indexedOn")}
+        off={t("inspector.indexedOff")}
+        onChange={onChange}
+      />
+      {!value && hasOptions && (
+        <p className="error-hint mt-0.5 mb-1.5 text-xs text-destructive">{t("inspector.indexedOptions")}</p>
+      )}
     </>
   );
 }
