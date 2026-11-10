@@ -10,7 +10,8 @@
 //! it is kept only beside a pre-image.
 //!
 //! Each `Relation` message is followed by a catalog lookup of the table's
-//! primary key, before the next replication event is read: a change is keyed by
+//! primary key (and whether it is partitioned, which withholds the post-image),
+//! before the next replication event is read: a change is keyed by
 //! its primary key, not by the replica-identity columns pgoutput flags (all of
 //! them, under `REPLICA IDENTITY FULL`). See [`pgoutput`].
 
@@ -149,6 +150,7 @@ async fn key_relations(
             super::quote_ident(relation.namespace.as_ref()),
             super::quote_ident(relation.table.as_ref())
         );
+        relation.partitioned = Some(is_partitioned(catalog, &qualified).await?);
         relation.primary_key = crate::document::primary_key_column_names(catalog, qualified)
             .await?
             .into_iter()
@@ -164,6 +166,14 @@ async fn key_relations(
 }
 
 /// Fold one replication event into the state, possibly queueing changes.
+async fn is_partitioned(catalog: &PgPool, qualified: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT relkind = 'p' FROM pg_class WHERE oid = $1::regclass")
+        .bind(qualified)
+        .fetch_one(catalog)
+        .await
+        .map_err(|e| SourceError::Query(e.to_string()))
+}
+
 fn handle(
     state: &mut DecodeState,
     event: ReplicationEvent,
@@ -242,7 +252,7 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 .and_then(|old| pgoutput::pre_image(relation, old));
             let after = old
                 .as_ref()
-                .filter(|_| before.is_some())
+                .filter(|_| before.is_some() && relation.partitioned == Some(false))
                 .map(|old| pgoutput::post_image(relation, old, &new));
             if let Some(old_key) = old_key
                 && old_key.0 != new_key.0

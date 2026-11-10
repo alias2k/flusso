@@ -145,6 +145,7 @@ fn announce_child(decode: &mut DecodeState, identity: u8) {
     decode.unkeyed.clear();
     decode.relations.get_mut(&16385).unwrap().primary_key =
         vec![kernel::ColumnName::try_new("id").unwrap()];
+    decode.relations.get_mut(&16385).unwrap().partitioned = Some(false);
     record_untraceable(decode, 16385);
 }
 
@@ -209,6 +210,40 @@ fn a_full_identity_reparent_is_one_upsert_carrying_the_old_parent() {
         after.as_ref().unwrap().get(&column("parent_id")),
         Some(&GenericValue::Int(3))
     );
+}
+
+#[test]
+fn an_update_of_a_partitioned_table_carries_no_post_image() {
+    for partitioned in [Some(true), None] {
+        let (mut decode, _) = state();
+        announce_child(&mut decode, b'f');
+        decode.relations.get_mut(&16385).unwrap().partitioned = partitioned;
+
+        let mut update = vec![b'U'];
+        update.extend_from_slice(&16385u32.to_be_bytes());
+        update.push(b'O');
+        update.extend_from_slice(&2i16.to_be_bytes());
+        update.extend(text("7"));
+        update.extend(text("1"));
+        update.push(b'N');
+        update.extend_from_slice(&2i16.to_be_bytes());
+        update.extend(text("7"));
+        update.extend(text("3"));
+        handle_xlog(&mut decode, &update).unwrap();
+
+        assert!(
+            matches!(
+                decode.open_txn.as_slice(),
+                [ChangeEvent::Upsert {
+                    before: Some(_),
+                    after: None,
+                    ..
+                }]
+            ),
+            "{partitioned:?}: {:?}",
+            decode.open_txn
+        );
+    }
 }
 
 #[test]

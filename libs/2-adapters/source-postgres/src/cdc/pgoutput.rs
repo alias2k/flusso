@@ -61,6 +61,12 @@ pub(crate) struct Relation {
     /// The table's primary-key columns, from the catalog. Empty until looked
     /// up, and for a table without one — then the identity columns key it.
     pub(crate) primary_key: Vec<ColumnName>,
+    /// Whether the table is partitioned, from the catalog. `None` until looked
+    /// up. A partitioned table's changes carry no post-image: its old tuples
+    /// are logged by each partition's own identity, while the `Relation`
+    /// describes the root's, so a partition not under `FULL` sends placeholder
+    /// nulls that read like real old values.
+    pub(crate) partitioned: Option<bool>,
 }
 
 impl Relation {
@@ -339,6 +345,7 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
         table,
         columns,
         primary_key: Vec::new(),
+        partitioned: None,
     }))
 }
 
