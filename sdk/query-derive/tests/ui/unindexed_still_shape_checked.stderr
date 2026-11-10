@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Variant`: field `color` is `i64`, which cannot hold the schema field at this path
+  --> tests/ui/unindexed_still_shape_checked.rs:9:15
+   |
+ 9 |     variants: Vec<Variant>,
+   |               ^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Variant::__flusso_check`
+  --> tests/ui/unindexed_still_shape_checked.rs:14:12
+   |
+14 |     color: i64,
+   |            ^^^ the failure occurred here
