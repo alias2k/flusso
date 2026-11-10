@@ -10,8 +10,8 @@
 //! - **The declared type wins over the first value**: a `double` key whose first
 //!   value is integral stays `double`, so a later fraction keeps its precision.
 //! - **Mismatched values behave like a plain field**: a number in a `text` map is
-//!   coerced; a string in a numeric map and an object in a `text` map are
-//!   item-level rejections in the flush report (so `on_error` applies), and the
+//!   coerced; a string in a numeric map, an object in a `text` map and a dotted
+//!   key (an object path to OpenSearch) are item-level rejections in the flush report (so `on_error` applies), and the
 //!   rest of the batch lands.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
@@ -226,10 +226,11 @@ async fn map_keys_are_typed_like_plain_fields_of_their_values() {
         json!({ "title": { "en": { "nested": "object" } } }),
     )
     .await;
+    upsert(&sink, "6", json!({ "title": { "en.US": "dotted key" } })).await;
     let report = sink.flush(true).await.unwrap();
     let mut rejected: Vec<&str> = report.rejected.iter().map(|doc| doc.id.as_str()).collect();
     rejected.sort_unstable();
-    assert_eq!(rejected, ["3", "4"], "{:?}", report.rejected);
+    assert_eq!(rejected, ["3", "4", "6"], "{:?}", report.rejected);
     sink.mark_seeded(&mapping.index).await.unwrap();
     reqwest::Client::new()
         .post(format!("{base}/{ALIAS}/_refresh"))
