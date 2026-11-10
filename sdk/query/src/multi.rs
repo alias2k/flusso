@@ -97,7 +97,7 @@ pub trait FlussoMultiDocument: Sized {
 
     /// Decode one hit's `_source` into the right variant, dispatching on the
     /// hit's physical index name. A hit from an index no variant claims is
-    /// [`Error::UnexpectedIndex`](crate::Error::UnexpectedIndex).
+    /// [`Error::UnexpectedIndex`].
     fn decode(physical_index: &str, source: Value) -> Result<Self>;
 
     /// Start a typed query across all of this union's indexes. Like
@@ -233,12 +233,12 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
     /// snapshot across every index of the union, unaffected by later writes or
     /// a reindex. `None` starts a new walk; pass the previous page's
     /// [`SearchResponse::next`] to continue (see
-    /// [`PageCursor`](crate::PageCursor)).
+    /// [`PageCursor`]).
     ///
     /// The sort is made total by appending `_index` then `_id` ascending
     /// (ids collide across indexes) unless it already sorts on them. A
     /// [`from`](Self::from) makes the cursor search fail with
-    /// [`Error::Cursor`](crate::Error::Cursor). Needs OpenSearch ≥ 2.4.
+    /// [`Error::Cursor`]. Needs OpenSearch ≥ 2.4.
     #[must_use]
     pub fn cursor(self, cursor: impl Into<Option<PageCursor>>) -> MultiCursorSearch<U> {
         MultiCursorSearch {
@@ -444,7 +444,7 @@ impl<U: FlussoMultiDocument> Default for MultiSearch<U> {
 ///    be mistaken for a generation of `{INDEX}`.
 ///
 /// A name matching no target is passed through unchanged, so the variant's
-/// `decode` reports it as [`Error::UnexpectedIndex`](crate::Error::UnexpectedIndex).
+/// `decode` reports it as [`Error::UnexpectedIndex`].
 pub(crate) fn decode_response<U: FlussoMultiDocument>(
     value: Value,
     prefix: &str,

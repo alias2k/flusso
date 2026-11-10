@@ -284,7 +284,7 @@ impl<T> Search<T> {
     /// The sort is made total by appending `_id` ascending unless it already
     /// sorts on `_id`. A [`from`](Self::from) or raw
     /// [`search_after`](Self::search_after) makes the cursor search fail with
-    /// [`Error::Cursor`](crate::Error::Cursor): the cursor owns the position.
+    /// [`Error::Cursor`]: the cursor owns the position.
     /// Needs OpenSearch ≥ 2.4.
     #[must_use]
     pub fn cursor(self, cursor: impl Into<Option<PageCursor>>) -> CursorSearch<T> {
@@ -532,7 +532,7 @@ const SINGLE_INDEX_TIEBREAK: &[&str] = &["_id"];
 impl<T> CursorSearch<T> {
     /// How long the snapshot stays open between two pages (default one
     /// minute). Every page renews it; once it lapses the next page fails with
-    /// [`Error::CursorExpired`](crate::Error::CursorExpired).
+    /// [`Error::CursorExpired`].
     #[must_use]
     pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
         self.keep_alive = keep_alive;

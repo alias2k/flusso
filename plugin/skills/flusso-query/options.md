@@ -75,7 +75,8 @@ Free functions, each an `AsQuery`: `ids([..])`, `query_string(..)`, `simple_quer
 
 ## Search-level controls
 
-`min_score`, `track_total_hits`, `track_scores`, `search_after([..])` (deep pagination),
+`min_score`, `track_total_hits`, `track_scores`, `search_after([..])` (raw sort values; for
+paging prefer `.cursor(..)`, the skill's `## Paging`),
 `collapse(field)`, `post_filter(q)`, `highlight(Highlight::new().field(..).pre_tags(..))`.
 
 ## SortBuilder
