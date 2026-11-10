@@ -360,21 +360,6 @@ impl CaptureProvisioning for WalChangeCapture {
                 !report.misrouted.is_empty(),
             )
             .await?;
-            if !report.misrouted.is_empty() {
-                // Published via the root, a parent is listed only if it really
-                // is a member: one whose lone partition was added on its own
-                // shows up as missing only now.
-                let rerouted =
-                    publication::inspect_publication(pool, &self.config.publication, required)
-                        .await?;
-                publication::apply_publication(
-                    pool,
-                    &self.config.publication,
-                    &rerouted.missing,
-                    false,
-                )
-                .await?;
-            }
             tracing::info!(
                 publication = %self.config.publication,
                 tables = %missing,

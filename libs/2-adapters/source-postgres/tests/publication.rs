@@ -274,8 +274,8 @@ async fn partitioned_tables_are_published_via_their_root() {
     assert!(via_root(&pool).await);
     assert!(admin.inspect_coverage(&both).await.unwrap().satisfied);
 
-    // A lone partition published on its own looks like its parent until the
-    // option is set; then the parent is added too.
+    // A lone partition published on its own doesn't make its parent a member:
+    // the parent is added, and the option set, in one go.
     for statement in [
         "CREATE TABLE solo (id int PRIMARY KEY) PARTITION BY RANGE (id)",
         "CREATE TABLE solo_only PARTITION OF solo FOR VALUES FROM (0) TO (1000)",
@@ -293,6 +293,58 @@ async fn partitioned_tables_are_published_via_their_root() {
             .contains(&"public.solo".to_owned())
     );
     assert!(admin.inspect_coverage(&all).await.unwrap().satisfied);
+
+    // A member with no partitions yet (pg_partman creates them later) is still
+    // a member: only the option is set, no ADD TABLE that would fail.
+    for statement in [
+        "CREATE TABLE bare (id int PRIMARY KEY) PARTITION BY RANGE (id)",
+        "ALTER PUBLICATION flusso ADD TABLE bare",
+        "ALTER PUBLICATION flusso SET (publish_via_partition_root = false)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let with_bare = required(&["users", "parted", "bare"]);
+    let report = admin.inspect_coverage(&with_bare).await.unwrap();
+    assert!(report.missing.is_empty(), "{:?}", report.missing);
+    assert_eq!(
+        report.remediation,
+        ["ALTER PUBLICATION \"flusso\" SET (publish_via_partition_root = true);"]
+    );
+    admin.ensure_coverage(&with_bare, true).await.unwrap();
+    assert!(via_root(&pool).await);
+    assert!(admin.inspect_coverage(&with_bare).await.unwrap().satisfied);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_for_all_tables_publication_covers_partitioned_tables() {
+    let container = postgres().await;
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY)",
+        "CREATE TABLE parted (id int PRIMARY KEY) PARTITION BY RANGE (id)",
+        "CREATE TABLE parted_low PARTITION OF parted FOR VALUES FROM (0) TO (1000)",
+        "CREATE TABLE bare (id int PRIMARY KEY) PARTITION BY RANGE (id)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let admin = capture(port, "postgres", "postgres", "postgres");
+    let tables = required(&["users", "parted", "bare"]);
+
+    let report = admin.inspect_coverage(&tables).await.unwrap();
+    assert!(report.missing.is_empty(), "{:?}", report.missing);
+    assert_eq!(
+        report.misrouted,
+        required(&["bare", "parted"])
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+    admin.ensure_coverage(&tables, true).await.unwrap();
+    assert!(via_root(&pool).await);
+    assert!(admin.inspect_coverage(&tables).await.unwrap().satisfied);
 }
 
 /// `table → [link columns]` under `public`, as `SourceSpec::pre_image_columns`
@@ -335,6 +387,14 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         "CREATE TABLE parted_high PARTITION OF parted FOR VALUES FROM (1000) TO (2000)",
         // Already carries the link: left as is.
         "ALTER TABLE parted_high REPLICA IDENTITY FULL",
+        // A foreign partition (its parent can't have a unique index) has no
+        // identity to set: it is left out rather than failing every start.
+        "CREATE EXTENSION postgres_fdw",
+        "CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw",
+        "CREATE TABLE spread (id int, user_id int NOT NULL) PARTITION BY RANGE (id)",
+        "CREATE TABLE spread_near PARTITION OF spread FOR VALUES FROM (0) TO (1000)",
+        "CREATE FOREIGN TABLE spread_far PARTITION OF spread \
+         FOR VALUES FROM (1000) TO (2000) SERVER remote",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -419,6 +479,21 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         identities,
         [("parted", "f"), ("parted_high", "f"), ("parted_low", "f")]
     );
+
+    let spread = links(&[("spread", "user_id")]);
+    let report = cap.inspect_pre_image(&spread).await.unwrap();
+    assert_eq!(
+        report.gaps.first().unwrap().remediation,
+        "ALTER TABLE \"public\".\"spread\" REPLICA IDENTITY FULL; \
+         ALTER TABLE \"public\".\"spread_near\" REPLICA IDENTITY FULL;"
+    );
+    cap.ensure_pre_image(&spread, true).await.unwrap();
+    let near: String =
+        sqlx::query_scalar("SELECT relreplident::text FROM pg_class WHERE relname = 'spread_near'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(near, "f");
 
     // A partition created later doesn't inherit the parent's identity: the
     // next inspection reports it.

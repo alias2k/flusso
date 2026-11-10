@@ -23,7 +23,7 @@
 //! grant than the `REPLICATION + SELECT` flusso otherwise runs as, so when the
 //! role can't do it we report the exact SQL instead of failing.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use source::{CoverageReport, QualifiedTable, Result, SourceError};
 
@@ -79,28 +79,50 @@ fn publication_sql(
 /// table's own name rather than each partition's.
 const VIA_ROOT: &str = "publish_via_partition_root";
 
-/// Per required table: whether the role owns it, whether it is partitioned, and
-/// whether every one of its leaf partitions is published. While the
-/// publication doesn't publish via the root, `pg_publication_tables` lists a
-/// partitioned member's leaves, never the member itself, so all of them listed
-/// is how a member shows. (One leaf added on its own looks the same when it is
-/// the only leaf; once the option is set the parent is listed only if it really
-/// is a member, so [`super::WalChangeCapture`]'s re-check adds it then.) No row
-/// when the table is absent.
-const TABLE_SQL: &str = "SELECT pg_has_role(current_user, c.relowner, 'USAGE') AS owned, \
-       c.relkind = 'p' AS partitioned, \
-       c.relkind = 'p' \
-       AND EXISTS (SELECT 1 FROM pg_partition_tree(c.oid::regclass) t WHERE t.isleaf) \
-       AND NOT EXISTS ( \
-         SELECT 1 FROM pg_partition_tree(c.oid::regclass) t \
-         JOIN pg_class l ON l.oid = t.relid \
-         JOIN pg_namespace ln ON ln.oid = l.relnamespace \
-         LEFT JOIN pg_publication_tables pt \
-           ON pt.pubname = $3 AND pt.schemaname = ln.nspname AND pt.tablename = l.relname \
-         WHERE t.isleaf AND pt.tablename IS NULL \
-       ) AS leaves_published \
-     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')";
+/// Per required table: whether the role owns it, whether it is partitioned, the
+/// tables above it in a partition tree (`"schema.table"`, nearest first), and
+/// whether the publication `$3` covers it. No row when the table is absent.
+///
+/// Membership is read from the catalog that records it — a table or one of its
+/// ancestors listed (`pg_publication_rel`), `FOR ALL TABLES`, or, when
+/// `schemas` (Postgres 15+), the schema of either under `FOR TABLES IN SCHEMA`
+/// — never from `pg_publication_tables`, which lists a partitioned member's
+/// leaves rather than the member unless the publication publishes via the root,
+/// and lists nothing for a member with no (publishable) partitions yet.
+fn table_sql(schemas: bool) -> String {
+    let in_schema = if schemas {
+        "OR EXISTS (SELECT 1 FROM pg_publication_namespace pn \
+                    JOIN pg_class r ON r.relnamespace = pn.pnnspid \
+                    WHERE pn.pnpubid = p.oid AND r.oid IN (SELECT oid FROM tree))"
+    } else {
+        ""
+    };
+    format!(
+        "WITH target AS ( \
+           SELECT c.oid, c.relkind, c.relowner FROM pg_class c \
+           JOIN pg_namespace n ON n.oid = c.relnamespace \
+           WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+         ), tree AS ( \
+           SELECT oid FROM target \
+           UNION SELECT a.relid FROM target, pg_partition_ancestors(target.oid) a \
+         ) \
+         SELECT pg_has_role(current_user, target.relowner, 'USAGE') AS owned, \
+           target.relkind = 'p' AS partitioned, \
+           ARRAY(SELECT an.nspname || '.' || ac.relname \
+                 FROM pg_partition_ancestors(target.oid) WITH ORDINALITY AS a(relid, depth) \
+                 JOIN pg_class ac ON ac.oid = a.relid \
+                 JOIN pg_namespace an ON an.oid = ac.relnamespace \
+                 WHERE a.relid <> target.oid ORDER BY a.depth) AS ancestors, \
+           COALESCE(( \
+             SELECT p.puballtables \
+               OR EXISTS (SELECT 1 FROM pg_publication_rel pr \
+                          WHERE pr.prpubid = p.oid AND pr.prrelid IN (SELECT oid FROM tree)) \
+               {in_schema} \
+             FROM pg_publication p WHERE p.pubname = $3 \
+           ), false) AS published \
+         FROM target"
+    )
+}
 
 /// Read-only coverage + privilege report for publication `name` against the
 /// `required` tables. Computes which tables are missing, which are misrouted
@@ -131,19 +153,12 @@ pub(crate) async fn inspect_publication(
         None => (false, false, true),
     };
 
-    // Tables the publication already streams (FOR ALL TABLES is expanded here).
-    let present_rows =
-        sqlx::query("SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = $1")
-            .bind(name)
-            .fetch_all(pool)
-            .await
-            .map_err(query_err)?;
-    let mut present_set: HashSet<(String, String)> = HashSet::new();
-    for row in present_rows {
-        let schema: String = row.try_get("schemaname").map_err(query_err)?;
-        let table: String = row.try_get("tablename").map_err(query_err)?;
-        present_set.insert((schema, table));
-    }
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(pool)
+        .await
+        .map_err(query_err)?;
+    let table_sql = table_sql(version >= 150_000);
+    let names: BTreeSet<String> = required.iter().map(ToString::to_string).collect();
 
     // Partition the requested set (iterating the BTreeSet keeps the lists
     // sorted), noting ownership of each missing table — required to add it.
@@ -153,7 +168,7 @@ pub(crate) async fn inspect_publication(
     let mut blockers = Vec::new();
     let mut owns_all_missing = true;
     for table in required {
-        let row = sqlx::query(TABLE_SQL)
+        let row = sqlx::query(AssertSqlSafe(table_sql.clone()))
             .bind(table.schema.as_ref())
             .bind(table.table.as_ref())
             .bind(name)
@@ -168,12 +183,18 @@ pub(crate) async fn inspect_publication(
         };
         let owned: bool = row.try_get("owned").map_err(query_err)?;
         let partitioned: bool = row.try_get("partitioned").map_err(query_err)?;
-        let leaves_published: bool = row.try_get("leaves_published").map_err(query_err)?;
-        let key = (
-            table.schema.as_ref().to_owned(),
-            table.table.as_ref().to_owned(),
-        );
-        if present_set.contains(&key) || (!via_root && leaves_published) {
+        let published: bool = row.try_get("published").map_err(query_err)?;
+        let ancestors: Vec<String> = row.try_get("ancestors").map_err(query_err)?;
+        if let Some(ancestor) = ancestors.iter().find(|a| names.contains(*a)) {
+            tracing::warn!(
+                table = %table,
+                partitioned = %ancestor,
+                "an index reads a partition directly, and another reads its partitioned table: \
+                 published via the root, the partition's changes arrive as the partitioned \
+                 table's, so the index on the partition sees none of them",
+            );
+        }
+        if published {
             present.push(table.clone());
         } else {
             missing.push(table.clone());
