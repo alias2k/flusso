@@ -8,10 +8,8 @@ validation error back to the agent (exit 2 + stderr) so it gets fixed in the
 same turn. Anything else — unrelated edits, no flusso project, no runner — exits
 0 silently and never interrupts editing.
 
-Runner resolution (first that works):
-  1. $FLUSSO_CHECK_CMD  — full command prefix, e.g. "flusso" or "cargo run -q --"
-  2. `flusso` on PATH
-  3. `cargo run --quiet --`  from the nearest Cargo workspace root (repo-dev mode)
+Runner resolution: see "Runner resolution" in plugin/README.md. Any failure
+message names the runner it used.
 """
 
 import json
@@ -100,16 +98,37 @@ def find_cargo_root(start_dir):
     return None
 
 
+def builds_flusso(root):
+    """True when the workspace at `root` contains the flusso CLI package."""
+    try:
+        with open(os.path.join(root, "apps", "cli", "Cargo.toml"), "r", encoding="utf-8") as f:
+            return 'name = "flusso-cli"' in f.read()
+    except OSError:
+        return False
+
+
+def path_flusso_label(exe):
+    try:
+        out = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, timeout=10
+        ).stdout.split()
+    except (subprocess.TimeoutExpired, OSError):
+        out = []
+    return f"{exe} {out[-1]}" if out else exe
+
+
 def resolve_runner(config_path):
+    """Returns (command prefix, cwd, label) or (None, None, None)."""
     override = os.environ.get("FLUSSO_CHECK_CMD")
     if override:
-        return override.split(), None
-    if shutil.which("flusso"):
-        return ["flusso"], None
+        return override.split(), None, f"$FLUSSO_CHECK_CMD={override}"
     cargo_root = find_cargo_root(os.path.dirname(config_path))
-    if cargo_root and shutil.which("cargo"):
-        return ["cargo", "run", "--quiet", "--"], cargo_root
-    return None, None
+    if cargo_root and builds_flusso(cargo_root) and shutil.which("cargo"):
+        return ["cargo", "run", "--quiet", "--"], cargo_root, f"cargo run from {cargo_root}"
+    exe = shutil.which("flusso")
+    if exe:
+        return [exe], None, path_flusso_label(exe)
+    return None, None, None
 
 
 def run_check(runner, cwd, config, offline):
@@ -141,7 +160,7 @@ def main():
     if not config:
         sys.exit(0)  # edited file isn't part of a flusso project — nothing to validate
 
-    runner, cwd = resolve_runner(config)
+    runner, cwd, label = resolve_runner(config)
     if not runner:
         # No way to run flusso here; stay quiet rather than nag on every edit.
         sys.exit(0)
@@ -172,7 +191,7 @@ def main():
 
     fail_to_agent(
         f"flusso check failed after this edit {note} — {rel} no longer "
-        f"validates:\n\n{detail}\n\n"
+        f"validates (runner: {label}):\n\n{detail}\n\n"
         "Fix the reported schema/config error (see the flusso-schema skill), "
         "then it will re-validate on the next edit."
     )
