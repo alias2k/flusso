@@ -87,7 +87,7 @@ fn example_value(field: &ResolvedField) -> Value {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use config::yaml::SchemaYaml;
     use kernel::ParseFrom;
@@ -129,6 +129,30 @@ mod tests {
             obj.get("meta").and_then(|m| m.get("note")),
             Some(&json!("example text")),
         );
+    }
+
+    #[test]
+    fn a_map_previews_the_mapping_each_key_gets() {
+        let schema = schema(
+            "version: 1\n\
+             table: t\n\
+             primary_key: id\n\
+             fields:\n\
+             \x20 - integer: id\n\
+             \x20   required: true\n\
+             \x20 - map: title\n\
+             \x20   values: identifier\n\
+             \x20   required: false\n",
+        );
+        let index = IndexName::try_new("t").expect("index name");
+
+        let preview = preview(&schema, &index);
+        let mapping = serde_json::to_value(&preview.mapping).expect("serialize");
+        let title = &mapping["fields"][1]["mapping"];
+        assert_eq!(title["type"], json!("object"));
+        assert_eq!(title["values"]["type"], json!("text"));
+        assert!(title["values"].get("analyzer").is_some());
+        assert_eq!(preview.document[1].type_label, "map<text>");
     }
 }
 
