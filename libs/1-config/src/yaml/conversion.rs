@@ -46,6 +46,35 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
         Some(column) => column,
         None => default_column(&body.field)?,
     };
+    let tag = scalar_tag(&ty);
+    let subfields = match body.subfields {
+        Some(_)
+            if !matches!(
+                ty,
+                FlussoType::Text | FlussoType::Keyword | FlussoType::Uuid
+            ) =>
+        {
+            return Err(ConversionError::SubfieldsNotAllowed {
+                tag,
+                field: body.field.to_string(),
+            });
+        }
+        subfields => subfields.unwrap_or(true),
+    };
+    let indexed = match body.indexed {
+        Some(_) if ty != FlussoType::Json => {
+            return Err(ConversionError::IndexedNotAllowed {
+                tag,
+                field: body.field.to_string(),
+            });
+        }
+        indexed => indexed.unwrap_or(true),
+    };
+    if !indexed && !body.options.is_empty() {
+        return Err(ConversionError::OptionsOnUnindexed {
+            field: body.field.to_string(),
+        });
+    }
     let options = convert_options(body.options);
     let (ty, options) = resolve_column_type(ty, options);
     let transforms = body
@@ -62,10 +91,18 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             transforms,
             default: convert_default(body.default)?,
             enum_order: Vec::new(),
-            subfields: true,
-            indexed: true,
+            subfields,
+            indexed,
         }),
     })
+}
+
+/// The YAML type tag a scalar type is written with, for error messages.
+fn scalar_tag(ty: &FlussoType) -> String {
+    match serde_yaml::to_value(ty) {
+        Ok(serde_yaml::Value::String(tag)) => tag,
+        _ => "custom".to_owned(),
+    }
 }
 
 /// Convert a scalar field's `default`, rejecting non-scalar values. A `default`
@@ -265,6 +302,12 @@ fn convert_join_field(
     } else {
         !body.required.unwrap_or(false)
     };
+    let indexed = body.indexed.unwrap_or(true);
+    if !indexed && !body.options.is_empty() {
+        return Err(ConversionError::OptionsOnUnindexed {
+            field: body.field.to_string(),
+        });
+    }
     let fields = body
         .fields
         .into_iter()
@@ -281,7 +324,7 @@ fn convert_join_field(
             .map(|os| os.into_iter().map(convert_order_by).collect()),
         limit: body.limit,
         fields,
-        indexed: true,
+        indexed,
     };
     Ok(Field {
         field: body.field,

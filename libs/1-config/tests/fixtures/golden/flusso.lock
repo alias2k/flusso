@@ -156,6 +156,7 @@ field = "description"
 column = "description"
 ty = "text"
 nullable = true
+subfields = false
 
 [config.indexes.catalog.schema.fields.source.column.default]
 String = ""
@@ -275,6 +276,15 @@ ty = "json"
 nullable = true
 
 [[config.indexes.catalog.schema.fields]]
+field = "snapshot"
+
+[config.indexes.catalog.schema.fields.source.column]
+column = "snapshot"
+ty = "json"
+nullable = true
+indexed = false
+
+[[config.indexes.catalog.schema.fields]]
 field = "rating"
 
 [config.indexes.catalog.schema.fields.options.scaling_factor]
@@ -370,6 +380,7 @@ field = "detail"
 table = "product_details"
 primary_key = "product_id"
 nullable = true
+indexed = false
 
 [config.indexes.catalog.schema.fields.source.relation.join.kind.has_one]
 foreign_key = "product_id"

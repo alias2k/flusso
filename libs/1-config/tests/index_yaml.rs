@@ -781,3 +781,118 @@ fn many_to_many_join_takes_junction_filters() {
         other => panic!("expected a join, got {other:?}"),
     }
 }
+
+// ── subfields / indexed opt-outs ─────────────────────────────────────────────
+
+fn column<'a>(schema: &'a IndexSchema, name: &str) -> &'a Column {
+    match &field(schema, name).source {
+        FieldSource::Column(column) => column,
+        other => panic!("expected a column, got {other:?}"),
+    }
+}
+
+fn join<'a>(schema: &'a IndexSchema, name: &str) -> &'a kernel::Join {
+    match &field(schema, name).source {
+        FieldSource::Relation(Relation::Join(join)) => join,
+        other => panic!("expected a join, got {other:?}"),
+    }
+}
+
+#[test]
+fn subfields_false_is_accepted_on_text_keyword_and_uuid() {
+    let schema = convert(
+        "version: 1\ntable: notes\nfields:\n  \
+         - text: body\n    required: true\n    subfields: false\n  \
+         - keyword: code\n    required: true\n    subfields: false\n  \
+         - uuid: ref\n    required: true\n    subfields: false\n  \
+         - text: title\n    required: true\n    subfields: true\n  \
+         - keyword: plain\n    required: true",
+    )
+    .unwrap();
+    for name in ["body", "code", "ref"] {
+        assert!(!column(&schema, name).subfields, "`{name}` opted out");
+    }
+    assert!(column(&schema, "title").subfields, "`true` is the default");
+    assert!(column(&schema, "plain").subfields, "omitted → subfields on");
+}
+
+#[test]
+fn subfields_is_rejected_on_any_other_type() {
+    for tag in ["integer", "json", "identifier", "date"] {
+        let err = convert(&format!(
+            "version: 1\ntable: notes\nfields:\n  - {tag}: x\n    required: true\n    subfields: false"
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConversionError::SubfieldsNotAllowed { tag: t, field } if t == tag && field == "x"),
+            "{tag}: got {err:?}"
+        );
+        assert!(err.to_string().contains("`text`, `keyword` or `uuid`"));
+    }
+    for body in [
+        "  - enum: status\n    required: true\n    subfields: false",
+        "  - map: labels\n    values: text\n    required: true\n    subfields: false",
+        "  - has_many: orders\n    table: orders\n    primary_key: id\n    foreign_key: user_id\n    subfields: false\n    fields: []",
+    ] {
+        let err = parse(&format!("version: 1\ntable: users\nfields:\n{body}")).unwrap_err();
+        assert!(err.to_string().contains("subfields"), "got {err}");
+    }
+}
+
+#[test]
+fn indexed_false_is_accepted_on_json_and_every_join_verb() {
+    let schema = convert(
+        "version: 1\ntable: users\nfields:\n  \
+         - json: snapshot\n    required: false\n    indexed: false\n  \
+         - json: attrs\n    required: false\n  \
+         - has_many: orders\n    table: orders\n    primary_key: id\n    foreign_key: user_id\n    indexed: false\n    fields:\n      - keyword: status\n        required: true\n        options: { ignore_above: 10 }\n  \
+         - has_one: profile\n    table: profiles\n    primary_key: id\n    foreign_key: user_id\n    indexed: false\n    fields: []\n  \
+         - belongs_to: org\n    table: orgs\n    primary_key: id\n    indexed: false\n    fields: []\n  \
+         - many_to_many: tags\n    table: tags\n    primary_key: id\n    through: { table: user_tags, left_key: user_id, right_key: tag_id }\n    indexed: false\n    fields: []\n  \
+         - has_many: visits\n    table: visits\n    primary_key: id\n    foreign_key: user_id\n    indexed: true\n    fields: []",
+    )
+    .unwrap();
+    assert!(!column(&schema, "snapshot").indexed);
+    assert!(column(&schema, "attrs").indexed, "omitted → indexed");
+    for name in ["orders", "profile", "org", "tags"] {
+        assert!(!join(&schema, name).indexed, "`{name}` opted out");
+    }
+    assert!(join(&schema, "visits").indexed);
+}
+
+#[test]
+fn indexed_is_rejected_on_any_other_type() {
+    for tag in ["text", "keyword", "integer"] {
+        let err = convert(&format!(
+            "version: 1\ntable: notes\nfields:\n  - {tag}: x\n    required: true\n    indexed: false"
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConversionError::IndexedNotAllowed { tag: t, .. } if t == tag),
+            "{tag}: got {err:?}"
+        );
+        assert!(err.to_string().contains("only a `json` field or a join"));
+    }
+    for body in [
+        "  - object: address\n    indexed: false\n    fields: []",
+        "  - map: labels\n    values: text\n    required: true\n    indexed: false",
+        "  - count: orderCount\n    table: orders\n    foreign_key: user_id\n    indexed: false",
+    ] {
+        let err = parse(&format!("version: 1\ntable: users\nfields:\n{body}")).unwrap_err();
+        assert!(err.to_string().contains("indexed"), "got {err}");
+    }
+}
+
+#[test]
+fn options_on_an_unindexed_field_are_rejected() {
+    for body in [
+        "  - json: snapshot\n    required: false\n    indexed: false\n    options: { dynamic: true }",
+        "  - has_many: orders\n    table: orders\n    primary_key: id\n    foreign_key: user_id\n    indexed: false\n    options: { include_in_parent: true }\n    fields: []",
+    ] {
+        let err = convert(&format!("version: 1\ntable: users\nfields:\n{body}")).unwrap_err();
+        assert!(
+            matches!(err, ConversionError::OptionsOnUnindexed { .. }),
+            "got {err:?}"
+        );
+    }
+}

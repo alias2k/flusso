@@ -118,6 +118,21 @@ pub enum ConversionError {
          `=>` and newlines (it becomes an OpenSearch mapping char-filter rule)"
     )]
     InvalidEnumVariant { variant: String },
+    #[error(
+        "`{tag}` field `{field}` does not take `subfields` — only a `text`, `keyword` or `uuid` \
+         field has automatic subfields to turn off"
+    )]
+    SubfieldsNotAllowed { tag: String, field: String },
+    #[error(
+        "`{tag}` field `{field}` does not take `indexed` — only a `json` field or a join \
+         (`belongs_to`/`has_one`/`has_many`/`many_to_many`) can be stored without indexing"
+    )]
+    IndexedNotAllowed { tag: String, field: String },
+    #[error(
+        "field `{field}` has `indexed: false` and `options` — a field that is not indexed is \
+         mapped as one disabled object, so mapping options cannot apply; remove `options`"
+    )]
+    OptionsOnUnindexed { field: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -57,6 +57,14 @@ pub struct ScalarBody {
     pub transforms: Option<Vec<Transform>>,
     #[serde(default)]
     pub default: Option<serde_yaml::Value>,
+    /// `false` maps the field without the sink's automatic subfields. Only on
+    /// `text`/`keyword`/`uuid` — enforced at conversion.
+    #[serde(default)]
+    pub subfields: Option<bool>,
+    /// `false` stores the value without indexing it. Only on `json` — enforced
+    /// at conversion.
+    #[serde(default)]
+    pub indexed: Option<bool>,
 }
 
 /// An `enum:` scalar — a closed set of string values with an optional declared
@@ -171,6 +179,10 @@ pub struct JoinBody {
     pub fields: Vec<Field>,
     #[serde(default)]
     pub options: BTreeMap<String, serde_yaml::Value>,
+    /// `false` keeps the folded-in rows in the stored document without
+    /// indexing them. Absent means indexed.
+    #[serde(default)]
+    pub indexed: Option<bool>,
 }
 
 /// An aggregate field (its op is the type key). `value_type` is required for
@@ -366,6 +378,8 @@ impl<'de> Deserialize<'de> for Field {
                         options: c.options,
                         transforms: None,
                         default: c.default,
+                        subfields: None,
+                        indexed: None,
                     },
                 )
             }
