@@ -1165,3 +1165,190 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
         ]
     );
 }
+
+/// A sink whose flushes report a scripted visibility, one per flush.
+#[derive(Debug)]
+struct ScriptedVisibility {
+    script: Mutex<std::collections::VecDeque<sink::Visibility>>,
+}
+
+impl ScriptedVisibility {
+    fn new(script: impl IntoIterator<Item = sink::Visibility>) -> Arc<Self> {
+        Arc::new(Self {
+            script: Mutex::new(script.into_iter().collect()),
+        })
+    }
+}
+
+#[async_trait]
+impl Sink for ScriptedVisibility {
+    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+        let visibility = self.script.lock().unwrap().pop_front().unwrap_or_default();
+        Ok(FlushReport::clean().visible(visibility))
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// Records the two fence levels a sink engine reports.
+#[derive(Debug, Default)]
+struct PositionObserver {
+    events: Mutex<Vec<String>>,
+}
+
+impl PositionObserver {
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl Observer for PositionObserver {
+    fn on_position_applied(&self, sink: &SinkName, position: Position) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("applied {sink} {}", position.0));
+    }
+
+    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("searchable {sink} {}", position.0));
+    }
+}
+
+/// A sink engine over `sink` with a [`PositionObserver`], and the producing end
+/// of its lane, so a test publishes batches by hand.
+struct PositionRig {
+    observer: Arc<PositionObserver>,
+    lane: Box<dyn stream::Producer<stream::LaneItem>>,
+    engine: tokio::task::JoinHandle<Result<()>>,
+    _control: tokio::sync::mpsc::Sender<SinkControl>,
+}
+
+impl PositionRig {
+    fn start(sink: Arc<dyn Sink>) -> Self {
+        let name = sink_name("primary");
+        let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(64, [name.clone()]));
+        let observer = Arc::new(PositionObserver::default());
+        let engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), vec![mapping()])
+            .with_observer(Arc::clone(&observer) as Arc<dyn Observer>);
+        let lane = stream.lane(&name).unwrap().producer;
+        let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+        Self {
+            observer,
+            lane,
+            engine: tokio::spawn(async move { engine.run(&mut rx).await }),
+            _control: control,
+        }
+    }
+
+    async fn publish(&self, position: Option<u64>) {
+        self.lane
+            .publish(stream::LaneItem::Batch(stream::Batch {
+                position: position.map(Position),
+                changes: 1,
+                envelopes: Vec::new().into(),
+            }))
+            .await
+            .unwrap();
+    }
+
+    /// Let the engine work through what is published without moving the
+    /// (paused) clock.
+    async fn settle(&self) {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+impl Drop for PositionRig {
+    fn drop(&mut self) {
+        self.engine.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_immediately_visible_flush_is_applied_then_searchable() {
+    let rig = PositionRig::start(ScriptedVisibility::new([]));
+    rig.publish(Some(7)).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.observer.events(),
+        vec!["applied primary 7", "searchable primary 7"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_position_becomes_searchable_when_its_refresh_interval_passes() {
+    use sink::Visibility::{Immediate, Within};
+    let rig = PositionRig::start(ScriptedVisibility::new([
+        Within(Duration::from_secs(10)),
+        Immediate,
+    ]));
+    rig.publish(Some(1)).await;
+    rig.publish(Some(2)).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.observer.events(),
+        vec!["applied primary 1", "applied primary 2"],
+        "position 2 was refreshed, but 1 before it was not: nothing is searchable yet"
+    );
+
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    rig.settle().await;
+    assert_eq!(rig.observer.events().len(), 2);
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.observer.events().last().map(String::as_str),
+        Some("searchable primary 2"),
+        "one report covers both once the older one is due"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deferred_position_waits_for_the_next_immediate_flush() {
+    use sink::Visibility::{Deferred, Immediate};
+    let rig = PositionRig::start(ScriptedVisibility::new([Deferred, Deferred, Immediate]));
+    rig.publish(Some(1)).await;
+    rig.publish(Some(2)).await;
+    rig.settle().await;
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.observer.events(),
+        vec!["applied primary 1", "applied primary 2"],
+        "no amount of time makes a deferred position searchable"
+    );
+
+    rig.publish(Some(3)).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.observer.events().last().map(String::as_str),
+        Some("searchable primary 3")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_immediate_snapshot_flush_releases_deferred_positions() {
+    use sink::Visibility::{Deferred, Immediate};
+    let rig = PositionRig::start(ScriptedVisibility::new([Deferred, Immediate]));
+    rig.publish(Some(4)).await;
+    rig.publish(None).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.observer.events(),
+        vec!["applied primary 4", "searchable primary 4"],
+        "a snapshot batch has no position of its own"
+    );
+}
