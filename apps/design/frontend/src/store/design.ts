@@ -3,7 +3,7 @@
 import { create, useStore } from "zustand";
 import { temporal } from "zundo";
 import type { CatalogResponse, ConfigToml, DiagnosticDto, IndexSchema, PreviewResponse, Project } from "../api";
-import { stampIds, uidsByPath, withUidsByPath } from "../model/ids";
+import { stampIds, stripUids, uidsByPath, withUidsByPath } from "../model/ids";
 import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
 import { type Graph, pathId, projectGraph } from "../model/tree";
 import type { Selection } from "../state";
@@ -279,7 +279,7 @@ export const useDesignStore = create<DesignState>()(
               ],
             },
             schemas: doc.schemas[src.name]
-              ? { ...doc.schemas, [name]: structuredClone(doc.schemas[src.name]) }
+              ? { ...doc.schemas, [name]: stampIds(stripUids(structuredClone(doc.schemas[src.name]))) }
               : doc.schemas,
           },
           active: name,

@@ -7,7 +7,7 @@
 // - `stampIds` gives every container a uid (and re-stamps copies), run after
 //   every load and edit.
 // - `adoptIds` carries the current uids onto a schema that arrived without them
-//   (Code mode's parsed YAML), matching containers by position.
+//   (Code mode's parsed YAML), matching containers by name, then position.
 // - `uidsByPath` / `withUidsByPath` flatten the uids to a path-keyed table and
 //   back, so the store can persist the saved doc's uids and re-apply them to
 //   the same file on the next page load.
@@ -47,19 +47,33 @@ export function stampIds(schema: IndexSchema): IndexSchema {
   return fields === schema.fields ? schema : { ...schema, fields };
 }
 
-/// Copy `prev`'s container uids onto the uid-less containers of `next` that sit
-/// at the same path, then stamp whatever is left.
+/// Copy `prev`'s container uids onto the uid-less containers of `next`, then
+/// stamp whatever is left. A container takes the uid of the sibling container
+/// with its name (so removing a field above it doesn't shift ids), else of an
+/// unclaimed one at its index whose name is gone (a rename).
 export function adoptIds(prev: IndexSchema | undefined, next: IndexSchema): IndexSchema {
-  const adopt = (old: Field[] | null, fields: Field[]): Field[] =>
-    fields.map((field, i) => {
+  const adopt = (old: Field[], fields: Field[]): Field[] => {
+    const olds = old.filter(isContainer);
+    const names = new Set(fields.map((f) => f.field));
+    const claimed = new Set<Field>();
+    const match = (field: Field, i: number): Field | undefined => {
+      const byName = olds.find((o) => o.field === field.field && !claimed.has(o));
+      if (byName) return byName;
+      const atIndex = old[i];
+      return atIndex && isContainer(atIndex) && !claimed.has(atIndex) && !names.has(atIndex.field)
+        ? atIndex
+        : undefined;
+    };
+    return fields.map((field, i) => {
       const children = childFields(field);
       if (children === null) return field;
-      const before = old?.[i];
-      const fromBefore = before && isContainer(before) ? before : undefined;
-      const withUid = field.uid || !fromBefore?.uid ? field : { ...field, uid: fromBefore.uid };
-      return withChildFields(withUid, adopt(fromBefore ? childFields(fromBefore) : null, children));
+      const before = match(field, i);
+      if (before) claimed.add(before);
+      const withUid = field.uid || !before?.uid ? field : { ...field, uid: before.uid };
+      return withChildFields(withUid, adopt(before ? (childFields(before) ?? []) : [], children));
     });
-  return stampIds({ ...next, fields: adopt(prev?.fields ?? null, next.fields) });
+  };
+  return stampIds({ ...next, fields: adopt(prev?.fields ?? [], next.fields) });
 }
 
 /// Every container's uid, keyed by its positional path (`"2.0"`).

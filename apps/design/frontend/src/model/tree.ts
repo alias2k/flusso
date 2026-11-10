@@ -14,8 +14,6 @@
 import type { Field, FlussoType, IndexSchema, Join, JoinKind } from "../api";
 import { childFields, withChildFields } from "./containers";
 
-export { childFields, withChildFields };
-
 export type NodeKind = "root" | "object" | "belongs_to" | "has_one" | "has_many" | "many_to_many";
 
 export interface LeafField {
