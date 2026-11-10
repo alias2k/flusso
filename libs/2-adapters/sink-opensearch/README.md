@@ -124,7 +124,9 @@ lives in the engine, not here; see the `flusso-engine` docs.
 - **A second reindex is a no-op.** [`reindex`](OpensearchSink::reindex) stages
   nothing for an index that's unseeded or has no meta doc, since a rebuild from
   scratch is already pending. [`mark_seeded`](OpensearchSink::mark_seeded)
-  drops every non-active generation, which reclaims orphans.
+  drops every non-active generation, which reclaims orphans. That includes a
+  hand-made `{hash_alias}_1` from the legacy-migration message when meta is
+  absent; it's harmless, because the data is reseeded into the active generation.
 
 ## Module layout
 

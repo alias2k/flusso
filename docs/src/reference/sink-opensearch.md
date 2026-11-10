@@ -14,7 +14,7 @@ A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk opt
 | A reachable HTTP(S) endpoint | The `url`. |
 | A user that can create, alias, write, and delete flusso's indexes | Plus the small `{prefix}flusso_meta` index. |
 | `analysis-icu` on every node | Only with `text_analysis = "icu"`. |
-| `action.auto_create_index` excluding flusso's generations | Recommended. Keep `{prefix}flusso_meta` allowed (it's created by its first write) and forbid `{prefix}{logical}_*` for each index, first match wins: `+flusso_meta,-users_*,-orders_*,+*`. See [Seeding](#seeding). |
+| `action.auto_create_index` excluding flusso's generations | Recommended. Keep `{prefix}flusso_meta` allowed (it's created by its first write) and forbid `{prefix}{logical}_*` for each index, first match wins. With no `prefix`: `+flusso_meta,-users_*,-orders_*,+*`. With `prefix = "staging_"`, every entry carries it: `+staging_flusso_meta,-staging_users_*,-staging_orders_*,+*` (an unprefixed entry never matches, and the trailing `+*` lets auto-create through). See [Seeding](#seeding). |
 
 ## Index naming
 
@@ -49,7 +49,7 @@ Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfi
 
 Deleting a seeded generation **while flusso runs** is caught on the next write to that index: the alias is gone with it, so the write fails with `index_not_found_exception` instead of OpenSearch auto-creating a dynamically mapped index. That fails the whole flush, not one document. The sink's engine restarts with backoff, the batch is redelivered, and the restart's marker check rebuilds the generation as above. Until that next write, reads through the alias return 404.
 
-Deleting an **unseeded** generation mid-backfill isn't covered by `require_alias`. With the default `action.auto_create_index: true` the next write recreates it with a dynamic mapping. With the recommended pattern from [Cluster requirements](#cluster-requirements) the write fails and the engine restarts, but the part of the snapshot already written is lost. Restart flusso to reseed that index.
+Deleting an **unseeded** generation mid-backfill isn't covered by `require_alias`. With the default `action.auto_create_index: true` the next write recreates it with a dynamic mapping. With the recommended pattern from [Cluster requirements](#cluster-requirements) the write fails and the engine restarts, but the part of the snapshot already written is lost. A restart doesn't fix either case: the snapshot in flight is still outstanding, so no new one is requested, and when it completes the partial (or dynamically mapped) generation is marked seeded and kept. Once that backfill finishes, run `flusso reindex <index>` to rebuild it from scratch.
 
 ## Analysis and subfields
 
