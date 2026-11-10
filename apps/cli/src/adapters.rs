@@ -5,7 +5,8 @@
 //! This module maps each known `type` to its adapter's config struct
 //! ([`kernel::AdapterConfig`]) and exposes three things built from that:
 //!
-//! - [`validate`]: every entry instantiates its adapter config, without
+//! - [`validate`]: every entry instantiates its adapter config, and every
+//!   `[index.sinks.<name>]` table its sink's per-index config, without
 //!   connecting. `build`, `check`, `run`, and the designer call it right after
 //!   loading, so an unknown type, a misspelled option, or a wrong value fails
 //!   before any network call or lock write.
@@ -21,8 +22,8 @@ use std::sync::LazyLock;
 
 use anyhow::{Context, anyhow};
 use config::Config;
-use kernel::{AdapterConfig, AdapterDescription, Port, PortEntry, SinkName};
-use sink_opensearch::OpensearchConfig;
+use kernel::{AdapterConfig, AdapterDescription, IndexName, Options, Port, PortEntry, SinkName};
+use sink_opensearch::{OpensearchConfig, OpensearchIndexConfig};
 use sink_stdout::StdoutConfig;
 use source_postgres::PostgresConfig;
 use stream_channel::ChannelConfig;
@@ -64,7 +65,50 @@ pub(crate) fn validate(config: &Config) -> anyhow::Result<()> {
     for (name, entry) in &config.sinks {
         sink_config(name, entry)?;
     }
+    for (index, entry) in &config.indexes {
+        for (sink, options) in &entry.sinks {
+            index_sink_config(config, index, sink, options)?;
+        }
+    }
     Ok(())
+}
+
+/// One index's options for one sink, as that sink's adapter reads them.
+#[derive(Debug, Clone)]
+pub(crate) enum IndexSinkConfig {
+    Opensearch(OpensearchIndexConfig),
+}
+
+/// The `[index.sinks.<sink>]` table of `index` as its sink's per-index config.
+/// The sink must be declared and its adapter must take per-index options.
+pub(crate) fn index_sink_config(
+    config: &Config,
+    index: &IndexName,
+    sink: &SinkName,
+    options: &Options,
+) -> anyhow::Result<IndexSinkConfig> {
+    let table = format!("[[index]] \"{index}\": [index.sinks.{sink}]");
+    let Some(entry) = config.sinks.get(sink) else {
+        let declared = config
+            .sinks
+            .keys()
+            .map(|name| name.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(anyhow!(
+            "{table}: no sink is named \"{sink}\"; declared sinks: {declared}"
+        ));
+    };
+    match entry.kind.as_str() {
+        OpensearchConfig::KIND => options
+            .clone()
+            .deserialize_into()
+            .map(IndexSinkConfig::Opensearch)
+            .with_context(|| format!("{table} (type = \"{}\")", entry.kind)),
+        other => Err(anyhow!(
+            "{table}: the {other} sink takes no per-index options"
+        )),
+    }
 }
 
 /// The source entry as its adapter's typed config.
@@ -226,6 +270,99 @@ mod tests {
         let error = format!("{:#}", validate(&cfg).unwrap_err());
         assert!(error.contains("[sinks.primary]"), "{error}");
         assert!(error.contains("unknown field `batch_sizee`"), "{error}");
+    }
+
+    const INDEXED: &str = r#"
+        [source]
+        type = "postgres"
+
+        [sinks.primary]
+        type = "opensearch"
+        url = "https://search:9200"
+
+        [sinks.audit]
+        type = "stdout"
+    "#;
+
+    fn with_index_sinks(sinks: &str) -> Config {
+        use config::ParseFrom;
+        let raw = format!(
+            "{INDEXED}\n[[index]]\nname = \"orders\"\nschema = \"orders.schema.yml\"\nenabled = true\n{sinks}"
+        );
+        let mut parsed = config::toml::ConfigToml::try_parse(&raw).unwrap();
+        let entry = parsed.index.remove(0);
+        let mut cfg = Config::from(parsed);
+        cfg.indexes.insert(
+            entry.name,
+            config::Index {
+                enabled: true,
+                schema: serde_json::from_value(serde_json::json!({
+                    "version": 1, "table": "orders", "db_schema": "public", "fields": []
+                }))
+                .unwrap(),
+                on_error: None,
+                sinks: entry.sinks,
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn validate_accepts_index_settings_for_an_opensearch_sink() {
+        let cfg = with_index_sinks(
+            "[index.sinks.primary]\nindex_settings = { \"mapping.total_fields.limit\" = 5000 }",
+        );
+        validate(&cfg).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_per_index_options_for_an_undeclared_sink() {
+        let cfg = with_index_sinks("[index.sinks.primry]\nindex_settings = { x = 1 }");
+        let error = format!("{:#}", validate(&cfg).unwrap_err());
+        assert!(error.contains("[index.sinks.primry]"), "{error}");
+        assert!(error.contains("no sink is named \"primry\""), "{error}");
+        assert!(error.contains("audit, primary"), "{error}");
+    }
+
+    #[test]
+    fn validate_rejects_per_index_options_for_a_sink_that_takes_none() {
+        let cfg = with_index_sinks("[index.sinks.audit]\npretty = true");
+        let error = format!("{:#}", validate(&cfg).unwrap_err());
+        assert!(
+            error.contains("stdout sink takes no per-index options"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_unknown_per_index_option_and_an_owned_setting() {
+        let cfg = with_index_sinks("[index.sinks.primary]\nindex_setings = { x = 1 }");
+        let error = format!("{:#}", validate(&cfg).unwrap_err());
+        assert!(error.contains("[[index]] \"orders\""), "{error}");
+        assert!(error.contains("unknown field `index_setings`"), "{error}");
+        let cfg = with_index_sinks(
+            "[index.sinks.primary]\nindex_settings = { refresh_interval = \"1s\" }",
+        );
+        let error = format!("{:#}", validate(&cfg).unwrap_err());
+        assert!(error.contains("owned by flusso"), "{error}");
+    }
+
+    #[test]
+    fn validate_rejects_an_owned_sink_wide_setting() {
+        let cfg = config(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+            index_settings = { "analysis.analyzer.x.type" = "standard" }
+            "#,
+        );
+        let error = format!("{:#}", validate(&cfg).unwrap_err());
+        assert!(error.contains("[sinks.primary]"), "{error}");
+        assert!(error.contains("index.analysis"), "{error}");
     }
 
     #[test]
