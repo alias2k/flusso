@@ -14,6 +14,8 @@ use std::time::Instant;
 use kernel::{IndexName, SinkName};
 use serde::Serialize;
 
+use crate::fence::{Fence, FencePositions, SinkPositions};
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -76,6 +78,8 @@ pub struct Status {
     last_error: Mutex<Option<String>>,
     sinks: BTreeMap<SinkName, SinkStatus>,
     indexes: Vec<IndexName>,
+    /// Where the fence positions come from; `None` reports none.
+    fence: Option<Fence>,
 }
 
 /// The live status of one sink engine.
@@ -108,9 +112,11 @@ impl SinkStatus {
         }
     }
 
-    fn snapshot(&self, captured: u64) -> SinkSnapshot {
+    fn snapshot(&self, captured: u64, positions: SinkPositions) -> SinkSnapshot {
         let committed = self.changes_committed.load(Ordering::Relaxed);
         SinkSnapshot {
+            applied_position: positions.applied,
+            searchable_position: positions.searchable,
             phase: *lock(&self.phase),
             indexes: lock(&self.indexes)
                 .iter()
@@ -149,7 +155,14 @@ impl Status {
                 .map(|sink| (sink, SinkStatus::new(&indexes)))
                 .collect(),
             indexes,
+            fence: None,
         }
+    }
+
+    /// Report the fence's positions in the snapshot.
+    pub fn with_fence(mut self, fence: Fence) -> Self {
+        self.fence = Some(fence);
+        self
     }
 
     fn sink(&self, sink: &SinkName) -> Option<&SinkStatus> {
@@ -334,10 +347,21 @@ impl Status {
     /// A point-in-time copy for serialization.
     pub fn snapshot(&self) -> StatusSnapshot {
         let captured = self.changes_captured.load(Ordering::Relaxed);
+        let mut positions: FencePositions = self
+            .fence
+            .as_ref()
+            .map(Fence::positions)
+            .unwrap_or_default();
         let sinks: BTreeMap<String, SinkSnapshot> = self
             .sinks
             .iter()
-            .map(|(name, status)| (name.as_ref().to_owned(), status.snapshot(captured)))
+            .map(|(name, status)| {
+                let positions = positions.sinks.remove(name).unwrap_or_default();
+                (
+                    name.as_ref().to_owned(),
+                    status.snapshot(captured, positions),
+                )
+            })
             .collect();
         let indexes = self
             .indexes
@@ -369,6 +393,8 @@ impl Status {
                 .slot_lag_known
                 .load(Ordering::Relaxed)
                 .then(|| self.slot_lag_bytes.load(Ordering::Relaxed)),
+            applied_position: positions.applied,
+            searchable_position: positions.searchable,
             errors: self.errors.load(Ordering::Relaxed),
             last_error: lock(&self.last_error).clone(),
             sinks,
@@ -395,6 +421,13 @@ pub struct StatusSnapshot {
     pub documents_built: u64,
     /// Bytes the confirmed position trails the source head by; `None` until sampled.
     pub slot_lag_bytes: Option<u64>,
+    /// The source position every sink has applied, in the source's own text
+    /// form: a fetch by id sees every commit at or before it. `None` until the
+    /// source follows live changes.
+    pub applied_position: Option<String>,
+    /// The source position every sink can search: a search sees every commit
+    /// at or before it.
+    pub searchable_position: Option<String>,
     /// Engine errors, ingest and sink.
     pub errors: u64,
     /// The most recent engine error.
@@ -420,4 +453,8 @@ pub struct SinkSnapshot {
     pub documents_quarantined: u64,
     /// Duration of the most recent flush, in microseconds.
     pub last_flush_micros: u64,
+    /// The source position this sink has applied.
+    pub applied_position: Option<String>,
+    /// The source position this sink can search.
+    pub searchable_position: Option<String>,
 }

@@ -36,4 +36,4 @@ tokio = { workspace = true, features = ["rt", "time", "macros", "sync"] }
 serde_json.workspace = true
 stream-channel.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }

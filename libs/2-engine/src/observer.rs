@@ -113,9 +113,11 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, index, id, reason);
     }
 
-    /// `sink` flushed and acknowledged every live change up to and including
-    /// `position`: a fetch by id at the destination now sees them. Reported
-    /// after the acknowledgement, in order; keep the highest.
+    /// `sink` flushed every live change up to and including `position`: a
+    /// fetch by id at the destination now sees them. Reported as the flush
+    /// returns and *before* the batch is acknowledged, so whoever listens
+    /// knows of a position before the source can be told it is confirmed. A
+    /// redelivered batch can repeat an earlier position; keep the highest.
     fn on_position_applied(&self, sink: &SinkName, position: Position) {
         let _ = (sink, position);
     }

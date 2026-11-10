@@ -18,7 +18,8 @@
 //! `reindex` + `ensure_index` on the sink, then a fresh `Backfill` request.
 //!
 //! The loop also reports the sink's two **fence levels** to the observer.
-//! *Applied* is the position of the batch just acknowledged. *Searchable*
+//! *Applied* is the position of the batch just flushed, reported before its
+//! acknowledgement (see the loop for why the order matters). *Searchable*
 //! trails it by what each flush reported ([`Visibility`]): the engine queues
 //! every positioned flush with the moment it becomes searchable and reports the
 //! position of the last one that has, in order, so a searchable position always
@@ -62,7 +63,7 @@ pub struct SinkEngine {
     /// received yet. Survives a restart of this engine's run, so re-staging
     /// doesn't ask for a snapshot the ingest engine is already serving.
     outstanding: Mutex<BTreeSet<IndexName>>,
-    /// Flushed and acknowledged positions not yet reported as searchable,
+    /// Flushed positions not yet reported as searchable,
     /// oldest first. Survives a restart of this engine's run, so a position
     /// flushed before a failure is still reported once its time comes.
     unsearchable: Mutex<VecDeque<(Position, Searchable)>>,
@@ -284,10 +285,14 @@ impl SinkEngine {
                                 None
                             }
                         };
-                        handle.ack().await?;
+                        // Before the acknowledgement: applied is a fact about
+                        // the destination, and a listener must hear of it
+                        // before the source can be told the position is
+                        // confirmed and forget it.
                         if let Some((position, visibility)) = flushed {
                             self.report_positions(position, visibility);
                         }
+                        handle.ack().await?;
                     }
                 },
                 message = control.recv(), if control_open => match message {
@@ -301,7 +306,7 @@ impl SinkEngine {
         }
     }
 
-    /// Report an acknowledged flush: its position is applied, and it joins the
+    /// Report a flush that returned: its position is applied, and it joins the
     /// queue of positions waiting to become searchable. A snapshot batch has no
     /// position, but an immediate flush of one still releases what earlier
     /// flushes deferred.
