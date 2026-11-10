@@ -5,16 +5,10 @@
 //! fetches the next page once they're consumed — no prefetch, so the caller
 //! sets the pace.
 //!
-//! - Built by the cursor terminals: [`CursorSearch::pages`] / [`hits`] /
-//!   [`id_stream`] and [`MultiCursorSearch::pages`] / [`hits`](crate::MultiCursorSearch::hits).
-//!   It owns a clone of the [`Client`], so it is `'static + Send`: store it,
-//!   return it, spawn it.
-//! - A failed page yields its error, then the walk ends. [`Walk::cursor`]
-//!   still names the failed page, so a new walk from it retries.
-//! - A **live** walk holds nothing on the cluster. A **pinned** walk
-//!   ([`point_in_time`]) holds a point-in-time until it ends: the last page
-//!   closes it, [`Walk::close`] closes it now, dropping the walk closes it in
-//!   the background, and [`Walk::into_cursor`] keeps it for a later resume.
+//! Built by the cursor terminals: [`CursorSearch::pages`] / [`hits`] /
+//! [`id_stream`] and [`MultiCursorSearch::pages`] /
+//! [`hits`](crate::MultiCursorSearch::hits). How a walk ends (and what a
+//! pinned walk does with its point-in-time) is on [`Walk`].
 //!
 //! ```no_run
 //! # use flusso_query::{Client, FlussoRoot, FlussoScope, Result, Segment};
@@ -39,7 +33,6 @@
 //! [`hits`]: crate::CursorSearch::hits
 //! [`id_stream`]: crate::CursorSearch::id_stream
 //! [`MultiCursorSearch::pages`]: crate::MultiCursorSearch::pages
-//! [`point_in_time`]: crate::CursorSearch::point_in_time
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -51,7 +44,8 @@ use futures_core::Stream;
 
 use crate::Client;
 use crate::cursor::PageCursor;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::search::{Hit, SearchResponse};
 
 /// One fetched page, reduced to what a walk yields.
 pub(crate) struct Fetched<I> {
@@ -61,12 +55,33 @@ pub(crate) struct Fetched<I> {
 
 type PageFuture<I> = Pin<Box<dyn Future<Output = Result<Fetched<I>>> + Send>>;
 
+impl<T> Fetched<SearchResponse<T>> {
+    /// A [`pages`](crate::CursorSearch::pages) walk's step: the whole page.
+    pub(crate) fn page(page: SearchResponse<T>) -> Self {
+        let next = page.next.clone();
+        Self {
+            items: vec![page],
+            next,
+        }
+    }
+}
+
+impl<T> Fetched<Hit<T>> {
+    /// A [`hits`](crate::CursorSearch::hits) walk's step: the page's hits.
+    pub(crate) fn hits(page: SearchResponse<T>) -> Self {
+        Self {
+            items: page.hits,
+            next: page.next,
+        }
+    }
+}
+
 /// Fetches the page after a cursor (`None`: the first page).
 pub(crate) type FetchPage<I> =
     Box<dyn Fn(Client, Option<PageCursor>) -> PageFuture<I> + Send + Sync>;
 
 /// A whole cursor walk as a [`Stream`] of `Result<I>`: pages
-/// ([`SearchResponse`](crate::SearchResponse)), hits ([`Hit`](crate::Hit)), or
+/// ([`SearchResponse`]), hits ([`Hit`]), or
 /// ids (`String`), depending on the terminal that built it.
 ///
 /// Consume it with `futures::TryStreamExt` (`try_next`, `try_collect`, …).
@@ -76,8 +91,12 @@ pub(crate) type FetchPage<I> =
 /// - **After the last page.** A pinned walk's point-in-time is closed then.
 /// - **On a failed page.** The error is yielded, then the stream ends;
 ///   [`cursor`](Self::cursor) still names the failed page, so a new walk from it
-///   retries.
-/// - **[`close`](Self::close)**: now, reporting a failed close.
+///   retries (a pinned walk: take it with [`into_cursor`](Self::into_cursor),
+///   or the drop closes its point-in-time). A [`CursorMismatch`] or
+///   [`CursorExpired`] page leaves no cursor: there is nothing to retry.
+/// - **[`close`](Self::close)**: now, reporting a failed close. A pinned first
+///   page still in flight has no point-in-time the walk knows of yet; that one
+///   expires on its own.
 /// - **[`into_cursor`](Self::into_cursor)**: now, keeping a pinned walk's
 ///   point-in-time open for a later resume.
 /// - **Dropped early** (`break`, `?`, a cancelled request): a pinned walk's
@@ -87,6 +106,9 @@ pub(crate) type FetchPage<I> =
 ///   one expires on its own too.
 ///
 /// A live walk holds nothing on the cluster, so every ending is free for it.
+///
+/// [`CursorMismatch`]: crate::Error::CursorMismatch
+/// [`CursorExpired`]: crate::Error::CursorExpired
 pub struct Walk<I> {
     client: Client,
     fetch: FetchPage<I>,
@@ -111,11 +133,13 @@ impl<I> Walk<I> {
     }
 
     /// The checkpoint: the cursor that resumes right after the **last page
-    /// fetched**. Hand it to a new `.cursor(..)` to continue later.
+    /// fetched**. Hand it to a new `.cursor(..)` to continue later; to keep a
+    /// pinned walk's point-in-time open for that, end the walk with
+    /// [`into_cursor`](Self::into_cursor) instead of dropping it.
     ///
     /// Exact for [`pages`](crate::CursorSearch::pages). For hits and ids, the
     /// items of the current page not yet consumed are skipped on resume. `None`
-    /// before the first page of a new walk, and once the walk is finished.
+    /// before the first page of a new walk and after its last page.
     #[must_use]
     pub fn cursor(&self) -> Option<&PageCursor> {
         self.cursor.as_ref()
@@ -127,8 +151,8 @@ impl<I> Walk<I> {
         self.finished
     }
 
-    /// End the walk now. A pinned walk closes its point-in-time and reports a
-    /// failure to; a live walk holds nothing, so this is free.
+    /// End the walk now. A pinned walk closes its point-in-time, and a failed
+    /// close is returned; a live walk holds nothing, so this is free.
     pub async fn close(mut self) -> Result<()> {
         self.in_flight = None;
         match self.cursor.take() {
@@ -178,6 +202,11 @@ impl<I> Stream for Walk<I> {
                 }
                 Err(error) => {
                     this.finished = true;
+                    // A foreign or dead cursor is nothing to retry, and its
+                    // point-in-time is not this walk's to close on drop.
+                    if matches!(error, Error::CursorMismatch | Error::CursorExpired { .. }) {
+                        this.cursor = None;
+                    }
                     return Poll::Ready(Some(Err(error)));
                 }
             }

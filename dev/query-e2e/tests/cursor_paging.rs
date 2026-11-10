@@ -296,13 +296,21 @@ async fn a_prefixed_live_union_walk_follows_a_reindex_and_ids_page_too() {
             break;
         }
     }
-    let streamed: Vec<_> = walk()
+    let streamed: Vec<String> = walk()
         .cursor(None)
         .hits(&client)
+        .map_ok(|hit| match hit.source {
+            StoreItem::User(_) => format!("user:{}", hit.id),
+            StoreItem::Order(_) => format!("order:{}", hit.id),
+        })
         .try_collect()
         .await
         .unwrap();
-    assert_eq!(streamed.len(), 4, "the union streams as one walk too");
+    assert_eq!(
+        streamed,
+        ["order:1", "order:2", "user:1", "user:2"],
+        "the union streams as one walk, colliding ids apart"
+    );
     assert_eq!(
         seen,
         [

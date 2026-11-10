@@ -459,22 +459,13 @@ where
     /// from this search's cursor and mode; see [`Walk`] for how it ends.
     #[must_use]
     pub fn pages(self, client: &Client) -> Walk<SearchResponse<U>> {
-        self.walk(client, |page| {
-            let next = page.next.clone();
-            Fetched {
-                items: vec![page],
-                next,
-            }
-        })
+        self.walk(client, Fetched::page)
     }
 
     /// Stream every hit of the blended walk, page after page. See [`Walk`].
     #[must_use]
     pub fn hits(self, client: &Client) -> Walk<Hit<U>> {
-        self.walk(client, |page| Fetched {
-            items: page.hits,
-            next: page.next,
-        })
+        self.walk(client, Fetched::hits)
     }
 
     fn walk<I: 'static>(

@@ -685,22 +685,13 @@ where
     /// cursor and mode; see [`Walk`] for how it ends.
     #[must_use]
     pub fn pages(self, client: &Client) -> Walk<SearchResponse<T>> {
-        self.walk(client, |page| {
-            let next = page.next.clone();
-            Fetched {
-                items: vec![page],
-                next,
-            }
-        })
+        self.walk(client, Fetched::page)
     }
 
     /// Stream every hit of the walk, page after page. See [`Walk`].
     #[must_use]
     pub fn hits(self, client: &Client) -> Walk<Hit<T>> {
-        self.walk(client, |page| Fetched {
-            items: page.hits,
-            next: page.next,
-        })
+        self.walk(client, Fetched::hits)
     }
 
     fn walk<I: 'static>(
@@ -723,10 +714,7 @@ where
     }
 }
 
-impl<T> CursorSearch<T>
-where
-    T: Send + 'static,
-{
+impl<T: 'static> CursorSearch<T> {
     /// Stream every document id of the walk (no sources fetched), page after
     /// page — the cheap way to feed every match into another lookup. See
     /// [`Walk`].

@@ -365,8 +365,9 @@ page.next                            // Option<PageCursor>: opaque string, None 
 - `filter_nested` projections take no cursor; they page by `.from`/`.size` within each parent.
 - **Walk everything as a stream** instead of looping on `next`: `.cursor(None).hits(&client)` (or
   `.pages`, `.id_stream`) is a `Walk` (`futures::Stream`, `'static + Send`, `TryStreamExt::try_next`),
-  one page fetched per page consumed. `walk.cursor()` is the checkpoint; for a pinned walk,
-  `close().await` / `into_cursor()` (keeps it open) / drop (closes in the background) end it.
+  fetching the next page once the current one is consumed. `walk.cursor()` is the checkpoint; for a
+  pinned walk, `close().await` / `into_cursor()` (keeps it open, the only way to resume it later) /
+  drop (closes in the background) end it.
 
 ## Custom value types — `#[derive(FlussoValue)]`
 

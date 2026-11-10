@@ -762,8 +762,8 @@ serves now (`GET {path}/_alias`), or a reindex mid-walk repeats every tie; a PIT
 FNV-1a over the body (minus delivery keys) and the *prefixed* path, pinned by
 `the_fingerprint_is_pinned`; a gone PIT is `CursorExpired`, matched on the exception type, not the 404.
 `Walk<I>` (`sdk/query/src/walk.rs`, issue #158) streams a whole walk (`pages`/`hits`/`id_stream`
-consume the cursor search): a hand-written `futures_core::Stream` over a boxed page fetch, one page
-per page consumed; its `Drop` closes a still-pinned point-in-time by **spawning** on
+consume the cursor search): a hand-written `futures_core::Stream` over a boxed page fetch, fetching the
+next page once the current one is consumed; its `Drop` closes a still-pinned point-in-time by **spawning** on
 `tokio::runtime::Handle::try_current()` (`Drop` can't await), while `into_cursor` keeps it open.
 Guarded by `tests::cursor`, `tests::walk`, and the `cursor_paging` live e2e (helpers shared in
 `tests/common/`).

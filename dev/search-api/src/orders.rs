@@ -69,7 +69,9 @@ struct ExportFilter {
 /// A pinned walk: the export is one consistent copy of the index, however long
 /// it takes to download. Each page is fetched only once the client has taken
 /// the previous one, and if the client disconnects, axum drops the body, the
-/// walk with it, and the walk closes its point-in-time.
+/// walk with it, and the walk closes its point-in-time. The status and headers
+/// go out before the first page is read, so an error mid-export can only cut
+/// the body short; it is logged here.
 async fn export(
     State(client): State<Client>,
     Query(filter): Query<ExportFilter>,
@@ -82,7 +84,8 @@ async fn export(
         .point_in_time()
         .hits(&client);
     let lines = walk.map(|hit| -> Result<Vec<u8>, BoxError> {
-        let mut line = serde_json::to_vec(&hit?.source)?;
+        let hit = hit.inspect_err(|error| tracing::warn!(%error, "order export cut short"))?;
+        let mut line = serde_json::to_vec(&hit.source)?;
         line.push(b'\n');
         Ok(line)
     });

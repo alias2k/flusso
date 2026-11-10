@@ -2380,7 +2380,8 @@ mod walk {
 
     type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-    /// One scripted page: its items, and whether another page follows.
+    /// The pages a fake walk serves, in order: each one's items, or `Err(())`
+    /// for a page that fails. Every page but the last hands out a next cursor.
     type Script = Vec<std::result::Result<Vec<u32>, ()>>;
 
     fn cursor_after(page: usize, pinned: bool) -> PageCursor {
@@ -2435,6 +2436,14 @@ mod walk {
         Ok(())
     }
 
+    #[test]
+    fn a_walk_is_send_and_static() {
+        fn assert_send<W: Send + 'static>() {}
+        assert_send::<Walk<crate::Hit<super::DecodedUser>>>();
+        assert_send::<Walk<crate::SearchResponse<super::StoreItem>>>();
+        assert_send::<Walk<String>>();
+    }
+
     #[tokio::test]
     async fn an_empty_last_page_ends_the_walk() -> Result {
         let (walk, _) = scripted(vec![Ok(vec![1]), Ok(Vec::new())], false);
@@ -2455,6 +2464,27 @@ mod walk {
             Some(&cursor_after(0, false)),
             "the cursor still names the failed page"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_mismatched_or_expired_page_leaves_nothing_to_retry_or_close() -> Result {
+        for error in [
+            || Error::CursorMismatch,
+            || Error::CursorExpired {
+                body: String::new(),
+            },
+        ] {
+            let fetch: FetchPage<u32> =
+                Box::new(move |_client, _cursor| Box::pin(async move { Err(error()) }));
+            let client = Client::connect("http://127.0.0.1:9")?;
+            let mut walk = Walk::new(&client, Some(cursor_after(0, true)), fetch);
+            assert!(walk.try_next().await.is_err());
+            assert!(
+                walk.cursor().is_none(),
+                "a foreign or dead point-in-time is not this walk's to retry or close"
+            );
+        }
         Ok(())
     }
 
