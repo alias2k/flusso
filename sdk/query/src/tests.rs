@@ -1868,7 +1868,7 @@ fn keyword_map_without_subfields_mirrors_the_exact_family_over_its_keys() {
         json!("/a\\/[0-9]+/")
     );
     assert_eq!(qs(codes.fuzzy("sael").to_value()), json!("sael~"));
-    assert_eq!(codes.fuzzy("").to_value(), json!({ "match_none": {} }));
+    assert_eq!(qs(codes.fuzzy("").to_value()), json!("//"));
     assert_eq!(
         qs(codes.regexp(r"a\/b/c\\").to_value()),
         json!(r"/a\/b\/c\\/")
@@ -2021,6 +2021,98 @@ fn a_cross_key_query_in_a_nested_scope_lifts_like_a_field_query() {
     assert_eq!(
         value["nested"]["query"]["multi_match"]["fields"],
         json!(["orders.names.it^2", "orders.names.*"])
+    );
+}
+
+#[test]
+fn map_bare_terms_take_an_operator_word_literally() {
+    let codes = KeywordMap::<Root, NoSubfields>::leaf("codes");
+    let qs = |value: serde_json::Value| value["query_string"]["query"].clone();
+    for word in ["AND", "OR", "NOT"] {
+        assert_eq!(
+            qs(codes.fuzzy(word).to_value()),
+            json!(format!("\\{word}~"))
+        );
+        assert_eq!(
+            qs(codes.wildcard(word).to_value()),
+            json!(format!("\\{word}"))
+        );
+        assert_eq!(
+            qs(codes.prefix(word).to_value()),
+            json!(format!("\\{word}*"))
+        );
+        assert_eq!(qs(codes.eq(word).to_value()), json!(format!("\"{word}\"")));
+    }
+    assert_eq!(qs(codes.prefix("ORANGE").to_value()), json!("\\ORANGE*"));
+    assert_eq!(qs(codes.fuzzy("and").to_value()), json!("and~"));
+    assert_eq!(qs(codes.fuzzy("&&").to_value()), json!("\\&\\&~"));
+    assert_eq!(qs(codes.wildcard("||").to_value()), json!("\\|\\|"));
+    assert_eq!(qs(codes.prefix("!").to_value()), json!("\\!*"));
+    assert_eq!(
+        qs(TextMap::<Root>::at("title").contains("NOT").to_value()),
+        json!("*\\NOT*")
+    );
+}
+
+#[test]
+fn map_wildcard_copies_a_user_escape_as_a_pair() {
+    let codes = KeywordMap::<Root, NoSubfields>::leaf("codes");
+    let qs = |value: serde_json::Value| value["query_string"]["query"].clone();
+    assert_eq!(qs(codes.wildcard(r"a\ b").to_value()), json!(r"a\ b"));
+    assert_eq!(qs(codes.wildcard(r"a\-b").to_value()), json!(r"a\-b"));
+    assert_eq!(qs(codes.wildcard(r"a\\b").to_value()), json!(r"a\\b"));
+    assert_eq!(qs(codes.wildcard(r"a\").to_value()), json!(r"a\\"));
+    assert_eq!(qs(codes.wildcard(r"\AND").to_value()), json!(r"\AND"));
+    assert_eq!(codes.wildcard("").to_value(), json!({ "match_none": {} }));
+}
+
+#[test]
+fn map_an_empty_exact_value_matches_only_the_empty_value() {
+    let codes = KeywordMap::<Root, NoSubfields>::leaf("codes");
+    let qs = |value: serde_json::Value| value["query_string"]["query"].clone();
+    assert_eq!(qs(codes.eq("").to_value()), json!("//"));
+    assert_eq!(
+        qs(codes.any_of(["", "a"]).to_value()),
+        json!(r#"// OR "a""#)
+    );
+}
+
+#[test]
+fn map_only_preferred_with_no_preferred_key_matches_nothing() {
+    let none = json!({ "match_none": {} });
+    let title = TextMap::<Root>::at("title");
+    assert_eq!(title.matches("x").only_preferred().to_value(), none);
+    assert_eq!(title.match_phrase("x").only_preferred().to_value(), none);
+    assert_eq!(title.contains("x").only_preferred().to_value(), none);
+    assert_eq!(
+        title
+            .keyword_lowercase()
+            .eq("x")
+            .only_preferred()
+            .to_value(),
+        none
+    );
+    assert_eq!(
+        KeywordMap::<Root, NoSubfields>::leaf("codes")
+            .wildcard("x*")
+            .only_preferred()
+            .to_value(),
+        none
+    );
+    assert_eq!(
+        NumberMap::<crate::kind::Long, Root>::at("prices")
+            .gt(1)
+            .only_preferred()
+            .name("cheap")
+            .to_value(),
+        json!({ "match_none": { "_name": "cheap" } })
+    );
+    assert_eq!(
+        DateMap::<Root>::at("released")
+            .gte("now-1d")
+            .only_preferred()
+            .to_value(),
+        none
     );
 }
 

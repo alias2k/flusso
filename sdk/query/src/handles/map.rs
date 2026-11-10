@@ -17,7 +17,8 @@
 //! - `prefer(key, weight)` weights one key (`path.key^weight`). Add several to
 //!   rank keys, e.g. the user's locale first. In a filter it changes nothing.
 //! - `only_preferred()` drops the all-keys fallback, so only the preferred keys
-//!   are searched.
+//!   are searched. With no preferred key it renders `match_none`: an empty
+//!   `fields` would search every field of the index.
 //!
 //! # How a cross-key query renders
 //!
@@ -32,7 +33,8 @@
 //! - Every other operator is a `query_string` over one explicit pattern, the
 //!   value escaped so it's matched literally: `eq`/`any_of` are quoted terms,
 //!   ranges are `[a TO b]`, `prefix` is `v*`, `regexp` is `/re/`, `fuzzy` is
-//!   `v~`.
+//!   `v~`. A bare term starting with `AND`/`OR`/`NOT` gets its first letter
+//!   escaped so it doesn't parse as an operator.
 //!
 //! A pattern that matches no field (a map with no keys yet) matches nothing.
 //!
@@ -156,7 +158,7 @@ impl MapPath {
 
     /// `"a" OR "b"`; no values matches nothing, as an empty `terms` does.
     fn terms(&self, values: impl IntoIterator<Item = Value>) -> CrossKey {
-        let terms: Vec<String> = values.into_iter().map(|v| quoted(&literal(&v))).collect();
+        let terms: Vec<String> = values.into_iter().map(|v| exact(&literal(&v))).collect();
         self.query_string((!terms.is_empty()).then(|| terms.join(" OR ")))
     }
 
@@ -226,22 +228,72 @@ fn quoted(value: &str) -> String {
     out
 }
 
+/// One exact value: [`quoted`], or `//` for the empty string. An empty phrase
+/// `""` analyzes to nothing and matches nothing; the empty regex matches
+/// exactly the empty value, as a `term` does.
+fn exact(value: &str) -> String {
+    if value.is_empty() {
+        EMPTY_VALUE.to_string()
+    } else {
+        quoted(value)
+    }
+}
+
+/// The `query_string` regex that matches only the empty value.
+const EMPTY_VALUE: &str = "//";
+
 /// The characters `query_string` gives a meaning; each is escaped with a backslash so
 /// the value is matched literally (whitespace too, so it stays one term).
 fn is_query_string_syntax(c: char) -> bool {
     c.is_whitespace() || "\\+-=&|><!(){}[]^\"~*?:/".contains(c)
 }
 
-/// Escape every `query_string` syntax character except those in `keep`.
-fn escaped(value: &str, keep: &str) -> String {
+/// A bare `query_string` term, `value` escaped so it's matched literally.
+fn escaped(value: &str) -> String {
     let mut out = String::new();
     for c in value.chars() {
-        if is_query_string_syntax(c) && !keep.contains(c) {
+        if is_query_string_syntax(c) {
             out.push('\\');
         }
         out.push(c);
     }
-    out
+    not_an_operator(out)
+}
+
+/// A bare `query_string` wildcard term: `?` and `*` stay wildcards, a `\` and
+/// the character after it are copied as one escape, and every other syntax
+/// character is escaped. A trailing lone `\` is a literal backslash, as in a
+/// `wildcard` query.
+fn wildcard_term(pattern: &str) -> String {
+    let mut out = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push('\\');
+                out.push(chars.next().unwrap_or('\\'));
+            }
+            '*' | '?' => out.push(c),
+            _ => {
+                if is_query_string_syntax(c) {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+        }
+    }
+    not_an_operator(out)
+}
+
+/// A bare term starting with `AND`, `OR` or `NOT` can parse as that operator
+/// (`AND~` is a 400). Escaping its first letter keeps it a term: `\AND` is
+/// `AND`.
+fn not_an_operator(term: String) -> String {
+    if ["AND", "OR", "NOT"].iter().any(|op| term.starts_with(op)) {
+        format!("\\{term}")
+    } else {
+        term
+    }
 }
 
 /// A `query_string` regex term, `/pattern/`. An unescaped `/` would end it, so
@@ -291,15 +343,17 @@ impl CrossKey {
         self.opts.insert(key.to_string(), value);
     }
 
+    /// No query, or no field to run it on, renders `match_none`. An empty
+    /// `fields` would fall back to `index.query.default_field`: every field.
     fn render<S>(self) -> Query<S> {
-        let Some(query) = self.query else {
+        let (Some(query), Some(fields)) = (self.query, self.keys.into_value()) else {
             let mut body = Map::new();
             self.common.write(&mut body);
             return wrap("match_none", body);
         };
         let mut body = self.opts;
         body.insert("query".to_string(), Value::String(query));
-        body.insert("fields".to_string(), self.keys.into_value());
+        body.insert("fields".to_string(), fields);
         self.common.write(&mut body);
         wrap(self.wrapper, body)
     }
@@ -332,7 +386,8 @@ macro_rules! cross_key_builder {
                 self
             }
 
-            /// Query only the preferred keys: drop the `path.*` fallback.
+            /// Query only the preferred keys: drop the `path.*` fallback. With
+            /// no preferred key, the query matches nothing.
             #[must_use]
             pub fn only_preferred(mut self) -> Self {
                 self.body.keys.include_all = false;
@@ -614,7 +669,7 @@ cross_key_builder!(
 );
 
 fn contains_body(path: &MapPath, value: &str) -> CrossKey {
-    let query = (!value.trim().is_empty()).then(|| format!("*{}*", escaped(value, "")));
+    let query = (!value.trim().is_empty()).then(|| format!("*{}*", escaped(value)));
     path.view(KEYWORD_LOWERCASE_SUFFIX).query_string(query)
 }
 
@@ -878,17 +933,17 @@ impl<S> KeywordMap<S, NoSubfields> {
 
     /// Some key starts with `value`.
     pub fn prefix(&self, value: impl Into<String>) -> MapPrefix<S> {
-        let query = format!("{}*", escaped(&value.into(), ""));
+        let query = format!("{}*", escaped(&value.into()));
         MapPrefix::new(self.keys.query_string(Some(query)))
     }
 
     /// Some key matches the wildcard `pattern`: `?` matches one character,
-    /// `*` matches any run, and `\` escapes the next character.
+    /// `*` matches any run, and `\` escapes the next character. An empty
+    /// pattern matches nothing, as on one key.
     pub fn wildcard(&self, pattern: impl Into<String>) -> MapWildcard<S> {
-        MapWildcard::new(
-            self.keys
-                .query_string(Some(escaped(&pattern.into(), "*?\\"))),
-        )
+        let pattern = pattern.into();
+        let query = (!pattern.is_empty()).then(|| wildcard_term(&pattern));
+        MapWildcard::new(self.keys.query_string(query))
     }
 
     /// Some key matches the regular expression `pattern` (Lucene syntax,
@@ -898,11 +953,15 @@ impl<S> KeywordMap<S, NoSubfields> {
     }
 
     /// Some key is within the default `AUTO` edit distance of `value`. An
-    /// empty value matches nothing.
+    /// empty value matches only the empty value, as `AUTO` does on one key.
     pub fn fuzzy(&self, value: impl Into<String>) -> MapFuzzy<S> {
         let value = value.into();
-        let query = (!value.is_empty()).then(|| format!("{}~", escaped(&value, "")));
-        MapFuzzy::new(self.keys.query_string(query))
+        let query = if value.is_empty() {
+            EMPTY_VALUE.to_string()
+        } else {
+            format!("{}~", escaped(&value))
+        };
+        MapFuzzy::new(self.keys.query_string(Some(query)))
     }
 
     /// Sort by this key, with optional fallback (`sort_key("a").or("b")`),
@@ -1021,11 +1080,12 @@ impl KeyFields {
             .push(format!("{}.{key}{}^{weight}", self.path, self.suffix));
     }
 
-    fn into_value(self) -> Value {
+    /// `None` when there is no field: only preferred keys, and none preferred.
+    fn into_value(self) -> Option<Value> {
         let mut fields: Vec<Value> = self.preferred.into_iter().map(Value::String).collect();
         if self.include_all {
             fields.push(Value::String(format!("{}.*{}", self.path, self.suffix)));
         }
-        Value::Array(fields)
+        (!fields.is_empty()).then_some(Value::Array(fields))
     }
 }

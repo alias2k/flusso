@@ -17,7 +17,9 @@
 //! each key returns, `only_preferred` narrows to the preferred keys, and a
 //! cross-key query lifts into a `nested` scope. A keyword map with subfields
 //! shows why it has no cross-key `eq`: `path.*` also reaches each key's `.text`
-//! and `.keyword_lowercase`.
+//! and `.keyword_lowercase`. Adversarial values (operator words, backslash
+//! escapes, quotes, a leading `-`, the empty string) agree with the per-key
+//! `or` too, and `only_preferred` with no preferred key matches nothing.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -313,8 +315,10 @@ async fn agree<R: FlussoRoot>(
     cross_key: impl AsQuery<Root>,
     or_of_keys: Query<Root>,
 ) -> Vec<String> {
+    let cross_key = cross_key.into_query().unwrap();
+    let shown = cross_key.clone().to_value();
     let cross = ids_in::<R>(client, cross_key).await;
-    assert_eq!(cross, ids_in::<R>(client, or_of_keys).await);
+    assert_eq!(cross, ids_in::<R>(client, or_of_keys).await, "{shown}");
     cross
 }
 
@@ -482,9 +486,30 @@ async fn map_cross_key_queries_match_the_per_key_or() {
     assert_eq!(
         ids_in::<Catalog>(
             &client,
+            title.matches("zebra").prefer("en", 1.0).only_preferred()
+        )
+        .await,
+        ["2"]
+    );
+    assert_eq!(
+        ids_in::<Catalog>(
+            &client,
             title.matches("zebra").prefer("it", 1.0).only_preferred()
         )
         .await,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ids_in::<Catalog>(&client, title.matches("zebra").only_preferred()).await,
+        Vec::<String>::new(),
+        "only_preferred with no prefer must not fall back to every field"
+    );
+    assert_eq!(
+        ids_in::<Catalog>(&client, title.contains("zebra")).await,
+        ["2"]
+    );
+    assert_eq!(
+        ids_in::<Catalog>(&client, title.contains("zebra").only_preferred()).await,
         Vec::<String>::new()
     );
     let ranked: Vec<String> = Catalog::query()
@@ -603,7 +628,15 @@ async fn map_cross_key_queries_match_the_per_key_or() {
         ["1"]
     );
     assert_eq!(
+        ids_in::<Tagged>(&client, tags.eq("sale").prefer("b", 2.0).only_preferred()).await,
+        ["3"]
+    );
+    assert_eq!(
         ids_in::<Tagged>(&client, tags.eq("sale").prefer("a", 2.0).only_preferred()).await,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ids_in::<Tagged>(&client, tags.eq("sale").only_preferred()).await,
         Vec::<String>::new()
     );
 
@@ -682,7 +715,15 @@ async fn map_cross_key_queries_match_the_per_key_or() {
         ["2"]
     );
     assert_eq!(
+        ids_in::<Catalog>(&client, prices.gt(15).prefer("eur", 1.0).only_preferred()).await,
+        ["2"]
+    );
+    assert_eq!(
         ids_in::<Catalog>(&client, prices.gt(15).prefer("usd", 1.0).only_preferred()).await,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ids_in::<Catalog>(&client, prices.gt(15).only_preferred()).await,
         Vec::<String>::new()
     );
 
@@ -751,6 +792,121 @@ async fn map_cross_key_queries_match_the_per_key_or() {
     let empty = NumberMap::<kind::Double, Root>::at("nothing");
     assert_eq!(
         ids_in::<Catalog>(&client, empty.gt(0)).await,
+        Vec::<String>::new()
+    );
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Tricky {}
+impl FlussoScope for Tricky {
+    const PATH: &'static [Segment] = &[];
+}
+impl FlussoRoot for Tricky {
+    const INDEX: &'static str = "tricky";
+    const SCHEMA_HASH: &'static str = "00001861";
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn map_cross_key_adversarial_values_match_the_per_key_or() {
+    let (_container, base) = start_opensearch().await;
+    let tricky = IndexMapping {
+        index: IndexName::try_new(Tricky::INDEX).unwrap(),
+        hash: ContentHash::new(0x1861),
+        fields: vec![map_field("tags", &FlussoType::Keyword)],
+    };
+    let values = [
+        "AND", "OR", "NOT", "and", "or", "not", "&&", "||", "!", "a b", "a-b", "a\\", "\"q\"",
+        "-lead", "", "ANDROID",
+    ];
+    let docs: Vec<(String, GenericValue)> = values
+        .iter()
+        .enumerate()
+        .map(|(n, value)| {
+            let key = if n % 2 == 0 { "a" } else { "b" };
+            let tags = strings(&[(key, value), ("c", "filler")]);
+            (
+                n.to_string(),
+                GenericValue::Map(BTreeMap::from([("tags".to_owned(), tags)])),
+            )
+        })
+        .collect();
+    let docs: Vec<(&str, GenericValue)> = docs
+        .iter()
+        .map(|(id, doc)| (id.as_str(), doc.clone()))
+        .collect();
+    seed_many(&bare_sink(&base), &tricky, &docs).await;
+    refresh(&base, &Tricky::physical_index()).await;
+    let client = Client::connect(&base).unwrap();
+
+    let tags = KeywordMap::<Root, NoSubfields>::leaf("tags");
+    let k = ["a", "b", "c"];
+    for value in values {
+        let found = agree::<Tricky>(
+            &client,
+            tags.eq(value),
+            per_key(&k, |key| tags.key(key).eq(value)),
+        )
+        .await;
+        assert!(!found.is_empty(), "eq {value:?} finds its document");
+        agree::<Tricky>(
+            &client,
+            tags.prefix(value),
+            per_key(&k, |key| tags.key(key).prefix(value)),
+        )
+        .await;
+        agree::<Tricky>(
+            &client,
+            tags.fuzzy(value),
+            per_key(&k, |key| tags.key(key).fuzzy(value)),
+        )
+        .await;
+    }
+    for pattern in [
+        "AND", "OR", "NOT", "and", "&&", "||", "!", "a\\ b", "a\\-b", "a\\", "a\\\\", "a b",
+        "\"q\"", "-lead", "N?T", "AND*", "",
+    ] {
+        agree::<Tricky>(
+            &client,
+            tags.wildcard(pattern),
+            per_key(&k, |key| tags.key(key).wildcard(pattern)),
+        )
+        .await;
+    }
+    assert_eq!(
+        agree::<Tricky>(
+            &client,
+            tags.wildcard("a\\ b"),
+            per_key(&k, |key| tags.key(key).wildcard("a\\ b"))
+        )
+        .await,
+        ["9"]
+    );
+    assert_eq!(
+        agree::<Tricky>(
+            &client,
+            tags.wildcard("a\\"),
+            per_key(&k, |key| tags.key(key).wildcard("a\\"))
+        )
+        .await,
+        ["11"]
+    );
+    assert_eq!(
+        agree::<Tricky>(
+            &client,
+            tags.any_of(["AND", "OR", "NOT"]),
+            per_key(&k, |key| tags.key(key).any_of(["AND", "OR", "NOT"]))
+        )
+        .await,
+        ["0", "1", "2"]
+    );
+    assert!(
+        !ids_in::<Tricky>(&client, tags.eq("filler"))
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        ids_in::<Tricky>(&client, tags.eq("filler").only_preferred()).await,
         Vec::<String>::new()
     );
 }
