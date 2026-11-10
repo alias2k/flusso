@@ -8,9 +8,8 @@
 //   every load and edit.
 // - `adoptIds` carries the current uids onto a schema that arrived without them
 //   (Code mode's parsed YAML), matching containers by name, then position.
-// - `uidsByPath` / `withUidsByPath` flatten the uids to a path-keyed table and
-//   back, so the store can persist the saved doc's uids and re-apply them to
-//   the same file on the next page load.
+// - `uidSkeleton` reduces a schema to names + uids, so the store can persist
+//   the saved doc's uids and `adoptIds` them onto the file on the next load.
 // - `stripUids` removes them before a schema crosses the wire.
 
 import type { Field, IndexSchema } from "../api";
@@ -50,8 +49,14 @@ export function stampIds(schema: IndexSchema): IndexSchema {
 /// Copy `prev`'s container uids onto the uid-less containers of `next`, then
 /// stamp whatever is left. A container takes the uid of the sibling container
 /// with its name (so removing a field above it doesn't shift ids), else of an
-/// unclaimed one at its index whose name is gone (a rename).
-export function adoptIds(prev: IndexSchema | undefined, next: IndexSchema): IndexSchema {
+/// unclaimed one at its index whose name is gone (a rename) — unless `byNameOnly`,
+/// for a file that may have changed outside the designer, where a new container
+/// landing in a removed one's slot must not inherit it.
+export function adoptIds(
+  prev: Pick<IndexSchema, "fields"> | undefined,
+  next: IndexSchema,
+  byNameOnly = false,
+): IndexSchema {
   const adopt = (old: Field[], fields: Field[]): Field[] => {
     const olds = old.filter(isContainer);
     const names = new Set(fields.map((f) => f.field));
@@ -59,7 +64,7 @@ export function adoptIds(prev: IndexSchema | undefined, next: IndexSchema): Inde
     const match = (field: Field, i: number): Field | undefined => {
       const byName = olds.find((o) => o.field === field.field && !claimed.has(o));
       if (byName) return byName;
-      const atIndex = old[i];
+      const atIndex = byNameOnly ? undefined : old[i];
       return atIndex && isContainer(atIndex) && !claimed.has(atIndex) && !names.has(atIndex.field)
         ? atIndex
         : undefined;
@@ -76,33 +81,17 @@ export function adoptIds(prev: IndexSchema | undefined, next: IndexSchema): Inde
   return stampIds({ ...next, fields: adopt(prev?.fields ?? [], next.fields) });
 }
 
-/// Every container's uid, keyed by its positional path (`"2.0"`).
-export function uidsByPath(schema: IndexSchema): Record<string, string> {
-  const out: Record<string, string> = {};
-  const walk = (fields: Field[], prefix: string) =>
-    fields.forEach((field, i) => {
+/// The schema reduced to what `adoptIds` matches on: every field's name, and
+/// each container's uid and children. Small enough to persist per index.
+export function uidSkeleton(schema: IndexSchema): Pick<IndexSchema, "fields"> {
+  const skeleton = (fields: Field[]): Field[] =>
+    fields.map((field) => {
       const children = childFields(field);
-      if (children === null) return;
-      const key = prefix ? `${prefix}.${i}` : `${i}`;
-      if (field.uid) out[key] = field.uid;
-      walk(children, key);
+      return children === null
+        ? { field: field.field, source: { constant: null } }
+        : { field: field.field, uid: field.uid, source: { group: skeleton(children) } };
     });
-  walk(schema.fields, "");
-  return out;
-}
-
-/// Give each uid-less container the uid `table` records for its path, then
-/// stamp whatever is left.
-export function withUidsByPath(schema: IndexSchema, table: Record<string, string>): IndexSchema {
-  const assign = (fields: Field[], prefix: string): Field[] =>
-    fields.map((field, i) => {
-      const children = childFields(field);
-      if (children === null) return field;
-      const key = prefix ? `${prefix}.${i}` : `${i}`;
-      const uid = field.uid ?? table[key];
-      return withChildFields(uid ? { ...field, uid } : field, assign(children, key));
-    });
-  return stampIds({ ...schema, fields: assign(schema.fields, "") });
+  return { fields: skeleton(schema.fields) };
 }
 
 /// The fields without any uid, recursively — the kernel shape.

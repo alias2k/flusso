@@ -3,7 +3,7 @@
 import { create, useStore } from "zustand";
 import { temporal } from "zundo";
 import type { CatalogResponse, ConfigToml, DiagnosticDto, IndexSchema, PreviewResponse, Project } from "../api";
-import { stampIds, stripUids, uidsByPath, withUidsByPath } from "../model/ids";
+import { adoptIds, stampIds, stripUids, uidSkeleton } from "../model/ids";
 import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
 import { type Graph, pathId, projectGraph } from "../model/tree";
 import type { Selection } from "../state";
@@ -73,15 +73,18 @@ function reconcileViewState(index: string, graph: Graph) {
 
 // Node uids are made in the browser, so to key view state across reloads the
 // uids of the *saved* doc (what the next load reads from disk) are persisted per
-// index by path, and re-applied to the same paths on load. Unsaved containers
-// get fresh uids next session; their view state is dropped with them.
+// index as a name skeleton, and adopted onto the loaded file by name — so a file
+// changed on disk in between (a pull, a hand edit) can't hand one node's uid to
+// another that moved into its slot. Unsaved containers get fresh uids next
+// session; their view state is dropped with them.
 const uidsKey = (index: string) => `flusso-design.uids.${index}`;
 
-const readUids = (index: string): Record<string, string> => {
+const readUids = (index: string): Pick<IndexSchema, "fields"> | undefined => {
   try {
-    return JSON.parse(localStorage.getItem(uidsKey(index)) ?? "{}") as Record<string, string>;
+    const stored = JSON.parse(localStorage.getItem(uidsKey(index)) ?? "null") as Pick<IndexSchema, "fields"> | null;
+    return Array.isArray(stored?.fields) ? stored : undefined;
   } catch {
-    return {};
+    return undefined;
   }
 };
 
@@ -89,14 +92,14 @@ const persistUids = (saved: string) => {
   try {
     const doc = JSON.parse(saved) as Doc;
     for (const [name, schema] of Object.entries(doc.schemas))
-      localStorage.setItem(uidsKey(name), JSON.stringify(uidsByPath(schema)));
+      localStorage.setItem(uidsKey(name), JSON.stringify(uidSkeleton(schema)));
   } catch {
     /* storage disabled — view state just won't survive a reload */
   }
 };
 
 const stampAll = (schemas: Record<string, IndexSchema>): Record<string, IndexSchema> =>
-  Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, withUidsByPath(schema, readUids(name))]));
+  Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, adoptIds(readUids(name), schema, true)]));
 
 interface DesignState {
   project: Project | null;
