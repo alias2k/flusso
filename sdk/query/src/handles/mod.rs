@@ -25,6 +25,10 @@ use serde_json::{Map, Value};
 
 use crate::query::Query;
 
+/// The suffix of the case/accent-folded keyword subfield the OpenSearch sink
+/// puts on every `text`/`keyword` field (its `KEYWORD_LOWERCASE_SUBFIELD`).
+const KEYWORD_LOWERCASE_SUFFIX: &str = ".keyword_lowercase";
+
 mod compound;
 mod extra;
 mod geo;

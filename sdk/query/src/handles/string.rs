@@ -12,8 +12,9 @@ use std::marker::PhantomData;
 use serde_json::{Map, Value};
 
 use super::{
-    Common, FlussoValue, Fuzziness, MinimumShouldMatch, MultiMatchType, Operator, Sort, SortOrder,
-    Sortable, TermsQuery, ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
+    Common, FlussoValue, Fuzziness, KEYWORD_LOWERCASE_SUFFIX, MinimumShouldMatch, MultiMatchType,
+    Operator, Sort, SortOrder, Sortable, TermsQuery, ZeroTermsQuery, common_opts, exists_q,
+    keyed_value_query, kind, wrap,
 };
 use crate::FlussoScope;
 use crate::query::{AsQuery, Query, Root};
@@ -544,7 +545,7 @@ impl<S> Keyword<S, WithSubfields> {
     /// auto-creates — for case-insensitive exact match and sort. Only in scope
     /// when the field carries auto subfields.
     pub fn keyword_lowercase(&self) -> Keyword<S, NoSubfields> {
-        Keyword::leaf(format!("{}.keyword_lowercase", self.path))
+        Keyword::leaf(format!("{}{KEYWORD_LOWERCASE_SUFFIX}", self.path))
     }
 }
 
@@ -763,7 +764,7 @@ impl<S> Text<S, WithSubfields> {
     /// case-insensitive exact match and sort. Only in scope when the field
     /// carries auto subfields.
     pub fn keyword_lowercase(&self) -> Keyword<S, NoSubfields> {
-        Keyword::leaf(format!("{}.keyword_lowercase", self.path))
+        Keyword::leaf(format!("{}{KEYWORD_LOWERCASE_SUFFIX}", self.path))
     }
 }
 

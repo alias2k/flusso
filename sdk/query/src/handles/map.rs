@@ -50,8 +50,9 @@ use serde_json::{Map, Value};
 
 use super::sort::MapSortValueKind;
 use super::{
-    Common, Date, Fuzziness, Keyword, MapKeySort, MinimumShouldMatch, MultiMatchType, NoSubfields,
-    Number, Operator, Text, WithSubfields, common_opts, exists_q, wrap,
+    Common, Date, Fuzziness, KEYWORD_LOWERCASE_SUFFIX, Keyword, MapKeySort, MinimumShouldMatch,
+    MultiMatchType, NoSubfields, Number, Operator, Text, WithSubfields, common_opts, exists_q,
+    wrap,
 };
 use crate::query::{AsQuery, Query, Root};
 
@@ -267,10 +268,8 @@ impl<K, S> NumberMap<K, S> {
 /// [`only_preferred`](Self::only_preferred) drops the fallback.
 #[derive(Debug, Clone)]
 pub struct MapSearch<S = Root> {
-    path: String,
+    keys: KeyFields,
     query: String,
-    preferred: Vec<String>,
-    include_all: bool,
     opts: Map<String, Value>,
     common: Common,
     _scope: PhantomData<fn() -> S>,
@@ -279,10 +278,8 @@ pub struct MapSearch<S = Root> {
 impl<S> MapSearch<S> {
     fn new(path: &str, query: String) -> Self {
         Self {
-            path: path.to_string(),
+            keys: KeyFields::new(path, ""),
             query,
-            preferred: Vec::new(),
-            include_all: true,
             opts: Map::new(),
             common: Common::default(),
             _scope: PhantomData,
@@ -293,8 +290,7 @@ impl<S> MapSearch<S> {
     /// several to rank keys (e.g. the user's locale highest).
     #[must_use]
     pub fn prefer(mut self, key: impl AsRef<str>, weight: f32) -> Self {
-        self.preferred
-            .push(format!("{}.{}^{weight}", self.path, key.as_ref()));
+        self.keys.prefer(key.as_ref(), weight);
         self
     }
 
@@ -302,7 +298,7 @@ impl<S> MapSearch<S> {
     /// otherwise also searches every other key.
     #[must_use]
     pub fn only_preferred(mut self) -> Self {
-        self.include_all = false;
+        self.keys.include_all = false;
         self
     }
 
@@ -342,13 +338,9 @@ impl<S> MapSearch<S> {
 
 impl<S> AsQuery<S> for MapSearch<S> {
     fn into_query(self) -> Option<Query<S>> {
-        let mut fields: Vec<Value> = self.preferred.iter().cloned().map(Value::String).collect();
-        if self.include_all {
-            fields.push(Value::String(format!("{}.*", self.path)));
-        }
         let mut body = self.opts;
         body.insert("query".to_string(), Value::String(self.query));
-        body.insert("fields".to_string(), Value::Array(fields));
+        body.insert("fields".to_string(), self.keys.into_value());
         // `best_fields` takes the max score per field, so the same term matching
         // several keys isn't double-counted.
         body.entry("type")
@@ -385,10 +377,8 @@ fn is_query_string_syntax(c: char) -> bool {
 /// ```
 #[derive(Debug, Clone)]
 pub struct MapContains<S = Root> {
-    path: String,
+    keys: KeyFields,
     value: String,
-    preferred: Vec<String>,
-    include_all: bool,
     common: Common,
     _scope: PhantomData<fn() -> S>,
 }
@@ -396,10 +386,8 @@ pub struct MapContains<S = Root> {
 impl<S> MapContains<S> {
     fn new(path: &str, value: &str) -> Self {
         Self {
-            path: path.to_string(),
+            keys: KeyFields::new(path, KEYWORD_LOWERCASE_SUFFIX),
             value: value.to_string(),
-            preferred: Vec::new(),
-            include_all: true,
             common: Common::default(),
             _scope: PhantomData,
         }
@@ -408,36 +396,22 @@ impl<S> MapContains<S> {
     /// Prefer a key, weighting its score by `weight`.
     #[must_use]
     pub fn prefer(mut self, key: impl AsRef<str>, weight: f32) -> Self {
-        self.preferred.push(format!(
-            "{}.{}.{KEYWORD_LOWERCASE}^{weight}",
-            self.path,
-            key.as_ref()
-        ));
+        self.keys.prefer(key.as_ref(), weight);
         self
     }
 
     /// Match only the preferred keys — drop the `path.*` fallback.
     #[must_use]
     pub fn only_preferred(mut self) -> Self {
-        self.include_all = false;
+        self.keys.include_all = false;
         self
     }
 
     common_opts!(common);
 }
 
-/// The subfield [`MapContains`] matches on (the sink's `keyword_lowercase`).
-const KEYWORD_LOWERCASE: &str = "keyword_lowercase";
-
 impl<S> AsQuery<S> for MapContains<S> {
     fn into_query(self) -> Option<Query<S>> {
-        let mut fields: Vec<Value> = self.preferred.into_iter().map(Value::String).collect();
-        if self.include_all {
-            fields.push(Value::String(format!(
-                "{}.*.{KEYWORD_LOWERCASE}",
-                self.path
-            )));
-        }
         let mut pattern = String::from("*");
         for c in self.value.chars() {
             if is_query_string_syntax(c) {
@@ -448,8 +422,43 @@ impl<S> AsQuery<S> for MapContains<S> {
         pattern.push('*');
         let mut body = Map::new();
         body.insert("query".to_string(), Value::String(pattern));
-        body.insert("fields".to_string(), Value::Array(fields));
+        body.insert("fields".to_string(), self.keys.into_value());
         self.common.write(&mut body);
         Some(wrap("query_string", body))
+    }
+}
+
+/// The `fields` list of a cross-key query: each preferred key with its weight,
+/// then the `path.*` fallback unless dropped. `suffix` targets a subfield of
+/// every key (`.keyword_lowercase`), or the key itself when empty.
+#[derive(Debug, Clone)]
+struct KeyFields {
+    path: String,
+    suffix: &'static str,
+    preferred: Vec<String>,
+    include_all: bool,
+}
+
+impl KeyFields {
+    fn new(path: &str, suffix: &'static str) -> Self {
+        Self {
+            path: path.to_string(),
+            suffix,
+            preferred: Vec::new(),
+            include_all: true,
+        }
+    }
+
+    fn prefer(&mut self, key: &str, weight: f32) {
+        self.preferred
+            .push(format!("{}.{key}{}^{weight}", self.path, self.suffix));
+    }
+
+    fn into_value(self) -> Value {
+        let mut fields: Vec<Value> = self.preferred.into_iter().map(Value::String).collect();
+        if self.include_all {
+            fields.push(Value::String(format!("{}.*{}", self.path, self.suffix)));
+        }
+        Value::Array(fields)
     }
 }

@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 
 use serde_json::{Map, Value};
 
-use super::{Geo, GeoPoint, NumericType, ScriptSortType};
+use super::{Geo, GeoPoint, KEYWORD_LOWERCASE_SUFFIX, NumericType, ScriptSortType};
 use crate::query::{AsQuery, Root};
 use crate::{FlussoScope, nested_boundaries};
 
@@ -413,9 +413,8 @@ pub(crate) enum MapSortValueKind {
 /// `for (def f : params.fields) { if present → return … }` then the `missing`
 /// fallback. Walking `params.fields` in order is the whole point: it's the
 /// **key fallback** (sort by the first preferred key a document actually has).
-const STRING_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;";
 const LOWERCASE_STRING_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;";
-const NUMBER_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;";
+const FIRST_PRESENT_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;";
 const DATE_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toInstant().toEpochMilli(); } } return params.missing;";
 
 /// The `params.missing` sentinel that places key-less documents first or last on
@@ -492,7 +491,7 @@ impl<S> MapKeySort<S> {
 
     fn leaf_field(&self, key: &str) -> String {
         match self.kind {
-            MapSortValueKind::Folded => format!("{}.{key}.keyword_lowercase", self.path),
+            MapSortValueKind::Folded => format!("{}.{key}{KEYWORD_LOWERCASE_SUFFIX}", self.path),
             MapSortValueKind::Exact | MapSortValueKind::Number | MapSortValueKind::Date => {
                 format!("{}.{key}", self.path)
             }
@@ -509,13 +508,15 @@ impl<S: FlussoScope> MapKeySort<S> {
             .collect();
 
         let (sort_type, source, default_missing) = match self.kind {
-            MapSortValueKind::Folded => ("string", STRING_SOURCE, Value::String(String::new())),
+            MapSortValueKind::Folded => {
+                ("string", FIRST_PRESENT_SOURCE, Value::String(String::new()))
+            }
             MapSortValueKind::Exact => (
                 "string",
                 LOWERCASE_STRING_SOURCE,
                 Value::String(String::new()),
             ),
-            MapSortValueKind::Number => ("number", NUMBER_SOURCE, Value::from(0)),
+            MapSortValueKind::Number => ("number", FIRST_PRESENT_SOURCE, Value::from(0)),
             MapSortValueKind::Date => ("number", DATE_SOURCE, Value::from(0)),
         };
 
