@@ -208,6 +208,9 @@ export interface IndexEntry {
   schema: string;
   enabled: boolean;
   on_error?: unknown;
+  /// Per-sink options for this index only, keyed by sink name
+  /// (`[index.sinks.<name>]`); the shape is the sink adapter's `index_schema`.
+  sinks?: Record<string, Record<string, unknown>>;
   /// A session-local, stable id used to correlate an index across renames and
   /// path changes when computing the save op set. Never written to disk —
   /// stripped from the config before any backend call.
@@ -365,6 +368,9 @@ export interface AdapterDescription {
   example: Record<string, unknown>;
   /// `.`-joined paths of the options that take an override variable.
   secrets: string[];
+  /// A draft-07 JSON schema of the options the adapter takes per index, under
+  /// `[index.sinks.<name>]`; absent when it takes none.
+  index_schema?: Record<string, unknown>;
 }
 
 export const api = {

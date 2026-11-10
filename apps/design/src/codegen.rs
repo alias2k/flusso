@@ -450,6 +450,36 @@ mod tests {
     }
 
     #[test]
+    fn roundtrips_per_index_sink_options() {
+        let raw = r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+            index_settings = { "mapping.total_fields.limit" = 5000 }
+
+            [[index]]
+            name = "orders"
+            schema = "orders.schema.yml"
+            enabled = true
+
+            [index.sinks.primary]
+            index_settings = { "mapping.nested_objects.limit" = 20000 }
+        "#;
+        let config = ConfigToml::try_parse(raw).unwrap();
+        let regenerated = config_to_toml(&config).unwrap();
+        let reparsed = ConfigToml::try_parse(&regenerated).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::to_value(&reparsed).unwrap(),
+            "regenerated flusso.toml differs\n--- generated ---\n{regenerated}",
+        );
+        assert!(!reparsed.index[0].sinks.is_empty());
+    }
+
+    #[test]
     fn emits_type_first_form() {
         let schema = parse(include_str!("../../../dev/orders.schema.yml"));
         let yaml = schema_to_yaml(&schema).unwrap();
