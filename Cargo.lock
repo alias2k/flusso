@@ -1134,6 +1134,7 @@ version = "0.15.1"
 dependencies = [
  "axum",
  "flusso-query",
+ "futures",
  "serde",
  "serde_json",
  "tokio",

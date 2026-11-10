@@ -1,12 +1,16 @@
-//! The `orders` index document and a filterable endpoint.
+//! The `orders` index document, a filterable endpoint, and a streaming export.
 
 // Note: the `orders` document has no analyzed `text` field (status is a
 // `keyword`, the rest numeric/date), so there's no free-text `q` here — unlike
 // users/products. Filter it by its exact and range fields below.
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{BoxError, Json, Router};
 use flusso_query::{Client, Decimal, FlussoRoot, PageCursor, Sortable};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -48,7 +52,44 @@ struct OrderFilter {
 pub(crate) fn routes() -> Router<Client> {
     Router::new()
         .route("/orders", get(list))
+        .route("/orders/export", get(export))
         .route("/orders/{id}", get(get_one))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ExportFilter {
+    user_id: Option<i32>,
+    status: Option<String>,
+}
+
+/// `GET /orders/export?status=delivered` — every matching order as NDJSON,
+/// streamed as it's read.
+///
+/// A pinned walk: the export is one consistent copy of the index, however long
+/// it takes to download. Each page is fetched only once the client has taken
+/// the previous one, and if the client disconnects, axum drops the body, the
+/// walk with it, and the walk closes its point-in-time.
+async fn export(
+    State(client): State<Client>,
+    Query(filter): Query<ExportFilter>,
+) -> impl IntoResponse {
+    let walk = Order::query()
+        .filter(filter.user_id.map(|v| Order::user_id().eq(v)))
+        .filter(filter.status.map(|v| Order::status().eq(v)))
+        .size(500)
+        .cursor(None)
+        .point_in_time()
+        .hits(&client);
+    let lines = walk.map(|hit| -> Result<Vec<u8>, BoxError> {
+        let mut line = serde_json::to_vec(&hit?.source)?;
+        line.push(b'\n');
+        Ok(line)
+    });
+    (
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        Body::from_stream(lines),
+    )
 }
 
 /// `GET /orders/{id}` — fetch one document by its root primary key, or `404`.
