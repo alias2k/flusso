@@ -4,16 +4,16 @@
 //! lower-level pieces live in [`transport`](crate), [`generations`](crate),
 //! [`mapping`](crate), and [`bulk`](crate).
 
-use std::sync::PoisonError;
+use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
 use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, to_json};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
-use crate::OpensearchSink;
 use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks};
-use crate::generations::{generation_name, hash_alias_of, next_generation, parse_generation};
+use crate::generations::{generation_name, next_generation, parse_generation};
+use crate::{IndexTarget, OpensearchSink};
 
 #[async_trait]
 impl Sink for OpensearchSink {
@@ -37,6 +37,9 @@ impl Sink for OpensearchSink {
     ///   and the backfill refills it. Deleting the generation index is therefore
     ///   a "rebuild this index on the next start" signal, never a way to end up
     ///   serving an empty index that claims to be seeded.
+    ///
+    /// The outcome also picks where [`apply`](Self::apply) writes: a seeded
+    /// index through its hash alias, an unseeded one through its generation.
     #[tracing::instrument(
         name = "os.ensure_index",
         skip_all,
@@ -66,11 +69,6 @@ impl Sink for OpensearchSink {
             }
         };
         let index = generation_name(&hash_alias, generation);
-
-        self.index_names
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(logical.to_owned(), index.clone());
 
         if self.index_exists(&index).await? {
             debug!(index, "generation exists; leaving its mapping untouched");
@@ -105,17 +103,35 @@ impl Sink for OpensearchSink {
             self.ensure_alias(&self.convenience_alias(logical), &index)
                 .await;
         }
+        self.set_target(
+            logical,
+            IndexTarget {
+                generation: index,
+                hash_alias,
+                seeded,
+            },
+        );
         Ok(())
     }
 
+    /// Buffer one envelope's bulk action, addressed by its index's write
+    /// target (see `IndexTarget::write_target`).
     async fn apply(&self, envelope: &Envelope) -> Result<()> {
-        let index = self.physical(envelope.index.as_ref());
+        let logical = envelope.index.as_ref();
+        let (index, require_alias) = match self.target(logical) {
+            Some(target) => {
+                let (index, require_alias) = target.write_target();
+                (index.to_owned(), require_alias)
+            }
+            None => (logical.to_owned(), false),
+        };
         let id = envelope.id.clone();
         let action = match (envelope.op, &envelope.document) {
             (Op::Upsert, Some(document)) => BulkAction::Index {
                 index,
                 id,
                 doc: to_json(document),
+                require_alias,
             },
             (Op::Upsert, None) => {
                 return Err(SinkError::Write(format!(
@@ -144,6 +160,9 @@ impl Sink for OpensearchSink {
     /// no refresh is forced; visibility is left to the index's configured
     /// `refresh_interval`, keeping bulk indexing fast so the backlog clears (see
     /// the module docs).
+    ///
+    /// A missing target fails the whole flush, not one document (see the
+    /// `bulk` module docs).
     #[tracing::instrument(name = "os.flush", skip_all, fields(caught_up), err)]
     async fn flush(&self, caught_up: bool) -> Result<FlushReport> {
         let actions = {
@@ -195,22 +214,12 @@ impl Sink for OpensearchSink {
             start = end;
         }
 
-        // Rejections carry the *physical* index (what the bulk request used);
-        // map each back to its *logical* name so the engine can resolve a
-        // per-index failure policy. Reverse the logical→physical table learned
-        // at `ensure_index`; fall back to the physical name if it's unknown.
+        // The engine resolves failure policies by logical name.
         if !rejected.is_empty() {
-            let names = self
-                .index_names
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let to_logical: std::collections::HashMap<&str, &str> = names
-                .iter()
-                .map(|(l, p)| (p.as_str(), l.as_str()))
-                .collect();
+            let to_logical = self.logical_names();
             for doc in &mut rejected {
-                if let Some(&logical) = to_logical.get(doc.index.as_str()) {
-                    doc.index = logical.to_owned();
+                if let Some(logical) = to_logical.get(&doc.index) {
+                    doc.index.clone_from(logical);
                 }
             }
         }
@@ -219,11 +228,11 @@ impl Sink for OpensearchSink {
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {
-        let Some(hash_alias) = hash_alias_of(&self.physical(index.as_ref())) else {
+        let Some(target) = self.target(index.as_ref()) else {
             return Ok(false);
         };
         Ok(self
-            .read_index_meta(&hash_alias)
+            .read_index_meta(&target.hash_alias)
             .await?
             .is_some_and(|(_, seeded)| seeded))
     }
@@ -239,50 +248,78 @@ impl Sink for OpensearchSink {
     /// swap); on a reindex the swap is the moment the rebuild becomes visible —
     /// until here reads stayed on the old generation. If any step fails the
     /// marker isn't written, so the next run re-runs the (idempotent) backfill.
+    ///
+    /// Every other `{hash_alias}_{n}` is dropped too, not only the ones the
+    /// alias moved off: a generation nothing serves and nothing builds (an
+    /// orphan from a crash, or from an older flusso staging a second reindex
+    /// over an in-flight one) would otherwise hold a full copy forever.
     async fn mark_seeded(&self, index: &IndexName) -> Result<()> {
         let logical = index.as_ref();
-        let generation = self.physical(logical);
-        let Some(hash_alias) = hash_alias_of(&generation) else {
+        let Some(target) = self.target(logical) else {
             return Err(SinkError::Write(format!(
                 "cannot mark {logical} seeded: it has no active generation (ensure_index not run?)"
             )));
         };
-        let active = parse_generation(&hash_alias, &generation).unwrap_or(1);
+        let IndexTarget {
+            generation,
+            hash_alias,
+            ..
+        } = &target;
+        let active = parse_generation(hash_alias, generation).unwrap_or(1);
 
-        self.refresh_index(&generation).await?;
-        self.restore_auto_refresh(&generation).await?;
+        self.refresh_index(generation).await?;
+        self.restore_auto_refresh(generation).await?;
 
-        // The generations the hash alias is about to move off — drop them once
-        // both aliases have swapped. Computed before the swap.
-        let superseded: Vec<String> = self
-            .alias_holders(&hash_alias)
+        // Computed before the swap: afterwards the alias holders are just the
+        // active generation.
+        let stale: BTreeSet<String> = self
+            .alias_holders(hash_alias)
             .await?
             .into_iter()
-            .filter(|holder| {
-                holder != &generation && parse_generation(&hash_alias, holder).is_some()
-            })
+            .chain(self.list_generations(hash_alias).await?)
+            .filter(|name| name != generation && parse_generation(hash_alias, name).is_some())
             .collect();
 
-        self.try_ensure_alias(&hash_alias, &generation).await?;
-        self.ensure_alias(&self.convenience_alias(logical), &generation)
+        self.try_ensure_alias(hash_alias, generation).await?;
+        self.ensure_alias(&self.convenience_alias(logical), generation)
             .await;
 
-        for stale in &superseded {
-            self.delete_index(stale).await?;
+        for name in &stale {
+            self.delete_index(name).await?;
         }
 
-        self.write_index_meta(&hash_alias, active, true).await
+        self.write_index_meta(hash_alias, active, true).await?;
+        self.set_target(
+            logical,
+            IndexTarget {
+                seeded: true,
+                ..target
+            },
+        );
+        Ok(())
     }
 
     /// Stage a from-scratch rebuild of `index` into a fresh generation, leaving
     /// the current one serving reads. Only flips meta to the next (unseeded)
-    /// generation; the next run's [`ensure_index`](Self::ensure_index) builds it,
-    /// the backfill seeds it, and [`mark_seeded`](Self::mark_seeded) swaps the
-    /// alias and drops the old generation. Creating the index is deferred to
-    /// `ensure_index` because that's where the mapping is available.
+    /// generation; the following [`ensure_index`](Self::ensure_index) builds
+    /// it, the backfill seeds it, and [`mark_seeded`](Self::mark_seeded) swaps
+    /// the alias and drops the old generation. Creating the index is deferred
+    /// to `ensure_index` because that's where the mapping is available.
+    ///
+    /// A no-op when the index isn't seeded (no meta doc, or `seeded: false`):
+    /// a from-scratch rebuild is already pending, and staging yet another
+    /// generation would orphan the one being built.
     async fn reindex(&self, mapping: &IndexMapping) -> Result<()> {
         let logical = mapping.index.as_ref();
         let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
+        if !matches!(self.read_index_meta(&hash_alias).await?, Some((_, true))) {
+            info!(
+                logical,
+                hash_alias,
+                "reindex requested while a rebuild is already pending; nothing to stage"
+            );
+            return Ok(());
+        }
         // Past everything that currently exists, so a crashed earlier reindex
         // can't make us reuse a live generation's name.
         let next = next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);

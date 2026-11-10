@@ -27,6 +27,9 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
   `{logical}_{hash}` — the hash comes from the parsed schema.
 - **Convenience alias.** Bare `{logical}` is also kept on the current generation
   for ad-hoc queries; best-effort.
+- **Writes.** A seeded index is written through `{logical}_{hash}` with
+  `require_alias`; an unseeded one (first seed, or a rebuild) through its
+  generation.
 - **Mapping.** Field types come from the schema, created `dynamic: strict`.
 - **Subfields.** Each `text`/`keyword` field gets `keyword` (exact),
   `keyword_lowercase` (sortable), and `text` (searchable) subfields.
@@ -34,7 +37,8 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
   immediate refresh on any caught-up flush.
 - **Seeding.** Persisted in a hidden `flusso_meta` index, so restarts skip a
   completed backfill. A marker whose generation index is gone is retracted, so
-  deleting the generation means "rebuild on next start".
+  deleting the generation means "rebuild it" — on the next start, or, while
+  running, on the next write to it.
 
 ## Index naming — alias over generations
 
@@ -107,10 +111,27 @@ had to be recreated, the engine treats every seeded index as stale and stages a
 exist at the source are dropped on the swap — before backfilling. That decision
 lives in the engine, not here; see the `flusso-engine` docs.
 
+## The generation lifecycle while running
+
+- **A deleted generation fails the write.** A seeded index is written through
+  its hash alias with `require_alias`, so a deleted generation can't be
+  auto-created with a dynamic mapping. The `index_not_found_exception` fails the
+  whole [`flush`](OpensearchSink::flush), and the sink engine's restart
+  rebuilds the generation through `ensure_index`. An unseeded generation is
+  still written by its concrete name. The gap and the recommended
+  `action.auto_create_index` setting are in the
+  [manual](https://alias2k.github.io/flusso/reference/sink-opensearch.html#seeding).
+- **A second reindex is a no-op.** [`reindex`](OpensearchSink::reindex) stages
+  nothing for an index that's unseeded or has no meta doc, since a rebuild from
+  scratch is already pending. [`mark_seeded`](OpensearchSink::mark_seeded)
+  drops every non-active generation, which reclaims orphans. That includes a
+  hand-made `{hash_alias}_1` from the legacy-migration message when meta is
+  absent; it's harmless, because the data is reseeded into the active generation.
+
 ## Module layout
 
 This file holds the [`OpensearchSink`] type, its constructor (from an [`OpensearchConfig`], the adapter's own `[sinks.<name>]` declaration), and the few
-shared helpers (`maybe_auth`, `physical`). The rest is split by concern:
+shared helpers (`maybe_auth`, `target`). The rest is split by concern:
 
 - `transport` — the HTTP plumbing: the bulk request, the small request
   helpers, and the generic per-index operations (create/exists/delete/refresh).

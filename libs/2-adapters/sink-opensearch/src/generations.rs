@@ -198,15 +198,6 @@ pub(crate) fn parse_generation(hash_alias: &str, index: &str) -> Option<u64> {
         .ok()
 }
 
-/// The hash alias an active generation belongs to — the name minus its
-/// `_{n}` suffix (the inverse of [`generation_name`]). `None` if the name has no
-/// numeric generation suffix.
-pub(crate) fn hash_alias_of(generation: &str) -> Option<String> {
-    let (prefix, suffix) = generation.rsplit_once('_')?;
-    suffix.parse::<u64>().ok()?;
-    Some(prefix.to_owned())
-}
-
 /// The generation to build next, given the existing generation indexes of a hash
 /// alias: one past the highest existing generation, or `1` when none exist — so a
 /// generation number is never reused, even if a crashed reindex left an orphan.

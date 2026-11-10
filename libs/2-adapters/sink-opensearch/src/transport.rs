@@ -32,7 +32,8 @@ impl OpensearchSink {
     /// conflict, a malformed value) — are **not** retried: re-sending the same
     /// document yields the same rejection. They are returned as
     /// [`RejectedDocument`]s for the engine's failure policy to handle, while
-    /// the accepted actions in the same request stay applied.
+    /// the accepted actions in the same request stay applied, except a missing
+    /// target, which is an `Err` (see the `bulk` module docs).
     #[tracing::instrument(
         name = "os.bulk",
         level = "debug",
@@ -73,7 +74,7 @@ impl OpensearchSink {
                         SinkError::Write(format!("failed to read bulk response: {e}"))
                     })?;
 
-                    let rejected = bulk_rejected(&result, actions);
+                    let rejected = bulk_rejected(&result, actions)?;
                     debug!(
                         count = actions.len(),
                         rejected = rejected.len(),

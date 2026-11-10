@@ -26,6 +26,7 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
                 index: envelope.index.to_string(),
                 id: envelope.id.clone(),
                 doc: sink::to_json(document),
+                require_alias: false,
             },
             (kernel::Op::Upsert, None) => {
                 return Err(SinkError::Write(format!(
@@ -67,10 +68,11 @@ pub(crate) const META_INDEX: &str = "flusso_meta";
 ///
 /// Each [`apply`](OpensearchSink::apply) appends the envelope's operation to an
 /// in-memory buffer; [`flush`](OpensearchSink::flush) drains it as one or more bulk
-/// requests. Every index is addressed by its **physical** name — the logical
-/// name plus the schema hash, learned at
-/// [`ensure_index`](OpensearchSink::ensure_index) — so a structural schema change writes
-/// to a fresh index instead of the old one.
+/// requests. Every index is addressed by its schema hash, learned at
+/// [`ensure_index`](OpensearchSink::ensure_index), so a structural schema
+/// change writes to a fresh index instead of the old one. A seeded index is
+/// written through its hash alias (with `require_alias`), an unseeded one
+/// through its concrete generation.
 #[derive(Debug, Clone)]
 pub struct OpensearchSink {
     pub(crate) client: reqwest::Client,
@@ -97,10 +99,34 @@ pub struct OpensearchSink {
     pub(crate) index_prefix: String,
     /// In-flight operations, shared across clones.
     pub(crate) buffer: Arc<Mutex<Vec<BulkAction>>>,
-    /// Logical index name → physical name (logical + schema hash), learned from
-    /// [`ensure_index`](OpensearchSink::ensure_index). Writes and seed markers are
-    /// addressed by the physical name. Shared across clones.
-    pub(crate) index_names: Arc<SyncMutex<HashMap<String, String>>>,
+    /// Logical index name → where it lives and where its writes go, learned
+    /// from [`ensure_index`](OpensearchSink::ensure_index) and updated by
+    /// [`mark_seeded`](OpensearchSink::mark_seeded). Shared across clones.
+    pub(crate) targets: Arc<SyncMutex<HashMap<String, IndexTarget>>>,
+}
+
+/// Where one logical index lives, and so where its bulk writes are addressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndexTarget {
+    /// The active generation `{hash_alias}_{n}`.
+    pub(crate) generation: String,
+    /// The hash alias `{prefix}{logical}_{hash}` the generation sits behind.
+    pub(crate) hash_alias: String,
+    /// Whether the active generation is seeded.
+    pub(crate) seeded: bool,
+}
+
+impl IndexTarget {
+    /// The bulk `_index` for a write, and whether it must already be an alias
+    /// (`require_alias`): the hash alias once seeded, else the generation,
+    /// since the alias may still serve the previous one during a rebuild.
+    pub(crate) fn write_target(&self) -> (&str, bool) {
+        if self.seeded {
+            (&self.hash_alias, true)
+        } else {
+            (&self.generation, false)
+        }
+    }
 }
 
 impl OpensearchSink {
@@ -158,7 +184,7 @@ impl OpensearchSink {
             },
             index_prefix: String::new(),
             buffer: Arc::new(Mutex::new(Vec::new())),
-            index_names: Arc::new(SyncMutex::new(HashMap::new())),
+            targets: Arc::new(SyncMutex::new(HashMap::new())),
         })
     }
 
@@ -199,16 +225,37 @@ impl OpensearchSink {
         }
     }
 
-    /// The physical index name for a logical one, as learned from
-    /// [`ensure_index`](OpensearchSink::ensure_index). Falls back to the logical name if
-    /// the index was never announced, so a stray write is still addressable
-    /// rather than silently misrouted.
-    pub(crate) fn physical(&self, logical: &str) -> String {
-        self.index_names
+    /// What [`ensure_index`](OpensearchSink::ensure_index) learned about a
+    /// logical index; `None` if it was never announced.
+    pub(crate) fn target(&self, logical: &str) -> Option<IndexTarget> {
+        self.targets
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(logical)
             .cloned()
-            .unwrap_or_else(|| logical.to_owned())
+    }
+
+    /// Every name a write may have targeted (generation or hash alias) →
+    /// its logical index.
+    pub(crate) fn logical_names(&self) -> HashMap<String, String> {
+        self.targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .flat_map(|(logical, target)| {
+                [
+                    (target.generation.clone(), logical.clone()),
+                    (target.hash_alias.clone(), logical.clone()),
+                ]
+            })
+            .collect()
+    }
+
+    /// Record what is known about a logical index.
+    pub(crate) fn set_target(&self, logical: &str, target: IndexTarget) {
+        self.targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(logical.to_owned(), target);
     }
 }

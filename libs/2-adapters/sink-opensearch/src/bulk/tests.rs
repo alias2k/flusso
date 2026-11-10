@@ -7,6 +7,7 @@ fn bulk_body_index_produces_two_ndjson_lines() {
         index: "users".to_owned(),
         id: "42".to_owned(),
         doc,
+        require_alias: false,
     }];
     let body = build_bulk_body(&actions).unwrap();
     let lines: Vec<&str> = body.trim_end_matches('\n').split('\n').collect();
@@ -42,6 +43,7 @@ fn bulk_body_mixed_operations_are_ordered() {
             index: "users".to_owned(),
             id: "1".to_owned(),
             doc: json!({ "name": "alice" }),
+            require_alias: false,
         },
         BulkAction::Delete {
             index: "users".to_owned(),
@@ -85,7 +87,7 @@ fn bulk_url_pipeline_and_refresh() {
 #[test]
 fn bulk_rejected_is_empty_when_no_errors_flag() {
     let resp = json!({ "errors": false, "items": [] });
-    assert!(bulk_rejected(&resp, &[]).is_empty());
+    assert!(bulk_rejected(&resp, &[]).unwrap().is_empty());
 }
 
 #[test]
@@ -97,7 +99,7 @@ fn bulk_rejected_reports_the_item_with_a_4xx_status_and_its_reason() {
             "error": { "type": "mapper_parsing_exception", "reason": "failed to parse field" }
         } }]
     });
-    let rejected = bulk_rejected(&resp, &[]);
+    let rejected = bulk_rejected(&resp, &[]).unwrap();
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0].index, "users_ab12");
     assert_eq!(rejected[0].id, "1");
@@ -117,6 +119,7 @@ fn bulk_rejected_maps_position_to_the_originating_action() {
             index: "users_ab12".to_owned(),
             id: "2".to_owned(),
             doc: json!({}),
+            require_alias: false,
         },
     ];
     let resp = json!({
@@ -127,7 +130,7 @@ fn bulk_rejected_maps_position_to_the_originating_action() {
                          "error": { "reason": "boom" } } }
         ]
     });
-    let rejected = bulk_rejected(&resp, &actions);
+    let rejected = bulk_rejected(&resp, &actions).unwrap();
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0].id, "2");
     assert_eq!(rejected[0].reason, "boom");
@@ -139,7 +142,7 @@ fn bulk_rejected_is_empty_when_all_items_succeed() {
         "errors": true,
         "items": [{ "index": { "_index": "x", "_id": "1", "status": 200 } }]
     });
-    assert!(bulk_rejected(&resp, &[]).is_empty());
+    assert!(bulk_rejected(&resp, &[]).unwrap().is_empty());
 }
 
 #[test]
@@ -181,4 +184,68 @@ fn plan_chunks_applies_whichever_cap_is_hit_first() {
 #[test]
 fn plan_chunks_of_nothing_is_no_requests() {
     assert!(plan_chunks(&[], 10, 100).is_empty());
+}
+
+#[test]
+fn an_alias_targeted_index_action_requires_the_alias() {
+    let actions = vec![BulkAction::Index {
+        index: "users_ab12".to_owned(),
+        id: "1".to_owned(),
+        doc: json!({}),
+        require_alias: true,
+    }];
+    let body = build_bulk_body(&actions).unwrap();
+    let meta: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        meta,
+        json!({ "index": { "_index": "users_ab12", "_id": "1", "require_alias": true } })
+    );
+}
+
+#[test]
+fn a_generation_targeted_index_action_omits_require_alias() {
+    let actions = vec![BulkAction::Index {
+        index: "users_ab12_2".to_owned(),
+        id: "1".to_owned(),
+        doc: json!({}),
+        require_alias: false,
+    }];
+    let body = build_bulk_body(&actions).unwrap();
+    let meta: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+    assert!(meta["index"].get("require_alias").is_none());
+}
+
+#[test]
+fn a_missing_alias_fails_the_whole_flush() {
+    let actions = [BulkAction::Index {
+        index: "users_ab12".to_owned(),
+        id: "1".to_owned(),
+        doc: json!({}),
+        require_alias: true,
+    }];
+    let resp = json!({
+        "errors": true,
+        "items": [{ "index": { "_index": "users_ab12", "_id": "1", "status": 404,
+            "error": {
+                "type": "index_not_found_exception",
+                "reason": "no such index [users_ab12] and [require_alias] request flag is [true] and [users_ab12] is not an alias"
+            } } }]
+    });
+    let err = bulk_rejected(&resp, &actions).unwrap_err().to_string();
+    assert!(err.contains("users_ab12 is missing"), "{err}");
+    assert!(err.contains("is not an alias"), "{err}");
+}
+
+#[test]
+fn a_delete_against_a_missing_index_fails_the_whole_flush() {
+    let actions = [BulkAction::Delete {
+        index: "users_ab12".to_owned(),
+        id: "1".to_owned(),
+    }];
+    let resp = json!({
+        "errors": true,
+        "items": [{ "delete": { "_index": "users_ab12", "_id": "1", "status": 404,
+            "error": { "type": "index_not_found_exception", "reason": "no such index [users_ab12]" } } }]
+    });
+    assert!(bulk_rejected(&resp, &actions).is_err());
 }

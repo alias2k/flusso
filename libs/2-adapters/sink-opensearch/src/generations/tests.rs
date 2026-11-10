@@ -70,32 +70,15 @@ fn parse_generation_reads_a_numeric_suffix_only() {
 }
 
 #[test]
-fn hash_alias_of_strips_the_generation_suffix() {
-    assert_eq!(hash_alias_of("users_ab12_3").as_deref(), Some("users_ab12"));
-    // A logical name with underscores: only the trailing `_{n}` is stripped.
-    assert_eq!(
-        hash_alias_of("user_events_ab12_10").as_deref(),
-        Some("user_events_ab12")
-    );
-    // No numeric suffix → not a generation name.
-    assert_eq!(hash_alias_of("users"), None);
-    assert_eq!(hash_alias_of("users_abcd"), None);
-}
-
-#[test]
 fn naming_round_trips_under_an_index_prefix() {
     // A prefixed hash alias is just a longer string to the pure naming
-    // functions: generation naming and its inverses still line up, even when
+    // functions: generation naming and its inverse still line up, even when
     // the prefix itself contains underscores or trailing digits.
     for prefix in ["dev_", "staging-", "env1_"] {
         let hash_alias = format!("{prefix}users_ab12");
         let generation = generation_name(&hash_alias, 3);
         assert_eq!(generation, format!("{prefix}users_ab12_3"));
         assert_eq!(parse_generation(&hash_alias, &generation), Some(3));
-        assert_eq!(
-            hash_alias_of(&generation).as_deref(),
-            Some(hash_alias.as_str())
-        );
         assert_eq!(next_generation(&[generation], &hash_alias), 4);
     }
 }
