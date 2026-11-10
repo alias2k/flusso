@@ -1,0 +1,325 @@
+//! Page cursors: resume an ordered result list right after a page's last hit,
+//! reading **one consistent snapshot** of the index.
+//!
+//! Offset paging (`from`/`size`) re-runs the query on every page, so on an
+//! index flusso keeps current from the WAL it drifts: a write ahead of the
+//! window shifts every later page, a reindex swaps the generation under it, and
+//! `from + size` stops at `index.max_result_window`. A page cursor fixes all
+//! three (ADR 0008):
+//!
+//! - The first page opens an OpenSearch **point-in-time** (PIT) over the index.
+//!   Every page searches that PIT, so it sees neither later writes nor the
+//!   generation swap of a reindex.
+//! - Each page resumes with `search_after` the previous page's last sort values.
+//!   The sort is made total by appending `_id` (and `_index` for a combined
+//!   search) unless the caller's sort already holds it.
+//! - The [`PageCursor`] handed back in [`SearchResponse::next`] carries the PIT
+//!   id and those sort values as an **opaque string**, safe to pass through an
+//!   HTTP API and back.
+//!
+//! Start a walk with `None`, continue with the previous page's `next`:
+//!
+//! ```no_run
+//! # use flusso_query::{Client, FlussoRoot, FlussoScope, PageCursor, Result, Segment};
+//! # #[derive(serde::Deserialize)] struct User { email: String }
+//! # impl FlussoScope for User { const PATH: &'static [Segment] = &[]; }
+//! # impl FlussoRoot for User {
+//! #     const INDEX: &'static str = "users";
+//! #     const SCHEMA_HASH: &'static str = "xxxxxx";
+//! # }
+//! # async fn walk(client: &Client) -> Result<()> {
+//! let mut cursor: Option<PageCursor> = None;
+//! loop {
+//!     let page = User::query().size(500).cursor(cursor).send(client).await?;
+//!     for hit in &page.hits {
+//!         println!("{}", hit.source.email);
+//!     }
+//!     match page.next {
+//!         Some(next) => cursor = Some(next),
+//!         None => break,
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Cursors need **OpenSearch ≥ 2.4**. The snapshot lives for the
+//! [`keep_alive`](crate::CursorSearch::keep_alive), renewed by every page; once
+//! it lapses, or a reindex drops the generation it pinned, the next page fails
+//! with [`Error::CursorExpired`] and the walk restarts from page one.
+//!
+//! [`SearchResponse::next`]: crate::SearchResponse::next
+
+use std::fmt;
+use std::str::FromStr;
+use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::Client;
+use crate::error::{Error, Result};
+
+/// The token version this crate writes and reads.
+const VERSION: u8 = 1;
+
+/// How long the snapshot behind a cursor walk stays open between two pages,
+/// unless [`keep_alive`](crate::CursorSearch::keep_alive) says otherwise.
+pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(60);
+
+/// The page size OpenSearch uses when a search names none.
+const DEFAULT_SIZE: u64 = 10;
+
+/// An opaque token that resumes a cursor walk right after the page it came
+/// with. Get one from [`SearchResponse::next`](crate::SearchResponse::next) and
+/// hand it back to [`Search::cursor`](crate::Search::cursor).
+///
+/// It renders as a URL-safe string ([`Display`](fmt::Display) /
+/// [`FromStr`], and serde as a plain string), so it can travel through an
+/// HTTP API unchanged. It is bound to the query that produced it: resuming a
+/// different query fails with [`Error::CursorMismatch`]. It is not signed —
+/// editing it only changes the caller's own pages.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageCursor {
+    pit: String,
+    after: Vec<Value>,
+    fingerprint: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Token {
+    v: u8,
+    pit: String,
+    after: Vec<Value>,
+    fp: String,
+}
+
+impl PageCursor {
+    pub(crate) fn new(pit: String, after: Vec<Value>, fingerprint: u64) -> Self {
+        Self {
+            pit,
+            after,
+            fingerprint,
+        }
+    }
+
+    /// Close the snapshot behind this walk now, instead of letting it expire.
+    /// The last page of a walk closes it on its own; call this when a walk is
+    /// abandoned early. Closing an already-expired snapshot is not an error.
+    pub async fn close(&self, client: &Client) -> Result<()> {
+        client.close_pit(&self.pit).await
+    }
+
+    pub(crate) fn pit(&self) -> &str {
+        &self.pit
+    }
+
+    pub(crate) fn after(&self) -> &[Value] {
+        &self.after
+    }
+
+    /// Reject a cursor handed back with a different query than the one that
+    /// produced it.
+    pub(crate) fn check(&self, fingerprint: u64) -> Result<()> {
+        if self.fingerprint == fingerprint {
+            Ok(())
+        } else {
+            Err(Error::CursorMismatch)
+        }
+    }
+}
+
+impl fmt::Display for PageCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let token = Token {
+            v: VERSION,
+            pit: self.pit.clone(),
+            after: self.after.clone(),
+            fp: format!("{:016x}", self.fingerprint),
+        };
+        let json = serde_json::to_vec(&token).map_err(|_| fmt::Error)?;
+        f.write_str(&URL_SAFE_NO_PAD.encode(json))
+    }
+}
+
+impl FromStr for PageCursor {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let malformed = |reason: &str| Error::Cursor(format!("malformed page cursor: {reason}"));
+        let bytes = URL_SAFE_NO_PAD
+            .decode(s.trim())
+            .map_err(|_| malformed("not base64url"))?;
+        let token: Token = serde_json::from_slice(&bytes).map_err(|_| malformed("not a token"))?;
+        if token.v != VERSION {
+            return Err(malformed("unknown version"));
+        }
+        let fingerprint =
+            u64::from_str_radix(&token.fp, 16).map_err(|_| malformed("bad fingerprint"))?;
+        Ok(Self::new(token.pit, token.after, fingerprint))
+    }
+}
+
+impl Serialize for PageCursor {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for PageCursor {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// A stable 64-bit FNV-1a hash of what a cursor is bound to: the request body
+/// (query, total sort, filters — everything but the page size and position)
+/// and the unprefixed index path. Hand-rolled because std's
+/// hasher may change between Rust releases, and a token outlives a deploy.
+pub(crate) fn fingerprint(bound: &Value, path: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    bound
+        .to_string()
+        .bytes()
+        .chain(path.bytes())
+        .fold(OFFSET, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+        })
+}
+
+/// One cursor page's request, independent of how its hits decode: what
+/// [`CursorSearch`](crate::CursorSearch) and
+/// [`MultiCursorSearch`](crate::MultiCursorSearch) both hand to [`fetch_page`].
+pub(crate) struct PageRequest<'a> {
+    /// The unprefixed physical path: one index or a comma-joined list.
+    pub(crate) path: &'a str,
+    /// The search's own body (query, sort, size, …) without `from`/`search_after`.
+    pub(crate) body: Map<String, Value>,
+    /// Sort keys appended, in order, when the caller's sort lacks them.
+    pub(crate) tiebreak: &'static [&'static str],
+    pub(crate) cursor: Option<&'a PageCursor>,
+    pub(crate) keep_alive: Duration,
+}
+
+/// A fetched cursor page: the raw `_search` response and the cursor that
+/// resumes after it (`None` on the last page).
+pub(crate) struct FetchedPage {
+    pub(crate) response: Value,
+    pub(crate) next: Option<PageCursor>,
+}
+
+/// Append each `tiebreak` key the sort doesn't already hold, ascending — so the
+/// sort is total and `search_after` never skips or repeats a hit with equal
+/// leading keys.
+pub(crate) fn total_sort(mut sort: Vec<Value>, tiebreak: &[&str]) -> Vec<Value> {
+    for key in tiebreak {
+        let present = sort.iter().any(|entry| sort_key(entry) == Some(key));
+        if !present {
+            let mut order = Map::new();
+            order.insert("order".to_string(), Value::String("asc".to_string()));
+            let mut entry = Map::new();
+            entry.insert((*key).to_string(), Value::Object(order));
+            sort.push(Value::Object(entry));
+        }
+    }
+    sort
+}
+
+/// The field a rendered sort entry sorts on: `{ "<key>": {…} }` or `"<key>"`.
+fn sort_key(entry: &Value) -> Option<&str> {
+    match entry {
+        Value::String(key) => Some(key),
+        Value::Object(map) => map.keys().next().map(String::as_str),
+        _ => None,
+    }
+}
+
+/// The body a cursor page POSTs to `/_search`: the search's body with the total
+/// sort, the PIT, and (when resuming) `search_after`. Also returns the
+/// fingerprint the page's cursor is bound to.
+pub(crate) fn page_body(request: &PageRequest<'_>, pit: &str) -> (Value, u64) {
+    let mut body = request.body.clone();
+    let sort = match body.remove("sort") {
+        Some(Value::Array(sort)) => sort,
+        _ => Vec::new(),
+    };
+    body.insert(
+        "sort".to_string(),
+        Value::Array(total_sort(sort, request.tiebreak)),
+    );
+    let mut bound = body.clone();
+    bound.remove("size");
+    let fingerprint = fingerprint(&Value::Object(bound), request.path);
+
+    let mut pit_clause = Map::new();
+    pit_clause.insert("id".to_string(), Value::String(pit.to_owned()));
+    pit_clause.insert(
+        "keep_alive".to_string(),
+        Value::String(keep_alive_param(request.keep_alive)),
+    );
+    body.insert("pit".to_string(), Value::Object(pit_clause));
+    if let Some(cursor) = request.cursor {
+        body.insert(
+            "search_after".to_string(),
+            Value::Array(cursor.after().to_vec()),
+        );
+    }
+    (Value::Object(body), fingerprint)
+}
+
+/// A keep-alive as an OpenSearch time value, in whole milliseconds (at least 1).
+pub(crate) fn keep_alive_param(keep_alive: Duration) -> String {
+    format!("{}ms", keep_alive.as_millis().max(1))
+}
+
+/// Run one cursor page: open the snapshot (first page) or check the cursor
+/// (later pages), search it, and work out `next`. The last page closes the
+/// snapshot, best-effort.
+pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Result<FetchedPage> {
+    let pit = match request.cursor {
+        Some(cursor) => cursor.pit().to_owned(),
+        None => client.open_pit(request.path, request.keep_alive).await?,
+    };
+    let (body, fingerprint) = page_body(&request, &pit);
+    if let Some(cursor) = request.cursor {
+        cursor.check(fingerprint)?;
+    }
+    let size = body
+        .get("size")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_SIZE);
+    let response = client.search_pit(&body).await?;
+    let pit = response
+        .get("pit_id")
+        .and_then(Value::as_str)
+        .map_or(pit, str::to_owned);
+    let next = match next_after(&response, size) {
+        Some(after) => Some(PageCursor::new(pit, after, fingerprint)),
+        None => {
+            if let Err(error) = client.close_pit(&pit).await {
+                tracing::warn!(%error, "closing the snapshot of a finished cursor walk failed");
+            }
+            None
+        }
+    };
+    Ok(FetchedPage { response, next })
+}
+
+/// The last hit's sort values when the page came back full (more may follow);
+/// `None` for a short or empty page — the end of the walk.
+pub(crate) fn next_after(response: &Value, size: u64) -> Option<Vec<Value>> {
+    let hits = response.get("hits")?.get("hits")?.as_array()?;
+    if size == 0 || (hits.len() as u64) < size {
+        return None;
+    }
+    hits.last()?.get("sort")?.as_array().cloned()
+}

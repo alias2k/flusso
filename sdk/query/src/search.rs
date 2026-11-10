@@ -8,6 +8,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::Client;
+use crate::cursor::{FetchedPage, PageCursor, PageRequest, fetch_page};
+use crate::error::Error;
 use crate::error::Result;
 use crate::handles::{MinimumShouldMatch, NestedProjection, Sort};
 use crate::path::Segment;
@@ -273,6 +275,26 @@ impl<T> Search<T> {
         self
     }
 
+    /// Page this search by **cursor** instead of offset: every page reads one
+    /// consistent snapshot of the index, unaffected by later writes or a
+    /// reindex, and comes back with a [`SearchResponse::next`] cursor that
+    /// resumes right after it. `None` starts a new walk; pass the previous
+    /// page's `next` to continue (see [`PageCursor`]).
+    ///
+    /// The sort is made total by appending `_id` ascending unless it already
+    /// sorts on `_id`. A [`from`](Self::from) or raw
+    /// [`search_after`](Self::search_after) makes the cursor search fail with
+    /// [`Error::Cursor`](crate::Error::Cursor): the cursor owns the position.
+    /// Needs OpenSearch ≥ 2.4.
+    #[must_use]
+    pub fn cursor(self, cursor: impl Into<Option<PageCursor>>) -> CursorSearch<T> {
+        CursorSearch {
+            search: self,
+            cursor: cursor.into(),
+            keep_alive: crate::cursor::DEFAULT_KEEP_ALIVE,
+        }
+    }
+
     /// The accumulated query alone: the raw override, the bool clauses, or
     /// `match_all` when nothing was added. Shared by [`body`](Self::body) and
     /// [`count_body`](Self::count_body).
@@ -483,6 +505,130 @@ where
     }
 }
 
+/// A [`Search`] paged by [`PageCursor`] — built by [`Search::cursor`]. Only
+/// the keep-alive and the terminals are reachable: the query is fixed and the
+/// cursor owns the page position.
+#[derive(Debug, Clone)]
+pub struct CursorSearch<T> {
+    search: Search<T>,
+    cursor: Option<PageCursor>,
+    keep_alive: Duration,
+}
+
+/// A page of bare document ids from [`CursorSearch::ids`], with the cursor
+/// that resumes after it.
+#[derive(Debug, Clone)]
+pub struct IdsPage {
+    /// The page's document ids, in order.
+    pub ids: Vec<String>,
+    /// The cursor that resumes right after this page; `None` on the last page.
+    pub next: Option<PageCursor>,
+}
+
+/// The tiebreak that makes a single-index sort total: `_id` is the root
+/// primary key, unique within the index.
+const SINGLE_INDEX_TIEBREAK: &[&str] = &["_id"];
+
+impl<T> CursorSearch<T> {
+    /// How long the snapshot stays open between two pages (default one
+    /// minute). Every page renews it; once it lapses the next page fails with
+    /// [`Error::CursorExpired`](crate::Error::CursorExpired).
+    #[must_use]
+    pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
+
+    /// The page request for `body` (a full search body or the ids body)
+    /// against `path`, refusing a search that also positions itself.
+    pub(crate) fn request<'a>(&'a self, body: Value, path: &'a str) -> Result<PageRequest<'a>> {
+        if self.search.from.is_some() {
+            return Err(Error::Cursor(
+                "`from` can't be combined with a page cursor".to_string(),
+            ));
+        }
+        if self.search.search_after.is_some() {
+            return Err(Error::Cursor(
+                "`search_after` can't be combined with a page cursor".to_string(),
+            ));
+        }
+        let Value::Object(body) = body else {
+            return Err(Error::Cursor("search body is not an object".to_string()));
+        };
+        Ok(PageRequest {
+            path,
+            body,
+            tiebreak: SINGLE_INDEX_TIEBREAK,
+            cursor: self.cursor.as_ref(),
+            keep_alive: self.keep_alive,
+        })
+    }
+
+    /// Run one page from `body` (a full search body or the ids body).
+    async fn fetch(&self, client: &Client, body: Value) -> Result<FetchedPage> {
+        let path = self.search.physical_index();
+        fetch_page(client, self.request(body, &path)?).await
+    }
+
+    /// Execute one page and return only its document ids (no sources), with
+    /// the cursor that resumes after it — the cheap way to walk every match
+    /// (e.g. to load the rows from Postgres).
+    #[tracing::instrument(
+        name = "search.cursor_ids",
+        skip_all,
+        fields(index = %self.search.index, returned = tracing::field::Empty),
+        err,
+    )]
+    pub async fn ids(&self, client: &Client) -> Result<IdsPage> {
+        let page = self.fetch(client, self.search.ids_body()).await?;
+        let raw: RawIdsResponse = serde_json::from_value(page.response)?;
+        let ids: Vec<String> = raw.hits.hits.into_iter().map(|hit| hit.id).collect();
+        tracing::Span::current().record("returned", ids.len());
+        Ok(IdsPage {
+            ids,
+            next: page.next,
+        })
+    }
+}
+
+impl<T> CursorSearch<T>
+where
+    T: DeserializeOwned,
+{
+    /// Execute one page and decode its hits; [`SearchResponse::next`] resumes
+    /// after it.
+    #[tracing::instrument(
+        name = "search.cursor_send",
+        skip_all,
+        fields(
+            index = %self.search.index,
+            resumed = self.cursor.is_some(),
+            total = tracing::field::Empty,
+        ),
+        err,
+    )]
+    pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
+        let page = self.fetch(client, self.search.body()).await?;
+        let mut response = page.response;
+        let paths = self.search.nested_paths();
+        if !paths.is_empty() {
+            merge_inner_hits(&mut response, &paths);
+        }
+        let mut decoded = SearchResponse::from_value(response)?;
+        decoded.next = page.next;
+        tracing::Span::current().record("total", decoded.total);
+        if decoded.is_partial() {
+            tracing::warn!(
+                index = %self.search.index,
+                timed_out = decoded.timed_out,
+                shards_failed = decoded.shards.failed,
+                "cursor page returned partial results"
+            );
+        }
+        Ok(decoded)
+    }
+}
+
 /// Replace each `paths` array in every hit's `_source` with that path's
 /// `inner_hits` subset, so the typed source carries the filtered nested array.
 pub(crate) fn merge_inner_hits(response: &mut Value, paths: &[&str]) {
@@ -621,6 +767,10 @@ pub struct SearchResponse<T> {
     /// shards errored and their matches are **missing from `hits`** — again
     /// with a 200 status.
     pub shards: ShardStats,
+    /// The cursor that resumes right after this page, from a cursor search
+    /// ([`Search::cursor`]). `None` on the last page, and always `None` for
+    /// offset paging and [`Client::msearch`](crate::Client::msearch).
+    pub next: Option<PageCursor>,
 }
 
 impl<T> SearchResponse<T> {
@@ -663,6 +813,7 @@ where
             .map(|hit| Hit {
                 id: hit.id,
                 score: hit.score.unwrap_or(0.0),
+                sort: hit.sort,
                 source: hit.source,
             })
             .collect();
@@ -673,6 +824,7 @@ where
             took: Duration::from_millis(raw.took),
             timed_out: raw.timed_out,
             shards: raw.shards.into(),
+            next: None,
         })
     }
 }
@@ -684,6 +836,9 @@ pub struct Hit<T> {
     pub id: String,
     /// The relevance score (`0.0` when the query didn't score).
     pub score: f32,
+    /// The hit's sort values, in sort-key order — what `search_after` resumes
+    /// from. Empty when the search had no sort.
+    pub sort: Vec<Value>,
     /// The fully-typed document.
     pub source: T,
 }
@@ -767,6 +922,8 @@ struct RawHit<T> {
     id: String,
     #[serde(rename = "_score", default)]
     score: Option<f32>,
+    #[serde(default)]
+    sort: Vec<Value>,
     #[serde(rename = "_source")]
     source: T,
 }

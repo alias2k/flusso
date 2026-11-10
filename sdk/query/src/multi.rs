@@ -34,7 +34,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::Client;
-use crate::error::Result;
+use crate::cursor::{PageCursor, PageRequest, fetch_page};
+use crate::error::{Error, Result};
 use crate::handles::Sort;
 use crate::query::{AsQuery, BoolBuilder, Root};
 use crate::search::{Hit, RawCount, SearchResponse};
@@ -228,6 +229,25 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
         self
     }
 
+    /// Page the blended list by **cursor** instead of offset — one consistent
+    /// snapshot across every index of the union, unaffected by later writes or
+    /// a reindex. `None` starts a new walk; pass the previous page's
+    /// [`SearchResponse::next`] to continue (see
+    /// [`PageCursor`](crate::PageCursor)).
+    ///
+    /// The sort is made total by appending `_index` then `_id` ascending
+    /// (ids collide across indexes) unless it already sorts on them. A
+    /// [`from`](Self::from) makes the cursor search fail with
+    /// [`Error::Cursor`](crate::Error::Cursor). Needs OpenSearch ≥ 2.4.
+    #[must_use]
+    pub fn cursor(self, cursor: impl Into<Option<PageCursor>>) -> MultiCursorSearch<U> {
+        MultiCursorSearch {
+            search: self,
+            cursor: cursor.into(),
+            keep_alive: crate::cursor::DEFAULT_KEEP_ALIVE,
+        }
+    }
+
     /// The comma-joined physical index list this query addresses — one
     /// `{index}_{hash}` per union variant. For logging and debugging.
     #[must_use]
@@ -328,6 +348,78 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
     }
 }
 
+/// A [`MultiSearch`] paged by [`PageCursor`] — built by
+/// [`MultiSearch::cursor`]. Only the keep-alive and [`send`](Self::send) are
+/// reachable: the query is fixed and the cursor owns the page position.
+#[derive(Debug, Clone)]
+pub struct MultiCursorSearch<U> {
+    search: MultiSearch<U>,
+    cursor: Option<PageCursor>,
+    keep_alive: Duration,
+}
+
+/// The tiebreak that makes a blended sort total: ids are unique only within
+/// one index, so `_index` comes first.
+const UNION_TIEBREAK: &[&str] = &["_index", "_id"];
+
+impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
+    /// How long the snapshot stays open between two pages (default one
+    /// minute). Every page renews it; once it lapses the next page fails with
+    /// [`Error::CursorExpired`].
+    #[must_use]
+    pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
+
+    /// The page request, refusing a search that also positions itself.
+    pub(crate) fn request(&self) -> Result<PageRequest<'_>> {
+        if self.search.from.is_some() {
+            return Err(Error::Cursor(
+                "`from` can't be combined with a page cursor".to_string(),
+            ));
+        }
+        let Value::Object(body) = self.search.body() else {
+            return Err(Error::Cursor("search body is not an object".to_string()));
+        };
+        Ok(PageRequest {
+            path: &self.search.path,
+            body,
+            tiebreak: UNION_TIEBREAK,
+            cursor: self.cursor.as_ref(),
+            keep_alive: self.keep_alive,
+        })
+    }
+
+    /// Execute one page of the blended list and decode it into the union;
+    /// [`SearchResponse::next`] resumes after it.
+    #[tracing::instrument(
+        name = "search.multi_cursor",
+        skip_all,
+        fields(
+            path = %self.search.path,
+            resumed = self.cursor.is_some(),
+            total = tracing::field::Empty,
+        ),
+        err,
+    )]
+    pub async fn send(&self, client: &Client) -> Result<SearchResponse<U>> {
+        let page = fetch_page(client, self.request()?).await?;
+        let mut decoded = decode_response::<U>(page.response, &client.index_prefix)?;
+        decoded.next = page.next;
+        tracing::Span::current().record("total", decoded.total);
+        if decoded.is_partial() {
+            tracing::warn!(
+                path = %self.search.path,
+                timed_out = decoded.timed_out,
+                shards_failed = decoded.shards.failed,
+                "combined cursor page returned partial results"
+            );
+        }
+        Ok(decoded)
+    }
+}
+
 impl<U: FlussoMultiDocument> Default for MultiSearch<U> {
     fn default() -> Self {
         Self::new()
@@ -368,6 +460,7 @@ pub(crate) fn decode_response<U: FlussoMultiDocument>(
             Ok(Hit {
                 id: hit.id,
                 score: hit.score.unwrap_or(0.0),
+                sort: hit.sort,
                 source: U::decode(index.as_ref(), hit.source)?,
             })
         })
@@ -379,6 +472,7 @@ pub(crate) fn decode_response<U: FlussoMultiDocument>(
         took: Duration::from_millis(raw.took),
         timed_out: raw.timed_out,
         shards: raw.shards.into(),
+        next: None,
     })
 }
 
@@ -440,6 +534,8 @@ struct RawMultiHit {
     id: String,
     #[serde(rename = "_score", default)]
     score: Option<f32>,
+    #[serde(default)]
+    sort: Vec<Value>,
     #[serde(rename = "_source")]
     source: Value,
 }

@@ -1,6 +1,8 @@
 //! The [`Client`] transport. Points at OpenSearch (not at flusso — the engine
 //! is write-only; reads go straight to the index it maintains).
 
+use std::time::Duration;
+
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -117,6 +119,75 @@ impl Client {
         self.post_json(&endpoint, body).await
     }
 
+    /// Open a point-in-time over `path` (one physical index or a comma-joined
+    /// list, prefixed here) and return its id. Crate-internal: the first page
+    /// of a cursor walk drives this.
+    #[tracing::instrument(
+        name = "pit.open",
+        level = "debug",
+        skip_all,
+        fields(path, status = tracing::field::Empty),
+        err,
+    )]
+    pub(crate) async fn open_pit(&self, path: &str, keep_alive: Duration) -> Result<String> {
+        let endpoint = format!(
+            "{}/{}/_search/point_in_time?keep_alive={}",
+            self.base,
+            self.prefixed(path),
+            crate::cursor::keep_alive_param(keep_alive),
+        );
+        tracing::debug!(%endpoint, "POST point_in_time");
+        let response = self.execute_json(self.http.post(&endpoint)).await?;
+        let opened: OpenedPit = serde_json::from_value(response)?;
+        Ok(opened.pit_id)
+    }
+
+    /// POST a point-in-time search to `/_search` (no index path: the PIT names
+    /// the indexes, and OpenSearch refuses both). A gone snapshot — expired,
+    /// closed, or its generation dropped by a reindex — is
+    /// [`Error::CursorExpired`].
+    #[tracing::instrument(
+        name = "pit.search",
+        level = "debug",
+        skip_all,
+        fields(status = tracing::field::Empty),
+        err,
+    )]
+    pub(crate) async fn search_pit(&self, body: &Value) -> Result<Value> {
+        let endpoint = format!("{}/_search", self.base);
+        tracing::debug!(%endpoint, query = %body, "POST _search (point in time)");
+        self.post_json(&endpoint, body)
+            .await
+            .map_err(|error| match error {
+                Error::Status { status, body } if snapshot_gone(status, &body) => {
+                    Error::CursorExpired { body }
+                }
+                other => other,
+            })
+    }
+
+    /// Close a point-in-time. Closing one that already expired is not an
+    /// error.
+    #[tracing::instrument(
+        name = "pit.close",
+        level = "debug",
+        skip_all,
+        fields(status = tracing::field::Empty),
+        err,
+    )]
+    pub(crate) async fn close_pit(&self, pit: &str) -> Result<()> {
+        let endpoint = format!("{}/_search/point_in_time", self.base);
+        let body = serde_json::json!({ "pit_id": [pit] });
+        match self
+            .execute_json(self.http.delete(&endpoint).json(&body))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(Error::Status { status, body }) if snapshot_gone(status, &body) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// POST an NDJSON body to `/_msearch` and return the parsed response JSON
     /// (the `{"responses": […]}` envelope). Crate-internal:
     /// [`Client::msearch`](Self::msearch) drives this.
@@ -211,6 +282,17 @@ impl Client {
             }
         }
     }
+}
+
+/// Whether an OpenSearch error says a point-in-time is gone: its search
+/// context expired or was freed, or the index it pinned was deleted.
+fn snapshot_gone(status: u16, body: &str) -> bool {
+    status == StatusCode::NOT_FOUND.as_u16() || body.contains("search_context_missing_exception")
+}
+
+#[derive(Deserialize)]
+struct OpenedPit {
+    pit_id: String,
 }
 
 #[derive(Deserialize)]

@@ -1965,3 +1965,212 @@ fn sorts_plural_matches_repeated_sort() {
         .body();
     assert_eq!(plural, singular);
 }
+
+// ───────────────────────────── page cursors ─────────────────────────────
+
+mod cursor {
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+
+    use super::{DecodedUser, Result, StoreItem, User};
+    use crate::cursor::{PageCursor, fingerprint, next_after, page_body, total_sort};
+    use crate::{Error, FlussoMultiDocument, SearchResponse, SortBuilder, Sortable};
+
+    #[test]
+    fn a_cursor_round_trips_through_its_string_form() -> Result {
+        let cursor = PageCursor::new("pit-id==".into(), vec![json!(4.5), json!("abc")], 42);
+        let token = cursor.to_string();
+        assert!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "token must be URL-safe: {token}"
+        );
+        assert_eq!(token.parse::<PageCursor>()?, cursor);
+        Ok(())
+    }
+
+    #[test]
+    fn a_cursor_serializes_as_a_plain_string() -> Result {
+        let cursor = PageCursor::new("pit".into(), vec![json!(1)], 7);
+        let value = serde_json::to_value(&cursor)?;
+        assert_eq!(value, Value::String(cursor.to_string()));
+        let back: PageCursor = serde_json::from_value(value)?;
+        assert_eq!(back, cursor);
+        Ok(())
+    }
+
+    #[test]
+    fn a_malformed_token_is_a_cursor_error() {
+        for token in [
+            "",
+            "not base64!",
+            "bm90IGpzb24",
+            "eyJ2Ijo5LCJwaXQiOiJwIiwiYWZ0ZXIiOltdLCJmcCI6IjAifQ",
+        ] {
+            assert!(
+                matches!(token.parse::<PageCursor>(), Err(Error::Cursor(_))),
+                "{token:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_is_pinned() {
+        // FNV-1a 64 of `{}` then `users_1`: a token must keep validating
+        // across builds, so this value must never drift.
+        assert_eq!(fingerprint(&json!({}), "users_1"), 0xd974_4414_9395_a08f);
+    }
+
+    #[test]
+    fn total_sort_appends_missing_tiebreaks_only() {
+        let sort = vec![json!({ "email": { "order": "desc" } })];
+        assert_eq!(
+            total_sort(sort.clone(), &["_id"]),
+            vec![
+                json!({ "email": { "order": "desc" } }),
+                json!({ "_id": { "order": "asc" } }),
+            ]
+        );
+        let with_id = vec![json!({ "_id": { "order": "desc" } })];
+        assert_eq!(total_sort(with_id.clone(), &["_id"]), with_id);
+        assert_eq!(
+            total_sort(Vec::new(), &["_index", "_id"]),
+            vec![
+                json!({ "_index": { "order": "asc" } }),
+                json!({ "_id": { "order": "asc" } }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_first_page_carries_the_pit_and_a_total_sort_but_no_search_after() -> Result {
+        let search = User::query()
+            .filter(User::email().eq("a@b.c"))
+            .sorts(SortBuilder::new().by(User::email(), crate::OrderBy::asc()))
+            .size(20);
+        let body = search.body();
+        let cursor_search = search.cursor(None).keep_alive(Duration::from_secs(90));
+        let request = cursor_search.request(body, "users_xxxxxx")?;
+        let (body, _) = page_body(&request, "PIT");
+        assert_eq!(
+            body,
+            json!({
+                "query": { "bool": { "filter": [ { "term": { "email": "a@b.c" } } ] } },
+                "sort": [ { "email": { "order": "asc" } }, { "_id": { "order": "asc" } } ],
+                "size": 20,
+                "pit": { "id": "PIT", "keep_alive": "90000ms" },
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_resumed_page_searches_after_the_cursor() -> Result {
+        let cursor = PageCursor::new("PIT2".into(), vec![json!("a@b.c"), json!("7")], 0);
+        let search = User::query().size(5).cursor(cursor);
+        let request = search.request(User::query().size(5).body(), "users_xxxxxx")?;
+        let (body, _) = page_body(&request, "PIT2");
+        assert_eq!(body["search_after"], json!(["a@b.c", "7"]));
+        assert_eq!(body["pit"]["id"], json!("PIT2"));
+        assert_eq!(body["sort"], json!([{ "_id": { "order": "asc" } }]));
+        Ok(())
+    }
+
+    #[test]
+    fn the_fingerprint_binds_the_query_but_not_the_page_size() -> Result {
+        let fp = |search: crate::Search<User>| -> std::result::Result<u64, Error> {
+            let body = search.body();
+            let cursor = search.cursor(None);
+            let request = cursor.request(body, "users_xxxxxx")?;
+            Ok(page_body(&request, "PIT").1)
+        };
+        let base = fp(User::query().filter(User::email().eq("x")).size(10))?;
+        assert_eq!(
+            base,
+            fp(User::query().filter(User::email().eq("x")).size(50))?
+        );
+        assert_ne!(
+            base,
+            fp(User::query().filter(User::email().eq("y")).size(10))?
+        );
+        assert_ne!(
+            base,
+            fp(User::query()
+                .filter(User::email().eq("x"))
+                .sort(User::email().desc())
+                .size(10))?
+        );
+        let cursor = PageCursor::new("PIT".into(), Vec::new(), base);
+        assert!(cursor.check(base).is_ok());
+        assert!(matches!(cursor.check(base ^ 1), Err(Error::CursorMismatch)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_positioned_search_refuses_a_cursor() {
+        let from = User::query().from(10);
+        let body = from.body();
+        assert!(matches!(
+            from.cursor(None).request(body, "users_xxxxxx"),
+            Err(Error::Cursor(_))
+        ));
+        let after = User::query().search_after([1]);
+        let body = after.body();
+        assert!(matches!(
+            after.cursor(None).request(body, "users_xxxxxx"),
+            Err(Error::Cursor(_))
+        ));
+        assert!(matches!(
+            StoreItem::query().from(3).cursor(None).request(),
+            Err(Error::Cursor(_))
+        ));
+    }
+
+    #[test]
+    fn a_combined_cursor_breaks_ties_on_index_then_id() -> Result {
+        let search = StoreItem::query().size(3).cursor(None);
+        let (body, _) = page_body(&search.request()?, "PIT");
+        assert_eq!(
+            body["sort"],
+            json!([{ "_index": { "order": "asc" } }, { "_id": { "order": "asc" } }])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn next_follows_a_full_page_and_stops_after_a_short_one() {
+        let page = |n: usize| {
+            let hits: Vec<Value> = (0..n)
+                .map(|i| json!({ "_id": i.to_string(), "sort": [i] }))
+                .collect();
+            json!({ "hits": { "hits": hits } })
+        };
+        assert_eq!(next_after(&page(3), 3), Some(vec![json!(2)]));
+        assert_eq!(next_after(&page(2), 3), None);
+        assert_eq!(next_after(&page(0), 3), None);
+        assert_eq!(next_after(&page(0), 0), None);
+    }
+
+    #[test]
+    fn hits_decode_their_sort_values() -> Result {
+        let response = json!({
+            "took": 1,
+            "hits": {
+                "total": { "value": 1 },
+                "hits": [{
+                    "_index": "users_xxxxxx_1", "_id": "7", "_score": null,
+                    "sort": ["a@b.c", "7"], "_source": { "email": "a@b.c", "orderCount": 1 }
+                }]
+            }
+        });
+        let single: SearchResponse<DecodedUser> = SearchResponse::from_value(response.clone())?;
+        let hit = single.hits.first().ok_or("one hit")?;
+        assert_eq!(hit.sort, vec![json!("a@b.c"), json!("7")]);
+        assert!(single.next.is_none());
+        let multi: SearchResponse<StoreItem> = crate::multi::decode_response(response, "")?;
+        assert_eq!(multi.hits.first().ok_or("one hit")?.sort.len(), 2);
+        Ok(())
+    }
+}

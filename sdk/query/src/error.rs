@@ -47,6 +47,26 @@ pub enum Error {
         index: String,
     },
 
+    /// A [`PageCursor`](crate::PageCursor) couldn't be used: the token is
+    /// malformed, or the search it was handed to also sets `from` or a raw
+    /// `search_after` (a cursor owns the page position).
+    #[error("page cursor: {0}")]
+    Cursor(String),
+
+    /// A [`PageCursor`](crate::PageCursor) was handed back with a different
+    /// query, sort, or index set than the one that produced it.
+    #[error("page cursor belongs to a different query")]
+    CursorMismatch,
+
+    /// The snapshot behind a [`PageCursor`](crate::PageCursor) is gone: its
+    /// keep-alive lapsed, it was closed, or a reindex dropped the generation it
+    /// pinned. Restart the walk from page one.
+    #[error("page cursor expired: {body}")]
+    CursorExpired {
+        /// OpenSearch's error body, for diagnostics.
+        body: String,
+    },
+
     /// A response could not be decoded into the expected shape.
     #[error("decoding response: {0}")]
     Decode(#[from] serde_json::Error),

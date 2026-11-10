@@ -97,6 +97,7 @@
 
 mod check;
 mod client;
+mod cursor;
 mod error;
 mod handles;
 mod msearch;
@@ -113,6 +114,7 @@ pub use check::{
     map_kind_ok, map_value_is, map_values_of, nullable, variants_covered, variants_exhausted,
 };
 pub use client::Client;
+pub use cursor::PageCursor;
 pub use error::{Error, Result};
 pub use handles::{
     Binary, Bool, BoostMode, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
@@ -130,10 +132,13 @@ pub use handles::{
     script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
-pub use multi::{FlussoMultiDocument, MultiSearch};
+pub use multi::{FlussoMultiDocument, MultiCursorSearch, MultiSearch};
 pub use path::{Segment, SegmentKind, nested_boundaries};
 pub use query::{AsQuery, Query, Root};
-pub use search::{FlussoRoot, FlussoScope, Highlight, Hit, Search, SearchResponse, ShardStats};
+pub use search::{
+    CursorSearch, FlussoRoot, FlussoScope, Highlight, Hit, IdsPage, Search, SearchResponse,
+    ShardStats,
+};
 
 /// `#[derive(FlussoRoot)]` — the index-bound **root**. Generates the typed query
 /// surface for the *whole* index (a handle for every field at every level,
