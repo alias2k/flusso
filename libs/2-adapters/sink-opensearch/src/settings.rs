@@ -9,8 +9,9 @@
 //!   = 5000 } }` is `index.mapping.total_fields.limit`);
 //! - a key without the `index.` prefix gets it, as OpenSearch itself reads it;
 //! - a key flusso owns is rejected: `index.refresh_interval` (the sink's
-//!   `refresh_interval` option sets it) and anything under `index.analysis`
-//!   (the `flusso_*` analyzers);
+//!   `refresh_interval` option sets it), anything under `index.analysis` (the
+//!   `flusso_*` analyzers) or `index.blocks` (flusso must write), and
+//!   `index.hidden` (flusso lists its generations by wildcard);
 //! - the same key written twice, a key that is both a value and a table, an
 //!   empty table, and `null` are rejected.
 //!
@@ -54,6 +55,14 @@ const OWNED: &[(&str, &str)] = &[
     (
         "index.analysis",
         "flusso defines the `flusso_*` analyzers and normalizers itself",
+    ),
+    (
+        "index.blocks",
+        "a block stops flusso's writes, alias swaps, and settings updates",
+    ),
+    (
+        "index.hidden",
+        "flusso finds its generations by wildcard, which skips hidden indexes",
     ),
 ];
 

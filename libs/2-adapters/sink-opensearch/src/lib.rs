@@ -97,7 +97,7 @@ pub struct OpensearchSink {
     /// Logical index name → that index's own `index_settings`, laid over the
     /// sink-wide ones when its generation is created. Set with
     /// [`with_index_settings`](OpensearchSink::with_index_settings).
-    pub(crate) per_index_settings: Arc<HashMap<String, IndexSettings>>,
+    pub(crate) per_index_settings: Arc<HashMap<kernel::IndexName, IndexSettings>>,
     /// Literal prefix prepended to every name this sink owns — the hash alias,
     /// its generations, the `{logical}` convenience alias, and the meta index —
     /// so several deployments can share one cluster without colliding. Empty by
@@ -213,18 +213,13 @@ impl OpensearchSink {
         mut self,
         settings: impl IntoIterator<Item = (kernel::IndexName, IndexSettings)>,
     ) -> Self {
-        self.per_index_settings = Arc::new(
-            settings
-                .into_iter()
-                .map(|(index, settings)| (index.as_ref().to_owned(), settings))
-                .collect(),
-        );
+        self.per_index_settings = Arc::new(settings.into_iter().collect());
         self
     }
 
     /// The index options for creating a generation of `logical`: the sink's,
     /// with that index's own settings laid over the sink-wide ones.
-    pub(crate) fn index_options_for(&self, logical: &str) -> IndexOptions {
+    pub(crate) fn index_options_for(&self, logical: &kernel::IndexName) -> IndexOptions {
         let mut options = self.index_options.clone();
         if let Some(own) = self.per_index_settings.get(logical) {
             options.settings = options.settings.layered(own);

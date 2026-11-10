@@ -22,11 +22,10 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
 | `index_settings` | none | extra index settings for every created index (e.g. `"mapping.total_fields.limit" = 5000`) |
 
 Per index, an `[[index]]` entry's `[index.sinks.<name>]` table takes `index_settings` too
-([`OpensearchIndexConfig`]), laid over the sink-wide ones; the composition root hands them over
-with [`with_index_settings`](OpensearchSink::with_index_settings). Precedence, highest first:
-flusso's own keys (`refresh_interval`, `analysis`, rejected if set) > per-index > sink-wide >
-`number_of_shards`/`number_of_replicas`. Settings apply when a generation is created, never to a
-live index, and never change the hash ([`IndexSettings`]).
+([`OpensearchIndexConfig`]); the composition root hands them over with
+[`with_index_settings`](OpensearchSink::with_index_settings). Normalization and the owned keys are
+[`IndexSettings`]; precedence and when settings apply are on the
+[Reference page](https://alias2k.github.io/flusso/reference/sink-opensearch.html#index-settings).
 
 ## At a glance
 

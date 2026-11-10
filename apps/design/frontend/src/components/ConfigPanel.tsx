@@ -83,8 +83,7 @@ export function ConfigPanel({
     delete next[name];
     onChange({ ...config, sinks: next, index: reKeyIndexSinks(name, undefined) });
   };
-  // The sinks that take per-index options, with the schema of those options.
-  const indexOptionSinks = Object.entries(sinks).flatMap(([name, sink]) => {
+  const sinksWithIndexOptions = Object.entries(sinks).flatMap(([name, sink]) => {
     const description = sinkAdapters.find((a) => a.kind === splitEntry(sink).kind);
     return description?.index_schema
       ? [{ name, description: { ...description, schema: description.index_schema, secrets: [] } }]
@@ -293,11 +292,11 @@ export function ConfigPanel({
                   </Button>
                   <RemoveButton label={t("common.remove")} onClick={() => setPendingRemove(i)} />
                 </div>
-                {indexOptionSinks.length > 0 && (
+                {sinksWithIndexOptions.length > 0 && (
                   <div className="px-3 pb-2">
                     <Drawer title={t("config.sinkOptions")} count={Object.keys(e.sinks ?? {}).length || undefined}>
                       <p className="mb-2 text-2xs text-muted-foreground">{t("config.sinkOptionsHint")}</p>
-                      {indexOptionSinks.map(({ name, description }) => (
+                      {sinksWithIndexOptions.map(({ name, description }) => (
                         <div key={name} className="mb-2 last:mb-0">
                           <div className="mb-1 flex items-center gap-1.5 font-mono text-2xs text-foreground">
                             {kindIcon(description.kind)}

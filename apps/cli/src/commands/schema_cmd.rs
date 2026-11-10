@@ -109,7 +109,7 @@ pub(crate) fn assemble_config_schema() -> Value {
         .iter()
         .filter_map(|d| {
             let schema = d.index_schema.as_ref()?;
-            let name = format!("{}_{}_index", d.port, d.kind);
+            let name = index_options_name(d);
             let entry = index_options_schema(d, schema, &mut definitions);
             definitions.insert(name.clone(), entry);
             Some(json!({ "$ref": format!("#/definitions/{name}") }))
@@ -165,24 +165,8 @@ fn adapter_entry_schema(
     description: &AdapterDescription,
     definitions: &mut Map<String, Value>,
 ) -> Value {
-    let mut schema = description.schema.clone().to_value();
     let prefix = format!("{}_{}_", description.port, description.kind);
-    let local: Map<String, Value> = schema
-        .as_object_mut()
-        .and_then(|o| o.remove("definitions"))
-        .and_then(|d| d.as_object().cloned())
-        .unwrap_or_default();
-    for (name, definition) in local {
-        let target = if SHARED_DEFINITIONS.contains(&name.as_str()) {
-            name
-        } else {
-            format!("{prefix}{name}")
-        };
-        let mut definition = definition;
-        rewrite_refs(&mut definition, &renames_placeholder(&prefix));
-        definitions.insert(target, definition);
-    }
-    rewrite_refs(&mut schema, &renames_placeholder(&prefix));
+    let mut schema = hoist_definitions(&description.schema, &prefix, definitions);
     if let Some(object) = schema.as_object_mut() {
         object.remove("$schema");
         object.remove("title");
@@ -210,6 +194,11 @@ fn adapter_entry_schema(
     schema
 }
 
+/// The definition name of one adapter's per-index options schema.
+fn index_options_name(description: &AdapterDescription) -> String {
+    format!("{}_{}_index", description.port, description.kind)
+}
+
 /// One adapter's per-index options schema (an `[index.sinks.<name>]` table),
 /// its definitions hoisted under `<port>_<kind>_index_<Name>`.
 fn index_options_schema(
@@ -217,18 +206,8 @@ fn index_options_schema(
     schema: &kernel::AdapterSchema,
     definitions: &mut Map<String, Value>,
 ) -> Value {
-    let mut schema = schema.clone().to_value();
-    let prefix = format!("{}_{}_index_", description.port, description.kind);
-    let local: Map<String, Value> = schema
-        .as_object_mut()
-        .and_then(|o| o.remove("definitions"))
-        .and_then(|d| d.as_object().cloned())
-        .unwrap_or_default();
-    for (name, mut definition) in local {
-        rewrite_refs(&mut definition, &renames_placeholder(&prefix));
-        definitions.insert(format!("{prefix}{name}"), definition);
-    }
-    rewrite_refs(&mut schema, &renames_placeholder(&prefix));
+    let prefix = format!("{}_", index_options_name(description));
+    let mut schema = hoist_definitions(schema, &prefix, definitions);
     if let Some(object) = schema.as_object_mut() {
         object.remove("$schema");
         object.insert(
@@ -237,6 +216,33 @@ fn index_options_schema(
         );
         object.insert("additionalProperties".to_owned(), Value::Bool(false));
     }
+    schema
+}
+
+/// `schema` as a value with its own definitions moved into the root under
+/// `prefix`, except [`SHARED_DEFINITIONS`], which keep their name; every
+/// `$ref` is rewritten to match.
+fn hoist_definitions(
+    schema: &kernel::AdapterSchema,
+    prefix: &str,
+    definitions: &mut Map<String, Value>,
+) -> Value {
+    let mut schema = schema.clone().to_value();
+    let local: Map<String, Value> = schema
+        .as_object_mut()
+        .and_then(|o| o.remove("definitions"))
+        .and_then(|d| d.as_object().cloned())
+        .unwrap_or_default();
+    for (name, mut definition) in local {
+        let target = if SHARED_DEFINITIONS.contains(&name.as_str()) {
+            name
+        } else {
+            format!("{prefix}{name}")
+        };
+        rewrite_refs(&mut definition, &renames_placeholder(prefix));
+        definitions.insert(target, definition);
+    }
+    rewrite_refs(&mut schema, &renames_placeholder(prefix));
     schema
 }
 

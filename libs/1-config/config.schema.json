@@ -583,7 +583,7 @@
           "default": true
         },
         "index_settings": {
-          "description": "Extra OpenSearch index settings for every index this sink creates, e.g.\n`{ \"mapping.total_fields.limit\" = 5000 }`. Keys may omit the `index.`\nprefix; nested tables are flattened. They override `number_of_shards`\nand `number_of_replicas`, and an `[[index]]` entry's own\n`index_settings` override them. `refresh_interval` and `analysis` are\nflusso's and rejected. Applied when an index generation is created.",
+          "description": "Extra OpenSearch index settings for every index this sink creates, e.g.\n`{ \"mapping.total_fields.limit\" = 5000 }`. Keys may omit the `index.`\nprefix; nested tables are flattened. They override `number_of_shards`\nand `number_of_replicas`, and an `[[index]]` entry's own\n`index_settings` override them. `refresh_interval`, `analysis`,\n`blocks`, and `hidden` are flusso's and rejected. Applied when an index\ngeneration is created.",
           "allOf": [
             {
               "$ref": "#/definitions/sink_opensearch_IndexSettings"

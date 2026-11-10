@@ -157,7 +157,7 @@ impl OpensearchSink {
             .header("Content-Type", "application/json")
             .json(&build_index_body(
                 &mapping.fields,
-                &self.index_options_for(mapping.index.as_ref()),
+                &self.index_options_for(&mapping.index),
             ));
 
         let resp = self

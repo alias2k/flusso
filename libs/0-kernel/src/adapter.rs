@@ -114,7 +114,7 @@ pub trait AdapterConfig: JsonSchema + Serialize + DeserializeOwned + Sized {
     /// `[[index]]` entry's `sinks.<name>` table. `None` (the default) means the
     /// adapter takes none, so naming it there is an error. The derive's
     /// `index_options = Type` key fills it.
-    fn index_schema() -> Option<Schema> {
+    fn index_schema() -> Option<AdapterSchema> {
         None
     }
 
@@ -140,7 +140,7 @@ pub type AdapterSchema = Schema;
 /// The draft-07 root schema of `T`, the dialect every adapter description
 /// uses: `definitions`, no `$defs`, which TOML/YAML editor tooling supports
 /// most widely.
-pub fn schema_for<T: JsonSchema>() -> Schema {
+pub fn schema_for<T: JsonSchema>() -> AdapterSchema {
     schemars::generate::SchemaSettings::draft07()
         .into_generator()
         .into_root_schema_for::<T>()
@@ -156,7 +156,7 @@ pub struct AdapterDescription {
     /// The adapter's `type` token.
     pub kind: String,
     /// The JSON schema of the options struct.
-    pub schema: Schema,
+    pub schema: AdapterSchema,
     /// A complete example, as it would appear under the entry.
     pub example: Options,
     /// The `Secret` fields, as `.`-joined paths from the entry root.
@@ -164,7 +164,7 @@ pub struct AdapterDescription {
     /// The schema of the options the adapter takes per index (an `[[index]]`
     /// entry's `sinks.<name>` table), or `None` when it takes none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index_schema: Option<Schema>,
+    pub index_schema: Option<AdapterSchema>,
 }
 
 impl AdapterDescription {

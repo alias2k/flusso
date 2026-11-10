@@ -48,7 +48,7 @@ A key is a setting name, with or without the `index.` prefix (`"mapping.total_fi
 
 **Precedence**, highest first:
 
-1. Keys flusso owns. `index.refresh_interval` (see [Refresh](#refresh); set the `refresh_interval` option instead) and anything under `index.analysis` (the `flusso_*` components) are **rejected** by `build`, `check`, and `run`, not silently dropped.
+1. Keys flusso owns, **rejected** by `build`, `check`, and `run` rather than silently dropped: `index.refresh_interval` (see [Refresh](#refresh); set the `refresh_interval` option instead), anything under `index.analysis` (the `flusso_*` components) or `index.blocks` (flusso must write, swap aliases, and update settings), and `index.hidden` (generations are found by wildcard, which skips hidden indexes).
 2. The index's own `index_settings`.
 3. The sink-wide `index_settings`.
 4. The typed `number_of_shards` and `number_of_replicas` options.
