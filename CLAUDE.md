@@ -477,12 +477,18 @@ primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by th
 which mark every column under `FULL`. **An update that changes no column a document reads rebuilds nothing**
 (issue #169): an update with a pre-image also carries a post-image (`ChangeEvent::Upsert.after`,
 built in `cdc/stream.rs` via `pgoutput::post_image`; an unchanged-TOAST `'u'` cell takes the old
-identity column's value), and `PgDocumentBuilder::resolve` emits the root row's own id only when
-`source::root_columns` was touched and walks a path only when `source::relation_columns` of its
-last relation was (`ColumnUse::touched_by`: a missing image or column, or a key change, counts as
-touched). Those two functions (`libs/1-ports/source/src/spec/columns.rs`, beside `row_link`, which
-`pre_image_columns` and the resolver's `link_on_row` share) are the one derivation of "which
-columns a path reads" — fields, filters, `order_by`, aggregate input, link; a raw filter means all. A third source-neutral capability is
+identity column's value; a **partitioned** table's update carries none — its partitions log old
+rows by their own identity while the `Relation` flags the root's, so placeholder nulls would read as
+real), and `PgDocumentBuilder::resolve` emits the root row's own id only when `source::root_columns`
+was touched and walks a path only when `source::relation_columns` of its last relation was
+(`ColumnUse::touched_by` over a per-change `RowDiff`: a missing image or column, or a key change,
+counts as touched; the sets are derived once per builder in `document/reads.rs`). Those functions
+(`libs/1-ports/source/src/spec/columns.rs`, beside `row_link`, which `pre_image_columns` and the
+resolver's `link_on_row` share, and `soft_delete_column`, which the document query's soft-delete
+predicate uses too) are the one derivation of "which columns a path reads" — fields, filters,
+`order_by`, aggregate input, link. A **raw filter anywhere in an index** makes every set of that
+index "all" (raw SQL is pasted into a correlated subquery and can read `root.…`, a junction, an
+enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_that_column`). A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers
 "the type of *this* column" and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's

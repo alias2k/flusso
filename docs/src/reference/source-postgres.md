@@ -130,7 +130,7 @@ A column counts as read by a part of the document when it is:
 | Any of them | the table's primary key, and a nested `belongs_to`'s `column` |
 
 - A column reached only through `filters` or `order_by` counts: changing it can move the row in or out of the document.
-- A `raw` filter can read any column, so a table it filters always rebuilds.
+- A `raw` filter can read any column of any table its SQL can name (the root row as `root`, a junction, an enclosing level), so an index with a `raw` filter anywhere (root `filters`, `soft_delete.when`, any join's or aggregate's `filters`, `through.filters`) rebuilds on every update, as it always has.
 - Each part is checked on its own. Changing a field the root projects rebuilds the row's own document but not the parents that embed it, unless they read it too.
 - Inserts and deletes always rebuild.
 
@@ -142,7 +142,9 @@ ALTER TABLE "public"."users" REPLICA IDENTITY FULL;
 
 - `USING INDEX` logs only the index's columns, so an update there rebuilds unless every read column is in the index.
 - A large value Postgres keeps out of line (TOAST) and the update didn't touch counts as unchanged.
-- On a partitioned table each partition's own identity decides.
+- Values are compared as values, not as text: a `numeric` whose scale alone changes (`1.0` → `1.00`) rebuilds nothing, so the document keeps the old scale until something it reads changes.
+- A join with a `limit` but no `order_by` that orders its rows totally picks rows in physical order. After a skipped update the document keeps its selection, where a rebuild might have picked different rows. Give a limited join a total `order_by` (end it with a unique column).
+- An update to a partitioned table always rebuilds, whatever you set. `ALTER TABLE … REPLICA IDENTITY FULL` on a partitioned parent doesn't reach its partitions, each partition logs its old rows by its own identity, and the stream can't show which identity logged a row, so flusso doesn't compare them. There is nothing to set for this; the partitions flusso does set are for [deleted and re-parented rows](#deleted-and-re-parented-rows).
 
 ## Example
 
