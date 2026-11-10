@@ -6,7 +6,7 @@ use quote::quote;
 use syn::spanned::Spanned;
 use syn::{Field, Fields, Ident, LitStr, Type};
 
-use config::{MappingType, ResolvedField};
+use config::{Mapping, MappingType, ResolvedField};
 
 use crate::resolve::PathSegment;
 use crate::value::Kind;
@@ -301,7 +301,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             // opaque `json` (no children) accepts anything; a group / to-one
             // object wants a struct.
             if let Some(values) = &resolved.mapping.map_values {
-                return check_map_type(field, inner, &values.mapping_type);
+                return check_map_type(field, inner, values);
             }
             if resolved.children.is_empty() {
                 return Ok(None);
@@ -388,15 +388,13 @@ fn value_assert(ty: &Type, kind: TokenStream) -> TokenStream {
 fn check_map_type(
     field: &DocField,
     inner: &Type,
-    values: &MappingType,
+    values: &Mapping,
 ) -> syn::Result<Option<TokenStream>> {
-    let os = values.name();
-    // The map handles have no decimal kind, so a `decimal`-valued map keys to
-    // the `Double` kind like a `double` one.
-    let kind = kind_of(values, false);
+    let os = values.mapping_type.name();
+    let kind = kind_of(&values.mapping_type, values.decimal);
     match map_container_value(inner) {
         Some(value_ty) => {
-            let expected = expected_leaves(values);
+            let expected = expected_leaves(&values.mapping_type);
             let found = leaf_ident(value_ty);
             if found.as_deref().is_some_and(|f| expected.contains(&f)) {
                 return Ok(None);
@@ -942,7 +940,14 @@ fn leaf_handle(
                 | MappingType::HalfFloat
                 | MappingType::Double
                 | MappingType::ScaledFloat),
-            ) => number_map(kind_of(value, false)?),
+            ) => number_map(kind_of(
+                value,
+                resolved
+                    .mapping
+                    .map_values
+                    .as_deref()
+                    .is_some_and(|values| values.decimal),
+            )?),
             // Any other value kind has no typed map handle (the conversion
             // rejects non-leaf map values, so this is defensive) — fall back to
             // the opaque object handle so the field is still addressable.

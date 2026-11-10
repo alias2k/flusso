@@ -25,3 +25,7 @@ fields:
   - map: releaseDates
     values: date
     required: false
+  # A decimal-valued map: exact per-currency costs, keyed like a `decimal` field.
+  - map: costs
+    values: decimal
+    required: false

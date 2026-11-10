@@ -336,6 +336,26 @@ fn number_and_date_maps_generate_typed_leaves() -> Result {
     Ok(())
 }
 
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct CostedProduct {
+    sku: String,
+    costs: Option<HashMap<String, flusso_query::Decimal>>,
+}
+
+#[test]
+fn a_decimal_map_keys_like_a_plain_decimal_field() -> Result {
+    use flusso_query::Decimal;
+
+    // `costs` is a `decimal` map: its keys take a `Decimal`, exactly as a plain
+    // `decimal` field's `Number<kind::Decimal>` does.
+    let body = CostedProduct::query()
+        .filter(CostedProduct::costs().key("eur").eq(Decimal::new(999, 2)))
+        .body();
+    assert!(body.to_string().contains(r#""costs.eur""#), "{body}");
+    Ok(())
+}
+
 #[test]
 fn string_map_keys_have_the_plain_field_surface() -> Result {
     use flusso_query::{SortBuilder, SortOrder};

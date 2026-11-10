@@ -29,11 +29,9 @@ fn bake_field(field: &ResolvedField) -> TokenStream {
         }
         None => quote! { &[] },
     };
-    // The map handles have no decimal kind, so a `decimal`-valued map keys to
-    // the `Double` tag like a `double` one.
     let map_values = match &field.mapping.map_values {
         Some(values) => {
-            let values = tag(&values.mapping_type, false);
+            let values = tag(&values.mapping_type, values.decimal);
             quote! { ::core::option::Option::Some(#values) }
         }
         None => quote! { ::core::option::Option::None },
