@@ -53,7 +53,7 @@ Two `PostToolUse` hooks run **after any edit** (`Edit`/`Write`/`MultiEdit`):
 
 - **Online first, offline fallback.** It validates against the live database (catching type/nullability mismatches against real columns); if the DB isn't reachable it silently falls back to offline structural validation rather than nagging about connections.
 - **Silent on success**, speaks only when validation fails. Unrelated edits, files outside a flusso project, or a missing runner all exit quietly.
-- **Runner resolution:** `$FLUSSO_CHECK_CMD` (a full command prefix) → `flusso` on `PATH` → `cargo run --quiet --` from the nearest Cargo workspace (repo-dev mode).
+- **Runner resolution:** `$FLUSSO_CHECK_CMD` (a full command prefix) → `cargo run --quiet --` when the edited file sits in a Cargo workspace that builds flusso (its `apps/cli` is `flusso-cli`; so a stale `flusso` on `PATH` never shadows the repo's own build) → `flusso` on `PATH`. A failure message names the runner it used, e.g. `(runner: cargo run from /path)` or `(runner: /usr/bin/flusso 0.15.1)`.
 
 **`hooks/flusso_query_lint.py`** — on a `.rs` edit, flags the one query anti-pattern a compiler can't: a `Keyword`/`Text` **string-path handle** (`Keyword::at("…")` / `Text::<Root>::at("…")`) in a file that also uses `#[derive(FlussoRoot)]`. There every schema field already has a generated `Type::field()` handle, so a string path bypasses the compile-time mapping check — the classic escape-hatch mistake. High precision: a file with no derive (hand-written handles) is never flagged; the typed fix is fed back for a same-turn correction. Style only — it never blocks editing.
 
