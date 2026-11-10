@@ -4,8 +4,7 @@
 //! lower-level pieces live in [`transport`](crate), [`generations`](crate),
 //! [`mapping`](crate), and [`bulk`](crate).
 
-use std::collections::{BTreeSet, HashMap};
-use std::sync::PoisonError;
+use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
@@ -115,11 +114,8 @@ impl Sink for OpensearchSink {
         Ok(())
     }
 
-    /// Buffer one envelope's bulk action. A seeded index is addressed through
-    /// its hash alias with `require_alias`, so a generation deleted while
-    /// running makes the [`flush`](Self::flush) fail instead of OpenSearch
-    /// auto-creating it with a dynamic mapping; an unseeded one through its
-    /// generation, since the alias may still serve the previous generation.
+    /// Buffer one envelope's bulk action, addressed by its index's write
+    /// target (see `IndexTarget::write_target`).
     async fn apply(&self, envelope: &Envelope) -> Result<()> {
         let logical = envelope.index.as_ref();
         let (index, require_alias) = match self.target(logical) {
@@ -165,11 +161,8 @@ impl Sink for OpensearchSink {
     /// `refresh_interval`, keeping bulk indexing fast so the backlog clears (see
     /// the module docs).
     ///
-    /// A write whose target is missing (`index_not_found_exception`: the
-    /// generation or its alias was deleted while running) fails the whole
-    /// flush rather than being reported as a rejected document. The sink
-    /// engine stops, and its restart re-runs [`ensure_index`](Self::ensure_index),
-    /// which recreates the generation and reseeds it.
+    /// A missing target fails the whole flush, not one document (see the
+    /// `bulk` module docs).
     #[tracing::instrument(name = "os.flush", skip_all, fields(caught_up), err)]
     async fn flush(&self, caught_up: bool) -> Result<FlushReport> {
         let actions = {
@@ -221,26 +214,12 @@ impl Sink for OpensearchSink {
             start = end;
         }
 
-        // Rejections carry the bulk target (a hash alias or a generation); map
-        // each back to its *logical* name so the engine can resolve a per-index
-        // failure policy. Fall back to the target name if it's unknown.
+        // The engine resolves failure policies by logical name.
         if !rejected.is_empty() {
-            let names = self
-                .index_names
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let to_logical: HashMap<&str, &str> = names
-                .iter()
-                .flat_map(|(logical, target)| {
-                    [
-                        (target.generation.as_str(), logical.as_str()),
-                        (target.hash_alias.as_str(), logical.as_str()),
-                    ]
-                })
-                .collect();
+            let to_logical = self.logical_names();
             for doc in &mut rejected {
-                if let Some(&logical) = to_logical.get(doc.index.as_str()) {
-                    doc.index = logical.to_owned();
+                if let Some(logical) = to_logical.get(&doc.index) {
+                    doc.index.clone_from(logical);
                 }
             }
         }

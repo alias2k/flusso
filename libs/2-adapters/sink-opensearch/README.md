@@ -111,36 +111,20 @@ had to be recreated, the engine treats every seeded index as stale and stages a
 exist at the source are dropped on the swap — before backfilling. That decision
 lives in the engine, not here; see the `flusso-engine` docs.
 
-## A generation deleted while running
+## The generation lifecycle while running
 
-A seeded index is written through its hash alias, each bulk `index` action
-carrying `require_alias: true`. Delete the active generation and its aliases go
-with it, so the next write fails with `index_not_found_exception` instead of
-OpenSearch's default `action.auto_create_index` quietly recreating it with a
-dynamic mapping and no aliases. That item error is not a per-document rejection:
-[`flush`](OpensearchSink::flush) returns `Err`, the sink engine stops with the
-batch unacked, and its restart re-runs [`ensure_index`](OpensearchSink::ensure_index),
-which recreates the generation and reseeds it (the path above). The flag is per
-item, not `?require_alias=true` on the URL, because one bulk request can also
-carry writes to an unseeded generation, which is concrete.
-
-The gap: an **unseeded** generation (a first seed, or a rebuild while the alias
-still serves the old one) is written by its concrete name, and auto-create
-still recreates it if it's deleted mid-backfill. Set `action.auto_create_index`
-to a pattern that excludes flusso's generations but still allows the meta index,
-which is created by its first write: `+flusso_meta,-users_*,-orders_*,+*` (first
-match wins; add your `prefix` to each name). The write then fails the same way,
-but the documents the in-flight snapshot already wrote are gone, so restart
-flusso to reseed that index.
-
-## Reindex while a rebuild is pending
-
-[`reindex`](OpensearchSink::reindex) stages a new generation only when the index
-is seeded. With no meta doc, or one already `seeded: false`, a from-scratch
-rebuild is pending, so the call logs and does nothing rather than orphan the
-generation being built. [`mark_seeded`](OpensearchSink::mark_seeded) drops every
-other `{logical}_{hash}_{n}`, not only those the alias moved off, so orphans an
-older version left behind are reclaimed on the next swap.
+- **A deleted generation fails the write.** A seeded index is written through
+  its hash alias with `require_alias`, so a deleted generation can't be
+  auto-created with a dynamic mapping. The `index_not_found_exception` fails the
+  whole [`flush`](OpensearchSink::flush), and the sink engine's restart
+  rebuilds the generation through `ensure_index`. An unseeded generation is
+  still written by its concrete name. The gap and the recommended
+  `action.auto_create_index` setting are in the
+  [manual](https://alias2k.github.io/flusso/reference/sink-opensearch.html#seeding).
+- **A second reindex is a no-op.** [`reindex`](OpensearchSink::reindex) stages
+  nothing for an index that's unseeded or has no meta doc, since a rebuild from
+  scratch is already pending. [`mark_seeded`](OpensearchSink::mark_seeded)
+  drops every non-active generation, which reclaims orphans.
 
 ## Module layout
 

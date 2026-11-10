@@ -102,7 +102,7 @@ pub struct OpensearchSink {
     /// Logical index name → where it lives and where its writes go, learned
     /// from [`ensure_index`](OpensearchSink::ensure_index) and updated by
     /// [`mark_seeded`](OpensearchSink::mark_seeded). Shared across clones.
-    pub(crate) index_names: Arc<SyncMutex<HashMap<String, IndexTarget>>>,
+    pub(crate) targets: Arc<SyncMutex<HashMap<String, IndexTarget>>>,
 }
 
 /// Where one logical index lives, and so where its bulk writes are addressed.
@@ -112,17 +112,14 @@ pub(crate) struct IndexTarget {
     pub(crate) generation: String,
     /// The hash alias `{prefix}{logical}_{hash}` the generation sits behind.
     pub(crate) hash_alias: String,
-    /// Whether the active generation is seeded. A seeded index is written
-    /// through the hash alias; an unseeded one (first seed, or a rebuild while
-    /// the alias still serves the previous generation) through its generation.
+    /// Whether the active generation is seeded.
     pub(crate) seeded: bool,
 }
 
 impl IndexTarget {
     /// The bulk `_index` for a write, and whether it must already be an alias
-    /// (`require_alias`): the hash alias once seeded, so a generation deleted
-    /// while running fails the write instead of being auto-created with a
-    /// dynamic mapping.
+    /// (`require_alias`): the hash alias once seeded, else the generation,
+    /// since the alias may still serve the previous one during a rebuild.
     pub(crate) fn write_target(&self) -> (&str, bool) {
         if self.seeded {
             (&self.hash_alias, true)
@@ -187,7 +184,7 @@ impl OpensearchSink {
             },
             index_prefix: String::new(),
             buffer: Arc::new(Mutex::new(Vec::new())),
-            index_names: Arc::new(SyncMutex::new(HashMap::new())),
+            targets: Arc::new(SyncMutex::new(HashMap::new())),
         })
     }
 
@@ -231,16 +228,32 @@ impl OpensearchSink {
     /// What [`ensure_index`](OpensearchSink::ensure_index) learned about a
     /// logical index; `None` if it was never announced.
     pub(crate) fn target(&self, logical: &str) -> Option<IndexTarget> {
-        self.index_names
+        self.targets
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(logical)
             .cloned()
     }
 
+    /// Every name a write may have targeted (generation or hash alias) →
+    /// its logical index.
+    pub(crate) fn logical_names(&self) -> HashMap<String, String> {
+        self.targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .flat_map(|(logical, target)| {
+                [
+                    (target.generation.clone(), logical.clone()),
+                    (target.hash_alias.clone(), logical.clone()),
+                ]
+            })
+            .collect()
+    }
+
     /// Record what is known about a logical index.
     pub(crate) fn set_target(&self, logical: &str, target: IndexTarget) {
-        self.index_names
+        self.targets
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(logical.to_owned(), target);
