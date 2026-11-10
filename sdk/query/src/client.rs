@@ -159,9 +159,7 @@ impl Client {
         self.post_json(&endpoint, body)
             .await
             .map_err(|error| match error {
-                Error::Status { status, body } if snapshot_gone(status, &body) => {
-                    Error::CursorExpired { body }
-                }
+                Error::Status { body, .. } if snapshot_gone(&body) => Error::CursorExpired { body },
                 other => other,
             })
     }
@@ -183,7 +181,11 @@ impl Client {
             .await
         {
             Ok(_) => Ok(()),
-            Err(Error::Status { status, body }) if snapshot_gone(status, &body) => Ok(()),
+            Err(Error::Status { status, body })
+                if status == StatusCode::NOT_FOUND.as_u16() || snapshot_gone(&body) =>
+            {
+                Ok(())
+            }
             Err(error) => Err(error),
         }
     }
@@ -285,9 +287,11 @@ impl Client {
 }
 
 /// Whether an OpenSearch error says a point-in-time is gone: its search
-/// context expired or was freed, or the index it pinned was deleted.
-fn snapshot_gone(status: u16, body: &str) -> bool {
-    status == StatusCode::NOT_FOUND.as_u16() || body.contains("search_context_missing_exception")
+/// context expired or was freed, or the index it pinned was deleted. Matched on
+/// the exception type, not the status, so an unrelated 404 (a wrong base URL, a
+/// proxy) stays a plain [`Error::Status`].
+fn snapshot_gone(body: &str) -> bool {
+    body.contains("search_context_missing_exception") || body.contains("index_not_found_exception")
 }
 
 #[derive(Deserialize)]

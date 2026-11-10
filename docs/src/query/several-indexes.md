@@ -47,7 +47,7 @@ Two semantics:
 - A **query** on a field that exists in only one index is fine; it doesn't match in the others.
 - A **sort** on such a field is rejected by OpenSearch unless it carries an `unmapped_type`. Sort blended results by relevance, or on shared fields.
 
-The blended list pages like a single index, by offset or by cursor; see [Paging](results-and-escape-hatch.md#paging). A cursor breaks ties on `_index` then `_id`, since two indexes can share an id.
+The blended list pages like a single index, by offset or by cursor; see [Paging](paging.md). A cursor breaks ties on `_index` then `_id`, since two indexes can share an id.
 
 ## Generation suffix normalization
 

@@ -2,11 +2,11 @@
 //!
 //! Proves what the unit tests can't: against a **live** OpenSearch, indexed by
 //! the **real sink**, a cursor walk reads one snapshot. A document written
-//! mid-walk never shows up, a reindex that moves the hash alias to a fresh
-//! generation doesn't disturb it, and once the reindex drops the generation the
-//! walk pinned, the next page is `CursorExpired`. A combined walk keeps two
-//! indexes' colliding ids apart (the `_index` tiebreak), and an early
-//! `PageCursor::close` ends the walk.
+//! mid-walk never shows up, moving the hash alias to another generation doesn't
+//! disturb it, and once a reindex drops the generation the walk pinned, the next
+//! page is `CursorExpired`. A prefixed combined walk keeps two indexes'
+//! colliding ids apart (the `_index` tiebreak) and dispatches generation-named
+//! hits, an `ids` walk pages too, and an early `PageCursor::close` ends a walk.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -109,23 +109,31 @@ async fn a_cursor_walk_reads_one_snapshot_across_writes_and_a_reindex() {
     let doomed = walk().cursor(None).send(&client).await.unwrap();
     assert_eq!(first.total, 5);
     let mut seen: Vec<String> = first.hits.iter().map(|hit| hit.id.clone()).collect();
-    assert!(
-        first.hits.iter().all(|hit| hit.sort.len() == 1),
-        "the `_id` tiebreak is the sort"
+    assert_eq!(
+        first.hits.first().unwrap().sort.len(),
+        2,
+        "an unsorted walk sorts on `_score` then the `_id` tiebreak"
     );
 
-    // A write that sorts ahead of everything the walk has seen, then a reindex
-    // that stages generation 2.
+    // A write that sorts after everything seen so far (a live `search_after`
+    // would return it), then the hash alias moves to an empty generation while
+    // generation 1 still exists — the swap a reindex makes.
     write(
         &sink,
         &users.index,
-        "0",
-        document("email", "u0@example.com"),
+        "6",
+        document("email", "u6@example.com"),
     )
     .await;
     refresh(&base, &User::physical_index()).await;
-    sink.reindex(&users).await.unwrap();
-    sink.ensure_index(&users).await.unwrap();
+    let gen1 = format!("{}_1", User::physical_index());
+    let swapped = format!("{}_99", User::physical_index());
+    swap_alias(&base, &User::physical_index(), &gen1, &swapped).await;
+    let offset = User::query().send(&client).await.unwrap();
+    assert_eq!(
+        offset.total, 0,
+        "offset paging now reads the new generation"
+    );
 
     // The walk finishes on its snapshot: every seeded id once, nothing new.
     let mut next = first.next;
@@ -143,10 +151,15 @@ async fn a_cursor_walk_reads_one_snapshot_across_writes_and_a_reindex() {
     assert_eq!(
         seen,
         ["1", "2", "3", "4", "5"],
-        "no duplicate, no skip, no mid-walk write"
+        "no duplicate, no skip, no mid-walk write, no generation mix"
     );
 
-    // Activating generation 2 drops generation 1: a walk still pinned to it ends.
+    // Back to the sink's own lifecycle: a reindex activates generation 2 and
+    // drops generation 1, so a walk still pinned to it ends.
+    swap_alias(&base, &User::physical_index(), &swapped, &gen1).await;
+    delete_index(&base, &swapped).await;
+    sink.reindex(&users).await.unwrap();
+    sink.ensure_index(&users).await.unwrap();
     sink.mark_seeded(&users.index).await.unwrap();
     let expired = walk()
         .cursor(doomed.next.expect("a full first page has a next"))
@@ -158,11 +171,38 @@ async fn a_cursor_walk_reads_one_snapshot_across_writes_and_a_reindex() {
     );
 }
 
+/// Point `alias` at a fresh empty index `to` instead of `from`, atomically
+/// (creating `to` when missing).
+async fn swap_alias(base: &str, alias: &str, from: &str, to: &str) {
+    let http = reqwest::Client::new();
+    let _ = http.put(format!("{base}/{to}")).send().await.unwrap();
+    http.post(format!("{base}/_aliases"))
+        .json(&serde_json::json!({ "actions": [
+            { "remove": { "index": from, "alias": alias } },
+            { "add": { "index": to, "alias": alias } },
+        ]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+}
+
+async fn delete_index(base: &str, index: &str) {
+    reqwest::Client::new()
+        .delete(format!("{base}/{index}"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
-async fn a_combined_walk_keeps_colliding_ids_apart_and_close_ends_it() {
+async fn a_prefixed_combined_walk_keeps_colliding_ids_apart_and_close_ends_it() {
     let (_container, base) = start_opensearch().await;
-    let sink = sink(&base);
+    let sink = sink(&base).with_index_prefix("e2e_");
     let users = mapping("users", 1, "email", MappingType::Keyword);
     let orders = mapping("orders", 2, "status", MappingType::Keyword);
     seed_many(
@@ -183,9 +223,14 @@ async fn a_combined_walk_keeps_colliding_ids_apart_and_close_ends_it() {
         ],
     )
     .await;
-    let path = StoreItem::query().physical_path().to_owned();
+    let path = StoreItem::query()
+        .physical_path()
+        .split(',')
+        .map(|index| format!("e2e_{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
     refresh(&base, &path).await;
-    let client = Client::connect(&base).unwrap();
+    let client = Client::connect(&base).unwrap().index_prefix("e2e_");
 
     let mut seen = BTreeSet::new();
     let mut cursor: Option<PageCursor> = None;

@@ -16,7 +16,7 @@ endpoint is documented once, on a page under `docs/src/reference/`, and the how-
 there instead of restating it. Adapter option tables are **generated** (`just schema-gen` →
 `docs/src/reference/generated/`) and included by the adapter pages; edit the doc comment on the
 adapter's config struct, never the table. Docker recipes are `docs/src/deploy/docker.md`, the query
-manual is the twelve chapters under `docs/src/query/`, the designer is
+manual is the thirteen chapters under `docs/src/query/`, the designer is
 `docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing
 architecture tour is `docs/src/contribute/` (this file stays the agent-facing index). Page
 types, templates, and the ownership rule are in `docs/STYLE.md`. Every crate has its own
@@ -750,21 +750,15 @@ Guarded by the `multi_decode_*` unit tests and the `combined_search` live e2e (`
 — an unpublished crate, so the published `flusso-query` carries no flusso lib deps and the query
 release train can't be dragged into a release by a libs bump).
 
-**Page cursors (issue #156, ADR 0008).** Offset paging (`from`/`size`) is unchanged; the
-alternative is `Search::cursor(Option<PageCursor>)` / `MultiSearch::cursor(..)`, a typestate
-(`CursorSearch`/`MultiCursorSearch`: only `keep_alive`/`send`/`ids`) over an OpenSearch
-**point-in-time + `search_after`** (`sdk/query/src/cursor.rs`; OpenSearch ≥ 2.4 only, the ES PIT
-API differs — #157). The first page opens the PIT on the prefixed path; a PIT search POSTs to bare
-`/_search` (OpenSearch refuses an index path with `pit`) and always continues with the *returned*
-`pit_id`. The sort is made total by appending `_id` (union: `_index`, `_id`) unless present —
-OpenSearch has no `_shard_doc`. `SearchResponse::next` is the opaque token (base64url JSON: PIT id,
-last hit's sort values, FNV-1a fingerprint of the body minus `size` + the unprefixed path → a
-different query is `CursorMismatch`; the hash is hand-rolled so tokens survive a rustc bump, pinned
-by `the_fingerprint_is_pinned`); `next` is `None` on a short page, which closes the PIT. A gone
-snapshot (expired, closed, or its generation dropped by `mark_seeded` after a reindex) is
-`CursorExpired`. `Hit::sort` carries each hit's sort values. Guarded by the `tests::cursor` unit
-tests and the `cursor_paging` live e2e (same crate as `combined_search`, shared helpers in
-`tests/common/`).
+**Page cursors (issue #156, ADR 0008).** Offset paging is unchanged; `Search::cursor(Option<PageCursor>)`
+/ `MultiSearch::cursor(..)` return a typestate (`CursorSearch`/`MultiCursorSearch`) that walks an
+OpenSearch **point-in-time + `search_after`** (`sdk/query/src/cursor.rs`; OpenSearch only, ES is #157).
+Gotchas: a PIT search POSTs to bare `/_search` and must continue with the *returned* `pit_id`;
+OpenSearch has no `_shard_doc`, so the sort is made total with `_id` (union: `_index`, `_id`) and an
+unsorted walk leads with `_score`; the token's fingerprint is a hand-rolled FNV-1a over the body
+(minus delivery keys) and the *prefixed* path, pinned by `the_fingerprint_is_pinned` so tokens survive
+a rustc bump; a gone snapshot is `CursorExpired`, matched on the exception type, not the 404.
+Guarded by `tests::cursor` and the `cursor_paging` live e2e (helpers shared in `tests/common/`).
 
 ## Keeping this file current
 

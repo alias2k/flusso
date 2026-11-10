@@ -2053,7 +2053,7 @@ mod cursor {
         let body = search.body();
         let cursor_search = search.cursor(None).keep_alive(Duration::from_secs(90));
         let request = cursor_search.request(body, "users_xxxxxx")?;
-        let (body, _) = page_body(&request, "PIT");
+        let body = page_body(&request, "PIT", "users_xxxxxx").body;
         assert_eq!(
             body,
             json!({
@@ -2071,10 +2071,14 @@ mod cursor {
         let cursor = PageCursor::new("PIT2".into(), vec![json!("a@b.c"), json!("7")], 0);
         let search = User::query().size(5).cursor(cursor);
         let request = search.request(User::query().size(5).body(), "users_xxxxxx")?;
-        let (body, _) = page_body(&request, "PIT2");
+        let body = page_body(&request, "PIT2", "users_xxxxxx").body;
         assert_eq!(body["search_after"], json!(["a@b.c", "7"]));
         assert_eq!(body["pit"]["id"], json!("PIT2"));
-        assert_eq!(body["sort"], json!([{ "_id": { "order": "asc" } }]));
+        assert_eq!(
+            body["sort"],
+            json!([{ "_score": { "order": "desc" } }, { "_id": { "order": "asc" } }]),
+            "an unsorted walk keeps relevance order"
+        );
         Ok(())
     }
 
@@ -2084,7 +2088,7 @@ mod cursor {
             let body = search.body();
             let cursor = search.cursor(None);
             let request = cursor.request(body, "users_xxxxxx")?;
-            Ok(page_body(&request, "PIT").1)
+            Ok(page_body(&request, "PIT", "users_xxxxxx").fingerprint)
         };
         let base = fp(User::query().filter(User::email().eq("x")).size(10))?;
         assert_eq!(
@@ -2105,6 +2109,33 @@ mod cursor {
         let cursor = PageCursor::new("PIT".into(), Vec::new(), base);
         assert!(cursor.check(base).is_ok());
         assert!(matches!(cursor.check(base ^ 1), Err(Error::CursorMismatch)));
+        Ok(())
+    }
+
+    #[test]
+    fn send_and_ids_share_a_cursor_but_deployments_do_not() -> Result {
+        let search = User::query().filter(User::email().eq("x")).size(10);
+        let send_body = search.body();
+        let ids_body = search.ids_body();
+        let cursor = search.cursor(None);
+        let send = page_body(
+            &cursor.request(send_body, "users_xxxxxx")?,
+            "PIT",
+            "users_xxxxxx",
+        );
+        let ids_request = cursor.request(ids_body, "users_xxxxxx")?;
+        let ids = page_body(&ids_request, "PIT", "users_xxxxxx");
+        assert_eq!(send.fingerprint, ids.fingerprint);
+        assert_eq!(
+            ids.body["_source"],
+            json!(false),
+            "ids still fetch no source"
+        );
+        let prefixed = page_body(&ids_request, "PIT", "staging_users_xxxxxx");
+        assert_ne!(
+            ids.fingerprint, prefixed.fingerprint,
+            "a cursor is bound to the prefixed index it walked"
+        );
         Ok(())
     }
 
@@ -2131,10 +2162,14 @@ mod cursor {
     #[test]
     fn a_combined_cursor_breaks_ties_on_index_then_id() -> Result {
         let search = StoreItem::query().size(3).cursor(None);
-        let (body, _) = page_body(&search.request()?, "PIT");
+        let body = page_body(&search.request()?, "PIT", "users_xxxxxx").body;
         assert_eq!(
             body["sort"],
-            json!([{ "_index": { "order": "asc" } }, { "_id": { "order": "asc" } }])
+            json!([
+                { "_score": { "order": "desc" } },
+                { "_index": { "order": "asc" } },
+                { "_id": { "order": "asc" } },
+            ])
         );
         Ok(())
     }

@@ -344,15 +344,16 @@ page reads one snapshot (OpenSearch point-in-time + `search_after`, OpenSearch �
 
 ```rust
 let page = User::query().filter(..).sort(..).size(50)
-    .cursor(params.cursor)          // Option<PageCursor>: None starts a walk
-    .send(&client).await?;          // → CursorSearch; .ids() → IdsPage { ids, next }
+    .cursor(params.cursor)          // Option<PageCursor>: None starts a walk → CursorSearch
+    .send(&client).await?;          // → SearchResponse; .ids(&client) → IdsPage { ids, next }
 page.next                            // Option<PageCursor>: opaque string, None on the last page
 ```
 
 - Rebuild the **same** query for every page; a cursor resumed with other filters or sort is
   `Error::CursorMismatch`. `PageCursor` is a string in serde, so an HTTP API takes `?cursor=` and
   returns `next` with no conversion (see `dev/search-api`).
-- The sort is made total for you (`_id`; a `MultiSearch` cursor adds `_index` first). Don't add a
+- The sort is made total for you (`_id`; a `MultiSearch` cursor adds `_index` first; unsorted keeps
+  `_score` first). Don't add a
   `tiebreak` just for paging, and never set `.from()` or `.search_after()` alongside `.cursor()`
   (`Error::Cursor`).
 - `Error::CursorExpired` (keep-alive lapsed, default 1 min via `.keep_alive(..)`, or a reindex

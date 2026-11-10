@@ -2,7 +2,7 @@
 //!
 //! Targets OpenSearch and Elasticsearch 7.x, which share the `_search` query DSL
 //! this crate emits; any future backend divergence is handled on the [`Client`],
-//! not by separate crates. One exception: cursor paging ([`Search::cursor`])
+//! not by separate crates. One exception: [cursor paging](PageCursor)
 //! needs OpenSearch ≥ 2.4.
 //!
 //! This is the **runtime** layer described in the
@@ -35,7 +35,7 @@
 //!   [`Search::cursor`] / [`MultiSearch::cursor`] walk one consistent snapshot
 //!   of the index (a point-in-time + `search_after`), unaffected by writes or a
 //!   reindex mid-walk; [`SearchResponse::next`] carries the opaque token that
-//!   resumes after each page. See the `cursor` module docs.
+//!   resumes after each page. See [`PageCursor`] for a walk.
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); shaping returned
 //! nested arrays ([`Search::filter_nested`] with [`Nested::matching`], via

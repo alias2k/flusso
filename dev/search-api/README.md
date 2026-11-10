@@ -54,6 +54,9 @@ sending `next` back as `?cursor=` (with the same filters) returns the following 
 same snapshot of the index, so writes and a reindex during the walk never shift it. `next` is
 `null` on the last page. A cursor sent with different filters is `400`; one whose snapshot
 expired (one minute idle, or a reindex dropped it) is `410` — start again without `cursor`.
+Every first page holds a snapshot until the walk ends or idles out, and OpenSearch caps open
+snapshots per node (`search.max_open_pit_context`, 300), so a high-traffic endpoint that rarely
+pages past page one is better served by offset paging.
 
 | Endpoint | Filters |
 | -------- | ------- |
