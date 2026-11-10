@@ -77,13 +77,7 @@ fn map_value_type(field: &Field) -> Option<Box<Mapping>> {
         FieldSource::Column(Column {
             ty: FlussoType::Map { values },
             ..
-        }) => Some(Box::new(Mapping {
-            mapping_type: values.opensearch(),
-            extra: values.default_options(),
-            map_values: None,
-            decimal: matches!(**values, FlussoType::Decimal),
-            enum_order: None,
-        })),
+        }) => Some(Box::new(Mapping::of_type(values))),
         _ => None,
     }
 }

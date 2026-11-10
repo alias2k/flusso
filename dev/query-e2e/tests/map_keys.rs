@@ -55,13 +55,7 @@ fn map_field(name: &str, values: &FlussoType) -> ResolvedField {
         mapping: Mapping {
             mapping_type: MappingType::Object,
             extra: BTreeMap::from([("dynamic".to_owned(), GenericValue::Bool(true))]),
-            map_values: Some(Box::new(Mapping {
-                mapping_type: values.opensearch(),
-                extra: values.default_options(),
-                map_values: None,
-                decimal: false,
-                enum_order: None,
-            })),
+            map_values: Some(Box::new(Mapping::of_type(values))),
             decimal: false,
             enum_order: None,
         },

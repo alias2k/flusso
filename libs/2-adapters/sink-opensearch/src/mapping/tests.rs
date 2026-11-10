@@ -266,23 +266,12 @@ fn extra_mapping_settings_pass_through() {
     assert_eq!(amount["scaling_factor"], 100);
 }
 
-/// The mapping a plain field of `ty` resolves to — what a map key of `ty` gets.
-fn value_mapping(ty: &FlussoType) -> Mapping {
-    Mapping {
-        mapping_type: ty.opensearch(),
-        extra: ty.default_options(),
-        map_values: None,
-        decimal: matches!(ty, FlussoType::Decimal),
-        enum_order: None,
-    }
-}
-
 fn map_field(name: &str, values: &FlussoType) -> ResolvedField {
     let mut map = field(name, MappingType::Object, vec![]);
     map.mapping
         .extra
         .insert("dynamic".to_owned(), GenericValue::Bool(true));
-    map.mapping.map_values = Some(Box::new(value_mapping(values)));
+    map.mapping.map_values = Some(Box::new(Mapping::of_type(values)));
     map
 }
 
@@ -323,7 +312,7 @@ fn a_map_key_is_mapped_like_a_plain_field_of_its_values_type() {
     for options in every_option_set() {
         for ty in leaf_value_types() {
             let mut plain = field("title", MappingType::Text, vec![]);
-            plain.mapping = value_mapping(&ty);
+            plain.mapping = Mapping::of_type(&ty);
             let plain = build_index_body(&[plain], &options);
             let map = build_index_body(&[map_field("title", &ty)], &options);
 

@@ -239,6 +239,21 @@ pub struct Mapping {
     pub enum_order: Option<Vec<String>>,
 }
 
+impl Mapping {
+    /// The mapping a field of the declared type `ty` gets with no options of its
+    /// own: its OpenSearch type, the type's [default options](FlussoType::default_options)
+    /// and its `decimal` flag. What every key of a `map` of `ty` is mapped as.
+    pub fn of_type(ty: &FlussoType) -> Self {
+        Self {
+            mapping_type: ty.opensearch(),
+            extra: ty.default_options(),
+            map_values: None,
+            decimal: matches!(ty, FlussoType::Decimal),
+            enum_order: None,
+        }
+    }
+}
+
 /// Serializes the way OpenSearch expects a field mapping — `{ "type": …, …extra }`
 /// — rather than the struct's named fields. The `extra` settings sit beside
 /// `type`, exactly as they would in the index body. A `map` adds `values`: the
