@@ -38,8 +38,11 @@ A publication is the server-side allowlist of tables whose changes are decoded. 
 - `flusso check` prints the same coverage report read-only (no writes), so you see the gap before running.
 - Opt out with `manage_publication = false` (or `FLUSSO_MANAGE_PUBLICATION=false` / `--manage-publication false`) to own the publication yourself:
   ```sql
-  CREATE PUBLICATION flusso FOR TABLE users, orders, order_items;  -- or FOR ALL TABLES
+  CREATE PUBLICATION flusso FOR TABLE users, orders, order_items  -- or FOR ALL TABLES
+    WITH (publish_via_partition_root = true);
   ```
+
+**Partitioned tables stream under the partition's name** unless the publication sets `publish_via_partition_root = true`, and flusso matches changes by table name, so without it every change to a partitioned table is dropped (flusso warns once per table: "a change arrived for a table no index reads"). A publication flusso creates sets it; an existing one is altered when an index reads a partitioned table and the role owns the publication, else flusso prints `ALTER PUBLICATION … SET (publish_via_partition_root = true);`. `flusso check` lists such tables under coverage.
 
 **A new join/aggregate pulls in a new table** → the publication must grow to include it. With management on, flusso extends it automatically; with management off, that's a manual `ALTER PUBLICATION`. This is the usual answer to "I added a `has_many` and its rows aren't syncing."
 
@@ -52,7 +55,7 @@ A publication is the server-side allowlist of tables whose changes are decoded. 
 - **USING INDEX** — the columns of a unique index; one over `(id, parent_id)` carries the link with less WAL than `FULL`. It must include the primary key: an index on the link alone (`UNIQUE (parent_id)`) keys changes by that column and carries nothing extra.
 - **NOTHING / keyless** — no identity; the table can't be addressed (see the table above).
 
-**Child tables need their parent link in it.** A `has_one`/`has_many` target (its `foreign_key`) or a junction (its `left_key`, unless that's in its PK): once such a row is **deleted** or **moved to another parent**, only the WAL pre-image still names the old parent, so the old parent's document is rebuilt only if the identity carries that column. Without it the old document silently keeps a stale copy. **flusso sets it itself:** with `manage_replica_identity = true` (the default) and a role that owns the table, `flusso run` issues `ALTER TABLE … REPLICA IDENTITY FULL;` at startup, before the slot is created (under a 5 s `lock_timeout`; partitioned tables are reported, not altered). When it can't (not the owner, or opted out with `manage_replica_identity = false` / `--manage-replica-identity false`), it logs the SQL and warns once per table on such a change; `flusso check` prints a **Replica identity** section saying, per table, whether the next run will set it. Changes made before it was set stay stale until `flusso reindex`. `belongs_to` targets and the far side of a many-to-many need nothing. Owned meaning: the [Postgres source reference](https://alias2k.github.io/flusso/reference/source-postgres.html#deleted-and-re-parented-rows).
+**Child tables need their parent link in it.** A `has_one`/`has_many` target (its `foreign_key`) or a junction (its `left_key`, unless that's in its PK): once such a row is **deleted** or **moved to another parent**, only the WAL pre-image still names the old parent, so the old parent's document is rebuilt only if the identity carries that column. Without it the old document silently keeps a stale copy. **flusso sets it itself:** with `manage_replica_identity = true` (the default) and a role that owns the table, `flusso run` issues `ALTER TABLE … REPLICA IDENTITY FULL;` at startup, before the slot is created (under a 5 s `lock_timeout`; a partitioned table is set on the parent and each partition, and a partition added later is set at the next start). When it can't (not the owner, or opted out with `manage_replica_identity = false` / `--manage-replica-identity false`), it logs the SQL and warns once per table on such a change; `flusso check` prints a **Replica identity** section saying, per table, whether the next run will set it. Changes made before it was set stay stale until `flusso reindex`. `belongs_to` targets and the far side of a many-to-many need nothing. Owned meaning: the [Postgres source reference](https://alias2k.github.io/flusso/reference/source-postgres.html#deleted-and-re-parented-rows).
 
 ## How relational structure becomes a document
 
@@ -82,7 +85,7 @@ Full reference: the [Postgres source reference, TLS section](https://alias2k.git
 ## Debugging checklist ("changes aren't showing up")
 
 1. `wal_level = logical`? (`SHOW wal_level;` — needs a restart if you just changed it.)
-2. Is the changed table **in the publication**? (New join target? `flusso check` shows coverage.)
+2. Is the changed table **in the publication**, under its own name? (New join target? Partitioned table without `publish_via_partition_root`? `flusso check` shows coverage.)
 3. Does the table have a **key** (PK or `REPLICA IDENTITY`)? Keyless = skipped/errored.
 4. Deleted or re-parented child rows still in the old parent's doc? → the child table's replica identity misses its link column and flusso couldn't set it (not the owner, or `manage_replica_identity = false`); `flusso check` says which and prints the `ALTER TABLE … REPLICA IDENTITY FULL`. Then `flusso reindex` to repair what went stale.
 5. Is another flusso (or a leftover slot) consuming the same slot? One slot, one consumer.
