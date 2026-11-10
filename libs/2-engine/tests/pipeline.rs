@@ -484,6 +484,100 @@ async fn deleted_and_reparented_children_leave_their_old_parent() {
     live.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_self_referencing_has_many_rebuilds_the_parent() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    create_table(
+        &pg.pool,
+        "CREATE TABLE items (id int PRIMARY KEY, parent_id int REFERENCES items(id), name text)",
+    )
+    .await;
+
+    let children = |nested: Vec<Field>| {
+        let mut fields = vec![column_field("label", "name")];
+        fields.extend(nested);
+        join_field(
+            "children",
+            "items",
+            JoinKind::HasMany {
+                foreign_key: column("parent_id"),
+            },
+            fields,
+        )
+    };
+    let mut items = simple_schema("items", None);
+    items.fields.push(children(vec![children(vec![])]));
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("items"), items)]));
+    let live = start_pipeline(&pg, &os, spec, &["items"]).await;
+    live.await_seeded(1).await;
+
+    let child_labels = |doc: &serde_json::Value| labels(doc.pointer("/children"));
+    let grandchild_labels = |doc: &serde_json::Value| {
+        let mut out = Vec::new();
+        for child in doc
+            .pointer("/children")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            out.extend(labels(child.get("children")));
+        }
+        out.sort();
+        out
+    };
+
+    exec(
+        &pg.pool,
+        "INSERT INTO items VALUES (1, NULL, 'p1'), (3, NULL, 'p3')",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "INSERT INTO items VALUES (10, 1, 'kept'), (11, 1, 'deleted'), (12, 1, 'moved')",
+    )
+    .await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["deleted", "kept", "moved"])
+        .await;
+
+    exec(&pg.pool, "UPDATE items SET name = 'renamed' WHERE id = 10").await;
+    live.assert_doc_eventually(
+        "items",
+        "1",
+        &child_labels,
+        &["deleted", "moved", "renamed"],
+    )
+    .await;
+
+    exec(&pg.pool, "DELETE FROM items WHERE id = 11").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["moved", "renamed"])
+        .await;
+
+    exec(&pg.pool, "UPDATE items SET parent_id = 3 WHERE id = 12").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["renamed"])
+        .await;
+    live.assert_doc_eventually("items", "3", &child_labels, &["moved"])
+        .await;
+
+    // Two declared levels: a grandchild rebuilds its grandparent too.
+    exec(&pg.pool, "INSERT INTO items VALUES (100, 10, 'grand')").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["grand"])
+        .await;
+    live.assert_doc_eventually("items", "10", &child_labels, &["grand"])
+        .await;
+    exec(&pg.pool, "UPDATE items SET name = 'regrand' WHERE id = 100").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["regrand"])
+        .await;
+    exec(&pg.pool, "DELETE FROM items WHERE id = 100").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &[])
+        .await;
+    live.assert_doc_eventually("items", "10", &child_labels, &[])
+        .await;
+
+    live.shutdown();
+}
+
 /// The sorted `label`s of a nested array, empty when absent.
 fn labels(array: Option<&serde_json::Value>) -> Vec<String> {
     let mut out: Vec<String> = array
