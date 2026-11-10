@@ -242,6 +242,7 @@ exists, state it in one line.
 | `.flatten()` / `Vec<Option<` near filters | hand-rolled optionals | `.filter(opt.map(\|v\| …))` |
 | `match_phrase` / `matches` | check the field is **`text`** | keyword → `.eq()` / `.any_of()` |
 | a struct only holding filter inputs | wrapper-to-filter | filter via handles |
+| `.from(` on a list/scroll/export endpoint, or a hand-rolled `search_after` from `hit.sort` | offset paging on a live index | `.cursor(..)` ([`## Paging`](#paging--offset-or-cursor)) |
 
 ## Writing readable queries
 
@@ -334,6 +335,34 @@ off the struct. A parent with no matches still returns, with `[]`.
   but resolves no schema. A *sort* on a field not in every index needs `unmapped_type`.
 - **Several searches, one round-trip** — `client.msearch((&q1, &q2))` (tuple arity 1-8) gives one
   typed `SearchResponse` per slot, in order. `client.msearch_all(&searches)` for many of one type.
+
+## Paging — offset or cursor
+
+`.from(n).size(k)` re-runs the query and skips a count, so on flusso's continuously-written index
+an insert or delete before the window shifts every later page. For infinite scroll, "load more",
+or an export, page by **cursor**: each page resumes after the last hit's sort values
+(`search_after`), so inserts and deletes never shift it, with no depth limit and no server state.
+
+```rust
+let page = User::query().filter(..).sort(..).size(50)
+    .cursor(params.cursor)          // Option<PageCursor>: None starts a walk → CursorSearch
+    .send(&client).await?;          // → SearchResponse; .ids(&client) → IdsPage { ids, next }
+page.next                            // Option<PageCursor>: opaque string, None on the last page
+```
+
+- Rebuild the **same** query for every page; a cursor resumed with other filters or sort is
+  `Error::CursorMismatch`. `PageCursor` is a string in serde, so an HTTP API takes `?cursor=` and
+  returns `next` with no conversion (see `dev/search-api`).
+- The sort is made total for you (`_id`; a `MultiSearch` cursor adds `_index` first; unsorted keeps
+  `_score` first). Don't add a `tiebreak` just for paging, and never set `.from()` or
+  `.search_after()` alongside `.cursor()` (`Error::Cursor`).
+- A walk is **live**: fresh content, never expires, follows a reindex. Prefer a sort on a stable
+  value; one that changes mid-walk can repeat or skip the document that moved.
+- `.point_in_time()` **pins** a walk to one view (OpenSearch ≥ 2.4): no later write shows up. It
+  holds a server context per walk, so use it for exports/reports, not for a page-one-heavy list.
+  `Error::CursorExpired` (keep-alive lapsed, default 1 min via `.keep_alive(..)`, or a reindex
+  dropped its generation) means restart from page one; `next.close(&client)` ends it early.
+- `filter_nested` projections take no cursor; they page by `.from`/`.size` within each parent.
 
 ## Custom value types — `#[derive(FlussoValue)]`
 

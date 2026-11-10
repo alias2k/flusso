@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, FlussoRoot, Sortable, multi_match};
+use flusso_query::{Client, FlussoRoot, PageCursor, Sortable, multi_match};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -43,6 +43,8 @@ struct ProductFilter {
     min_reviews: Option<i64>,
     min_rating: Option<f64>,
     limit: Option<u64>,
+    /// The previous page's `next`, to continue a cursor walk; absent for page one.
+    cursor: Option<PageCursor>,
 }
 
 pub(crate) fn routes() -> Router<Client> {
@@ -92,6 +94,7 @@ async fn list(
         .filter(filter.min_rating.map(|v| Product::avg_rating().gte(v)))
         .sort(Product::review_count().desc())
         .size(filter.limit.unwrap_or(20))
+        .cursor(filter.cursor)
         .send(&client)
         .await?;
     Ok(Json(Page::from(response)))

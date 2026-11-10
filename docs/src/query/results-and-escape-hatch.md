@@ -1,13 +1,13 @@
 # Results and the escape hatch
 
-The three terminals a search can end in, the response shape, and the `raw` hatch for DSL the typed builder doesn't cover.
+The terminals a search can end in, the response shape, and the `raw` hatch for DSL the typed builder doesn't cover.
 
 ## Terminals
 
 | Call | Returns | Notes |
 | --- | --- | --- |
 | `.send(&client)` | `SearchResponse<T>` | a typed page |
-| `.ids(&client)` | `Vec<String>` | matching document ids (root primary keys, stringified) in order, with `_source: false`; sort and `from`/`size` apply, `filter_nested` is dropped |
+| `.ids(&client)` | `Vec<String>` | matching document ids (root primary keys, stringified) in order, with `_source: false`; sort and `from`/`size` apply, `filter_nested` is dropped; after `.cursor(..)` it returns an `IdsPage` |
 | `.count(&client)` | `u64` | the same query to `_count`; sort, pagination, and projections are ignored |
 | `Type::get(&client, id)` | `Option<T>` | one document by id; `id` is typed as the root primary key |
 
@@ -21,16 +21,22 @@ pub struct SearchResponse<T> {
     pub max_score: Option<f32>,
     pub hits: Vec<Hit<T>>,
     pub took: std::time::Duration,
+    pub timed_out: bool,        // with `shards`: `is_partial()` flags an incomplete page
+    pub shards: ShardStats,
+    pub next: Option<PageCursor>, // cursor paging only; see Paging
 }
 
 pub struct Hit<T> {
     pub id: String,
     pub score: f32,
+    pub sort: Vec<serde_json::Value>, // the hit's sort values; empty with no sort
     pub source: T,              // your struct
 }
 ```
 
 There is no `serde_json::Value` in the common path.
+
+Paging by offset or by cursor has [its own page](paging.md).
 
 ## The escape hatch
 
@@ -52,5 +58,6 @@ It's the valve for the few types with no flusso field (`knn`, `geo_shape`, span 
 - **Aggregations** (facets, histograms, cardinality). They need their own typed result tree; `raw` covers them meanwhile.
 - **Writes.** flusso owns the index; the client never upserts or deletes.
 - **Correlating hits across indexes.** Both multi-index shapes ship; joining their results is the caller's job.
-- **Scroll pagination.** `from`/`size` and `search_after` ship; a scroll cursor is a follow-on.
+- **Scroll.** Cursor paging covers both list UIs and full exports.
+- **Pinned cursor walks on Elasticsearch.** Its point-in-time API differs (live cursors work there); tracked in [#157](https://github.com/alias2k/flusso/issues/157).
 - **Generating the struct.** By design; the developer owns it.

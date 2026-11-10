@@ -6,7 +6,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, Decimal, FlussoRoot, Sortable};
+use flusso_query::{Client, Decimal, FlussoRoot, PageCursor, Sortable};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -41,6 +41,8 @@ struct OrderFilter {
     // anything else (or absent) sorts by `total` descending.
     sort: Option<String>,
     limit: Option<u64>,
+    /// The previous page's `next`, to continue a cursor walk; absent for page one.
+    cursor: Option<PageCursor>,
 }
 
 pub(crate) fn routes() -> Router<Client> {
@@ -81,6 +83,6 @@ async fn list(
     } else {
         query.sort(Order::total().desc())
     };
-    let response = query.send(&client).await?;
+    let response = query.cursor(filter.cursor).send(&client).await?;
     Ok(Json(Page::from(response)))
 }

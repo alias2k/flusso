@@ -1965,3 +1965,396 @@ fn sorts_plural_matches_repeated_sort() {
         .body();
     assert_eq!(plural, singular);
 }
+
+// ───────────────────────────── page cursors ─────────────────────────────
+
+mod cursor {
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+
+    use super::{DecodedUser, Result, StoreItem, User};
+    use std::collections::HashMap;
+
+    use crate::cursor::{
+        PageBody, PageCursor, PageRequest, PinnedView, check_hit_indexes, effective_sort,
+        fingerprint, next_after, page_body, rewrite_generations, total_sort,
+    };
+    use crate::{Error, FlussoMultiDocument, SearchResponse, SortBuilder, Sortable};
+
+    fn pin(id: &str) -> PinnedView {
+        PinnedView {
+            id: id.to_owned(),
+            keep_alive: Duration::from_secs(60),
+        }
+    }
+
+    /// A page body with the request's own effective sort.
+    fn body_of(
+        request: &PageRequest<'_>,
+        pinned: Option<&PinnedView>,
+        path: &str,
+        after: Option<Vec<Value>>,
+    ) -> PageBody {
+        page_body(request, effective_sort(request), pinned, path, after)
+    }
+
+    #[test]
+    fn a_cursor_round_trips_through_its_string_form() -> Result {
+        let cursor = PageCursor::new(Some(pin("pit-id==")), vec![json!(4.5), json!("abc")], 42);
+        let token = cursor.to_string();
+        assert!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "token must be URL-safe: {token}"
+        );
+        assert_eq!(token.parse::<PageCursor>()?, cursor);
+        Ok(())
+    }
+
+    #[test]
+    fn a_cursor_serializes_as_a_plain_string() -> Result {
+        let cursor = PageCursor::new(Some(pin("pit")), vec![json!(1)], 7);
+        let value = serde_json::to_value(&cursor)?;
+        assert_eq!(value, Value::String(cursor.to_string()));
+        let back: PageCursor = serde_json::from_value(value)?;
+        assert_eq!(back, cursor);
+        Ok(())
+    }
+
+    #[test]
+    fn a_live_cursor_carries_no_point_in_time() -> Result {
+        let cursor = PageCursor::new(None, vec![json!("7")], 3);
+        let token = cursor.to_string();
+        let back: PageCursor = token.parse()?;
+        assert!(!back.is_pinned());
+        assert_eq!(back, cursor);
+        assert!(PageCursor::new(Some(pin("p")), Vec::new(), 3).is_pinned());
+        Ok(())
+    }
+
+    #[test]
+    fn a_live_first_page_has_no_pit_and_a_pinned_one_does() -> Result {
+        let search = || User::query().size(20);
+        let body = search().body();
+        let live = search().cursor(None);
+        let request = live.request(body.clone(), "users_xxxxxx")?;
+        assert!(request.pin.is_none(), "a cursor walk is live by default");
+        let live_body = body_of(&request, None, "users_xxxxxx", None).body;
+        assert!(live_body.get("pit").is_none());
+        assert!(live_body.get("search_after").is_none());
+        assert_eq!(
+            live_body["sort"],
+            json!([{ "_score": { "order": "desc" } }, { "_id": { "order": "asc" } }])
+        );
+        let pinned = search().cursor(None).point_in_time();
+        assert_eq!(
+            pinned.request(body.clone(), "users_xxxxxx")?.pin,
+            Some(Duration::from_secs(60))
+        );
+        let kept = search().cursor(None).keep_alive(Duration::from_secs(5));
+        assert!(
+            kept.request(body, "users_xxxxxx")?.pin == Some(Duration::from_secs(5)),
+            "keep_alive implies a pin"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_pinned_cursor_keeps_its_keep_alive_across_the_token() -> Result {
+        let view = PinnedView {
+            id: "PIT".into(),
+            keep_alive: Duration::from_secs(600),
+        };
+        let cursor = PageCursor::new(Some(view), vec![json!("1")], 9);
+        let back: PageCursor = cursor.to_string().parse()?;
+        assert_eq!(
+            back, cursor,
+            "a resumed pinned walk renews its own keep-alive"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_pinned_page_refuses_hits_from_an_index_it_does_not_address() {
+        let page = |index: &str| json!({ "hits": { "hits": [ { "_index": index, "_id": "1" } ] } });
+        let targets = vec!["users_00000001".to_string()];
+        assert!(check_hit_indexes(&page("e2e_users_00000001_3"), &targets, "e2e_").is_ok());
+        assert!(check_hit_indexes(&page("users_00000001"), &targets, "").is_ok());
+        assert!(matches!(
+            check_hit_indexes(&page("e2e_secrets_00000009_1"), &targets, "e2e_"),
+            Err(Error::CursorMismatch)
+        ));
+    }
+
+    #[test]
+    fn a_live_resume_follows_the_hash_alias_to_its_current_generation() {
+        let sort = vec![
+            json!({ "_score": { "order": "desc" } }),
+            json!({ "_index": { "order": "asc" } }),
+            json!({ "_id": { "order": "asc" } }),
+        ];
+        let targets = vec!["users_00000001".to_string(), "orders_00000002".to_string()];
+        let current = HashMap::from([
+            (
+                "e2e_users_00000001".to_string(),
+                "e2e_users_00000001_2".to_string(),
+            ),
+            (
+                "e2e_orders_00000002".to_string(),
+                "e2e_orders_00000002_1".to_string(),
+            ),
+        ]);
+        let mut after = vec![json!(1.0), json!("e2e_users_00000001_1"), json!("7")];
+        rewrite_generations(&mut after, &sort, &targets, "e2e_", &current);
+        assert_eq!(
+            after,
+            vec![json!(1.0), json!("e2e_users_00000001_2"), json!("7")]
+        );
+
+        let mut unchanged = vec![json!(1.0), json!("e2e_orders_00000002_1"), json!("7")];
+        rewrite_generations(&mut unchanged, &sort, &targets, "e2e_", &current);
+        assert_eq!(unchanged[1], json!("e2e_orders_00000002_1"));
+
+        let mut foreign = vec![json!(1.0), json!("e2e_legacy_index"), json!("7")];
+        rewrite_generations(&mut foreign, &sort, &targets, "e2e_", &current);
+        assert_eq!(
+            foreign[1],
+            json!("e2e_legacy_index"),
+            "an unknown index is left alone"
+        );
+
+        let mut unaliased = vec![json!(1.0), json!("e2e_users_00000001_1"), json!("7")];
+        rewrite_generations(&mut unaliased, &sort, &targets, "e2e_", &HashMap::new());
+        assert_eq!(
+            unaliased[1],
+            json!("e2e_users_00000001_1"),
+            "no alias, no rewrite"
+        );
+    }
+
+    #[test]
+    fn a_malformed_token_is_a_cursor_error() {
+        for token in [
+            "",
+            "not base64!",
+            "bm90IGpzb24",
+            "eyJ2Ijo5LCJwaXQiOiJwIiwiYWZ0ZXIiOltdLCJmcCI6IjAifQ",
+        ] {
+            assert!(
+                matches!(token.parse::<PageCursor>(), Err(Error::Cursor(_))),
+                "{token:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_is_pinned() {
+        // FNV-1a 64 of `{}` then `users_1`: a token must keep validating
+        // across builds, so this value must never drift.
+        assert_eq!(fingerprint(&json!({}), "users_1"), 0xd974_4414_9395_a08f);
+    }
+
+    #[test]
+    fn total_sort_appends_missing_tiebreaks_only() {
+        let sort = vec![json!({ "email": { "order": "desc" } })];
+        assert_eq!(
+            total_sort(sort.clone(), &["_id"]),
+            vec![
+                json!({ "email": { "order": "desc" } }),
+                json!({ "_id": { "order": "asc" } }),
+            ]
+        );
+        let with_id = vec![json!({ "_id": { "order": "desc" } })];
+        assert_eq!(total_sort(with_id.clone(), &["_id"]), with_id);
+        assert_eq!(
+            total_sort(Vec::new(), &["_index", "_id"]),
+            vec![
+                json!({ "_index": { "order": "asc" } }),
+                json!({ "_id": { "order": "asc" } }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pinned_first_page_carries_the_pit_and_a_total_sort_but_no_search_after() -> Result {
+        let search = User::query()
+            .filter(User::email().eq("a@b.c"))
+            .sorts(SortBuilder::new().by(User::email(), crate::OrderBy::asc()))
+            .size(20);
+        let body = search.body();
+        let cursor_search = search.cursor(None).keep_alive(Duration::from_secs(90));
+        let request = cursor_search.request(body, "users_xxxxxx")?;
+        let view = PinnedView {
+            id: "PIT".into(),
+            keep_alive: request.pin.ok_or("keep_alive pins the walk")?,
+        };
+        let body = body_of(&request, Some(&view), "users_xxxxxx", None).body;
+        assert_eq!(
+            body,
+            json!({
+                "query": { "bool": { "filter": [ { "term": { "email": "a@b.c" } } ] } },
+                "sort": [ { "email": { "order": "asc" } }, { "_id": { "order": "asc" } } ],
+                "size": 20,
+                "pit": { "id": "PIT", "keep_alive": "90000ms" },
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_resumed_page_searches_after_the_cursor() -> Result {
+        let cursor = PageCursor::new(Some(pin("PIT2")), vec![json!("a@b.c"), json!("7")], 0);
+        let search = User::query().size(5).cursor(cursor);
+        let request = search.request(User::query().size(5).body(), "users_xxxxxx")?;
+        let body = body_of(
+            &request,
+            Some(&pin("PIT2")),
+            "users_xxxxxx",
+            Some(vec![json!("a@b.c"), json!("7")]),
+        )
+        .body;
+        assert_eq!(body["search_after"], json!(["a@b.c", "7"]));
+        assert_eq!(body["pit"]["id"], json!("PIT2"));
+        assert_eq!(
+            body["sort"],
+            json!([{ "_score": { "order": "desc" } }, { "_id": { "order": "asc" } }]),
+            "an unsorted walk keeps relevance order"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_fingerprint_binds_the_query_but_not_the_page_size() -> Result {
+        let fp = |search: crate::Search<User>| -> std::result::Result<u64, Error> {
+            let body = search.body();
+            let cursor = search.cursor(None);
+            let request = cursor.request(body, "users_xxxxxx")?;
+            Ok(body_of(&request, Some(&pin("PIT")), "users_xxxxxx", None).fingerprint)
+        };
+        let base = fp(User::query().filter(User::email().eq("x")).size(10))?;
+        assert_eq!(
+            base,
+            fp(User::query().filter(User::email().eq("x")).size(50))?
+        );
+        assert_ne!(
+            base,
+            fp(User::query().filter(User::email().eq("y")).size(10))?
+        );
+        assert_ne!(
+            base,
+            fp(User::query()
+                .filter(User::email().eq("x"))
+                .sort(User::email().desc())
+                .size(10))?
+        );
+        let cursor = PageCursor::new(Some(pin("PIT")), Vec::new(), base);
+        assert!(cursor.check(base).is_ok());
+        assert!(matches!(cursor.check(base ^ 1), Err(Error::CursorMismatch)));
+        Ok(())
+    }
+
+    #[test]
+    fn send_and_ids_share_a_cursor_but_deployments_do_not() -> Result {
+        let search = User::query().filter(User::email().eq("x")).size(10);
+        let send_body = search.body();
+        let ids_body = search.ids_body();
+        let cursor = search.cursor(None);
+        let send = body_of(
+            &cursor.request(send_body, "users_xxxxxx")?,
+            Some(&pin("PIT")),
+            "users_xxxxxx",
+            None,
+        );
+        let ids_request = cursor.request(ids_body, "users_xxxxxx")?;
+        let ids = body_of(&ids_request, Some(&pin("PIT")), "users_xxxxxx", None);
+        assert_eq!(send.fingerprint, ids.fingerprint);
+        assert_eq!(
+            ids.body["_source"],
+            json!(false),
+            "ids still fetch no source"
+        );
+        let prefixed = body_of(
+            &ids_request,
+            Some(&pin("PIT")),
+            "staging_users_xxxxxx",
+            None,
+        );
+        assert_ne!(
+            ids.fingerprint, prefixed.fingerprint,
+            "a cursor is bound to the prefixed index it walked"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_positioned_search_refuses_a_cursor() {
+        let from = User::query().from(10);
+        let body = from.body();
+        assert!(matches!(
+            from.cursor(None).request(body, "users_xxxxxx"),
+            Err(Error::Cursor(_))
+        ));
+        let after = User::query().search_after([1]);
+        let body = after.body();
+        assert!(matches!(
+            after.cursor(None).request(body, "users_xxxxxx"),
+            Err(Error::Cursor(_))
+        ));
+        assert!(matches!(
+            StoreItem::query().from(3).cursor(None).request(),
+            Err(Error::Cursor(_))
+        ));
+    }
+
+    #[test]
+    fn a_combined_cursor_breaks_ties_on_index_then_id() -> Result {
+        let search = StoreItem::query().size(3).cursor(None);
+        let body = body_of(&search.request()?, Some(&pin("PIT")), "users_xxxxxx", None).body;
+        assert_eq!(
+            body["sort"],
+            json!([
+                { "_score": { "order": "desc" } },
+                { "_index": { "order": "asc" } },
+                { "_id": { "order": "asc" } },
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn next_follows_a_full_page_and_stops_after_a_short_one() {
+        let page = |n: usize| {
+            let hits: Vec<Value> = (0..n)
+                .map(|i| json!({ "_id": i.to_string(), "sort": [i] }))
+                .collect();
+            json!({ "hits": { "hits": hits } })
+        };
+        assert_eq!(next_after(&page(3), 3), Some(vec![json!(2)]));
+        assert_eq!(next_after(&page(2), 3), None);
+        assert_eq!(next_after(&page(0), 3), None);
+        assert_eq!(next_after(&page(0), 0), None);
+    }
+
+    #[test]
+    fn hits_decode_their_sort_values() -> Result {
+        let response = json!({
+            "took": 1,
+            "hits": {
+                "total": { "value": 1 },
+                "hits": [{
+                    "_index": "users_xxxxxx_1", "_id": "7", "_score": null,
+                    "sort": ["a@b.c", "7"], "_source": { "email": "a@b.c", "orderCount": 1 }
+                }]
+            }
+        });
+        let single: SearchResponse<DecodedUser> = SearchResponse::from_value(response.clone())?;
+        let hit = single.hits.first().ok_or("one hit")?;
+        assert_eq!(hit.sort, vec![json!("a@b.c"), json!("7")]);
+        assert!(single.next.is_none());
+        let multi: SearchResponse<StoreItem> = crate::multi::decode_response(response, "")?;
+        assert_eq!(multi.hits.first().ok_or("one hit")?.sort.len(), 2);
+        Ok(())
+    }
+}

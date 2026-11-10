@@ -178,6 +178,16 @@ _Avoid_: operation, step, hook
 How the outside world reaches the daemon: HTTP surfaces, process signals, telemetry export. Owned by the binary, never by the daemon.
 _Avoid_: API layer, server, interface
 
+### Querying
+
+**Page cursor**:
+An opaque token handed back with a page of query results that resumes the same ordered result list right after that page's last hit's sort values, so inserts and deletes never shift the walk; paging by offset (`from`/`size`) re-runs the query and skips a count. A walk is live (each page reads the index now) unless pinned. Belongs to the query client, never to the change feed.
+_Avoid_: cursor (alone; that is a position), scroll, continuation token, offset
+
+**Pinned walk**:
+A page cursor walk that reads one point-in-time view of the index, opened by its first page: no later write, no reindex, until it is closed or expires. Opt-in, because it holds a server-side context for its life.
+_Avoid_: snapshot (that is the source's backfill read), frozen, consistent cursor
+
 ### Measuring
 
 **Benchmark**:

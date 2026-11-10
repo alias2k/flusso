@@ -7,7 +7,8 @@ use axum::response::{IntoResponse, Response};
 /// A handler error.
 pub(crate) enum ApiError {
     /// A `flusso-query` client error. An upstream OpenSearch status is passed
-    /// through; anything else (transport, decode) is a bad gateway.
+    /// through; a bad `?cursor=` is `400`, an expired one `410` (restart from
+    /// page one); anything else (transport, decode) is a bad gateway.
     Upstream(flusso_query::Error),
     /// A `get`-by-id lookup found nothing → `404`.
     NotFound { resource: &'static str, id: String },
@@ -27,6 +28,10 @@ impl IntoResponse for ApiError {
                     flusso_query::Error::Status { status, .. } => {
                         StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
                     }
+                    flusso_query::Error::Cursor(_) | flusso_query::Error::CursorMismatch => {
+                        StatusCode::BAD_REQUEST
+                    }
+                    flusso_query::Error::CursorExpired { .. } => StatusCode::GONE,
                     _ => StatusCode::BAD_GATEWAY,
                 };
                 (status, error.to_string())

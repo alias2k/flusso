@@ -2,7 +2,8 @@
 //!
 //! Targets OpenSearch and Elasticsearch 7.x, which share the `_search` query DSL
 //! this crate emits; any future backend divergence is handled on the [`Client`],
-//! not by separate crates.
+//! not by separate crates. One exception: a
+//! [pinned](CursorSearch::point_in_time) cursor walk needs OpenSearch ≥ 2.4.
 //!
 //! This is the **runtime** layer described in the
 //! [Query part of the manual](https://alias2k.github.io/flusso/query/overview.html):
@@ -30,6 +31,12 @@
 //!   query across all the union's indexes, one relevance-ranked result list,
 //!   each hit decoded into the variant matching its physical `_index`.
 //! - Typed [`SearchResponse`] / [`Hit`].
+//! - Two ways to page: by offset (`from`/`size`), or by [`PageCursor`] —
+//!   [`Search::cursor`] / [`MultiSearch::cursor`] resume after the last hit's
+//!   sort values (`search_after`), so inserts and deletes
+//!   never shift the walk and depth is unlimited; `.point_in_time()` pins the
+//!   walk to one fixed view. [`SearchResponse::next`] carries the opaque token
+//!   that resumes after each page. See [`PageCursor`] for a walk.
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); shaping returned
 //! nested arrays ([`Search::filter_nested`] with [`Nested::matching`], via
@@ -97,6 +104,7 @@
 
 mod check;
 mod client;
+mod cursor;
 mod error;
 mod handles;
 mod msearch;
@@ -113,6 +121,7 @@ pub use check::{
     map_kind_ok, map_value_is, map_values_of, nullable, variants_covered, variants_exhausted,
 };
 pub use client::Client;
+pub use cursor::PageCursor;
 pub use error::{Error, Result};
 pub use handles::{
     Binary, Bool, BoostMode, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
@@ -130,10 +139,13 @@ pub use handles::{
     script_score, simple_query_string,
 };
 pub use msearch::MsearchBundle;
-pub use multi::{FlussoMultiDocument, MultiSearch};
+pub use multi::{FlussoMultiDocument, MultiCursorSearch, MultiSearch};
 pub use path::{Segment, SegmentKind, nested_boundaries};
 pub use query::{AsQuery, Query, Root};
-pub use search::{FlussoRoot, FlussoScope, Highlight, Hit, Search, SearchResponse, ShardStats};
+pub use search::{
+    CursorSearch, FlussoRoot, FlussoScope, Highlight, Hit, IdsPage, Search, SearchResponse,
+    ShardStats,
+};
 
 /// `#[derive(FlussoRoot)]` — the index-bound **root**. Generates the typed query
 /// surface for the *whole* index (a handle for every field at every level,

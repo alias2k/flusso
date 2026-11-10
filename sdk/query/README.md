@@ -70,10 +70,21 @@ Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, ne
 | `uuid` | `uuid::Uuid` as a keyword value |
 | `time`, `chrono` | the date types for `date`/`timestamp` fields |
 
-Targets OpenSearch and Elasticsearch 7.x, which share the query DSL.
+## Paging
+
+Offset paging (`.from(n).size(k)`) re-runs the query each page, so CDC inserts and deletes shift it. For infinite scroll or an export, page by **cursor**: each page resumes after the last hit, so inserts and deletes never shift the walk, with no depth limit and nothing held on the server. `.point_in_time()` pins a walk to one fixed view instead.
+
+```rust,ignore
+let page = User::query().size(50).cursor(params.cursor).send(client).await?;
+// page.next: Option<PageCursor> — an opaque string; send it back for the next page
+```
+
+See [paging](https://alias2k.github.io/flusso/query/paging.html) in the manual.
+
+Targets OpenSearch and Elasticsearch 7.x, which share the query DSL ([pinned cursor walks](https://alias2k.github.io/flusso/query/paging.html#pinned-walks) are OpenSearch-only).
 
 ## Learn more
 
-The manual's **Query** part is the full guide: [overview](https://alias2k.github.io/flusso/query/overview.html), [document structs](https://alias2k.github.io/flusso/query/document-structs.html), [field handles](https://alias2k.github.io/flusso/query/field-handles.html), [composing and options](https://alias2k.github.io/flusso/query/composing.html), [nested collections](https://alias2k.github.io/flusso/query/nested.html), [sorting](https://alias2k.github.io/flusso/query/sorting.html), [maps](https://alias2k.github.io/flusso/query/maps.html), [enums and custom values](https://alias2k.github.io/flusso/query/enums-and-values.html), [several indexes](https://alias2k.github.io/flusso/query/several-indexes.html), [results and the escape hatch](https://alias2k.github.io/flusso/query/results-and-escape-hatch.html), [binding to the schema](https://alias2k.github.io/flusso/query/binding.html), and [migrating from `path`](https://alias2k.github.io/flusso/query/migrating-from-path.html). The API surface is on [docs.rs](https://docs.rs/flusso-query).
+The manual's **Query** part is the full guide: [overview](https://alias2k.github.io/flusso/query/overview.html), [document structs](https://alias2k.github.io/flusso/query/document-structs.html), [field handles](https://alias2k.github.io/flusso/query/field-handles.html), [composing and options](https://alias2k.github.io/flusso/query/composing.html), [nested collections](https://alias2k.github.io/flusso/query/nested.html), [sorting](https://alias2k.github.io/flusso/query/sorting.html), [maps](https://alias2k.github.io/flusso/query/maps.html), [enums and custom values](https://alias2k.github.io/flusso/query/enums-and-values.html), [several indexes](https://alias2k.github.io/flusso/query/several-indexes.html), [results and the escape hatch](https://alias2k.github.io/flusso/query/results-and-escape-hatch.html), [paging](https://alias2k.github.io/flusso/query/paging.html), [binding to the schema](https://alias2k.github.io/flusso/query/binding.html), and [migrating from `path`](https://alias2k.github.io/flusso/query/migrating-from-path.html). The API surface is on [docs.rs](https://docs.rs/flusso-query).
 
 `flusso-query-derive` is the proc-macro crate behind the `derive` feature; don't depend on it directly. Both crates sit above the schema vocabulary and depend on nothing from the engine, sources, or sinks.

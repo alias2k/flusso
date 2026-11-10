@@ -1202,6 +1202,7 @@ dependencies = [
 name = "flusso-query"
 version = "0.16.0"
 dependencies = [
+ "base64",
  "chrono",
  "flusso-query-derive",
  "reqwest 0.12.28",
