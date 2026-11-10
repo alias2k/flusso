@@ -3,7 +3,7 @@
 import { create, useStore } from "zustand";
 import { temporal } from "zundo";
 import type { CatalogResponse, ConfigToml, DiagnosticDto, IndexSchema, PreviewResponse, Project } from "../api";
-import { stampIds } from "../model/ids";
+import { stampIds, uidsByPath, withUidsByPath } from "../model/ids";
 import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
 import { type Graph, pathId, projectGraph } from "../model/tree";
 import type { Selection } from "../state";
@@ -45,17 +45,14 @@ const readCollapsed = (index: string): string[] => {
   }
 };
 
-// Indexes whose stored view state was reconciled this page session. Only the
-// first load reconciles: it runs against the on-disk doc (what positional keys
-// were saved against), and later in the session a removed node's entries must
-// survive so undoing the removal brings its collapse state and position back.
-const reconciled = new Set<string>();
-
 // Translate legacy positional keys (`root.2.0`) to stable node ids and drop
 // entries for nodes that no longer exist, for the collapse set and the manual
 // positions alike; persists only what changed. An entry already under a live
-// id wins over a translated legacy one.
-function reconcileViewState(index: string, graph: Graph): string[] {
+// id wins over a translated legacy one. Runs once, on project load: that is the
+// on-disk doc positional keys were saved against, and it must precede the
+// canvas's first read of the overrides. Later in the session a removed node's
+// entries are kept, so undoing the removal brings its view state back.
+function reconcileViewState(index: string, graph: Graph) {
   const live = new Set(graph.nodes.map((n) => n.id));
   const byPath = new Map(graph.nodes.map((n) => [pathId(n.path), n.id]));
   const translate = (id: string) => (live.has(id) ? id : byPath.get(id));
@@ -72,11 +69,34 @@ function reconcileViewState(index: string, graph: Graph): string[] {
     if (to && (to === id || !(to in overrides))) kept[to] = pos;
   }
   if (JSON.stringify(kept) !== JSON.stringify(overrides)) saveOverrides(index, kept);
-  return collapsed;
 }
 
+// Node uids are made in the browser, so to key view state across reloads the
+// uids of the *saved* doc (what the next load reads from disk) are persisted per
+// index by path, and re-applied to the same paths on load. Unsaved containers
+// get fresh uids next session; their view state is dropped with them.
+const uidsKey = (index: string) => `flusso-design.uids.${index}`;
+
+const readUids = (index: string): Record<string, string> => {
+  try {
+    return JSON.parse(localStorage.getItem(uidsKey(index)) ?? "{}") as Record<string, string>;
+  } catch {
+    return {};
+  }
+};
+
+const persistUids = (saved: string) => {
+  try {
+    const doc = JSON.parse(saved) as Doc;
+    for (const [name, schema] of Object.entries(doc.schemas))
+      localStorage.setItem(uidsKey(name), JSON.stringify(uidsByPath(schema)));
+  } catch {
+    /* storage disabled — view state just won't survive a reload */
+  }
+};
+
 const stampAll = (schemas: Record<string, IndexSchema>): Record<string, IndexSchema> =>
-  Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, stampIds(schema)]));
+  Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, withUidsByPath(schema, readUids(name))]));
 
 interface DesignState {
   project: Project | null;
@@ -132,7 +152,10 @@ export const useDesignStore = create<DesignState>()(
       focus: null,
 
       setCatalog: (catalog) => set({ catalog }),
-      setSaved: (saved) => set({ saved }),
+      setSaved: (saved) => {
+        persistUids(saved);
+        set({ saved });
+      },
       setPreview: (preview) => set({ preview }),
       setDiagnostics: (diagnostics) => set({ diagnostics }),
       setActive: (active) => set({ active }),
@@ -148,10 +171,13 @@ export const useDesignStore = create<DesignState>()(
           index: (project.config.index ?? []).map((e) => ({ ...e, id: newId() })),
         };
         const doc: Doc = { config, schemas: stampAll(schemas) };
+        const saved = JSON.stringify(doc);
+        persistUids(saved);
+        for (const [name, schema] of Object.entries(doc.schemas)) reconcileViewState(name, projectGraph(schema));
         set({
           project,
           doc,
-          saved: JSON.stringify(doc),
+          saved,
           ...(resetActive ? { active: project.indexes[0]?.name ?? "config" } : {}),
         });
         useDesignStore.temporal.getState().clear();
@@ -277,13 +303,7 @@ export const useDesignStore = create<DesignState>()(
 
       loadCollapsed: (index) => {
         if (index === "config") return;
-        const schema = get().doc?.schemas[index];
-        if (!schema || reconciled.has(index)) {
-          set({ collapsed: new Set(readCollapsed(index)) });
-          return;
-        }
-        reconciled.add(index);
-        set({ collapsed: new Set(reconcileViewState(index, projectGraph(schema))) });
+        set({ collapsed: new Set(readCollapsed(index)) });
       },
 
       toggleCollapsed: (id) => {
