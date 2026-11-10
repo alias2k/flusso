@@ -30,6 +30,7 @@
 - [Watch it run](operate/watch-it-run.md)
 - [Ship traces over OTLP](operate/traces-otlp.md)
 - [Reindex without downtime](operate/reindex.md)
+- [Read your own writes](operate/read-your-writes.md)
 - [Handle rejected documents](operate/rejected-documents.md)
 - [Recover from a dropped slot](operate/dropped-slot.md)
 - [Secure the private surface](operate/private-surface.md)
@@ -49,6 +50,7 @@
 - [Results and the escape hatch](query/results-and-escape-hatch.md)
 - [Paging](query/paging.md)
 - [Streaming a walk](query/streaming.md)
+- [Reading your own writes](query/read-your-writes.md)
 - [Binding to the schema](query/binding.md)
 - [Migrating from path](query/migrating-from-path.md)
 

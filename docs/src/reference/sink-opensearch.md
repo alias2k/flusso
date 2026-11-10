@@ -84,6 +84,8 @@ index_settings = { "mapping.total_fields.limit" = 5000, "mapping.nested_objects.
 
 The configured value therefore only matters while a backlog is draining. Raise it for throughput under load; lower it toward `1s` for fresher reads while behind.
 
+Each flush also reports when its documents become searchable, which is what a [`searchable` fence](http.md#get-waitpositionposition) waits on: at once for a caught-up flush, within `refresh_interval` otherwise. With `refresh_interval = "-1"` nothing refreshes a flush made during a backlog, so the next caught-up flush refreshes the indexes the backlog wrote. flusso never refreshes because a reader is waiting.
+
 ## Seeding
 
 Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfill. On every start the marker is checked against the generation it names: if that index is gone, the marker is retracted with a warning, the generation is recreated empty, and the backfill refills it. Deleting `{logical}_{hash}_{n}` between runs is the supported way to force a rebuild of one index. A missing replication slot overrides every marker; see [Recover from a dropped slot](../operate/dropped-slot.md).

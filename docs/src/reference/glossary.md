@@ -5,10 +5,12 @@ The project's nouns, each with a pointer to the page that owns it.
 | Term | Means | Home |
 | --- | --- | --- |
 | **backfill** | Seeding an unseeded index by snapshotting its root table through the normal pipeline, before live capture. | [How flusso works](../start/how-it-works.md#seeding-and-continuity) |
+| **applied** | A fence level: the sink's flush for a change has returned, so a fetch by id sees it. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **batch** | The changes grouped into one build and sink flush: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`. | [batch](config-toml.md#batch) |
 | **convenience alias** | The bare logical name (`users`) kept as an alias on the current generation, for humans and dashboards. Best-effort. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
 | **continuity** | Whether the source's resume point (the slot) survived from the last run. `Resumed` or `Fresh`. | [Recover from a dropped slot](../operate/dropped-slot.md) |
 | **document** | One search record, assembled from a root row plus its joins and aggregates, written by a deterministic id. | [How flusso works](../start/how-it-works.md#documents-are-assembled-not-copied) |
+| **fence** | A wait until a sink has reached a source position, so a client can read its own write. It only observes. | [Read your own writes](../operate/read-your-writes.md) |
 | **flush-wide error** | The whole bulk request failed. Always stops the run; the batch is redelivered. | [Index entries and on_error](index-and-on-error.md#on_error) |
 | **generation** | A concrete OpenSearch index `{logical}_{hash}_{n}` holding data behind the hash alias. Reindex builds `n+1`. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
 | **hash alias** | `{logical}_{hash}`: the addressable name flusso and `flusso-query` use. The hash derives from the schema. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
