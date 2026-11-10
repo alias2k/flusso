@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::Position;
-use pgwire_replication::{ReplicationClient, ReplicationConfig};
-use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
+use pgwire_replication::{Lsn, ReplicationClient, ReplicationConfig};
+use source::cdc::{
+    AdvanceListener, ChangeCapture, ChangeEvent, Continuity, LiveChange, SourcePosition,
+};
 use source::{
     CaptureProvisioning, CoverageReport, PreImageColumns, PreImageReport, QualifiedTable, Result,
     SnapshotTable, SourceError,
@@ -14,7 +16,7 @@ use source::{
 use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
-use super::ack::Positions;
+use super::ack::{Listeners, Positions};
 use super::{backfill, publication, replica_identity, stream};
 
 /// Postgres change capture over logical replication (pgoutput).
@@ -73,6 +75,9 @@ pub struct WalChangeCapture {
     /// The position bookkeeping of the open live stream, so `confirm` can reach
     /// it. Replaced each time `live` opens a stream; `None` before the first.
     positions: Arc<Mutex<Option<Arc<Positions>>>>,
+    /// Who to wake when a stream's horizon moves; handed to every stream
+    /// `live` opens.
+    listeners: Arc<Listeners>,
     /// Set by [`prepare`](ChangeCapture::prepare) once it has ensured coverage,
     /// taken by the next [`live`](ChangeCapture::live) so it doesn't repeat it.
     coverage_ensured: Arc<AtomicBool>,
@@ -95,6 +100,7 @@ impl WalChangeCapture {
             pre_image_columns: PreImageColumns::new(),
             manage_replica_identity: false,
             positions: Arc::new(Mutex::new(None)),
+            listeners: Arc::new(Listeners::default()),
             coverage_ensured: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -180,6 +186,51 @@ impl WalChangeCapture {
         Ok(Continuity::Resumed)
     }
 
+    /// Where the stream about to open starts: the configured start LSN, or the
+    /// slot's `confirmed_flush_lsn` when resuming from the slot. Everything at
+    /// or before it was confirmed by every sink, which is what lets a fence on
+    /// an old position pass before the first keepalive arrives. Advisory: a
+    /// failed lookup starts the bookkeeping at zero and the first event the
+    /// stream reads corrects it.
+    async fn stream_start_lsn(&self) -> u64 {
+        if !self.config.start_lsn.is_zero() {
+            return self.config.start_lsn.as_u64();
+        }
+        let confirmed = async {
+            let pool = self.admin_pool().await?;
+            let row = sqlx::query(
+                "SELECT confirmed_flush_lsn::text AS lsn FROM pg_replication_slots \
+                 WHERE slot_name = $1",
+            )
+            .bind(&self.config.slot)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| SourceError::Query(e.to_string()))?;
+            let text: Option<String> = match row {
+                Some(row) => row
+                    .try_get("lsn")
+                    .map_err(|e| SourceError::Query(e.to_string()))?,
+                None => None,
+            };
+            Ok::<_, SourceError>(text.and_then(|text| Lsn::parse(&text).ok()))
+        };
+        match confirmed.await {
+            Ok(Some(lsn)) => lsn.as_u64(),
+            Ok(None) => 0,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the slot's confirmed position");
+                0
+            }
+        }
+    }
+
+    fn open_positions(&self) -> Option<Arc<Positions>> {
+        self.positions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Ensure the replication slot exists, creating it if it does not. Runs
     /// over the shared admin pool so it can run before the replication
     /// connection is opened.
@@ -240,18 +291,20 @@ impl ChangeCapture for WalChangeCapture {
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
 
+        let start_lsn = self.stream_start_lsn().await;
         let mut slot = self
             .positions
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let first_seq = slot.as_ref().map_or(0, |previous| previous.next_seq());
-        let positions = Arc::new(Positions::new(self.config.start_lsn.as_u64(), first_seq));
+        let positions = Arc::new(Positions::new(
+            start_lsn,
+            first_seq,
+            Arc::clone(&self.listeners),
+        ));
         *slot = Some(Arc::clone(&positions));
         drop(slot);
-        tracing::info!(
-            start_lsn = self.config.start_lsn.as_u64(),
-            "opened replication stream"
-        );
+        tracing::info!(start_lsn, "opened replication stream");
         Ok(stream::build(
             client,
             catalog,
@@ -261,14 +314,34 @@ impl ChangeCapture for WalChangeCapture {
     }
 
     fn confirm(&self, position: Position) {
-        if let Some(positions) = self
-            .positions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
+        if let Some(positions) = self.open_positions() {
             positions.confirm(position.0);
         }
+    }
+
+    /// A position is a WAL LSN in Postgres's own text form (`0/16B3748`), what
+    /// `SELECT pg_current_wal_lsn()` returns.
+    fn parse_position(&self, text: &str) -> Result<SourcePosition> {
+        Lsn::parse(text.trim())
+            .map(|lsn| SourcePosition(lsn.as_u64()))
+            .map_err(|error| {
+                SourceError::Decode(format!("`{text}` is not a WAL position (an LSN): {error}"))
+            })
+    }
+
+    fn format_position(&self, position: SourcePosition) -> String {
+        Lsn::from_u64(position.0).to_pg_string()
+    }
+
+    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
+        let positions = self.open_positions()?;
+        Some(SourcePosition(
+            positions.reached(position.map(|position| position.0)),
+        ))
+    }
+
+    fn on_advance(&self, listener: AdvanceListener) {
+        self.listeners.add(listener);
     }
 
     #[tracing::instrument(name = "wal.snapshot", skip_all, fields(tables = tables.len()), err)]

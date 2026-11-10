@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use super::*;
 
 fn state() -> (DecodeState, Arc<Positions>) {
-    let ack = Arc::new(Positions::new(0, 0));
+    let ack = Arc::new(Positions::new(0, 0, Default::default()));
     let decode = DecodeState {
         relations: HashMap::new(),
         unkeyed: Vec::new(),
@@ -76,9 +76,44 @@ fn keepalive_waits_for_an_emitted_but_unconfirmed_change() {
     handle(&mut decode, keepalive(100)).unwrap();
     assert_eq!(ack.confirmed_lsn(), 0, "must not pass the unflushed change");
     ack.confirm(seq);
-    assert_eq!(ack.confirmed_lsn(), 50);
-    ack.confirm(seq + 1);
-    assert_eq!(ack.confirmed_lsn(), 100, "the queued keepalive follows");
+    assert_eq!(
+        ack.confirmed_lsn(),
+        100,
+        "with the change confirmed, the keepalive's WAL end is covered"
+    );
+}
+
+#[test]
+fn emitting_the_last_change_of_a_commit_moves_the_horizon() {
+    let (mut decode, ack) = state();
+    decode.open_txn.push(upsert());
+    decode.open_txn.push(upsert());
+    handle(&mut decode, commit(100)).unwrap();
+
+    let (first, _) = decode.next_change().unwrap();
+    assert_eq!(
+        ack.reached(Some(first.0)),
+        0,
+        "half a transaction covers nothing of its commit"
+    );
+    let (second, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(first.0)), 0);
+    assert_eq!(ack.reached(Some(second.0)), 100);
+    assert!(decode.next_change().is_none());
+}
+
+#[test]
+fn a_commit_behind_another_keeps_the_horizon_at_the_emitted_one() {
+    let (mut decode, ack) = state();
+    decode.open_txn.push(upsert());
+    handle(&mut decode, commit(100)).unwrap();
+    decode.open_txn.push(upsert());
+    handle(&mut decode, commit(200)).unwrap();
+
+    let (first, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(first.0)), 100);
+    let (second, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(second.0)), 200);
 }
 
 #[test]
