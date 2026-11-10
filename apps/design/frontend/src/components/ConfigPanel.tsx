@@ -78,6 +78,14 @@ export function ConfigPanel({
       }
       return { ...e, sinks: Object.keys(next).length ? next : undefined };
     });
+  // A sink switched to an adapter that takes no per-index options drops them
+  // too: the drawer would no longer show them, and they would fail the build.
+  const changeSink = (name: string, sink: Sink) => {
+    const kind = splitEntry(sink).kind;
+    const takesIndexOptions = sinkAdapters.find((a) => a.kind === kind)?.index_schema;
+    const keep = kind === splitEntry(sinks[name]).kind || takesIndexOptions;
+    onChange({ ...config, sinks: { ...sinks, [name]: sink }, index: keep ? index : reKeyIndexSinks(name, undefined) });
+  };
   const removeSink = (name: string) => {
     const next = { ...sinks };
     delete next[name];
@@ -335,7 +343,7 @@ export function ConfigPanel({
             sink={sink}
             adapters={sinkAdapters}
             taken={Object.keys(sinks).filter((n) => n !== name)}
-            onChange={(s) => setSink(name, s)}
+            onChange={(s) => changeSink(name, s)}
             onRename={(to) => renameSink(name, to)}
             onRemove={() => removeSink(name)}
           />
