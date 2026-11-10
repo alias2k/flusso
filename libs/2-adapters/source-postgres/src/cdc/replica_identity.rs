@@ -38,7 +38,8 @@ use super::quote_ident;
 /// One relation's identity setting, the columns it puts in an old tuple (for
 /// `d`, the primary key; for `i`, the identity index), and the primary key
 /// itself — for the named table and, when it is partitioned, every partition
-/// beneath it, parent first. No rows when the table is absent.
+/// beneath it, parent first — foreign partitions left out, since they have no
+/// identity to set and log no WAL. No rows when the table is absent.
 const MEMBERS_SQL: &str = "WITH target AS ( \
          SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
@@ -62,6 +63,7 @@ const MEMBERS_SQL: &str = "WITH target AS ( \
        pg_has_role(current_user, c.relowner, 'USAGE') AS owned \
      FROM members m JOIN pg_class c ON c.oid = m.relid \
      JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('r', 'p') \
      ORDER BY m.level, n.nspname, c.relname";
 
 /// One relation of a table's partition tree (or the table alone), as
@@ -164,9 +166,10 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
 const LOCK_TIMEOUT: &str = "5s";
 
 /// Close one gap: `REPLICA IDENTITY FULL` on its table — and on every partition
-/// that falls short, for a partitioned one — in one transaction under
-/// [`LOCK_TIMEOUT`]. A timeout or a denied grant is a [`SourceError::Setup`]
-/// naming the table.
+/// that falls short, for a partitioned one. Each relation gets its own
+/// transaction under [`LOCK_TIMEOUT`], so a busy partition neither holds the
+/// parent's lock while it waits nor undoes its siblings. A timeout or a denied
+/// grant is a [`SourceError::Setup`] naming the table; the rest still run.
 pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap) -> Result<()> {
     let setup = |e: sqlx::Error| {
         SourceError::Setup(format!(
@@ -174,25 +177,32 @@ pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap) -> Result<()> {
             gap.table
         ))
     };
-    let mut tx = pool.begin().await.map_err(setup)?;
+    let mut first_error = None;
+    for member in members(pool, &gap.table).await.map_err(setup)? {
+        if member.uncarried(&gap.missing).is_empty() {
+            continue;
+        }
+        if let Err(e) = alter(pool, &member).await {
+            first_error.get_or_insert(setup(e));
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// `REPLICA IDENTITY FULL` on one relation, in its own transaction.
+async fn alter(pool: &PgPool, member: &Member) -> std::result::Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"
     )))
     .execute(&mut *tx)
-    .await
-    .map_err(setup)?;
-    for member in members(&mut *tx, &gap.table).await.map_err(setup)? {
-        if member.uncarried(&gap.missing).is_empty() {
-            continue;
-        }
-        // Built from catalog names via `quote_ident` (no user free-text
-        // reaches it), so it is safe to run as a dynamic string.
-        sqlx::query(sqlx::AssertSqlSafe(member.alter_sql()))
-            .execute(&mut *tx)
-            .await
-            .map_err(setup)?;
-    }
-    tx.commit().await.map_err(setup)
+    .await?;
+    // Built from catalog names via `quote_ident` (no user free-text reaches
+    // it), so it is safe to run as a dynamic string.
+    sqlx::query(sqlx::AssertSqlSafe(member.alter_sql()))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
 }
 
 /// A table's `pg_class.relreplident`.
