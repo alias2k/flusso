@@ -444,7 +444,8 @@ fn missing_sentinel(last: bool, order: SortOrder, kind: MapSortValueKind) -> Val
 /// sorts by the value of the **first one a document has** — true fallback, so a
 /// row with only `en` still orders by `en` (not lexicographic tiers). String
 /// maps sort case- and accent-insensitively on each key's `.keyword_lowercase`
-/// subfield (a keyword map without subfields: on the bare key, lowercased);
+/// subfield (a keyword map without subfields, or a subfield view such as
+/// `keyword()`: on that path, lowercased);
 /// numeric/date maps on the bare key (epoch millis for dates). Nesting-aware via scope `S`,
 /// exactly like a field sort.
 ///

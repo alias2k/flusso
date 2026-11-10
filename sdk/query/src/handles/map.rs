@@ -244,6 +244,27 @@ fn escaped(value: &str, keep: &str) -> String {
     out
 }
 
+/// A `query_string` regex term, `/pattern/`. An unescaped `/` would end it, so
+/// it is escaped; an existing escape (`\/`, `\\`) is kept as written.
+fn regexp_term(pattern: &str) -> String {
+    let mut out = String::from("/");
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '/' => out.push_str("\\/"),
+            _ => out.push(c),
+        }
+    }
+    out.push('/');
+    out
+}
+
 /// The body every cross-key builder renders: `{ <wrapper>: { query, fields,
 /// ...opts, boost, _name } }`, or `match_none` when there is no query.
 #[derive(Debug, Clone)]
@@ -856,31 +877,32 @@ impl<S> KeywordMap<S, NoSubfields> {
     }
 
     /// Some key starts with `value`.
-    pub fn prefix(&self, value: impl AsRef<str>) -> MapPrefix<S> {
-        let query = format!("{}*", escaped(value.as_ref(), ""));
+    pub fn prefix(&self, value: impl Into<String>) -> MapPrefix<S> {
+        let query = format!("{}*", escaped(&value.into(), ""));
         MapPrefix::new(self.keys.query_string(Some(query)))
     }
 
     /// Some key matches the wildcard `pattern`: `?` matches one character,
-    /// `*` matches any run.
-    pub fn wildcard(&self, pattern: impl AsRef<str>) -> MapWildcard<S> {
+    /// `*` matches any run, and `\` escapes the next character.
+    pub fn wildcard(&self, pattern: impl Into<String>) -> MapWildcard<S> {
         MapWildcard::new(
             self.keys
-                .query_string(Some(escaped(pattern.as_ref(), "*?"))),
+                .query_string(Some(escaped(&pattern.into(), "*?\\"))),
         )
     }
 
     /// Some key matches the regular expression `pattern` (Lucene syntax,
     /// anchored to the whole value).
-    pub fn regexp(&self, pattern: impl AsRef<str>) -> MapRegexp<S> {
-        let query = format!("/{}/", pattern.as_ref().replace('/', "\\/"));
-        MapRegexp::new(self.keys.query_string(Some(query)))
+    pub fn regexp(&self, pattern: impl Into<String>) -> MapRegexp<S> {
+        MapRegexp::new(self.keys.query_string(Some(regexp_term(&pattern.into()))))
     }
 
-    /// Some key is within the default `AUTO` edit distance of `value`.
-    pub fn fuzzy(&self, value: impl AsRef<str>) -> MapFuzzy<S> {
-        let query = format!("{}~", escaped(value.as_ref(), ""));
-        MapFuzzy::new(self.keys.query_string(Some(query)))
+    /// Some key is within the default `AUTO` edit distance of `value`. An
+    /// empty value matches nothing.
+    pub fn fuzzy(&self, value: impl Into<String>) -> MapFuzzy<S> {
+        let value = value.into();
+        let query = (!value.is_empty()).then(|| format!("{}~", escaped(&value, "")));
+        MapFuzzy::new(self.keys.query_string(query))
     }
 
     /// Sort by this key, with optional fallback (`sort_key("a").or("b")`),

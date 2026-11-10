@@ -1868,6 +1868,12 @@ fn keyword_map_without_subfields_mirrors_the_exact_family_over_its_keys() {
         json!("/a\\/[0-9]+/")
     );
     assert_eq!(qs(codes.fuzzy("sael").to_value()), json!("sael~"));
+    assert_eq!(codes.fuzzy("").to_value(), json!({ "match_none": {} }));
+    assert_eq!(
+        qs(codes.regexp(r"a\/b/c\\").to_value()),
+        json!(r"/a\/b\/c\\/")
+    );
+    assert_eq!(qs(codes.wildcard(r"a\*b*").to_value()), json!(r"a\*b*"));
     assert_eq!(
         codes
             .fuzzy("sael")

@@ -12,7 +12,7 @@
 //!
 //! - `string` — [`Keyword`], [`Text`], and the cross-field [`multi_match`].
 //! - `scalar` — [`Bool`], [`Number`], [`Date`] (exact/range value fields).
-//! - `map` — [`TextMap`]/[`KeywordMap`] /[`NumberMap`]/[`DateMap`] dynamic-key objects and their cross-key builders ([`MapMatch`], [`MapTerm`], [`MapRange`], …).
+//! - `map` — [`TextMap`]/[`KeywordMap`]/[`NumberMap`]/[`DateMap`] dynamic-key objects and their cross-key builders ([`MapMatch`], [`MapTerm`], [`MapRange`], …).
 //! - `nested` — [`Nested`] arrays and their [`NestedProjection`].
 //! - `object` — [`Object`] sub-documents and the opaque [`Binary`]/[`Json`] fields.
 //! - `geo` — [`Geo`] points and [`GeoPoint`].
