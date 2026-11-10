@@ -5,8 +5,9 @@
 //! arrives, tagged with the commit LSN. That gives every change a clean,
 //! commit-aligned position to acknowledge against, and matches logical
 //! decoding's "whole transactions only" model. Because events are thin (a table
-//! name, primary key, and at most a pre-image), buffering even a large
-//! transaction is cheap.
+//! name, primary key, and at most a pre- and post-image), buffering even a large
+//! transaction is cheap. An update's post-image is the one wider payload, and
+//! it is kept only beside a pre-image.
 //!
 //! Each `Relation` message is followed by a catalog lookup of the table's
 //! primary key, before the next replication event is read: a change is keyed by
@@ -223,6 +224,7 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 table,
                 key,
                 before: None,
+                after: None,
             });
         }
         Decoded::Update { rel, old, new } => {
@@ -238,6 +240,10 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
             let before = old
                 .as_ref()
                 .and_then(|old| pgoutput::pre_image(relation, old));
+            let after = old
+                .as_ref()
+                .filter(|_| before.is_some())
+                .map(|old| pgoutput::post_image(relation, old, &new));
             if let Some(old_key) = old_key
                 && old_key.0 != new_key.0
             {
@@ -251,6 +257,7 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 table,
                 key: new_key,
                 before,
+                after,
             });
             warn_untraceable(state, rel);
         }

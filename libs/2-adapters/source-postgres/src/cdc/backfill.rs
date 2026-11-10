@@ -272,6 +272,7 @@ fn upsert_change(table: TableName, key: RowKey) -> ChangeEvent {
         table,
         key,
         before: None,
+        after: None,
     }
 }
 

@@ -42,6 +42,7 @@ fn upsert() -> ChangeEvent {
         table: TableName::try_new("users").unwrap(),
         key: RowKey(Vec::new()),
         before: None,
+        after: None,
     }
 }
 
@@ -191,7 +192,12 @@ fn a_full_identity_reparent_is_one_upsert_carrying_the_old_parent() {
     update.extend(text("3"));
     handle_xlog(&mut decode, &update).unwrap();
 
-    let [ChangeEvent::Upsert { key, before, .. }] = decode.open_txn.as_slice() else {
+    let [
+        ChangeEvent::Upsert {
+            key, before, after, ..
+        },
+    ] = decode.open_txn.as_slice()
+    else {
         panic!("expected one upsert, got {:?}", decode.open_txn);
     };
     assert_eq!(key.0, vec![(column("id"), GenericValue::Int(7))]);
@@ -199,6 +205,33 @@ fn a_full_identity_reparent_is_one_upsert_carrying_the_old_parent() {
         before.as_ref().unwrap().get(&column("parent_id")),
         Some(&GenericValue::Int(1))
     );
+    assert_eq!(
+        after.as_ref().unwrap().get(&column("parent_id")),
+        Some(&GenericValue::Int(3))
+    );
+}
+
+#[test]
+fn an_update_without_a_pre_image_carries_no_post_image() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'd');
+
+    let mut update = vec![b'U'];
+    update.extend_from_slice(&16385u32.to_be_bytes());
+    update.push(b'N');
+    update.extend_from_slice(&2i16.to_be_bytes());
+    update.extend(text("7"));
+    update.extend(text("3"));
+    handle_xlog(&mut decode, &update).unwrap();
+
+    assert!(matches!(
+        decode.open_txn.as_slice(),
+        [ChangeEvent::Upsert {
+            before: None,
+            after: None,
+            ..
+        }]
+    ));
 }
 
 fn needs_parent_link(decode: &mut DecodeState) {
