@@ -76,7 +76,7 @@ pub struct Column {
 const MAP_KEY_MAPPING_REVISION: u8 = 1;
 
 /// Hashes the fields in declaration order (exactly what the derive did), plus
-/// [`MAP_KEY_MAPPING_REVISION`] for a `map` column only.
+/// `MAP_KEY_MAPPING_REVISION` for a `map` column only.
 impl Hash for Column {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let Self {
