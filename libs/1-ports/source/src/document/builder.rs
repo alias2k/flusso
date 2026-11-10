@@ -51,7 +51,8 @@ pub struct IndexScope {
 ///    and `key` — to the ids of every document it affects. A change on a
 ///    document's own root table resolves to that one id; a change on a
 ///    *related* table (one folded in by a join or aggregate) is a reverse
-///    lookup whose result size is not known until queried.
+///    lookup whose result size is not known until queried. A root table that
+///    is also related to itself (a self-join) is both.
 /// 2. [`build`](Self::build) assembles one document by id — the root row plus
 ///    its joins and aggregates — or reports it deleted.
 ///

@@ -24,8 +24,10 @@
 //!   `has_many`); parent-side-key relations (`belongs_to`, resolved against the
 //!   parent table — so a change to, or deletion of, the *target* row re-emits
 //!   every document pointing at it); many-to-many (`through`) relations on
-//!   either the far or junction table; and tables reachable through multiple
-//!   hops of nesting, chained back to the root.
+//!   either the far or junction table; tables reachable through multiple
+//!   hops of nesting, chained back to the root; and self-joins, where a
+//!   root-table row is also some other document's related row — it resolves to
+//!   its own id plus every document that embeds it, to the declared depth.
 //! - Assembly: column fields (transforms, defaults); belongs_to / has_one /
 //!   has_many / many_to_many joins (filters, ordering, limit); joins nested
 //!   inside joins; aggregates, including over a junction; boolean and timestamp
@@ -417,13 +419,13 @@ impl DocumentBuilder for PgDocumentBuilder {
         let mut ids = Vec::new();
         let mut read = false;
         for (name, schema) in self.spec.indexes() {
-            if schema.table == *table {
+            let is_root = schema.table == *table;
+            if is_root {
                 read = true;
                 ids.push(DocumentId {
                     index: name.clone(),
                     key: key.clone(),
                 });
-                continue;
             }
 
             let mut paths = Vec::new();
@@ -442,6 +444,12 @@ impl DocumentBuilder for PgDocumentBuilder {
             };
 
             let mut seen = HashSet::new();
+            if is_root
+                && let [(column, own)] = key.0.as_slice()
+                && *column == pk_column
+            {
+                seen.insert(own.clone());
+            }
             for path in &paths {
                 for root in self.resolve_path(schema, table, key, before, path).await? {
                     if seen.insert(root.clone()) {
