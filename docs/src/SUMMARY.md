@@ -46,6 +46,7 @@
 - [Several indexes](query/several-indexes.md)
 - [Results and the escape hatch](query/results-and-escape-hatch.md)
 - [Paging](query/paging.md)
+- [Streaming a walk](query/streaming.md)
 - [Binding to the schema](query/binding.md)
 - [Migrating from path](query/migrating-from-path.md)
 

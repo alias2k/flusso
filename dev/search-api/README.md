@@ -62,6 +62,7 @@ and a cursor never expires.
 | `GET /products` | `q` (full-text over `name` + `description`), `sku`, `name` (full-text), `in_stock`, `min_reviews`, `min_rating`, `limit` |
 | `GET /products/{id}` | — (fetch one) |
 | `GET /orders` | `user_id`, `status`, `min_total`, `min_items`, `sort` (`status` → the declared enum lifecycle `pending → paid → shipped → delivered → cancelled`; else biggest `total` first), `limit` |
+| `GET /orders/export` | `user_id`, `status` — every match as NDJSON, streamed from a pinned walk (one consistent copy; a disconnect closes it) |
 | `GET /orders/{id}` | — (fetch one) |
 | `GET /health` | — |
 
@@ -83,6 +84,9 @@ curl 'localhost:8080/orders?sort=status'
 # Page through every delivered order, 50 at a time:
 curl 'localhost:8080/orders?status=delivered&limit=50'                # → { …, "next": "eyJ2Ijox…" }
 curl 'localhost:8080/orders?status=delivered&limit=50&cursor=eyJ2Ijox…'
+
+# Export every delivered order as NDJSON, streamed page by page:
+curl 'localhost:8080/orders/export?status=delivered'
 
 # Fetch one document by id (404 if absent):
 curl 'localhost:8080/users/1'

@@ -36,7 +36,8 @@
 //!   sort values (`search_after`), so inserts and deletes
 //!   never shift the walk and depth is unlimited; `.point_in_time()` pins the
 //!   walk to one fixed view. [`SearchResponse::next`] carries the opaque token
-//!   that resumes after each page. See [`PageCursor`] for a walk.
+//!   that resumes after each page. See [`PageCursor`] for a walk, and
+//!   [`Walk`] to stream a whole one (`.pages`/`.hits`/`.id_stream`).
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); shaping returned
 //! nested arrays ([`Search::filter_nested`] with [`Nested::matching`], via
@@ -112,6 +113,7 @@ mod multi;
 mod path;
 mod query;
 mod search;
+mod walk;
 
 #[cfg(test)]
 mod tests;
@@ -146,6 +148,7 @@ pub use search::{
     CursorSearch, FlussoRoot, FlussoScope, Highlight, Hit, IdsPage, Search, SearchResponse,
     ShardStats,
 };
+pub use walk::Walk;
 
 /// `#[derive(FlussoRoot)]` — the index-bound **root**. Generates the typed query
 /// surface for the *whole* index (a handle for every field at every level,

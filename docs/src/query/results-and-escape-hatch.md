@@ -10,8 +10,9 @@ The terminals a search can end in, the response shape, and the `raw` hatch for D
 | `.ids(&client)` | `Vec<String>` | matching document ids (root primary keys, stringified) in order, with `_source: false`; sort and `from`/`size` apply, `filter_nested` is dropped; after `.cursor(..)` it returns an `IdsPage` |
 | `.count(&client)` | `u64` | the same query to `_count`; sort, pagination, and projections are ignored |
 | `Type::get(&client, id)` | `Option<T>` | one document by id; `id` is typed as the root primary key |
+| `.cursor(c).pages(&client)` / `.hits(&client)` / `.id_stream(&client)` | `Walk` (a `futures::Stream`) | the whole cursor walk as one stream of pages, hits, or ids; see [Streaming a walk](streaming.md) |
 
-`ids` is the cheap way to search in OpenSearch and load full rows from Postgres.
+`ids` is the cheap way to search in OpenSearch and load full rows from Postgres. Paging through more than one page: [Paging](paging.md).
 
 ## The response
 

@@ -66,7 +66,12 @@ loop {
 
 How it works, and why: [ADR 0008](https://github.com/alias2k/flusso/blob/main/docs/adr/0008-page-cursors-are-keyset-with-an-opt-in-point-in-time.md).
 
+## Streaming a walk
+
+`.pages(&client)`, `.hits(&client)`, and `.id_stream(&client)` turn a cursor search into one `futures::Stream` over the whole walk, fetching each page as the previous one is consumed. Checkpoints, errors, ending a pinned walk, and recipes for an HTTP export and a resumable job: [Streaming a walk](streaming.md).
+
 ## Related
 
+- [Streaming a walk](streaming.md) to walk everything as one stream.
 - [Results and the escape hatch](results-and-escape-hatch.md) for the response types.
 - [Several indexes](several-indexes.md) for the blended list a `MultiSearch` cursor walks.

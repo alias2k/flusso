@@ -9,6 +9,9 @@
 //! - **Pinned walk** (`point_in_time`): a write mid-walk never shows up, an
 //!   alias swap doesn't disturb it, and once a reindex drops the generation it
 //!   pinned the next page is `CursorExpired`; `close` ends it early.
+//! - **Streaming a walk** (`hits`/`id_stream`/`pages`): every hit across pages,
+//!   a checkpoint resumes, and a pinned walk's point-in-time is closed by its
+//!   last page, by `close`, and by a drop — kept open only by `into_cursor`.
 //! - **Prefixed union, live**: colliding ids stay apart (the `_index`
 //!   tiebreak), and a reindex of one index mid-walk repeats no tie — the resume
 //!   follows the hash alias to its new generation. An `ids` walk pages too.
@@ -27,6 +30,8 @@
 )]
 
 mod common;
+
+use futures::TryStreamExt;
 
 use common::{document, mapping, refresh, seed_many, sink, start_opensearch, write};
 use flusso_query::{
@@ -291,6 +296,21 @@ async fn a_prefixed_live_union_walk_follows_a_reindex_and_ids_page_too() {
             break;
         }
     }
+    let streamed: Vec<String> = walk()
+        .cursor(None)
+        .hits(&client)
+        .map_ok(|hit| match hit.source {
+            StoreItem::User(_) => format!("user:{}", hit.id),
+            StoreItem::Order(_) => format!("order:{}", hit.id),
+        })
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        streamed,
+        ["order:1", "order:2", "user:1", "user:2"],
+        "the union streams as one walk, colliding ids apart"
+    );
     assert_eq!(
         seen,
         [
@@ -319,6 +339,114 @@ async fn a_prefixed_live_union_walk_follows_a_reindex_and_ids_page_too() {
         }
     }
     assert_eq!(ids, ["1", "2"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_walk_streams_every_hit_and_cleans_up_its_point_in_time() {
+    let (_container, base) = start_opensearch().await;
+    let sink = sink(&base);
+    seed_users(&sink, &base).await;
+    let client = Client::connect(&base).unwrap();
+    let walk = || User::query().size(2);
+    let all = ["1", "2", "3", "4", "5"];
+
+    // Every hit and every id, across three pages, as one stream each.
+    let hits: Vec<_> = walk()
+        .cursor(None)
+        .hits(&client)
+        .try_collect()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = hits.iter().map(|hit| hit.id.as_str()).collect();
+    assert_eq!(ids, all);
+    let ids: Vec<String> = walk()
+        .cursor(None)
+        .id_stream(&client)
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(ids, all);
+
+    // A checkpoint from `pages` resumes after the last page fetched.
+    let mut pages = walk().cursor(None).pages(&client);
+    let first = pages.try_next().await.unwrap().unwrap();
+    assert_eq!(first.total, 5);
+    let checkpoint = pages.into_cursor().expect("a full first page has a next");
+    let rest: Vec<String> = walk()
+        .cursor(checkpoint)
+        .id_stream(&client)
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        rest,
+        ["3", "4", "5"],
+        "nothing repeated after the checkpoint"
+    );
+
+    // A pinned walk run to its end closes its point-in-time.
+    let pinned = || walk().cursor(None).point_in_time();
+    let _: Vec<_> = pinned().hits(&client).try_collect().await.unwrap();
+    assert_eq!(open_pits(&base).await, 0, "the last page closes it");
+
+    // Dropped mid-walk: closed in the background.
+    let mut dropped = pinned().hits(&client);
+    dropped.try_next().await.unwrap();
+    assert_eq!(open_pits(&base).await, 1);
+    drop(dropped);
+    await_no_open_pits(&base).await;
+
+    // `close` closes it now.
+    let mut closed = pinned().hits(&client);
+    closed.try_next().await.unwrap();
+    closed.close().await.unwrap();
+    assert_eq!(open_pits(&base).await, 0, "close releases it at once");
+
+    // `into_cursor` keeps it open, and the kept cursor resumes the same view.
+    let mut kept = pinned().hits(&client);
+    kept.try_next().await.unwrap();
+    let cursor = kept
+        .into_cursor()
+        .expect("a pinned walk mid-way has a cursor");
+    assert_eq!(open_pits(&base).await, 1, "into_cursor leaves it open");
+    let rest: Vec<String> = walk()
+        .cursor(cursor)
+        .id_stream(&client)
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rest, ["3", "4", "5"]);
+    assert_eq!(
+        open_pits(&base).await,
+        0,
+        "the resumed walk's last page closes it"
+    );
+}
+
+/// How many point-in-times the cluster holds open.
+async fn open_pits(base: &str) -> usize {
+    let listing: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/_search/point_in_time/_all"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    listing["pits"].as_array().map_or(0, Vec::len)
+}
+
+/// Wait for a background close to land.
+async fn await_no_open_pits(base: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while open_pits(base).await > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a dropped pinned walk should close its point-in-time"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 /// Seed `users` 1..=5 (generation 1 + the hash alias) and make them searchable.

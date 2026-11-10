@@ -23,5 +23,6 @@ sink-opensearch.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+futures.workspace = true
 testcontainers-modules = { workspace = true, features = ["http_wait"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

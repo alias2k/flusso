@@ -28,6 +28,7 @@
 
 use std::borrow::Cow;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -39,6 +40,7 @@ use crate::error::{Error, Result};
 use crate::handles::Sort;
 use crate::query::{AsQuery, BoolBuilder, Root};
 use crate::search::{Hit, RawCount, SearchResponse};
+use crate::walk::{Fetched, Walk};
 
 /// A union of [`FlussoScope`](crate::FlussoScope) types searched
 /// together — one query, one blended result list, each hit decoded into the
@@ -386,8 +388,9 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
         self
     }
 
-    /// The page request, refusing a search that also positions itself.
-    pub(crate) fn request(&self) -> Result<PageRequest<'_>> {
+    /// The page request resuming after `cursor`, refusing a search that also
+    /// positions itself.
+    pub(crate) fn request<'a>(&'a self, cursor: Option<&'a PageCursor>) -> Result<PageRequest<'a>> {
         if self.search.from.is_some() {
             return Err(Error::Cursor(
                 "`from` can't be combined with a page cursor".to_string(),
@@ -404,25 +407,35 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
                 .iter()
                 .map(|(index, hash)| format!("{index}_{hash}"))
                 .collect(),
-            cursor: self.cursor.as_ref(),
+            cursor,
             pin: self.pin,
         })
     }
 
     /// Execute one page of the blended list and decode it into the union;
     /// [`SearchResponse::next`] resumes after it.
+    pub async fn send(&self, client: &Client) -> Result<SearchResponse<U>> {
+        self.send_from(client, self.cursor.as_ref()).await
+    }
+
+    /// [`send`](Self::send), resuming after `cursor` instead of the one the
+    /// search was built with — what a [`Walk`] drives page by page.
     #[tracing::instrument(
         name = "search.multi_cursor",
         skip_all,
         fields(
             path = %self.search.path,
-            resumed = self.cursor.is_some(),
+            resumed = cursor.is_some(),
             total = tracing::field::Empty,
         ),
         err,
     )]
-    pub async fn send(&self, client: &Client) -> Result<SearchResponse<U>> {
-        let page = fetch_page(client, self.request()?).await?;
+    pub(crate) async fn send_from(
+        &self,
+        client: &Client,
+        cursor: Option<&PageCursor>,
+    ) -> Result<SearchResponse<U>> {
+        let page = fetch_page(client, self.request(cursor)?).await?;
         let mut decoded = decode_response::<U>(page.response, &client.index_prefix)?;
         decoded.next = page.next;
         tracing::Span::current().record("total", decoded.total);
@@ -435,6 +448,43 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
             );
         }
         Ok(decoded)
+    }
+}
+
+impl<U> MultiCursorSearch<U>
+where
+    U: FlussoMultiDocument + Send + 'static,
+{
+    /// Stream the whole blended walk, one [`SearchResponse`] per page. Starts
+    /// from this search's cursor and mode; see [`Walk`] for how it ends.
+    #[must_use]
+    pub fn pages(self, client: &Client) -> Walk<SearchResponse<U>> {
+        self.walk(client, Fetched::page)
+    }
+
+    /// Stream every hit of the blended walk, page after page. See [`Walk`].
+    #[must_use]
+    pub fn hits(self, client: &Client) -> Walk<Hit<U>> {
+        self.walk(client, Fetched::hits)
+    }
+
+    fn walk<I: 'static>(
+        self,
+        client: &Client,
+        items: fn(SearchResponse<U>) -> Fetched<I>,
+    ) -> Walk<I> {
+        let start = self.cursor.clone();
+        let search = Arc::new(self);
+        Walk::new(
+            client,
+            start,
+            Box::new(move |client, cursor| {
+                let search = Arc::clone(&search);
+                Box::pin(
+                    async move { Ok(items(search.send_from(&client, cursor.as_ref()).await?)) },
+                )
+            }),
+        )
     }
 }
 

@@ -1,6 +1,7 @@
 //! The [`Search`] builder and the typed [`SearchResponse`] / [`Hit`] results.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -14,6 +15,7 @@ use crate::error::Result;
 use crate::handles::{MinimumShouldMatch, NestedProjection, Sort};
 use crate::path::Segment;
 use crate::query::{AsQuery, BoolBuilder, Root};
+use crate::walk::{Fetched, Walk};
 
 /// A view onto a flusso-maintained index — the root document **or** any of its
 /// `nested` element projections. Every struct `#[derive(FlussoDocument)]`
@@ -553,8 +555,14 @@ impl<T> CursorSearch<T> {
     }
 
     /// The page request for `body` (a full search body or the ids body)
-    /// against `path`, refusing a search that also positions itself.
-    pub(crate) fn request<'a>(&'a self, body: Value, path: &'a str) -> Result<PageRequest<'a>> {
+    /// against `path`, resuming after `cursor`, refusing a search that also
+    /// positions itself.
+    pub(crate) fn request<'a>(
+        &'a self,
+        body: Value,
+        path: &'a str,
+        cursor: Option<&'a PageCursor>,
+    ) -> Result<PageRequest<'a>> {
         if self.search.from.is_some() {
             return Err(Error::Cursor(
                 "`from` can't be combined with a page cursor".to_string(),
@@ -573,28 +581,43 @@ impl<T> CursorSearch<T> {
             body,
             tiebreak: SINGLE_INDEX_TIEBREAK,
             targets: vec![self.search.physical_index()],
-            cursor: self.cursor.as_ref(),
+            cursor,
             pin: self.pin,
         })
     }
 
     /// Run one page from `body` (a full search body or the ids body).
-    async fn fetch(&self, client: &Client, body: Value) -> Result<FetchedPage> {
+    async fn fetch(
+        &self,
+        client: &Client,
+        body: Value,
+        cursor: Option<&PageCursor>,
+    ) -> Result<FetchedPage> {
         let path = self.search.physical_index();
-        fetch_page(client, self.request(body, &path)?).await
+        fetch_page(client, self.request(body, &path, cursor)?).await
     }
 
     /// Execute one page and return only its document ids (no sources), with
     /// the cursor that resumes after it — the cheap way to walk every match
     /// (e.g. to load the rows from Postgres).
+    pub async fn ids(&self, client: &Client) -> Result<IdsPage> {
+        self.ids_from(client, self.cursor.as_ref()).await
+    }
+
+    /// [`ids`](Self::ids), resuming after `cursor` instead of the one the
+    /// search was built with — what a [`Walk`] drives page by page.
     #[tracing::instrument(
         name = "search.cursor_ids",
         skip_all,
         fields(index = %self.search.index, returned = tracing::field::Empty),
         err,
     )]
-    pub async fn ids(&self, client: &Client) -> Result<IdsPage> {
-        let page = self.fetch(client, self.search.ids_body()).await?;
+    pub(crate) async fn ids_from(
+        &self,
+        client: &Client,
+        cursor: Option<&PageCursor>,
+    ) -> Result<IdsPage> {
+        let page = self.fetch(client, self.search.ids_body(), cursor).await?;
         let raw: RawIdsResponse = serde_json::from_value(page.response)?;
         let ids: Vec<String> = raw.hits.hits.into_iter().map(|hit| hit.id).collect();
         tracing::Span::current().record("returned", ids.len());
@@ -611,18 +634,28 @@ where
 {
     /// Execute one page and decode its hits; [`SearchResponse::next`] resumes
     /// after it.
+    pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
+        self.send_from(client, self.cursor.as_ref()).await
+    }
+
+    /// [`send`](Self::send), resuming after `cursor` instead of the one the
+    /// search was built with — what a [`Walk`] drives page by page.
     #[tracing::instrument(
         name = "search.cursor_send",
         skip_all,
         fields(
             index = %self.search.index,
-            resumed = self.cursor.is_some(),
+            resumed = cursor.is_some(),
             total = tracing::field::Empty,
         ),
         err,
     )]
-    pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
-        let page = self.fetch(client, self.search.body()).await?;
+    pub(crate) async fn send_from(
+        &self,
+        client: &Client,
+        cursor: Option<&PageCursor>,
+    ) -> Result<SearchResponse<T>> {
+        let page = self.fetch(client, self.search.body(), cursor).await?;
         let mut response = page.response;
         let paths = self.search.nested_paths();
         if !paths.is_empty() {
@@ -640,6 +673,69 @@ where
             );
         }
         Ok(decoded)
+    }
+}
+
+impl<T> CursorSearch<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    /// Stream the whole walk, one [`SearchResponse`] per page — `total`,
+    /// timing, and partial-result flags included. Starts from this search's
+    /// cursor and mode; see [`Walk`] for how it ends.
+    #[must_use]
+    pub fn pages(self, client: &Client) -> Walk<SearchResponse<T>> {
+        self.walk(client, Fetched::page)
+    }
+
+    /// Stream every hit of the walk, page after page. See [`Walk`].
+    #[must_use]
+    pub fn hits(self, client: &Client) -> Walk<Hit<T>> {
+        self.walk(client, Fetched::hits)
+    }
+
+    fn walk<I: 'static>(
+        self,
+        client: &Client,
+        items: fn(SearchResponse<T>) -> Fetched<I>,
+    ) -> Walk<I> {
+        let start = self.cursor.clone();
+        let search = Arc::new(self);
+        Walk::new(
+            client,
+            start,
+            Box::new(move |client, cursor| {
+                let search = Arc::clone(&search);
+                Box::pin(
+                    async move { Ok(items(search.send_from(&client, cursor.as_ref()).await?)) },
+                )
+            }),
+        )
+    }
+}
+
+impl<T: 'static> CursorSearch<T> {
+    /// Stream every document id of the walk (no sources fetched), page after
+    /// page — the cheap way to feed every match into another lookup. See
+    /// [`Walk`].
+    #[must_use]
+    pub fn id_stream(self, client: &Client) -> Walk<String> {
+        let start = self.cursor.clone();
+        let search = Arc::new(self);
+        Walk::new(
+            client,
+            start,
+            Box::new(move |client, cursor| {
+                let search = Arc::clone(&search);
+                Box::pin(async move {
+                    let page = search.ids_from(&client, cursor.as_ref()).await?;
+                    Ok(Fetched {
+                        items: page.ids,
+                        next: page.next,
+                    })
+                })
+            }),
+        )
     }
 }
 
