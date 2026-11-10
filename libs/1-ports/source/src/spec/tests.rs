@@ -154,3 +154,34 @@ fn pre_image_columns_are_child_foreign_keys_and_junction_left_keys() {
         BTreeMap::from([entry("book_tags", "book_id"), entry("reviews", "book_id")])
     );
 }
+
+#[test]
+fn pre_image_columns_carry_a_self_join_link_on_the_root_table() {
+    let mut items = schema("items");
+    items.fields.push(Field {
+        field: kernel::FieldName::try_new("children").unwrap(),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: TableName::try_new("items").unwrap(),
+            kind: JoinKind::HasMany {
+                foreign_key: kernel::ColumnName::try_new("parent_id").unwrap(),
+            },
+            primary_key: kernel::ColumnName::try_new("id").unwrap(),
+            nullable: false,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![column_field("name")],
+        })),
+    });
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("items"), items)]));
+    let items_table = QualifiedTable::new(
+        DatabaseSchema::try_new("public").unwrap(),
+        TableName::try_new("items").unwrap(),
+    );
+
+    assert_eq!(
+        spec.pre_image_columns(),
+        BTreeMap::from([(items_table, vec![ColumnName::try_new("parent_id").unwrap()])])
+    );
+}
