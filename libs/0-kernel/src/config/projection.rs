@@ -58,6 +58,8 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
         map_values: map_value_type(field),
         decimal: is_decimal(field),
         enum_order: enum_order(field),
+        subfields: !matches!(&field.source, FieldSource::Column(column) if !column.subfields),
+        indexed: is_indexed(field),
     };
 
     ResolvedField {
@@ -79,6 +81,16 @@ fn map_value_type(field: &Field) -> Option<Box<Mapping>> {
             ..
         }) => Some(Box::new(Mapping::of_type(values))),
         _ => None,
+    }
+}
+
+/// Whether a sink indexes this field: off only for a `json` column or a join
+/// that says `indexed: false`.
+fn is_indexed(field: &Field) -> bool {
+    match &field.source {
+        FieldSource::Column(column) => column.indexed,
+        FieldSource::Relation(Relation::Join(join)) => join.indexed,
+        _ => true,
     }
 }
 

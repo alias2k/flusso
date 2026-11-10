@@ -53,6 +53,7 @@ fn belongs_to_schema(nullable: bool) -> IndexSchema {
                 order_by: None,
                 limit: None,
                 fields: vec![],
+                indexed: true,
             })),
         }],
     }
@@ -90,6 +91,8 @@ fn column_schema(name: &str, ty: FlussoType) -> IndexSchema {
                 transforms: vec![],
                 default: None,
                 enum_order: Vec::new(),
+                subfields: true,
+                indexed: true,
             }),
         }],
     }
@@ -130,6 +133,8 @@ fn enum_schema(name: &str, order: Vec<String>) -> IndexSchema {
                 transforms: vec![],
                 default: None,
                 enum_order: order,
+                subfields: true,
+                indexed: true,
             }),
         }],
     }
@@ -206,6 +211,7 @@ fn through_schema() -> IndexSchema {
                     order_by: None,
                     limit: None,
                     fields: vec![],
+                    indexed: true,
                 })),
             },
         ],
@@ -283,6 +289,8 @@ fn column_field(name: &str, ty: FlussoType) -> Field {
             transforms: vec![],
             default: None,
             enum_order: vec![],
+            subfields: true,
+            indexed: true,
         }),
     }
 }
@@ -386,4 +394,94 @@ fn a_map_serializes_its_key_mapping_as_values() {
     assert_eq!(json["type"], "object");
     assert_eq!(json["values"]["type"], "text");
     assert!(json["values"].get("analyzer").is_some());
+}
+
+/// The two pinned hashes above already cover `text`/`keyword`/`json` columns
+/// and a join; pinned again here so the reason they must not move is named.
+#[test]
+fn a_schema_that_never_opts_out_keeps_its_content_hash() {
+    let columns = mapless_schema().resolve(IndexName::try_new("products").unwrap());
+    let joined = through_schema().resolve(IndexName::try_new("orders").unwrap());
+    assert_eq!(columns.hash.to_string(), "9156f06f");
+    assert_eq!(joined.hash.to_string(), "af5b97ca");
+}
+
+fn set_column(schema: &mut IndexSchema, name: &str, edit: impl FnOnce(&mut crate::config::Column)) {
+    let field = schema
+        .fields
+        .iter_mut()
+        .find(|field| field.field.as_ref() == name)
+        .unwrap();
+    if let FieldSource::Column(column) = &mut field.source {
+        edit(column);
+    }
+}
+
+#[test]
+fn opting_out_of_subfields_or_indexing_changes_the_content_hash() {
+    let products = IndexName::try_new("products").unwrap();
+    let base = mapless_schema().resolve(products.clone()).hash;
+
+    let mut bare = mapless_schema();
+    set_column(&mut bare, "name", |column| column.subfields = false);
+    let bare = bare.resolve(products.clone()).hash;
+
+    let mut stored = mapless_schema();
+    set_column(&mut stored, "attrs", |column| column.indexed = false);
+    let stored = stored.resolve(products).hash;
+
+    let mut unindexed_join = through_schema();
+    if let FieldSource::Relation(Relation::Join(join)) = &mut unindexed_join.fields[1].source {
+        join.indexed = false;
+    }
+    let orders = IndexName::try_new("orders").unwrap();
+    let unindexed_join = unindexed_join.resolve(orders.clone()).hash;
+
+    assert_ne!(base, bare);
+    assert_ne!(base, stored);
+    assert_ne!(bare, stored);
+    assert_ne!(through_schema().resolve(orders).hash, unindexed_join);
+}
+
+#[test]
+fn opt_outs_flow_into_the_mapping_and_serialize_only_when_off() {
+    let mut schema = mapless_schema();
+    set_column(&mut schema, "name", |column| column.subfields = false);
+    set_column(&mut schema, "attrs", |column| column.indexed = false);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let by_name = |name: &str| {
+        &mapping
+            .fields
+            .iter()
+            .find(|field| field.name.as_ref() == name)
+            .unwrap()
+            .mapping
+    };
+
+    assert!(!by_name("name").subfields);
+    assert!(by_name("name").indexed);
+    assert!(!by_name("attrs").indexed);
+    assert!(by_name("code").subfields && by_name("code").indexed);
+
+    let name = serde_json::to_value(by_name("name")).unwrap();
+    assert_eq!(name["subfields"], false);
+    assert!(name.get("indexed").is_none());
+    let attrs = serde_json::to_value(by_name("attrs")).unwrap();
+    assert_eq!(attrs["indexed"], false);
+    let code = serde_json::to_value(by_name("code")).unwrap();
+    assert!(code.get("subfields").is_none() && code.get("indexed").is_none());
+}
+
+#[test]
+fn an_unindexed_join_keeps_its_shape_and_children() {
+    let mut schema = through_schema();
+    if let FieldSource::Relation(Relation::Join(join)) = &mut schema.fields[1].source {
+        join.indexed = false;
+        join.fields = vec![column_field("name", FlussoType::Text)];
+    }
+    let mapping = schema.resolve(IndexName::try_new("orders").unwrap());
+    let products = &mapping.fields[1];
+    assert_eq!(products.mapping.mapping_type, MappingType::Nested);
+    assert!(!products.mapping.indexed);
+    assert_eq!(products.children.len(), 1);
 }

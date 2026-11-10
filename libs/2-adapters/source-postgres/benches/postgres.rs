@@ -200,6 +200,7 @@ fn spec() -> SourceSpec {
                 column_field("total", "total"),
                 column_field("status", "status"),
             ],
+            indexed: true,
         })),
     };
     let schema = IndexSchema {
@@ -234,6 +235,8 @@ fn column_field(name: &str, col: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }

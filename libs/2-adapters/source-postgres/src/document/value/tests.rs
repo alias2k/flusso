@@ -14,6 +14,8 @@ fn column_field(name: &str, ty: FlussoType) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }

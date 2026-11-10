@@ -55,6 +55,8 @@ pub(crate) fn mapping(logical: &str, hash: u32, field: &str, ty: MappingType) ->
                 map_values: None,
                 decimal: false,
                 enum_order: None,
+                subfields: true,
+                indexed: true,
             },
             nullable: true,
             array: false,

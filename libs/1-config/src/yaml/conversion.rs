@@ -62,6 +62,8 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             transforms,
             default: convert_default(body.default)?,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     })
 }
@@ -113,6 +115,8 @@ fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     })
 }
@@ -141,6 +145,8 @@ fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
             transforms,
             default: convert_default(body.default)?,
             enum_order: body.variants,
+            subfields: true,
+            indexed: true,
         }),
     })
 }
@@ -216,6 +222,8 @@ fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
                 transforms: Vec::new(),
                 default: None,
                 enum_order: Vec::new(),
+                subfields: true,
+                indexed: true,
             })
         }
         _ => return Err(ConversionError::InvalidGeoSource),
@@ -273,6 +281,7 @@ fn convert_join_field(
             .map(|os| os.into_iter().map(convert_order_by).collect()),
         limit: body.limit,
         fields,
+        indexed: true,
     };
     Ok(Field {
         field: body.field,

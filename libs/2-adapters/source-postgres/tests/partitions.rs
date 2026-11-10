@@ -241,6 +241,7 @@ fn spec() -> SourceSpec {
             order_by: None,
             limit: None,
             fields: vec![column_field("id")],
+            indexed: true,
         })),
     };
     let users = IndexSchema {
@@ -270,6 +271,8 @@ fn column_field(name: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }

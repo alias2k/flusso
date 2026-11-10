@@ -68,6 +68,28 @@ pub struct Column {
     /// [`FlussoType`], because it is a property of this specific field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enum_order: Vec<String>,
+    /// Whether a sink may add its automatic subfields to this string field
+    /// (the OpenSearch `.keyword`/`.keyword_lowercase`/`.text`). `false` maps
+    /// the bare field whatever the sink's own switch says. Only a `text`,
+    /// `keyword` or `uuid` column may turn it off.
+    #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
+    pub subfields: bool,
+    /// Whether a sink indexes this field's content. `false` keeps the value in
+    /// the stored document but maps it as one disabled object, so nothing
+    /// under it is searchable. Only a `json` column may turn it off.
+    #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
+    pub indexed: bool,
+}
+
+/// The serde default of an opt-out flag: on.
+pub(crate) fn enabled() -> bool {
+    true
+}
+
+/// Whether an opt-out flag is still on, so it is left out of the serialized form.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_enabled(flag: &bool) -> bool {
+    *flag
 }
 
 /// Bumped when the index a `map` column produces changes shape, so every
@@ -76,7 +98,9 @@ pub struct Column {
 const MAP_KEY_MAPPING_REVISION: u8 = 1;
 
 /// Hashes the fields in declaration order (exactly what the derive did), plus
-/// `MAP_KEY_MAPPING_REVISION` for a `map` column only.
+/// `MAP_KEY_MAPPING_REVISION` for a `map` column only. `subfields` and `indexed`
+/// are hashed only when turned off, so a schema that never opts out keeps the
+/// content hash (and so the physical index) it had before they existed.
 impl Hash for Column {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let Self {
@@ -86,6 +110,8 @@ impl Hash for Column {
             transforms,
             default,
             enum_order,
+            subfields,
+            indexed,
         } = self;
         column.hash(state);
         ty.hash(state);
@@ -95,6 +121,12 @@ impl Hash for Column {
         enum_order.hash(state);
         if matches!(ty, FlussoType::Map { .. }) {
             MAP_KEY_MAPPING_REVISION.hash(state);
+        }
+        if !subfields {
+            "subfields".hash(state);
+        }
+        if !indexed {
+            "indexed".hash(state);
         }
     }
 }
@@ -237,6 +269,18 @@ pub struct Mapping {
     /// bindings uses it to offer an order-aware sort handle. Internal metadata —
     /// the enum itself is still serialized as a plain `keyword`.
     pub enum_order: Option<Vec<String>>,
+    /// Whether a sink may add its automatic subfields to this string field —
+    /// `false` when the schema field says `subfields: false`. A consumer
+    /// building typed bindings reads it to drop the subfield accessors.
+    /// Serialized as `subfields: false` only when off.
+    pub subfields: bool,
+    /// Whether a sink indexes this field — `false` when the schema field says
+    /// `indexed: false`. The [`mapping_type`](Self::mapping_type) and the
+    /// resolved children still describe the *stored* value's shape; the
+    /// OpenSearch sink maps the field as one `object` with `enabled: false`
+    /// whatever they say, and a consumer building typed bindings offers no
+    /// query handle for it. Serialized as `indexed: false` only when off.
+    pub indexed: bool,
 }
 
 impl Mapping {
@@ -250,6 +294,8 @@ impl Mapping {
             map_values: None,
             decimal: matches!(ty, FlussoType::Decimal),
             enum_order: None,
+            subfields: true,
+            indexed: true,
         }
     }
 }
@@ -257,11 +303,16 @@ impl Mapping {
 /// Serializes the way OpenSearch expects a field mapping — `{ "type": …, …extra }`
 /// — rather than the struct's named fields. The `extra` settings sit beside
 /// `type`, exactly as they would in the index body. A `map` adds `values`: the
-/// mapping each of its keys gets.
+/// mapping each of its keys gets. A field that opted out adds `subfields: false`
+/// or `indexed: false`.
 impl Serialize for Mapping {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let len = 1 + self.extra.len() + usize::from(self.map_values.is_some());
+        let len = 1
+            + self.extra.len()
+            + usize::from(self.map_values.is_some())
+            + usize::from(!self.subfields)
+            + usize::from(!self.indexed);
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("type", &self.mapping_type)?;
         for (key, value) in &self.extra {
@@ -269,6 +320,12 @@ impl Serialize for Mapping {
         }
         if let Some(values) = &self.map_values {
             map.serialize_entry("values", values)?;
+        }
+        if !self.subfields {
+            map.serialize_entry("subfields", &false)?;
+        }
+        if !self.indexed {
+            map.serialize_entry("indexed", &false)?;
         }
         map.end()
     }

@@ -98,6 +98,8 @@ fn field(name: &str, mapping_type: MappingType, children: Vec<ResolvedField>) ->
             map_values: None,
             decimal: false,
             enum_order: None,
+            subfields: true,
+            indexed: true,
         },
         nullable: true,
         array: false,

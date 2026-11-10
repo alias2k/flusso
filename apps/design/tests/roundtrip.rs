@@ -132,6 +132,8 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
                 transforms,
                 default: None,
                 enum_order,
+                subfields: true,
+                indexed: true,
             })
         })
         .boxed()
@@ -153,6 +155,8 @@ fn map_source() -> BoxedStrategy<FieldSource> {
                 transforms: Vec::new(),
                 default: None,
                 enum_order: Vec::new(),
+                subfields: true,
+                indexed: true,
             })
         })
         .boxed()
@@ -175,6 +179,8 @@ fn custom_source() -> BoxedStrategy<FieldSource> {
                 transforms: Vec::new(),
                 default: None,
                 enum_order: Vec::new(),
+                subfields: true,
+                indexed: true,
             })
         })
         .boxed()
@@ -246,6 +252,7 @@ fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {
             order_by,
             limit,
             fields,
+            indexed: true,
         }))
     };
     let limit_opt = prop_oneof![Just(None), (1u64..1000).prop_map(Some)];
