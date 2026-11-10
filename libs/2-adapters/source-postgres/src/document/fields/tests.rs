@@ -1,4 +1,4 @@
-use kernel::{Column, FieldSource, FlussoType, Join, JoinKind};
+use kernel::{Column, FieldName, FieldSource, FlussoType, Join, JoinKind};
 
 use super::*;
 

@@ -1,8 +1,8 @@
 //! Pure traversal of an index's field tree: finding relation paths (for reverse
-//! resolution), collecting relation tables (to pre-resolve their primary keys),
-//! and resolving a field name back to its column. No I/O.
+//! resolution) and collecting relation tables (to pre-resolve their primary keys).
+//! No I/O.
 
-use kernel::{ColumnName, Field, FieldName, Filter, Relation, RelationKey, TableName};
+use kernel::{ColumnName, Field, Filter, Relation, RelationKey, TableName};
 
 pub(super) fn relation_target(relation: &Relation) -> (&TableName, RelationKey<'_>) {
     (relation.table(), relation.key())
@@ -78,18 +78,6 @@ pub(super) fn collect_relation_tables(fields: &[Field], out: &mut Vec<TableName>
         }
         collect_relation_tables(field.children(), out);
     }
-}
-
-pub(super) fn field_column<'a>(fields: &'a [Field], name: &FieldName) -> Option<&'a ColumnName> {
-    for field in fields {
-        if &field.field == name {
-            return field.column();
-        }
-        if let Some(column) = field_column(field.children(), name) {
-            return Some(column);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

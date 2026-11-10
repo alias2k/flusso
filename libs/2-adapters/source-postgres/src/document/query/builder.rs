@@ -22,7 +22,6 @@ use super::sql::{
     agg_function, column_value, geo_value, ids_agg, json_agg_subquery, json_key, limit_clause,
     literal_or_null, order_clause, qcol, qident, qtable,
 };
-use crate::document::fields::field_column;
 
 /// Most `(key, value)` field pairs one `json_build_object` can hold: Postgres
 /// caps a function call at 100 arguments and each pair spends two.
@@ -418,13 +417,13 @@ impl Builder<'_> {
     /// the marker is truthy (true boolean or any present value) and the optional
     /// `when` filters match. Generic over the marker's type via `pg_typeof`.
     pub(super) fn soft_delete_predicate(&mut self, schema: &IndexSchema) -> Result<Option<String>> {
-        let (column, when) = match &schema.soft_delete {
+        let when = match &schema.soft_delete {
             None => return Ok(None),
-            Some(SoftDelete::Column(c)) => (c.column.clone(), c.when.as_deref()),
-            Some(SoftDelete::Field(f)) => match field_column(&schema.fields, &f.field) {
-                Some(column) => (column.clone(), f.when.as_deref()),
-                None => return Ok(None),
-            },
+            Some(SoftDelete::Column(c)) => c.when.as_deref(),
+            Some(SoftDelete::Field(f)) => f.when.as_deref(),
+        };
+        let Some(column) = source::soft_delete_column(schema).cloned() else {
+            return Ok(None);
         };
         let marker = qcol(ROOT, &column);
         // The cast goes through `text` so the expression plans for any marker

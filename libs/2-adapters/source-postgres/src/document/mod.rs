@@ -51,7 +51,9 @@
 //! emitted only if a column the index reads from the root changed, and a path
 //! back from a related row is walked only if a column that relation reads
 //! changed (fields, filters, `order_by`, aggregate input, link; see
-//! [`source::relation_columns`]). Without both images every path is walked.
+//! [`source::relation_columns`]). Without both images every path is walked,
+//! and an index with a raw filter anywhere walks every path. The column sets
+//! are derived once, when the builder is built.
 //!
 //! ## Remaining limits
 //!
@@ -59,6 +61,7 @@
 
 mod fields;
 mod query;
+mod reads;
 mod resolve;
 pub(crate) mod value;
 
@@ -71,12 +74,12 @@ use kernel::{
 };
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{
-    Catalog, ColumnInfo, Result, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
-    relation_columns, root_columns,
+    Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
 };
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
+use reads::ReadColumns;
 
 /// Cache of each `(schema, table, column)`'s catalog metadata.
 type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
@@ -104,6 +107,8 @@ struct ColumnMeta {
 pub struct PgDocumentBuilder {
     pool: PgPool,
     spec: Arc<SourceSpec>,
+    /// The columns each index reads, per part, derived from `spec` once.
+    reads: Arc<ReadColumns>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
@@ -117,6 +122,7 @@ impl PgDocumentBuilder {
     pub fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
         Self {
             pool,
+            reads: Arc::new(ReadColumns::new(&spec)),
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -430,12 +436,13 @@ impl DocumentBuilder for PgDocumentBuilder {
         let mut ids = Vec::new();
         let mut read = false;
         let mut skipped = 0_usize;
+        let diff = RowDiff::new(key, before, after);
         for (name, schema) in self.spec.indexes() {
             let is_root = schema.table == *table;
             let mut seen = HashSet::new();
             if is_root {
                 read = true;
-                if root_columns(schema).touched_by(key, before, after) {
+                if self.reads.root(name).touched_by(&diff) {
                     ids.push(DocumentId {
                         index: name.clone(),
                         key: key.clone(),
@@ -467,11 +474,8 @@ impl DocumentBuilder for PgDocumentBuilder {
                 continue;
             };
 
-            for path in &paths {
-                let touched = path.last().is_none_or(|relation| {
-                    relation_columns(relation, table).touched_by(key, before, after)
-                });
-                if !touched {
+            for (n, path) in paths.iter().enumerate() {
+                if !self.reads.path(name, table, n).touched_by(&diff) {
                     skipped += 1;
                     continue;
                 }

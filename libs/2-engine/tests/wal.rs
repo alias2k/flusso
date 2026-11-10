@@ -20,7 +20,8 @@ use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Envelope, Field,
     FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, IndexName, IndexSchema,
-    Join, JoinKind, OrderBy, Relation, SinkName, TableName, ValueOpFilter,
+    Join, JoinKind, OrderBy, RawFilter, RawFilterValue, Relation, SinkName, TableName,
+    ValueOpFilter,
 };
 use sink::{Result as SinkResult, Sink};
 use source::SourceSpec;
@@ -330,6 +331,90 @@ async fn an_update_of_unread_columns_rebuilds_nothing() {
     engine.abort();
 }
 
+/// A raw filter is pasted into a correlated subquery, so it can read the root
+/// row: a change to that root column must rebuild even though no field reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_raw_filter_reading_the_root_row_rebuilds_on_that_column() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text, trial_start int)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int, total int, placed_at int)",
+        "ALTER TABLE users REPLICA IDENTITY FULL",
+        "ALTER TABLE orders REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE users, orders",
+        "INSERT INTO users VALUES (1, 'ada@x.io', 0)",
+        "INSERT INTO orders VALUES (10, 1, 5, 3)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(users_with_recent_orders_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
+        documents,
+        sink,
+    ));
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+
+    recorded.lock().unwrap().clear();
+    sqlx::query("UPDATE users SET trial_start = 5 WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users VALUES (100, 'marker', 0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    expect_op(&mut engine, &recorded, "upsert users 100").await;
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .contains(&"upsert users 1".to_owned()),
+        "the raw filter reads `root.trial_start`, so changing it rebuilds: {:?}",
+        recorded.lock().unwrap()
+    );
+
+    engine.abort();
+}
+
 /// One deployment the way the daemon runs it: stage the sink engine, then run
 /// it and the ingest engine together until either stops. `Ok` when the live
 /// stream ends; the first engine error otherwise.
@@ -454,6 +539,44 @@ fn users_with_relations_spec() -> SourceSpec {
             relation("orders", Relation::Join(orders)),
             relation("paid", paid),
             relation("visits", Relation::Join(visits)),
+        ],
+    };
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
+}
+
+/// `users` reading `email` and the `orders` placed since the user's
+/// `trial_start`, through a raw filter on the root row.
+fn users_with_recent_orders_spec() -> SourceSpec {
+    let orders = Join {
+        table: table("orders"),
+        kind: JoinKind::HasMany {
+            foreign_key: column("user_id"),
+        },
+        primary_key: column("id"),
+        nullable: false,
+        filters: Some(vec![Filter::Raw(RawFilter {
+            raw: RawFilterValue::try_new("placed_at >= root.trial_start").unwrap(),
+        })]),
+        order_by: None,
+        limit: None,
+        fields: vec![column_field("total", "total")],
+    };
+    let schema = IndexSchema {
+        version: 1,
+        table: table("users"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_field("id", "id"),
+            column_field("email", "email"),
+            Field {
+                field: field("orders"),
+                options: Default::default(),
+                source: FieldSource::Relation(Relation::Join(orders)),
+            },
         ],
     };
     SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))

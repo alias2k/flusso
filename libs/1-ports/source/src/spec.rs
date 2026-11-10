@@ -15,7 +15,9 @@
 
 mod columns;
 
-pub use columns::{ColumnUse, relation_columns, root_columns, row_link};
+pub use columns::{
+    ColumnUse, RowDiff, relation_columns, root_columns, row_link, soft_delete_column,
+};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
