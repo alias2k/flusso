@@ -42,14 +42,31 @@ You're standing up flusso against a database and a cluster, or adding a sink or 
 
 4. **Decide the rejection policy.** The default `stop` halts on a single bad document. Set `on_error = "skip"` globally or per index only where dropping a document is preferable to stopping. See [on_error](../reference/index-and-on-error.md#on_error).
 
-5. **Bind the HTTP surfaces for the environment.** In a container, the public surface must listen on all interfaces; the private one should stay on localhost.
+5. **Raise an OpenSearch index limit if a document needs it.** A wide document can pass OpenSearch's default of 1000 mapped fields (`mapping.total_fields.limit`), or the `nested_fields`/`nested_objects` limits, and fail index creation or get rejected. Raise it for every index the sink creates:
+
+   ```toml
+   [sinks.primary]
+   type = "opensearch"
+   index_settings = { "mapping.total_fields.limit" = 2000 }
+   ```
+
+   or for one index on one sink:
+
+   ```toml
+   [index.sinks.primary]
+   index_settings = { "mapping.nested_objects.limit" = 20000 }
+   ```
+
+   The per-index table belongs to the `[[index]]` entry just above it. Which keys flusso owns and rejects, how the two layers combine, and when a change takes effect are in [Index settings](../reference/sink-opensearch.md#index-settings).
+
+6. **Bind the HTTP surfaces for the environment.** In a container, the public surface must listen on all interfaces; the private one should stay on localhost.
 
    ```toml
    [server]
    public_address = "0.0.0.0:9464"
    ```
 
-6. **Validate.**
+7. **Validate.**
 
    ```sh
    flusso check --config flusso.toml --offline   # files only
