@@ -97,6 +97,8 @@ pub struct PgDocumentBuilder {
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
     col_type_cache: Arc<Mutex<ColTypeCache>>,
+    /// Tables a change arrived for that no index reads, already warned about.
+    unread_warned: Arc<Mutex<HashSet<TableName>>>,
 }
 
 impl PgDocumentBuilder {
@@ -106,6 +108,7 @@ impl PgDocumentBuilder {
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: Arc::new(Mutex::new(HashMap::new())),
+            unread_warned: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -356,6 +359,27 @@ impl PgDocumentBuilder {
     }
 }
 
+impl PgDocumentBuilder {
+    /// Warn, once per table, that a change arrived for a table no index reads —
+    /// so a change streamed under an unexpected name (a partition's, say) isn't
+    /// dropped silently.
+    fn warn_unread(&self, table: &TableName) {
+        let first = self
+            .unread_warned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(table.clone());
+        if first {
+            tracing::warn!(
+                table = %table,
+                "a change arrived for a table no index reads and was dropped; if it is a \
+                 partition, publish its partitioned table via the root \
+                 (publish_via_partition_root)",
+            );
+        }
+    }
+}
+
 /// The Postgres source's view of its own catalog. The index mapping is derived
 /// from the self-describing schema in [`kernel`]; this is the one
 /// store-specific piece used for *validation* — how Postgres types and
@@ -393,8 +417,10 @@ impl DocumentBuilder for PgDocumentBuilder {
         before: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
         let mut ids = Vec::new();
+        let mut read = false;
         for (name, schema) in self.spec.indexes() {
             if schema.table == *table {
+                read = true;
                 ids.push(DocumentId {
                     index: name.clone(),
                     key: key.clone(),
@@ -408,6 +434,7 @@ impl DocumentBuilder for PgDocumentBuilder {
             if paths.is_empty() {
                 continue;
             }
+            read = true;
             let Some(pk_column) = schema.primary_key.clone() else {
                 tracing::warn!(
                     index = %name, table = %table,
@@ -427,6 +454,9 @@ impl DocumentBuilder for PgDocumentBuilder {
                     }
                 }
             }
+        }
+        if !read {
+            self.warn_unread(table);
         }
         tracing::trace!(documents = ids.len(), "resolved affected documents");
         Ok(ids)
