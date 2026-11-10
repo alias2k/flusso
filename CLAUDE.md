@@ -16,7 +16,7 @@ endpoint is documented once, on a page under `docs/src/reference/`, and the how-
 there instead of restating it. Adapter option tables are **generated** (`just schema-gen` →
 `docs/src/reference/generated/`) and included by the adapter pages; edit the doc comment on the
 adapter's config struct, never the table. Docker recipes are `docs/src/deploy/docker.md`, the query
-manual is the thirteen chapters under `docs/src/query/`, the designer is
+manual is the fourteen chapters under `docs/src/query/`, the designer is
 `docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing
 architecture tour is `docs/src/contribute/` (this file stays the agent-facing index). Page
 types, templates, and the ownership rule are in `docs/STYLE.md`. Every crate has its own
