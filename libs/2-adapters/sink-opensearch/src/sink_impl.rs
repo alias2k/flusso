@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
-use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, to_json};
+use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, Visibility, to_json};
 use tracing::{debug, info, warn};
 
 use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks};
@@ -161,6 +161,13 @@ impl Sink for OpensearchSink {
     /// `refresh_interval`, keeping bulk indexing fast so the backlog clears (see
     /// the module docs).
     ///
+    /// The report says when the flush's documents become searchable
+    /// ([`Visibility`]): at once for a caught-up flush, within
+    /// `refresh_interval` otherwise. With automatic refresh off
+    /// (`refresh_interval = "-1"`) nothing else would ever make an unforced
+    /// flush searchable, so those indexes are remembered and the next
+    /// caught-up flush refreshes them.
+    ///
     /// A missing target fails the whole flush, not one document (see the
     /// `bulk` module docs).
     #[tracing::instrument(name = "os.flush", skip_all, fields(caught_up), err)]
@@ -171,7 +178,8 @@ impl Sink for OpensearchSink {
         };
 
         if actions.is_empty() {
-            return Ok(FlushReport::clean());
+            let visibility = self.settle_visibility(caught_up, &actions).await;
+            return Ok(FlushReport::clean().visible(visibility));
         }
 
         let mut fragments = Vec::with_capacity(actions.len());
@@ -224,7 +232,11 @@ impl Sink for OpensearchSink {
             }
         }
 
-        Ok(FlushReport { rejected })
+        let visibility = self.settle_visibility(caught_up, &actions).await;
+        Ok(FlushReport {
+            rejected,
+            visibility,
+        })
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {
@@ -329,5 +341,52 @@ impl Sink for OpensearchSink {
             hash_alias, next, "staged reindex into a new generation"
         );
         Ok(())
+    }
+}
+
+impl OpensearchSink {
+    /// When the flush that just wrote `written` becomes searchable, settling
+    /// what earlier flushes left behind.
+    ///
+    /// A caught-up flush forced a refresh of what it wrote; it also refreshes
+    /// the indexes earlier flushes wrote with automatic refresh off, so
+    /// `Immediate` covers them as the port requires. If that refresh fails the
+    /// documents are still durable: the flush reports `Deferred` and the next
+    /// caught-up flush tries again.
+    async fn settle_visibility(&self, caught_up: bool, written: &[BulkAction]) -> Visibility {
+        let unforced = self.unforced_visibility();
+        if !caught_up {
+            return match unforced {
+                Visibility::Within(_) if written.is_empty() => Visibility::Immediate,
+                Visibility::Within(interval) => Visibility::Within(interval),
+                Visibility::Immediate | Visibility::Deferred => {
+                    let mut unrefreshed = self.lock_unrefreshed();
+                    unrefreshed.extend(written.iter().map(|action| action.index().to_owned()));
+                    if unrefreshed.is_empty() {
+                        Visibility::Immediate
+                    } else {
+                        Visibility::Deferred
+                    }
+                }
+            };
+        }
+        let pending = std::mem::take(&mut *self.lock_unrefreshed());
+        if pending.is_empty() {
+            return Visibility::Immediate;
+        }
+        match self.refresh_indexes(&pending).await {
+            Ok(()) => Visibility::Immediate,
+            Err(error) => {
+                warn!(%error, "could not refresh indexes written without a refresh; retrying on the next caught-up flush");
+                self.lock_unrefreshed().extend(pending);
+                Visibility::Deferred
+            }
+        }
+    }
+
+    fn lock_unrefreshed(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.unrefreshed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
