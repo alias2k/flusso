@@ -33,7 +33,7 @@
 //! - Typed [`SearchResponse`] / [`Hit`].
 //! - Two ways to page: by offset (`from`/`size`), or by [`PageCursor`] —
 //!   [`Search::cursor`] / [`MultiSearch::cursor`] resume after the last hit's
-//!   sort values (`search_after`), so inserts and deletes ahead of the position
+//!   sort values (`search_after`), so inserts and deletes
 //!   never shift the walk and depth is unlimited; `.point_in_time()` pins the
 //!   walk to one fixed view. [`SearchResponse::next`] carries the opaque token
 //!   that resumes after each page. See [`PageCursor`] for a walk.

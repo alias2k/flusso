@@ -4,7 +4,7 @@ status: accepted
 
 # Page cursors are keyset paging, with an opt-in point-in-time
 
-`flusso-query` paged only by offset (`from`/`size`). flusso's index changes continuously from the WAL, so offset pages shift under any insert or delete ahead of the window (duplicates, skips) and stop at `index.max_result_window` (issue #156). A **page cursor** is the alternative: an opaque token returned with a page that resumes the ordered result list right after that page's last hit.
+`flusso-query` paged only by offset (`from`/`size`). flusso's index changes continuously from the WAL, so offset pages shift under any insert or delete before the window (duplicates, skips) and stop at `index.max_result_window` (issue #156). A **page cursor** is the alternative: an opaque token returned with a page that resumes the ordered result list right after that page's last hit.
 
 The mechanism: every page searches with `search_after` the previous page's last sort values, with the sort made total. By default the walk is **live**: each page reads the index as it is now. `point_in_time()` opts into a **pinned walk**: the first page opens an OpenSearch point-in-time (PIT) and every page reads it. The token is base64url JSON carrying a version, the last sort values, the PIT id (pinned walks only), and an FNV-1a fingerprint of the query, sort, and prefixed index path; a token handed back with a different query is `Error::CursorMismatch`. It is not signed: tampering only changes the caller's own pages. The token, not the builder, decides the mode on resume.
 
@@ -13,7 +13,7 @@ Verified against OpenSearch 2.19 before deciding: a PIT hides documents written 
 ## Considered options
 
 - **A PIT for every walk.** The first implementation. Exact (one fixed view per walk), but every first page costs a server context (`search.max_open_pit_context`, 300 per node) that also keeps merged-away segments alive on a CDC-churned index, and a list UI where most visitors stop at page one pays it for nothing. It also freezes a walk's content for as long as the user scrolls. Kept as the opt-in.
-- **Live keyset by default (chosen).** No server state, no expiry, fresh content, works on Elasticsearch 7.x too. Inserts and deletes ahead of the position never shift the walk, which is offset paging's real failure on this index. What it gives up: a document whose *sort value* changes mid-walk can repeat or be skipped, `_score` near-ties can swap between pages, and `total` is recounted per page.
+- **Live keyset by default (chosen).** No server state, no expiry, fresh content, works on Elasticsearch 7.x too. Inserts and deletes never shift the walk, which is offset paging's real failure on this index. What it gives up: a document whose *sort value* changes mid-walk can repeat or be skipped, `_score` near-ties can swap between pages, and `total` is recounted per page.
 - **Expose `sort` on `Hit` + a typed `search_after` only.** The live walk without the token, the tiebreak, or the reindex fix. (`Hit::sort` ships anyway.)
 - **Scroll.** Heavyweight, forward-only, discouraged for user-facing paging; a pinned walk covers exports.
 - **Reject a non-total sort** instead of fixing it. A runtime error for something the client can fix silently.

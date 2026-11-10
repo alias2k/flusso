@@ -2,7 +2,7 @@
 //!
 //! Offset paging (`from`/`size`) re-runs the query and skips `from` hits, so on
 //! an index flusso keeps current from the WAL it drifts: an insert or delete
-//! ahead of the window shifts every later page, and `from + size` stops at
+//! before the window shifts every later page, and `from + size` stops at
 //! `index.max_result_window`. A page cursor resumes *after a sort position*
 //! instead (ADR 0008):
 //!
@@ -11,7 +11,7 @@
 //!   combined search) unless the caller's sort already holds it; an unsorted
 //!   search keeps relevance order, with `_score` descending first.
 //! - **Live** (the default): every page reads the index as it is now. Inserts
-//!   and deletes ahead of the position never shift the walk, nothing is held
+//!   and deletes never shift the walk, nothing is held
 //!   open on the server, and nothing expires. A resumed union walk first
 //!   points its `_index` values at the generation each hash alias serves now,
 //!   so a reindex mid-walk repeats nothing.
@@ -57,8 +57,9 @@ const DEFAULT_SIZE: u64 = 10;
 /// [`FromStr`], and serde as a plain string), so it can travel through an
 /// HTTP API unchanged. It is bound to the query (and the prefixed indexes)
 /// that produced it: resuming a different query fails with
-/// [`Error::CursorMismatch`]. It is not signed — editing it only changes the
-/// caller's own pages.
+/// [`Error::CursorMismatch`]. It is not signed: editing it only changes which
+/// pages of the same search come back, and a pinned token naming another
+/// search's point-in-time is refused ([`Error::CursorMismatch`]).
 ///
 /// Start a walk with `None`, continue with the previous page's `next`:
 ///
@@ -96,9 +97,17 @@ const DEFAULT_SIZE: u64 = 10;
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageCursor {
     /// The point-in-time a pinned walk reads; `None` for a live walk.
-    pit: Option<String>,
+    pinned: Option<PinnedView>,
     after: Vec<Value>,
     fingerprint: u64,
+}
+
+/// A pinned walk's point-in-time and the keep-alive it renews on every page,
+/// so a resumed page keeps the walk's own keep-alive.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PinnedView {
+    pub(crate) id: String,
+    pub(crate) keep_alive: Duration,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -106,14 +115,17 @@ struct Token {
     v: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pit: Option<String>,
+    /// The pinned walk's keep-alive, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ka: Option<u64>,
     after: Vec<Value>,
     fp: String,
 }
 
 impl PageCursor {
-    pub(crate) fn new(pit: Option<String>, after: Vec<Value>, fingerprint: u64) -> Self {
+    pub(crate) fn new(pinned: Option<PinnedView>, after: Vec<Value>, fingerprint: u64) -> Self {
         Self {
-            pit,
+            pinned,
             after,
             fingerprint,
         }
@@ -125,8 +137,8 @@ impl PageCursor {
     /// holds nothing, so this is a no-op; closing an expired point-in-time is
     /// not an error either.
     pub async fn close(&self, client: &Client) -> Result<()> {
-        match &self.pit {
-            Some(pit) => client.close_pit(pit).await,
+        match &self.pinned {
+            Some(view) => client.close_pit(&view.id).await,
             None => Ok(()),
         }
     }
@@ -134,7 +146,7 @@ impl PageCursor {
     /// Whether this walk is pinned to a point-in-time.
     #[must_use]
     pub fn is_pinned(&self) -> bool {
-        self.pit.is_some()
+        self.pinned.is_some()
     }
 
     /// Reject a cursor handed back with a different query than the one that
@@ -152,7 +164,11 @@ impl fmt::Display for PageCursor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let token = Token {
             v: VERSION,
-            pit: self.pit.clone(),
+            pit: self.pinned.as_ref().map(|view| view.id.clone()),
+            ka: self
+                .pinned
+                .as_ref()
+                .map(|view| u64::try_from(view.keep_alive.as_millis()).unwrap_or(u64::MAX)),
             after: self.after.clone(),
             fp: format!("{:016x}", self.fingerprint),
         };
@@ -175,7 +191,11 @@ impl FromStr for PageCursor {
         }
         let fingerprint =
             u64::from_str_radix(&token.fp, 16).map_err(|_| malformed("bad fingerprint"))?;
-        Ok(Self::new(token.pit, token.after, fingerprint))
+        let pinned = token.pit.map(|id| PinnedView {
+            id,
+            keep_alive: token.ka.map_or(DEFAULT_KEEP_ALIVE, Duration::from_millis),
+        });
+        Ok(Self::new(pinned, token.after, fingerprint))
     }
 }
 
@@ -199,7 +219,7 @@ impl<'de> Deserialize<'de> for PageCursor {
 
 /// A stable 64-bit FNV-1a hash of what a cursor is bound to: the request body
 /// (query, total sort, filters — everything but the page size and position)
-/// and the unprefixed index path. Hand-rolled because std's
+/// and the prefixed index path. Hand-rolled because std's
 /// hasher may change between Rust releases, and a token outlives a deploy.
 pub(crate) fn fingerprint(bound: &Value, path: &str) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -228,10 +248,9 @@ pub(crate) struct PageRequest<'a> {
     /// current generation on a live resume.
     pub(crate) targets: Vec<String>,
     pub(crate) cursor: Option<&'a PageCursor>,
-    /// Open a point-in-time on the first page. A resumed walk follows its
-    /// cursor instead.
-    pub(crate) pinned: bool,
-    pub(crate) keep_alive: Duration,
+    /// Open a point-in-time with this keep-alive on the first page. A resumed
+    /// walk follows its cursor instead.
+    pub(crate) pin: Option<Duration>,
 }
 
 /// A fetched cursor page: the raw `_search` response and the cursor that
@@ -301,24 +320,25 @@ pub(crate) fn effective_sort(request: &PageRequest<'_>) -> Vec<Value> {
 /// cursor can't cross deployments.
 pub(crate) fn page_body(
     request: &PageRequest<'_>,
-    pit: Option<&str>,
+    sort: Vec<Value>,
+    pinned: Option<&PinnedView>,
     bound_path: &str,
     after: Option<Vec<Value>>,
 ) -> PageBody {
     let mut body = request.body.clone();
-    body.insert("sort".to_string(), Value::Array(effective_sort(request)));
+    body.insert("sort".to_string(), Value::Array(sort));
     let mut bound = body.clone();
     for key in UNBOUND_KEYS {
         bound.remove(*key);
     }
     let fingerprint = fingerprint(&Value::Object(bound), bound_path);
 
-    if let Some(pit) = pit {
+    if let Some(view) = pinned {
         let mut pit_clause = Map::new();
-        pit_clause.insert("id".to_string(), Value::String(pit.to_owned()));
+        pit_clause.insert("id".to_string(), Value::String(view.id.clone()));
         pit_clause.insert(
             "keep_alive".to_string(),
-            Value::String(keep_alive_param(request.keep_alive)),
+            Value::String(keep_alive_param(view.keep_alive)),
         );
         body.insert("pit".to_string(), Value::Object(pit_clause));
     }
@@ -355,10 +375,9 @@ pub(crate) fn rewrite_generations(
         let Some(Value::String(concrete)) = after.get_mut(position) else {
             continue;
         };
-        let stripped = concrete.strip_prefix(prefix).unwrap_or(concrete);
-        let target = targets.iter().find(|target| {
-            stripped == target.as_str() || crate::multi::is_generation_of(stripped, target)
-        });
+        let target = targets
+            .iter()
+            .find(|target| is_target(concrete, std::slice::from_ref(target), prefix));
         if let Some(now) = target.and_then(|target| current.get(&format!("{prefix}{target}"))) {
             concrete.clone_from(now);
         }
@@ -380,21 +399,21 @@ pub(crate) fn keep_alive_param(keep_alive: Duration) -> String {
 ///   fails, which would otherwise hold it until the keep-alive lapses.
 pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Result<FetchedPage> {
     let bound_path = client.prefixed(request.path);
-    let (pit, opened) = match request.cursor {
-        Some(cursor) => (cursor.pit.clone(), false),
-        None if request.pinned => (
-            Some(client.open_pit(request.path, request.keep_alive).await?),
-            true,
-        ),
-        None => (None, false),
+    let (pinned, opened) = match (request.cursor, request.pin) {
+        (Some(cursor), _) => (cursor.pinned.clone(), false),
+        (None, Some(keep_alive)) => {
+            let id = client.open_pit(request.path, keep_alive).await?;
+            (Some(PinnedView { id, keep_alive }), true)
+        }
+        (None, None) => (None, false),
     };
+    let sort = effective_sort(&request);
     let after = match request.cursor {
         None => None,
         Some(cursor) => {
             let mut after = cursor.after.clone();
-            let sort = effective_sort(&request);
             let sorts_on_index = sort.iter().any(|entry| sort_key(entry) == Some("_index"));
-            if cursor.pit.is_none() && sorts_on_index {
+            if cursor.pinned.is_none() && sorts_on_index {
                 let current = client.current_generations(request.path).await?;
                 rewrite_generations(
                     &mut after,
@@ -407,7 +426,8 @@ pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Res
             Some(after)
         }
     };
-    let PageBody { body, fingerprint } = page_body(&request, pit.as_deref(), &bound_path, after);
+    let PageBody { body, fingerprint } =
+        page_body(&request, sort, pinned.as_ref(), &bound_path, after);
     if let Some(cursor) = request.cursor {
         cursor.check(fingerprint)?;
     }
@@ -415,35 +435,68 @@ pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Res
         .get("size")
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_SIZE);
-    let searched = match &pit {
+    let searched = match &pinned {
         Some(_) => client.search_pit(&body).await,
         None => client.search_at(request.path, &body).await,
     };
     let response = match searched {
         Ok(response) => response,
         Err(error) => {
-            if let (true, Some(pit)) = (opened, &pit) {
-                close_quietly(client, pit).await;
+            if let (true, Some(view)) = (opened, &pinned) {
+                close_quietly(client, &view.id).await;
             }
             return Err(error);
         }
     };
-    let pit = pit.map(|pit| {
-        response
+    if pinned.is_some() {
+        // The cursor isn't signed, so a resumed pinned walk could name any
+        // point-in-time: refuse hits from an index this search doesn't address.
+        check_hit_indexes(&response, &request.targets, &client.index_prefix)?;
+    }
+    let pinned = pinned.map(|view| PinnedView {
+        id: response
             .get("pit_id")
             .and_then(Value::as_str)
-            .map_or(pit, str::to_owned)
+            .map_or(view.id, str::to_owned),
+        keep_alive: view.keep_alive,
     });
     let next = match next_after(&response, size) {
-        Some(after) => Some(PageCursor::new(pit, after, fingerprint)),
+        Some(after) => Some(PageCursor::new(pinned, after, fingerprint)),
         None => {
-            if let Some(pit) = &pit {
-                close_quietly(client, pit).await;
+            if let Some(view) = &pinned {
+                close_quietly(client, &view.id).await;
             }
             None
         }
     };
     Ok(FetchedPage { response, next })
+}
+
+/// Whether `name` (prefix included) is one of `targets` or a generation of one.
+fn is_target(name: &str, targets: &[String], prefix: &str) -> bool {
+    let stripped = name.strip_prefix(prefix).unwrap_or(name);
+    targets.iter().any(|target| {
+        stripped == target.as_str() || crate::multi::is_generation_of(stripped, target)
+    })
+}
+
+/// Refuse a page holding a hit from an index outside `targets` — a pinned
+/// cursor whose point-in-time belongs to another search.
+pub(crate) fn check_hit_indexes(response: &Value, targets: &[String], prefix: &str) -> Result<()> {
+    let hits = response
+        .get("hits")
+        .and_then(|hits| hits.get("hits"))
+        .and_then(Value::as_array);
+    let foreign = hits.into_iter().flatten().any(|hit| {
+        hit.get("_index")
+            .and_then(Value::as_str)
+            .is_some_and(|index| !is_target(index, targets, prefix))
+    });
+    if foreign {
+        Err(Error::CursorMismatch)
+    } else {
+        Ok(())
+    }
 }
 
 /// Close a point-in-time best-effort: a failure only costs a context until its

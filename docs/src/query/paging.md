@@ -9,7 +9,7 @@ All three work on `Search` and on combined search (`MultiSearch`):
 | | Offset: `.from(n).size(k)` | Live cursor: `.cursor(c)` | Pinned cursor: `.cursor(c).point_in_time()` |
 | --- | --- | --- | --- |
 | Each page reads | the index now | the index now | the index as of page one |
-| Insert or delete ahead of the position | shifts later pages: duplicates, skips | no effect | no effect |
+| Insert or delete before the position (already paged past) | shifts later pages: duplicates, skips | no effect | no effect |
 | Insert after the position | shows up | shows up | never shows up |
 | Updated content | fresh | fresh | as of page one |
 | A document whose sort value changes mid-walk | may repeat or vanish | may repeat or vanish | no effect |

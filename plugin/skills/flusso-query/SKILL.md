@@ -339,9 +339,9 @@ off the struct. A parent with no matches still returns, with `[]`.
 ## Paging — offset or cursor
 
 `.from(n).size(k)` re-runs the query and skips a count, so on flusso's continuously-written index
-an insert or delete ahead of the window shifts every later page. For infinite scroll, "load more",
+an insert or delete before the window shifts every later page. For infinite scroll, "load more",
 or an export, page by **cursor**: each page resumes after the last hit's sort values
-(`search_after`), unaffected by writes ahead of it, with no depth limit and no server state.
+(`search_after`), so inserts and deletes never shift it, with no depth limit and no server state.
 
 ```rust
 let page = User::query().filter(..).sort(..).size(50)

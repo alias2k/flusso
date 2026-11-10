@@ -277,7 +277,7 @@ impl<T> Search<T> {
 
     /// Page this search by **cursor** instead of offset: each page comes back
     /// with a [`SearchResponse::next`] cursor that resumes right after its last
-    /// hit, so inserts and deletes ahead of it never shift the walk and depth is
+    /// hit, so inserts and deletes never shift the walk and depth is
     /// unlimited. `None` starts a new walk; pass the previous page's `next` to
     /// continue (see [`PageCursor`]). Live by default;
     /// [`point_in_time`](CursorSearch::point_in_time) pins one fixed view.
@@ -291,8 +291,7 @@ impl<T> Search<T> {
         CursorSearch {
             search: self,
             cursor: cursor.into(),
-            pinned: false,
-            keep_alive: crate::cursor::DEFAULT_KEEP_ALIVE,
+            pin: None,
         }
     }
 
@@ -513,8 +512,7 @@ where
 pub struct CursorSearch<T> {
     search: Search<T>,
     cursor: Option<PageCursor>,
-    pinned: bool,
-    keep_alive: Duration,
+    pin: Option<Duration>,
 }
 
 /// A page of bare document ids from [`CursorSearch::ids`], with the cursor
@@ -539,18 +537,18 @@ impl<T> CursorSearch<T> {
     /// whichever mode its cursor started in.
     #[must_use]
     pub fn point_in_time(mut self) -> Self {
-        self.pinned = true;
+        self.pin.get_or_insert(crate::cursor::DEFAULT_KEEP_ALIVE);
         self
     }
 
     /// How long a pinned walk's point-in-time stays open between two pages
-    /// (default one minute; every page renews it). Implies
+    /// (default one minute; every page renews it, and a resumed walk keeps it).
+    /// Implies
     /// [`point_in_time`](Self::point_in_time). Once it lapses, the next page
     /// fails with [`Error::CursorExpired`].
     #[must_use]
     pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
-        self.pinned = true;
-        self.keep_alive = keep_alive;
+        self.pin = Some(keep_alive);
         self
     }
 
@@ -576,8 +574,7 @@ impl<T> CursorSearch<T> {
             tiebreak: SINGLE_INDEX_TIEBREAK,
             targets: vec![self.search.physical_index()],
             cursor: self.cursor.as_ref(),
-            pinned: self.pinned,
-            keep_alive: self.keep_alive,
+            pin: self.pin,
         })
     }
 

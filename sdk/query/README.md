@@ -72,7 +72,7 @@ Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, ne
 
 ## Paging
 
-Offset paging (`.from(n).size(k)`) re-runs the query each page, so CDC inserts and deletes shift it. For infinite scroll or an export, page by **cursor**: each page resumes after the last hit, so writes ahead of it never shift the walk, with no depth limit and nothing held on the server. `.point_in_time()` pins a walk to one fixed view instead.
+Offset paging (`.from(n).size(k)`) re-runs the query each page, so CDC inserts and deletes shift it. For infinite scroll or an export, page by **cursor**: each page resumes after the last hit, so inserts and deletes never shift the walk, with no depth limit and nothing held on the server. `.point_in_time()` pins a walk to one fixed view instead.
 
 ```rust,ignore
 let page = User::query().size(50).cursor(params.cursor).send(client).await?;

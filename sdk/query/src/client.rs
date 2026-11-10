@@ -160,14 +160,14 @@ impl Client {
         self.post_json(&endpoint, body)
             .await
             .map_err(|error| match error {
-                Error::Status { body, .. } if snapshot_gone(&body) => Error::CursorExpired { body },
+                Error::Status { body, .. } if pit_gone(&body) => Error::CursorExpired { body },
                 other => other,
             })
     }
 
     /// Which concrete index each alias on `path` (prefixed here) points at
     /// now, keyed by the prefixed alias name: `users_x` → `users_x_2`. A live
-    /// union walk reads it to follow a reindex. Crate-internal.
+    /// union walk reads it to follow a reindex.
     #[tracing::instrument(
         name = "alias.current",
         level = "debug",
@@ -209,7 +209,7 @@ impl Client {
         {
             Ok(_) => Ok(()),
             Err(Error::Status { status, body })
-                if status == StatusCode::NOT_FOUND.as_u16() || snapshot_gone(&body) =>
+                if status == StatusCode::NOT_FOUND.as_u16() || pit_gone(&body) =>
             {
                 Ok(())
             }
@@ -317,7 +317,7 @@ impl Client {
 /// context expired or was freed, or the index it pinned was deleted. Matched on
 /// the exception type, not the status, so an unrelated 404 (a wrong base URL, a
 /// proxy) stays a plain [`Error::Status`].
-fn snapshot_gone(body: &str) -> bool {
+fn pit_gone(body: &str) -> bool {
     body.contains("search_context_missing_exception") || body.contains("index_not_found_exception")
 }
 

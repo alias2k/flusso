@@ -1977,13 +1977,31 @@ mod cursor {
     use std::collections::HashMap;
 
     use crate::cursor::{
-        PageCursor, fingerprint, next_after, page_body, rewrite_generations, total_sort,
+        PageBody, PageCursor, PageRequest, PinnedView, check_hit_indexes, effective_sort,
+        fingerprint, next_after, page_body, rewrite_generations, total_sort,
     };
     use crate::{Error, FlussoMultiDocument, SearchResponse, SortBuilder, Sortable};
 
+    fn pin(id: &str) -> PinnedView {
+        PinnedView {
+            id: id.to_owned(),
+            keep_alive: Duration::from_secs(60),
+        }
+    }
+
+    /// A page body with the request's own effective sort.
+    fn body_of(
+        request: &PageRequest<'_>,
+        pinned: Option<&PinnedView>,
+        path: &str,
+        after: Option<Vec<Value>>,
+    ) -> PageBody {
+        page_body(request, effective_sort(request), pinned, path, after)
+    }
+
     #[test]
     fn a_cursor_round_trips_through_its_string_form() -> Result {
-        let cursor = PageCursor::new(Some("pit-id==".into()), vec![json!(4.5), json!("abc")], 42);
+        let cursor = PageCursor::new(Some(pin("pit-id==")), vec![json!(4.5), json!("abc")], 42);
         let token = cursor.to_string();
         assert!(
             token
@@ -1997,7 +2015,7 @@ mod cursor {
 
     #[test]
     fn a_cursor_serializes_as_a_plain_string() -> Result {
-        let cursor = PageCursor::new(Some("pit".into()), vec![json!(1)], 7);
+        let cursor = PageCursor::new(Some(pin("pit")), vec![json!(1)], 7);
         let value = serde_json::to_value(&cursor)?;
         assert_eq!(value, Value::String(cursor.to_string()));
         let back: PageCursor = serde_json::from_value(value)?;
@@ -2012,7 +2030,7 @@ mod cursor {
         let back: PageCursor = token.parse()?;
         assert!(!back.is_pinned());
         assert_eq!(back, cursor);
-        assert!(PageCursor::new(Some("p".into()), Vec::new(), 3).is_pinned());
+        assert!(PageCursor::new(Some(pin("p")), Vec::new(), 3).is_pinned());
         Ok(())
     }
 
@@ -2022,8 +2040,8 @@ mod cursor {
         let body = search().body();
         let live = search().cursor(None);
         let request = live.request(body.clone(), "users_xxxxxx")?;
-        assert!(!request.pinned, "a cursor walk is live by default");
-        let live_body = page_body(&request, None, "users_xxxxxx", None).body;
+        assert!(request.pin.is_none(), "a cursor walk is live by default");
+        let live_body = body_of(&request, None, "users_xxxxxx", None).body;
         assert!(live_body.get("pit").is_none());
         assert!(live_body.get("search_after").is_none());
         assert_eq!(
@@ -2031,13 +2049,43 @@ mod cursor {
             json!([{ "_score": { "order": "desc" } }, { "_id": { "order": "asc" } }])
         );
         let pinned = search().cursor(None).point_in_time();
-        assert!(pinned.request(body.clone(), "users_xxxxxx")?.pinned);
+        assert_eq!(
+            pinned.request(body.clone(), "users_xxxxxx")?.pin,
+            Some(Duration::from_secs(60))
+        );
         let kept = search().cursor(None).keep_alive(Duration::from_secs(5));
         assert!(
-            kept.request(body, "users_xxxxxx")?.pinned,
+            kept.request(body, "users_xxxxxx")?.pin == Some(Duration::from_secs(5)),
             "keep_alive implies a pin"
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_pinned_cursor_keeps_its_keep_alive_across_the_token() -> Result {
+        let view = PinnedView {
+            id: "PIT".into(),
+            keep_alive: Duration::from_secs(600),
+        };
+        let cursor = PageCursor::new(Some(view), vec![json!("1")], 9);
+        let back: PageCursor = cursor.to_string().parse()?;
+        assert_eq!(
+            back, cursor,
+            "a resumed pinned walk renews its own keep-alive"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_pinned_page_refuses_hits_from_an_index_it_does_not_address() {
+        let page = |index: &str| json!({ "hits": { "hits": [ { "_index": index, "_id": "1" } ] } });
+        let targets = vec!["users_00000001".to_string()];
+        assert!(check_hit_indexes(&page("e2e_users_00000001_3"), &targets, "e2e_").is_ok());
+        assert!(check_hit_indexes(&page("users_00000001"), &targets, "").is_ok());
+        assert!(matches!(
+            check_hit_indexes(&page("e2e_secrets_00000009_1"), &targets, "e2e_"),
+            Err(Error::CursorMismatch)
+        ));
     }
 
     #[test]
@@ -2138,7 +2186,11 @@ mod cursor {
         let body = search.body();
         let cursor_search = search.cursor(None).keep_alive(Duration::from_secs(90));
         let request = cursor_search.request(body, "users_xxxxxx")?;
-        let body = page_body(&request, Some("PIT"), "users_xxxxxx", None).body;
+        let view = PinnedView {
+            id: "PIT".into(),
+            keep_alive: request.pin.ok_or("keep_alive pins the walk")?,
+        };
+        let body = body_of(&request, Some(&view), "users_xxxxxx", None).body;
         assert_eq!(
             body,
             json!({
@@ -2153,12 +2205,12 @@ mod cursor {
 
     #[test]
     fn a_resumed_page_searches_after_the_cursor() -> Result {
-        let cursor = PageCursor::new(Some("PIT2".into()), vec![json!("a@b.c"), json!("7")], 0);
+        let cursor = PageCursor::new(Some(pin("PIT2")), vec![json!("a@b.c"), json!("7")], 0);
         let search = User::query().size(5).cursor(cursor);
         let request = search.request(User::query().size(5).body(), "users_xxxxxx")?;
-        let body = page_body(
+        let body = body_of(
             &request,
-            Some("PIT2"),
+            Some(&pin("PIT2")),
             "users_xxxxxx",
             Some(vec![json!("a@b.c"), json!("7")]),
         )
@@ -2179,7 +2231,7 @@ mod cursor {
             let body = search.body();
             let cursor = search.cursor(None);
             let request = cursor.request(body, "users_xxxxxx")?;
-            Ok(page_body(&request, Some("PIT"), "users_xxxxxx", None).fingerprint)
+            Ok(body_of(&request, Some(&pin("PIT")), "users_xxxxxx", None).fingerprint)
         };
         let base = fp(User::query().filter(User::email().eq("x")).size(10))?;
         assert_eq!(
@@ -2197,7 +2249,7 @@ mod cursor {
                 .sort(User::email().desc())
                 .size(10))?
         );
-        let cursor = PageCursor::new(Some("PIT".into()), Vec::new(), base);
+        let cursor = PageCursor::new(Some(pin("PIT")), Vec::new(), base);
         assert!(cursor.check(base).is_ok());
         assert!(matches!(cursor.check(base ^ 1), Err(Error::CursorMismatch)));
         Ok(())
@@ -2209,21 +2261,26 @@ mod cursor {
         let send_body = search.body();
         let ids_body = search.ids_body();
         let cursor = search.cursor(None);
-        let send = page_body(
+        let send = body_of(
             &cursor.request(send_body, "users_xxxxxx")?,
-            Some("PIT"),
+            Some(&pin("PIT")),
             "users_xxxxxx",
             None,
         );
         let ids_request = cursor.request(ids_body, "users_xxxxxx")?;
-        let ids = page_body(&ids_request, Some("PIT"), "users_xxxxxx", None);
+        let ids = body_of(&ids_request, Some(&pin("PIT")), "users_xxxxxx", None);
         assert_eq!(send.fingerprint, ids.fingerprint);
         assert_eq!(
             ids.body["_source"],
             json!(false),
             "ids still fetch no source"
         );
-        let prefixed = page_body(&ids_request, Some("PIT"), "staging_users_xxxxxx", None);
+        let prefixed = body_of(
+            &ids_request,
+            Some(&pin("PIT")),
+            "staging_users_xxxxxx",
+            None,
+        );
         assert_ne!(
             ids.fingerprint, prefixed.fingerprint,
             "a cursor is bound to the prefixed index it walked"
@@ -2254,7 +2311,7 @@ mod cursor {
     #[test]
     fn a_combined_cursor_breaks_ties_on_index_then_id() -> Result {
         let search = StoreItem::query().size(3).cursor(None);
-        let body = page_body(&search.request()?, Some("PIT"), "users_xxxxxx", None).body;
+        let body = body_of(&search.request()?, Some(&pin("PIT")), "users_xxxxxx", None).body;
         assert_eq!(
             body["sort"],
             json!([

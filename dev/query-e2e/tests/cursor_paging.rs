@@ -4,8 +4,8 @@
 //! the **real sink**:
 //!
 //! - **Live walk** (the default): a delete behind the position skips nothing,
-//!   an insert after it shows up, and moving the hash alias to a copied
-//!   generation mid-walk repeats nothing.
+//!   one ahead of it just drops out, an insert after it shows up, and moving
+//!   the hash alias to a copied generation mid-walk repeats nothing.
 //! - **Pinned walk** (`point_in_time`): a write mid-walk never shows up, an
 //!   alias swap doesn't disturb it, and once a reindex drops the generation it
 //!   pinned the next page is `CursorExpired`; `close` ends it early.
@@ -99,9 +99,11 @@ async fn a_live_walk_stays_fresh_and_follows_a_reindex() {
     let next = first.next.expect("a full first page has a next");
     assert!(!next.is_pinned(), "a cursor walk is live by default");
 
-    // A delete behind the position, an insert after it, then the hash alias
-    // moves to a copy of the generation — what a reindex looks like to a reader.
+    // A delete behind the position and one ahead of it, an insert after it,
+    // then the hash alias moves to a copy of the generation — what a reindex
+    // looks like to a reader.
     delete_doc(&base, &User::physical_index(), "1").await;
+    delete_doc(&base, &User::physical_index(), "4").await;
     write(
         &sink,
         &users.index,
@@ -126,8 +128,8 @@ async fn a_live_walk_stays_fresh_and_follows_a_reindex() {
     }
     assert_eq!(
         seen,
-        ["1", "2", "3", "4", "5", "6"],
-        "the delete behind shifts nothing, the insert after shows up, the swap repeats nothing"
+        ["1", "2", "3", "5", "6"],
+        "the delete behind shifts nothing, the one ahead just drops out, the insert shows up, the swap repeats nothing"
     );
 }
 
@@ -230,7 +232,7 @@ async fn a_pinned_walk_reads_one_view_until_its_generation_drops() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
-async fn a_prefixed_live_union_walk_follows_a_reindex_without_repeating_ties() {
+async fn a_prefixed_live_union_walk_follows_a_reindex_and_ids_page_too() {
     let (_container, base) = start_opensearch().await;
     let sink = sink(&base).with_index_prefix("e2e_");
     let users = mapping("users", 1, "email", MappingType::Keyword);

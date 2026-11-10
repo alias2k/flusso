@@ -230,8 +230,8 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
     }
 
     /// Page the blended list by **cursor** instead of offset: each page resumes
-    /// right after the previous page's last hit, so inserts and deletes ahead of
-    /// it never shift the walk, and a reindex mid-walk repeats nothing. `None`
+    /// right after the previous page's last hit, so inserts and deletes never
+    /// shift the walk, and a reindex mid-walk repeats nothing. `None`
     /// starts a new walk; pass the previous page's [`SearchResponse::next`] to
     /// continue (see [`PageCursor`]). Live by default;
     /// [`point_in_time`](MultiCursorSearch::point_in_time) pins one fixed view.
@@ -245,8 +245,7 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
         MultiCursorSearch {
             search: self,
             cursor: cursor.into(),
-            pinned: false,
-            keep_alive: crate::cursor::DEFAULT_KEEP_ALIVE,
+            pin: None,
         }
     }
 
@@ -357,8 +356,7 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
 pub struct MultiCursorSearch<U> {
     search: MultiSearch<U>,
     cursor: Option<PageCursor>,
-    pinned: bool,
-    keep_alive: Duration,
+    pin: Option<Duration>,
 }
 
 /// The tiebreak that makes a blended sort total: ids are unique only within
@@ -373,18 +371,18 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
     /// whichever mode its cursor started in.
     #[must_use]
     pub fn point_in_time(mut self) -> Self {
-        self.pinned = true;
+        self.pin.get_or_insert(crate::cursor::DEFAULT_KEEP_ALIVE);
         self
     }
 
     /// How long a pinned walk's point-in-time stays open between two pages
-    /// (default one minute; every page renews it). Implies
+    /// (default one minute; every page renews it, and a resumed walk keeps it).
+    /// Implies
     /// [`point_in_time`](Self::point_in_time). Once it lapses, the next page
     /// fails with [`Error::CursorExpired`].
     #[must_use]
     pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
-        self.pinned = true;
-        self.keep_alive = keep_alive;
+        self.pin = Some(keep_alive);
         self
     }
 
@@ -407,8 +405,7 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
                 .map(|(index, hash)| format!("{index}_{hash}"))
                 .collect(),
             cursor: self.cursor.as_ref(),
-            pinned: self.pinned,
-            keep_alive: self.keep_alive,
+            pin: self.pin,
         })
     }
 
