@@ -117,7 +117,7 @@ fn a_child_reads_its_fields_belongs_to_columns_and_foreign_key() {
     let orders = Relation::Join(has_many_orders());
     assert_eq!(
         relation_columns(&orders, &table("orders")),
-        columns(&["shop_id", "total", "user_id"])
+        columns(&["id", "shop_id", "total", "user_id"])
     );
 }
 
@@ -131,7 +131,7 @@ fn a_join_reads_its_filter_and_order_by_columns() {
     }]);
     assert_eq!(
         relation_columns(&Relation::Join(orders), &table("orders")),
-        columns(&["placed_at", "shop_id", "status", "total", "user_id"])
+        columns(&["id", "placed_at", "shop_id", "status", "total", "user_id"])
     );
 }
 
@@ -164,7 +164,10 @@ fn a_junction_reads_both_keys_and_its_filters_and_the_far_side_its_fields() {
         relation_columns(&tags, &table("user_tags")),
         columns(&["active", "tag_id", "user_id"])
     );
-    assert_eq!(relation_columns(&tags, &table("tags")), columns(&["label"]));
+    assert_eq!(
+        relation_columns(&tags, &table("tags")),
+        columns(&["id", "label"])
+    );
 }
 
 #[test]
@@ -183,7 +186,10 @@ fn a_raw_filter_reads_every_column() {
         vec![field("label")],
     ));
     assert_eq!(relation_columns(&tags, &table("user_tags")), ColumnUse::All);
-    assert_eq!(relation_columns(&tags, &table("tags")), columns(&["label"]));
+    assert_eq!(
+        relation_columns(&tags, &table("tags")),
+        columns(&["id", "label"])
+    );
 }
 
 #[test]
@@ -209,7 +215,7 @@ fn the_root_reads_its_fields_filters_and_soft_delete_marker() {
     }));
     assert_eq!(
         root_columns(&schema),
-        columns(&["deleted_at", "email", "kind", "team_id", "tenant"])
+        columns(&["deleted_at", "email", "id", "kind", "team_id", "tenant"])
     );
 
     schema.filters = Some(vec![raw_filter()]);

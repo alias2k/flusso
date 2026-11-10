@@ -17,7 +17,8 @@
 //!
 //! A raw SQL filter can read any column, so it makes its table [`ColumnUse::All`].
 //! A table's primary key is always read (it correlates the table's own
-//! relations), so `touched_by` checks the changed row's key columns too.
+//! relations): the declared `primary_key` is in every set, and `touched_by`
+//! checks the changed row's key columns too.
 //!
 //! ```
 //! use kernel::{ColumnName, GenericValue};
@@ -138,6 +139,9 @@ impl Collector {
 /// The columns an index reads from its root row.
 pub fn root_columns(schema: &IndexSchema) -> ColumnUse {
     let mut used = Collector::default();
+    if let Some(primary_key) = &schema.primary_key {
+        used.column(primary_key);
+    }
     used.level(&schema.fields);
     used.filters(schema.filters.as_deref());
     match &schema.soft_delete {
@@ -165,6 +169,7 @@ pub fn relation_columns(relation: &Relation, table: &TableName) -> ColumnUse {
     if relation.table() == table {
         match relation {
             Relation::Join(join) => {
+                used.column(&join.primary_key);
                 used.level(&join.fields);
                 for order in join.order_by.as_deref().unwrap_or_default() {
                     used.column(&order.column);
