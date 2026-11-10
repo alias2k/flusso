@@ -231,6 +231,12 @@ async fn an_update_of_unread_columns_rebuilds_nothing() {
         "ALTER TABLE orders REPLICA IDENTITY FULL",
         "ALTER TABLE payments REPLICA IDENTITY FULL",
         "CREATE PUBLICATION flusso FOR TABLE users, orders, payments, visits",
+        // Seeded before the slot, so only the backfill emits them: nothing of
+        // the setup can arrive live after the checks below start.
+        "INSERT INTO users VALUES (1, 'ada@x.io', 0), (2, 'grace@x.io', 0)",
+        "INSERT INTO orders VALUES (10, 1, 5, 'open', 1, '')",
+        "INSERT INTO payments VALUES (20, 1, 7, '')",
+        "INSERT INTO visits VALUES (30, 1, '/', 0)",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -267,13 +273,6 @@ async fn an_update_of_unread_columns_rebuilds_nothing() {
         let pool = pool.clone();
         async move { sqlx::raw_sql(sql).execute(&pool).await.unwrap() }
     };
-    exec("INSERT INTO users VALUES (1, 'ada@x.io', 0), (2, 'grace@x.io', 0)").await;
-    exec(
-        "INSERT INTO orders VALUES (10, 1, 5, 'open', 1, ''); \
-         INSERT INTO payments VALUES (20, 1, 7, ''); \
-         INSERT INTO visits VALUES (30, 1, '/', 0)",
-    )
-    .await;
     expect_op(&mut engine, &recorded, "upsert users 1").await;
     expect_op(&mut engine, &recorded, "upsert users 2").await;
 
