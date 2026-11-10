@@ -47,7 +47,7 @@ You're adding a location, a translations column, a status or severity with a mea
      transforms: [trim, lowercase]
    ```
 
-5. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `object` with `dynamic: true` for the map, with the mapping each key gets as its `values`, a `.sort` subfield under the enum.
+5. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `map<text>` for the map (`--format json` shows the mapping every key gets as its `values`), a `.sort` subfield under the enum.
 
 ## Options and variations
 
