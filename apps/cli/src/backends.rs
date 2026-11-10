@@ -185,3 +185,70 @@ fn build_sinks(config: &Config) -> anyhow::Result<Vec<SinkParts>> {
     }
     Ok(sinks)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use config::ParseFrom;
+    use config::toml::ConfigToml;
+
+    use super::*;
+
+    fn config_with(indexes: &[(&str, bool, i64)]) -> Config {
+        let mut raw = String::from(
+            r#"
+            prefix = "dev_"
+
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+            "#,
+        );
+        for (name, enabled, limit) in indexes {
+            raw.push_str(&format!(
+                "\n[[index]]\nname = \"{name}\"\nschema = \"{name}.schema.yml\"\nenabled = {enabled}\n\
+                 [index.sinks.primary]\nindex_settings = {{ \"mapping.total_fields.limit\" = {limit} }}\n"
+            ));
+        }
+        let mut draft = ConfigToml::try_parse(&raw).unwrap();
+        let entries = std::mem::take(&mut draft.index);
+        let mut config = Config::from(draft);
+        for entry in entries {
+            let schema = serde_json::from_value(serde_json::json!({
+                "version": 1, "table": entry.name.as_ref(), "db_schema": "public", "fields": []
+            }))
+            .unwrap();
+            config.indexes.insert(
+                entry.name,
+                config::Index {
+                    enabled: entry.enabled,
+                    schema,
+                    on_error: None,
+                    sinks: entry.sinks,
+                },
+            );
+        }
+        config
+    }
+
+    #[test]
+    fn index_settings_skip_disabled_indexes_and_key_by_logical_name() {
+        let config = config_with(&[("orders", true, 5000), ("users", false, 9000)]);
+        let primary = SinkName::try_new("primary").unwrap();
+
+        let settings = opensearch_index_settings(&config, &primary).unwrap();
+
+        let [(index, orders)] = settings.as_slice() else {
+            panic!("expected only the enabled index, got {settings:?}");
+        };
+        assert_eq!(index.as_ref(), "orders");
+        assert_eq!(
+            orders.get("index.mapping.total_fields.limit"),
+            Some(&serde_json::json!(5000))
+        );
+    }
+}
