@@ -33,7 +33,8 @@ Data in the index has drifted from the source (a bug, a manual edit, rows import
 ## Options and variations
 
 - **With `curl`.** `curl -u admin:… -X POST 'http://10.0.0.5:9465/reindex?index=users&sink=primary'` (drop `&sink=` for every sink). Responses are in [HTTP endpoints](../reference/http.md#post-reindexindexnamesinkname).
-- **Rebuild one index without the server running.** Delete its generation index (`users_<hash>_<n>`) in OpenSearch. On the next start the seed marker is found to name a missing index, so the marker is retracted and the backfill refills it in place.
+- **Rebuild one index by deleting it.** Delete its generation index (`users_<hash>_<n>`) in OpenSearch. On the next start the seed marker is found to name a missing index, so the marker is retracted and the backfill refills it in place. While the server runs, the same happens on the next write to that index: the write fails instead of recreating the index, and the sink restarts into the rebuild. Reads 404 until then and see a partial index while it refills. Don't do this mid-rebuild; see [Sink: OpenSearch](../reference/sink-opensearch.md#seeding).
+- **Asking twice.** A reindex of an index that is still rebuilding is accepted and does nothing: the rebuild in flight is already from scratch.
 - **Rebuild everything.** Drop the replication slot. Every seeded index is rebuilt into a fresh generation on the next start. See [Recover from a dropped slot](dropped-slot.md).
 - **Live changes during the rebuild** are captured into the new generation as it's built; the slot advances only as documents land, as always.
 - **Only the private surface** can trigger this. It's Basic-auth and localhost by default; see [Secure the private surface](private-surface.md).

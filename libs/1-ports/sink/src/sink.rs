@@ -106,7 +106,11 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Returns a [`FlushReport`]: `Ok` with an empty report means every buffered
     /// document was applied; `Ok` with rejections means the flush succeeded but
     /// the destination refused specific documents (see [`FlushReport`] for why
-    /// that differs from an `Err`). `Err` is a flush-wide failure.
+    /// that differs from an `Err`). `Err` is a flush-wide failure. A write whose
+    /// *target* is gone (the destination index was deleted under the sink) is
+    /// flush-wide too: every document bound for it would fail the same way, and
+    /// the engine's restart re-runs [`ensure_index`](Self::ensure_index), which
+    /// is where the target is rebuilt.
     async fn flush(&self, caught_up: bool) -> Result<FlushReport>;
 
     /// Whether `index` has already been seeded — its initial backfill completed
@@ -142,6 +146,9 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// swappable target (e.g. the OpenSearch sink's per-generation indexes behind
     /// a stable alias) prepares that target here so the seeding path rebuilds it
     /// and atomically swaps on completion — the live copy is untouched until then.
+    ///
+    /// An index that is already unseeded has a from-scratch rebuild pending, so a
+    /// sink may treat the call as a no-op rather than stage a second target.
     ///
     /// This only flips the seeded-state and stages the target; the actual reseed
     /// runs through the normal [`ensure_index`](Self::ensure_index) → backfill →

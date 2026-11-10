@@ -27,6 +27,9 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
   `{logical}_{hash}` — the hash comes from the parsed schema.
 - **Convenience alias.** Bare `{logical}` is also kept on the current generation
   for ad-hoc queries; best-effort.
+- **Writes.** A seeded index is written through `{logical}_{hash}` with
+  `require_alias`; an unseeded one (first seed, or a rebuild) through its
+  generation.
 - **Mapping.** Field types come from the schema, created `dynamic: strict`.
 - **Subfields.** Each `text`/`keyword` field gets `keyword` (exact),
   `keyword_lowercase` (sortable), and `text` (searchable) subfields.
@@ -34,7 +37,8 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
   immediate refresh on any caught-up flush.
 - **Seeding.** Persisted in a hidden `flusso_meta` index, so restarts skip a
   completed backfill. A marker whose generation index is gone is retracted, so
-  deleting the generation means "rebuild on next start".
+  deleting the generation means "rebuild it" — on the next start, or, while
+  running, on the next write to it.
 
 ## Index naming — alias over generations
 
@@ -107,10 +111,41 @@ had to be recreated, the engine treats every seeded index as stale and stages a
 exist at the source are dropped on the swap — before backfilling. That decision
 lives in the engine, not here; see the `flusso-engine` docs.
 
+## A generation deleted while running
+
+A seeded index is written through its hash alias, each bulk `index` action
+carrying `require_alias: true`. Delete the active generation and its aliases go
+with it, so the next write fails with `index_not_found_exception` instead of
+OpenSearch's default `action.auto_create_index` quietly recreating it with a
+dynamic mapping and no aliases. That item error is not a per-document rejection:
+[`flush`](OpensearchSink::flush) returns `Err`, the sink engine stops with the
+batch unacked, and its restart re-runs [`ensure_index`](OpensearchSink::ensure_index),
+which recreates the generation and reseeds it (the path above). The flag is per
+item, not `?require_alias=true` on the URL, because one bulk request can also
+carry writes to an unseeded generation, which is concrete.
+
+The gap: an **unseeded** generation (a first seed, or a rebuild while the alias
+still serves the old one) is written by its concrete name, and auto-create
+still recreates it if it's deleted mid-backfill. Set `action.auto_create_index`
+to a pattern that excludes flusso's generations but still allows the meta index,
+which is created by its first write: `+flusso_meta,-users_*,-orders_*,+*` (first
+match wins; add your `prefix` to each name). The write then fails the same way,
+but the documents the in-flight snapshot already wrote are gone, so restart
+flusso to reseed that index.
+
+## Reindex while a rebuild is pending
+
+[`reindex`](OpensearchSink::reindex) stages a new generation only when the index
+is seeded. With no meta doc, or one already `seeded: false`, a from-scratch
+rebuild is pending, so the call logs and does nothing rather than orphan the
+generation being built. [`mark_seeded`](OpensearchSink::mark_seeded) drops every
+other `{logical}_{hash}_{n}`, not only those the alias moved off, so orphans an
+older version left behind are reclaimed on the next swap.
+
 ## Module layout
 
 This file holds the [`OpensearchSink`] type, its constructor (from an [`OpensearchConfig`], the adapter's own `[sinks.<name>]` declaration), and the few
-shared helpers (`maybe_auth`, `physical`). The rest is split by concern:
+shared helpers (`maybe_auth`, `target`). The rest is split by concern:
 
 - `transport` — the HTTP plumbing: the bulk request, the small request
   helpers, and the generic per-index operations (create/exists/delete/refresh).
