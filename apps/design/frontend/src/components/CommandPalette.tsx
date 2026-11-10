@@ -12,7 +12,6 @@ import {
   type SearchRecord,
   type SearchTarget,
 } from "../model/search";
-import { pathId } from "../model/tree";
 import { type Doc, useDesignStore } from "../store/design";
 import { useUiStore } from "../store/ui";
 import { GlowDot } from "./widgets";
@@ -288,14 +287,14 @@ export function CommandPalette({
         setRawMode(false);
         setActive(target.index);
         setSelection({ kind: "field", path: target.path, index: target.leaf });
-        requestFocus(target.index, pathId(target.path));
+        requestFocus(target.index, target.path);
         break;
       case "node":
         setBrowseCatalog(false);
         setRawMode(false);
         setActive(target.index);
         setSelection(target.path.length ? { kind: "node", path: target.path } : { kind: "root" });
-        requestFocus(target.index, pathId(target.path));
+        requestFocus(target.index, target.path);
         break;
       case "config":
         setBrowseCatalog(false);

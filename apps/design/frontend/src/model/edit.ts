@@ -3,7 +3,8 @@
 
 import type { Field, FlussoType, IndexSchema } from "../api";
 import { defaultField } from "../fields";
-import { nodeFields, setNodeField, withNodeFields } from "./tree";
+import { stripFieldUids } from "./ids";
+import { carryUid, nodeFields, setNodeField, withNodeFields } from "./tree";
 
 /// Include or drop a scalar field backed by `column` on the node at `path`.
 export function toggleColumn(
@@ -78,13 +79,15 @@ export function clearColumns(schema: IndexSchema, path: number[]): IndexSchema {
 }
 
 /// Insert a deep copy of the field at `index` (with a fresh unique name) right
-/// after it. Works for leaves and whole container subtrees alike.
+/// after it. Works for leaves and whole container subtrees alike; the copy's
+/// containers drop their uids so the store stamps fresh ones.
 export function duplicateAt(schema: IndexSchema, path: number[], index: number): IndexSchema {
   const fields = nodeFields(schema, path);
   const orig = fields[index];
   if (!orig) return schema;
+  const [clone] = stripFieldUids([structuredClone(orig)]);
   const copy: Field = {
-    ...structuredClone(orig),
+    ...clone,
     field: uniqueName(
       fields.map((f) => f.field),
       orig.field,
@@ -111,7 +114,6 @@ function uniqueName(existing: string[], base: string): string {
   return name;
 }
 
-/// Move the field at `index` one slot up (`dir = -1`) or down (`dir = +1`).
 /// Append a fresh special/leaf field of `kind` (geo/map/custom/constant/aggregate
 /// op) or an `object` group to the node at `path`.
 export function addSpecial(schema: IndexSchema, path: number[], kind: string): IndexSchema {
@@ -125,7 +127,7 @@ export function addSpecial(schema: IndexSchema, path: number[], kind: string): I
 /// Replace the field at index `i` within the node at `path`.
 export function setLeaf(schema: IndexSchema, path: number[], i: number, field: Field): IndexSchema {
   const next = nodeFields(schema, path).slice();
-  next[i] = field;
+  next[i] = carryUid(next[i], field);
   return withNodeFields(schema, path, next);
 }
 

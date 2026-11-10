@@ -3,7 +3,9 @@
 import { create, useStore } from "zustand";
 import { temporal } from "zundo";
 import type { CatalogResponse, ConfigToml, DiagnosticDto, IndexSchema, PreviewResponse, Project } from "../api";
-import { projectGraph } from "../model/tree";
+import { adoptIds, stampIds, stripUids, uidSkeleton } from "../model/ids";
+import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
+import { type Graph, pathId, projectGraph } from "../model/tree";
 import type { Selection } from "../state";
 
 export interface Doc {
@@ -35,6 +37,70 @@ const persistCollapsed = (index: string, ids: Set<string>) => {
   }
 };
 
+const readCollapsed = (index: string): string[] => {
+  try {
+    return JSON.parse(localStorage.getItem(collapseKey(index)) ?? "[]") as string[];
+  } catch {
+    return [];
+  }
+};
+
+// Translate legacy positional keys (`root.2.0`) to stable node ids and drop
+// entries for nodes that no longer exist, for the collapse set and the manual
+// positions alike; persists only what changed. An entry already under a live
+// id wins over a translated legacy one. Runs once, on project load: that is the
+// on-disk doc positional keys were saved against, and it must precede the
+// canvas's first read of the overrides. Later in the session a removed node's
+// entries are kept, so undoing the removal brings its view state back.
+function reconcileViewState(index: string, graph: Graph) {
+  const live = new Set(graph.nodes.map((n) => n.id));
+  const byPath = new Map(graph.nodes.map((n) => [pathId(n.path), n.id]));
+  const translate = (id: string) => (live.has(id) ? id : byPath.get(id));
+
+  const stored = readCollapsed(index);
+  const collapsed = [...new Set(stored.map(translate).filter((id): id is string => id !== undefined))];
+  if (collapsed.length !== stored.length || collapsed.some((id, i) => id !== stored[i]))
+    persistCollapsed(index, new Set(collapsed));
+
+  const overrides = loadOverrides(index);
+  const kept: Positions = {};
+  for (const [id, pos] of Object.entries(overrides)) {
+    const to = translate(id);
+    if (to && (to === id || !(to in overrides))) kept[to] = pos;
+  }
+  if (JSON.stringify(kept) !== JSON.stringify(overrides)) saveOverrides(index, kept);
+}
+
+// Node uids are made in the browser, so to key view state across reloads the
+// uids of the *saved* doc (what the next load reads from disk) are persisted per
+// index as a name skeleton, and adopted onto the loaded file by name — so a file
+// changed on disk in between (a pull, a hand edit) can't hand one node's uid to
+// another that moved into its slot. Unsaved containers get fresh uids next
+// session; their view state is dropped with them.
+const uidsKey = (index: string) => `flusso-design.uids.${index}`;
+
+const readUids = (index: string): Pick<IndexSchema, "fields"> | undefined => {
+  try {
+    const stored = JSON.parse(localStorage.getItem(uidsKey(index)) ?? "null") as Pick<IndexSchema, "fields"> | null;
+    return Array.isArray(stored?.fields) ? stored : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const persistUids = (saved: string) => {
+  try {
+    const doc = JSON.parse(saved) as Doc;
+    for (const [name, schema] of Object.entries(doc.schemas))
+      localStorage.setItem(uidsKey(name), JSON.stringify(uidSkeleton(schema)));
+  } catch {
+    /* storage disabled — view state just won't survive a reload */
+  }
+};
+
+const stampAll = (schemas: Record<string, IndexSchema>): Record<string, IndexSchema> =>
+  Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, adoptIds(readUids(name), schema, true)]));
+
 interface DesignState {
   project: Project | null;
   catalog: CatalogResponse | null;
@@ -46,8 +112,9 @@ interface DesignState {
   preview: PreviewResponse | null;
   diagnostics: DiagnosticDto[] | null;
   /// A pending "pan the canvas to this node" request (e.g. from global search),
-  /// consumed and cleared by the canvas once the node is on screen.
-  focus: { index: string; nodeId: string } | null;
+  /// consumed and cleared by the canvas once the node is on screen. Addressed
+  /// by path; the canvas resolves it to the node id.
+  focus: { index: string; path: number[] } | null;
 
   setCatalog: (catalog: CatalogResponse | null) => void;
   setSaved: (saved: string) => void;
@@ -68,9 +135,8 @@ interface DesignState {
   toggleCollapsed: (id: string) => void;
   collapseAll: () => void;
   expandAll: () => void;
-  pruneCollapsed: (liveIds: string[]) => void;
 
-  requestFocus: (index: string, nodeId: string) => void;
+  requestFocus: (index: string, path: number[]) => void;
   clearFocus: () => void;
 }
 
@@ -89,7 +155,10 @@ export const useDesignStore = create<DesignState>()(
       focus: null,
 
       setCatalog: (catalog) => set({ catalog }),
-      setSaved: (saved) => set({ saved }),
+      setSaved: (saved) => {
+        persistUids(saved);
+        set({ saved });
+      },
       setPreview: (preview) => set({ preview }),
       setDiagnostics: (diagnostics) => set({ diagnostics }),
       setActive: (active) => set({ active }),
@@ -104,11 +173,14 @@ export const useDesignStore = create<DesignState>()(
           ...project.config,
           index: (project.config.index ?? []).map((e) => ({ ...e, id: newId() })),
         };
-        const doc: Doc = { config, schemas };
+        const doc: Doc = { config, schemas: stampAll(schemas) };
+        const saved = JSON.stringify(doc);
+        persistUids(saved);
+        for (const [name, schema] of Object.entries(doc.schemas)) reconcileViewState(name, projectGraph(schema));
         set({
           project,
           doc,
-          saved: JSON.stringify(doc),
+          saved,
           ...(resetActive ? { active: project.indexes[0]?.name ?? "config" } : {}),
         });
         useDesignStore.temporal.getState().clear();
@@ -122,7 +194,7 @@ export const useDesignStore = create<DesignState>()(
             ? {
                 doc: {
                   ...s.doc,
-                  schemas: { ...s.doc.schemas, [active]: fn(s.doc.schemas[active] ?? emptySchema("")) },
+                  schemas: { ...s.doc.schemas, [active]: stampIds(fn(s.doc.schemas[active] ?? emptySchema(""))) },
                 },
               }
             : {},
@@ -210,7 +282,7 @@ export const useDesignStore = create<DesignState>()(
               ],
             },
             schemas: doc.schemas[src.name]
-              ? { ...doc.schemas, [name]: structuredClone(doc.schemas[src.name]) }
+              ? { ...doc.schemas, [name]: stampIds(stripUids(structuredClone(doc.schemas[src.name]))) }
               : doc.schemas,
           },
           active: name,
@@ -234,25 +306,7 @@ export const useDesignStore = create<DesignState>()(
 
       loadCollapsed: (index) => {
         if (index === "config") return;
-        const { doc } = get();
-        let stored: string[];
-        try {
-          stored = JSON.parse(localStorage.getItem(collapseKey(index)) ?? "[]") as string[];
-        } catch {
-          set({ collapsed: new Set() });
-          return;
-        }
-        // Reconcile against the live graph: drop ids for nodes that no longer
-        // exist so a deleted node's id can't linger in storage forever.
-        const schema = doc?.schemas[index];
-        if (!schema) {
-          set({ collapsed: new Set(stored) });
-          return;
-        }
-        const live = new Set(projectGraph(schema).nodes.map((n) => n.id));
-        const pruned = new Set(stored.filter((id) => live.has(id)));
-        if (pruned.size !== stored.length) persistCollapsed(index, pruned);
-        set({ collapsed: pruned });
+        set({ collapsed: new Set(readCollapsed(index)) });
       },
 
       toggleCollapsed: (id) => {
@@ -280,20 +334,7 @@ export const useDesignStore = create<DesignState>()(
         set({ collapsed: next });
       },
 
-      // Reconcile against the live graph after an edit that may have removed
-      // nodes; only writes when something actually dropped, so a no-op edit
-      // doesn't churn storage or state.
-      pruneCollapsed: (liveIds) => {
-        const { active, collapsed } = get();
-        if (active === "config") return;
-        const live = new Set(liveIds);
-        const pruned = new Set([...collapsed].filter((id) => live.has(id)));
-        if (pruned.size === collapsed.size) return;
-        persistCollapsed(active, pruned);
-        set({ collapsed: pruned });
-      },
-
-      requestFocus: (index, nodeId) => set({ focus: { index, nodeId } }),
+      requestFocus: (index, path) => set({ focus: { index, path } }),
       clearFocus: () => set({ focus: null }),
     }),
     {

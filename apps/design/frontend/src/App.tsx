@@ -69,6 +69,7 @@ import { LANGS, useT, type Translate } from "./i18n";
 // the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
 import type { ParseErrorInfo } from "./model/anchors";
 import { removeAt, removeFields, removeNode } from "./model/edit";
+import { adoptIds, stripUids } from "./model/ids";
 import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { prunedForPreview } from "./model/prune";
@@ -147,6 +148,13 @@ function LegendRow({ color, label, desc }: { color: string; label: string; desc:
     </div>
   );
 }
+
+/// The doc as JSON without the client-only node uids — what Save would write.
+const bareDocJson = (doc: Doc): string =>
+  JSON.stringify({
+    config: doc.config,
+    schemas: Object.fromEntries(Object.entries(doc.schemas).map(([name, s]) => [name, stripUids(s)])),
+  });
 
 export default function App() {
   const { t, lang, setLang } = useT();
@@ -313,11 +321,19 @@ export default function App() {
 
   // Parsed once per snapshot — `indexDirty` runs per sidebar row per render, so
   // it must not re-parse the whole saved doc each call.
+  // Compared without the client-only node uids: a uid-only change (a container
+  // removed and re-added as-is) writes nothing, so it must not read as unsaved.
   const savedDoc = useMemo(() => (saved ? (JSON.parse(saved) as Doc) : null), [saved]);
-  const dirty = useMemo(() => !!doc && JSON.stringify(doc) !== saved, [doc, saved]);
+  const savedBare = useMemo(() => (savedDoc ? bareDocJson(savedDoc) : null), [savedDoc]);
+  const savedSchemasBare = useMemo(
+    () => new Map(Object.entries(savedDoc?.schemas ?? {}).map(([name, s]) => [name, JSON.stringify(stripUids(s))])),
+    [savedDoc],
+  );
+  const dirty = useMemo(() => !!doc && bareDocJson(doc) !== savedBare, [doc, savedBare]);
   const indexDirty = (name: string): boolean => {
     if (!doc || !savedDoc) return false;
-    return JSON.stringify(doc.schemas[name]) !== JSON.stringify(savedDoc.schemas[name]);
+    const current = doc.schemas[name];
+    return (current ? JSON.stringify(stripUids(current)) : undefined) !== savedSchemasBare.get(name);
   };
   const configDirty = useMemo(
     () => !!doc && (!savedDoc || JSON.stringify(doc.config) !== JSON.stringify(savedDoc.config)),
@@ -387,7 +403,8 @@ export default function App() {
           const parsed = res.schema;
           if (!parsed) return;
           const current = useDesignStore.getState().doc?.schemas[active];
-          if (JSON.stringify(parsed) !== JSON.stringify(current)) apply(() => parsed);
+          if (!current || JSON.stringify(parsed) !== JSON.stringify(stripUids(current)))
+            apply((prev) => adoptIds(prev, parsed));
         })
         .catch(() => setCodeProblem(null));
     }, 300);

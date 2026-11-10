@@ -27,7 +27,7 @@ import {
   saveViewport,
 } from "../model/layout";
 import { suggestRelations } from "../model/relations";
-import { type DocNode, projectGraph } from "../model/tree";
+import { type DocNode, nodeIdAt, projectGraph } from "../model/tree";
 import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { useDesignStore } from "../store/design";
@@ -76,14 +76,12 @@ export function Canvas() {
   };
 
   // Re-project the tree to nodes/edges on every schema change, but *keep each
-  // existing node's current position* — only brand-new nodes get an estimated
-  // slot. So a field edit never moves anything, and this never clobbers the
+  // existing node's current position* (node ids are stable across re-indexing)
+  // — only brand-new nodes get an estimated slot. So a field edit never moves anything, and this never clobbers the
   // measured layout (below) or a manual drag. Deliberately NOT keyed on
   // `catalog`: it arrives async, and re-running here would reset positions.
-  const pruneCollapsed = useDesignStore((s) => s.pruneCollapsed);
   useEffect(() => {
     const graph = projectGraph(schema);
-    pruneCollapsed(graph.nodes.map((n) => n.id));
     const auto = autoLayout(graph.nodes, estimateHeight);
     const overrides = loadOverrides(indexName);
     setNodes((prev) => {
@@ -162,7 +160,7 @@ export function Canvas() {
     >
       <Background />
       <NodeControls
-        allCollapsed={nodes.length > 0 && collapsed.size >= nodes.length}
+        allCollapsed={nodes.length > 0 && nodes.every((n) => collapsed.has(n.id))}
         locked={locked}
         onToggleLock={() => setLocked((l) => !l)}
         onReset={resetLayout}
@@ -315,16 +313,17 @@ function RestoreViewport({ index }: { index: string }) {
 function FocusOnRequest() {
   const { getNode, fitView } = useReactFlow();
   const nodes = useNodes();
-  const { indexName, collapsed, toggleCollapsed } = useDesign();
+  const { schema, indexName, collapsed, toggleCollapsed } = useDesign();
   const focus = useDesignStore((s) => s.focus);
   const clearFocus = useDesignStore((s) => s.clearFocus);
   useEffect(() => {
     if (!focus) return;
     if (focus.index !== indexName) return;
-    if (!getNode(focus.nodeId)) return; // not projected yet — re-runs when `nodes` changes
-    if (collapsed.has(focus.nodeId)) toggleCollapsed(focus.nodeId);
-    void fitView({ nodes: [{ id: focus.nodeId }], duration: 300, maxZoom: 1 });
+    const id = nodeIdAt(schema, focus.path);
+    if (!getNode(id)) return; // not projected yet — re-runs when `nodes` changes
+    if (collapsed.has(id)) toggleCollapsed(id);
+    void fitView({ nodes: [{ id }], duration: 300, maxZoom: 1 });
     clearFocus();
-  }, [focus, indexName, nodes, getNode, fitView, collapsed, toggleCollapsed, clearFocus]);
+  }, [focus, schema, indexName, nodes, getNode, fitView, collapsed, toggleCollapsed, clearFocus]);
   return null;
 }
