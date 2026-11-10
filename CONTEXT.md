@@ -181,8 +181,12 @@ _Avoid_: API layer, server, interface
 ### Querying
 
 **Page cursor**:
-An opaque token handed back with a page of query results that resumes the same ordered result list right after that page's last hit. Paging by page cursor reads one consistent view of the index, unaffected by later writes or a reindex; paging by offset (`from`/`size`) re-runs the query each time. Belongs to the query client, never to the change feed.
+An opaque token handed back with a page of query results that resumes the same ordered result list right after that page's last hit's sort values, so writes ahead of it never shift the walk; paging by offset (`from`/`size`) re-runs the query and skips a count. A walk is live (each page reads the index now) unless pinned. Belongs to the query client, never to the change feed.
 _Avoid_: cursor (alone; that is a position), scroll, continuation token, offset
+
+**Pinned walk**:
+A page cursor walk that reads one point-in-time view of the index, opened by its first page: no later write, no reindex, until it is closed or expires. Opt-in, because it holds a server-side context for its life.
+_Avoid_: snapshot (that is the source's backfill read), frozen, consistent cursor
 
 ### Measuring
 

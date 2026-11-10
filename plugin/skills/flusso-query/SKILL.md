@@ -338,9 +338,10 @@ off the struct. A parent with no matches still returns, with `[]`.
 
 ## Paging — offset or cursor
 
-`.from(n).size(k)` re-runs the query each page against the index as it is *now*. flusso's index
-changes continuously, so for infinite scroll, "load more", or an export, page by **cursor**: every
-page reads one snapshot (OpenSearch point-in-time + `search_after`, OpenSearch ≥ 2.4 only).
+`.from(n).size(k)` re-runs the query and skips a count, so on flusso's continuously-written index
+an insert or delete ahead of the window shifts every later page. For infinite scroll, "load more",
+or an export, page by **cursor**: each page resumes after the last hit's sort values
+(`search_after`), unaffected by writes ahead of it, with no depth limit and no server state.
 
 ```rust
 let page = User::query().filter(..).sort(..).size(50)
@@ -353,13 +354,15 @@ page.next                            // Option<PageCursor>: opaque string, None 
   `Error::CursorMismatch`. `PageCursor` is a string in serde, so an HTTP API takes `?cursor=` and
   returns `next` with no conversion (see `dev/search-api`).
 - The sort is made total for you (`_id`; a `MultiSearch` cursor adds `_index` first; unsorted keeps
-  `_score` first). Don't add a
-  `tiebreak` just for paging, and never set `.from()` or `.search_after()` alongside `.cursor()`
-  (`Error::Cursor`).
-- `Error::CursorExpired` (keep-alive lapsed, default 1 min via `.keep_alive(..)`, or a reindex
-  dropped the snapshot's generation) means restart from page one. `next.close(&client)` ends an
-  abandoned walk early.
-- `filter_nested` projections take no cursor; inside a cursor page they read the same snapshot.
+  `_score` first). Don't add a `tiebreak` just for paging, and never set `.from()` or
+  `.search_after()` alongside `.cursor()` (`Error::Cursor`).
+- A walk is **live**: fresh content, never expires, follows a reindex. Prefer a sort on a stable
+  value; one that changes mid-walk can repeat or skip the document that moved.
+- `.point_in_time()` **pins** a walk to one view (OpenSearch ≥ 2.4): no later write shows up. It
+  holds a server context per walk, so use it for exports/reports, not for a page-one-heavy list.
+  `Error::CursorExpired` (keep-alive lapsed, default 1 min via `.keep_alive(..)`, or a reindex
+  dropped its generation) means restart from page one; `next.close(&client)` ends it early.
+- `filter_nested` projections take no cursor; they page by `.from`/`.size` within each parent.
 
 ## Custom value types — `#[derive(FlussoValue)]`
 

@@ -59,5 +59,5 @@ It's the valve for the few types with no flusso field (`knn`, `geo_shape`, span 
 - **Writes.** flusso owns the index; the client never upserts or deletes.
 - **Correlating hits across indexes.** Both multi-index shapes ship; joining their results is the caller's job.
 - **Scroll.** Cursor paging covers both list UIs and full exports.
-- **Cursors on Elasticsearch.** Its point-in-time API differs; tracked in [#157](https://github.com/alias2k/flusso/issues/157).
+- **Pinned cursor walks on Elasticsearch.** Its point-in-time API differs (live cursors work there); tracked in [#157](https://github.com/alias2k/flusso/issues/157).
 - **Generating the struct.** By design; the developer owns it.

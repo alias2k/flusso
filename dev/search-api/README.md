@@ -50,13 +50,10 @@ that document's analyzed `text` fields, driving relevance ranking while the othe
 only narrow. (`orders` has no `text` field, so no `q`.)
 
 Every list (and `/search`) is **cursor-paged**: the response is `{ total, hits, next }`, and
-sending `next` back as `?cursor=` (with the same filters) returns the following page from the
-same snapshot of the index, so writes and a reindex during the walk never shift it. `next` is
-`null` on the last page. A cursor sent with different filters is `400`; one whose snapshot
-expired (one minute idle, or a reindex dropped it) is `410` — start again without `cursor`.
-Every first page holds a snapshot until the walk ends or idles out, and OpenSearch caps open
-snapshots per node (`search.max_open_pit_context`, 300), so a high-traffic endpoint that rarely
-pages past page one is better served by offset paging.
+sending `next` back as `?cursor=` (with the same filters) returns the page right after it, so
+inserts and deletes during the walk never shift it. `next` is `null` on the last page. A cursor
+sent with different filters is `400`. The walks are live: nothing is held open on the cluster,
+and a cursor never expires.
 
 | Endpoint | Filters |
 | -------- | ------- |
@@ -83,7 +80,7 @@ curl 'localhost:8080/orders?status=delivered&min_total=100'
 # cancelled), not alphabetically — an ordered `enum`, so `.asc()` uses the rank:
 curl 'localhost:8080/orders?sort=status'
 
-# Page through every delivered order, 50 at a time, on one snapshot:
+# Page through every delivered order, 50 at a time:
 curl 'localhost:8080/orders?status=delivered&limit=50'                # → { …, "next": "eyJ2Ijox…" }
 curl 'localhost:8080/orders?status=delivered&limit=50&cursor=eyJ2Ijox…'
 

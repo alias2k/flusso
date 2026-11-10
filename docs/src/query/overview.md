@@ -67,7 +67,7 @@ What won't compile: `User::email().matches(..)` (a text operator on a keyword), 
 flusso-query = { version = "…", features = ["derive"] }
 ```
 
-Optional features: `decimal` (`rust_decimal::Decimal` as a decimal value), `uuid` (`uuid::Uuid` as a keyword), and a date crate, `time` or `chrono`. The crate targets OpenSearch and Elasticsearch 7.x, which share the query DSL; [cursor paging](paging.md#cursor-paging) needs OpenSearch ≥ 2.4.
+Optional features: `decimal` (`rust_decimal::Decimal` as a decimal value), `uuid` (`uuid::Uuid` as a keyword), and a date crate, `time` or `chrono`. The crate targets OpenSearch and Elasticsearch 7.x, which share the query DSL; a [pinned cursor walk](paging.md#pinned-walks) needs OpenSearch ≥ 2.4.
 
 ## Where to next
 

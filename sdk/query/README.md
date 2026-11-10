@@ -72,7 +72,7 @@ Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, ne
 
 ## Paging
 
-Offset paging (`.from(n).size(k)`) re-runs the query each page. For infinite scroll or an export, page by **cursor** instead: every page reads one snapshot, so CDC writes and a reindex mid-walk never shift it.
+Offset paging (`.from(n).size(k)`) re-runs the query each page, so CDC inserts and deletes shift it. For infinite scroll or an export, page by **cursor**: each page resumes after the last hit, so writes ahead of it never shift the walk, with no depth limit and nothing held on the server. `.point_in_time()` pins a walk to one fixed view instead.
 
 ```rust,ignore
 let page = User::query().size(50).cursor(params.cursor).send(client).await?;
@@ -81,7 +81,7 @@ let page = User::query().size(50).cursor(params.cursor).send(client).await?;
 
 See [paging](https://alias2k.github.io/flusso/query/paging.html) in the manual.
 
-Targets OpenSearch and Elasticsearch 7.x, which share the query DSL ([cursor paging](https://alias2k.github.io/flusso/query/paging.html) is OpenSearch-only).
+Targets OpenSearch and Elasticsearch 7.x, which share the query DSL ([pinned cursor walks](https://alias2k.github.io/flusso/query/paging.html#pinned-walks) are OpenSearch-only).
 
 ## Learn more
 
