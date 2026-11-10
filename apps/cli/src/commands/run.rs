@@ -225,6 +225,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         .await?;
     let status = running.status();
     let control = running.control();
+    let fence = running.fence();
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
 
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
@@ -235,6 +236,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         http::public_router(http::PublicState {
             status: Arc::clone(&status),
             registry,
+            fence,
         }),
         public_rx,
     ));
