@@ -147,6 +147,7 @@ pub struct DateMap<S = Root> {
 }
 
 impl<S> DateMap<S> {
+    /// A handle for the date map at `path`.
     pub fn at(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
