@@ -15,8 +15,8 @@ Each schema field generates a handle whose type decides which operators exist. A
 | object namespace | chains from its parent: `User::account().tier()`, `User::account().exists()` |
 | `Nested<S, T>` | `any(q)`, `all(q)` to match parents and lift a child query; `matching(q)` to shape the returned array; `exists`. See [Nested collections](nested.md). |
 | `Geo` | `within(Distance::km(12.0), center)`, `within_box`, `within_polygon`, `exists`; sort with `distance_from(center)` or `distance_sort(center, order, unit)` |
-| `TextMap` | `key(k)` → `Text`; `search(q)` with `.prefer(key, weight)` / `.only_preferred()`; `has_key`, `exists` |
-| `KeywordMap` | `key(k)` → `Keyword`; `has_key`, `exists`. No `search`. |
+| `TextMap` | `key(k)` → `Text`; `search(q)` with `.prefer(key, weight)` / `.only_preferred()` / `.match_type(..)`; `contains(part)`; `sort_key(k)`; `has_key`, `exists` |
+| `KeywordMap` | `key(k)` → `Keyword`; `contains(part)`; `sort_key(k)`; `has_key`, `exists`. No `search`. |
 | `NumberMap`, `DateMap` | `key(k)` → `Number` / `Date`; `has_key`, `exists` |
 | `Binary` | `exists` |
 | `Json` | `exists`, `raw(serde_json::Value)` |

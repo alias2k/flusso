@@ -12,7 +12,7 @@
 //!
 //! - `string` — [`Keyword`], [`Text`], and the cross-field [`multi_match`].
 //! - `scalar` — [`Bool`], [`Number`], [`Date`] (exact/range value fields).
-//! - `map` — [`TextMap`]/[`KeywordMap`] dynamic-key objects and [`MapSearch`].
+//! - `map` — [`TextMap`]/[`KeywordMap`] dynamic-key objects, [`MapSearch`] and [`MapContains`].
 //! - `nested` — [`Nested`] arrays and their [`NestedProjection`].
 //! - `object` — [`Object`] sub-documents and the opaque [`Binary`]/[`Json`] fields.
 //! - `geo` — [`Geo`] points and [`GeoPoint`].
@@ -24,6 +24,10 @@
 use serde_json::{Map, Value};
 
 use crate::query::Query;
+
+/// The suffix of the case/accent-folded keyword subfield the OpenSearch sink
+/// puts on every `text`/`keyword` field (its `KEYWORD_LOWERCASE_SUBFIELD`).
+const KEYWORD_LOWERCASE_SUFFIX: &str = ".keyword_lowercase";
 
 mod compound;
 mod extra;
@@ -47,7 +51,7 @@ pub use extra::{
     simple_query_string,
 };
 pub use geo::{Distance, DistanceUnit, Geo, GeoDistanceQuery, GeoPoint};
-pub use map::{DateMap, KeywordMap, MapSearch, NumberMap, TextMap};
+pub use map::{DateMap, KeywordMap, MapContains, MapSearch, NumberMap, TextMap};
 pub use nested::{Nested, NestedProjection, NestedQuery};
 pub use object::{Binary, Json, Object};
 pub use params::{
@@ -60,8 +64,8 @@ pub use sort::{
     MapKeySort, MaybeOrderBy, Missing, OrderBy, Sort, SortBuilder, SortMode, SortOrder, Sortable,
 };
 pub use string::{
-    Enum, FuzzyQuery, Keyword, MapKey, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery,
-    RegexpQuery, TermQuery, Text, WildcardQuery, WithSubfields, multi_match,
+    Enum, FuzzyQuery, Keyword, MatchQuery, MultiMatchQuery, NoSubfields, PrefixQuery, RegexpQuery,
+    TermQuery, Text, WildcardQuery, WithSubfields, multi_match,
 };
 
 /// `{ "<wrapper>": { "<path>": <value> } }`.

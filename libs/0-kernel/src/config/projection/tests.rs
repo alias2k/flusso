@@ -264,3 +264,126 @@ fn opting_into_distinct_or_junction_filters_changes_the_content_hash() {
     assert_ne!(base, filtered);
     assert_ne!(distinct, filtered);
 }
+
+fn column_field(name: &str, ty: FlussoType) -> Field {
+    let mut options = ty.default_options();
+    if matches!(ty, FlussoType::Map { .. }) {
+        options.insert(
+            "dynamic".to_owned(),
+            crate::common::GenericValue::Bool(true),
+        );
+    }
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options,
+        source: FieldSource::Column(crate::config::Column {
+            column: ColumnName::try_new(name).unwrap(),
+            ty,
+            nullable: true,
+            transforms: vec![],
+            default: None,
+            enum_order: vec![],
+        }),
+    }
+}
+
+fn columns_schema(fields: Vec<Field>) -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: TableName::try_new("products").unwrap(),
+        db_schema: DatabaseSchema::default(),
+        primary_key: None,
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields,
+    }
+}
+
+fn map_of(values: FlussoType) -> FlussoType {
+    FlussoType::Map {
+        values: Box::new(values),
+    }
+}
+
+/// Every column type but `map`, including the `json` a map reads from.
+fn mapless_schema() -> IndexSchema {
+    let mut status = column_field("status", FlussoType::Enum);
+    if let FieldSource::Column(column) = &mut status.source {
+        column.enum_order = vec!["open".to_owned(), "closed".to_owned()];
+    }
+    columns_schema(vec![
+        column_field("name", FlussoType::Text),
+        column_field("sku", FlussoType::Identifier),
+        column_field("code", FlussoType::Keyword),
+        status,
+        column_field("price", FlussoType::Decimal),
+        column_field("stock", FlussoType::Integer),
+        column_field("created", FlussoType::Timestamp),
+        column_field("attrs", FlussoType::Json),
+        column_field(
+            "rank",
+            FlussoType::Custom {
+                postgres: vec!["numeric".to_owned()],
+                opensearch: "scaled_float".to_owned(),
+            },
+        ),
+    ])
+}
+
+#[test]
+fn a_schema_without_a_map_keeps_its_content_hash() {
+    let mapping = mapless_schema().resolve(IndexName::try_new("products").unwrap());
+    assert_eq!(mapping.hash.to_string(), "9156f06f");
+}
+
+#[test]
+fn a_map_schema_moves_off_its_dynamically_mapped_hash() {
+    let pre_typed_keys = ["ab9831b4", "c99e8742"];
+    for (values, old) in [FlussoType::Text, FlussoType::Double]
+        .into_iter()
+        .zip(pre_typed_keys)
+    {
+        let schema = columns_schema(vec![
+            column_field("name", FlussoType::Text),
+            column_field("title", map_of(values)),
+        ]);
+        let hash = schema.resolve(IndexName::try_new("products").unwrap()).hash;
+        assert_ne!(hash.to_string(), old);
+    }
+}
+
+#[test]
+fn a_map_key_maps_like_a_plain_field_of_its_values_type() {
+    for values in [
+        FlussoType::Text,
+        FlussoType::Identifier,
+        FlussoType::Keyword,
+        FlussoType::Decimal,
+        FlussoType::Long,
+        FlussoType::Timestamp,
+    ] {
+        let plain = columns_schema(vec![column_field("title", values.clone())])
+            .resolve(IndexName::try_new("products").unwrap());
+        let map = columns_schema(vec![column_field("title", map_of(values))])
+            .resolve(IndexName::try_new("products").unwrap());
+        let plain = &plain.fields[0].mapping;
+        let map = &map.fields[0].mapping;
+        assert_eq!(map.mapping_type, MappingType::Object);
+        let key = map.map_values.as_deref().unwrap();
+        assert_eq!(key.mapping_type, plain.mapping_type);
+        assert_eq!(key.extra, plain.extra);
+        assert_eq!(key.decimal, plain.decimal);
+        assert!(key.map_values.is_none());
+    }
+}
+
+#[test]
+fn a_map_serializes_its_key_mapping_as_values() {
+    let mapping = columns_schema(vec![column_field("title", map_of(FlussoType::Identifier))])
+        .resolve(IndexName::try_new("products").unwrap());
+    let json = serde_json::to_value(&mapping.fields[0].mapping).unwrap();
+    assert_eq!(json["type"], "object");
+    assert_eq!(json["values"]["type"], "text");
+    assert!(json["values"].get("analyzer").is_some());
+}

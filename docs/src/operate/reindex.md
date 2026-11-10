@@ -4,7 +4,7 @@ Rebuild one index from scratch while the current copy keeps serving reads, then 
 
 ## When to use this
 
-Data in the index has drifted from the source (a bug, a manual edit, rows imported behind flusso's back), or you want a clean generation for its own sake. A **schema change** does not need this: a structural change moves the hash and re-seeds into a new index on the next run by itself.
+Data in the index has drifted from the source (a bug, a manual edit, rows imported behind flusso's back), or you want a clean generation for its own sake. A **schema change** does not need this: a structural change moves the hash and re-seeds into a new index on the next run by itself. So does the [upgrade to 0.17](upgrade-to-0-17.md) for indexes with a `map` field.
 
 ## Steps
 

@@ -86,10 +86,11 @@ fn convert_default(
 }
 
 /// A dynamic-key object: a `json`/`jsonb` column read through verbatim, mapped
-/// as an OpenSearch `object` with `dynamic: true` so its runtime keys stay
-/// searchable without enumeration. `values` declares the shared leaf type and
-/// must be a leaf kind (text/keyword/number/date); `dynamic: true` is injected
-/// into the field's mapping options (an explicit `dynamic` option wins).
+/// as an OpenSearch `object` with `dynamic: true` so its runtime keys are
+/// accepted without enumeration. `values` declares the shared leaf type every
+/// key is mapped as and must be a leaf kind (text/keyword/number/date);
+/// `dynamic: true` is injected into the field's mapping options (an explicit
+/// `dynamic` option wins).
 fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
     let values = require_map_value_type(body.values)?;
     let column = match body.column {
@@ -467,16 +468,14 @@ fn convert_options(options: BTreeMap<String, serde_yaml::Value>) -> BTreeMap<Str
         .collect()
 }
 
-/// Apply type-specific option defaults. The `identifier` type is analyzed `text`
-/// carrying the `flusso_code` analyzer (an explicit `analyzer` option wins).
+/// Apply the type's option defaults ([`FlussoType::default_options`]); an
+/// explicit option wins.
 fn resolve_column_type(
     ty: FlussoType,
     mut options: BTreeMap<String, GenericValue>,
 ) -> (FlussoType, BTreeMap<String, GenericValue>) {
-    if ty == FlussoType::Identifier {
-        options
-            .entry("analyzer".to_owned())
-            .or_insert_with(|| GenericValue::String("flusso_code".to_owned()));
+    for (key, value) in ty.default_options() {
+        options.entry(key).or_insert(value);
     }
     (ty, options)
 }

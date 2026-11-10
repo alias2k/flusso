@@ -15,8 +15,9 @@ use crate::query::Root;
 use crate::{
     AsQuery, BoostMode, Client, Date, DateMap, Distance, FlussoMultiDocument, FlussoRoot,
     FlussoScope, Fuzziness, Geo, GeoPoint, Keyword, KeywordMap, MsearchBundle, MultiMatchType,
-    Nested, NestedScoreMode, Number, NumberMap, Operator, OrderBy, Query, Search, SearchResponse,
-    Segment, SegmentKind, Sort, SortBuilder, SortOrder, Sortable, Text, TextMap, multi_match,
+    Nested, NestedScoreMode, NoSubfields, Number, NumberMap, Operator, OrderBy, Query, Search,
+    SearchResponse, Segment, SegmentKind, Sort, SortBuilder, SortOrder, Sortable, Text, TextMap,
+    multi_match,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -1646,10 +1647,10 @@ fn ascending_nested_sort_defaults_mode_to_min() {
 // --- Map-key sort with language fallback (issue #58) -----------------------
 
 #[test]
-fn text_map_sort_key_with_or_renders_a_lowercasing_string_fallback_script() {
-    // "sort by it, else en": a string map sorts on the dynamic `.keyword`
-    // subfield of each key, lowercased (parity with scalar text sort), walking
-    // the keys in order so a row with only `en` still orders by `en`.
+fn text_map_sort_key_with_or_renders_a_folded_string_fallback_script() {
+    // "sort by it, else en": a string map sorts on each key's case/accent-folded
+    // `.keyword_lowercase` subfield (parity with a plain text sort), walking the
+    // keys in order so a row with only `en` still orders by `en`.
     let sort = TextMap::<Root>::at("name").sort_key("it").or("en").desc();
     assert_eq!(
         sort.to_value(),
@@ -1657,9 +1658,9 @@ fn text_map_sort_key_with_or_renders_a_lowercasing_string_fallback_script() {
             "type": "string",
             "order": "desc",
             "script": {
-                "source": "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;",
+                "source": "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;",
                 "params": {
-                    "fields": ["name.it.keyword", "name.en.keyword"],
+                    "fields": ["name.it.keyword_lowercase", "name.en.keyword_lowercase"],
                     "missing": "",
                 }
             }
@@ -1676,7 +1677,117 @@ fn single_map_sort_key_needs_no_or() {
     assert_eq!(value["_script"]["type"], json!("string"));
     assert_eq!(
         value["_script"]["script"]["params"]["fields"],
-        json!(["codes.ean.keyword"])
+        json!(["codes.ean.keyword_lowercase"])
+    );
+}
+
+#[test]
+fn a_keyword_map_without_subfields_sorts_on_the_bare_key_lowercased() {
+    let value = KeywordMap::<Root, NoSubfields>::leaf("codes")
+        .sort_key("ean")
+        .asc()
+        .to_value();
+    assert_eq!(
+        value["_script"]["script"]["params"]["fields"],
+        json!(["codes.ean"])
+    );
+    assert!(
+        value["_script"]["script"]["source"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("toLowerCase")
+    );
+}
+
+#[test]
+fn a_map_key_has_the_plain_field_surface() {
+    let title = TextMap::<Root>::at("title");
+    assert_eq!(
+        title.key("en").keyword().wildcard("*Exc*").to_value(),
+        json!({ "wildcard": { "title.en.keyword": "*Exc*" } })
+    );
+    assert_eq!(
+        title.key("en").keyword_lowercase().prefix("caf").to_value(),
+        json!({ "prefix": { "title.en.keyword_lowercase": "caf" } })
+    );
+    assert_eq!(
+        title.key("en").match_phrase_prefix("exc").to_value(),
+        json!({ "match_phrase_prefix": { "title.en": "exc" } })
+    );
+    assert_eq!(
+        KeywordMap::<Root>::at("codes")
+            .key("ean")
+            .eq("Foo Bar")
+            .to_value(),
+        json!({ "term": { "codes.ean": "Foo Bar" } })
+    );
+    assert_eq!(
+        KeywordMap::<Root>::at("codes")
+            .key("ean")
+            .text()
+            .matches("foo")
+            .to_value(),
+        json!({ "match": { "codes.ean.text": "foo" } })
+    );
+}
+
+#[test]
+fn a_map_key_with_subfields_sorts_like_a_plain_field() {
+    assert_eq!(
+        TextMap::<Root>::at("title").key("en").asc().to_value(),
+        Text::<Root>::at("title.en").asc().to_value()
+    );
+    assert_eq!(
+        KeywordMap::<Root>::at("codes").key("ean").desc().to_value(),
+        json!({ "codes.ean": { "order": "desc" } })
+    );
+}
+
+#[test]
+fn map_search_match_type_is_configurable() {
+    let value = TextMap::<Root>::at("title")
+        .search("excav")
+        .match_type(MultiMatchType::BoolPrefix)
+        .to_value();
+    assert_eq!(value["multi_match"]["type"], json!("bool_prefix"));
+    assert_eq!(value["multi_match"]["fields"], json!(["title.*"]));
+}
+
+#[test]
+fn map_contains_escapes_the_value_and_spans_every_key() {
+    let value = TextMap::<Root>::at("title")
+        .contains("a b*(c)")
+        .prefer("it", 2.0)
+        .to_value();
+    assert_eq!(
+        value,
+        json!({ "query_string": {
+            "query": "*a\\ b\\*\\(c\\)*",
+            "fields": ["title.it.keyword_lowercase^2", "title.*.keyword_lowercase"],
+        } })
+    );
+    let value = KeywordMap::<Root>::at("codes")
+        .contains("x")
+        .prefer("ean", 1.0)
+        .only_preferred()
+        .to_value();
+    assert_eq!(
+        value["query_string"]["fields"],
+        json!(["codes.ean.keyword_lowercase^1"])
+    );
+}
+
+#[test]
+fn map_contains_an_empty_or_blank_value_matches_nothing() {
+    let title = TextMap::<Root>::at("title");
+    assert_eq!(title.contains("").to_value(), json!({ "match_none": {} }));
+    assert_eq!(
+        title.contains(" \t").name("blank").to_value(),
+        json!({ "match_none": { "_name": "blank" } })
+    );
+    assert_eq!(
+        KeywordMap::<Root>::at("codes").contains("").to_value(),
+        json!({ "match_none": {} })
     );
 }
 
@@ -1735,9 +1846,9 @@ fn map_sort_flows_through_by_with_request_direction_and_skips_none() {
             "type": "string",
             "order": "desc",
             "script": {
-                "source": "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;",
+                "source": "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;",
                 "params": {
-                    "fields": ["name.it.keyword", "name.en.keyword"],
+                    "fields": ["name.it.keyword_lowercase", "name.en.keyword_lowercase"],
                     "missing": "",
                 }
             }

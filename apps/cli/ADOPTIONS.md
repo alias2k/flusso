@@ -13,3 +13,4 @@ audit trail of which lib fixes were deliberately shipped.
 ## Log
 
 <!-- newest first: `- YYYY-MM-DD: <crate> <version> (<reason>)` -->
+- 2026-11-10: flusso-kernel, flusso-sink-opensearch 0.17.0 (map keys mapped like plain fields; every index with a `map` field rebuilds once — https://alias2k.github.io/flusso/operate/upgrade-to-0-17.html)

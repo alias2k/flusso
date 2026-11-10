@@ -1,10 +1,10 @@
 use flusso_query::{FlussoRoot, SortBuilder, SortOrder};
 use std::collections::HashMap;
 
-// `title` is a `text` map. `title().key("it")` is a `MapKey`-marked leaf, which
-// is intentionally NOT `Sortable`: a plain `.asc()` would sort on a nonexistent
-// `.keyword_lowercase` subfield and fail at query time. Sort a map by key with
-// `TextMap::sort_by` / `SortBuilder::by_map_key` instead.
+// Resolved against `no_subfields.toml`. `title` is a `text` map, and a map key
+// is mapped like a plain field of its value kind: with subfields off it has no
+// `.keyword_lowercase`, so — like a plain `text` field — it is not `Sortable`.
+// With subfields on, `title().key("it").asc()` compiles and sorts on it.
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products")]
 struct Product {

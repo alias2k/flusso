@@ -5,7 +5,8 @@ Reach for this file when the schema has a `map:` field. A `map` is a `jsonb`-bac
 (`name: {"it": "ciao", "en": "hi"}`), per-currency prices, per-region dates.
 
 Schema side is `- map: name` plus a required `values:` leaf type (`text` / `keyword` / a number /
-`date`). The derive gives it one handle per value kind: `TextMap`, `KeywordMap`, `NumberMap<K>`,
+`date`). The sink maps **every key like a plain field of the `values` type** (same analyzer, same
+subfields). The derive gives it one handle per value kind: `TextMap`, `KeywordMap`, `NumberMap<K>`,
 `DateMap`. Runtime keys, compile-time value type. That split is the whole point.
 
 ## Doc side
@@ -35,12 +36,16 @@ derive; the E0277 note points at it.
 
 ## Query side
 
-**One key** gives a fully-typed leaf of the value kind, queried like any field of that kind:
+**One key** gives the plain-field handle of the value kind, with everything a plain field of
+that kind has: subfield accessors (`TextMap`/`KeywordMap` carry the same
+`WithSubfields`/`NoSubfields` marker as a plain `text`/`keyword` field), `wildcard`, `prefix`,
+phrase variants, and `.asc()`/`.desc()` where a plain field of the kind sorts.
 
 ```rust
-Product::title().key("it").matches("ciao")     // text
-Product::codes().key("ean").eq("0049")         // keyword exact
-Product::prices().key("usd").gte(9.99)         // number range
+Product::title().key("it").matches("ciao")                      // text, accent-folded
+Product::title().key("it").keyword_lowercase().prefix("cia")    // part of a word, one key
+Product::codes().key("ean").eq("0049")                          // keyword exact term
+Product::prices().key("usd").gte(9.99)                          // number range
 ```
 
 **Presence** is `Product::title().has_key("it")` (that key non-null) or `Product::title().exists()`
@@ -52,15 +57,20 @@ Product::prices().key("usd").gte(9.99)         // number range
 Product::title().search("ciao").prefer("it", 3.0).prefer("en", 2.0)
 ```
 
-One `multi_match best_fields` over the preferred keys (each `key^weight`) plus a `title.*` fallback,
-so the best-scoring key wins. `.only_preferred()` drops the fallback. `operator` / `fuzziness` /
+One `multi_match` over the preferred keys (each `key^weight`) plus a `title.*` fallback,
+`best_fields` by default so the best-scoring key wins; `.match_type(MultiMatchType::BoolPrefix)` for
+search-as-you-type. `.only_preferred()` drops the fallback. `operator` / `fuzziness` /
 `minimum_should_match` behave as on `matches`. Exact-match maps have no `search`; use
 `key(..).eq(..)`.
+
+**Part of a word, any key**, `TextMap` and `KeywordMap` with subfields:
+`Product::title().contains("excav")` is a case- and accent-insensitive substring match (a
+`query_string` of the escaped `*excav*` over `title.*.keyword_lowercase`); `prefer` /
+`only_preferred` as on `search`.
 
 **Sort by key with fallback** is `Product::title().sort_key("it").or("en")`. The rules live in the
 skill's `## Sorting` section. Two things to keep straight:
 
-- `.key("it")` is **not** sortable. A bare `key(..).asc()` would target a subfield that doesn't
-  exist, so it doesn't compile.
+- `key("it").asc()` sorts that one key like a plain field; `sort_key` is for fallback.
 - `prefer(key, weight)` is search *scoring* (blend across keys). `sort_key("it").or("en")` is
   ordered *fallback* (take the first key present). Don't reach for weights when you mean fallback.

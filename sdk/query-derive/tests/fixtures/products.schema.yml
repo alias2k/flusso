@@ -13,7 +13,7 @@ fields:
   - map: title
     values: text
     required: true
-  # A keyword-valued map (exact per-key lookup, no `search`).
+  # A keyword-valued map (exact per-key lookup).
   - map: codes
     values: keyword
     required: false
@@ -24,4 +24,8 @@ fields:
   # A date-valued map: per-region release dates.
   - map: releaseDates
     values: date
+    required: false
+  # A decimal-valued map: exact per-currency costs, keyed like a `decimal` field.
+  - map: costs
+    values: decimal
     required: false

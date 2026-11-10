@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `flusso_query::Text<Root, MapKey>: Sortable` is not satisfied
-  --> tests/ui/map_key_not_sortable.rs:17:13
+error[E0277]: the trait bound `flusso_query::Text<Root, NoSubfields>: Sortable` is not satisfied
+  --> tests/ui_no_subfields/map_key_not_sortable.rs:17:13
    |
 17 |         .by(Product::title().key("it"), SortOrder::Asc)
-   |          -- ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Sortable` is not implemented for `flusso_query::Text<Root, MapKey>`
+   |          -- ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Sortable` is not implemented for `flusso_query::Text<Root, NoSubfields>`
    |          |
    |          required by a bound introduced by this call
    |

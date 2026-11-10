@@ -7,6 +7,11 @@
 //! for a [`NumberMap`], [`Date`] for a [`DateMap`] — so a specific key is queried
 //! with full type safety while keys stay open-ended.
 //!
+//! The sink maps every key exactly like a plain field of the value kind, so a
+//! key handle is a plain-field handle: the same operators, subfield accessors
+//! and sort. A string map carries the same [`WithSubfields`]/[`NoSubfields`]
+//! type-state as a plain `text`/`keyword` field and passes it to its keys.
+//!
 //! Three operators are shared by every map handle:
 //!
 //! - [`key`](TextMap::key) — a specific key → a typed leaf handle.
@@ -15,7 +20,9 @@
 //!
 //! [`TextMap`] additionally offers [`search`](TextMap::search): full-text across
 //! *every* key at once, with optional per-key preference — the common
-//! cross-language case, without enumerating keys or silently missing one.
+//! cross-language case, without enumerating keys or silently missing one. Both
+//! string maps offer [`contains`](TextMap::contains): part of a value, across
+//! every key, case- and accent-insensitively.
 //!
 //! ```
 //! use flusso_query::{AsQuery, Root, TextMap};
@@ -31,6 +38,10 @@
 //!     .prefer("en", 2.0)
 //!     .to_value();
 //! assert_eq!(q["multi_match"]["type"], serde_json::json!("best_fields"));
+//!
+//! // Part of a word, in any key: "excav" finds "Excavator".
+//! let q = TextMap::<Root>::at("title").contains("excav").to_value();
+//! assert_eq!(q["query_string"]["query"], serde_json::json!("*excav*"));
 //! ```
 
 use std::marker::PhantomData;
@@ -39,97 +50,164 @@ use serde_json::{Map, Value};
 
 use super::sort::MapSortValueKind;
 use super::{
-    Common, Date, Fuzziness, Keyword, MapKey, MapKeySort, MinimumShouldMatch, Number, Operator,
-    Text, common_opts, exists_q, wrap,
+    Common, Date, Fuzziness, KEYWORD_LOWERCASE_SUFFIX, Keyword, MapKeySort, MinimumShouldMatch,
+    MultiMatchType, NoSubfields, Number, Operator, Text, WithSubfields, common_opts, exists_q,
+    wrap,
 };
 use crate::query::{AsQuery, Query, Root};
 
-/// Define a concrete map handle. Each carries a field path and scope `S` and
-/// exposes the key-agnostic `has_key`/`exists`; per-handle `key` (a fully-typed
-/// leaf) and `sort_key` (a key-fallback [`MapKeySort`]) are defined alongside.
-macro_rules! map_handle {
+/// The key-agnostic presence checks every map handle shares.
+macro_rules! presence_ops {
+    () => {
+        /// The map holds the given key with a non-null value.
+        pub fn has_key(&self, key: impl AsRef<str>) -> Query<S> {
+            exists_q(&format!("{}.{}", self.path, key.as_ref()))
+        }
+
+        /// The map field itself is present (has at least one key).
+        pub fn exists(&self) -> Query<S> {
+            exists_q(&self.path)
+        }
+    };
+}
+
+/// Define a string map handle. `Sub` is the [`WithSubfields`]/[`NoSubfields`]
+/// type-state of its keys, exactly as for a plain field of the value kind: the
+/// derive stamps `WithSubfields` when every OpenSearch sink has
+/// `auto_subfields` on.
+macro_rules! string_map_handle {
     ($(#[$meta:meta])* $Name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone)]
-        pub struct $Name<S = Root> {
+        pub struct $Name<S = Root, Sub = WithSubfields> {
             path: String,
-            _scope: PhantomData<fn() -> S>,
+            _marker: PhantomData<fn() -> (S, Sub)>,
         }
 
-        impl<S> $Name<S> {
-            pub fn at(path: impl Into<String>) -> Self {
+        impl<S, Sub> $Name<S, Sub> {
+            fn handle(path: impl Into<String>) -> Self {
                 Self {
                     path: path.into(),
-                    _scope: PhantomData,
+                    _marker: PhantomData,
                 }
             }
 
-            /// The map holds the given key with a non-null value.
-            pub fn has_key(&self, key: impl AsRef<str>) -> Query<S> {
-                exists_q(&format!("{}.{}", self.path, key.as_ref()))
+            presence_ops!();
+        }
+
+        impl<S> $Name<S, WithSubfields> {
+            /// A handle for a map whose keys carry flusso's auto subfields.
+            pub fn at(path: impl Into<String>) -> Self {
+                Self::handle(path)
             }
 
-            /// The map field itself is present (has at least one key).
-            pub fn exists(&self) -> Query<S> {
-                exists_q(&self.path)
+            /// Case- and accent-insensitive substring match across **every**
+            /// key — `contains("excav")` finds "Excavator". An empty or
+            /// whitespace-only value matches nothing. Returns a
+            /// [`MapContains`] builder; see it for the rendered shape.
+            pub fn contains(&self, value: impl AsRef<str>) -> MapContains<S> {
+                MapContains::new(&self.path, value.as_ref())
+            }
+        }
+
+        impl<S> $Name<S, NoSubfields> {
+            /// A handle for a map whose keys have no auto subfields.
+            pub fn leaf(path: impl Into<String>) -> Self {
+                Self::handle(path)
             }
         }
     };
 }
 
-map_handle!(
+string_map_handle!(
     /// A dynamic-key object whose values are analyzed full text (`map` with a
     /// `text`/`identifier` value kind). [`key`](Self::key) yields a [`Text`]
     /// leaf; [`search`](Self::search) runs full text across every key;
+    /// [`contains`](Self::contains) matches part of a value across every key;
     /// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
     TextMap
 );
-map_handle!(
+string_map_handle!(
     /// A dynamic-key object whose values are exact strings (`map` with a
     /// `keyword`/`enum`/`uuid` value kind). [`key`](Self::key) yields a
-    /// [`Keyword`] leaf for exact match. No `search` — exact-match maps use
-    /// `key(..).eq(..)` / `has_key(..)`, consistent with the leaf split.
-    /// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
+    /// [`Keyword`] leaf for exact match; [`contains`](Self::contains) matches
+    /// part of a value across every key; [`sort_key`](Self::sort_key) orders by
+    /// a key, with `.or(..)` fallback.
     KeywordMap
 );
-map_handle!(
-    /// A dynamic-key object whose values are dates (`map` with a
-    /// `date`/`timestamp` value kind). [`key`](Self::key) yields a [`Date`]
-    /// leaf for range/exact operators (`gte`/`between`/`eq`/…).
-    /// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
-    DateMap
-);
 
-impl<S> TextMap<S> {
-    /// A specific runtime key → a fully-typed [`Text`] leaf, queried like any
-    /// other text field. It carries the [`MapKey`] marker, so it is **not**
-    /// directly sortable — order a text map by key with
-    /// [`sort_key`](Self::sort_key), which is correct at query time and supports
-    /// key fallback.
-    pub fn key(&self, key: impl AsRef<str>) -> Text<S, MapKey> {
-        Text::map_key(format!("{}.{}", self.path, key.as_ref()))
+/// A dynamic-key object whose values are dates (`map` with a
+/// `date`/`timestamp` value kind). [`key`](Self::key) yields a [`Date`]
+/// leaf for range/exact operators (`gte`/`between`/`eq`/…).
+/// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
+#[derive(Debug, Clone)]
+pub struct DateMap<S = Root> {
+    path: String,
+    _scope: PhantomData<fn() -> S>,
+}
+
+impl<S> DateMap<S> {
+    /// A handle for the date map at `path`.
+    pub fn at(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            _scope: PhantomData,
+        }
     }
 
-    /// Sort by this key, with optional fallback — `sort_key("it").or("en")`
-    /// orders by `it`, else `en` (language fallback). Returns a [`MapKeySort`];
-    /// pass it to [`SortBuilder::by`](crate::SortBuilder::by) or `.asc()`/`.desc()`.
-    pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), key, MapSortValueKind::String)
+    presence_ops!();
+}
+
+impl<S, Sub> TextMap<S, Sub> {
+    /// A specific runtime key → a [`Text`] leaf, mapped and queried exactly like
+    /// a plain `text` field: the same subfield accessors and, with subfields,
+    /// the same `.asc()`/`.desc()` (on `.keyword_lowercase`).
+    pub fn key(&self, key: impl AsRef<str>) -> Text<S, Sub> {
+        Text::handle(format!("{}.{}", self.path, key.as_ref()))
+    }
+
+    /// Full-text search across *every* key at once, with optional per-key
+    /// preference. Returns a [`MapSearch`] builder; add [`prefer`](MapSearch::prefer)
+    /// to weight a key (e.g. the user's locale).
+    pub fn search(&self, query: impl Into<String>) -> MapSearch<S> {
+        MapSearch::new(&self.path, query.into())
     }
 }
 
-impl<S> KeywordMap<S> {
-    /// A specific runtime key → a fully-typed [`Keyword`] leaf for exact match.
-    /// It carries the [`MapKey`] marker, so it is **not** directly sortable —
-    /// order a keyword map by key with [`sort_key`](Self::sort_key).
-    pub fn key(&self, key: impl AsRef<str>) -> Keyword<S, MapKey> {
-        Keyword::map_key(format!("{}.{}", self.path, key.as_ref()))
-    }
-
-    /// Sort by this key, with optional fallback (`sort_key("a").or("b")`).
-    /// Returns a [`MapKeySort`]; see it for the rendered shape.
+impl<S> TextMap<S, WithSubfields> {
+    /// Sort by this key, with optional fallback — `sort_key("it").or("en")`
+    /// orders by `it`, else `en` (language fallback), case- and
+    /// accent-insensitively. Returns a [`MapKeySort`]; pass it to
+    /// [`SortBuilder::by`](crate::SortBuilder::by) or `.asc()`/`.desc()`.
+    /// Needs the auto subfields, like sorting a plain `text` field.
     pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
-        MapKeySort::new(self.path.clone(), key, MapSortValueKind::String)
+        MapKeySort::new(self.path.clone(), key, MapSortValueKind::Folded)
+    }
+}
+
+impl<S, Sub> KeywordMap<S, Sub> {
+    /// A specific runtime key → a [`Keyword`] leaf, mapped and queried exactly
+    /// like a plain `keyword` field (`eq` is an exact `term`; sorts directly).
+    pub fn key(&self, key: impl AsRef<str>) -> Keyword<S, Sub> {
+        Keyword::handle(format!("{}.{}", self.path, key.as_ref()))
+    }
+}
+
+impl<S> KeywordMap<S, WithSubfields> {
+    /// Sort by this key, with optional fallback (`sort_key("a").or("b")`),
+    /// case- and accent-insensitively. Returns a [`MapKeySort`]; see it for the
+    /// rendered shape.
+    pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
+        MapKeySort::new(self.path.clone(), key, MapSortValueKind::Folded)
+    }
+}
+
+impl<S> KeywordMap<S, NoSubfields> {
+    /// Sort by this key, with optional fallback (`sort_key("a").or("b")`),
+    /// case-insensitively (no accent folding without the subfields). Returns a
+    /// [`MapKeySort`]; see it for the rendered shape.
+    pub fn sort_key(&self, key: impl Into<String>) -> MapKeySort<S> {
+        MapKeySort::new(self.path.clone(), key, MapSortValueKind::Exact)
     }
 }
 
@@ -152,6 +230,10 @@ impl<S> DateMap<S> {
 /// kind — `short`…`double`, `decimal`). [`key`](Self::key) yields a [`Number`]
 /// leaf for range/exact operators (`gt`/`between`/`eq`/…). `has_key`/`exists`
 /// are presence checks. No `search` — numbers aren't full text.
+///
+/// `K` is the declared kind, as for a plain field: a `decimal` map is a
+/// `NumberMap<kind::Decimal>`, so its keys take a `Decimal` or an integer,
+/// never an `f64`.
 #[derive(Debug, Clone)]
 pub struct NumberMap<K, S = Root> {
     path: String,
@@ -180,37 +262,20 @@ impl<K, S> NumberMap<K, S> {
         MapKeySort::new(self.path.clone(), key, MapSortValueKind::Number)
     }
 
-    /// The map holds the given key with a non-null value.
-    pub fn has_key(&self, key: impl AsRef<str>) -> Query<S> {
-        exists_q(&format!("{}.{}", self.path, key.as_ref()))
-    }
-
-    /// The map field itself is present (has at least one key).
-    pub fn exists(&self) -> Query<S> {
-        exists_q(&self.path)
-    }
-}
-
-impl<S> TextMap<S> {
-    /// Full-text search across *every* key at once, with optional per-key
-    /// preference. Returns a [`MapSearch`] builder; add [`prefer`](MapSearch::prefer)
-    /// to weight a key (e.g. the user's locale).
-    pub fn search(&self, query: impl Into<String>) -> MapSearch<S> {
-        MapSearch::new(&self.path, query.into())
-    }
+    presence_ops!();
 }
 
 /// A cross-key full-text query over a [`TextMap`]: one analyzed `query` matched
 /// against every key, with optional per-key preference. Renders a `multi_match`
-/// of `type: best_fields` over the preferred keys (each `field^weight`) plus the
-/// wildcard `path.*` fallback, so the best-scoring key wins without
-/// double-counting. [`only_preferred`](Self::only_preferred) drops the fallback.
+/// over the preferred keys (each `field^weight`) plus the wildcard `path.*`
+/// fallback. The type defaults to `best_fields`, so the best-scoring key wins
+/// without double-counting; [`match_type`](Self::match_type) picks another
+/// (`BoolPrefix` matches the start of a word, as typed in a search box).
+/// [`only_preferred`](Self::only_preferred) drops the fallback.
 #[derive(Debug, Clone)]
 pub struct MapSearch<S = Root> {
-    path: String,
+    keys: KeyFields,
     query: String,
-    preferred: Vec<String>,
-    include_all: bool,
     opts: Map<String, Value>,
     common: Common,
     _scope: PhantomData<fn() -> S>,
@@ -219,10 +284,8 @@ pub struct MapSearch<S = Root> {
 impl<S> MapSearch<S> {
     fn new(path: &str, query: String) -> Self {
         Self {
-            path: path.to_string(),
+            keys: KeyFields::new(path, ""),
             query,
-            preferred: Vec::new(),
-            include_all: true,
             opts: Map::new(),
             common: Common::default(),
             _scope: PhantomData,
@@ -233,8 +296,7 @@ impl<S> MapSearch<S> {
     /// several to rank keys (e.g. the user's locale highest).
     #[must_use]
     pub fn prefer(mut self, key: impl AsRef<str>, weight: f32) -> Self {
-        self.preferred
-            .push(format!("{}.{}^{weight}", self.path, key.as_ref()));
+        self.keys.prefer(key.as_ref(), weight);
         self
     }
 
@@ -242,13 +304,19 @@ impl<S> MapSearch<S> {
     /// otherwise also searches every other key.
     #[must_use]
     pub fn only_preferred(mut self) -> Self {
-        self.include_all = false;
+        self.keys.include_all = false;
         self
     }
 
     fn set(mut self, key: &str, value: Value) -> Self {
         self.opts.insert(key.to_string(), value);
         self
+    }
+
+    /// The `multi_match` type (default [`MultiMatchType::BestFields`]).
+    #[must_use]
+    pub fn match_type(self, match_type: MultiMatchType) -> Self {
+        self.set("type", Value::String(match_type.as_str().to_string()))
     }
 
     /// Combine analyzed terms with [`Operator::And`] or [`Operator::Or`]
@@ -276,18 +344,138 @@ impl<S> MapSearch<S> {
 
 impl<S> AsQuery<S> for MapSearch<S> {
     fn into_query(self) -> Option<Query<S>> {
-        let mut fields: Vec<Value> = self.preferred.iter().cloned().map(Value::String).collect();
-        if self.include_all {
-            fields.push(Value::String(format!("{}.*", self.path)));
-        }
         let mut body = self.opts;
         body.insert("query".to_string(), Value::String(self.query));
-        body.insert("fields".to_string(), Value::Array(fields));
+        body.insert("fields".to_string(), self.keys.into_value());
         // `best_fields` takes the max score per field, so the same term matching
         // several keys isn't double-counted.
         body.entry("type")
             .or_insert_with(|| Value::String("best_fields".to_string()));
         self.common.write(&mut body);
         Some(wrap("multi_match", body))
+    }
+}
+
+/// The characters `query_string` gives a meaning; each is escaped with a backslash so
+/// the value is matched literally (whitespace too, so it stays one term).
+fn is_query_string_syntax(c: char) -> bool {
+    c.is_whitespace() || "\\+-=&|><!(){}[]^\"~*?:/".contains(c)
+}
+
+/// A case- and accent-insensitive substring match across every key of a
+/// string map (`TextMap::contains` / `KeywordMap::contains`). Renders a
+/// `query_string` of `*<value>*` — the value escaped, so it is matched
+/// literally — over every key's `.keyword_lowercase` subfield
+/// (`path.*.keyword_lowercase`, plus each [`prefer`](Self::prefer)'d key with
+/// its weight). The subfield's normalizer folds the pattern like the indexed
+/// value. A value longer than the subfield's `ignore_above` (256) is not
+/// indexed there, so it never matches — the same rule as a plain field.
+///
+/// An empty or whitespace-only value renders `match_none`, like a full-text
+/// query with no terms: `*` alone would match every document with any key.
+///
+/// ```
+/// use flusso_query::{AsQuery, Root, TextMap};
+///
+/// let q = TextMap::<Root>::at("title").contains("excav").to_value();
+/// assert_eq!(q["query_string"]["query"], serde_json::json!("*excav*"));
+/// assert_eq!(
+///     q["query_string"]["fields"],
+///     serde_json::json!(["title.*.keyword_lowercase"])
+/// );
+///
+/// let none = TextMap::<Root>::at("title").contains("  ").to_value();
+/// assert_eq!(none, serde_json::json!({ "match_none": {} }));
+/// ```
+#[derive(Debug, Clone)]
+pub struct MapContains<S = Root> {
+    keys: KeyFields,
+    value: String,
+    common: Common,
+    _scope: PhantomData<fn() -> S>,
+}
+
+impl<S> MapContains<S> {
+    fn new(path: &str, value: &str) -> Self {
+        Self {
+            keys: KeyFields::new(path, KEYWORD_LOWERCASE_SUFFIX),
+            value: value.to_string(),
+            common: Common::default(),
+            _scope: PhantomData,
+        }
+    }
+
+    /// Prefer a key, weighting its score by `weight`.
+    #[must_use]
+    pub fn prefer(mut self, key: impl AsRef<str>, weight: f32) -> Self {
+        self.keys.prefer(key.as_ref(), weight);
+        self
+    }
+
+    /// Match only the preferred keys — drop the `path.*` fallback.
+    #[must_use]
+    pub fn only_preferred(mut self) -> Self {
+        self.keys.include_all = false;
+        self
+    }
+
+    common_opts!(common);
+}
+
+impl<S> AsQuery<S> for MapContains<S> {
+    fn into_query(self) -> Option<Query<S>> {
+        if self.value.trim().is_empty() {
+            let mut body = Map::new();
+            self.common.write(&mut body);
+            return Some(wrap("match_none", body));
+        }
+        let mut pattern = String::from("*");
+        for c in self.value.chars() {
+            if is_query_string_syntax(c) {
+                pattern.push('\\');
+            }
+            pattern.push(c);
+        }
+        pattern.push('*');
+        let mut body = Map::new();
+        body.insert("query".to_string(), Value::String(pattern));
+        body.insert("fields".to_string(), self.keys.into_value());
+        self.common.write(&mut body);
+        Some(wrap("query_string", body))
+    }
+}
+
+/// The `fields` list of a cross-key query: each preferred key with its weight,
+/// then the `path.*` fallback unless dropped. `suffix` targets a subfield of
+/// every key (`.keyword_lowercase`), or the key itself when empty.
+#[derive(Debug, Clone)]
+struct KeyFields {
+    path: String,
+    suffix: &'static str,
+    preferred: Vec<String>,
+    include_all: bool,
+}
+
+impl KeyFields {
+    fn new(path: &str, suffix: &'static str) -> Self {
+        Self {
+            path: path.to_string(),
+            suffix,
+            preferred: Vec::new(),
+            include_all: true,
+        }
+    }
+
+    fn prefer(&mut self, key: &str, weight: f32) {
+        self.preferred
+            .push(format!("{}.{key}{}^{weight}", self.path, self.suffix));
+    }
+
+    fn into_value(self) -> Value {
+        let mut fields: Vec<Value> = self.preferred.into_iter().map(Value::String).collect();
+        if self.include_all {
+            fields.push(Value::String(format!("{}.*{}", self.path, self.suffix)));
+        }
+        Value::Array(fields)
     }
 }

@@ -12,8 +12,9 @@ use std::marker::PhantomData;
 use serde_json::{Map, Value};
 
 use super::{
-    Common, FlussoValue, Fuzziness, MinimumShouldMatch, MultiMatchType, Operator, Sort, SortOrder,
-    Sortable, TermsQuery, ZeroTermsQuery, common_opts, exists_q, keyed_value_query, kind, wrap,
+    Common, FlussoValue, Fuzziness, KEYWORD_LOWERCASE_SUFFIX, MinimumShouldMatch, MultiMatchType,
+    Operator, Sort, SortOrder, Sortable, TermsQuery, ZeroTermsQuery, common_opts, exists_q,
+    keyed_value_query, kind, wrap,
 };
 use crate::FlussoScope;
 use crate::query::{AsQuery, Query, Root};
@@ -370,18 +371,6 @@ pub enum WithSubfields {}
 #[derive(Debug)]
 pub enum NoSubfields {}
 
-/// Type-state marker: this leaf is one **key of a dynamic-key `map`** (from
-/// `TextMap::key` / `KeywordMap::key`). The key's value ops work as usual, but
-/// it carries no flusso subfields **and is not directly [`Sortable`]** — its
-/// real OpenSearch field is created by default dynamic mapping, which has no
-/// `keyword_lowercase` subfield, so a plain `.asc()` would target a path that
-/// doesn't exist and 400 at query time. Sort a map by key through
-/// [`TextMap::sort_key`](crate::TextMap::sort_key) (then
-/// [`SortBuilder::by`](crate::SortBuilder::by)) instead, which emits a correct
-/// (fallback-capable) sort.
-#[derive(Debug)]
-pub enum MapKey {}
-
 /// An exact, aggregatable string field (`keyword`, `enum`, `uuid`). `Sub` is a
 /// [`WithSubfields`]/[`NoSubfields`] type-state marker gating the subfield
 /// accessors.
@@ -392,7 +381,7 @@ pub struct Keyword<S = Root, Sub = WithSubfields> {
 }
 
 impl<S, Sub> Keyword<S, Sub> {
-    fn handle(path: impl Into<String>) -> Self {
+    pub(crate) fn handle(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             _marker: PhantomData,
@@ -441,24 +430,15 @@ impl<S, Sub> Keyword<S, Sub> {
     }
 }
 
-/// A `keyword` field sorts directly on its own path. Implemented for the
-/// scalar markers ([`WithSubfields`]/[`NoSubfields`]) only — **not** [`MapKey`],
-/// whose dynamically-mapped field isn't sortable on its bare path (sort a map by
-/// key through [`KeywordMap::sort_key`](crate::KeywordMap::sort_key) instead).
-macro_rules! keyword_sortable {
-    ($sub:ty) => {
-        impl<S: FlussoScope> Sortable for Keyword<S, $sub> {
-            fn asc(&self) -> Sort {
-                Sort::field::<S>(&self.path, SortOrder::Asc)
-            }
-            fn desc(&self) -> Sort {
-                Sort::field::<S>(&self.path, SortOrder::Desc)
-            }
-        }
-    };
+/// A `keyword` field sorts directly on its own (doc-valued) path.
+impl<S: FlussoScope, Sub> Sortable for Keyword<S, Sub> {
+    fn asc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Asc)
+    }
+    fn desc(&self) -> Sort {
+        Sort::field::<S>(&self.path, SortOrder::Desc)
+    }
 }
-keyword_sortable!(WithSubfields);
-keyword_sortable!(NoSubfields);
 
 /// An `enum` field with a declared variant order (`- enum: status` +
 /// `variants: [...]`). It is a `keyword` in every respect — the value ops and
@@ -549,14 +529,6 @@ impl<S: FlussoScope, Sub> Sortable for Enum<S, Sub> {
 /// an [`Enum`] targets it (kept in sync with the sink's `ENUM_SORT_SUBFIELD`).
 const ENUM_SORT_SUBFIELD: &str = "sort";
 
-impl<S> Keyword<S, MapKey> {
-    /// A handle for one key of a dynamic-key `map` (see [`MapKey`]). The value
-    /// ops apply; the subfield accessors and direct sort do not.
-    pub(crate) fn map_key(path: impl Into<String>) -> Self {
-        Self::handle(path)
-    }
-}
-
 impl<S> Keyword<S, WithSubfields> {
     pub fn at(path: impl Into<String>) -> Self {
         Self::handle(path)
@@ -573,7 +545,7 @@ impl<S> Keyword<S, WithSubfields> {
     /// auto-creates — for case-insensitive exact match and sort. Only in scope
     /// when the field carries auto subfields.
     pub fn keyword_lowercase(&self) -> Keyword<S, NoSubfields> {
-        Keyword::leaf(format!("{}.keyword_lowercase", self.path))
+        Keyword::leaf(format!("{}{KEYWORD_LOWERCASE_SUFFIX}", self.path))
     }
 }
 
@@ -705,7 +677,7 @@ pub struct Text<S = Root, Sub = WithSubfields> {
 }
 
 impl<S, Sub> Text<S, Sub> {
-    fn handle(path: impl Into<String>) -> Self {
+    pub(crate) fn handle(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             boost: None,
@@ -792,7 +764,7 @@ impl<S> Text<S, WithSubfields> {
     /// case-insensitive exact match and sort. Only in scope when the field
     /// carries auto subfields.
     pub fn keyword_lowercase(&self) -> Keyword<S, NoSubfields> {
-        Keyword::leaf(format!("{}.keyword_lowercase", self.path))
+        Keyword::leaf(format!("{}{KEYWORD_LOWERCASE_SUFFIX}", self.path))
     }
 }
 
@@ -812,14 +784,6 @@ impl<S> Text<S, NoSubfields> {
     /// Construct a handle for a field known to have no auto subfields (a
     /// subfield leaf, or a field the derive resolved as un-subfielded).
     pub fn leaf(path: impl Into<String>) -> Self {
-        Self::handle(path)
-    }
-}
-
-impl<S> Text<S, MapKey> {
-    /// A handle for one key of a dynamic-key `map` (see [`MapKey`]). The
-    /// match/`exists` ops apply; the subfield accessors and direct sort do not.
-    pub(crate) fn map_key(path: impl Into<String>) -> Self {
         Self::handle(path)
     }
 }

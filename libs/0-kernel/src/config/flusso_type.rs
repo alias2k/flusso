@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use std::collections::BTreeMap;
+
 use super::MappingType;
+use crate::common::GenericValue;
 
 /// The declared type of a leaf field — the single vocabulary that bridges a
 /// Postgres column type and an OpenSearch mapping type.
@@ -57,8 +60,9 @@ pub enum FlussoType {
     /// A dynamic-key object: a `json`/`jsonb` column whose keys are
     /// runtime-determined but whose values all share one leaf type (e.g.
     /// translations `{"en": …, "it": …}`). Maps to OS `object` with
-    /// `dynamic: true`, so unmapped keys stay full-text searchable without
-    /// enumerating them in the schema. `values` is the leaf type of every value.
+    /// `dynamic: true`, so runtime keys are accepted without enumerating them
+    /// in the schema; every key is mapped like a plain field of `values`, the
+    /// leaf type of every value.
     Map { values: Box<FlussoType> },
     /// A geographic point → OS `geo_point`.
     ///
@@ -79,6 +83,20 @@ pub enum FlussoType {
 }
 
 impl FlussoType {
+    /// The mapping options a field of this type carries unless it sets them
+    /// itself: `identifier` is analyzed `text` with the `flusso_code` analyzer.
+    /// Empty for every other type. A plain column and a `map`'s keys both start
+    /// from these, so a key of a type is mapped like a field of it.
+    pub fn default_options(&self) -> BTreeMap<String, GenericValue> {
+        match self {
+            FlussoType::Identifier => BTreeMap::from([(
+                "analyzer".to_owned(),
+                GenericValue::String("flusso_code".to_owned()),
+            )]),
+            _ => BTreeMap::new(),
+        }
+    }
+
     /// The OpenSearch [`MappingType`] this declared type maps to.
     pub fn opensearch(&self) -> MappingType {
         match self {

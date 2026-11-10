@@ -66,7 +66,7 @@ fn example_value(field: &ResolvedField) -> Value {
     if let Some(values) = &field.mapping.map_values {
         return Value::Object(Map::from_iter([(
             "example_key".to_owned(),
-            example_scalar(values),
+            example_scalar(&values.mapping_type),
         )]));
     }
     if !field.children.is_empty() {
@@ -87,7 +87,7 @@ fn example_value(field: &ResolvedField) -> Value {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use config::yaml::SchemaYaml;
     use kernel::ParseFrom;
@@ -130,6 +130,30 @@ mod tests {
             Some(&json!("example text")),
         );
     }
+
+    #[test]
+    fn a_map_previews_the_mapping_each_key_gets() {
+        let schema = schema(
+            "version: 1\n\
+             table: t\n\
+             primary_key: id\n\
+             fields:\n\
+             \x20 - integer: id\n\
+             \x20   required: true\n\
+             \x20 - map: title\n\
+             \x20   values: identifier\n\
+             \x20   required: false\n",
+        );
+        let index = IndexName::try_new("t").expect("index name");
+
+        let preview = preview(&schema, &index);
+        let mapping = serde_json::to_value(&preview.mapping).expect("serialize");
+        let title = &mapping["fields"][1]["mapping"];
+        assert_eq!(title["type"], json!("object"));
+        assert_eq!(title["values"]["type"], json!("text"));
+        assert!(title["values"].get("analyzer").is_some());
+        assert_eq!(preview.document[1].type_label, "map<text>");
+    }
 }
 
 fn example_scalar(mapping_type: &MappingType) -> Value {
@@ -164,7 +188,7 @@ fn node(field: &ResolvedField) -> DocumentNode {
 
 fn type_label(mapping: &Mapping) -> String {
     if let Some(values) = &mapping.map_values {
-        return format!("map<{}>", mapping_type_name(values));
+        return format!("map<{}>", mapping_type_name(&values.mapping_type));
     }
     // A declared-order enum reads as `enum` (ordered), not the bare `keyword` it
     // maps to; a bare enum is indistinguishable from keyword and stays `keyword`.

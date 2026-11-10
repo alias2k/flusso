@@ -336,13 +336,60 @@ fn number_and_date_maps_generate_typed_leaves() -> Result {
     Ok(())
 }
 
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "products", config = "tests/fixtures/flusso.toml")]
+struct CostedProduct {
+    sku: String,
+    costs: Option<HashMap<String, flusso_query::Decimal>>,
+}
+
+#[test]
+fn a_decimal_map_keys_like_a_plain_decimal_field() -> Result {
+    use flusso_query::Decimal;
+
+    // `costs` is a `decimal` map: its keys take a `Decimal`, exactly as a plain
+    // `decimal` field's `Number<kind::Decimal>` does.
+    let body = CostedProduct::query()
+        .filter(CostedProduct::costs().key("eur").eq(Decimal::new(999, 2)))
+        .body();
+    assert!(body.to_string().contains(r#""costs.eur""#), "{body}");
+    Ok(())
+}
+
+#[test]
+fn string_map_keys_have_the_plain_field_surface() -> Result {
+    use flusso_query::{SortBuilder, SortOrder};
+
+    // With subfields on, a `text` map key is a `Text` with its subfields, and
+    // sorts on `.keyword_lowercase` like a plain `text` field; a `keyword` map
+    // key `eq` is an exact `term` on the key itself.
+    let body = Product::query()
+        .filter(Product::title().key("en").keyword_lowercase().prefix("caf"))
+        .filter(Product::codes().key("ean").eq("Foo Bar"))
+        .filter(Product::codes().contains("ba"))
+        .sorts(SortBuilder::new().by(Product::title().key("en"), SortOrder::Asc))
+        .body();
+    let json = body.to_string();
+    assert!(
+        json.contains(r#""title.en.keyword_lowercase":"caf""#),
+        "{json}"
+    );
+    assert!(json.contains(r#""codes.ean":"Foo Bar""#), "{json}");
+    assert!(json.contains(r#""codes.*.keyword_lowercase""#), "{json}");
+    assert!(
+        json.contains(r#"{"title.en.keyword_lowercase":{"order":"asc"}}"#),
+        "{json}"
+    );
+    Ok(())
+}
+
 #[test]
 fn map_fields_sort_by_key_with_language_fallback() -> Result {
     use flusso_query::{SortBuilder, SortOrder};
 
-    // Sort by Italian title, falling back to English — a `_script` sort over the
-    // dynamic `.keyword` subfields (not the broken single-key field sort), plus
-    // a numeric map sort on bare keys, driven from request directions.
+    // Sort by Italian title, falling back to English — a `_script` sort over each
+    // key's folded `.keyword_lowercase` subfield, plus a numeric map sort on
+    // bare keys, driven from request directions.
     let body = Product::query()
         .sorts(
             SortBuilder::new()
@@ -354,10 +401,10 @@ fn map_fields_sort_by_key_with_language_fallback() -> Result {
     let json = body.to_string();
     assert!(json.contains(r#""type":"string""#), "{json}");
     assert!(
-        json.contains(r#"["title.it.keyword","title.en.keyword"]"#),
+        json.contains(r#"["title.it.keyword_lowercase","title.en.keyword_lowercase"]"#),
         "{json}"
     );
-    assert!(json.contains("toLowerCase"), "{json}");
+    assert!(!json.contains("toLowerCase"), "{json}");
     assert!(json.contains(r#""type":"number""#), "{json}");
     assert!(json.contains(r#"["prices.usd"]"#), "{json}");
     Ok(())
