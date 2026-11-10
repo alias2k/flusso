@@ -37,3 +37,11 @@ serde_json.workspace = true
 stream-channel.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }
+# The fence e2e (`tests/fence.rs`) runs a whole deployment against a real
+# Postgres and a real OpenSearch: a fence is only worth its name if a read
+# right after it really sees the commit.
+source-postgres.workspace = true
+sink-opensearch.workspace = true
+sqlx.workspace = true
+testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }

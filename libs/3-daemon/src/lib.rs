@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(test, allow(unused_crate_dependencies))]
 
 mod backends;
 mod fence;
