@@ -13,6 +13,7 @@
 - [Fold in related tables](author/related-tables.md)
 - [Filter rows and soft-delete](author/filters-and-soft-delete.md)
 - [Geo, maps, enums and transforms](author/geo-maps-enums-transforms.md)
+- [Keep content without indexing it](author/keep-content-unindexed.md)
 - [Design a schema visually](author/design-visually.md)
 - [Designer reference](author/designer-reference.md)
 

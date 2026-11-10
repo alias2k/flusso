@@ -21,6 +21,7 @@ A join folds rows from a related table into the document. The relationship verb 
 | `filters` | list | all | Narrow which related rows fold in. See [Filters](filters-and-soft-delete.md). |
 | `order_by` | list of `{ column, direction }` | `has_one`, `has_many`, `many_to_many` | Ordering; `direction` is `asc` (default) or `desc`. On `has_one` it picks which row becomes the object. Rejected on `belongs_to`. |
 | `limit` | int ≥ 1 | `has_many`, `many_to_many` | Cap the rows folded in. The to-one verbs imply `LIMIT 1`. |
+| `indexed` | bool | all | `false` keeps the rows in the stored document without indexing them. Default `true`. See [indexed](#indexed). |
 
 **Key arity rule.** A join takes exactly the key sibling its verb implies. Anything else is a load-time error naming the right one.
 
@@ -34,6 +35,33 @@ A join folds rows from a related table into the document. The relationship verb 
 | `filters` | Narrow the junction rows, e.g. skip a removed membership. The join's own `filters` narrow the related table. See [Filters](filters-and-soft-delete.md). |
 
 The same `through` shape keys an aggregate; see [Aggregates](aggregates.md#over-a-junction) for what a junction aggregate counts.
+
+## indexed
+
+`indexed: false` keeps a subtree in the document without indexing it. It applies to every join verb and to a `json` field.
+
+```yaml
+- has_many: priceHistory
+  table: price_changes
+  foreign_key: product_id
+  primary_key: id
+  indexed: false
+  fields:
+    - decimal: amount
+      required: true
+    - timestamp: changedAt
+      column: changed_at
+      required: true
+```
+
+- **Built and stored as usual.** The rows are read, folded in, and kept live by the same change capture; they land in `_source` and come back with every hit.
+- **Mapped as one field.** The OpenSearch sink maps the whole subtree as `{"type": "object", "enabled": false}`, whatever the verb (a to-many join is not `nested`). Nothing under it counts toward the mapping limits, and nothing under it is parsed, so a value a mapped field would refuse is accepted.
+- **Not searchable.** Nothing under it can be queried, filtered, sorted, or aggregated. On the query side the field has no handle; the struct field still deserializes. See [Document structs](../query/document-structs.md#stored-only-fields).
+- **Fields under it keep their meaning for the document**: columns, transforms, nested joins, and filters all apply. Their mapping-only settings (`options`, `subfields`, `indexed`, an `enum`'s `variants` order, a `map`'s typed keys) have no effect and are accepted, so toggling `indexed` never forces an edit below.
+- **No `options` beside it.** A field with `indexed: false` rejects `options` at load: the disabled object owns its mapping.
+- **Aggregates are separate fields.** A `count` or `sum` over the same table is its own leaf on the parent and stays searchable.
+- **Changing it** moves the schema to a new content hash, so the index is rebuilt once. Omitted or `true` keeps the subtree indexed.
+- **Anywhere else** (`object`, a scalar, a `map`, an aggregate) the key is rejected at load.
 
 ## What a related change rebuilds
 

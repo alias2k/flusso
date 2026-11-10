@@ -63,6 +63,20 @@ Type matching is by **leaf identifier plus `Option` shape**: the macro compares 
 
 Fragments are checked **where embedded**. The root bakes the resolved level into const data and drives one assertion per fragment field; the error's primary span is the embedding, with a note chain down to the offending field. Two limits follow from const evaluation: messages can't interpolate the schema's type name, and there are no warnings, only pass or fail.
 
+## Stored-only fields
+
+A field with [`indexed: false`](../reference/joins.md#indexed) (a join or a `json` blob) is in `_source` but not in the index, so the derive generates **no handle** for it: `User::price_history()` doesn't exist, and a query on it is a compile error rather than an empty result. The struct field still deserializes and is checked like any other: a stored `has_many` is a `Vec<Fragment>`, a stored `json` a `serde_json::Value`.
+
+```rust
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "products")]
+pub struct Product {
+    pub name: String,
+    #[serde(rename = "priceHistory")]
+    pub price_history: Vec<PriceChange>,   // indexed: false → read, never queried
+}
+```
+
 ## Escape hatches
 
 - `serde_json::Value` as a field type opts that field out of type checking.
@@ -85,13 +99,14 @@ Fragments are checked **where embedded**. The root bakes the resolved level into
 | `date` | `time::Date` or chrono's | `Date` |
 | `timestamp` | `time::OffsetDateTime` or chrono's | `Date` |
 | `binary` | `String` (base64) | `Binary` |
-| `json` | `serde_json::Value` | `Json` |
+| `json` | `serde_json::Value` | `Json`; none with `indexed: false` |
 | `map` | `HashMap<String, V>`, `BTreeMap<String, V>`, or a `#[derive(FlussoMap)]` struct | `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` |
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `custom` | the matching scalar, else `serde_json::Value` | by OpenSearch type |
 | `object` | a struct | object namespace |
 | `belongs_to`, `has_one` | `Option<Struct>` | object namespace |
 | `has_many`, `many_to_many` | `Vec<Struct>` | `Nested<S, T>` |
+| any join or `json` with `indexed: false` | as above | none; see [Stored-only fields](#stored-only-fields) |
 | `ids` aggregate | `Vec<i64>` or `Vec<String>` | `Number` / `Keyword` |
 
 Dates sit behind a feature so a caller picks `time` or `chrono` (or `String` for raw ISO-8601).

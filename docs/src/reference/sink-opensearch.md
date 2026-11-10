@@ -44,7 +44,7 @@ Each index is created up front from the resolved schema mapping with `dynamic: s
 
 {{#include generated/sink-opensearch-index.md}}
 
-A key is a setting name, with or without the `index.` prefix (`"mapping.total_fields.limit"` = `index.mapping.total_fields.limit`); nested tables flatten to dotted keys. The typical use is raising the mapping limits a wide document hits: `index.mapping.total_fields.limit` (1000 by default, and each `text`/`keyword` field costs 3–4 fields with `auto_subfields` on), `index.mapping.nested_fields.limit`, `index.mapping.nested_objects.limit`.
+A key is a setting name, with or without the `index.` prefix (`"mapping.total_fields.limit"` = `index.mapping.total_fields.limit`); nested tables flatten to dotted keys. The typical use is raising the mapping limits a wide document hits: `index.mapping.total_fields.limit` (1000 by default, and each `text`/`keyword` field costs 3–4 fields with `auto_subfields` on; see [Keep content without indexing it](../author/keep-content-unindexed.md) to shrink the mapping instead), `index.mapping.nested_fields.limit`, `index.mapping.nested_objects.limit`.
 
 **Precedence**, highest first:
 
@@ -111,7 +111,7 @@ With `auto_subfields` on, each string field is enriched:
 | `text`, `identifier` | analyzer + `.keyword` + `.keyword_lowercase` | the field: full-text; `.keyword`: exact filter, aggregation, exact sort; `.keyword_lowercase`: case-insensitive sort and lookup |
 | `keyword`, `enum`, `uuid` | `.text` (`flusso_code`) + `.keyword_lowercase` | the field: exact term, aggregation; `.text`: full-text; `.keyword_lowercase`: case-insensitive sort |
 
-Keyword subfields cap at `ignore_above: 256`. An `enum` with declared `variants` also gets a `.sort` subfield holding each value's rank; see [Field types](field-types.md#enum). Any key set in a field's `options` overrides the auto default for that field: your `analyzer` replaces the default, your `fields` replaces the subfields wholesale.
+Keyword subfields cap at `ignore_above: 256`. An `enum` with declared `variants` also gets a `.sort` subfield holding each value's rank; see [Field types](field-types.md#enum). Any key set in a field's `options` overrides the auto default for that field: your `analyzer` replaces the default, your `fields` replaces the subfields wholesale. A field with [`subfields: false`](field-types.md#subfields) keeps the analyzer and gets no subfields, and a field with [`indexed: false`](joins.md#indexed) is one disabled `object` with nothing under it mapped.
 
 ## Example
 

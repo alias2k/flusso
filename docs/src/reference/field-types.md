@@ -19,11 +19,32 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `date` | `date` | `date` | |
 | `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | |
 | `binary` | `bytea` | `binary` | Base64 on the wire. |
-| `json` | `json`, `jsonb` | `object` | Opaque; no children declared. |
+| `json` | `json`, `jsonb` | `object` | Opaque; no children declared. The strict root refuses any key inside it, so store it with [`indexed: false`](joins.md#indexed) or declare a [`map`](objects-and-maps.md). |
 | `custom` | as declared | as declared | See [custom](#custom). |
 | `geo` | see below | `geo_point` | Not a scalar; see [geo](#geo). |
 
-With `auto_subfields` on (the default), `text`/`identifier`/`keyword`/`enum`/`uuid` fields gain analyzer and subfield defaults from the sink. See [Sink: OpenSearch](sink-opensearch.md#analysis-and-subfields). A key set in `options` overrides the default for that field.
+With `auto_subfields` on (the default), `text`/`identifier`/`keyword`/`enum`/`uuid` fields gain analyzer and subfield defaults from the sink. See [Sink: OpenSearch](sink-opensearch.md#analysis-and-subfields). A key set in `options` overrides the default for that field, and [`subfields: false`](#subfields) drops the subfields from one field.
+
+| Sibling | Type | Default | Applies to | Meaning |
+| --- | --- | --- | --- | --- |
+| `subfields` | bool | `true` | `text`, `keyword`, `uuid` | `false` maps the field without the sink's automatic subfields. See [subfields](#subfields). |
+| `indexed` | bool | `true` | `json` (and every join) | `false` stores the value without indexing it. See [Joins: indexed](joins.md#indexed). |
+
+## subfields
+
+`subfields: false` maps one string field bare: no `.keyword`, `.keyword_lowercase` or `.text`, whatever the sink's `auto_subfields` says. A `text` field keeps its `flusso_text` analyzer, so it's still full-text searchable.
+
+```yaml
+- text: notes
+  required: false
+  subfields: false
+```
+
+- **What it saves.** Each subfield is a mapping field, so a `text`/`keyword` field drops from 3 to 1 toward `index.mapping.total_fields.limit`.
+- **What it costs.** No exact filter, aggregation, or sort on a `text` field; no case-insensitive sort or full-text search on a `keyword`. On the query side the handle is `NoSubfields`, so the accessors don't compile; see [Field handles](../query/field-handles.md#subfield-accessors).
+- **Only `text`, `keyword`, and `uuid`.** Any other type rejects the key at load. An `enum` with `variants` keeps its `.sort` subfield regardless.
+- **Changing it** moves the schema to a new content hash, so the index is rebuilt once.
+- **Omitted or `true`** keeps the sink-wide behaviour.
 
 ## text vs identifier
 

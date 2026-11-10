@@ -43,7 +43,7 @@ User::full_name().keyword_lowercase()  // Keyword → case-insensitive match and
 User::email().text()                   // Text    → full-text over a keyword
 ```
 
-A `wildcard` belongs on `.keyword()`, not the analyzed handle, which matches tokens. The accessors exist **only when the subfield is provisioned**, and the derive enforces it: a handle is stamped `WithSubfields` only when every OpenSearch sink has `auto_subfields` on and the field declares no custom `fields`. Otherwise the handle is `NoSubfields` and `.keyword()`/`.text()`/`.keyword_lowercase()` (and the `Text::any_of` and `Text::asc` sugar built on them) don't exist.
+A `wildcard` belongs on `.keyword()`, not the analyzed handle, which matches tokens. The accessors exist **only when the subfield is provisioned**, and the derive enforces it: a handle is stamped `WithSubfields` only when every OpenSearch sink has `auto_subfields` on, the field doesn't say [`subfields: false`](../reference/field-types.md#subfields), and it declares no custom `fields`. Otherwise the handle is `NoSubfields` and `.keyword()`/`.text()`/`.keyword_lowercase()` (and the `Text::any_of` and `Text::asc` sugar built on them) don't exist.
 
 ## Across several fields
 

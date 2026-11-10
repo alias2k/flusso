@@ -41,8 +41,8 @@ Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a
 | --- | --- |
 | index root | root table, schema, root filters, soft-delete |
 | object group | name; its fields are edited on the node |
-| join | verb, related table, key (`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, junction table + keys + junction filters for `many_to_many`), required (to-one), filters, the FK nullability note |
-| scalar field | **From the database** (column, SQL type, `NOT NULL`/nullable) · bridge rule · **In the document** (rename chips, type with description and *suggested* chip, `lowercase`/`trim`, required, default) · **Advanced · index tuning** drawer (`options` as key/JSON-value pairs with quick-adds) · **Filters** drawer where the kind takes them |
+| join | verb, related table, key (`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, junction table + keys + junction filters for `many_to_many`), required (to-one), **Indexed** (off stores the rows without indexing them; see [Joins](../reference/joins.md#indexed)), filters, the FK nullability note |
+| scalar field | **From the database** (column, SQL type, `NOT NULL`/nullable) · bridge rule · **In the document** (rename chips, type with description and *suggested* chip, `lowercase`/`trim`, **Auto subfields** on `text`/`keyword`/`uuid` and **Indexed** on `json` (each with a hint naming what turning it off loses; changing the type drops the one it no longer takes), required, default) · **Advanced · index tuning** drawer (`options` as key/JSON-value pairs with quick-adds) · **Filters** drawer where the kind takes them |
 | enum field | plus **Variants (ordered)** with add, move up/down, remove |
 | aggregate | related table, column to aggregate, `value_type`/`element_type`, key, `distinct` + junction filters (over a junction), filters |
 | geo | lat and lon columns, or a single json column |
@@ -65,8 +65,10 @@ A YAML editor over the selected index. Problems panel with a count, valid-YAML i
 | Tab | Shows |
 | --- | --- |
 | YAML | the canonical file that would be written |
-| Mapping | the derived OpenSearch mapping, database-free |
+| Mapping | the derived OpenSearch mapping, database-free; an opted-out field shows `subfields: false` or `indexed: false` |
 | Sample | a document built from one live row via the same path the sink uses; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
+
+The document tree marks a stored-only field (`indexed: false`) with a *not indexed* chip.
 
 Incomplete pieces (a field with a blank name mid-edit) are pruned from the live preview payload only, so a half-typed field doesn't error the panel.
 
