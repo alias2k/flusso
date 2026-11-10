@@ -72,6 +72,16 @@ pub(crate) fn document(field: &str, value: &str) -> GenericValue {
 }
 
 pub(crate) fn sink(base_url: &str) -> OpensearchSink {
+    sink_with(base_url, true)
+}
+
+/// The sink with `auto_subfields` off: `text`/`keyword` fields (and map keys)
+/// carry no subfields.
+pub(crate) fn bare_sink(base_url: &str) -> OpensearchSink {
+    sink_with(base_url, false)
+}
+
+fn sink_with(base_url: &str, auto_subfields: bool) -> OpensearchSink {
     let config = sink_opensearch::OpensearchConfig {
         url: kernel::Secret::Value(base_url.to_owned()),
         username: None,
@@ -86,7 +96,7 @@ pub(crate) fn sink(base_url: &str) -> OpensearchSink {
         number_of_replicas: 0,
         refresh_interval: "1s".to_owned(),
         text_analysis: sink_opensearch::TextAnalysis::Builtin,
-        auto_subfields: true,
+        auto_subfields,
         index_settings: Default::default(),
     };
     let name = kernel::SinkName::try_new("e2e").unwrap();
