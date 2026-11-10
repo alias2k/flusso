@@ -288,7 +288,14 @@ fn map_resolves_value_kind_onto_the_mapping() {
         .find(|f| f.name.as_ref() == "codes")
         .unwrap();
     assert_eq!(codes.mapping.mapping_type, MappingType::Object);
-    assert_eq!(codes.mapping.map_values, Some(MappingType::Keyword));
+    assert_eq!(
+        codes
+            .mapping
+            .map_values
+            .as_ref()
+            .map(|values| &values.mapping_type),
+        Some(&MappingType::Keyword)
+    );
     assert!(codes.nullable, "not required → nullable");
 }
 

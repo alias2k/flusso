@@ -66,7 +66,7 @@ fn example_value(field: &ResolvedField) -> Value {
     if let Some(values) = &field.mapping.map_values {
         return Value::Object(Map::from_iter([(
             "example_key".to_owned(),
-            example_scalar(values),
+            example_scalar(&values.mapping_type),
         )]));
     }
     if !field.children.is_empty() {
@@ -164,7 +164,7 @@ fn node(field: &ResolvedField) -> DocumentNode {
 
 fn type_label(mapping: &Mapping) -> String {
     if let Some(values) = &mapping.map_values {
-        return format!("map<{}>", mapping_type_name(values));
+        return format!("map<{}>", mapping_type_name(&values.mapping_type));
     }
     // A declared-order enum reads as `enum` (ordered), not the bare `keyword` it
     // maps to; a bare enum is indistinguishable from keyword and stays `keyword`.

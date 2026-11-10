@@ -69,15 +69,21 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
     }
 }
 
-/// The value mapping type of a `map` field — `Some(values.opensearch())` for a
-/// column declared [`FlussoType::Map`], `None` for everything else. This is the
+/// The mapping every key of a `map` field gets — the mapping a plain field of
+/// its `values` type resolves to — or `None` for any other field. This is the
 /// only thing distinguishing a `map`'s `object` mapping from a plain one.
-fn map_value_type(field: &Field) -> Option<MappingType> {
+fn map_value_type(field: &Field) -> Option<Box<Mapping>> {
     match &field.source {
         FieldSource::Column(Column {
             ty: FlussoType::Map { values },
             ..
-        }) => Some(values.opensearch()),
+        }) => Some(Box::new(Mapping {
+            mapping_type: values.opensearch(),
+            extra: values.default_options(),
+            map_values: None,
+            decimal: matches!(**values, FlussoType::Decimal),
+            enum_order: None,
+        })),
         _ => None,
     }
 }

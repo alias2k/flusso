@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +48,7 @@ pub enum FieldSource {
 
 /// A column-backed field: the column to read, its declared type and nullability,
 /// the transforms to apply, and a default to coalesce nulls to.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Column {
     pub column: common::ColumnName,
     /// The declared type — the OpenSearch mapping derives from it, and a live
@@ -67,6 +68,35 @@ pub struct Column {
     /// [`FlussoType`], because it is a property of this specific field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enum_order: Vec<String>,
+}
+
+/// Bumped when the index a `map` column produces changes shape, so every
+/// schema with a map gets a new content hash (a new physical index, rebuilt
+/// once) while no other schema moves. `1`: keys mapped as their `values` type.
+const MAP_KEY_MAPPING_REVISION: u8 = 1;
+
+/// Hashes the fields in declaration order (exactly what the derive did), plus
+/// [`MAP_KEY_MAPPING_REVISION`] for a `map` column only.
+impl Hash for Column {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self {
+            column,
+            ty,
+            nullable,
+            transforms,
+            default,
+            enum_order,
+        } = self;
+        column.hash(state);
+        ty.hash(state);
+        nullable.hash(state);
+        transforms.hash(state);
+        default.hash(state);
+        enum_order.hash(state);
+        if matches!(ty, FlussoType::Map { .. }) {
+            MAP_KEY_MAPPING_REVISION.hash(state);
+        }
+    }
 }
 
 /// A geographic point built from two same-row columns. Resolves to an
@@ -182,13 +212,14 @@ impl Relation {
 pub struct Mapping {
     pub mapping_type: MappingType,
     pub extra: BTreeMap<String, common::GenericValue>,
-    /// For a `map` field (a dynamic-key object), the mapping type of every
-    /// value; `None` for every other field. Internal metadata only — it is
-    /// **not** serialized into the index body (a map carries just
-    /// `{"type":"object","dynamic":true}`, the latter via `extra`). It exists so
-    /// a consumer turning the mapping into typed bindings can tell a `map` from a
-    /// plain `object` and offer a value-kind-typed handle.
-    pub map_values: Option<MappingType>,
+    /// For a `map` field (a dynamic-key object), the mapping every runtime key
+    /// gets — the same mapping a plain field of the map's `values` type
+    /// resolves to; `None` for every other field. A sink maps each key with it
+    /// (the OpenSearch sink as a `dynamic_templates` entry scoped to the map's
+    /// path); a consumer turning the mapping into typed bindings uses it to tell
+    /// a `map` from a plain `object` and offer a value-kind-typed handle.
+    /// Serialized as `values` beside the map's own `type`.
+    pub map_values: Option<Box<Mapping>>,
     /// Whether this numeric field came from a [`FlussoType::Decimal`] — a PG
     /// `numeric`/`decimal`. It maps to OpenSearch `double` like a true `double`,
     /// so [`mapping_type`](Self::mapping_type) alone can't tell them apart.
@@ -209,15 +240,20 @@ pub struct Mapping {
 }
 
 /// Serializes the way OpenSearch expects a field mapping — `{ "type": …, …extra }`
-/// — rather than the struct's two named fields. The `extra` settings sit beside
-/// `type`, exactly as they would in the index body.
+/// — rather than the struct's named fields. The `extra` settings sit beside
+/// `type`, exactly as they would in the index body. A `map` adds `values`: the
+/// mapping each of its keys gets.
 impl Serialize for Mapping {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(1 + self.extra.len()))?;
+        let len = 1 + self.extra.len() + usize::from(self.map_values.is_some());
+        let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("type", &self.mapping_type)?;
         for (key, value) in &self.extra {
             map.serialize_entry(key, value)?;
+        }
+        if let Some(values) = &self.map_values {
+            map.serialize_entry("values", values)?;
         }
         map.end()
     }

@@ -301,7 +301,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             // opaque `json` (no children) accepts anything; a group / to-one
             // object wants a struct.
             if let Some(values) = &resolved.mapping.map_values {
-                return check_map_type(field, inner, values);
+                return check_map_type(field, inner, &values.mapping_type);
             }
             if resolved.children.is_empty() {
                 return Ok(None);
@@ -391,8 +391,8 @@ fn check_map_type(
     values: &MappingType,
 ) -> syn::Result<Option<TokenStream>> {
     let os = values.name();
-    // Map value kinds carry no decimal flag (`map_values` is just a mapping
-    // type), so a `double`-valued map keys to the `Double` kind.
+    // The map handles have no decimal kind, so a `decimal`-valued map keys to
+    // the `Double` kind like a `double` one.
     let kind = kind_of(values, false);
     match map_container_value(inner) {
         Some(value_ty) => {
@@ -922,7 +922,12 @@ fn leaf_handle(
         // An `object` reaching here is either a `map` (dynamic-key object → a
         // kind-typed map handle) or an opaque `json` with no children; a group
         // or to-one join was handled by its own namespace.
-        MappingType::Object => match &resolved.mapping.map_values {
+        MappingType::Object => match resolved
+            .mapping
+            .map_values
+            .as_deref()
+            .map(|values| &values.mapping_type)
+        {
             Some(MappingType::Text) => simple("TextMap"),
             Some(MappingType::Keyword) => simple("KeywordMap"),
             Some(MappingType::Date) => simple("DateMap"),
