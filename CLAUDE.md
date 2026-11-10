@@ -16,7 +16,7 @@ endpoint is documented once, on a page under `docs/src/reference/`, and the how-
 there instead of restating it. Adapter option tables are **generated** (`just schema-gen` →
 `docs/src/reference/generated/`) and included by the adapter pages; edit the doc comment on the
 adapter's config struct, never the table. Docker recipes are `docs/src/deploy/docker.md`, the query
-manual is the fourteen chapters under `docs/src/query/`, the designer is
+manual is the fifteen chapters under `docs/src/query/`, the designer is
 `docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing
 architecture tour is `docs/src/contribute/` (this file stays the agent-facing index). Page
 types, templates, and the ownership rule are in `docs/STYLE.md`. Every crate has its own
@@ -116,6 +116,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   its `an_unindexed_subtree_is_stored_but_not_searchable` (issue #170) proves an `indexed: false`
   join/`json` lands in `_source`, matches no query, and accepts values a mapped field would refuse,
   and that a `subfields: false` text field maps bare but stays searchable.
+  `daemon`'s `fence` binary (issue #136) runs the real daemon over a real Postgres and OpenSearch
+  and reads OpenSearch **once, unpolled**, after each fence: applied and searchable, a position
+  behind unwatched WAL, a transaction split across batches, concurrent writers, a stalled sibling
+  sink. `sink-opensearch`'s `reindex` binary also pins the visibility a flush reports
+  (`a_flush_reports_when_its_documents_become_searchable`).
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
@@ -341,6 +346,35 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   the daemon's `failed_sink_engine_restarts_and_redelivers` /
   `failed_ingest_engine_restarts_and_resumes_the_stream`, the Postgres adapter's
   `a_reopened_stream_continues_the_numbering`.
+- **A fence only observes, per sink, at two levels (issue #136, ADR 0009).** A client reads the
+  **source position** after its commit (`pg_current_wal_lsn()`) and waits on the daemon's `Fence`
+  (`libs/3-daemon/src/fence.rs`; the CLI serves it as `GET /wait`) until a sink, or every sink, has
+  every commit at or before it **applied** (flush returned) or **searchable** (a refresh covered
+  it). Nothing is flushed or refreshed for a waiter, and a backfill is not covered. Three pieces,
+  each load-bearing: (1) `ChangeCapture::reached(Option<Position>) -> Option<SourcePosition>`
+  translates a stream position into the source's terms. The Postgres `Positions` map
+  (`cdc/ack.rs`) answers it from its entries plus a **horizon** (the LSN through which everything
+  read is registered: moved by the last change of a commit being emitted, and by a keepalive or a
+  filtered commit while nothing is buffered; seeded from the slot's `confirmed_flush_lsn`), and
+  `confirm(w)` is just `reached(w)`. The answer is **strictly below the next outstanding
+  change's LSN**, because the changes of one transaction share its commit LSN: a transaction
+  split across batches is neither confirmed nor fenced until its last change is in. (2) A sink
+  *reports* visibility (`FlushReport.visibility`: `Immediate` / `Within(d)` / `Deferred`); the
+  sink engine reports `Observer::on_position_applied` **before the ack** (the source forgets a
+  position once every sink confirmed it, so the fence must hear first) and
+  `on_position_searchable` from an in-order queue with a timer arm. The OpenSearch sink reports
+  `Within(refresh_interval)` for an unforced flush and, with `refresh_interval = "-1"`,
+  `Deferred` plus a refresh of the indexes it wrote on the next caught-up flush. (3) The fence
+  translates a position when it is applied and keeps that answer until it is searchable, and
+  keeps each level monotonic across a reopened source stream. Guards: the Postgres adapter's
+  `a_split_transaction_is_not_confirmed_until_its_last_change`,
+  `a_keepalive_during_a_flight_does_not_pin_the_resume_point`, `reached_*`,
+  `emitting_the_last_change_of_a_commit_moves_the_horizon`; the engine's
+  `a_position_becomes_searchable_when_its_refresh_interval_passes`,
+  `a_deferred_position_waits_for_the_next_immediate_flush`; the daemon's `fence::tests`
+  (`searchable_trails_applied_until_the_engine_reports_it`,
+  `a_stalled_sibling_blocks_an_all_sinks_fence_but_not_one_on_the_healthy_sink`,
+  `idle_source_progress_wakes_a_waiter`); the CLI's `http::tests`; and the `fence` live e2e.
 - **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
   **once** for all sinks. Snapshot rows go through the same path but are published *without* a
@@ -530,7 +564,9 @@ at `/metrics`, and an OTLP periodic push when the standard
 `telemetry/mod.rs`), defines the metrics and records them (`telemetry/observer.rs`'s `OtelObserver`,
 attached via `with_observer`; metric names/labels/buckets live here because they're a presentation
 choice), serves **two** HTTP surfaces (`http/mod.rs`): a **public** one (`/healthz` `/readyz`
-`/status` `/metrics`, unauthenticated) and a **private** one (`/indexes`, later `/reindex`; HTTP
+`/status` `/metrics` `/wait`, unauthenticated; `/wait` long-polls the daemon's `Fence`, default
+5 s, capped at 60 s: `200` reached, `408` timed out, `400`/`404` refused, `503` before the source
+is live) and a **private** one (`/indexes`, later `/reindex`; HTTP
 Basic auth in `http/auth.rs`, default `admin`/`flusso` with a loud startup warning), both reading
 the daemon's `Status`, and owns SIGINT/SIGTERM. It binds **both** listeners up front (a bad
 `--public-address`/`--private-address` fails fast), then `Daemon::with_observer(otel).start()`
@@ -846,6 +882,18 @@ next page once the current one is consumed; its `Drop` closes a still-pinned poi
 Guarded by `tests::cursor`, `tests::walk`, and the `cursor_paging` live e2e (helpers shared in
 `tests/common/`).
 
+**Fenced reads (issue #136, ADR 0009).** Reads still go straight to OpenSearch; the one thing the
+client asks flusso is to wait. `Client::flusso(url)` sets the daemon's public address
+(`fence_sink`, `fence_timeout` tune it) and `Client::after(position)` returns a **clone** carrying
+the position: the hook is in the transport (`Client::fence_before` in `sdk/query/src/fence.rs`,
+called by `get_one` → applied, and by `search_at`/`count_at`/`open_pit`/`search_pit`/`msearch_raw`
+→ searchable), so every terminal is covered with no builder change, and a fenced client waits once
+per level (an `AtomicU8` its clones share). A new read path must call `fence_before`. A fence
+never falls back to a stale read: `Error::FenceTimeout`/`FenceUnavailable`/`FenceRefused`.
+`position::CURRENT_SQL` is the statement; the `diesel`/`diesel-async` features add
+`position::{diesel,diesel_async}::current` (backend types only, no driver). Guarded by
+`tests::fence` (a local TCP stub standing in for both servers).
+
 ## Keeping this file current
 
 This file is a living index — keep it accurate as part of normal work, no separate ask
@@ -880,7 +928,8 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | --- | --- |
 | The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, recv → apply → flush → ack, failure policies, `SinkControl::Reindex`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
-| Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs` |
+| Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
+| Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: entries + horizon) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/sink_engine.rs` (`report_positions`, the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |
 | Adapter assembly (build the running source/sinks): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surfaces, auth, signals | `apps/cli/src/` — `telemetry/mod.rs` (traces), `telemetry/metrics.rs` (meter provider + `in_flight` gauge), `telemetry/observer.rs` (`OtelObserver`), `http/mod.rs` (public + private routers + `serve`), `http/auth.rs` (Basic auth), `commands/run.rs` (orchestration + signals) |
@@ -898,14 +947,14 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
-| Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk) |
+| Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
-| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are keyset with an opt-in point-in-time: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position / source position / fence, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are keyset with an opt-in point-in-time, 0009 a fence waits on the source's own position, per sink, at two observed levels: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
 
