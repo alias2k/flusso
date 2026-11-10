@@ -13,6 +13,10 @@
 //! up), so a source is reusable and unit-testable without constructing one, and
 //! the `flusso.toml` shape can evolve without recompiling the backend.
 
+mod columns;
+
+pub use columns::{ColumnUse, relation_columns, root_columns, row_link};
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -139,12 +143,7 @@ impl SourceSpec {
 /// `db_schema` to `out`.
 fn collect_link_columns(fields: &[Field], db_schema: &DatabaseSchema, out: &mut PreImageColumns) {
     for field in fields {
-        let link = field.relation().and_then(|relation| match relation.key() {
-            RelationKey::Direct(foreign_key) => Some((relation.table(), foreign_key)),
-            RelationKey::Through(through) => Some((&through.table, &through.left_key)),
-            RelationKey::Local(_) => None,
-        });
-        if let Some((table, column)) = link {
+        if let Some((table, column)) = field.relation().and_then(row_link) {
             let columns = out
                 .entry(QualifiedTable::new(db_schema.clone(), table.clone()))
                 .or_default();

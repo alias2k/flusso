@@ -60,7 +60,7 @@ pub struct IndexScope {
 /// document is often touched by several changes in one transaction), and builds
 /// each unique id once.
 ///
-/// Note that `resolve` takes the table, key, and pre-image as plain values
+/// Note that `resolve` takes the table, key, and row images as plain values
 /// rather than a capture event: document construction is independent of how the change was
 /// captured.
 #[async_trait]
@@ -71,11 +71,16 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
     /// `before` is the row's pre-image, when the change carried one: resolve
     /// must also return the documents that embedded the row's old version, so
     /// a deleted or re-parented child leaves its old parent.
+    ///
+    /// `after` is an update's post-image. With both images, resolve may leave
+    /// out the documents that read none of the columns the update changed;
+    /// with either missing it must not.
     async fn resolve(
         &self,
         table: &TableName,
         key: &RowKey,
         before: Option<&RowImage>,
+        after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>>;
 
     /// Assemble one document, or report it deleted if its root row is absent.

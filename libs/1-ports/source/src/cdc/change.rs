@@ -9,10 +9,14 @@ use crate::{RowImage, RowKey};
 /// and aggregates — at build time. This keeps every mechanism (WAL, polling, …)
 /// identical from the engine's point of view.
 ///
-/// The one exception is the optional [`RowImage`] pre-image (`before`). It
-/// never builds a document; resolution reads it to find the documents that
-/// embedded the row's *old* version — a deleted or re-parented child whose
-/// link to its parent no longer exists in the source.
+/// The exceptions are the optional [`RowImage`]s. Neither builds a document:
+///
+/// - `before`, the pre-image: resolution reads it to find the documents that
+///   embedded the row's *old* version — a deleted or re-parented child whose
+///   link to its parent no longer exists in the source.
+/// - `after`, an update's post-image: compared with `before`, it tells
+///   resolution which columns the update changed, so a path that uses none of
+///   them is skipped. Without both images every path is resolved.
 ///
 /// The mechanism reports *raw per-table* changes. Mapping a change in a joined
 /// or junction table back to the parent documents that must be rebuilt is the
@@ -33,6 +37,10 @@ pub enum ChangeEvent {
         /// The row before an update, when the change feed carried it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         before: Option<RowImage>,
+        /// The row after an update, when the change feed carried it beside a
+        /// `before`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<RowImage>,
     },
 
     /// A row was deleted.
@@ -66,6 +74,15 @@ impl ChangeEvent {
             ChangeEvent::Upsert { before, .. } | ChangeEvent::Delete { before, .. } => {
                 before.as_ref()
             }
+        }
+    }
+
+    /// The row's post-image: an update's new column values, when the change
+    /// feed carried them. Always `None` for a delete.
+    pub fn after(&self) -> Option<&RowImage> {
+        match self {
+            ChangeEvent::Upsert { after, .. } => after.as_ref(),
+            ChangeEvent::Delete { .. } => None,
         }
     }
 }
