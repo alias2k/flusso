@@ -46,8 +46,8 @@ The `#[ignore]`d suites spin up containers with `testcontainers`. They're legiti
 | `source-postgres` | `partitions` | a partitioned root and child: leaf changes arrive under the parent's name and resolve, a deleted child's pre-image reaches its old parent, backfill reads the partitions |
 | `source-postgres` | `continuity` | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |
 | `source-postgres` | `record_pgoutput` | not a test: re-records the decode bench's fixture from a real Postgres (see [Benchmarks](benchmarks.md#re-recording-the-pgoutput-fixture)) |
-| `engine` | `wal` | which op the engine emits per change, against a recording sink |
-| `engine` | `pipeline` | the full source to OpenSearch path, reading the index back over HTTP: live insert/update/delete across key types, soft-delete tombstoning, backfill, and the two seed-marker contradictions |
+| `engine` | `wal` | which op the engine emits per change, against a recording sink, including none for an update of columns no document reads |
+| `engine` | `pipeline` | the full source to OpenSearch path, reading the index back over HTTP: live insert/update/delete across key types, soft-delete tombstoning, backfill, the two seed-marker contradictions, and an unread-column update leaving `_version` alone |
 | `sink-opensearch` | `reindex` | generations, alias swap, retracted markers |
 | `flusso-query-e2e` | `combined_search` | generation-suffix normalization against a real cluster |
 

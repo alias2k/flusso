@@ -11,13 +11,14 @@ The source abstractions for `flusso` — split into two independent halves, *wha
 | [`validate_indexes`] | Source-independent half of the schema/DB type check; a source supplies only a [`Catalog`] over its column types |
 | [`CaptureProvisioning`] | Reports whether a source can stream an index's tables and — when privileged — provisions the gap |
 | [`RowKey`] | A row's primary key as ordered column/value pairs |
+| [`ColumnUse`] | Which columns of a table a part of a document reads ([`root_columns`], [`relation_columns`]), and whether an update [touched](ColumnUse::touched_by) them |
 | [`SnapshotTable`] | A schema-qualified table to snapshot when seeding an index |
 | [`SourceSpec`] | The source's own view of what to build — the enabled indexes + their schemas, a subset of the top-level config |
 | [`SourceError`] / [`Result`] | The common error type |
 
 The two responsibilities each get their own module. Neither references the other; the engine is the only thing that bridges them. Mix any change mechanism with any document builder, and test or replace either without touching the other.
 
-[`cdc`] yields thin [`ChangeEvent`](cdc::ChangeEvent)s — table and key (plus an optional pre-image, used only to find the documents a deleted or re-parented row used to sit in), each tagged with a [`Position`](kernel::Position) — and the engine hands positions back through [`confirm`](cdc::ChangeCapture::confirm) once every sink has made the documents durable. Both halves of that contract are plain data, so a change can cross a process boundary. Logical replication (WAL) is the first mechanism; polling or triggers can follow.
+[`cdc`] yields thin [`ChangeEvent`](cdc::ChangeEvent)s — table and key (plus an optional pre-image, which finds the documents a deleted or re-parented row used to sit in, and an update's post-image; together they show which columns changed), each tagged with a [`Position`](kernel::Position) — and the engine hands positions back through [`confirm`](cdc::ChangeCapture::confirm) once every sink has made the documents durable. Both halves of that contract are plain data, so a change can cross a process boundary. Logical replication (WAL) is the first mechanism; polling or triggers can follow.
 
 [`validate_indexes`] leans on the fact that a self-describing schema states its own types, so the mapping derives without a database. A reachable database is used only to confirm the declared types and nullability match the real columns.
 

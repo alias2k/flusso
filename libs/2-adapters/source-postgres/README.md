@@ -37,7 +37,8 @@ TLS.
   table's catalog primary key, not the replica-identity columns (all of them
   under `REPLICA IDENTITY FULL`); an update or delete also carries the old row's
   identity columns as its pre-image, which is how a deleted or re-parented child
-  is traced to its old parent. The slot advances
+  is traced to its old parent. An update with a pre-image also carries its new
+  row as a post-image (an unchanged TOASTed value takes the old one). The slot advances
   only as far as the engine has durably written — at-least-once. While the
   watched tables are idle it still advances from the server's keepalives, so
   unrelated write traffic never pins WAL retention. `continuity` reports,
@@ -49,7 +50,9 @@ TLS.
 - **`DocumentBuilder`** resolves which documents a changed row affects and
   assembles each one. A root-table row that a self-join also folds in (a
   `has_many: children` back at the same table) resolves to its own document
-  plus every one that embeds it, to the declared depth. It also implements
+  plus every one that embeds it, to the declared depth. An update whose two
+  images agree on every column a document reads resolves to nothing for it;
+  without both images everything resolves. It also implements
   `Catalog`, the store-specific half of index validation (a column's SQL type +
   nullability).
 - **`CaptureProvisioning`** takes the tables an index reads, reports stream

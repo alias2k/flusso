@@ -107,7 +107,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   root-table change resolves to its own id *and* walks every path back at the root — issue #167),
   and `a_root_filtered_tree_indexes_only_top_level_rows` (the guide's tree with a `parent_id
   is_null` root filter: only top-level rows are documents across child/grandchild changes,
-  re-parenting, promotion, and demotion). `sink-opensearch`'s `map_keys` binary (issue #177)
+  re-parenting, promotion, and demotion), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
+  only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
+  `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
+  kind, and the no-pre-image fallback). `sink-opensearch`'s `map_keys` binary (issue #177)
   proves on a live OpenSearch that map keys take their `values` type under the strict root and
   inside a `nested` array, and that a value a plain field would refuse is an item-level rejection;
   its `an_unindexed_subtree_is_stored_but_not_searchable` (issue #170) proves an `indexed: false`
@@ -471,7 +474,15 @@ when `manage_replica_identity` (default on) and the role owns the table — unde
 (a partition added later is caught at the next start); an unclosable gap is warned with
 the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
-which mark every column under `FULL`. A third source-neutral capability is
+which mark every column under `FULL`. **An update that changes no column a document reads rebuilds nothing**
+(issue #169): an update with a pre-image also carries a post-image (`ChangeEvent::Upsert.after`,
+built in `cdc/stream.rs` via `pgoutput::post_image`; an unchanged-TOAST `'u'` cell takes the old
+identity column's value), and `PgDocumentBuilder::resolve` emits the root row's own id only when
+`source::root_columns` was touched and walks a path only when `source::relation_columns` of its
+last relation was (`ColumnUse::touched_by`: a missing image or column, or a key change, counts as
+touched). Those two functions (`libs/1-ports/source/src/spec/columns.rs`, beside `row_link`, which
+`pre_image_columns` and the resolver's `link_on_row` share) are the one derivation of "which
+columns a path reads" — fields, filters, `order_by`, aggregate input, link; a raw filter means all. A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers
 "the type of *this* column" and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
