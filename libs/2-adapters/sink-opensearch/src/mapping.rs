@@ -5,6 +5,7 @@
 use kernel::{MappingType, ResolvedField};
 
 use crate::config::TextAnalysis;
+use crate::settings::IndexSettings;
 use serde_json::{Map, Value, json};
 use sink::to_json;
 
@@ -17,6 +18,9 @@ pub(crate) struct IndexOptions {
     pub(crate) number_of_replicas: u32,
     pub(crate) text_analysis: TextAnalysis,
     pub(crate) auto_subfields: bool,
+    /// The user's `index_settings`, already layered (sink-wide, then this
+    /// index's own).
+    pub(crate) settings: IndexSettings,
 }
 
 /// The subfield key holding the exact, case-sensitive value of a string field —
@@ -99,22 +103,35 @@ fn field_path(prefix: &str, field: &ResolvedField) -> String {
 }
 
 /// Build the `PUT /{index}` request body: a `dynamic: strict` mapping with one
-/// typed property per field, the shard counts, `refresh_interval: -1` for bulk
-/// seeding, and the `flusso_*` analysis definitions the field shapes reference.
+/// typed property per field, the index settings, `refresh_interval: -1` for
+/// bulk seeding, and the `flusso_*` analysis definitions the field shapes
+/// reference.
+///
+/// Settings precedence, lowest first: the typed shard counts, the user's
+/// layered `index_settings`, then the keys flusso owns.
 pub(crate) fn build_index_body(fields: &[ResolvedField], options: &IndexOptions) -> Value {
     let mut enum_sorts = Vec::new();
     collect_enum_sorts(fields, "", &mut enum_sorts);
+    let typed = IndexSettings::from_trusted([
+        (
+            "index.number_of_shards".to_owned(),
+            json!(options.number_of_shards),
+        ),
+        (
+            "index.number_of_replicas".to_owned(),
+            json!(options.number_of_replicas),
+        ),
+    ]);
+    let owned = IndexSettings::from_trusted([("index.refresh_interval".to_owned(), json!("-1"))]);
+    let mut settings = typed.layered(&options.settings).layered(&owned).to_nested();
+    // Always emitted so an explicit `analyzer: flusso_text` works even when
+    // `auto_subfields` is off; an unused analyzer is harmless.
+    settings.insert(
+        "analysis".to_owned(),
+        build_analysis(options.text_analysis, &enum_sorts),
+    );
     json!({
-        "settings": {
-            "index": {
-                "refresh_interval": "-1",
-                "number_of_shards": options.number_of_shards,
-                "number_of_replicas": options.number_of_replicas,
-            },
-            // Always emitted so an explicit `analyzer: flusso_text` works even
-            // when `auto_subfields` is off; an unused analyzer is harmless.
-            "analysis": build_analysis(options.text_analysis, &enum_sorts),
-        },
+        "settings": settings,
         "mappings": {
             "dynamic": "strict",
             "properties": build_properties(fields, options, ""),

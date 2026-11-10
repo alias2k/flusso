@@ -27,6 +27,7 @@ fn opts() -> IndexOptions {
         number_of_replicas: 1,
         text_analysis: TextAnalysis::Builtin,
         auto_subfields: true,
+        settings: IndexSettings::default(),
     }
 }
 
@@ -299,4 +300,48 @@ fn other_mapping_type_uses_its_raw_name() {
         opensearch_type(&MappingType::Other("binary".to_owned())),
         "binary"
     );
+}
+
+fn settings(value: Value) -> IndexSettings {
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn user_settings_merge_into_the_index_settings_over_the_typed_options() {
+    let options = IndexOptions {
+        settings: settings(json!({
+            "mapping.total_fields.limit": 5000,
+            "number_of_replicas": 2,
+        })),
+        ..opts()
+    };
+    let index = &build_index_body(&[], &options)["settings"]["index"];
+    assert_eq!(index["mapping"]["total_fields"]["limit"], 5000);
+    assert_eq!(
+        index["number_of_replicas"], 2,
+        "index_settings beat the typed option"
+    );
+    assert_eq!(
+        index["number_of_shards"], 1,
+        "an untouched typed option stays"
+    );
+}
+
+#[test]
+fn per_index_settings_beat_sink_wide_ones_and_flusso_keys_beat_both() {
+    let sink_wide =
+        settings(json!({ "mapping.total_fields.limit": 2000, "max_result_window": 20000 }));
+    let per_index = settings(json!({ "mapping": { "total_fields": { "limit": 3000 } } }));
+    let owned_attempt =
+        IndexSettings::from_trusted([("index.refresh_interval".to_owned(), json!("1s"))]);
+    let options = IndexOptions {
+        settings: sink_wide.layered(&per_index).layered(&owned_attempt),
+        ..opts()
+    };
+    let body = build_index_body(&[], &options);
+    let index = &body["settings"]["index"];
+    assert_eq!(index["mapping"]["total_fields"]["limit"], 3000);
+    assert_eq!(index["max_result_window"], 20000);
+    assert_eq!(index["refresh_interval"], "-1");
+    assert!(body["settings"]["analysis"]["analyzer"]["flusso_code"].is_object());
 }
