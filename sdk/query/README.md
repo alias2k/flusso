@@ -70,7 +70,18 @@ Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, ne
 | `uuid` | `uuid::Uuid` as a keyword value |
 | `time`, `chrono` | the date types for `date`/`timestamp` fields |
 
-Targets OpenSearch and Elasticsearch 7.x, which share the query DSL.
+## Paging
+
+Offset paging (`.from(n).size(k)`) re-runs the query each page. For infinite scroll or an export, page by **cursor** instead: every page reads one snapshot, so CDC writes and a reindex mid-walk never shift it.
+
+```rust,ignore
+let page = User::query().size(50).cursor(params.cursor).send(client).await?;
+// page.next: Option<PageCursor> — an opaque string; send it back for the next page
+```
+
+See [paging](https://alias2k.github.io/flusso/query/results-and-escape-hatch.html#paging) in the manual.
+
+Targets OpenSearch and Elasticsearch 7.x, which share the query DSL. Cursor paging needs OpenSearch ≥ 2.4.
 
 ## Learn more
 

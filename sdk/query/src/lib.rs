@@ -2,7 +2,8 @@
 //!
 //! Targets OpenSearch and Elasticsearch 7.x, which share the `_search` query DSL
 //! this crate emits; any future backend divergence is handled on the [`Client`],
-//! not by separate crates.
+//! not by separate crates. One exception: cursor paging ([`Search::cursor`])
+//! needs OpenSearch ≥ 2.4.
 //!
 //! This is the **runtime** layer described in the
 //! [Query part of the manual](https://alias2k.github.io/flusso/query/overview.html):
@@ -30,6 +31,11 @@
 //!   query across all the union's indexes, one relevance-ranked result list,
 //!   each hit decoded into the variant matching its physical `_index`.
 //! - Typed [`SearchResponse`] / [`Hit`].
+//! - Two ways to page: by offset (`from`/`size`), or by [`PageCursor`] —
+//!   [`Search::cursor`] / [`MultiSearch::cursor`] walk one consistent snapshot
+//!   of the index (a point-in-time + `search_after`), unaffected by writes or a
+//!   reindex mid-walk; [`SearchResponse::next`] carries the opaque token that
+//!   resumes after each page. See the `cursor` module docs.
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); shaping returned
 //! nested arrays ([`Search::filter_nested`] with [`Nested::matching`], via

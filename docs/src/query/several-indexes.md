@@ -47,6 +47,8 @@ Two semantics:
 - A **query** on a field that exists in only one index is fine; it doesn't match in the others.
 - A **sort** on such a field is rejected by OpenSearch unless it carries an `unmapped_type`. Sort blended results by relevance, or on shared fields.
 
+The blended list pages like a single index, by offset or by cursor; see [Paging](results-and-escape-hatch.md#paging). A cursor breaks ties on `_index` then `_id`, since two indexes can share an id.
+
 ## Generation suffix normalization
 
 The query goes through the hash alias `{logical}_{hash}`, but OpenSearch reports the concrete generation `{logical}_{hash}_{n}` in each hit's `_index`. The decoder collapses that suffix back to the union's known targets before dispatch, anchored on those targets rather than a blind trailing-digits trim, because an eight-hex hash can itself be all digits. A hit from an index no variant claims is an error, not a skip. The client's index prefix is stripped the same way.

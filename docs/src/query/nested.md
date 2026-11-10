@@ -53,6 +53,8 @@ for hit in &page.hits {
 
 `matching(q)` takes a `Query<Orders>`; `.sort`, `.size`, `.from` are optional, and so is `matching` itself (drop it to keep every child but sort or cap). The client fetches the nested matches through `inner_hits` and **replaces** `hit.source.orders` with the subset before deserializing. A parent with no matching children still comes back, with an empty array; pair with `any` to drop those too.
 
+Under a [page cursor](results-and-escape-hatch.md#cursor-paging) the projection reads the same snapshot as its parents, but its elements still page by `.from`/`.size` within each parent (`inner_hits` takes no cursor, and OpenSearch caps `from + size` there at `index.max_inner_result_window`, 100 by default).
+
 ## Depth
 
 `filter_nested` shapes one level. Matching on deeper nesting inside the predicate works (`Orders::items().any(..)`) and the returned orders honor it, but returning a filtered `items` array inside each order is left to the `raw` hatch.
