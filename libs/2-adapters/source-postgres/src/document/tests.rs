@@ -34,6 +34,8 @@ fn builder() -> PgDocumentBuilder {
                 transforms: Vec::new(),
                 default: None,
                 enum_order: Vec::new(),
+                subfields: true,
+                indexed: true,
             }),
         }],
     };

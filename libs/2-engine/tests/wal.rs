@@ -499,6 +499,7 @@ fn users_with_relations_spec() -> SourceSpec {
         filters: None,
         order_by: None,
         limit: None,
+        indexed: true,
         fields,
     };
     let relation = |name: &str, relation: Relation| Field {
@@ -559,6 +560,7 @@ fn users_with_recent_orders_spec() -> SourceSpec {
         })]),
         order_by: None,
         limit: None,
+        indexed: true,
         fields: vec![column_field("total", "total")],
     };
     let schema = IndexSchema {

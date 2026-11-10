@@ -29,6 +29,8 @@ fn field(name: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }
@@ -64,6 +66,7 @@ fn join(target: &str, kind: JoinKind, fields: Vec<Field>) -> Join {
         filters: None,
         order_by: None,
         limit: None,
+        indexed: true,
         fields,
     }
 }
