@@ -821,6 +821,31 @@ async fn a_flush_reports_when_its_documents_become_searchable() {
         "the caught-up flush refreshes what the earlier one left",
     );
     assert_eq!(search_count(&client, &base, &hash_alias).await, before + 1);
+
+    // ── A restart forgets what was left unrefreshed, so staging refreshes ────
+    manual
+        .apply(&upsert(&index, "4", &document(4)))
+        .await
+        .unwrap();
+    assert_eq!(
+        manual.flush(false).await.unwrap().visibility,
+        Visibility::Deferred,
+    );
+    assert_eq!(search_count(&client, &base, &hash_alias).await, before + 1);
+    let restarted = OpensearchSink::from_config(
+        &kernel::SinkName::try_new("test").unwrap(),
+        &sink_opensearch::OpensearchConfig {
+            refresh_interval: "-1".to_owned(),
+            ..sink_config(&base)
+        },
+    )
+    .unwrap();
+    restarted.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        search_count(&client, &base, &hash_alias).await,
+        before + 2,
+        "a new run starts with everything written so far searchable",
+    );
 }
 
 async fn flat_settings(client: &reqwest::Client, base: &str, index: &str) -> Value {

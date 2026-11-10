@@ -24,10 +24,12 @@ The project's nouns, each with a pointer to the page that owns it.
 | **reindex** | Rebuilding one index into a fresh generation while the current one serves, then swapping the alias. | [Reindex without downtime](../operate/reindex.md) |
 | **reverse resolution** | Mapping a changed related row back to the parent documents it affects. | [Joins](joins.md#what-a-related-change-rebuilds) |
 | **root table** | The table a schema's documents are built from; one document per row (subject to root filters). | [Schema top-level keys](schema-top-level.md) |
+| **searchable** | A fence level: a search at the destination sees the change. Trails applied by the destination's refresh while a backlog drains. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **seed marker** | The `flusso_meta` record saying an index's generation is fully backfilled. | [Sink: OpenSearch](sink-opensearch.md#seeding) |
 | **sink** | A destination: OpenSearch or stdout. Each runs its own engine over its own lane; `backfill = false` opts a stateless one out of seeding. | [flusso.toml top level](config-toml.md#several-sinks) |
 | **slot** | The Postgres logical replication slot flusso consumes. Its confirmed position is the resume point. | [Source: Postgres](source-postgres.md#capture) |
 | **slot lag** | Bytes between the WAL head and the slot's confirmed position. | [Metrics](metrics.md) |
 | **soft-delete** | A row marked deleted by a column or field rather than a `DELETE`; emits a tombstone. | [Filters and soft_delete](filters-and-soft-delete.md#soft_delete) |
+| **source position** | A point in the source's own change order, as a client reads it after a commit (Postgres: `pg_current_wal_lsn()`). What a fence waits for. | [Read your own writes](../operate/read-your-writes.md) |
 | **tombstone** | A `delete` operation for a document whose row was deleted, soft-deleted, or left the root filter set. | [Filters and soft_delete](filters-and-soft-delete.md) |
 | **type-first** | The schema's field grammar: `- <type>: <name>` plus siblings. | [Schema top-level keys](schema-top-level.md#fields) |

@@ -12,16 +12,26 @@
 //!   keepalive or a filtered-out commit while nothing is buffered, so it keeps
 //!   following the WAL while the watched tables are idle.
 //!
-//! One question answers both confirmation and fences, [`Positions::reached`]:
-//! with every change through position `p` processed, which LSN is fully
-//! covered? Nothing outstanding past `p` → the horizon. Otherwise the highest
-//! LSN at or before `p` that lies *strictly below* the next outstanding
-//! change's. Strictly, because the changes of one transaction share its commit
-//! LSN: a transaction split across two batches is not covered until its last
-//! change is, or a restart would resume past the commit and lose the rest.
+//! One question drives both confirmation and fences: with every change through
+//! position `p` processed, which LSN is fully covered? Nothing outstanding
+//! past `p` → the horizon. Otherwise everything *strictly below* the next
+//! outstanding change's commit LSN. Strictly, because the changes of one
+//! transaction share its commit LSN: a transaction split across two batches is
+//! not covered until its last change is, or a restart would resume past the
+//! commit and lose the rest.
 //!
-//! Confirmation is **cumulative**: confirming `p` sets the resume point to
-//! `reached(p)` and drops the entries at or before `p`.
+//! The two callers stop at different points below that commit:
+//!
+//! - a **fence** ([`Positions::reached`]) may claim everything short of it,
+//!   one byte before its end, so unwatched WAL in between does not hold a
+//!   waiter back;
+//! - **confirmation** ([`Positions::confirm`]) stops at the end of the last
+//!   *covered* commit. The server skips a transaction whose commit record
+//!   starts before the confirmed LSN, so the slot must never be advanced into
+//!   the middle of an unprocessed commit's record.
+//!
+//! Confirmation is **cumulative**: confirming `p` advances the resume point
+//! and drops the entries at or before `p`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -76,28 +86,44 @@ struct Inner {
 }
 
 impl Inner {
-    fn reached(&self, seq: Option<u64>) -> u64 {
-        let outstanding = match seq {
+    /// The first change still outstanding once everything at or before `seq`
+    /// is processed.
+    fn next_outstanding(&self, seq: Option<u64>) -> Option<u64> {
+        match seq {
             Some(seq) => seq
                 .checked_add(1)
                 .and_then(|next| self.entries.range(next..).next()),
             None => self.entries.iter().next(),
-        };
-        let Some((_, &next_lsn)) = outstanding else {
+        }
+        .map(|(_, lsn)| *lsn)
+    }
+
+    /// What a fence may claim: every commit ending at or before the returned
+    /// LSN is processed. With a change outstanding that is everything short
+    /// of its commit, whatever unwatched WAL lies in between.
+    fn reached(&self, seq: Option<u64>) -> u64 {
+        match self.next_outstanding(seq) {
+            None => self.horizon.max(self.confirmed_lsn),
+            Some(next_lsn) => next_lsn.saturating_sub(1),
+        }
+    }
+
+    /// What the slot may be advanced to: like [`reached`](Self::reached), but
+    /// with a change outstanding it stops at the **end of the last covered
+    /// commit**. The server skips a transaction whose commit record *starts*
+    /// before the confirmed LSN, so confirming into the outstanding commit's
+    /// record would lose it on restart.
+    fn confirmable(&self, seq: u64) -> u64 {
+        let Some(next_lsn) = self.next_outstanding(Some(seq)) else {
             return self.horizon.max(self.confirmed_lsn);
         };
-        let covered = seq
-            .and_then(|seq| {
-                self.entries
-                    .range(..=seq)
-                    .rev()
-                    .map(|(_, lsn)| *lsn)
-                    .find(|lsn| *lsn < next_lsn)
-            })
-            .unwrap_or(0);
-        covered
+        self.entries
+            .range(..=seq)
+            .rev()
+            .map(|(_, lsn)| *lsn)
+            .find(|lsn| *lsn < next_lsn)
+            .unwrap_or(0)
             .max(self.confirmed_lsn)
-            .min(next_lsn.saturating_sub(1))
     }
 }
 
@@ -170,8 +196,7 @@ impl Positions {
     /// Every position at or before `seq` is durable downstream.
     pub(crate) fn confirm(&self, seq: u64) {
         let mut inner = self.lock();
-        let reached = inner.reached(Some(seq));
-        inner.confirmed_lsn = inner.confirmed_lsn.max(reached);
+        inner.confirmed_lsn = inner.confirmable(seq);
         let Some(after) = seq.checked_add(1) else {
             inner.entries.clear();
             return;

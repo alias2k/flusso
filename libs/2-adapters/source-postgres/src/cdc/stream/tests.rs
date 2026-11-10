@@ -97,7 +97,7 @@ fn emitting_the_last_change_of_a_commit_moves_the_horizon() {
         "half a transaction covers nothing of its commit"
     );
     let (second, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 0);
+    assert_eq!(ack.reached(Some(first.0)), 99, "still short of the commit");
     assert_eq!(ack.reached(Some(second.0)), 100);
     assert!(decode.next_change().is_none());
 }
@@ -113,6 +113,7 @@ fn a_commit_behind_another_keeps_the_horizon_at_the_emitted_one() {
     let (first, _) = decode.next_change().unwrap();
     assert_eq!(ack.reached(Some(first.0)), 100);
     let (second, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(first.0)), 199, "short of the next commit");
     assert_eq!(ack.reached(Some(second.0)), 200);
 }
 

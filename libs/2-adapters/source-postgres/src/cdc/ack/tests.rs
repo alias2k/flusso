@@ -115,7 +115,11 @@ fn reached_is_the_horizon_once_nothing_is_outstanding() {
     let p = positions(5, 0);
     assert_eq!(p.reached(None), 5, "a stream that emitted nothing");
     let a = emit(&p, 10);
-    assert_eq!(p.reached(None), 5, "the change is outstanding");
+    assert_eq!(
+        p.reached(None),
+        9,
+        "everything short of the outstanding commit"
+    );
     assert_eq!(p.reached(Some(a)), 10);
     p.read_through(40);
     assert_eq!(p.reached(Some(a)), 40, "idle WAL moves it on");
@@ -128,9 +132,30 @@ fn reached_stops_below_the_next_outstanding_change() {
     let b = emit(&p, 20);
     let c = emit(&p, 30);
     p.read_through(90);
-    assert_eq!(p.reached(Some(a)), 10);
-    assert_eq!(p.reached(Some(b)), 20);
+    assert_eq!(
+        p.reached(Some(a)),
+        19,
+        "unwatched WAL before the next commit is covered"
+    );
+    assert_eq!(p.reached(Some(b)), 29);
     assert_eq!(p.reached(Some(c)), 90);
+}
+
+/// A fence may claim everything short of the next commit; the slot may not.
+/// The server skips a transaction whose commit record starts before the
+/// confirmed LSN, so confirmation stays at the end of the last covered commit.
+#[test]
+fn confirmation_stops_at_a_commit_boundary_where_a_fence_goes_further() {
+    let p = positions(0, 0);
+    let a = emit(&p, 10);
+    emit(&p, 20);
+    assert_eq!(p.reached(Some(a)), 19);
+    p.confirm(a);
+    assert_eq!(
+        p.confirmed_lsn(),
+        10,
+        "never inside the next commit's record"
+    );
 }
 
 /// One sink is ahead of the confirmed watermark: its position still resolves
@@ -142,8 +167,8 @@ fn reached_survives_confirmation_of_earlier_positions() {
     let b = emit(&p, 20);
     let c = emit(&p, 30);
     p.confirm(a);
-    assert_eq!(p.reached(Some(a)), 10, "falls back to the resume point");
-    assert_eq!(p.reached(Some(b)), 20);
+    assert_eq!(p.reached(Some(a)), 19);
+    assert_eq!(p.reached(Some(b)), 29);
     assert_eq!(p.reached(Some(c)), 30);
 }
 
@@ -158,7 +183,11 @@ fn reached_holds_a_split_transaction_back() {
         "the rest of the transaction is not emitted yet"
     );
     let second = p.register(20);
-    assert_eq!(p.reached(Some(first)), 10);
+    assert_eq!(
+        p.reached(Some(first)),
+        19,
+        "short of the commit it is half of"
+    );
     p.read_through(20);
     assert_eq!(p.reached(Some(second)), 20);
 }
@@ -179,7 +208,11 @@ fn a_reopened_stream_continues_the_numbering() {
         0,
         "an old-stream position confirms nothing new"
     );
-    assert_eq!(second.reached(Some(1)), 0);
+    assert_eq!(
+        second.reached(Some(1)),
+        29,
+        "short of the redelivered commit"
+    );
     second.confirm(2);
     assert_eq!(second.confirmed_lsn(), 30);
 }

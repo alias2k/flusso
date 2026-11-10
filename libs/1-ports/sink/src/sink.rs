@@ -27,7 +27,7 @@ pub struct FlushReport {
 
 /// When the documents of one [`flush`](Sink::flush) become searchable.
 ///
-/// Durable and searchable are different moments for a destination that
+/// Applied and searchable are different moments for a destination that
 /// refreshes on a schedule: a flushed document is fetched by id at once but
 /// matched by a search only after the next refresh. A sink reports which of
 /// the three applies to the flush it just did; it never refreshes because

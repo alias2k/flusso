@@ -4,8 +4,8 @@
 //! A client commits, reads the source's own position (Postgres:
 //! `pg_current_wal_lsn()`), and asks a [`Fence`] to wait for it. The fence
 //! passes once every source commit at or before that position is, at the
-//! chosen sink (or at all of them), either **applied** (flushed and
-//! acknowledged: a fetch by id sees it) or **searchable** (a refresh covered
+//! chosen sink (or at all of them), either **applied** (its flush returned: a
+//! fetch by id sees it) or **searchable** (a refresh covered
 //! it: a search sees it). See [`FenceLevel`].
 //!
 //! It only ever *observes*. The sink engines report the stream position each
@@ -49,7 +49,7 @@ use tokio::time::{Instant, timeout_at};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FenceLevel {
-    /// The sink flushed and acknowledged the change: a fetch by id sees it.
+    /// The sink's flush for the change returned: a fetch by id sees it.
     Applied,
     /// The destination can also *search* it. The default: it is the level
     /// that is right for any read.
@@ -353,6 +353,7 @@ pub struct FenceObserver {
 }
 
 impl FenceObserver {
+    /// An observer feeding `fence`.
     pub fn new(fence: Fence) -> Self {
         Self { fence }
     }

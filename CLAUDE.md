@@ -355,20 +355,28 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   translates a stream position into the source's terms. The Postgres `Positions` map
   (`cdc/ack.rs`) answers it from its entries plus a **horizon** (the LSN through which everything
   read is registered: moved by the last change of a commit being emitted, and by a keepalive or a
-  filtered commit while nothing is buffered; seeded from the slot's `confirmed_flush_lsn`), and
-  `confirm(w)` is just `reached(w)`. The answer is **strictly below the next outstanding
-  change's LSN**, because the changes of one transaction share its commit LSN: a transaction
-  split across batches is neither confirmed nor fenced until its last change is in. (2) A sink
+  filtered commit while nothing is buffered; seeded from the slot's `confirmed_flush_lsn`). The
+  answer is **strictly below the next outstanding change's LSN**, because the changes of one
+  transaction share its commit LSN: a transaction split across batches is neither confirmed nor
+  fenced until its last change is in. A fence claims everything short of that commit (`next - 1`);
+  `confirm` stops at the **end of the last covered commit**, because Postgres skips a transaction
+  whose commit record *starts* before the confirmed LSN (never confirm into an unprocessed
+  commit's record). (2) A sink
   *reports* visibility (`FlushReport.visibility`: `Immediate` / `Within(d)` / `Deferred`); the
   sink engine reports `Observer::on_position_applied` **before the ack** (the source forgets a
   position once every sink confirmed it, so the fence must hear first) and
   `on_position_searchable` from an in-order queue with a timer arm. The OpenSearch sink reports
   `Within(refresh_interval)` for an unforced flush and, with `refresh_interval = "-1"`,
-  `Deferred` plus a refresh of the indexes it wrote on the next caught-up flush. (3) The fence
+  `Deferred` plus a refresh of the indexes it wrote on the next caught-up flush; its
+  `ensure_index` refreshes a seeded generation once per start, because what an earlier run left
+  unrefreshed is remembered nowhere (fences are unavailable until staging is done). An index
+  mid-reindex is **not** covered: live writes go to the new generation while the alias serves the
+  old one (#6). (3) The fence
   translates a position when it is applied and keeps that answer until it is searchable, and
   keeps each level monotonic across a reopened source stream. Guards: the Postgres adapter's
   `a_split_transaction_is_not_confirmed_until_its_last_change`,
-  `a_keepalive_during_a_flight_does_not_pin_the_resume_point`, `reached_*`,
+  `a_keepalive_during_a_flight_does_not_pin_the_resume_point`,
+  `confirmation_stops_at_a_commit_boundary_where_a_fence_goes_further`, `reached_*`,
   `emitting_the_last_change_of_a_commit_moves_the_horizon`; the engine's
   `a_position_becomes_searchable_when_its_refresh_interval_passes`,
   `a_deferred_position_waits_for_the_next_immediate_flush`; the daemon's `fence::tests`

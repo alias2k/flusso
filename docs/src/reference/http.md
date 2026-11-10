@@ -109,7 +109,7 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 `position` is how far the sink has got (the slowest one, without `sink`): at or past the one asked for on `200`, short of it on `408`.
 
 - **It only waits.** Nothing is flushed or refreshed on a caller's behalf. Under a draining backlog `searchable` trails `applied` by up to the sink's [`refresh_interval`](sink-opensearch.md#refresh).
-- **A backfill isn't covered.** Positions belong to live changes; an index that is still seeding is reported by `/status`.
+- **A backfill isn't covered, nor an index mid-reindex.** Positions belong to live changes; an index that is still seeding, or being rebuilt behind its alias, is reported by `/status`.
 - **A position already passed answers at once**, however old it is.
 
 The runbook is [Read your own writes](../operate/read-your-writes.md); the Rust client is [Reading your own writes](../query/read-your-writes.md).

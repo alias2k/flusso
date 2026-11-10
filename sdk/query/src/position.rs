@@ -1,4 +1,4 @@
-//! Reading the source's current position: the token a fence waits on.
+//! Reading the source's current position: what a fence waits on.
 //!
 //! After a commit, ask the database where its change log stands. Every commit
 //! made before the question lies at or before the answer, so once flusso has

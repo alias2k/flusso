@@ -116,7 +116,7 @@ _Avoid_: flushed, durable, committed, written
 
 **Searchable**:
 The fence level at which a search at the destination also sees the change. It trails applied by the destination's refresh while a backlog drains; a sink reports when each flush becomes searchable and is never asked to refresh.
-_Avoid_: visible, refreshed, indexed
+_Avoid_: refreshed, indexed
 
 **Document**:
 One denormalized, typed search record built from a root row and its joins and aggregates, keyed by a deterministic id. Built once, on the ingest side.

@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
 use std::time::Duration;
 
 use kernel::SinkName;
-use sink::{Result, SinkError, Visibility};
+use sink::{Result, SinkError};
 use tokio::sync::Mutex;
 
 use crate::bulk::BulkAction;
@@ -233,15 +233,12 @@ impl OpensearchSink {
         options
     }
 
-    /// When a flush that forced no refresh becomes searchable: within the
-    /// configured `refresh_interval`, or not until a later refresh when
-    /// automatic refresh is off (or the value is not a duration this sink can
-    /// read, which must not be reported as sooner than it is).
-    pub(crate) fn unforced_visibility(&self) -> Visibility {
-        match parse_time_value(&self.refresh_interval) {
-            Some(interval) => Visibility::Within(interval),
-            None => Visibility::Deferred,
-        }
+    /// How often OpenSearch refreshes a seeded index by itself: the
+    /// configured `refresh_interval`. `None` when automatic refresh is off, or
+    /// the value is not a duration this sink can read (which must not be
+    /// reported as sooner than it is).
+    pub(crate) fn refresh_period(&self) -> Option<Duration> {
+        parse_time_value(&self.refresh_interval)
     }
 
     /// The stable hash alias `{prefix}{logical}_{hash}` an index is addressed

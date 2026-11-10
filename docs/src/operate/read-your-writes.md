@@ -8,7 +8,7 @@ A request handler writes to Postgres and must answer from OpenSearch: save a pro
 
 Skip it when the reader can tolerate being a moment behind. A fence is a wait, and under a draining backlog a `searchable` one can last as long as the sink's `refresh_interval`.
 
-From Rust, `flusso-query` does the steps below for you: see [Reading your own writes](../query/read-your-writes.md).
+From Rust, `flusso-query` runs the steps below itself: see [Reading your own writes](../query/read-your-writes.md).
 
 ## Steps
 
@@ -48,6 +48,7 @@ From Rust, `flusso-query` does the steps below for you: see [Reading your own wr
 - **Several writes, one wait.** Read the position once after the last commit. It covers everything before it.
 - **Watch the positions.** `/status` reports `applied_position` and `searchable_position` per sink, comparable with `pg_current_wal_lsn()`.
 - **A backfill isn't fenced.** While an index is still seeding, a fence can pass before the snapshot has reached a row. Gate on `/readyz` or the index's state in `/status` for that.
+- **Neither is an index mid-reindex.** During a [reindex](reindex.md), live writes land in the new generation while readers stay on the old one until the swap. A fence passes when the write is in; a read of that index sees it after the swap. The index shows `backfilling` in `/status` meanwhile.
 
 > ⚠️ **Warning** — A position read *inside* the transaction lies before its commit, so the fence can pass before the write is in. A position read from a **replica** is that replica's replay position, not the one flusso follows. Both fail quietly: the wait returns `200` and the read is stale.
 

@@ -72,6 +72,12 @@ impl Sink for OpensearchSink {
 
         if self.index_exists(&index).await? {
             debug!(index, "generation exists; leaving its mapping untouched");
+            // What an earlier run flushed without a refresh is remembered
+            // nowhere. One refresh per start makes it searchable, so a run can
+            // begin from "everything written so far is searchable".
+            if seeded {
+                self.refresh_index(&index).await?;
+            }
         } else {
             if seeded {
                 warn!(
@@ -354,12 +360,11 @@ impl OpensearchSink {
     /// documents are still durable: the flush reports `Deferred` and the next
     /// caught-up flush tries again.
     async fn settle_visibility(&self, caught_up: bool, written: &[BulkAction]) -> Visibility {
-        let unforced = self.unforced_visibility();
         if !caught_up {
-            return match unforced {
-                Visibility::Within(_) if written.is_empty() => Visibility::Immediate,
-                Visibility::Within(interval) => Visibility::Within(interval),
-                Visibility::Immediate | Visibility::Deferred => {
+            return match self.refresh_period() {
+                Some(_) if written.is_empty() => Visibility::Immediate,
+                Some(period) => Visibility::Within(period),
+                None => {
                     let mut unrefreshed = self.lock_unrefreshed();
                     unrefreshed.extend(written.iter().map(|action| action.index().to_owned()));
                     if unrefreshed.is_empty() {
