@@ -393,13 +393,17 @@ pub enum Missing {
 }
 
 /// The doc-values shape of a `map`'s values, which decides how
-/// [`MapKeySort`] reads a key: the exact `.keyword` subfield + lowercasing for a
-/// string map, the bare numeric/date field otherwise.
+/// [`MapKeySort`] reads a key: the case/accent-folded `.keyword_lowercase`
+/// subfield for a string map with subfields, the bare key otherwise.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum MapSortValueKind {
-    /// `text`/`keyword` values — sort on the dynamic `.keyword` subfield,
-    /// lowercased for case-insensitive order (parity with scalar string sort).
-    String,
+    /// `text`/`keyword` values with the auto subfields — sort on
+    /// `.keyword_lowercase`, case- and accent-insensitive (parity with a plain
+    /// string sort).
+    Folded,
+    /// `keyword` values without subfields — sort on the bare key, lowercased in
+    /// the script for case-insensitive order.
+    Exact,
     /// Numeric values — sort on the bare key field.
     Number,
     /// Date values — sort on the bare key field, by epoch millis.
@@ -409,7 +413,8 @@ pub(crate) enum MapSortValueKind {
 /// `for (def f : params.fields) { if present → return … }` then the `missing`
 /// fallback. Walking `params.fields` in order is the whole point: it's the
 /// **key fallback** (sort by the first preferred key a document actually has).
-const STRING_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;";
+const STRING_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;";
+const LOWERCASE_STRING_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toLowerCase(); } } return params.missing;";
 const NUMBER_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value; } } return params.missing;";
 const DATE_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) && doc[f].size() > 0) { return doc[f].value.toInstant().toEpochMilli(); } } return params.missing;";
 
@@ -420,7 +425,7 @@ const DATE_SOURCE: &str = "for (def f : params.fields) { if (doc.containsKey(f) 
 fn missing_sentinel(last: bool, order: SortOrder, kind: MapSortValueKind) -> Value {
     let high = last == matches!(order, SortOrder::Asc);
     match kind {
-        MapSortValueKind::String => Value::String(if high {
+        MapSortValueKind::Folded | MapSortValueKind::Exact => Value::String(if high {
             "\u{10ffff}".to_string()
         } else {
             String::new()
@@ -439,8 +444,9 @@ fn missing_sentinel(last: bool, order: SortOrder, kind: MapSortValueKind) -> Val
 /// It renders a `_script` sort whose painless source walks the keys in order and
 /// sorts by the value of the **first one a document has** — true fallback, so a
 /// row with only `en` still orders by `en` (not lexicographic tiers). String
-/// maps sort case-insensitively on the dynamic `.keyword` subfield; numeric/date
-/// maps on the bare key (epoch millis for dates). Nesting-aware via scope `S`,
+/// maps sort case- and accent-insensitively on each key's `.keyword_lowercase`
+/// subfield (a keyword map without subfields: on the bare key, lowercased);
+/// numeric/date maps on the bare key (epoch millis for dates). Nesting-aware via scope `S`,
 /// exactly like a field sort.
 ///
 /// Documents with **none** of the keys sort first under `.asc()` / last under
@@ -486,8 +492,10 @@ impl<S> MapKeySort<S> {
 
     fn leaf_field(&self, key: &str) -> String {
         match self.kind {
-            MapSortValueKind::String => format!("{}.{key}.keyword", self.path),
-            MapSortValueKind::Number | MapSortValueKind::Date => format!("{}.{key}", self.path),
+            MapSortValueKind::Folded => format!("{}.{key}.keyword_lowercase", self.path),
+            MapSortValueKind::Exact | MapSortValueKind::Number | MapSortValueKind::Date => {
+                format!("{}.{key}", self.path)
+            }
         }
     }
 }
@@ -501,7 +509,12 @@ impl<S: FlussoScope> MapKeySort<S> {
             .collect();
 
         let (sort_type, source, default_missing) = match self.kind {
-            MapSortValueKind::String => ("string", STRING_SOURCE, Value::String(String::new())),
+            MapSortValueKind::Folded => ("string", STRING_SOURCE, Value::String(String::new())),
+            MapSortValueKind::Exact => (
+                "string",
+                LOWERCASE_STRING_SOURCE,
+                Value::String(String::new()),
+            ),
             MapSortValueKind::Number => ("number", NUMBER_SOURCE, Value::from(0)),
             MapSortValueKind::Date => ("number", DATE_SOURCE, Value::from(0)),
         };

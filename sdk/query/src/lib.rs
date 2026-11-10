@@ -129,7 +129,7 @@ pub use handles::{
     Binary, Bool, BoostMode, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
     DisMaxQuery, Distance, DistanceFeatureQuery, DistanceType, DistanceUnit, Enum, EqQuery,
     FlussoMap, FlussoValue, FunctionScoreQuery, Fuzziness, FuzzyQuery, Geo, GeoDistanceQuery,
-    GeoPoint, IdsQuery, Json, Keyword, KeywordMap, MapKey, MapKeySort, MapSearch, MatchQuery,
+    GeoPoint, IdsQuery, Json, Keyword, KeywordMap, MapContains, MapKeySort, MapSearch, MatchQuery,
     MaybeOrderBy, MinimumShouldMatch, Missing, MoreLikeThisQuery, MultiMatchQuery, MultiMatchType,
     Nested, NestedProjection, NestedQuery, NestedScoreMode, NoSubfields, Number, NumberMap,
     NumericType, Object, Operator, OrderBy, PrefixQuery, QueryStringQuery, RangeQuery,
