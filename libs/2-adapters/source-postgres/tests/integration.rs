@@ -432,6 +432,33 @@ async fn a_two_level_self_join_rebuilds_the_grandparent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
+async fn a_row_that_is_its_own_parent_resolves_once() {
+    let (_container, url) = items_tree(&[
+        "INSERT INTO items (id, parent_id, name) VALUES (7, NULL, 'self')",
+        "UPDATE items SET parent_id = 7 WHERE id = 7",
+    ])
+    .await;
+    let builder = items_builder(&url, children(vec![children(vec![])])).await;
+
+    assert_eq!(resolved_keys(&builder, 7, None).await, [7]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_parent_cycle_in_the_data_terminates() {
+    let (_container, url) = items_tree(&[
+        "INSERT INTO items (id, parent_id, name) VALUES (5, NULL, 'a'), (6, 5, 'b')",
+        "UPDATE items SET parent_id = 6 WHERE id = 5",
+    ])
+    .await;
+    let builder = items_builder(&url, children(vec![children(vec![])])).await;
+
+    assert_eq!(resolved_keys(&builder, 5, None).await, [5, 6]);
+    assert_eq!(resolved_keys(&builder, 6, None).await, [5, 6]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
 async fn a_belongs_to_back_at_the_root_rebuilds_its_referrers() {
     let (_container, url) = items_tree(&[]).await;
     let parent = join_field(

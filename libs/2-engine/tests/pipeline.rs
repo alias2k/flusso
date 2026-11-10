@@ -38,6 +38,10 @@
 //!   ADR 0007). The child tables start on `DEFAULT` and the capture sets them
 //!   to `FULL` itself (`manage_replica_identity`); the root is set to `FULL` by
 //!   hand, so the same test proves a `FULL` root keeps its plain `_id`.
+//! - [`a_self_referencing_has_many_rebuilds_the_parent`] — a `has_many` back at
+//!   the root table (issue #167): inserting, renaming, deleting, or re-parenting
+//!   a child or grandchild rebuilds every document that embeds it, to the
+//!   declared depth, while the row's own document still gets its own op.
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -540,6 +544,9 @@ async fn a_self_referencing_has_many_rebuilds_the_parent() {
     .await;
     live.assert_doc_eventually("items", "1", &child_labels, &["deleted", "kept", "moved"])
         .await;
+    live.assert_eventually("items", "11", Some("deleted"))
+        .await
+        .unwrap();
 
     exec(&pg.pool, "UPDATE items SET name = 'renamed' WHERE id = 10").await;
     live.assert_doc_eventually(
@@ -549,10 +556,14 @@ async fn a_self_referencing_has_many_rebuilds_the_parent() {
         &["deleted", "moved", "renamed"],
     )
     .await;
+    live.assert_eventually("items", "10", Some("renamed"))
+        .await
+        .unwrap();
 
     exec(&pg.pool, "DELETE FROM items WHERE id = 11").await;
     live.assert_doc_eventually("items", "1", &child_labels, &["moved", "renamed"])
         .await;
+    live.assert_eventually("items", "11", None).await.unwrap();
 
     exec(&pg.pool, "UPDATE items SET parent_id = 3 WHERE id = 12").await;
     live.assert_doc_eventually("items", "1", &child_labels, &["renamed"])
@@ -574,6 +585,7 @@ async fn a_self_referencing_has_many_rebuilds_the_parent() {
         .await;
     live.assert_doc_eventually("items", "10", &child_labels, &[])
         .await;
+    live.assert_eventually("items", "100", None).await.unwrap();
 
     live.shutdown();
 }
