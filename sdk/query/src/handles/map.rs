@@ -230,6 +230,10 @@ impl<S> DateMap<S> {
 /// kind — `short`…`double`, `decimal`). [`key`](Self::key) yields a [`Number`]
 /// leaf for range/exact operators (`gt`/`between`/`eq`/…). `has_key`/`exists`
 /// are presence checks. No `search` — numbers aren't full text.
+///
+/// `K` is the declared kind, as for a plain field: a `decimal` map is a
+/// `NumberMap<kind::Decimal>`, so its keys take a `Decimal` or an integer,
+/// never an `f64`.
 #[derive(Debug, Clone)]
 pub struct NumberMap<K, S = Root> {
     path: String,

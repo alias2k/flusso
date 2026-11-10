@@ -71,6 +71,7 @@ Use the derive rather than a hand-written `impl FlussoMap<K>`: a fragment valida
 
 - `MapKey` is gone: a key is a plain `Text`/`Keyword`. Code that named `Text<S, MapKey>` names `Text<S>` (or `Text<S, NoSubfields>`).
 - `TextMap`/`KeywordMap` take a second type parameter, the subfield marker, defaulting to `WithSubfields`.
+- A `decimal` map's keys take the decimal kind, like a plain `decimal` field: the handle is `NumberMap<kind::Decimal>` (was `kind::Double`) and the document type `HashMap<String, Decimal>`. A float no longer compiles: `Product::costs().key("eur").eq(9.99)` becomes `.eq(Decimal::new(999, 2))` (or an integer).
 - String map sorts read `.keyword_lowercase`, which exists only once the index is rebuilt with 0.17 (it is, once; see [Objects and maps](../reference/objects-and-maps.md#map)).
 
 ## Related
