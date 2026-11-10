@@ -21,7 +21,8 @@
 //!   accept values a mapped field would refuse (a string where a `double` was
 //!   declared, keys the strict root has never seen).
 //! - **`subfields: false`**: a `text` field is mapped with its analyzer and no
-//!   subfields, and is still searchable.
+//!   subfields, and is still searchable. An explicit `options: { fields: {} }`
+//!   (the route for `identifier`/`enum`) is accepted and leaves no subfields.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -327,12 +328,17 @@ async fn an_unindexed_subtree_is_stored_but_not_searchable() {
     };
     let mut note = field("note", MappingType::Text, vec![]);
     note.mapping.subfields = false;
+    let mut sku = field("sku", MappingType::Text, vec![]);
+    sku.mapping
+        .extra
+        .insert("fields".to_owned(), GenericValue::Map(Default::default()));
     let mapping = IndexMapping {
         index: IndexName::try_new(STORED).unwrap(),
         hash: ContentHash::new(0x170),
         fields: vec![
             field("title", MappingType::Text, vec![]),
             note,
+            sku,
             unindexed(field(
                 "orders",
                 MappingType::Nested,
@@ -346,6 +352,7 @@ async fn an_unindexed_subtree_is_stored_but_not_searchable() {
     let stored = json!({
         "title": "Excavator",
         "note": "Hello world",
+        "sku": "C-01234",
         "orders": [
             { "total": "not a number", "unmapped": { "deep": [1, "x"] } },
             { "total": 12.5 },
@@ -405,6 +412,13 @@ async fn an_unindexed_subtree_is_stored_but_not_searchable() {
     assert_eq!(
         search_in(&base, STORED_ALIAS, json!({ "match": { "note": "hello" } })).await,
         ["1"]
+    );
+    assert!(
+        properties["sku"]
+            .get("fields")
+            .is_none_or(|fields| fields == &json!({})),
+        "an explicit empty `fields` replaces the auto subfields with none: {}",
+        properties["sku"]
     );
     for query in [
         json!({ "term": { "orders.total": 12.5 } }),
