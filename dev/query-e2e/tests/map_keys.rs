@@ -268,6 +268,8 @@ fn catalog_mapping() -> IndexMapping {
                     map_values: None,
                     decimal: false,
                     enum_order: None,
+                    subfields: true,
+                    indexed: true,
                 },
                 nullable: true,
                 array: true,
