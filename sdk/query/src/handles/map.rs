@@ -102,7 +102,8 @@ macro_rules! string_map_handle {
             }
 
             /// Case- and accent-insensitive substring match across **every**
-            /// key — `contains("excav")` finds "Excavator". Returns a
+            /// key — `contains("excav")` finds "Excavator". An empty or
+            /// whitespace-only value matches nothing. Returns a
             /// [`MapContains`] builder; see it for the rendered shape.
             pub fn contains(&self, value: impl AsRef<str>) -> MapContains<S> {
                 MapContains::new(&self.path, value.as_ref())
@@ -365,6 +366,9 @@ fn is_query_string_syntax(c: char) -> bool {
 /// value. A value longer than the subfield's `ignore_above` (256) is not
 /// indexed there, so it never matches — the same rule as a plain field.
 ///
+/// An empty or whitespace-only value renders `match_none`, like a full-text
+/// query with no terms: `*` alone would match every document with any key.
+///
 /// ```
 /// use flusso_query::{AsQuery, Root, TextMap};
 ///
@@ -374,6 +378,9 @@ fn is_query_string_syntax(c: char) -> bool {
 ///     q["query_string"]["fields"],
 ///     serde_json::json!(["title.*.keyword_lowercase"])
 /// );
+///
+/// let none = TextMap::<Root>::at("title").contains("  ").to_value();
+/// assert_eq!(none, serde_json::json!({ "match_none": {} }));
 /// ```
 #[derive(Debug, Clone)]
 pub struct MapContains<S = Root> {
@@ -412,6 +419,11 @@ impl<S> MapContains<S> {
 
 impl<S> AsQuery<S> for MapContains<S> {
     fn into_query(self) -> Option<Query<S>> {
+        if self.value.trim().is_empty() {
+            let mut body = Map::new();
+            self.common.write(&mut body);
+            return Some(wrap("match_none", body));
+        }
         let mut pattern = String::from("*");
         for c in self.value.chars() {
             if is_query_string_syntax(c) {

@@ -1778,6 +1778,20 @@ fn map_contains_escapes_the_value_and_spans_every_key() {
 }
 
 #[test]
+fn map_contains_an_empty_or_blank_value_matches_nothing() {
+    let title = TextMap::<Root>::at("title");
+    assert_eq!(title.contains("").to_value(), json!({ "match_none": {} }));
+    assert_eq!(
+        title.contains(" \t").name("blank").to_value(),
+        json!({ "match_none": { "_name": "blank" } })
+    );
+    assert_eq!(
+        KeywordMap::<Root>::at("codes").contains("").to_value(),
+        json!({ "match_none": {} })
+    );
+}
+
+#[test]
 fn number_map_sort_key_renders_a_number_script_over_bare_keys() {
     // Numeric values are doc-valued on the bare key path (no `.keyword`).
     let value = NumberMap::<crate::kind::Double, Root>::at("prices")
