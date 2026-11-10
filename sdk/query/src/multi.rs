@@ -386,8 +386,9 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
         self
     }
 
-    /// The page request, refusing a search that also positions itself.
-    pub(crate) fn request(&self) -> Result<PageRequest<'_>> {
+    /// The page request resuming after `cursor`, refusing a search that also
+    /// positions itself.
+    pub(crate) fn request<'a>(&'a self, cursor: Option<&'a PageCursor>) -> Result<PageRequest<'a>> {
         if self.search.from.is_some() {
             return Err(Error::Cursor(
                 "`from` can't be combined with a page cursor".to_string(),
@@ -404,25 +405,35 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
                 .iter()
                 .map(|(index, hash)| format!("{index}_{hash}"))
                 .collect(),
-            cursor: self.cursor.as_ref(),
+            cursor,
             pin: self.pin,
         })
     }
 
     /// Execute one page of the blended list and decode it into the union;
     /// [`SearchResponse::next`] resumes after it.
+    pub async fn send(&self, client: &Client) -> Result<SearchResponse<U>> {
+        self.send_from(client, self.cursor.as_ref()).await
+    }
+
+    /// [`send`](Self::send), resuming after `cursor` instead of the one the
+    /// search was built with — what a [`Walk`](crate::Walk) drives page by page.
     #[tracing::instrument(
         name = "search.multi_cursor",
         skip_all,
         fields(
             path = %self.search.path,
-            resumed = self.cursor.is_some(),
+            resumed = cursor.is_some(),
             total = tracing::field::Empty,
         ),
         err,
     )]
-    pub async fn send(&self, client: &Client) -> Result<SearchResponse<U>> {
-        let page = fetch_page(client, self.request()?).await?;
+    pub(crate) async fn send_from(
+        &self,
+        client: &Client,
+        cursor: Option<&PageCursor>,
+    ) -> Result<SearchResponse<U>> {
+        let page = fetch_page(client, self.request(cursor)?).await?;
         let mut decoded = decode_response::<U>(page.response, &client.index_prefix)?;
         decoded.next = page.next;
         tracing::Span::current().record("total", decoded.total);

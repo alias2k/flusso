@@ -553,8 +553,14 @@ impl<T> CursorSearch<T> {
     }
 
     /// The page request for `body` (a full search body or the ids body)
-    /// against `path`, refusing a search that also positions itself.
-    pub(crate) fn request<'a>(&'a self, body: Value, path: &'a str) -> Result<PageRequest<'a>> {
+    /// against `path`, resuming after `cursor`, refusing a search that also
+    /// positions itself.
+    pub(crate) fn request<'a>(
+        &'a self,
+        body: Value,
+        path: &'a str,
+        cursor: Option<&'a PageCursor>,
+    ) -> Result<PageRequest<'a>> {
         if self.search.from.is_some() {
             return Err(Error::Cursor(
                 "`from` can't be combined with a page cursor".to_string(),
@@ -573,28 +579,43 @@ impl<T> CursorSearch<T> {
             body,
             tiebreak: SINGLE_INDEX_TIEBREAK,
             targets: vec![self.search.physical_index()],
-            cursor: self.cursor.as_ref(),
+            cursor,
             pin: self.pin,
         })
     }
 
     /// Run one page from `body` (a full search body or the ids body).
-    async fn fetch(&self, client: &Client, body: Value) -> Result<FetchedPage> {
+    async fn fetch(
+        &self,
+        client: &Client,
+        body: Value,
+        cursor: Option<&PageCursor>,
+    ) -> Result<FetchedPage> {
         let path = self.search.physical_index();
-        fetch_page(client, self.request(body, &path)?).await
+        fetch_page(client, self.request(body, &path, cursor)?).await
     }
 
     /// Execute one page and return only its document ids (no sources), with
     /// the cursor that resumes after it — the cheap way to walk every match
     /// (e.g. to load the rows from Postgres).
+    pub async fn ids(&self, client: &Client) -> Result<IdsPage> {
+        self.ids_from(client, self.cursor.as_ref()).await
+    }
+
+    /// [`ids`](Self::ids), resuming after `cursor` instead of the one the
+    /// search was built with — what a [`Walk`](crate::Walk) drives page by page.
     #[tracing::instrument(
         name = "search.cursor_ids",
         skip_all,
         fields(index = %self.search.index, returned = tracing::field::Empty),
         err,
     )]
-    pub async fn ids(&self, client: &Client) -> Result<IdsPage> {
-        let page = self.fetch(client, self.search.ids_body()).await?;
+    pub(crate) async fn ids_from(
+        &self,
+        client: &Client,
+        cursor: Option<&PageCursor>,
+    ) -> Result<IdsPage> {
+        let page = self.fetch(client, self.search.ids_body(), cursor).await?;
         let raw: RawIdsResponse = serde_json::from_value(page.response)?;
         let ids: Vec<String> = raw.hits.hits.into_iter().map(|hit| hit.id).collect();
         tracing::Span::current().record("returned", ids.len());
@@ -611,18 +632,28 @@ where
 {
     /// Execute one page and decode its hits; [`SearchResponse::next`] resumes
     /// after it.
+    pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
+        self.send_from(client, self.cursor.as_ref()).await
+    }
+
+    /// [`send`](Self::send), resuming after `cursor` instead of the one the
+    /// search was built with — what a [`Walk`](crate::Walk) drives page by page.
     #[tracing::instrument(
         name = "search.cursor_send",
         skip_all,
         fields(
             index = %self.search.index,
-            resumed = self.cursor.is_some(),
+            resumed = cursor.is_some(),
             total = tracing::field::Empty,
         ),
         err,
     )]
-    pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
-        let page = self.fetch(client, self.search.body()).await?;
+    pub(crate) async fn send_from(
+        &self,
+        client: &Client,
+        cursor: Option<&PageCursor>,
+    ) -> Result<SearchResponse<T>> {
+        let page = self.fetch(client, self.search.body(), cursor).await?;
         let mut response = page.response;
         let paths = self.search.nested_paths();
         if !paths.is_empty() {

@@ -2039,7 +2039,7 @@ mod cursor {
         let search = || User::query().size(20);
         let body = search().body();
         let live = search().cursor(None);
-        let request = live.request(body.clone(), "users_xxxxxx")?;
+        let request = live.request(body.clone(), "users_xxxxxx", None)?;
         assert!(request.pin.is_none(), "a cursor walk is live by default");
         let live_body = body_of(&request, None, "users_xxxxxx", None).body;
         assert!(live_body.get("pit").is_none());
@@ -2050,12 +2050,12 @@ mod cursor {
         );
         let pinned = search().cursor(None).point_in_time();
         assert_eq!(
-            pinned.request(body.clone(), "users_xxxxxx")?.pin,
+            pinned.request(body.clone(), "users_xxxxxx", None)?.pin,
             Some(Duration::from_secs(60))
         );
         let kept = search().cursor(None).keep_alive(Duration::from_secs(5));
         assert!(
-            kept.request(body, "users_xxxxxx")?.pin == Some(Duration::from_secs(5)),
+            kept.request(body, "users_xxxxxx", None)?.pin == Some(Duration::from_secs(5)),
             "keep_alive implies a pin"
         );
         Ok(())
@@ -2185,7 +2185,7 @@ mod cursor {
             .size(20);
         let body = search.body();
         let cursor_search = search.cursor(None).keep_alive(Duration::from_secs(90));
-        let request = cursor_search.request(body, "users_xxxxxx")?;
+        let request = cursor_search.request(body, "users_xxxxxx", None)?;
         let view = PinnedView {
             id: "PIT".into(),
             keep_alive: request.pin.ok_or("keep_alive pins the walk")?,
@@ -2207,7 +2207,7 @@ mod cursor {
     fn a_resumed_page_searches_after_the_cursor() -> Result {
         let cursor = PageCursor::new(Some(pin("PIT2")), vec![json!("a@b.c"), json!("7")], 0);
         let search = User::query().size(5).cursor(cursor);
-        let request = search.request(User::query().size(5).body(), "users_xxxxxx")?;
+        let request = search.request(User::query().size(5).body(), "users_xxxxxx", None)?;
         let body = body_of(
             &request,
             Some(&pin("PIT2")),
@@ -2230,7 +2230,7 @@ mod cursor {
         let fp = |search: crate::Search<User>| -> std::result::Result<u64, Error> {
             let body = search.body();
             let cursor = search.cursor(None);
-            let request = cursor.request(body, "users_xxxxxx")?;
+            let request = cursor.request(body, "users_xxxxxx", None)?;
             Ok(body_of(&request, Some(&pin("PIT")), "users_xxxxxx", None).fingerprint)
         };
         let base = fp(User::query().filter(User::email().eq("x")).size(10))?;
@@ -2262,12 +2262,12 @@ mod cursor {
         let ids_body = search.ids_body();
         let cursor = search.cursor(None);
         let send = body_of(
-            &cursor.request(send_body, "users_xxxxxx")?,
+            &cursor.request(send_body, "users_xxxxxx", None)?,
             Some(&pin("PIT")),
             "users_xxxxxx",
             None,
         );
-        let ids_request = cursor.request(ids_body, "users_xxxxxx")?;
+        let ids_request = cursor.request(ids_body, "users_xxxxxx", None)?;
         let ids = body_of(&ids_request, Some(&pin("PIT")), "users_xxxxxx", None);
         assert_eq!(send.fingerprint, ids.fingerprint);
         assert_eq!(
@@ -2293,17 +2293,17 @@ mod cursor {
         let from = User::query().from(10);
         let body = from.body();
         assert!(matches!(
-            from.cursor(None).request(body, "users_xxxxxx"),
+            from.cursor(None).request(body, "users_xxxxxx", None),
             Err(Error::Cursor(_))
         ));
         let after = User::query().search_after([1]);
         let body = after.body();
         assert!(matches!(
-            after.cursor(None).request(body, "users_xxxxxx"),
+            after.cursor(None).request(body, "users_xxxxxx", None),
             Err(Error::Cursor(_))
         ));
         assert!(matches!(
-            StoreItem::query().from(3).cursor(None).request(),
+            StoreItem::query().from(3).cursor(None).request(None),
             Err(Error::Cursor(_))
         ));
     }
@@ -2311,7 +2311,13 @@ mod cursor {
     #[test]
     fn a_combined_cursor_breaks_ties_on_index_then_id() -> Result {
         let search = StoreItem::query().size(3).cursor(None);
-        let body = body_of(&search.request()?, Some(&pin("PIT")), "users_xxxxxx", None).body;
+        let body = body_of(
+            &search.request(None)?,
+            Some(&pin("PIT")),
+            "users_xxxxxx",
+            None,
+        )
+        .body;
         assert_eq!(
             body["sort"],
             json!([
