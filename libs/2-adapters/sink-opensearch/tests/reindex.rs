@@ -10,7 +10,11 @@
 //! swap, and documents only present in the old generation are gone after. A
 //! second test covers the seed marker outliving its generation index (issue
 //! #120): `ensure_index` must retract the marker and report the recreated,
-//! empty generation unseeded rather than serve it.
+//! empty generation unseeded rather than serve it. The rest cover the generation
+//! lifecycle while running: a generation deleted mid-run fails the flush rather
+//! than being auto-created, and is rebuilt by the next `ensure_index` (#123); a
+//! second reindex during a rebuild stages nothing, and `mark_seeded` sweeps
+//! orphan generations (#121).
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -443,6 +447,235 @@ async fn deleted_generation_is_recreated_and_reported_unseeded() {
     let run3 = sink(&base);
     run3.ensure_index(&mapping).await.unwrap();
     assert!(run3.is_seeded(&index).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn generation_deleted_while_running_fails_the_flush_and_is_rebuilt() {
+    // Issue #123: the active generation is deleted while the sink runs. The
+    // next write must not let OpenSearch auto-create a dynamic-mapped index; it
+    // must fail the flush, and the restart's `ensure_index` must rebuild it.
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let sink = sink(&base);
+    sink.ensure_index(&mapping).await.unwrap();
+    sink.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    sink.flush(true).await.unwrap();
+    sink.mark_seeded(&index).await.unwrap();
+
+    // ── A seeded write goes through the alias ────────────────────────────────
+    sink.apply(&upsert(&index, "2", &document(2)))
+        .await
+        .unwrap();
+    sink.flush(true).await.unwrap();
+    assert!(doc_exists(&client, &base, &gen1, "2").await);
+
+    // ── Delete the live generation (its aliases go with it) ──────────────────
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {gen1} returned {status}");
+
+    sink.apply(&upsert(&index, "3", &document(3)))
+        .await
+        .unwrap();
+    let err = sink
+        .flush(true)
+        .await
+        .expect_err("a write to a deleted generation must fail the flush");
+    assert!(err.to_string().contains("missing"), "{err}");
+    assert!(
+        !index_exists(&client, &base, &gen1).await
+            && !index_exists(&client, &base, &hash_alias).await,
+        "nothing was auto-created under the generation or the alias name",
+    );
+
+    // ── The restart re-stages: ensure_index recreates it, unseeded ───────────
+    sink.ensure_index(&mapping).await.unwrap();
+    assert!(
+        !sink.is_seeded(&index).await.unwrap(),
+        "the recreated generation reports unseeded so the engine backfills it",
+    );
+    let mapping_body: Value = client
+        .get(format!("{base}/{gen1}/_mapping"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        mapping_body[&gen1]["mappings"]["dynamic"], "strict",
+        "the generation is recreated with flusso's mapping, not a dynamic one",
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()],
+    );
+
+    // ── The backfill plus the redelivered batch reseed it ────────────────────
+    for i in [1, 2, 3] {
+        sink.apply(&upsert(&index, &i.to_string(), &document(i)))
+            .await
+            .unwrap();
+    }
+    sink.flush(true).await.unwrap();
+    sink.mark_seeded(&index).await.unwrap();
+    assert!(sink.is_seeded(&index).await.unwrap());
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()],
+    );
+    assert_eq!(
+        alias_targets(&client, &base, LOGICAL).await,
+        vec![gen1.clone()],
+    );
+    for id in ["1", "2", "3"] {
+        assert!(doc_exists(&client, &base, &hash_alias, id).await, "id {id}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_second_reindex_while_rebuilding_stages_nothing() {
+    // Issue #121: a reindex while a rebuild is already pending must not stage
+    // another generation and orphan the one being built.
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+    let gen2 = format!("{hash_alias}_2");
+
+    let sink = sink(&base);
+    sink.reindex(&mapping).await.unwrap();
+    sink.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen1.clone()],
+        "a reindex before the first seed stages nothing",
+    );
+    sink.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    sink.flush(true).await.unwrap();
+    sink.mark_seeded(&index).await.unwrap();
+
+    // Two reindex requests while the first rebuild is still unseeded.
+    sink.reindex(&mapping).await.unwrap();
+    sink.ensure_index(&mapping).await.unwrap();
+    sink.reindex(&mapping).await.unwrap();
+    sink.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen1.clone(), gen2.clone()],
+        "the second reindex left the in-flight generation 2 alone",
+    );
+    assert!(!sink.is_seeded(&index).await.unwrap());
+
+    sink.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    sink.flush(true).await.unwrap();
+    sink.mark_seeded(&index).await.unwrap();
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen2.clone()],
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen2.clone()],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn mark_seeded_sweeps_an_orphan_generation() {
+    // The orphan an older flusso left behind (issue #121): generation 2 was
+    // staged, then a second reindex flipped the meta to generation 3, so 2
+    // never held the alias. Sweeping alias holders alone would keep it forever.
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+    let gen2 = format!("{hash_alias}_2");
+    let gen3 = format!("{hash_alias}_3");
+
+    let run1 = sink(&base);
+    run1.ensure_index(&mapping).await.unwrap();
+    run1.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    run1.flush(true).await.unwrap();
+    run1.mark_seeded(&index).await.unwrap();
+
+    run1.reindex(&mapping).await.unwrap();
+    run1.ensure_index(&mapping).await.unwrap();
+    let status = client
+        .put(format!("{base}/flusso_meta/_doc/{hash_alias}"))
+        .json(&serde_json::json!({ "active_generation": 3, "seeded": false }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "meta put returned {status}");
+
+    let run2 = sink(&base);
+    run2.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen1.clone(), gen2.clone(), gen3.clone()],
+    );
+    run2.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    run2.flush(true).await.unwrap();
+    run2.mark_seeded(&index).await.unwrap();
+
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen3.clone()],
+        "both the superseded generation 1 and the orphan generation 2 are dropped",
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen3.clone()],
+    );
+}
+
+/// The concrete generation indexes behind `hash_alias` (sorted).
+async fn generations(client: &reqwest::Client, base: &str, hash_alias: &str) -> Vec<String> {
+    let rows: Value = client
+        .get(format!(
+            "{base}/_cat/indices/{hash_alias}_*?h=index&format=json"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut names: Vec<String> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["index"].as_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 /// A live-shaped upsert envelope for `doc` under `id`, positioned arbitrarily:
