@@ -47,8 +47,11 @@ TLS.
   dropped slot can't leave a stale index behind. `prepare` then creates the slot,
   before the first backfill.
 - **`DocumentBuilder`** resolves which documents a changed row affects and
-  assembles each one. It also implements `Catalog`, the store-specific half of
-  index validation (a column's SQL type + nullability).
+  assembles each one. A root-table row that a self-join also folds in (a
+  `has_many: children` back at the same table) resolves to its own document
+  plus every one that embeds it, to the declared depth. It also implements
+  `Catalog`, the store-specific half of index validation (a column's SQL type +
+  nullability).
 - **`CaptureProvisioning`** takes the tables an index reads, reports stream
   coverage and a privilege verdict, and — when allowed — provisions the gap by
   creating or extending a Postgres publication.

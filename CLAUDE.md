@@ -101,8 +101,15 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   rows gone, old generation dropped), and `deleted_and_reparented_children_leave_their_old_parent`
   (a hard-deleted / re-parented `has_many` child and a row three relations deep leave their old
   parent's document, traced through the WAL pre-image; tables under `REPLICA IDENTITY FULL`, which
-  also proves a `FULL` root keeps a plain `_id` — issue #140). New e2e binaries must be added to the filtersets in
-  `.config/nextest.toml` (both profiles) to get the docker/opensearch group caps and retries.
+  also proves a `FULL` root keeps a plain `_id` — issue #140), and
+  `a_self_referencing_has_many_rebuilds_the_parent` (a root-table row inside its own `has_many` —
+  insert, update, delete, re-parent, and a two-level grandchild — rebuilds its parent, because a
+  root-table change resolves to its own id *and* walks every path back at the root — issue #167),
+  and `a_root_filtered_tree_indexes_only_top_level_rows` (the guide's tree with a `parent_id
+  is_null` root filter: only top-level rows are documents across child/grandchild changes,
+  re-parenting, promotion, and demotion).
+  New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
+  the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
   the `GenericValue` variant; see `cdc/pgoutput.rs::typed_value` vs

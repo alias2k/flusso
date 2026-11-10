@@ -38,6 +38,15 @@
 //!   ADR 0007). The child tables start on `DEFAULT` and the capture sets them
 //!   to `FULL` itself (`manage_replica_identity`); the root is set to `FULL` by
 //!   hand, so the same test proves a `FULL` root keeps its plain `_id`.
+//! - [`a_self_referencing_has_many_rebuilds_the_parent`] — a `has_many` back at
+//!   the root table (issue #167): inserting, renaming, deleting, or re-parenting
+//!   a child or grandchild rebuilds every document that embeds it, to the
+//!   declared depth, while the row's own document still gets its own op.
+//! - [`a_root_filtered_tree_indexes_only_top_level_rows`] — the tree the
+//!   related-tables guide recommends: the same two levels plus a root filter
+//!   `parent_id is_null`. Only top-level rows get a document, through backfill,
+//!   child/grandchild insert/update/delete, re-parenting, promotion to the top
+//!   level, and demotion under another row.
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -57,9 +66,9 @@ use std::time::{Duration, Instant};
 
 use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
-    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, IndexName,
-    IndexSchema, Join, JoinKind, Relation, Secret, SinkName, SoftDelete, SoftDeleteColumn,
-    TableName,
+    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, Filter, FlussoType,
+    IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, Relation, Secret, SinkName,
+    SoftDelete, SoftDeleteColumn, TableName,
 };
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
@@ -480,6 +489,236 @@ async fn deleted_and_reparented_children_leave_their_old_parent() {
     exec(&pg.pool, "DELETE FROM lines WHERE id = 5001").await;
     live.assert_doc_eventually("orders", "50", &lines, &["kept"])
         .await;
+
+    live.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_self_referencing_has_many_rebuilds_the_parent() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    create_table(
+        &pg.pool,
+        "CREATE TABLE items (id int PRIMARY KEY, parent_id int REFERENCES items(id), name text)",
+    )
+    .await;
+
+    let children = |nested: Vec<Field>| {
+        let mut fields = vec![column_field("label", "name")];
+        fields.extend(nested);
+        join_field(
+            "children",
+            "items",
+            JoinKind::HasMany {
+                foreign_key: column("parent_id"),
+            },
+            fields,
+        )
+    };
+    let mut items = simple_schema("items", None);
+    items.fields.push(children(vec![children(vec![])]));
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("items"), items)]));
+    let live = start_pipeline(&pg, &os, spec, &["items"]).await;
+    live.await_seeded(1).await;
+
+    let child_labels = |doc: &serde_json::Value| labels(doc.pointer("/children"));
+    let grandchild_labels = |doc: &serde_json::Value| {
+        let mut out = Vec::new();
+        for child in doc
+            .pointer("/children")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            out.extend(labels(child.get("children")));
+        }
+        out.sort();
+        out
+    };
+
+    exec(
+        &pg.pool,
+        "INSERT INTO items VALUES (1, NULL, 'p1'), (3, NULL, 'p3')",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "INSERT INTO items VALUES (10, 1, 'kept'), (11, 1, 'deleted'), (12, 1, 'moved')",
+    )
+    .await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["deleted", "kept", "moved"])
+        .await;
+    live.assert_eventually("items", "11", Some("deleted"))
+        .await
+        .unwrap();
+
+    exec(&pg.pool, "UPDATE items SET name = 'renamed' WHERE id = 10").await;
+    live.assert_doc_eventually(
+        "items",
+        "1",
+        &child_labels,
+        &["deleted", "moved", "renamed"],
+    )
+    .await;
+    live.assert_eventually("items", "10", Some("renamed"))
+        .await
+        .unwrap();
+
+    exec(&pg.pool, "DELETE FROM items WHERE id = 11").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["moved", "renamed"])
+        .await;
+    live.assert_eventually("items", "11", None).await.unwrap();
+
+    exec(&pg.pool, "UPDATE items SET parent_id = 3 WHERE id = 12").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["renamed"])
+        .await;
+    live.assert_doc_eventually("items", "3", &child_labels, &["moved"])
+        .await;
+
+    // Two declared levels: a grandchild rebuilds its grandparent too.
+    exec(&pg.pool, "INSERT INTO items VALUES (100, 10, 'grand')").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["grand"])
+        .await;
+    live.assert_doc_eventually("items", "10", &child_labels, &["grand"])
+        .await;
+    exec(&pg.pool, "UPDATE items SET name = 'regrand' WHERE id = 100").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["regrand"])
+        .await;
+    exec(&pg.pool, "DELETE FROM items WHERE id = 100").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &[])
+        .await;
+    live.assert_doc_eventually("items", "10", &child_labels, &[])
+        .await;
+    live.assert_eventually("items", "100", None).await.unwrap();
+
+    live.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_root_filtered_tree_indexes_only_top_level_rows() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    create_table(
+        &pg.pool,
+        "CREATE TABLE items (id int PRIMARY KEY, parent_id int REFERENCES items(id), name text)",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "INSERT INTO items VALUES (1, NULL, 'p1'), (2, NULL, 'p2'), \
+         (10, 1, 'c10'), (100, 10, 'g100')",
+    )
+    .await;
+
+    let children = |nested: Vec<Field>| {
+        let mut fields = vec![column_field("label", "name")];
+        fields.extend(nested);
+        join_field(
+            "children",
+            "items",
+            JoinKind::HasMany {
+                foreign_key: column("parent_id"),
+            },
+            fields,
+        )
+    };
+    let mut items = simple_schema("items", None);
+    items.filters = Some(vec![Filter::NullCheck(NullCheckFilter {
+        column: column("parent_id"),
+        op: NullOp::IsNull,
+    })]);
+    items.fields.push(children(vec![children(vec![])]));
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("items"), items)]));
+    let live = start_pipeline(&pg, &os, spec, &["items"]).await;
+    live.await_seeded(1).await;
+
+    let child_labels = |doc: &serde_json::Value| labels(doc.pointer("/children"));
+    let grandchild_labels = |doc: &serde_json::Value| {
+        let mut out = Vec::new();
+        for child in doc
+            .pointer("/children")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            out.extend(labels(child.get("children")));
+        }
+        out.sort();
+        out
+    };
+    let absent = |id: &'static str| {
+        let live = &live;
+        async move {
+            live.assert_eventually("items", id, None)
+                .await
+                .unwrap_or_else(|got| panic!("[items/{id}] must have no document, saw {got}"));
+        }
+    };
+
+    live.assert_doc_eventually("items", "1", &child_labels, &["c10"])
+        .await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["g100"])
+        .await;
+    live.assert_doc_eventually("items", "2", &child_labels, &[])
+        .await;
+    absent("10").await;
+    absent("100").await;
+
+    exec(&pg.pool, "INSERT INTO items VALUES (11, 1, 'c11')").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["c10", "c11"])
+        .await;
+    absent("11").await;
+    exec(&pg.pool, "INSERT INTO items VALUES (101, 10, 'g101')").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["g100", "g101"])
+        .await;
+    absent("101").await;
+
+    exec(&pg.pool, "UPDATE items SET name = 'c11b' WHERE id = 11").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["c10", "c11b"])
+        .await;
+    absent("11").await;
+    exec(&pg.pool, "UPDATE items SET name = 'g101b' WHERE id = 101").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["g100", "g101b"])
+        .await;
+    absent("101").await;
+
+    exec(&pg.pool, "DELETE FROM items WHERE id = 101").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["g100"])
+        .await;
+    exec(&pg.pool, "DELETE FROM items WHERE id = 11").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["c10"])
+        .await;
+    absent("11").await;
+    absent("101").await;
+
+    exec(&pg.pool, "UPDATE items SET parent_id = 2 WHERE id = 10").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &[])
+        .await;
+    live.assert_doc_eventually("items", "2", &child_labels, &["c10"])
+        .await;
+    live.assert_doc_eventually("items", "2", &grandchild_labels, &["g100"])
+        .await;
+    absent("10").await;
+
+    exec(&pg.pool, "UPDATE items SET parent_id = NULL WHERE id = 10").await;
+    live.assert_doc_eventually("items", "2", &child_labels, &[])
+        .await;
+    live.assert_doc_eventually("items", "10", &child_labels, &["g100"])
+        .await;
+    live.assert_eventually("items", "10", Some("c10"))
+        .await
+        .unwrap();
+
+    exec(&pg.pool, "UPDATE items SET parent_id = 1 WHERE id = 2").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["p2"])
+        .await;
+    absent("2").await;
+    exec(&pg.pool, "UPDATE items SET parent_id = 2 WHERE id = 10").await;
+    live.assert_doc_eventually("items", "1", &grandchild_labels, &["c10"])
+        .await;
+    absent("10").await;
 
     live.shutdown();
 }

@@ -91,3 +91,7 @@ pub(super) fn field_column<'a>(fields: &'a [Field], name: &FieldName) -> Option<
     }
     None
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;
