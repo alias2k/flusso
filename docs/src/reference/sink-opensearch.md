@@ -31,7 +31,7 @@ Writes to a **seeded** index go through the hash alias, each bulk item flagged `
 
 ## Mapping
 
-Each index is created up front from the resolved schema mapping with `dynamic: strict`: types come from the schema, and a document with an unmapped key is rejected. An index that already exists is left as is. The `on_error` policy decides what an item-level rejection does; see [Index entries and on_error](index-and-on-error.md#on_error).
+Each index is created up front from the resolved schema mapping with `dynamic: strict`: types come from the schema, and a document with an unmapped key is rejected. The one open spot is a [`map`](objects-and-maps.md#map): its object takes runtime keys, and a `dynamic_templates` entry per map (named `flusso_map:<path>`, matching `<path>.*`) maps each key like a plain field of the map's `values`. An index that already exists is left as is. The `on_error` policy decides what an item-level rejection does; see [Index entries and on_error](index-and-on-error.md#on_error).
 
 ## Index settings
 

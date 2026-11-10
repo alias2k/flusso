@@ -27,7 +27,7 @@ You're adding a location, a translations column, a status or severity with a mea
      required: true
    ```
 
-   The `jsonb` column's keys become searchable subfields at runtime (`title.en`, `title.it`), without declaring each. See [Objects and maps](../reference/objects-and-maps.md#map).
+   The `jsonb` column's keys become fields at runtime (`title.en`, `title.it`), without declaring each, and each is mapped like a plain field of the `values` type. See [Objects and maps](../reference/objects-and-maps.md#map).
 
 3. **An ordered enum.** Without `variants` an `enum` is a plain keyword and sorts alphabetically. List the variants in rank order and sorting follows that order, with no script.
 
@@ -47,7 +47,7 @@ You're adding a location, a translations column, a status or severity with a mea
      transforms: [trim, lowercase]
    ```
 
-5. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `object` with `dynamic: true` for the map, a `.sort` subfield under the enum.
+5. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `object` with `dynamic: true` for the map, with the mapping each key gets as its `values`, a `.sort` subfield under the enum.
 
 ## Options and variations
 

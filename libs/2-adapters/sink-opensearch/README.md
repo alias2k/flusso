@@ -37,7 +37,9 @@ Per index, an `[[index]]` entry's `[index.sinks.<name>]` table takes `index_sett
 - **Writes.** A seeded index is written through `{logical}_{hash}` with
   `require_alias`; an unseeded one (first seed, or a rebuild) through its
   generation.
-- **Mapping.** Field types come from the schema, created `dynamic: strict`.
+- **Mapping.** Field types come from the schema, created `dynamic: strict`. A
+  `map` field's runtime keys are mapped like a plain field of its `values` type
+  through one `dynamic_templates` entry per map.
 - **Subfields.** Each `text`/`keyword` field gets `keyword` (exact),
   `keyword_lowercase` (sortable), and `text` (searchable) subfields.
 - **Refresh.** Off during seeding; flips to `refresh_interval` once seeded; an

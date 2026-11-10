@@ -171,14 +171,15 @@ Everything about ordering, in one place.
 | --- | --- |
 | `Geo` | `Geo::distance_from(center)` for nearest-first |
 | a bare map handle | `Type::field().sort_key("it").or("en")` |
-| `.key("it")` on a map | the same `sort_key`. A bare `key(..).asc()` would target a nonexistent subfield, so it doesn't compile. |
+| `.key("it")` on a `text` map without subfields | nothing: like a plain `text` field without subfields, it has no sortable path. With subfields (the default) `key("it").asc()` sorts on `.keyword_lowercase`. |
 | `Object` namespaces | sort a leaf inside them |
 
 **Map sort with fallback.** `Type::field().sort_key("it").or("en")` reads as "sort by `it`, else
 `en`" and is true fallback, not lexicographic tiers: a row with only `en` still orders by `en`. It
 is `Sortable`, so it flows through the normal `.sort(..)` / `.by(handle, dir)`; a single key is
-`sort_key("it")` with no `.or`. String maps sort case-insensitively on the key's `.keyword`;
-numeric and date maps on the bare key. `missing_first` / `missing_last` / `missing(v)` resolve to a
+`sort_key("it")` with no `.or`. String maps sort case- and accent-insensitively on the key's
+`.keyword_lowercase` (so `TextMap::sort_key` needs the subfields; a `KeywordMap` without them sorts
+on the bare key, lowercased); numeric and date maps on the bare key. `missing_first` / `missing_last` / `missing(v)` resolve to a
 direction-correct fallback value rather than the `missing` field, which a `_script` sort ignores.
 `numeric_type` / `unmapped_type` / `format` don't apply and are dropped. Several map sorts coexist,
 deduped by field path.

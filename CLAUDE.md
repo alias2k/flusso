@@ -107,7 +107,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   root-table change resolves to its own id *and* walks every path back at the root — issue #167),
   and `a_root_filtered_tree_indexes_only_top_level_rows` (the guide's tree with a `parent_id
   is_null` root filter: only top-level rows are documents across child/grandchild changes,
-  re-parenting, promotion, and demotion).
+  re-parenting, promotion, and demotion). `sink-opensearch`'s `map_keys` binary (issue #177)
+  proves on a live OpenSearch that map keys take their `values` type under the strict root and
+  inside a `nested` array, and that a value a plain field would refuse is an item-level rejection.
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
@@ -152,7 +154,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   the build). Match these before assuming green. One scope note: on PRs confined to the query
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
-  query train's own `combined_search` + `cursor_paging` live e2e still run); pushes to main always run everything.
+  query train's own `combined_search`, `cursor_paging` + `map_keys` live e2e still run); pushes to main always run everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
@@ -590,10 +592,16 @@ and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filte
 unset — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
 pins it. Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
 `json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
-injected into options (so runtime keys stay searchable); the resolved `Mapping.map_values`
-carries the value kind, which is the only thing distinguishing a `map` from a plain
-`object`/`json`. `values` must be a leaf kind (text/keyword/number/date); the conversion
-rejects others. An `enum:` field takes an optional `variants:` list (its own
+injected into options (so runtime keys are accepted); the resolved `Mapping.map_values` is
+the **full `Mapping` every key gets** (what a plain field of `values` resolves to, incl.
+`FlussoType::default_options`, the identifier analyzer) and the only thing distinguishing a
+`map` from a plain `object`/`json`. The OpenSearch sink maps each key with it through one root
+`dynamic_templates` entry per map (`flusso_map:<path>`, `path_match: "<path>.*"`, the property
+`build_property` renders, never a second copy of the rules; issue #177). `Column`'s
+hand-written `Hash` adds `MAP_KEY_MAPPING_REVISION` for a map column only, so map schemas
+moved to a new physical index when keys became typed and nothing else did
+(`a_schema_without_a_map_keeps_its_content_hash` / `a_map_schema_moves_off_its_dynamically_mapped_hash`).
+`values` must be a leaf kind (text/keyword/number/date); the conversion rejects others. An `enum:` field takes an optional `variants:` list (its own
 `EnumBody`/`Field::Enum` entity) — the variants in rank order; empty/omitted = a
 plain keyword. It lands on `Column.enum_order` (**not** on `FlussoType::Enum`,
 which stays a unit variant so `value_type: enum` keeps working and the lock
@@ -645,10 +653,15 @@ is a hard error while a subset is silently fine. Embedding is checked by default
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
 handle per value kind — `TextMap`/`KeywordMap`/`NumberMap`/`DateMap` — where
-`.key(runtime_str)` returns a fully-typed leaf handle (`Text`/`Keyword`/`Number`/`Date`)
-of the declared kind: runtime keys, compile-time value type. `TextMap::search(q)` builds a
-`MapSearch` (a `best_fields` `multi_match` over `prefer`'d keys plus a `path.*` fallback) for
-cross-key search with per-key preference; `has_key`/`exists` are presence checks. The
+`.key(runtime_str)` returns the **plain-field handle** (`Text`/`Keyword`/`Number`/`Date`) of
+the declared kind, since the sink maps every key like a plain field (#177): runtime keys,
+compile-time value type. `TextMap`/`KeywordMap` carry the `WithSubfields`/`NoSubfields`
+type-state (the derive stamps it via `string_handle`, same rule as a plain field) and hand it
+to their keys. `TextMap::search(q)` builds a `MapSearch` (a `multi_match` over `prefer`'d keys
+plus a `path.*` fallback, `best_fields` unless `.match_type(..)`) for cross-key search with
+per-key preference; `contains(part)` (string maps, subfields only) is a `MapContains`: a
+`query_string` of the escaped `*part*` over `path.*.keyword_lowercase`, a case/accent-folded
+substring match across keys; `has_key`/`exists` are presence checks. The
 doc-side type is `HashMap<String, V>` or `BTreeMap<String, V>` (blanket `FlussoMap<K>` impls
 for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape** — newtype or
 named fields (e.g. a translations type with a `fallback` beside the language keys) with a
@@ -663,8 +676,8 @@ sides also enforce the value kind symmetrically (fragment `map_kind_ok` assert; 
 `embed_checks` mirrors it, so a map wrapper on a plain object/nested is rejected everywhere),
 and an opaque `json` field (object, no children) accepts any map-shaped type on both sides.
 `handle_fn` dispatches on `Mapping.map_values` (`Text`→`TextMap`, `Keyword`→`KeywordMap`,
-`Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (`dynamic_templates` per-key
-analyzers for per-language stemming) is deferred.
+`Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (per-key analyzers for per-language
+stemming) is deferred.
 
 **Ordered enums (issue #87).** A keyword mapping with `Mapping.enum_order` set gets the
 `Enum<S, Sub>` handle (`handles/string.rs`) instead of `Keyword`: same value ops (delegated;
@@ -678,18 +691,20 @@ reads as "sort by `it`, else `en`" and returns a `MapKeySort` (`handles/sort.rs`
 `Sortable`, so it flows through the **normal** `SortBuilder::by(handle, dir)` (same
 `Into<MaybeOrderBy>` optionality as any field sort) — single key is just `sort_key("it")` with no
 `.or`. It renders a `_script` sort whose painless source walks the keys in order and sorts by the
-first one a doc has — true fallback, not lexicographic tiers. String maps sort case-insensitively
-(`toLowerCase`) on the dynamic `.keyword` subfield; numeric/date maps on the bare key (epoch millis
+first one a doc has — true fallback, not lexicographic tiers. String maps sort case- and
+accent-insensitively on each key's `.keyword_lowercase` (`MapSortValueKind::Folded`, no script
+lowercasing; so `TextMap::sort_key` exists only with subfields), a `KeywordMap<_, NoSubfields>` on
+the bare key with `toLowerCase` (`Exact`); numeric/date maps on the bare key (epoch millis
 for dates). Nesting-aware via the scope path, like a field sort. `missing_first`/`missing_last`/`missing(v)`
 (on the produced `Sort`, or via an `OrderBy` through `by`) **redirect into the script's
 `params.missing`** with a direction-correct sentinel (`Sort` carries a `script_kind` flag + a `dedup_id`
 distinct from the render key, so several `_script` map sorts dedup by field path and coexist).
-**The single-key footgun is closed:** `TextMap::key`/`KeywordMap::key` return `MapKey`-marked leaves
-(`string.rs`) that are **not** `Sortable` — a plain `.asc()` used to compile and 400 on the
-nonexistent `name.it.keyword_lowercase` (the `Keyword` `Sortable` impl was split into
-`WithSubfields`+`NoSubfields` to exclude `MapKey`). Number/date map keys stay directly sortable
-(their bare path is doc-valued and runtime-correct). Guarded by the `*_map_sort_key_*`/`map_sort_*`
-tests and the `map_key_not_sortable` UI test.
+**A single key sorts like a plain field** (the `MapKey` marker is gone, #177): with typed keys a
+text key with subfields sorts on its real `.keyword_lowercase`, a keyword/number/date key on its
+doc-valued path, and a text key without subfields is not `Sortable` — the `NoSubfields` type-state
+already forbids it, as for a plain field. Guarded by the `*_map_sort_key_*`/`map_sort_*` tests, the
+`map_key_not_sortable` UI test (in the `ui_no_subfields` harness), and the `map_keys` live e2e in
+`dev/query-e2e`.
 
 The query surface is **builder-based** (issue #19): each leaf operator returns a small
 per-query builder (`handles/string.rs`/`scalar.rs`/`geo.rs`/`nested.rs`) carrying that

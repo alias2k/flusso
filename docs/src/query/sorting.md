@@ -4,7 +4,7 @@ Sort on any sortable handle with `.asc()`/`.desc()`, tune the resulting `Sort`, 
 
 ## What sorts
 
-`Sortable` is implemented for `Keyword`, `Text`, `Number`, `Date`, `Bool`, and `Enum`; not for `Geo`, objects, or string map keys.
+`Sortable` is implemented for `Keyword`, `Text`, `Number`, `Date`, `Bool`, and `Enum`; not for `Geo` or objects. A map key is a plain handle of its kind, so it sorts exactly when a plain field of that kind would.
 
 | Handle | `.asc()` / `.desc()` sorts on |
 | --- | --- |
