@@ -9,7 +9,7 @@
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use flusso_query::{Client, FlussoMultiDocument, FlussoRoot, Sortable, multi_match};
+use flusso_query::{Client, FlussoMultiDocument, FlussoRoot, PageCursor, Sortable, multi_match};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -36,6 +36,8 @@ struct SearchFilter {
     /// The search-box text (required — this endpoint *is* the search box).
     q: String,
     limit: Option<u64>,
+    /// The previous page's `next`, to continue a cursor walk; absent for page one.
+    cursor: Option<PageCursor>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -84,6 +86,7 @@ async fn search(
             ],
         ))
         .size(filter.limit.unwrap_or(20))
+        .cursor(filter.cursor)
         .send(&client)
         .await?;
     Ok(Json(Page::from(response)))

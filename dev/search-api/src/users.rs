@@ -5,7 +5,8 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use flusso_query::{
-    Client, FlussoFragment, FlussoRoot, FlussoValue, OrderBy, SortBuilder, Sortable, multi_match,
+    Client, FlussoFragment, FlussoRoot, FlussoValue, OrderBy, PageCursor, SortBuilder, Sortable,
+    multi_match,
 };
 use serde::{Deserialize, Serialize};
 
@@ -139,6 +140,8 @@ struct UserFilter {
     // A field inside the `orders` nested array — sorted by the same `.by` call.
     sort_recent_order: Option<OrderDirection>,
     limit: Option<u64>,
+    /// The previous page's `next`, to continue a cursor walk; absent for page one.
+    cursor: Option<PageCursor>,
 }
 
 pub(crate) fn routes() -> Router<Client> {
@@ -236,6 +239,6 @@ async fn list(
         );
     }
 
-    let response = search.send(&client).await?;
+    let response = search.cursor(filter.cursor).send(&client).await?;
     Ok(Json(Page::from(response)))
 }

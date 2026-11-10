@@ -49,6 +49,12 @@ endpoint (`GET /<index>/{id}`, backed by `Type::get`, `404` when the document is
 that document's analyzed `text` fields, driving relevance ranking while the other params
 only narrow. (`orders` has no `text` field, so no `q`.)
 
+Every list (and `/search`) is **cursor-paged**: the response is `{ total, hits, next }`, and
+sending `next` back as `?cursor=` (with the same filters) returns the following page from the
+same snapshot of the index, so writes and a reindex during the walk never shift it. `next` is
+`null` on the last page. A cursor sent with different filters is `400`; one whose snapshot
+expired (one minute idle, or a reindex dropped it) is `410` — start again without `cursor`.
+
 | Endpoint | Filters |
 | -------- | ------- |
 | `GET /users` | `q` (full-text over `fullName` + `profile.bio`), `email`, `email_prefix`, `name` (full-text on `fullName`), `tier` (`account.tier`), `bio` (full-text on `profile.bio`), `has_profile` (one-to-one exists), `city` (matches an address), `order_status` (matches an order), `min_orders`, `recent_orders=N` (trim each user's returned `orders` to the N newest), **sorting** (`SortBuilder`): `sort_name`, `sort_orders`, `sort_spend`, `sort_joined`, `sort_recent_order` (a nested `orders.placedAt` field) — each `asc`/`desc`, composable; `limit` |
@@ -73,6 +79,10 @@ curl 'localhost:8080/orders?status=delivered&min_total=100'
 # Sort by the declared enum order (pending → paid → shipped → delivered →
 # cancelled), not alphabetically — an ordered `enum`, so `.asc()` uses the rank:
 curl 'localhost:8080/orders?sort=status'
+
+# Page through every delivered order, 50 at a time, on one snapshot:
+curl 'localhost:8080/orders?status=delivered&limit=50'                # → { …, "next": "eyJ2Ijox…" }
+curl 'localhost:8080/orders?status=delivered&limit=50&cursor=eyJ2Ijox…'
 
 # Fetch one document by id (404 if absent):
 curl 'localhost:8080/users/1'
