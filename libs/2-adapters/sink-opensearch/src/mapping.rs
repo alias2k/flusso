@@ -1,6 +1,12 @@
 //! Translating resolved schema fields into an OpenSearch index body: the
 //! `dynamic: strict` mapping, the `flusso_*` analysis definitions, and the
 //! production-ready subfield enrichment for `text`/`keyword` fields.
+//!
+//! A `map` field is an `object` with `dynamic: true`, so its runtime keys are
+//! accepted under the strict root. Each key is mapped like a plain field of the
+//! map's `values` type: one root `dynamic_templates` entry per map, matching
+//! the map's full dotted path (`orders.labels.*` works inside a `nested`
+//! array too), carries the property [`build_property`] renders for that type.
 
 use kernel::{MappingType, ResolvedField};
 
@@ -53,6 +59,9 @@ const ENUM_SORT_SUBFIELD: &str = "sort";
 /// Prefix for the per-field char-filter + normalizer names that back the enum
 /// sort subfield.
 const ENUM_SORT_PREFIX: &str = "flusso_enumsort";
+/// Prefix for a map's `dynamic_templates` entry name; the map's dotted path
+/// follows, so names are unique and stable.
+const MAP_TEMPLATE_PREFIX: &str = "flusso_map:";
 
 /// The shared char-filter/normalizer name for an ordered enum at `path` — one
 /// per field, keyed by its (sanitized) dotted path so several enums coexist.
@@ -93,6 +102,36 @@ fn collect_enum_sorts<'a>(
     }
 }
 
+/// One `dynamic_templates` entry per `map` field, in field order (recursing
+/// into object/nested children): every key under the map's path gets the
+/// property a plain field of its `values` type renders to.
+fn collect_map_templates(
+    fields: &[ResolvedField],
+    options: &IndexOptions,
+    prefix: &str,
+    out: &mut Vec<Value>,
+) {
+    for field in fields {
+        let path = field_path(prefix, field);
+        if let Some(values) = &field.mapping.map_values {
+            let key = ResolvedField {
+                name: field.name.clone(),
+                mapping: values.as_ref().clone(),
+                nullable: true,
+                array: false,
+                children: Vec::new(),
+            };
+            out.push(json!({
+                format!("{MAP_TEMPLATE_PREFIX}{path}"): {
+                    "path_match": format!("{path}.*"),
+                    "mapping": build_property(&key, options, &path),
+                },
+            }));
+        }
+        collect_map_templates(&field.children, options, &path, out);
+    }
+}
+
 /// A field's dotted path from the index root.
 fn field_path(prefix: &str, field: &ResolvedField) -> String {
     if prefix.is_empty() {
@@ -103,9 +142,9 @@ fn field_path(prefix: &str, field: &ResolvedField) -> String {
 }
 
 /// Build the `PUT /{index}` request body: a `dynamic: strict` mapping with one
-/// typed property per field, the index settings, `refresh_interval: -1` for
-/// bulk seeding, and the `flusso_*` analysis definitions the field shapes
-/// reference.
+/// typed property per field (plus a `dynamic_templates` entry per `map`), the
+/// index settings, `refresh_interval: -1` for bulk seeding, and the `flusso_*`
+/// analysis definitions the field shapes reference.
 ///
 /// Settings precedence, lowest first: the typed shard counts, the user's
 /// layered `index_settings`, then the keys flusso owns.
@@ -130,12 +169,20 @@ pub(crate) fn build_index_body(fields: &[ResolvedField], options: &IndexOptions)
         "analysis".to_owned(),
         build_analysis(options.text_analysis, &enum_sorts),
     );
+    let mut mappings = Map::new();
+    mappings.insert("dynamic".to_owned(), json!("strict"));
+    let mut map_templates = Vec::new();
+    collect_map_templates(fields, options, "", &mut map_templates);
+    if !map_templates.is_empty() {
+        mappings.insert("dynamic_templates".to_owned(), Value::Array(map_templates));
+    }
+    mappings.insert(
+        "properties".to_owned(),
+        build_properties(fields, options, ""),
+    );
     json!({
         "settings": settings,
-        "mappings": {
-            "dynamic": "strict",
-            "properties": build_properties(fields, options, ""),
-        },
+        "mappings": mappings,
     })
 }
 

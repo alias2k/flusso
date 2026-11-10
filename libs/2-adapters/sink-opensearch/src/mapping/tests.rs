@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use kernel::{FieldName, GenericValue, Mapping};
+use kernel::{FieldName, FlussoType, GenericValue, Mapping};
 
 use super::*;
 
@@ -266,32 +266,156 @@ fn extra_mapping_settings_pass_through() {
     assert_eq!(amount["scaling_factor"], 100);
 }
 
+/// The mapping a plain field of `ty` resolves to — what a map key of `ty` gets.
+fn value_mapping(ty: &FlussoType) -> Mapping {
+    Mapping {
+        mapping_type: ty.opensearch(),
+        extra: ty.default_options(),
+        map_values: None,
+        decimal: matches!(ty, FlussoType::Decimal),
+        enum_order: None,
+    }
+}
+
+fn map_field(name: &str, values: &FlussoType) -> ResolvedField {
+    let mut map = field(name, MappingType::Object, vec![]);
+    map.mapping
+        .extra
+        .insert("dynamic".to_owned(), GenericValue::Bool(true));
+    map.mapping.map_values = Some(Box::new(value_mapping(values)));
+    map
+}
+
+/// Every type a map's `values` may declare.
+fn leaf_value_types() -> Vec<FlussoType> {
+    vec![
+        FlussoType::Text,
+        FlussoType::Identifier,
+        FlussoType::Keyword,
+        FlussoType::Enum,
+        FlussoType::Uuid,
+        FlussoType::Short,
+        FlussoType::Integer,
+        FlussoType::Long,
+        FlussoType::Float,
+        FlussoType::Double,
+        FlussoType::Decimal,
+        FlussoType::Date,
+        FlussoType::Timestamp,
+    ]
+}
+
+fn every_option_set() -> Vec<IndexOptions> {
+    [true, false]
+        .into_iter()
+        .flat_map(|auto_subfields| {
+            [TextAnalysis::Builtin, TextAnalysis::Icu].map(|text_analysis| IndexOptions {
+                auto_subfields,
+                text_analysis,
+                ..opts()
+            })
+        })
+        .collect()
+}
+
 #[test]
-fn map_field_renders_a_dynamic_object() {
-    // A `map` field resolves to an `object` with `dynamic: true` in `extra` and
-    // no children, so the dynamic keys stay searchable rather than being
-    // rejected by the index's root `dynamic: strict`.
-    let mut extra = BTreeMap::new();
-    extra.insert("dynamic".to_owned(), GenericValue::Bool(true));
-    let title = ResolvedField {
-        name: FieldName::try_new("title").unwrap(),
-        mapping: Mapping {
-            mapping_type: MappingType::Object,
-            extra,
-            map_values: Some(MappingType::Text),
-            decimal: false,
-            enum_order: None,
-        },
-        nullable: false,
-        array: false,
-        children: vec![],
-    };
-    let body = build_index_body(&[title], &opts());
+fn a_map_key_is_mapped_like_a_plain_field_of_its_values_type() {
+    for options in every_option_set() {
+        for ty in leaf_value_types() {
+            let mut plain = field("title", MappingType::Text, vec![]);
+            plain.mapping = value_mapping(&ty);
+            let plain = build_index_body(&[plain], &options);
+            let map = build_index_body(&[map_field("title", &ty)], &options);
+
+            let template = &map["mappings"]["dynamic_templates"][0]["flusso_map:title"];
+            assert_eq!(template["path_match"], "title.*", "{ty:?}");
+            assert_eq!(
+                template["mapping"], plain["mappings"]["properties"]["title"],
+                "{ty:?} auto_subfields={} {:?}",
+                options.auto_subfields, options.text_analysis,
+            );
+            assert_eq!(map["settings"], plain["settings"]);
+        }
+    }
+}
+
+#[test]
+fn a_text_map_key_gets_the_text_analyzer_and_subfields() {
+    let body = build_index_body(&[map_field("title", &FlussoType::Text)], &opts());
+    let key = &body["mappings"]["dynamic_templates"][0]["flusso_map:title"]["mapping"];
+    assert_eq!(key["type"], "text");
+    assert_eq!(key["analyzer"], TEXT_ANALYZER);
+    assert_eq!(key["fields"]["keyword"]["type"], "keyword");
+    assert_eq!(
+        key["fields"]["keyword_lowercase"]["normalizer"],
+        LOWERCASE_NORMALIZER
+    );
+}
+
+#[test]
+fn a_map_object_stays_open_with_no_fixed_keys() {
+    let body = build_index_body(&[map_field("title", &FlussoType::Text)], &opts());
     let title = &body["mappings"]["properties"]["title"];
     assert_eq!(title["type"], "object");
     assert_eq!(title["dynamic"], true);
-    // No fixed sub-properties — the keys are dynamic.
     assert!(title.get("properties").is_none());
+    assert_eq!(body["mappings"]["dynamic"], "strict");
+}
+
+#[test]
+fn map_templates_match_the_full_path_in_field_order() {
+    let orders = field(
+        "orders",
+        MappingType::Nested,
+        vec![
+            field("id", MappingType::Long, vec![]),
+            map_field("labels", &FlussoType::Keyword),
+        ],
+    );
+    let meta = field(
+        "meta",
+        MappingType::Object,
+        vec![map_field("prices", &FlussoType::Double)],
+    );
+    let fields = [map_field("title", &FlussoType::Text), orders, meta];
+    let body = build_index_body(&fields, &opts());
+
+    let templates = body["mappings"]["dynamic_templates"].as_array().unwrap();
+    let names: Vec<&str> = templates
+        .iter()
+        .map(|template| {
+            template
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .as_str()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "flusso_map:title",
+            "flusso_map:orders.labels",
+            "flusso_map:meta.prices"
+        ]
+    );
+    assert_eq!(
+        templates[1]["flusso_map:orders.labels"]["path_match"],
+        "orders.labels.*"
+    );
+    assert_eq!(
+        templates[2]["flusso_map:meta.prices"]["mapping"]["type"],
+        "double"
+    );
+    assert_eq!(body, build_index_body(&fields, &opts()));
+}
+
+#[test]
+fn an_index_without_a_map_has_no_dynamic_templates() {
+    let body = build_index_body(&[field("name", MappingType::Text, vec![])], &opts());
+    assert!(body["mappings"].get("dynamic_templates").is_none());
 }
 
 #[test]
