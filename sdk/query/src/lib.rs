@@ -112,6 +112,7 @@ mod multi;
 mod path;
 mod query;
 mod search;
+mod walk;
 
 #[cfg(test)]
 mod tests;
@@ -146,6 +147,7 @@ pub use search::{
     CursorSearch, FlussoRoot, FlussoScope, Highlight, Hit, IdsPage, Search, SearchResponse,
     ShardStats,
 };
+pub use walk::Walk;
 
 /// `#[derive(FlussoRoot)]` — the index-bound **root**. Generates the typed query
 /// surface for the *whole* index (a handle for every field at every level,

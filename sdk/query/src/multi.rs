@@ -28,6 +28,7 @@
 
 use std::borrow::Cow;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -39,6 +40,7 @@ use crate::error::{Error, Result};
 use crate::handles::Sort;
 use crate::query::{AsQuery, BoolBuilder, Root};
 use crate::search::{Hit, RawCount, SearchResponse};
+use crate::walk::{Fetched, Walk};
 
 /// A union of [`FlussoScope`](crate::FlussoScope) types searched
 /// together — one query, one blended result list, each hit decoded into the
@@ -417,7 +419,7 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
     }
 
     /// [`send`](Self::send), resuming after `cursor` instead of the one the
-    /// search was built with — what a [`Walk`](crate::Walk) drives page by page.
+    /// search was built with — what a [`Walk`] drives page by page.
     #[tracing::instrument(
         name = "search.multi_cursor",
         skip_all,
@@ -446,6 +448,52 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
             );
         }
         Ok(decoded)
+    }
+}
+
+impl<U> MultiCursorSearch<U>
+where
+    U: FlussoMultiDocument + Send + 'static,
+{
+    /// Stream the whole blended walk, one [`SearchResponse`] per page. Starts
+    /// from this search's cursor and mode; see [`Walk`] for how it ends.
+    #[must_use]
+    pub fn pages(self, client: &Client) -> Walk<SearchResponse<U>> {
+        self.walk(client, |page| {
+            let next = page.next.clone();
+            Fetched {
+                items: vec![page],
+                next,
+            }
+        })
+    }
+
+    /// Stream every hit of the blended walk, page after page. See [`Walk`].
+    #[must_use]
+    pub fn hits(self, client: &Client) -> Walk<Hit<U>> {
+        self.walk(client, |page| Fetched {
+            items: page.hits,
+            next: page.next,
+        })
+    }
+
+    fn walk<I: 'static>(
+        self,
+        client: &Client,
+        items: fn(SearchResponse<U>) -> Fetched<I>,
+    ) -> Walk<I> {
+        let start = self.cursor.clone();
+        let search = Arc::new(self);
+        Walk::new(
+            client,
+            start,
+            Box::new(move |client, cursor| {
+                let search = Arc::clone(&search);
+                Box::pin(
+                    async move { Ok(items(search.send_from(&client, cursor.as_ref()).await?)) },
+                )
+            }),
+        )
     }
 }
 

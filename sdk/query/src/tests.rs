@@ -2364,3 +2364,129 @@ mod cursor {
         Ok(())
     }
 }
+
+// ──────────────────────────── streaming a walk ────────────────────────────
+
+mod walk {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use futures::TryStreamExt;
+    use serde_json::json;
+
+    use crate::cursor::{PageCursor, PinnedView};
+    use crate::walk::{FetchPage, Fetched, Walk};
+    use crate::{Client, Error};
+
+    type Result = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    /// One scripted page: its items, and whether another page follows.
+    type Script = Vec<std::result::Result<Vec<u32>, ()>>;
+
+    fn cursor_after(page: usize, pinned: bool) -> PageCursor {
+        let view = pinned.then(|| PinnedView {
+            id: format!("pit-{page}"),
+            keep_alive: Duration::from_secs(60),
+        });
+        PageCursor::new(view, vec![json!(page)], 1)
+    }
+
+    /// A walk over `script`, recording the cursor each fetch was asked for.
+    fn scripted(script: Script, pinned: bool) -> (Walk<u32>, Arc<Mutex<Vec<Option<PageCursor>>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&asked);
+        let pages = script.len();
+        let script = Arc::new(script);
+        let fetch: FetchPage<u32> = Box::new(move |_client, cursor| {
+            let mut log = log.lock().unwrap();
+            let page = log.len();
+            log.push(cursor);
+            let outcome = script.get(page).cloned().unwrap_or(Ok(Vec::new()));
+            Box::pin(async move {
+                match outcome {
+                    Ok(items) => Ok(Fetched {
+                        items,
+                        next: (page + 1 < pages).then(|| cursor_after(page, pinned)),
+                    }),
+                    Err(()) => Err(Error::Cursor(format!("page {page} failed"))),
+                }
+            })
+        });
+        let client = Client::connect("http://127.0.0.1:9").unwrap();
+        (Walk::new(&client, None, fetch), asked)
+    }
+
+    #[tokio::test]
+    async fn a_walk_yields_every_item_across_pages_and_resumes_each_page_after_the_last() -> Result
+    {
+        let (walk, asked) = scripted(vec![Ok(vec![1, 2]), Ok(vec![3, 4]), Ok(vec![5])], false);
+        let items: Vec<u32> = walk.try_collect().await?;
+        assert_eq!(items, [1, 2, 3, 4, 5]);
+        let asked = asked.lock().unwrap();
+        assert_eq!(
+            *asked,
+            [
+                None,
+                Some(cursor_after(0, false)),
+                Some(cursor_after(1, false))
+            ],
+            "page one starts fresh; each later page resumes after the previous one"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_empty_last_page_ends_the_walk() -> Result {
+        let (walk, _) = scripted(vec![Ok(vec![1]), Ok(Vec::new())], false);
+        let items: Vec<u32> = walk.try_collect().await?;
+        assert_eq!(items, [1]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_page_ends_the_walk_and_keeps_its_cursor_for_a_retry() -> Result {
+        let (mut walk, _) = scripted(vec![Ok(vec![1]), Err(()), Ok(vec![3])], false);
+        assert_eq!(walk.try_next().await?, Some(1));
+        assert!(matches!(walk.try_next().await, Err(Error::Cursor(_))));
+        assert!(walk.is_finished());
+        assert_eq!(walk.try_next().await?, None, "nothing after the error");
+        assert_eq!(
+            walk.cursor(),
+            Some(&cursor_after(0, false)),
+            "the cursor still names the failed page"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_checkpoint_is_the_page_after_the_last_one_fetched() -> Result {
+        let (mut walk, _) = scripted(vec![Ok(vec![1, 2]), Ok(vec![3])], false);
+        assert!(walk.cursor().is_none(), "nothing fetched yet");
+        assert_eq!(walk.try_next().await?, Some(1));
+        assert_eq!(walk.cursor(), Some(&cursor_after(0, false)));
+        assert_eq!(walk.try_next().await?, Some(2));
+        assert_eq!(walk.try_next().await?, Some(3));
+        assert!(
+            walk.cursor().is_none() && walk.is_finished(),
+            "the last page leaves nothing"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn into_cursor_keeps_a_pinned_position_and_close_releases_it() -> Result {
+        let (mut walk, _) = scripted(vec![Ok(vec![1]), Ok(vec![2])], true);
+        assert_eq!(walk.try_next().await?, Some(1));
+        let kept = walk
+            .into_cursor()
+            .ok_or("a pinned walk mid-way has a cursor")?;
+        assert!(
+            kept.is_pinned(),
+            "into_cursor hands the pinned view back open"
+        );
+
+        let (walk, _) = scripted(vec![Ok(vec![1])], false);
+        walk.close().await?;
+        Ok(())
+    }
+}

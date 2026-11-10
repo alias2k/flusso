@@ -1,6 +1,7 @@
 //! The [`Search`] builder and the typed [`SearchResponse`] / [`Hit`] results.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -14,6 +15,7 @@ use crate::error::Result;
 use crate::handles::{MinimumShouldMatch, NestedProjection, Sort};
 use crate::path::Segment;
 use crate::query::{AsQuery, BoolBuilder, Root};
+use crate::walk::{Fetched, Walk};
 
 /// A view onto a flusso-maintained index — the root document **or** any of its
 /// `nested` element projections. Every struct `#[derive(FlussoDocument)]`
@@ -603,7 +605,7 @@ impl<T> CursorSearch<T> {
     }
 
     /// [`ids`](Self::ids), resuming after `cursor` instead of the one the
-    /// search was built with — what a [`Walk`](crate::Walk) drives page by page.
+    /// search was built with — what a [`Walk`] drives page by page.
     #[tracing::instrument(
         name = "search.cursor_ids",
         skip_all,
@@ -637,7 +639,7 @@ where
     }
 
     /// [`send`](Self::send), resuming after `cursor` instead of the one the
-    /// search was built with — what a [`Walk`](crate::Walk) drives page by page.
+    /// search was built with — what a [`Walk`] drives page by page.
     #[tracing::instrument(
         name = "search.cursor_send",
         skip_all,
@@ -671,6 +673,81 @@ where
             );
         }
         Ok(decoded)
+    }
+}
+
+impl<T> CursorSearch<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    /// Stream the whole walk, one [`SearchResponse`] per page — `total`,
+    /// timing, and partial-result flags included. Starts from this search's
+    /// cursor and mode; see [`Walk`] for how it ends.
+    #[must_use]
+    pub fn pages(self, client: &Client) -> Walk<SearchResponse<T>> {
+        self.walk(client, |page| {
+            let next = page.next.clone();
+            Fetched {
+                items: vec![page],
+                next,
+            }
+        })
+    }
+
+    /// Stream every hit of the walk, page after page. See [`Walk`].
+    #[must_use]
+    pub fn hits(self, client: &Client) -> Walk<Hit<T>> {
+        self.walk(client, |page| Fetched {
+            items: page.hits,
+            next: page.next,
+        })
+    }
+
+    fn walk<I: 'static>(
+        self,
+        client: &Client,
+        items: fn(SearchResponse<T>) -> Fetched<I>,
+    ) -> Walk<I> {
+        let start = self.cursor.clone();
+        let search = Arc::new(self);
+        Walk::new(
+            client,
+            start,
+            Box::new(move |client, cursor| {
+                let search = Arc::clone(&search);
+                Box::pin(
+                    async move { Ok(items(search.send_from(&client, cursor.as_ref()).await?)) },
+                )
+            }),
+        )
+    }
+}
+
+impl<T> CursorSearch<T>
+where
+    T: Send + 'static,
+{
+    /// Stream every document id of the walk (no sources fetched), page after
+    /// page — the cheap way to feed every match into another lookup. See
+    /// [`Walk`].
+    #[must_use]
+    pub fn id_stream(self, client: &Client) -> Walk<String> {
+        let start = self.cursor.clone();
+        let search = Arc::new(self);
+        Walk::new(
+            client,
+            start,
+            Box::new(move |client, cursor| {
+                let search = Arc::clone(&search);
+                Box::pin(async move {
+                    let page = search.ids_from(&client, cursor.as_ref()).await?;
+                    Ok(Fetched {
+                        items: page.ids,
+                        next: page.next,
+                    })
+                })
+            }),
+        )
     }
 }
 
