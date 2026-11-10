@@ -343,7 +343,11 @@ async fn items_builder(url: &str, relation: Field) -> PgDocumentBuilder {
 
 /// The `items` keys a change on `items.<id>` resolves to, sorted; fails on a
 /// duplicate.
-async fn resolved(builder: &PgDocumentBuilder, id: i64, parent_before: Option<i64>) -> Vec<i64> {
+async fn resolved_keys(
+    builder: &PgDocumentBuilder,
+    id: i64,
+    parent_before: Option<i64>,
+) -> Vec<i64> {
     let before = parent_before.map(|parent| {
         RowImage(vec![
             (column("id"), GenericValue::BigInt(id)),
@@ -378,17 +382,17 @@ async fn a_self_referencing_has_many_resolves_the_parent() {
     let builder = items_builder(&url, children(vec![])).await;
 
     assert_eq!(
-        resolved(&builder, 2, None).await,
+        resolved_keys(&builder, 2, None).await,
         [1, 2],
         "a child rebuilds its parent"
     );
     assert_eq!(
-        resolved(&builder, 3, None).await,
+        resolved_keys(&builder, 3, None).await,
         [2, 3],
         "one declared level, one parent"
     );
     assert_eq!(
-        resolved(&builder, 4, None).await,
+        resolved_keys(&builder, 4, None).await,
         [4],
         "a root rebuilds only itself"
     );
@@ -404,9 +408,9 @@ async fn a_deleted_or_reparented_self_referencing_child_rebuilds_its_old_parent(
     .await;
     let builder = items_builder(&url, children(vec![])).await;
 
-    assert_eq!(resolved(&builder, 3, Some(2)).await, [2, 3], "deleted");
+    assert_eq!(resolved_keys(&builder, 3, Some(2)).await, [2, 3], "deleted");
     assert_eq!(
-        resolved(&builder, 2, Some(1)).await,
+        resolved_keys(&builder, 2, Some(1)).await,
         [1, 2, 4],
         "re-parented"
     );
@@ -418,9 +422,9 @@ async fn a_two_level_self_join_rebuilds_the_grandparent() {
     let (_container, url) = items_tree(&["DELETE FROM items WHERE id = 3"]).await;
     let builder = items_builder(&url, children(vec![children(vec![])])).await;
 
-    assert_eq!(resolved(&builder, 2, None).await, [1, 2]);
+    assert_eq!(resolved_keys(&builder, 2, None).await, [1, 2]);
     assert_eq!(
-        resolved(&builder, 3, Some(2)).await,
+        resolved_keys(&builder, 3, Some(2)).await,
         [1, 2, 3],
         "a deleted grandchild rebuilds its parent and grandparent",
     );
@@ -439,8 +443,8 @@ async fn a_belongs_to_back_at_the_root_rebuilds_its_referrers() {
     );
     let builder = items_builder(&url, parent).await;
 
-    assert_eq!(resolved(&builder, 1, None).await, [1, 2]);
-    assert_eq!(resolved(&builder, 3, None).await, [3]);
+    assert_eq!(resolved_keys(&builder, 1, None).await, [1, 2]);
+    assert_eq!(resolved_keys(&builder, 3, None).await, [3]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -456,7 +460,7 @@ async fn a_has_one_back_at_the_root_rebuilds_the_parent() {
     );
     let builder = items_builder(&url, first_child).await;
 
-    assert_eq!(resolved(&builder, 2, None).await, [1, 2]);
+    assert_eq!(resolved_keys(&builder, 2, None).await, [1, 2]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -481,7 +485,7 @@ async fn a_many_to_many_back_at_the_root_rebuilds_the_linking_side() {
     );
     let builder = items_builder(&url, related).await;
 
-    assert_eq!(resolved(&builder, 3, None).await, [3, 4]);
+    assert_eq!(resolved_keys(&builder, 3, None).await, [3, 4]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -502,8 +506,8 @@ async fn an_aggregate_over_the_root_table_rebuilds_the_parent() {
     };
     let builder = items_builder(&url, child_count).await;
 
-    assert_eq!(resolved(&builder, 2, None).await, [1, 2]);
-    assert_eq!(resolved(&builder, 3, Some(2)).await, [2, 3], "deleted");
+    assert_eq!(resolved_keys(&builder, 2, None).await, [1, 2]);
+    assert_eq!(resolved_keys(&builder, 3, Some(2)).await, [2, 3], "deleted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

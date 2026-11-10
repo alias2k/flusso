@@ -444,6 +444,7 @@ impl DocumentBuilder for PgDocumentBuilder {
             };
 
             let mut seen = HashSet::new();
+            // A row that is its own ancestor must not re-emit the id pushed above.
             if is_root
                 && let [(column, own)] = key.0.as_slice()
                 && *column == pk_column
