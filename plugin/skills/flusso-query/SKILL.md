@@ -363,6 +363,10 @@ page.next                            // Option<PageCursor>: opaque string, None 
   `Error::CursorExpired` (keep-alive lapsed, default 1 min via `.keep_alive(..)`, or a reindex
   dropped its generation) means restart from page one; `next.close(&client)` ends it early.
 - `filter_nested` projections take no cursor; they page by `.from`/`.size` within each parent.
+- **Walk everything as a stream** instead of looping on `next`: `.cursor(None).hits(&client)` (or
+  `.pages`, `.id_stream`) is a `Walk` (`futures::Stream`, `'static + Send`, `TryStreamExt::try_next`),
+  one page fetched per page consumed. `walk.cursor()` is the checkpoint; for a pinned walk,
+  `close().await` / `into_cursor()` (keeps it open) / drop (closes in the background) end it.
 
 ## Custom value types — `#[derive(FlussoValue)]`
 

@@ -761,7 +761,12 @@ serves now (`GET {path}/_alias`), or a reindex mid-walk repeats every tie; a PIT
 `/_search` and continues with the *returned* `pit_id`; the token's fingerprint is a hand-rolled
 FNV-1a over the body (minus delivery keys) and the *prefixed* path, pinned by
 `the_fingerprint_is_pinned`; a gone PIT is `CursorExpired`, matched on the exception type, not the 404.
-Guarded by `tests::cursor` and the `cursor_paging` live e2e (helpers shared in `tests/common/`).
+`Walk<I>` (`sdk/query/src/walk.rs`, issue #158) streams a whole walk (`pages`/`hits`/`id_stream`
+consume the cursor search): a hand-written `futures_core::Stream` over a boxed page fetch, one page
+per page consumed; its `Drop` closes a still-pinned point-in-time by **spawning** on
+`tokio::runtime::Handle::try_current()` (`Drop` can't await), while `into_cursor` keeps it open.
+Guarded by `tests::cursor`, `tests::walk`, and the `cursor_paging` live e2e (helpers shared in
+`tests/common/`).
 
 ## Keeping this file current
 
@@ -814,7 +819,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
-| Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors) |
+| Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |

@@ -79,6 +79,8 @@ let page = User::query().size(50).cursor(params.cursor).send(client).await?;
 // page.next: Option<PageCursor> — an opaque string; send it back for the next page
 ```
 
+`.hits(&client)` (or `.pages`, `.id_stream`) streams the whole walk as one `futures::Stream`, fetching each page as the previous one is consumed.
+
 See [paging](https://alias2k.github.io/flusso/query/paging.html) in the manual.
 
 Targets OpenSearch and Elasticsearch 7.x, which share the query DSL ([pinned cursor walks](https://alias2k.github.io/flusso/query/paging.html#pinned-walks) are OpenSearch-only).

@@ -36,7 +36,8 @@
 //!   sort values (`search_after`), so inserts and deletes
 //!   never shift the walk and depth is unlimited; `.point_in_time()` pins the
 //!   walk to one fixed view. [`SearchResponse::next`] carries the opaque token
-//!   that resumes after each page. See [`PageCursor`] for a walk.
+//!   that resumes after each page. See [`PageCursor`] for a walk, and
+//!   [`Walk`] to stream a whole one (`.pages`/`.hits`/`.id_stream`).
 //!
 //! Also covered: optional filters (`Option<Q>` is a [`Query`]); shaping returned
 //! nested arrays ([`Search::filter_nested`] with [`Nested::matching`], via

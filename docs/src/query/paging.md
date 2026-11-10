@@ -66,6 +66,45 @@ loop {
 
 How it works, and why: [ADR 0008](https://github.com/alias2k/flusso/blob/main/docs/adr/0008-page-cursors-are-keyset-with-an-opt-in-point-in-time.md).
 
+## Streaming a walk
+
+A cursor search's `pages`, `hits`, or `id_stream` turns the whole walk into one `futures::Stream`: no `next` loop.
+
+```rust
+use futures::TryStreamExt;
+
+let mut hits = Order::query()
+    .filter(Order::status().eq("delivered"))
+    .size(500)
+    .cursor(None)
+    .hits(&client);
+while let Some(hit) = hits.try_next().await? {
+    export(hit.source);
+}
+```
+
+| Terminal | Yields | On |
+| --- | --- | --- |
+| `.pages(&client)` | `SearchResponse<T>` per page | `CursorSearch`, `MultiCursorSearch` |
+| `.hits(&client)` | `Hit<T>` | `CursorSearch`, `MultiCursorSearch` |
+| `.id_stream(&client)` | `String` | `CursorSearch` |
+
+- **It's a `Walk`.** It owns a clone of the client, so it's `'static + Send`: return it from a handler, hand it to `Body::from_stream`, spawn it. The `dev/search-api` example's `GET /orders/export` streams NDJSON this way.
+- **One page at a time.** The next page is fetched once the current page's items are consumed; nothing is prefetched.
+- **It starts where the cursor search does.** `.cursor(Some(c))` resumes, `.point_in_time()` pins: the same as a single page.
+- **A failed page** yields its error, then the stream ends. `walk.cursor()` still names that page, so a new walk from it retries.
+- **Checkpoints.** `walk.cursor()` resumes right after the last page fetched. With `pages` that's exact; with `hits` and `id_stream`, the current page's unconsumed items are skipped on resume.
+- **How a pinned walk lets go of its point-in-time:**
+
+  | The walk… | Point-in-time |
+  | --- | --- |
+  | runs to the last page | closed |
+  | `walk.close().await` | closed now; a failed close is reported |
+  | `walk.into_cursor()` | kept open, so the returned cursor resumes it (until the keep-alive) |
+  | is dropped early (`break`, `?`, a disconnected client) | closed in the background on the current tokio runtime; outside one, it expires |
+
+  A live walk holds nothing, so every ending is free for it.
+
 ## Related
 
 - [Results and the escape hatch](results-and-escape-hatch.md) for the response types.
