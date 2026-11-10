@@ -121,13 +121,13 @@ def resolve_runner(config_path):
     """Returns (command prefix, cwd, label) or (None, None, None)."""
     override = os.environ.get("FLUSSO_CHECK_CMD")
     if override:
-        return override.split(), None, f"$FLUSSO_CHECK_CMD={override}"
+        return override.split(), None, "$FLUSSO_CHECK_CMD"
     cargo_root = find_cargo_root(os.path.dirname(config_path))
     if cargo_root and builds_flusso(cargo_root) and shutil.which("cargo"):
         return ["cargo", "run", "--quiet", "--"], cargo_root, f"cargo run from {cargo_root}"
     exe = shutil.which("flusso")
     if exe:
-        return [exe], None, path_flusso_label(exe)
+        return [exe], None, exe
     return None, None, None
 
 
@@ -165,6 +165,7 @@ def main():
         # No way to run flusso here; stay quiet rather than nag on every edit.
         sys.exit(0)
 
+    config = os.path.abspath(config)
     rel = os.path.relpath(config)
 
     # Online check first — it also confirms declared types/nullability against
@@ -189,6 +190,8 @@ def main():
     else:
         note = "(validated against the live database)"
 
+    if label == runner[0]:
+        label = path_flusso_label(label)
     fail_to_agent(
         f"flusso check failed after this edit {note} — {rel} no longer "
         f"validates (runner: {label}):\n\n{detail}\n\n"
