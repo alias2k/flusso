@@ -11,8 +11,8 @@
 //! - [`relation_columns`]: what a relation reads from one of its tables — the
 //!   projected fields, `filters`, `order_by`, the aggregate input, and the
 //!   link (a child's `foreign_key`, a junction's `left_key`/`right_key`).
-//! - [`soft_delete_column`]: the root column a `soft_delete` marker names; the
-//!   document query reads the same one.
+//! - [`soft_delete_column`]: the column a `soft_delete` marker reads on the
+//!   root row; the document query reads the same one.
 //! - [`row_link`]: the link column a related row holds, which a deleted or
 //!   re-parented row's pre-image must carry (see
 //!   [`SourceSpec::pre_image_columns`](crate::SourceSpec::pre_image_columns)).
@@ -242,13 +242,16 @@ pub fn relation_columns(schema: &IndexSchema, relation: &Relation, table: &Table
     used.finish()
 }
 
-/// The root column a `soft_delete` marker reads: its `column`, or the column
-/// behind its `field` among the root-level fields (same-row groups included).
-/// `None` without a marker, or when the field names no root-level column.
+/// The column a `soft_delete` marker reads on the root row: its `column`, or
+/// the column behind the first field named `field`, searched depth-first in
+/// declaration order through groups **and** joins. A name found inside a join
+/// is still read on the root row, as the document query does.
+/// `None` without a marker, or when the first field of that name is not a
+/// column (or there is none).
 pub fn soft_delete_column(schema: &IndexSchema) -> Option<&ColumnName> {
     match schema.soft_delete.as_ref()? {
         SoftDelete::Column(marker) => Some(&marker.column),
-        SoftDelete::Field(marker) => root_level_column(&schema.fields, &marker.field),
+        SoftDelete::Field(marker) => field_column(&schema.fields, &marker.field),
     }
 }
 
@@ -274,13 +277,16 @@ fn aggregate_input(op: &kernel::AggregateOp) -> Option<&ColumnName> {
     }
 }
 
-/// The column behind a root-level field (groups included), if it is a column.
-fn root_level_column<'a>(fields: &'a [Field], name: &FieldName) -> Option<&'a ColumnName> {
-    fields.iter().find_map(|field| match &field.source {
-        FieldSource::Column(column) if field.field == *name => Some(&column.column),
-        FieldSource::Group(fields) => root_level_column(fields, name),
-        _ => None,
-    })
+fn field_column<'a>(fields: &'a [Field], name: &FieldName) -> Option<&'a ColumnName> {
+    for field in fields {
+        if field.field == *name {
+            return field.column();
+        }
+        if let Some(column) = field_column(field.children(), name) {
+            return Some(column);
+        }
+    }
+    None
 }
 
 fn soft_delete_when(soft_delete: &SoftDelete) -> Option<&[Filter]> {

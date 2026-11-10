@@ -280,31 +280,77 @@ fn the_root_reads_its_fields_filters_and_soft_delete_marker() {
     assert_eq!(root_columns(&schema), ColumnUse::All);
 }
 
-/// A `soft_delete` field resolves among the root level only — the column the
-/// document query reads on the root row — even when a relation listed first
-/// projects a field of the same name.
-#[test]
-fn a_soft_delete_field_resolves_to_the_root_level_column() {
-    let mut orders = has_many_orders();
-    orders.fields.push(Field {
-        field: FieldName::try_new("deleted").unwrap(),
-        ..field("cancelled")
-    });
-    let mut schema = users(vec![
-        relation_field("orders", Relation::Join(orders)),
-        Field {
-            field: FieldName::try_new("deleted").unwrap(),
-            ..field("archived")
-        },
-    ]);
+fn marked_by(field_name: &str, fields: Vec<Field>) -> IndexSchema {
+    let mut schema = users(fields);
     schema.soft_delete = Some(SoftDelete::Field(SoftDeleteField {
-        field: FieldName::try_new("deleted").unwrap(),
+        field: FieldName::try_new(field_name).unwrap(),
         when: None,
     }));
-    assert_eq!(soft_delete_column(&schema), Some(&column("archived")));
-    assert_eq!(root_columns(&schema), columns(&["archived", "id"]));
+    schema
+}
 
-    schema.fields.pop();
+fn named(name: &str, column_name: &str) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        ..field(column_name)
+    }
+}
+
+/// A `soft_delete` field projected only inside a relation names that column,
+/// read on the root row, as the document query has always done.
+#[test]
+fn a_soft_delete_field_inside_a_relation_names_its_column_on_the_root() {
+    let mut orders = has_many_orders();
+    orders.fields.push(field("deleted_at"));
+    let schema = marked_by(
+        "deleted_at",
+        vec![
+            field("name"),
+            relation_field("orders", Relation::Join(orders)),
+        ],
+    );
+    assert_eq!(soft_delete_column(&schema), Some(&column("deleted_at")));
+    assert_eq!(
+        root_columns(&schema),
+        columns(&["deleted_at", "id", "name"])
+    );
+}
+
+/// The search is depth-first in declaration order: a relation listed before a
+/// root-level field of the same name wins.
+#[test]
+fn a_soft_delete_field_takes_the_first_match_depth_first() {
+    let mut orders = has_many_orders();
+    orders.fields.push(named("deleted", "cancelled"));
+    let schema = marked_by(
+        "deleted",
+        vec![
+            relation_field("orders", Relation::Join(orders)),
+            named("deleted", "archived"),
+        ],
+    );
+    assert_eq!(soft_delete_column(&schema), Some(&column("cancelled")));
+    assert_eq!(
+        root_columns(&schema),
+        columns(&["archived", "cancelled", "id"])
+    );
+}
+
+/// No field of that name, or a first match that is not a column: no column,
+/// so the root reads everything.
+#[test]
+fn a_soft_delete_field_without_a_column_resolves_to_none() {
+    let schema = marked_by("deleted", vec![field("name")]);
+    assert_eq!(soft_delete_column(&schema), None);
+    assert_eq!(root_columns(&schema), ColumnUse::All);
+
+    let schema = marked_by(
+        "orders",
+        vec![
+            relation_field("orders", Relation::Join(has_many_orders())),
+            field("orders"),
+        ],
+    );
     assert_eq!(soft_delete_column(&schema), None);
     assert_eq!(root_columns(&schema), ColumnUse::All);
 }

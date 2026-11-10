@@ -165,7 +165,7 @@ async fn key_relations(
     Ok(())
 }
 
-/// Fold one replication event into the state, possibly queueing changes.
+/// Whether `qualified` names a partitioned table.
 async fn is_partitioned(catalog: &PgPool, qualified: &str) -> Result<bool> {
     sqlx::query_scalar::<_, bool>("SELECT relkind = 'p' FROM pg_class WHERE oid = $1::regclass")
         .bind(qualified)
@@ -174,6 +174,7 @@ async fn is_partitioned(catalog: &PgPool, qualified: &str) -> Result<bool> {
         .map_err(|e| SourceError::Query(e.to_string()))
 }
 
+/// Fold one replication event into the state, possibly queueing changes.
 fn handle(
     state: &mut DecodeState,
     event: ReplicationEvent,
