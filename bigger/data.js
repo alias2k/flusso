@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794322980676,
+  "lastUpdate": 1794324062417,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (bigger is better)": [
@@ -622,6 +622,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "reference/ci/drain_changes_per_s",
             "value": 428.1724306243539,
+            "unit": "changes/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "077bdc84e2fd8d641cc5ee25279713f615871c20",
+          "message": "Merge pull request #179 from alias2k/docs/index-settings-how-to\n\ndocs: lead the how-to guides to OpenSearch index settings",
+          "timestamp": "2026-11-10T16:05:03+01:00",
+          "tree_id": "89c7f4b7d5c69aa76ba1b321b55e8b062a31889e",
+          "url": "https://github.com/alias2k/flusso/commit/077bdc84e2fd8d641cc5ee25279713f615871c20"
+        },
+        "date": 1794324061830,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "complex/ci/backfill_docs_per_s",
+            "value": 832.8898011212532,
+            "unit": "docs/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "complex/ci/drain_changes_per_s",
+            "value": 704.0322165496895,
+            "unit": "changes/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/backfill_docs_per_s",
+            "value": 655.3656988719403,
+            "unit": "docs/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/drain_changes_per_s",
+            "value": 715.8974849825756,
             "unit": "changes/s",
             "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
           }
