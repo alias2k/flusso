@@ -928,8 +928,10 @@ fn leaf_handle(
             .as_deref()
             .map(|values| &values.mapping_type)
         {
-            Some(MappingType::Text) => simple("TextMap"),
-            Some(MappingType::Keyword) => simple("KeywordMap"),
+            // A string map's keys are mapped like a plain field of the value
+            // kind, so they carry the same subfield type-state.
+            Some(MappingType::Text) => string_handle("TextMap"),
+            Some(MappingType::Keyword) => string_handle("KeywordMap"),
             Some(MappingType::Date) => simple("DateMap"),
             Some(
                 value @ (MappingType::Byte

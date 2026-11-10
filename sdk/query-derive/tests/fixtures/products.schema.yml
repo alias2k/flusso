@@ -13,7 +13,7 @@ fields:
   - map: title
     values: text
     required: true
-  # A keyword-valued map (exact per-key lookup, no `search`).
+  # A keyword-valued map (exact per-key lookup).
   - map: codes
     values: keyword
     required: false
