@@ -119,8 +119,8 @@ pub enum ConversionError {
     )]
     InvalidEnumVariant { variant: String },
     #[error(
-        "`{tag}` field `{field}` does not take `subfields` — only a `text`, `keyword` or `uuid` \
-         field has automatic subfields to turn off"
+        "`{tag}` field `{field}` does not take `subfields` — `subfields` can be turned off only \
+         on a `text`, `keyword` or `uuid` field"
     )]
     SubfieldsNotAllowed { tag: String, field: String },
     #[error(

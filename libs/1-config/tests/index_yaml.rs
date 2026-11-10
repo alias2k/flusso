@@ -827,7 +827,10 @@ fn subfields_is_rejected_on_any_other_type() {
             matches!(&err, ConversionError::SubfieldsNotAllowed { tag: t, field } if t == tag && field == "x"),
             "{tag}: got {err:?}"
         );
-        assert!(err.to_string().contains("`text`, `keyword` or `uuid`"));
+        assert!(
+            err.to_string()
+                .contains("only on a `text`, `keyword` or `uuid` field")
+        );
     }
     for body in [
         "  - enum: status\n    required: true\n    subfields: false",
