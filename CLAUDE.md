@@ -145,7 +145,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   the build). Match these before assuming green. One scope note: on PRs confined to the query
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
-  query train's own `combined_search` live e2e still runs); pushes to main always run everything.
+  query train's own `combined_search` + `cursor_paging` live e2e still run); pushes to main always run everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
@@ -750,6 +750,22 @@ Guarded by the `multi_decode_*` unit tests and the `combined_search` live e2e (`
 — an unpublished crate, so the published `flusso-query` carries no flusso lib deps and the query
 release train can't be dragged into a release by a libs bump).
 
+**Page cursors (issue #156, ADR 0008).** Offset paging (`from`/`size`) is unchanged; the
+alternative is `Search::cursor(Option<PageCursor>)` / `MultiSearch::cursor(..)`, a typestate
+(`CursorSearch`/`MultiCursorSearch`: only `keep_alive`/`send`/`ids`) over an OpenSearch
+**point-in-time + `search_after`** (`sdk/query/src/cursor.rs`; OpenSearch ≥ 2.4 only, the ES PIT
+API differs — #157). The first page opens the PIT on the prefixed path; a PIT search POSTs to bare
+`/_search` (OpenSearch refuses an index path with `pit`) and always continues with the *returned*
+`pit_id`. The sort is made total by appending `_id` (union: `_index`, `_id`) unless present —
+OpenSearch has no `_shard_doc`. `SearchResponse::next` is the opaque token (base64url JSON: PIT id,
+last hit's sort values, FNV-1a fingerprint of the body minus `size` + the unprefixed path → a
+different query is `CursorMismatch`; the hash is hand-rolled so tokens survive a rustc bump, pinned
+by `the_fingerprint_is_pinned`); `next` is `None` on a short page, which closes the PIT. A gone
+snapshot (expired, closed, or its generation dropped by `mark_seeded` after a reindex) is
+`CursorExpired`. `Hit::sort` carries each hit's sort values. Guarded by the `tests::cursor` unit
+tests and the `cursor_paging` live e2e (same crate as `combined_search`, shared helpers in
+`tests/common/`).
+
 ## Keeping this file current
 
 This file is a living index — keep it accurate as part of normal work, no separate ask
@@ -801,14 +817,14 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
-| Query client (`flusso-query`) | `sdk/query/src/` |
+| Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
-| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are PIT + `search_after`: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
 
