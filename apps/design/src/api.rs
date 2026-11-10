@@ -630,13 +630,13 @@ pub async fn test_connection(
     config: ConfigToml,
     validator: &crate::server::ConfigValidator,
 ) -> CatalogResponse {
-    let config = Config::from(config);
     if let Err(e) = validator.check(&config) {
         return CatalogResponse {
             error: Some(format!("invalid configuration: {e:#}")),
             ..Default::default()
         };
     }
+    let config = Config::from(config);
     match introspect_with(&config).await {
         Ok((catalog, junctions)) => CatalogResponse {
             catalog,
@@ -721,10 +721,10 @@ pub async fn validate(
         ..Default::default()
     };
 
-    let config = Config::from(request.config);
-    if let Err(e) = validator.check(&config) {
+    if let Err(e) = validator.check(&request.config) {
         return unreachable("invalid configuration", format!("{e:#}"));
     }
+    let config = Config::from(request.config);
     let postgres = match postgres_config(&config) {
         Ok(postgres) => postgres,
         Err(e) => return unreachable("reading the source configuration", format!("{e:#}")),

@@ -86,6 +86,7 @@ pub(crate) fn assemble_config_schema() -> Value {
         .cloned()
         .unwrap_or_default();
     definitions.remove("PortEntry");
+    definitions.remove("Options");
 
     let alternatives = |port: Port, definitions: &mut Map<String, Value>| -> Value {
         let refs: Vec<Value> = adapters::descriptions()
@@ -104,6 +105,33 @@ pub(crate) fn assemble_config_schema() -> Value {
     let source = alternatives(Port::Source, &mut definitions);
     let stream = alternatives(Port::Stream, &mut definitions);
     let sink = alternatives(Port::Sink, &mut definitions);
+    let index_sink: Vec<Value> = adapters::descriptions()
+        .iter()
+        .filter_map(|d| {
+            let schema = d.index_schema.as_ref()?;
+            let name = index_options_name(d);
+            let entry = index_options_schema(d, schema, &mut definitions);
+            definitions.insert(name.clone(), entry);
+            Some(json!({ "$ref": format!("#/definitions/{name}") }))
+        })
+        .collect();
+    if let Some(sinks) = definitions
+        .get_mut("IndexEntry")
+        .and_then(|entry| entry.pointer_mut("/properties/sinks"))
+        .and_then(Value::as_object_mut)
+    {
+        // A `patternProperties` match exempts a key from `additionalProperties`,
+        // so the generic `Options` pattern would shadow the per-index schemas.
+        sinks.remove("patternProperties");
+        sinks.insert(
+            "additionalProperties".to_owned(),
+            json!({ "oneOf": index_sink }),
+        );
+        sinks.insert(
+            "propertyNames".to_owned(),
+            json!({ "$ref": "#/definitions/SinkName" }),
+        );
+    }
 
     if let Some(properties) = root.get_mut("properties").and_then(Value::as_object_mut) {
         for (key, schema) in [("source", source), ("stream", stream)] {
@@ -137,24 +165,8 @@ fn adapter_entry_schema(
     description: &AdapterDescription,
     definitions: &mut Map<String, Value>,
 ) -> Value {
-    let mut schema = description.schema.clone().to_value();
     let prefix = format!("{}_{}_", description.port, description.kind);
-    let local: Map<String, Value> = schema
-        .as_object_mut()
-        .and_then(|o| o.remove("definitions"))
-        .and_then(|d| d.as_object().cloned())
-        .unwrap_or_default();
-    for (name, definition) in local {
-        let target = if SHARED_DEFINITIONS.contains(&name.as_str()) {
-            name
-        } else {
-            format!("{prefix}{name}")
-        };
-        let mut definition = definition;
-        rewrite_refs(&mut definition, &renames_placeholder(&prefix));
-        definitions.insert(target, definition);
-    }
-    rewrite_refs(&mut schema, &renames_placeholder(&prefix));
+    let mut schema = hoist_definitions(&description.schema, &prefix, definitions);
     if let Some(object) = schema.as_object_mut() {
         object.remove("$schema");
         object.remove("title");
@@ -179,6 +191,58 @@ fn adapter_entry_schema(
         }
         object.insert("additionalProperties".to_owned(), Value::Bool(false));
     }
+    schema
+}
+
+/// The definition name of one adapter's per-index options schema.
+fn index_options_name(description: &AdapterDescription) -> String {
+    format!("{}_{}_index", description.port, description.kind)
+}
+
+/// One adapter's per-index options schema (an `[index.sinks.<name>]` table),
+/// its definitions hoisted under `<port>_<kind>_index_<Name>`.
+fn index_options_schema(
+    description: &AdapterDescription,
+    schema: &kernel::AdapterSchema,
+    definitions: &mut Map<String, Value>,
+) -> Value {
+    let prefix = format!("{}_", index_options_name(description));
+    let mut schema = hoist_definitions(schema, &prefix, definitions);
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$schema");
+        object.insert(
+            "title".to_owned(),
+            Value::String(format!("{} (per index)", description.kind)),
+        );
+        object.insert("additionalProperties".to_owned(), Value::Bool(false));
+    }
+    schema
+}
+
+/// `schema` as a value with its own definitions moved into the root under
+/// `prefix`, except [`SHARED_DEFINITIONS`], which keep their name; every
+/// `$ref` is rewritten to match.
+fn hoist_definitions(
+    schema: &kernel::AdapterSchema,
+    prefix: &str,
+    definitions: &mut Map<String, Value>,
+) -> Value {
+    let mut schema = schema.clone().to_value();
+    let local: Map<String, Value> = schema
+        .as_object_mut()
+        .and_then(|o| o.remove("definitions"))
+        .and_then(|d| d.as_object().cloned())
+        .unwrap_or_default();
+    for (name, mut definition) in local {
+        let target = if SHARED_DEFINITIONS.contains(&name.as_str()) {
+            name
+        } else {
+            format!("{prefix}{name}")
+        };
+        rewrite_refs(&mut definition, &renames_placeholder(prefix));
+        definitions.insert(target, definition);
+    }
+    rewrite_refs(&mut schema, &renames_placeholder(prefix));
     schema
 }
 
@@ -222,21 +286,23 @@ fn rewrite_refs(value: &mut Value, rename: &dyn Fn(&str) -> Option<String>) {
 /// One Markdown option table per registered adapter, as `(file name, content)`:
 /// the Reference pages include these, so an option's description has exactly
 /// one home, its doc comment.
+/// An adapter that takes per-index options gets a second table,
+/// `<port>-<kind>-index.md`.
 pub(crate) fn adapter_docs() -> Vec<(String, String)> {
-    adapters::descriptions()
-        .iter()
-        .map(|d| (format!("{}-{}.md", d.port, d.kind), render_table(d)))
-        .collect()
+    let mut docs = Vec::new();
+    for d in adapters::descriptions() {
+        docs.push((format!("{}-{}.md", d.port, d.kind), render_table(d)));
+        if let Some(schema) = &d.index_schema {
+            docs.push((
+                format!("{}-{}-index.md", d.port, d.kind),
+                render_index_table(d, schema),
+            ));
+        }
+    }
+    docs
 }
 
 fn render_table(description: &AdapterDescription) -> String {
-    let schema = description.schema.as_value();
-    let definitions = schema.get("definitions").and_then(Value::as_object);
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
     let entry = match description.port.singleton_entry() {
         Some(entry) => format!("`[{entry}]`"),
         None => "`[sinks.<name>]`".to_owned(),
@@ -250,6 +316,34 @@ fn render_table(description: &AdapterDescription) -> String {
         "| `type` | `\"{}\"` | — | Required. Selects this adapter for {entry}. |\n",
         description.kind
     ));
+    out.push_str(&render_rows(
+        description.schema.as_value(),
+        description,
+        &description.secrets,
+    ));
+    out
+}
+
+fn render_index_table(description: &AdapterDescription, schema: &kernel::AdapterSchema) -> String {
+    let mut out = format!(
+        "<!-- Generated by `flusso schema docs` from the {} adapter's per-index config type; edit the doc comments there, then run `just schema-gen`. -->\n",
+        description.kind
+    );
+    out.push_str("| Key | Type | Default | Meaning |\n| --- | --- | --- | --- |\n");
+    out.push_str(&render_rows(schema.as_value(), description, &[]));
+    out
+}
+
+/// One table row per property of `schema`; a key in `secrets` gets the
+/// override-variable note of `description`'s adapter.
+fn render_rows(schema: &Value, description: &AdapterDescription, secrets: &[String]) -> String {
+    let definitions = schema.get("definitions").and_then(Value::as_object);
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut out = String::new();
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (key, property) in properties {
             let ty = render_type(property, definitions);
@@ -270,7 +364,7 @@ fn render_table(description: &AdapterDescription) -> String {
                     .and_then(Value::as_str)
                     .unwrap_or(""),
             ));
-            if description.secrets.iter().any(|s| s == key) {
+            if secrets.iter().any(|s| s == key) {
                 let var = kernel::override_var(
                     description.port.singleton_entry().unwrap_or("<NAME>"),
                     &description.kind,
@@ -437,6 +531,39 @@ mod tests {
             schema.pointer("/properties/sinks/propertyNames/$ref"),
             Some(&json!("#/definitions/SinkName"))
         );
+    }
+
+    #[test]
+    fn index_entry_sinks_take_the_per_index_alternatives() {
+        let schema = assemble_config_schema();
+        let sinks = schema
+            .pointer("/definitions/IndexEntry/properties/sinks")
+            .unwrap();
+        assert_eq!(
+            sinks.pointer("/additionalProperties/oneOf/0/$ref"),
+            Some(&json!("#/definitions/sink_opensearch_index"))
+        );
+        assert_eq!(
+            sinks.pointer("/propertyNames/$ref"),
+            Some(&json!("#/definitions/SinkName"))
+        );
+        assert!(sinks.get("patternProperties").is_none());
+        assert!(schema.pointer("/definitions/Options").is_none());
+        let opensearch = schema
+            .pointer("/definitions/sink_opensearch_index")
+            .unwrap();
+        assert_eq!(
+            opensearch.get("additionalProperties"),
+            Some(&Value::Bool(false))
+        );
+        assert!(opensearch.pointer("/properties/index_settings").is_some());
+        let docs = adapter_docs();
+        let (_, table) = docs
+            .iter()
+            .find(|(file, _)| file == "sink-opensearch-index.md")
+            .unwrap();
+        assert!(table.contains("| `index_settings` | table |"), "{table}");
+        assert!(!docs.iter().any(|(file, _)| file == "sink-stdout-index.md"));
     }
 
     #[test]

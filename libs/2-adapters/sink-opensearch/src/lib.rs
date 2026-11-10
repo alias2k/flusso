@@ -8,10 +8,12 @@ mod bulk;
 mod config;
 mod generations;
 mod mapping;
+mod settings;
 mod sink_impl;
 mod transport;
 
-pub use config::{OpensearchConfig, TextAnalysis};
+pub use config::{OpensearchConfig, OpensearchIndexConfig, TextAnalysis};
+pub use settings::IndexSettings;
 
 /// Benchmark entry point: render `envelopes` into the NDJSON bulk body exactly
 /// as `apply` (document → JSON) and `flush` (action → fragment) would, without
@@ -92,6 +94,10 @@ pub struct OpensearchSink {
     /// Settings that shape every index this sink creates: shard counts, the
     /// analysis backend, and whether `text`/`keyword` fields are auto-enriched.
     pub(crate) index_options: IndexOptions,
+    /// Logical index name → that index's own `index_settings`, laid over the
+    /// sink-wide ones when its generation is created. Set with
+    /// [`with_index_settings`](OpensearchSink::with_index_settings).
+    pub(crate) per_index_settings: Arc<HashMap<kernel::IndexName, IndexSettings>>,
     /// Literal prefix prepended to every name this sink owns — the hash alias,
     /// its generations, the `{logical}` convenience alias, and the meta index —
     /// so several deployments can share one cluster without colliding. Empty by
@@ -181,7 +187,9 @@ impl OpensearchSink {
                 number_of_replicas: config.number_of_replicas,
                 text_analysis: config.text_analysis,
                 auto_subfields: config.auto_subfields,
+                settings: config.index_settings.clone(),
             },
+            per_index_settings: Arc::new(HashMap::new()),
             index_prefix: String::new(),
             buffer: Arc::new(Mutex::new(Vec::new())),
             targets: Arc::new(SyncMutex::new(HashMap::new())),
@@ -195,6 +203,28 @@ impl OpensearchSink {
     pub fn with_index_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.index_prefix = prefix.into();
         self
+    }
+
+    /// Set each index's own `index_settings` (an `[[index]]` entry's
+    /// `[index.sinks.<name>]` table), by logical index name. They are laid over
+    /// the sink-wide `index_settings` when that index's generation is created.
+    #[must_use]
+    pub fn with_index_settings(
+        mut self,
+        settings: impl IntoIterator<Item = (kernel::IndexName, IndexSettings)>,
+    ) -> Self {
+        self.per_index_settings = Arc::new(settings.into_iter().collect());
+        self
+    }
+
+    /// The index options for creating a generation of `logical`: the sink's,
+    /// with that index's own settings laid over the sink-wide ones.
+    pub(crate) fn index_options_for(&self, logical: &kernel::IndexName) -> IndexOptions {
+        let mut options = self.index_options.clone();
+        if let Some(own) = self.per_index_settings.get(logical) {
+            options.settings = options.settings.layered(own);
+        }
+        options
     }
 
     /// The stable hash alias `{prefix}{logical}_{hash}` an index is addressed

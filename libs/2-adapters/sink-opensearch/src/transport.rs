@@ -155,7 +155,10 @@ impl OpensearchSink {
             .client
             .put(&url)
             .header("Content-Type", "application/json")
-            .json(&build_index_body(&mapping.fields, &self.index_options));
+            .json(&build_index_body(
+                &mapping.fields,
+                &self.index_options_for(&mapping.index),
+            ));
 
         let resp = self
             .maybe_auth(req)

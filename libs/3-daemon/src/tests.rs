@@ -588,6 +588,7 @@ fn backendless_config() -> Config {
                 enabled: true,
                 schema,
                 on_error: None,
+                sinks: BTreeMap::new(),
             },
         )]),
         on_error: Default::default(),

@@ -1,0 +1,5 @@
+error: `index_options` is only for sink adapters (`port = sink`)
+  --> tests/ui/index_options_on_a_source.rs:10:57
+   |
+10 | #[adapter(port = source, kind = "demo", index_options = PerIndex)]
+   |                                                         ^^^^^^^^

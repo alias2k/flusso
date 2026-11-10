@@ -85,6 +85,7 @@ pub(crate) fn sink(base_url: &str) -> OpensearchSink {
         refresh_interval: "1s".to_owned(),
         text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
+        index_settings: Default::default(),
     };
     let name = kernel::SinkName::try_new("e2e").unwrap();
     OpensearchSink::from_config(&name, &config).unwrap()

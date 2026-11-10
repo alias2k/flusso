@@ -323,6 +323,9 @@ export const en: Record<string, string> = {
   "config.name": "name",
   "config.schemaFile": "schema file",
   "config.onError": "on error",
+  "config.sinkOptions": "per-sink options",
+  "config.sinkOptionsHint":
+    "Options for this index only, on each sink named here. They override the sink's own settings.",
   "config.state": "state",
   "config.enabled": "enabled",
   "config.disabled": "disabled",

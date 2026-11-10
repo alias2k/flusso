@@ -380,3 +380,51 @@ fn port_entries_serialize_as_written() {
     assert_eq!(again.source, config.source);
     assert_eq!(again.sinks, config.sinks);
 }
+
+#[test]
+fn index_sink_options_are_keyed_by_sink_name_and_left_uninterpreted() {
+    let config = parse(
+        r#"
+        [source]
+        type = "postgres"
+
+        [[index]]
+        name = "orders"
+        schema = "orders.schema.yml"
+        enabled = true
+
+        [index.sinks.primary]
+        index_settings = { "mapping.total_fields.limit" = 5000 }
+        anything = "the adapter decides"
+        "#,
+    )
+    .unwrap();
+    let entry = &config.index[0];
+    let options = &entry.sinks[&sink("primary")];
+    let settings = options.get("index_settings").unwrap().as_map().unwrap();
+    assert_eq!(settings["mapping.total_fields.limit"].as_i64(), Some(5000));
+    assert_eq!(
+        options.get("anything").unwrap().as_str(),
+        Some("the adapter decides")
+    );
+}
+
+#[test]
+fn an_index_without_sink_options_serializes_without_the_table() {
+    let config = parse(
+        r#"
+        [source]
+        type = "postgres"
+
+        [[index]]
+        name = "orders"
+        schema = "orders.schema.yml"
+        enabled = true
+        "#,
+    )
+    .unwrap();
+    assert!(config.index[0].sinks.is_empty());
+    let written = toml::to_string(&config).unwrap();
+    let index = written.split("[[index]]").nth(1).unwrap();
+    assert!(!index.contains("sinks"), "{written}");
+}

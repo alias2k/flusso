@@ -13,9 +13,9 @@ use anyhow::Context;
 use async_trait::async_trait;
 use config::Config;
 use daemon::{Backends, DaemonOptions, SinkParts, SourceParts};
-use kernel::{AdapterConfig, SinkName};
+use kernel::{AdapterConfig, IndexName, SinkName};
 use sink::{Sink, SinkOptions};
-use sink_opensearch::OpensearchSink;
+use sink_opensearch::{IndexSettings, OpensearchSink};
 use sink_stdout::{StdoutConfig, StdoutSink};
 use source::cdc::ChangeCapture;
 use source::document::DocumentBuilder;
@@ -26,7 +26,7 @@ use source_postgres::{
 use stream::Stream;
 use stream_channel::ChannelStream;
 
-use crate::adapters::{self, SinkConfig};
+use crate::adapters::{self, IndexSinkConfig, SinkConfig};
 
 /// The one [`Backends`] implementation: the composition root's choice of
 /// concrete adapters, looked up by each port entry's `type`.
@@ -137,6 +137,22 @@ pub(crate) fn source_spec(config: &Config) -> SourceSpec {
     SourceSpec::new(indexes)
 }
 
+/// The enabled indexes' own `index_settings` for the OpenSearch sink `sink`.
+fn opensearch_index_settings(
+    config: &Config,
+    sink: &SinkName,
+) -> anyhow::Result<Vec<(IndexName, IndexSettings)>> {
+    let mut settings = Vec::new();
+    for (index, entry) in config.indexes.iter().filter(|(_, entry)| entry.enabled) {
+        if let Some(options) = entry.sinks.get(sink) {
+            let IndexSinkConfig::Opensearch(own) =
+                adapters::index_sink_config(config, index, sink, options)?;
+            settings.push((index.clone(), own.index_settings));
+        }
+    }
+    Ok(settings)
+}
+
 /// Every configured sink as its own engine's parts; with no sink configured,
 /// a plain stdout sink so a first run shows its documents.
 fn build_sinks(config: &Config) -> anyhow::Result<Vec<SinkParts>> {
@@ -146,7 +162,8 @@ fn build_sinks(config: &Config) -> anyhow::Result<Vec<SinkParts>> {
             SinkConfig::Opensearch(os) => Arc::new(
                 OpensearchSink::from_config(name, &os)
                     .with_context(|| format!("building OpenSearch sink '{name}'"))?
-                    .with_index_prefix(&config.prefix),
+                    .with_index_prefix(&config.prefix)
+                    .with_index_settings(opensearch_index_settings(config, name)?),
             ),
             SinkConfig::Stdout(s) => Arc::new(StdoutSink::from_config(name, &s)),
         };
@@ -167,4 +184,71 @@ fn build_sinks(config: &Config) -> anyhow::Result<Vec<SinkParts>> {
         });
     }
     Ok(sinks)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use config::ParseFrom;
+    use config::toml::ConfigToml;
+
+    use super::*;
+
+    fn config_with(indexes: &[(&str, bool, i64)]) -> Config {
+        let mut raw = String::from(
+            r#"
+            prefix = "dev_"
+
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+            "#,
+        );
+        for (name, enabled, limit) in indexes {
+            raw.push_str(&format!(
+                "\n[[index]]\nname = \"{name}\"\nschema = \"{name}.schema.yml\"\nenabled = {enabled}\n\
+                 [index.sinks.primary]\nindex_settings = {{ \"mapping.total_fields.limit\" = {limit} }}\n"
+            ));
+        }
+        let mut draft = ConfigToml::try_parse(&raw).unwrap();
+        let entries = std::mem::take(&mut draft.index);
+        let mut config = Config::from(draft);
+        for entry in entries {
+            let schema = serde_json::from_value(serde_json::json!({
+                "version": 1, "table": entry.name.as_ref(), "db_schema": "public", "fields": []
+            }))
+            .unwrap();
+            config.indexes.insert(
+                entry.name,
+                config::Index {
+                    enabled: entry.enabled,
+                    schema,
+                    on_error: None,
+                    sinks: entry.sinks,
+                },
+            );
+        }
+        config
+    }
+
+    #[test]
+    fn index_settings_skip_disabled_indexes_and_key_by_logical_name() {
+        let config = config_with(&[("orders", true, 5000), ("users", false, 9000)]);
+        let primary = SinkName::try_new("primary").unwrap();
+
+        let settings = opensearch_index_settings(&config, &primary).unwrap();
+
+        let [(index, orders)] = settings.as_slice() else {
+            panic!("expected only the enabled index, got {settings:?}");
+        };
+        assert_eq!(index.as_ref(), "orders");
+        assert_eq!(
+            orders.get("index.mapping.total_fields.limit"),
+            Some(&serde_json::json!(5000))
+        );
+    }
 }

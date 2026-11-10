@@ -26,6 +26,7 @@ fn default_batch_size() -> u32 { 1000 }
 | Attribute | On | Meaning |
 | --- | --- | --- |
 | `#[adapter(port = source \| stream \| sink, kind = "…")]` | the struct | Which port, and the `type = "…"` token that selects the adapter |
+| `#[adapter(…, index_options = Type)]` | the struct | Sink adapters only: the type of the options the sink takes per index, under an `[[index]]` entry's `sinks.<name>` table. Published as `AdapterDescription::index_schema` |
 | `#[adapter(example = …)]` | a field | The value `example()` uses; a string literal goes through `Into`, anything else is used verbatim, an `Option<T>` is wrapped in `Some` |
 
 A field with no example falls back to its serde default; an `Option` with neither is `None`; a required field with no example is a compile error. The struct must carry `#[serde(deny_unknown_fields)]`, also checked at compile time.

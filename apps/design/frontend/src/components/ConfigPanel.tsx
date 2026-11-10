@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { Fragment, type ReactNode, useState } from "react";
 import { Copy, Plug, Plus, Search, Terminal } from "lucide-react";
 import type { AdapterDescription, ConfigToml, IndexEntry } from "../api";
 import { useT } from "../i18n";
@@ -66,10 +66,42 @@ export function ConfigPanel({
     onChange({ ...config, index: next });
   };
   const setSink = (name: string, sink: Sink) => onChange({ ...config, sinks: { ...sinks, [name]: sink } });
+  // Per-index sink options are keyed by sink name, so they follow a rename and
+  // go with a removal; a dangling key would fail validation.
+  const reKeyIndexSinks = (from: string, to: string | undefined) =>
+    index.map((e) => {
+      if (!e.sinks || !(from in e.sinks)) return e;
+      const next: Record<string, Record<string, unknown>> = {};
+      for (const [k, v] of Object.entries(e.sinks)) {
+        if (k !== from) next[k] = v;
+        else if (to) next[to] = v;
+      }
+      return { ...e, sinks: Object.keys(next).length ? next : undefined };
+    });
+  // A sink switched to an adapter that takes no per-index options drops them
+  // too: the drawer would no longer show them, and they would fail the build.
+  const changeSink = (name: string, sink: Sink) => {
+    const kind = splitEntry(sink).kind;
+    const takesIndexOptions = sinkAdapters.find((a) => a.kind === kind)?.index_schema;
+    const keep = kind === splitEntry(sinks[name]).kind || takesIndexOptions;
+    onChange({ ...config, sinks: { ...sinks, [name]: sink }, index: keep ? index : reKeyIndexSinks(name, undefined) });
+  };
   const removeSink = (name: string) => {
     const next = { ...sinks };
     delete next[name];
-    onChange({ ...config, sinks: next });
+    onChange({ ...config, sinks: next, index: reKeyIndexSinks(name, undefined) });
+  };
+  const sinksWithIndexOptions = Object.entries(sinks).flatMap(([name, sink]) => {
+    const description = sinkAdapters.find((a) => a.kind === splitEntry(sink).kind);
+    return description?.index_schema
+      ? [{ name, description: { ...description, schema: description.index_schema, secrets: [] } }]
+      : [];
+  });
+  const setIndexSink = (i: number, e: IndexEntry, sink: string, options: Record<string, unknown>) => {
+    const next = { ...e.sinks };
+    if (Object.keys(options).length) next[sink] = options;
+    else delete next[sink];
+    setEntry(i, { ...e, sinks: Object.keys(next).length ? next : undefined });
   };
   // Rename a sink (a config-map key) in place, preserving declaration order. A
   // no-op on empty / unchanged / colliding names, so the editor can commit
@@ -79,7 +111,7 @@ export function ConfigPanel({
     if (!name || name === from || name in sinks) return;
     const next: Record<string, Sink> = {};
     for (const [k, v] of Object.entries(sinks)) next[k === from ? name : k] = v;
-    onChange({ ...config, sinks: next });
+    onChange({ ...config, sinks: next, index: reKeyIndexSinks(from, name) });
   };
 
   return (
@@ -218,51 +250,77 @@ export function ConfigPanel({
             // autocomplete on an editable path field (not a fixed picker).
             const schemaList = Array.from(new Set([suggestion, ...index.map((x) => x.schema)].filter(Boolean)));
             return (
-              <div key={i} className={cn(INDEX_COLS, "px-3 py-1.5")}>
-                <Text value={e.name} onChange={(name) => setEntry(i, { ...e, name })} placeholder={t("config.name")} />
-                <Text
-                  value={e.schema}
-                  onChange={(schema) => setEntry(i, { ...e, schema })}
-                  list={schemaList}
-                  placeholder={suggestion || "x.schema.yml"}
-                />
-                <Select
-                  value={(e.on_error as string) ?? "default"}
-                  options={[
-                    // "default" = inherit the deployment-wide policy — say which
-                    // one, so the row reads without cross-checking the runbar.
-                    { value: "default", label: `default · ${(config.on_error as string) ?? "stop"}` },
-                    { value: "stop", label: "stop" },
-                    { value: "skip", label: "skip" },
-                  ]}
-                  onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
-                />
-                <button
-                  type="button"
-                  aria-pressed={e.enabled}
-                  onClick={() => setEntry(i, { ...e, enabled: !e.enabled })}
-                  className={cn(
-                    "inline-flex cursor-pointer items-center gap-1.5 justify-self-start rounded-md border px-2 py-1 text-2xs font-medium transition-colors",
-                    e.enabled
-                      ? "border-primary/40 bg-primary/10 text-primary hover:bg-primary/15"
-                      : "border-border text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <span className={cn("size-1.5 rounded-full", e.enabled ? "bg-primary" : "bg-muted-foreground")} />
-                  {e.enabled ? t("config.enabled") : t("config.disabled")}
-                </button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="shrink-0 text-muted-foreground hover:text-foreground"
-                  title={t("config.duplicate")}
-                  aria-label={t("config.duplicate")}
-                  onClick={() => onDuplicate(i)}
-                >
-                  <Copy />
-                </Button>
-                <RemoveButton label={t("common.remove")} onClick={() => setPendingRemove(i)} />
-              </div>
+              <Fragment key={i}>
+                <div className={cn(INDEX_COLS, "px-3 py-1.5")}>
+                  <Text
+                    value={e.name}
+                    onChange={(name) => setEntry(i, { ...e, name })}
+                    placeholder={t("config.name")}
+                  />
+                  <Text
+                    value={e.schema}
+                    onChange={(schema) => setEntry(i, { ...e, schema })}
+                    list={schemaList}
+                    placeholder={suggestion || "x.schema.yml"}
+                  />
+                  <Select
+                    value={(e.on_error as string) ?? "default"}
+                    options={[
+                      // "default" = inherit the deployment-wide policy — say which
+                      // one, so the row reads without cross-checking the runbar.
+                      { value: "default", label: `default · ${(config.on_error as string) ?? "stop"}` },
+                      { value: "stop", label: "stop" },
+                      { value: "skip", label: "skip" },
+                    ]}
+                    onChange={(v) => setEntry(i, { ...e, on_error: v === "default" ? undefined : v })}
+                  />
+                  <button
+                    type="button"
+                    aria-pressed={e.enabled}
+                    onClick={() => setEntry(i, { ...e, enabled: !e.enabled })}
+                    className={cn(
+                      "inline-flex cursor-pointer items-center gap-1.5 justify-self-start rounded-md border px-2 py-1 text-2xs font-medium transition-colors",
+                      e.enabled
+                        ? "border-primary/40 bg-primary/10 text-primary hover:bg-primary/15"
+                        : "border-border text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    <span className={cn("size-1.5 rounded-full", e.enabled ? "bg-primary" : "bg-muted-foreground")} />
+                    {e.enabled ? t("config.enabled") : t("config.disabled")}
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    title={t("config.duplicate")}
+                    aria-label={t("config.duplicate")}
+                    onClick={() => onDuplicate(i)}
+                  >
+                    <Copy />
+                  </Button>
+                  <RemoveButton label={t("common.remove")} onClick={() => setPendingRemove(i)} />
+                </div>
+                {sinksWithIndexOptions.length > 0 && (
+                  <div className="px-3 pb-2">
+                    <Drawer title={t("config.sinkOptions")} count={Object.keys(e.sinks ?? {}).length || undefined}>
+                      <p className="mb-2 text-2xs text-muted-foreground">{t("config.sinkOptionsHint")}</p>
+                      {sinksWithIndexOptions.map(({ name, description }) => (
+                        <div key={name} className="mb-2 last:mb-0">
+                          <div className="mb-1 flex items-center gap-1.5 font-mono text-2xs text-foreground">
+                            {kindIcon(description.kind)}
+                            {name}
+                          </div>
+                          <AdapterForm
+                            description={description}
+                            value={e.sinks?.[name] ?? {}}
+                            onChange={(options) => setIndexSink(i, e, name, options)}
+                          />
+                        </div>
+                      ))}
+                    </Drawer>
+                  </div>
+                )}
+              </Fragment>
             );
           })}
         </div>
@@ -285,7 +343,7 @@ export function ConfigPanel({
             sink={sink}
             adapters={sinkAdapters}
             taken={Object.keys(sinks).filter((n) => n !== name)}
-            onChange={(s) => setSink(name, s)}
+            onChange={(s) => changeSink(name, s)}
             onRename={(to) => renameSink(name, to)}
             onRemove={() => removeSink(name)}
           />

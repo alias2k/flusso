@@ -1047,6 +1047,7 @@ fn opensearch_sink(os_url: &str) -> OpensearchSink {
         refresh_interval: "1s".to_owned(),
         text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
+        index_settings: Default::default(),
     };
     OpensearchSink::from_config(&SinkName::try_new("e2e").unwrap(), &config).unwrap()
 }

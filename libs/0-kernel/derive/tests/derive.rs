@@ -90,3 +90,27 @@ fn example_round_trips_through_options() {
     assert_eq!(back.batch, 1000);
     assert_eq!(back.url, Secret::Value("postgres://app@db/shop".into()));
 }
+
+/// The per-index options of a sink.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PerIndex {
+    /// Extra settings for one index.
+    #[serde(default)]
+    limit: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, AdapterConfig)]
+#[serde(deny_unknown_fields)]
+#[adapter(port = sink, kind = "indexed", index_options = PerIndex)]
+struct Indexed {
+    #[serde(default)]
+    pretty: bool,
+}
+
+#[test]
+fn index_options_publish_the_per_index_schema() {
+    let schema = Indexed::description().index_schema.unwrap().to_value();
+    assert!(schema["properties"]["limit"].is_object(), "{schema}");
+    assert!(Demo::description().index_schema.is_none());
+}

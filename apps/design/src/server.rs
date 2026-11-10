@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use config::Config;
+use config::toml::ConfigToml;
 use kernel::AdapterDescription;
 use tokio::net::TcpListener;
 
@@ -44,19 +44,20 @@ pub struct DesignOptions {
 }
 
 /// The composition root's validation function, boxed for the state.
-type ValidateFn = dyn Fn(&Config) -> Result<()> + Send + Sync;
+type ValidateFn = dyn Fn(&ConfigToml) -> Result<()> + Send + Sync;
 
 /// A config validator handed in by the composition root.
 #[derive(Clone)]
 pub struct ConfigValidator(Arc<ValidateFn>);
 
 impl ConfigValidator {
-    pub fn new(validate: impl Fn(&Config) -> Result<()> + Send + Sync + 'static) -> Self {
+    pub fn new(validate: impl Fn(&ConfigToml) -> Result<()> + Send + Sync + 'static) -> Self {
         Self(Arc::new(validate))
     }
 
-    /// Validate `config` against the registered adapters.
-    pub fn check(&self, config: &Config) -> Result<()> {
+    /// Validate an unsaved `flusso.toml` against the registered adapters: every
+    /// port entry and every `[index.sinks.<name>]` table.
+    pub fn check(&self, config: &ConfigToml) -> Result<()> {
         (self.0)(config)
     }
 }

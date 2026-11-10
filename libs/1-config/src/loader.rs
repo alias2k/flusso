@@ -98,6 +98,7 @@ pub fn load(config_path: impl AsRef<Path>) -> Result<Config, LoadError> {
             enabled: entry.enabled,
             schema,
             on_error: entry.on_error,
+            sinks: entry.sinks,
         };
 
         if config.indexes.insert(entry.name.clone(), index).is_some() {

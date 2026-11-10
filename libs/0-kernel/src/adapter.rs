@@ -110,13 +110,17 @@ pub trait AdapterConfig: JsonSchema + Serialize + DeserializeOwned + Sized {
         options.deserialize_into()
     }
 
+    /// The schema of the options this adapter takes **per index**, under an
+    /// `[[index]]` entry's `sinks.<name>` table. `None` (the default) means the
+    /// adapter takes none, so naming it there is an error. The derive's
+    /// `index_options = Type` key fills it.
+    fn index_schema() -> Option<AdapterSchema> {
+        None
+    }
+
     /// Everything the composition root renders from this declaration.
     fn description() -> AdapterDescription {
-        // Draft-07 (`definitions`, no `$defs`): what TOML/YAML editor tooling
-        // supports most widely, and the dialect the assembled config schema uses.
-        let schema = schemars::generate::SchemaSettings::draft07()
-            .into_generator()
-            .into_root_schema_for::<Self>();
+        let schema = schema_for::<Self>();
         let secrets = secret_paths(&schema);
         AdapterDescription {
             port: Self::PORT,
@@ -124,8 +128,22 @@ pub trait AdapterConfig: JsonSchema + Serialize + DeserializeOwned + Sized {
             schema,
             example: Options::from_serialize(&Self::example()).unwrap_or_default(),
             secrets,
+            index_schema: Self::index_schema(),
         }
     }
+}
+
+/// A JSON schema an adapter publishes: [`schemars::Schema`], named here so a
+/// derive expands without depending on `schemars` directly.
+pub type AdapterSchema = Schema;
+
+/// The draft-07 root schema of `T`, the dialect every adapter description
+/// uses: `definitions`, no `$defs`, which TOML/YAML editor tooling supports
+/// most widely.
+pub fn schema_for<T: JsonSchema>() -> AdapterSchema {
+    schemars::generate::SchemaSettings::draft07()
+        .into_generator()
+        .into_root_schema_for::<T>()
 }
 
 /// The rendered facts about one adapter's options: the JSON schema (draft-07;
@@ -138,11 +156,15 @@ pub struct AdapterDescription {
     /// The adapter's `type` token.
     pub kind: String,
     /// The JSON schema of the options struct.
-    pub schema: Schema,
+    pub schema: AdapterSchema,
     /// A complete example, as it would appear under the entry.
     pub example: Options,
     /// The `Secret` fields, as `.`-joined paths from the entry root.
     pub secrets: Vec<String>,
+    /// The schema of the options the adapter takes per index (an `[[index]]`
+    /// entry's `sinks.<name>` table), or `None` when it takes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_schema: Option<AdapterSchema>,
 }
 
 impl AdapterDescription {

@@ -14,7 +14,10 @@
 //! lifecycle while running: a generation deleted mid-run fails the flush rather
 //! than being auto-created, and is rebuilt by the next `ensure_index` (#123); a
 //! second reindex during a rebuild stages nothing, and `mark_seeded` sweeps
-//! orphan generations (#121).
+//! orphan generations (#121). The last covers `index_settings` (#168): the
+//! sink-wide and per-index settings land on the created generation, the
+//! per-index one winning, and a raised `total_fields.limit` admits a mapping
+//! past OpenSearch's 1000-field default.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -76,7 +79,13 @@ async fn start_opensearch() -> (ContainerAsync<GenericImage>, String) {
 /// A fresh sink for `base_url` — one per "run", as the pipeline builds a new sink
 /// on each (re)start.
 fn sink(base_url: &str) -> OpensearchSink {
-    let config = sink_opensearch::OpensearchConfig {
+    let name = kernel::SinkName::try_new("test").unwrap();
+    OpensearchSink::from_config(&name, &sink_config(base_url)).unwrap()
+}
+
+/// The test sink's configuration: replicas off for a single-node cluster.
+fn sink_config(base_url: &str) -> sink_opensearch::OpensearchConfig {
+    sink_opensearch::OpensearchConfig {
         url: kernel::Secret::Value(base_url.to_owned()),
         username: None,
         password: None,
@@ -91,9 +100,8 @@ fn sink(base_url: &str) -> OpensearchSink {
         refresh_interval: "10s".to_owned(),
         text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
-    };
-    let name = kernel::SinkName::try_new("test").unwrap();
-    OpensearchSink::from_config(&name, &config).unwrap()
+        index_settings: Default::default(),
+    }
 }
 
 /// A fresh sink that prepends `prefix` to every name it owns — the deployment
@@ -654,6 +662,71 @@ async fn mark_seeded_sweeps_an_orphan_generation() {
         alias_targets(&client, &base, &hash_alias).await,
         vec![gen3.clone()],
     );
+}
+
+#[tokio::test]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn index_settings_land_on_the_created_generation_per_index_winning() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let settings =
+        |value: Value| -> sink_opensearch::IndexSettings { serde_json::from_value(value).unwrap() };
+    let wide = IndexName::try_new("wide").unwrap();
+    let field = |name: String| ResolvedField {
+        name: FieldName::try_new(&name).unwrap(),
+        mapping: Mapping {
+            mapping_type: MappingType::Long,
+            extra: BTreeMap::new(),
+            map_values: None,
+            decimal: false,
+            enum_order: None,
+        },
+        nullable: true,
+        array: false,
+        children: Vec::new(),
+    };
+    let wide_mapping = IndexMapping {
+        index: wide.clone(),
+        hash: ContentHash::new(2),
+        fields: (0..1100).map(|i| field(format!("f{i}"))).collect(),
+    };
+
+    let mut config = sink_config(&base);
+    config.index_settings = settings(serde_json::json!({
+        "mapping.total_fields.limit": 1500,
+        "index": { "max_result_window": 20000 },
+    }));
+    let sink = OpensearchSink::from_config(&kernel::SinkName::try_new("test").unwrap(), &config)
+        .unwrap()
+        .with_index_settings([(
+            wide.clone(),
+            settings(serde_json::json!({ "mapping.total_fields.limit": 2000 })),
+        )]);
+    sink.ensure_index(&mapping()).await.unwrap();
+    sink.ensure_index(&wide_mapping)
+        .await
+        .expect("1100 fields fit under the raised per-index limit");
+
+    let users = flat_settings(&client, &base, &format!("{LOGICAL}_{}_1", mapping().hash)).await;
+    assert_eq!(users["index.mapping.total_fields.limit"], "1500");
+    assert_eq!(users["index.max_result_window"], "20000");
+    assert_eq!(users["index.refresh_interval"], "-1", "flusso's key wins");
+    let wide = flat_settings(&client, &base, &format!("wide_{}_1", wide_mapping.hash)).await;
+    assert_eq!(wide["index.mapping.total_fields.limit"], "2000");
+    assert_eq!(wide["index.max_result_window"], "20000");
+}
+
+/// The settings of `index` as flat dotted keys.
+async fn flat_settings(client: &reqwest::Client, base: &str, index: &str) -> Value {
+    let body: Value = client
+        .get(format!("{base}/{index}/_settings?flat_settings=true"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body[index]["settings"].clone()
 }
 
 /// The concrete generation indexes behind `hash_alias` (sorted).

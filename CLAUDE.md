@@ -536,7 +536,13 @@ and `yaml` modules) works in two stages:
    `#[derive(AdapterConfig)]` struct with `deny_unknown_fields`. `build`, `check` (incl.
    `--offline`), `run`, and the designer call it right after load, so a typo in a sink option
    fails before any network call or lock write. `load` alone therefore does **not** mean
-   "fully validated".
+   "fully validated". The same goes for **per-index sink options** (issue #168): an `[[index]]`
+   entry's `[index.sinks.<name>]` tables are `Index.sinks: BTreeMap<SinkName, Options>`, keyed by
+   sink **name**, and `adapters::index_sink_config` checks the name is a declared sink and
+   deserializes the table into that adapter's per-index struct (declared with
+   `#[adapter(index_options = T)]`, published as `AdapterDescription::index_schema`; OpenSearch's is
+   `OpensearchIndexConfig { index_settings }`). Like `on_error`, they sit outside `IndexSchema`,
+   so they never move the content hash (`index_settings_never_change_the_content_hash`).
 
 **Adapter knobs that are flags** (`--slot`, `--publication`, `--manage-publication`,
 `--manage-replica-identity`, `--pretty`,
@@ -554,9 +560,10 @@ applied to `Secret` fields; an explicit `{ env }` beats it. `DATABASE_URL` no lo
 
 **One declaration renders everything.** `AdapterConfig::description()` yields the adapter's
 draft-07 schema (doc comments → descriptions, serde defaults → defaults), its example, and its
-secret paths (found by the `x-flusso-secret` marker `Secret`'s `JsonSchema` plants). The CLI
-renders the complete `flusso.toml` editor schema (`flusso schema config`), the Reference option
-tables (`flusso schema docs`), and hands the descriptions to the designer (`GET /api/adapters`),
+secret paths (found by the `x-flusso-secret` marker `Secret`'s `JsonSchema` plants), plus its
+per-index options schema when it takes any (`index_schema`). The CLI
+renders the complete `flusso.toml` editor schema (`flusso schema config`, incl. `index[].sinks`),
+the Reference option tables (`flusso schema docs`; a per-index table as `<port>-<kind>-index.md`), and hands the descriptions to the designer (`GET /api/adapters`),
 whose forms are schema-driven (`apps/design/frontend/src/components/AdapterForm.tsx`). Adding an
 option to an adapter = edit the struct, run `just schema-gen`, commit.
 
@@ -786,8 +793,9 @@ a field type tag/sibling, an enum token, a source/sink capability — align the 
 **same** change: model/codegen/preview (`apps/design/`), the canvas/inspector controls
 (`apps/design/frontend/`), and the introspection/source-steer if the source informs it. The one
 exception is an **adapter option**: the designer's source/stream/sink forms render from the
-adapters' `#[derive(AdapterConfig)]` descriptions (`AdapterForm.tsx`), so a new option or a new
-adapter needs no designer edit beyond `just schema-gen`.
+adapters' `#[derive(AdapterConfig)]` descriptions (`AdapterForm.tsx`; per-index sink options from
+`index_schema`, in each index row's drawer), so a new option or a new adapter needs no designer
+edit beyond `just schema-gen`.
 And any user-facing string goes through `t("ns.key")` with the key added to **every** locale
 catalog in `apps/design/frontend/src/locales/` (English `en.ts` is the base; translate the rest).
 Two CI guards in the `designer-frontend` job enforce this and will fail the build otherwise: the
@@ -807,7 +815,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surfaces, auth, signals | `apps/cli/src/` — `telemetry/mod.rs` (traces), `telemetry/metrics.rs` (meter provider + `in_flight` gauge), `telemetry/observer.rs` (`OtelObserver`), `http/mod.rs` (public + private routers + `serve`), `http/auth.rs` (Basic auth), `commands/run.rs` (orchestration + signals) |
 | Config loading + the assembled `Config`/`Index` with `PortEntry` ports (layer 1) | `libs/1-config/src/` — `lib.rs` (`load`), `loader.rs`, `compiled.rs` (`flusso.lock`), `deployment/` (the `Config` family + `From<ConfigToml>` conversion + `resolve_mappings`) |
 | Kernel vocabulary (the shared types — layer 0) | `libs/0-kernel/src/` — `config/` (`IndexSchema`, `FailurePolicy`, `Secret`, …), `common/` (newtypes), `GenericValue`, `envelope.rs` (`Envelope`/`Op`/`Position` — the stream message), `options.rs` (`Options`/`OptionValue`), `port_entry.rs`, `adapter.rs` (`AdapterConfig`/`AdapterDescription`/`Port`/`override_var`); the derive in `libs/0-kernel/derive/` |
-| Adapter config types (one per adapter, `#[derive(AdapterConfig)]`) | `libs/2-adapters/source-postgres/src/config.rs` (`PostgresConfig`, `Connection`, `SslMode`, `Tls`), `stream-channel/src/config.rs`, `sink-opensearch/src/config.rs` (+ `TextAnalysis`), `sink-stdout/src/config.rs` |
+| Adapter config types (one per adapter, `#[derive(AdapterConfig)]`) | `libs/2-adapters/source-postgres/src/config.rs` (`PostgresConfig`, `Connection`, `SslMode`, `Tls`), `stream-channel/src/config.rs`, `sink-opensearch/src/config.rs` (+ `TextAnalysis`, the per-index `OpensearchIndexConfig`; `settings.rs` holds `IndexSettings`: normalization, owned-key rejection, layering), `sink-stdout/src/config.rs` |
 | `flusso.toml` parsing (entities only; conversion is beside `Config`) | `libs/1-config/src/toml/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`, `replica_identity.rs`), `document/` (`resolve.rs`: reverse resolution + the first-hop pre-image union) |

@@ -25,10 +25,12 @@ use kernel::{AdapterConfig, HttpUrl, ResolveError, Secret, SinkName, override_va
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::settings::IndexSettings;
+
 /// The `[sinks.<name>]` options for `type = "opensearch"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, AdapterConfig)]
 #[serde(deny_unknown_fields)]
-#[adapter(port = sink, kind = "opensearch")]
+#[adapter(port = sink, kind = "opensearch", index_options = OpensearchIndexConfig)]
 pub struct OpensearchConfig {
     /// Base URL of the cluster, literal or `{ env = "VAR" }`.
     #[adapter(example = "https://search.example.com:9200")]
@@ -86,6 +88,31 @@ pub struct OpensearchConfig {
     /// mapping always wins.
     #[serde(default = "default_auto_subfields")]
     pub auto_subfields: bool,
+    /// Extra OpenSearch index settings for every index this sink creates, e.g.
+    /// `{ "mapping.total_fields.limit" = 5000 }`. Applied when an index
+    /// generation is created. Keys, precedence, and the keys flusso owns are in
+    /// the Sink: OpenSearch reference, under Index settings.
+    #[serde(default, skip_serializing_if = "IndexSettings::is_empty")]
+    #[adapter(example = example_index_settings())]
+    pub index_settings: IndexSettings,
+}
+
+/// The options an OpenSearch sink takes per index: an `[[index]]` entry's
+/// `[index.sinks.<name>]` table, where `<name>` is the OpenSearch sink.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpensearchIndexConfig {
+    /// OpenSearch index settings for this index only, laid over the sink's
+    /// `index_settings`. Same keys and rules.
+    #[serde(default, skip_serializing_if = "IndexSettings::is_empty")]
+    pub index_settings: IndexSettings,
+}
+
+fn example_index_settings() -> IndexSettings {
+    IndexSettings::from_trusted([(
+        "index.mapping.total_fields.limit".to_owned(),
+        serde_json::json!(5000),
+    )])
 }
 
 fn default_tls_verify() -> bool {

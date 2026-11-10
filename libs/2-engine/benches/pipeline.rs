@@ -383,6 +383,7 @@ async fn setup() -> Services {
         refresh_interval: "10s".to_owned(),
         text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
+        index_settings: Default::default(),
     };
     let os_name = SinkName::try_new("bench").unwrap();
     let inner = OpensearchSink::from_config(&os_name, &os_config).unwrap();
