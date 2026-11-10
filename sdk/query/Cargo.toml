@@ -26,6 +26,10 @@ decimal = ["dep:rust_decimal"]
 chrono = ["dep:chrono"]
 # Make `uuid::Uuid` a valid `keyword` value (id / foreign-key fields).
 uuid = ["dep:uuid"]
+# `position::diesel::current` / `position::diesel_async::current`: read the
+# source position a fence waits on through the consumer's own database driver.
+diesel = ["dep:diesel"]
+diesel-async = ["dep:diesel", "dep:diesel-async"]
 
 [dependencies]
 serde = { workspace = true }
@@ -43,6 +47,9 @@ flusso-query-derive = { path = "../query-derive", version = "=0.16.0", optional 
 rust_decimal = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["serde"] }
+# Backend types only: no libpq, no driver. The consumer brings the connection.
+diesel = { version = "2.3", default-features = false, features = ["postgres_backend"], optional = true }
+diesel-async = { version = "0.9", default-features = false, optional = true }
 
 # No flusso lib dev-deps here — the combined-search e2e that needs the real
 # OpenSearch sink lives in the unpublished `dev/query-e2e` crate, so the query
@@ -50,4 +57,4 @@ uuid = { workspace = true, optional = true, features = ["serde"] }
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }

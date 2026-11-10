@@ -1,7 +1,9 @@
-//! The [`Client`] transport. Points at OpenSearch (not at flusso — the engine
-//! is write-only; reads go straight to the index it maintains).
+//! The [`Client`] transport. Reads go straight to OpenSearch, to the index
+//! flusso maintains. The one thing a client asks flusso itself is to wait: a
+//! fence, so a read sees a commit that was just made (see [`crate::fence`]).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -11,6 +13,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::error::{Error, Result};
+use crate::fence::{After, FenceConfig, Level};
 
 /// A connection to an OpenSearch cluster.
 ///
@@ -19,7 +22,7 @@ use crate::error::{Error, Result};
 /// [`Client::basic_auth`].
 #[derive(Debug, Clone)]
 pub struct Client {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     /// Base URL with any trailing slash trimmed.
     base: String,
     auth: Option<(String, String)>,
@@ -28,6 +31,10 @@ pub struct Client {
     /// Empty by default; set with [`Client::index_prefix`]. Must match the
     /// `prefix` the writing flusso instance is running with.
     pub(crate) index_prefix: String,
+    /// Where and how this client fences; see [`Client::flusso`].
+    pub(crate) fence: FenceConfig,
+    /// The position this client's reads wait for; set by [`Client::after`].
+    pub(crate) after: Option<Arc<After>>,
 }
 
 impl Client {
@@ -46,6 +53,8 @@ impl Client {
             base: raw.trim_end_matches('/').to_string(),
             auth: None,
             index_prefix: String::new(),
+            fence: FenceConfig::default(),
+            after: None,
         })
     }
 
@@ -99,6 +108,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn search_at(&self, path: &str, body: &Value) -> Result<Value> {
+        self.fence_before(Level::Searchable).await?;
         let endpoint = format!("{}/{}/_search", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, query = %body, "POST _search");
         self.post_json(&endpoint, body).await
@@ -115,6 +125,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn count_at(&self, path: &str, body: &Value) -> Result<Value> {
+        self.fence_before(Level::Searchable).await?;
         let endpoint = format!("{}/{}/_count", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, query = %body, "POST _count");
         self.post_json(&endpoint, body).await
@@ -131,6 +142,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn open_pit(&self, path: &str, keep_alive: Duration) -> Result<String> {
+        self.fence_before(Level::Searchable).await?;
         let endpoint = format!(
             "{}/{}/_search/point_in_time?keep_alive={}",
             self.base,
@@ -155,6 +167,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn search_pit(&self, body: &Value) -> Result<Value> {
+        self.fence_before(Level::Searchable).await?;
         let endpoint = format!("{}/_search", self.base);
         tracing::debug!(%endpoint, query = %body, "POST _search (point in time)");
         self.post_json(&endpoint, body)
@@ -228,6 +241,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn msearch_raw(&self, ndjson: String) -> Result<Value> {
+        self.fence_before(Level::Searchable).await?;
         let endpoint = format!("{}/_msearch", self.base);
         tracing::debug!(%endpoint, query = %ndjson, "POST _msearch");
         let builder = self
@@ -280,6 +294,7 @@ impl Client {
     where
         T: DeserializeOwned,
     {
+        self.fence_before(Level::Applied).await?;
         let endpoint = format!(
             "{}/{}/_doc/{id}",
             self.base,
