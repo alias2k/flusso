@@ -197,6 +197,86 @@ fn auto_subfields_off_leaves_string_fields_bare() {
 }
 
 #[test]
+fn subfields_false_drops_the_auto_subfields_but_keeps_the_text_analyzer() {
+    let mut name = field("name", MappingType::Text, vec![]);
+    name.mapping.subfields = false;
+    let mut code = field("code", MappingType::Keyword, vec![]);
+    code.mapping.subfields = false;
+    let body = build_index_body(
+        &[name, code, field("sku", MappingType::Keyword, vec![])],
+        &opts(),
+    );
+    let props = &body["mappings"]["properties"];
+    assert_eq!(
+        props["name"],
+        json!({ "type": "text", "analyzer": "flusso_text" })
+    );
+    assert_eq!(props["code"], json!({ "type": "keyword" }));
+    assert!(
+        props["sku"].get("fields").is_some(),
+        "a sibling keeps its subfields"
+    );
+}
+
+#[test]
+fn subfields_false_still_keeps_an_ordered_enum_sort() {
+    let mut status = enum_field("status", &["a", "b"]);
+    status.mapping.subfields = false;
+    let body = build_index_body(&[status], &opts());
+    let fields = &body["mappings"]["properties"]["status"]["fields"];
+    assert_eq!(fields["sort"]["type"], "keyword");
+    assert!(fields.get("keyword_lowercase").is_none());
+}
+
+fn unindexed(mut field: ResolvedField) -> ResolvedField {
+    field.mapping.indexed = false;
+    field
+}
+
+#[test]
+fn an_unindexed_field_is_one_disabled_object_whatever_its_shape() {
+    let labels = map_field("labels", &FlussoType::Text);
+    let orders = unindexed(field(
+        "orders",
+        MappingType::Nested,
+        vec![
+            field("total", MappingType::Double, vec![]),
+            enum_field("state", &["open", "closed"]),
+            labels,
+        ],
+    ));
+    let author = unindexed(field(
+        "author",
+        MappingType::Object,
+        vec![field("name", MappingType::Text, vec![])],
+    ));
+    let snapshot = unindexed(field("snapshot", MappingType::Object, vec![]));
+    let body = build_index_body(
+        &[
+            orders,
+            author,
+            snapshot,
+            field("title", MappingType::Text, vec![]),
+        ],
+        &opts(),
+    );
+    let props = &body["mappings"]["properties"];
+    let disabled = json!({ "type": "object", "enabled": false });
+    assert_eq!(props["orders"], disabled);
+    assert_eq!(props["author"], disabled);
+    assert_eq!(props["snapshot"], disabled);
+    assert_eq!(props["title"]["type"], "text");
+    assert!(
+        body["mappings"].get("dynamic_templates").is_none(),
+        "a map under an unindexed field gets no template"
+    );
+    assert!(
+        body["settings"]["analysis"].get("char_filter").is_none(),
+        "an enum under an unindexed field gets no sort analysis"
+    );
+}
+
+#[test]
 fn explicit_extra_overrides_the_auto_shape() {
     // A field that sets its own analyzer (e.g. `options: { analyzer: english }`)
     // keeps it over the auto default, and explicit `fields` replace the auto

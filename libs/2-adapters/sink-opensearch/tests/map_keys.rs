@@ -14,6 +14,15 @@
 //!   key (an object path to OpenSearch) are item-level rejections in the flush report (so `on_error` applies), and the
 //!   rest of the batch lands.
 //!
+//! It also proves the two mapping opt-outs (issue #170), on their own index:
+//!
+//! - **`indexed: false`**: a `nested` join and a `json` field mapped as one
+//!   disabled object keep their content in `_source`, are not searchable, and
+//!   accept values a mapped field would refuse (a string where a `double` was
+//!   declared, keys the strict root has never seen).
+//! - **`subfields: false`**: a `text` field is mapped with its analyzer and no
+//!   subfields, and is still searchable.
+//!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
 //! ```text
@@ -159,8 +168,12 @@ fn generic(value: Value) -> GenericValue {
 }
 
 async fn upsert(sink: &OpensearchSink, id: &str, doc: Value) {
+    upsert_into(sink, LOGICAL, id, doc).await;
+}
+
+async fn upsert_into(sink: &OpensearchSink, logical: &str, id: &str, doc: Value) {
     sink.apply(&Envelope::upsert(
-        IndexName::try_new(LOGICAL).unwrap(),
+        IndexName::try_new(logical).unwrap(),
         id,
         generic(doc),
         Some(Position(0)),
@@ -171,8 +184,12 @@ async fn upsert(sink: &OpensearchSink, id: &str, doc: Value) {
 }
 
 async fn search(base: &str, query: Value) -> Vec<String> {
+    search_in(base, ALIAS, query).await
+}
+
+async fn search_in(base: &str, alias: &str, query: Value) -> Vec<String> {
     let response: Value = reqwest::Client::new()
-        .post(format!("{base}/{ALIAS}/_search"))
+        .post(format!("{base}/{alias}/_search"))
         .json(&json!({ "query": query }))
         .send()
         .await
@@ -294,4 +311,112 @@ async fn map_keys_are_typed_like_plain_fields_of_their_values() {
         "{:?}",
         report.rejected
     );
+}
+
+const STORED: &str = "stored";
+const STORED_ALIAS: &str = "stored_00000170";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn an_unindexed_subtree_is_stored_but_not_searchable() {
+    let (_container, base) = start_opensearch().await;
+    let sink = sink(&base);
+    let unindexed = |mut field: ResolvedField| {
+        field.mapping.indexed = false;
+        field
+    };
+    let mut note = field("note", MappingType::Text, vec![]);
+    note.mapping.subfields = false;
+    let mapping = IndexMapping {
+        index: IndexName::try_new(STORED).unwrap(),
+        hash: ContentHash::new(0x170),
+        fields: vec![
+            field("title", MappingType::Text, vec![]),
+            note,
+            unindexed(field(
+                "orders",
+                MappingType::Nested,
+                vec![field("total", MappingType::Double, vec![])],
+            )),
+            unindexed(field("snapshot", MappingType::Object, vec![])),
+        ],
+    };
+    sink.ensure_index(&mapping).await.unwrap();
+
+    let stored = json!({
+        "title": "Excavator",
+        "note": "Hello world",
+        "orders": [
+            { "total": "not a number", "unmapped": { "deep": [1, "x"] } },
+            { "total": 12.5 },
+        ],
+        "snapshot": { "anything": { "goes": true } },
+    });
+    upsert_into(&sink, STORED, "1", stored.clone()).await;
+    let report = sink.flush(true).await.unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    sink.mark_seeded(&mapping.index).await.unwrap();
+    reqwest::Client::new()
+        .post(format!("{base}/{STORED_ALIAS}/_refresh"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let doc: Value = reqwest::Client::new()
+        .get(format!("{base}/{STORED_ALIAS}/_doc/1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(doc["_source"]["orders"], stored["orders"]);
+    assert_eq!(doc["_source"]["snapshot"], stored["snapshot"]);
+
+    let body: Value = reqwest::Client::new()
+        .get(format!("{base}/{STORED_ALIAS}/_mapping"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (_, index) = body.as_object().unwrap().iter().next().unwrap();
+    let properties = &index["mappings"]["properties"];
+    let disabled = json!({ "type": "object", "enabled": false });
+    assert_eq!(properties["orders"], disabled);
+    assert_eq!(properties["snapshot"], disabled);
+    assert_eq!(
+        properties["note"],
+        json!({ "type": "text", "analyzer": "flusso_text" })
+    );
+
+    assert_eq!(
+        search_in(
+            &base,
+            STORED_ALIAS,
+            json!({ "match": { "title": "excavator" } })
+        )
+        .await,
+        ["1"]
+    );
+    assert_eq!(
+        search_in(&base, STORED_ALIAS, json!({ "match": { "note": "hello" } })).await,
+        ["1"]
+    );
+    for query in [
+        json!({ "term": { "orders.total": 12.5 } }),
+        json!({ "match": { "orders.total": "number" } }),
+        json!({ "exists": { "field": "orders" } }),
+        json!({ "exists": { "field": "snapshot.anything.goes" } }),
+    ] {
+        assert!(
+            search_in(&base, STORED_ALIAS, query.clone())
+                .await
+                .is_empty(),
+            "{query} should match nothing in an unindexed subtree"
+        );
+    }
 }

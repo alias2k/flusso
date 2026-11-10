@@ -7,6 +7,12 @@
 //! map's `values` type: one root `dynamic_templates` entry per map, matching
 //! the map's full dotted path (`orders.labels.*` works inside a `nested`
 //! array too), carries the property [`build_property`] renders for that type.
+//!
+//! Two per-field opt-outs shrink the mapping. A `subfields: false` string field
+//! gets no auto subfields. An `indexed: false` field (a `json` column or a join)
+//! is one `{"type": "object", "enabled": false}`: its content stays in
+//! `_source`, and nothing under it is mapped — no properties, no enum-sort
+//! analysis, no map templates.
 
 use kernel::{MappingType, ResolvedField};
 
@@ -93,7 +99,7 @@ fn collect_enum_sorts<'a>(
     prefix: &str,
     out: &mut Vec<(String, &'a [String])>,
 ) {
-    for field in fields {
+    for field in fields.iter().filter(|field| field.mapping.indexed) {
         let path = field_path(prefix, field);
         if let Some(order) = &field.mapping.enum_order {
             out.push((path.clone(), order));
@@ -111,7 +117,7 @@ fn collect_map_templates(
     prefix: &str,
     out: &mut Vec<Value>,
 ) {
-    for field in fields {
+    for field in fields.iter().filter(|field| field.mapping.indexed) {
         let path = field_path(prefix, field);
         if let Some(values) = &field.mapping.map_values {
             let key = ResolvedField {
@@ -284,10 +290,15 @@ fn build_properties(fields: &[ResolvedField], options: &IndexOptions, prefix: &s
 ///
 /// For a scalar `text`/`keyword` field (and `auto_subfields` on) this starts
 /// from a production-ready default — a good analyzer plus exact / sortable /
-/// searchable subfields — then overlays the field's own `extra` on top, so an
+/// searchable subfields, the subfields dropped for a `subfields: false` field —
+/// then overlays the field's own `extra` on top, so an
 /// explicit `analyzer`, `fields`, etc. always wins. `object`/`nested` recurse
-/// into their children; other types pass through with just their `extra`.
+/// into their children; other types pass through with just their `extra`. A
+/// field that is not indexed is a disabled `object`, whatever its shape.
 fn build_property(field: &ResolvedField, options: &IndexOptions, path: &str) -> Value {
+    if !field.mapping.indexed {
+        return json!({ "type": "object", "enabled": false });
+    }
     let mut prop = Map::new();
     prop.insert(
         "type".to_owned(),
@@ -295,12 +306,15 @@ fn build_property(field: &ResolvedField, options: &IndexOptions, path: &str) -> 
     );
 
     if options.auto_subfields && field.children.is_empty() {
+        let subfields = field.mapping.subfields;
         match field.mapping.mapping_type {
             MappingType::Text => {
                 prop.insert("analyzer".to_owned(), json!(TEXT_ANALYZER));
-                prop.insert("fields".to_owned(), text_subfields());
+                if subfields {
+                    prop.insert("fields".to_owned(), text_subfields());
+                }
             }
-            MappingType::Keyword => {
+            MappingType::Keyword if subfields => {
                 prop.insert("fields".to_owned(), keyword_subfields());
             }
             _ => {}
