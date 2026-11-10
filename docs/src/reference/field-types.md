@@ -42,7 +42,7 @@ With `auto_subfields` on (the default), `text`/`identifier`/`keyword`/`enum`/`uu
 
 - **What it saves.** Each subfield is a mapping field, so a `text`/`keyword` field drops from 3 to 1 toward `index.mapping.total_fields.limit`.
 - **What it costs.** No exact filter, aggregation, or sort on a `text` field; no case-insensitive sort or full-text search on a `keyword`. On the query side the handle is `NoSubfields`, so the accessors don't compile; see [Field handles](../query/field-handles.md#subfield-accessors).
-- **Only `text`, `keyword`, and `uuid`.** Any other type rejects the key at load, `identifier` and `enum` included even though they get auto subfields too; give those a custom `options: { fields: {} }` to replace the subfields with none. An `enum` with `variants` keeps its `.sort` subfield regardless.
+- **Only `text`, `keyword`, and `uuid`.** Any other type rejects the key at load, `identifier` and `enum` included even though they get auto subfields too; give those a custom `options: { fields: {} }` to replace the subfields with none. Don't do that on an `enum` with `variants`: the override also drops its `.sort` subfield, so sorting by declared order stops working.
 - **Changing it** moves the schema to a new content hash, so the index is rebuilt once.
 - **Omitted or `true`** keeps the sink-wide behaviour.
 
