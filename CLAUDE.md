@@ -364,7 +364,15 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   live read is covered). The daemon enforces it by finishing every sink's first `stage` before
   spawning the ingest engine. Only *seeded* indexes are staged (#121). Under `--skip-backfill`
   staging warns only. Both trait methods are required. The sink-side half: the OpenSearch
-  `ensure_index` retracts a seeded marker whose generation index is missing. Guarded by the
+  `ensure_index` retracts a seeded marker whose generation index is missing. While running
+  (issue #123), the OpenSearch sink writes a **seeded** index through its hash alias with a
+  per-item `require_alias` (an unseeded one through its concrete generation), so a deleted
+  generation fails the write with `index_not_found_exception` — mapped to a **flush-wide**
+  `Err`, never a rejection — and the sink engine's restart re-stages into the same rebuild;
+  `generation_deleted_while_running_fails_the_flush_and_is_rebuilt`. Its `reindex` is a no-op
+  for an index that is absent from meta or unseeded and `mark_seeded` drops every non-active
+  generation, not just alias holders (issue #121; `a_second_reindex_while_rebuilding_stages_nothing`,
+  `mark_seeded_sweeps_an_orphan_generation`). Guarded by the
   engine's `fresh_source_*`/`skip_backfill_with_a_fresh_source_*` unit tests, the daemon's
   `fresh_source_rebuilds_seeded_sinks_before_preparing`, the sink's
   `deleted_generation_is_recreated_and_reported_unseeded` e2e, the Postgres `continuity` e2e,
@@ -404,7 +412,8 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   the batch unacked (redelivered after restart); `Skip` quarantines it
   (`Observer::on_document_quarantined`, with the sink) and acks so the poison isn't redelivered.
   A single `Stop` halts the whole batch before any quarantine event is emitted. The OpenSearch
-  sink does *not* retry item-level rejections. Guarded by `skip_policy_*`/`stop_policy_*`/
+  sink does *not* retry item-level rejections, and reports a missing target
+  (`index_not_found_exception`) as flush-wide, not as a rejection. Guarded by `skip_policy_*`/`stop_policy_*`/
   `per_index_stop_*`.
 - **Observability is a trait, not baked in.** Both engines report to an `Observer`
   (`libs/2-engine/src/observer.rs`) — sync, cheap, no-op by default, set via `with_observer`;
