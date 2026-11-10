@@ -83,10 +83,10 @@ async fn list(
         .query(filter.name.map(|v| Product::name().matches(v)))
         // Cross-language title search; prefer the caller's locale when given.
         .query(filter.title.map(|v| {
-            let search = Product::title().search(v);
+            let matches = Product::title().matches(v);
             match filter.locale {
-                Some(locale) => search.prefer(locale, 3.0),
-                None => search,
+                Some(locale) => matches.prefer(locale, 3.0),
+                None => matches,
             }
         }))
         .filter(filter.in_stock.map(|v| Product::in_stock().eq(v)))

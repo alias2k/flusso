@@ -258,18 +258,19 @@ fn map_field_generates_typed_query_surface() -> Result {
     let q = Product::title().key("it").matches("ciao").to_value();
     assert_eq!(q["match"]["title.it"], serde_json::json!("ciao"));
 
-    // Cross-key search with per-key preference + presence checks.
+    // Cross-key match with per-key preference + presence checks.
     let body = Product::query()
         .query(
             Product::title()
-                .search("ciao")
+                .matches("ciao")
                 .prefer("it", 3.0)
                 .prefer("en", 2.0),
         )
         .filter(Product::title().exists())
         .filter(Product::title().has_key("it"))
-        // A keyword map: exact per-key lookup, no `search`.
+        // A keyword map: exact per-key lookup, and case-insensitive across keys.
         .filter(Product::codes().key("ean").eq("0049"))
+        .filter(Product::codes().keyword_lowercase().eq("0049"))
         .body();
 
     let json = body.to_string();
@@ -278,6 +279,7 @@ fn map_field_generates_typed_query_surface() -> Result {
     assert!(json.contains(r#""title.*""#), "{json}");
     assert!(json.contains(r#""best_fields""#), "{json}");
     assert!(json.contains(r#""codes.ean""#), "{json}");
+    assert!(json.contains(r#""codes.*.keyword_lowercase""#), "{json}");
     Ok(())
 }
 

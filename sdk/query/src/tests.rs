@@ -1744,13 +1744,273 @@ fn a_map_key_with_subfields_sorts_like_a_plain_field() {
 }
 
 #[test]
-fn map_search_match_type_is_configurable() {
-    let value = TextMap::<Root>::at("title")
-        .search("excav")
-        .match_type(MultiMatchType::BoolPrefix)
+fn text_map_analyzed_family_renders_a_multi_match_per_type() {
+    let title = TextMap::<Root>::at("title");
+    for (query, kind) in [
+        (title.matches("excav"), "best_fields"),
+        (title.match_phrase("excav"), "phrase"),
+        (title.match_phrase_prefix("excav"), "phrase_prefix"),
+        (title.match_bool_prefix("excav"), "bool_prefix"),
+    ] {
+        assert_eq!(
+            query.to_value(),
+            json!({ "multi_match": { "query": "excav", "type": kind, "fields": ["title.*"] } })
+        );
+    }
+    assert_eq!(
+        title.matches_fuzzy("excav").to_value(),
+        json!({ "multi_match": {
+            "query": "excav", "type": "best_fields", "fuzziness": "AUTO", "fields": ["title.*"]
+        } })
+    );
+}
+
+#[test]
+fn text_map_analyzed_family_takes_prefer_only_preferred_and_match_options() {
+    let title = TextMap::<Root>::at("title");
+    assert_eq!(
+        title
+            .matches("scarpe")
+            .prefer("it", 3.0)
+            .prefer("en", 1.5)
+            .to_value()["multi_match"]["fields"],
+        json!(["title.it^3", "title.en^1.5", "title.*"])
+    );
+    assert_eq!(
+        title
+            .match_phrase("scarpe rosse")
+            .prefer("it", 2.0)
+            .only_preferred()
+            .slop(1)
+            .boost(2.0)
+            .name("phrase")
+            .to_value(),
+        json!({ "multi_match": {
+            "query": "scarpe rosse", "type": "phrase", "slop": 1,
+            "fields": ["title.it^2"], "boost": 2.0, "_name": "phrase"
+        } })
+    );
+    let value = title
+        .matches("a b")
+        .operator(Operator::And)
+        .minimum_should_match(1)
+        .tie_breaker(0.3)
+        .match_type(MultiMatchType::MostFields)
         .to_value();
-    assert_eq!(value["multi_match"]["type"], json!("bool_prefix"));
-    assert_eq!(value["multi_match"]["fields"], json!(["title.*"]));
+    assert_eq!(value["multi_match"]["type"], json!("most_fields"));
+    assert_eq!(value["multi_match"]["operator"], json!("AND"));
+    assert_eq!(value["multi_match"]["tie_breaker"], json!(0.3_f32));
+}
+
+#[test]
+fn text_map_any_of_and_subfield_views_target_one_subfield_of_every_key() {
+    let title = TextMap::<Root>::at("title");
+    assert_eq!(
+        title
+            .any_of(["Red Shoes", "a\"b"])
+            .prefer("it", 2.0)
+            .to_value(),
+        json!({ "query_string": {
+            "query": r#""Red Shoes" OR "a\"b""#,
+            "fields": ["title.it.keyword^2", "title.*.keyword"],
+        } })
+    );
+    assert_eq!(
+        title.keyword().eq("Red Shoes").to_value(),
+        json!({ "query_string": { "query": "\"Red Shoes\"", "fields": ["title.*.keyword"] } })
+    );
+    assert_eq!(
+        title.keyword_lowercase().prefix("red").to_value(),
+        json!({ "query_string": { "query": "red*", "fields": ["title.*.keyword_lowercase"] } })
+    );
+    assert_eq!(
+        title.keyword().key("en").eq("x").to_value(),
+        json!({ "term": { "title.en.keyword": "x" } })
+    );
+    assert_eq!(
+        title.keyword().has_key("en").to_value(),
+        json!({ "exists": { "field": "title.en.keyword" } })
+    );
+    assert_eq!(
+        title.keyword().exists().to_value(),
+        json!({ "exists": { "field": "title.*.keyword" } })
+    );
+    assert_eq!(
+        title.keyword().sort_key("en").asc().to_value()["_script"]["script"]["params"]["fields"],
+        json!(["title.en.keyword"])
+    );
+}
+
+#[test]
+fn keyword_map_without_subfields_mirrors_the_exact_family_over_its_keys() {
+    let codes = KeywordMap::<Root, NoSubfields>::leaf("codes");
+    let qs = |value: serde_json::Value| value["query_string"]["query"].clone();
+    assert_eq!(
+        codes.eq("Foo Bar").to_value(),
+        json!({ "query_string": { "query": "\"Foo Bar\"", "fields": ["codes.*"] } })
+    );
+    assert_eq!(
+        qs(codes.any_of(["a", "b"]).to_value()),
+        json!(r#""a" OR "b""#)
+    );
+    assert_eq!(qs(codes.prefix("Foo B").to_value()), json!("Foo\\ B*"));
+    assert_eq!(
+        qs(codes.wildcard("F?o (*)").to_value()),
+        json!("F?o\\ \\(*\\)")
+    );
+    assert_eq!(
+        qs(codes.regexp("a/[0-9]+").to_value()),
+        json!("/a\\/[0-9]+/")
+    );
+    assert_eq!(qs(codes.fuzzy("sael").to_value()), json!("sael~"));
+    assert_eq!(
+        codes
+            .fuzzy("sael")
+            .fuzziness(Fuzziness::Edits(1))
+            .prefix_length(1)
+            .max_expansions(10)
+            .transpositions(false)
+            .prefer("sku", 2.0)
+            .only_preferred()
+            .to_value(),
+        json!({ "query_string": {
+            "query": "sael~", "fuzziness": 1, "fuzzy_prefix_length": 1,
+            "fuzzy_max_expansions": 10, "fuzzy_transpositions": false,
+            "fields": ["codes.sku^2"],
+        } })
+    );
+    assert_eq!(
+        codes.prefix("a").rewrite("constant_score").to_value()["query_string"]["rewrite"],
+        json!("constant_score")
+    );
+    assert_eq!(
+        codes.wildcard("a*").rewrite("top_terms_10").to_value()["query_string"]["rewrite"],
+        json!("top_terms_10")
+    );
+    assert_eq!(
+        codes.regexp("a.*").max_determinized_states(100).to_value()["query_string"]["max_determinized_states"],
+        json!(100)
+    );
+    assert_eq!(
+        codes.eq("x").prefer("ean", 2.0).to_value()["query_string"]["fields"],
+        json!(["codes.ean^2", "codes.*"])
+    );
+}
+
+#[test]
+fn keyword_map_with_subfields_reaches_its_keys_through_subfield_views() {
+    let codes = KeywordMap::<Root>::at("codes");
+    assert_eq!(
+        codes.text().matches("foo").prefer("ean", 2.0).to_value(),
+        json!({ "multi_match": {
+            "query": "foo", "type": "best_fields",
+            "fields": ["codes.ean.text^2", "codes.*.text"],
+        } })
+    );
+    assert_eq!(
+        codes.text().key("ean").matches("foo").to_value(),
+        json!({ "match": { "codes.ean.text": "foo" } })
+    );
+    assert_eq!(
+        codes
+            .keyword_lowercase()
+            .eq("foo bar")
+            .only_preferred()
+            .prefer("ean", 1.0)
+            .to_value(),
+        json!({ "query_string": {
+            "query": "\"foo bar\"", "fields": ["codes.ean.keyword_lowercase^1"],
+        } })
+    );
+}
+
+#[test]
+fn an_empty_any_of_across_keys_matches_nothing() {
+    let none: [&str; 0] = [];
+    assert_eq!(
+        KeywordMap::<Root, NoSubfields>::leaf("codes")
+            .any_of(none)
+            .to_value(),
+        json!({ "match_none": {} })
+    );
+    assert_eq!(
+        NumberMap::<crate::kind::Long, Root>::at("stock")
+            .any_of(Vec::<i64>::new())
+            .to_value(),
+        json!({ "match_none": {} })
+    );
+}
+
+#[test]
+fn number_map_mirrors_the_value_and_range_family_over_its_keys() {
+    let prices = NumberMap::<crate::kind::Double, Root>::at("prices");
+    let qs = |value: serde_json::Value| value["query_string"]["query"].clone();
+    assert_eq!(
+        prices.eq(3.5).to_value(),
+        json!({ "query_string": { "query": "\"3.5\"", "fields": ["prices.*"] } })
+    );
+    assert_eq!(
+        qs(prices.any_of([3.5, -2.0]).to_value()),
+        json!(r#""3.5" OR "-2.0""#)
+    );
+    assert_eq!(qs(prices.lt(10).to_value()), json!(r#"[* TO "10"}"#));
+    assert_eq!(qs(prices.lte(10).to_value()), json!(r#"[* TO "10"]"#));
+    assert_eq!(qs(prices.gt(3.2).to_value()), json!(r#"{"3.2" TO *]"#));
+    assert_eq!(qs(prices.gte(-5).to_value()), json!(r#"["-5" TO *]"#));
+    assert_eq!(
+        qs(prices.between(10, 50).to_value()),
+        json!(r#"["10" TO "50"]"#)
+    );
+    assert_eq!(
+        prices
+            .between(10, 50)
+            .prefer("eur", 2.0)
+            .only_preferred()
+            .to_value()["query_string"]["fields"],
+        json!(["prices.eur^2"])
+    );
+}
+
+#[test]
+fn date_map_mirrors_the_value_and_range_family_over_its_keys() {
+    let when = DateMap::<Root>::at("released");
+    assert_eq!(
+        when.gte("now-1d")
+            .time_zone("+01:00")
+            .prefer("eu", 2.0)
+            .to_value(),
+        json!({ "query_string": {
+            "query": r#"["now-1d" TO *]"#, "time_zone": "+01:00",
+            "fields": ["released.eu^2", "released.*"],
+        } })
+    );
+    assert_eq!(
+        when.eq("2024-01-10").to_value()["query_string"]["query"],
+        json!("\"2024-01-10\"")
+    );
+    assert_eq!(
+        when.between("2024-01-01", "2024-12-31").to_value()["query_string"]["query"],
+        json!(r#"["2024-01-01" TO "2024-12-31"]"#)
+    );
+}
+
+#[test]
+fn a_cross_key_query_in_a_nested_scope_lifts_like_a_field_query() {
+    let prices = NumberMap::<crate::kind::Double, Order>::at("orders.prices");
+    let value = User::orders().any(prices.gt(5)).to_value();
+    assert_eq!(value["nested"]["path"], json!("orders"));
+    assert_eq!(
+        value["nested"]["query"],
+        json!({ "query_string": { "query": r#"{"5" TO *]"#, "fields": ["orders.prices.*"] } })
+    );
+    let names = TextMap::<Order>::at("orders.names");
+    let value = User::orders()
+        .any(names.matches("x").prefer("it", 2.0))
+        .to_value();
+    assert_eq!(
+        value["nested"]["query"]["multi_match"]["fields"],
+        json!(["orders.names.it^2", "orders.names.*"])
+    );
 }
 
 #[test]

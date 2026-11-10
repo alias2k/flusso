@@ -466,6 +466,7 @@ fn missing_sentinel(last: bool, order: SortOrder, kind: MapSortValueKind) -> Val
 #[derive(Debug, Clone)]
 pub struct MapKeySort<S = Root> {
     path: String,
+    suffix: &'static str,
     keys: Vec<String>,
     kind: MapSortValueKind,
     _scope: PhantomData<fn() -> S>,
@@ -475,10 +476,18 @@ impl<S> MapKeySort<S> {
     pub(crate) fn new(path: String, key: impl Into<String>, kind: MapSortValueKind) -> Self {
         Self {
             path,
+            suffix: "",
             keys: vec![key.into()],
             kind,
             _scope: PhantomData,
         }
+    }
+
+    /// Read each key's `suffix` subfield instead of the key itself (a map
+    /// subfield view, e.g. `.keyword`).
+    pub(crate) fn with_suffix(mut self, suffix: &'static str) -> Self {
+        self.suffix = suffix;
+        self
     }
 
     /// Add the next fallback key, tried only for documents missing every key so
@@ -493,7 +502,7 @@ impl<S> MapKeySort<S> {
         match self.kind {
             MapSortValueKind::Folded => format!("{}.{key}{KEYWORD_LOWERCASE_SUFFIX}", self.path),
             MapSortValueKind::Exact | MapSortValueKind::Number | MapSortValueKind::Date => {
-                format!("{}.{key}", self.path)
+                format!("{}.{key}{}", self.path, self.suffix)
             }
         }
     }
@@ -545,7 +554,7 @@ impl<S: FlussoScope> MapKeySort<S> {
             );
         }
 
-        Sort::map_script(self.path.clone(), body, self.kind)
+        Sort::map_script(format!("{}{}", self.path, self.suffix), body, self.kind)
     }
 }
 

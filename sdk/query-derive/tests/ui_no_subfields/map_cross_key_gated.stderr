@@ -1,0 +1,17 @@
+error[E0599]: no method named `any_of` found for struct `TextMap<Root, NoSubfields>` in the current scope
+  --> tests/ui_no_subfields/map_cross_key_gated.rs:15:30
+   |
+15 |     let _ = Product::title().any_of(["a"]);
+   |                              ^^^^^^ method not found in `TextMap<Root, NoSubfields>`
+   |
+   = note: the method was found for
+           - `TextMap<S>`
+
+error[E0599]: no method named `keyword_lowercase` found for struct `TextMap<Root, NoSubfields>` in the current scope
+  --> tests/ui_no_subfields/map_cross_key_gated.rs:16:30
+   |
+16 |     let _ = Product::title().keyword_lowercase();
+   |                              ^^^^^^^^^^^^^^^^^ method not found in `TextMap<Root, NoSubfields>`
+   |
+   = note: the method was found for
+           - `TextMap<S>`

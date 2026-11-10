@@ -22,7 +22,7 @@ use crate::query::{AsQuery, Query, Root};
 /// (`String`/`&str` pass straight through; `chrono` types serialize to their
 /// ISO-8601 string). Mirrors `keyword_term` — a non-string serialization falls
 /// back to its display form rather than failing.
-fn date_value(value: &impl FlussoValue<kind::Date>) -> Value {
+pub(super) fn date_value(value: &impl FlussoValue<kind::Date>) -> Value {
     match serde_json::to_value(value) {
         Ok(Value::String(string)) => Value::String(string),
         Ok(other) => Value::String(other.to_string()),
@@ -35,7 +35,7 @@ fn date_value(value: &impl FlussoValue<kind::Date>) -> Value {
 /// serializes to a string (the workspace's `serde-with-str`), so parse it back
 /// to a number — the field is numeric, so a clean number is what it queries.
 /// Generic over the numeric kind `K` (`Byte`…`Decimal`).
-fn number_value<K>(value: &impl FlussoValue<K>) -> Value {
+pub(super) fn number_value<K>(value: &impl FlussoValue<K>) -> Value {
     match serde_json::to_value(value) {
         Ok(Value::String(string)) => string
             .parse::<serde_json::Number>()
