@@ -98,6 +98,7 @@ fn sink(base_url: &str, batch_size: u32) -> sink_opensearch::OpensearchSink {
         refresh_interval: "10s".to_owned(),
         text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
+        index_settings: Default::default(),
     };
     let name = kernel::SinkName::try_new("bench").unwrap();
     sink_opensearch::OpensearchSink::from_config(&name, &config).unwrap()
