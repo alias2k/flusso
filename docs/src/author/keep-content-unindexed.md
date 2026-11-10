@@ -45,7 +45,7 @@ Raising the limit with [`index_settings`](../reference/sink-opensearch.md) is th
          required: true
    ```
 
-   The same key on a `json` field stores the blob as-is. A plain `json` field accepts no keys under the strict root, so this is the way to keep one.
+   The same key on a `json` field stores the blob as-is; see [Field types](../reference/field-types.md) for why a plain `json` field needs it.
 
 4. **Run it.** Either change gives the schema a new content hash, so `flusso run` builds a new index and backfills it once. Verify with `GET <index>/_mapping`: `priceHistory` is `{"type": "object", "enabled": false}`, and a search returns it in `_source`.
 
@@ -54,7 +54,7 @@ Raising the limit with [`index_settings`](../reference/sink-opensearch.md) is th
 ## Options and variations
 
 - **Need one value from a stored subtree in a query?** Add an aggregate over the same relation (`count`, `max`, `ids`); it's its own searchable field. See [Aggregates](../reference/aggregates.md).
-- **Settings under an unindexed join** (`options`, `subfields`, an `enum`'s order) are accepted and ignored, so toggling `indexed` back on restores them.
+- **Settings under an unindexed join** are kept for when `indexed` is turned back on; see [Joins: indexed](../reference/joins.md#indexed) for which ones.
 - **In the designer** both are checkboxes in the inspector; see [Designer reference](designer-reference.md#inspector).
 
 ## Related
