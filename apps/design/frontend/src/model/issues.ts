@@ -1,6 +1,7 @@
 import type { CatalogResponse, ColumnShape, DiagnosticDto, Field, IndexSchema } from "../api";
 import type { Translate } from "../i18n";
 import { drasticTypeChange } from "../theme";
+import { retypeColumn } from "./edit";
 
 const sourceColOf = (catalog: CatalogResponse, table: string, column: string): ColumnShape | undefined =>
   catalog.catalog.tables.find((t) => t.name === table)?.columns.find((c) => c.name === column);
@@ -98,7 +99,7 @@ export function fixAllTypes(schema: IndexSchema, catalog: CatalogResponse | null
       const col = s.column;
       const src = sourceColOf(catalog, table, col.column);
       if (columnMismatch(col, src) && typeof src?.suggested_type === "string") {
-        return { ...f, source: { column: { ...col, ty: src.suggested_type } } };
+        return { ...f, source: { column: retypeColumn(col, src.suggested_type) } };
       }
       return f;
     }

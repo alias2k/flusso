@@ -618,7 +618,7 @@ function ScalarBody({
           <Select
             value={column.ty as string}
             options={scalarTypeOptions(t)}
-            onChange={(ty) => setCol(retypeColumn(column, ty as FlussoType))}
+            onChange={(ty) => setCol(edit.retypeColumn(column, ty as FlussoType))}
             className={`font-mono ${typeClass(column.ty as string)}`}
           />
         </Row>
@@ -628,7 +628,7 @@ function ScalarBody({
             <button
               type="button"
               className="cursor-pointer text-primary hover:underline"
-              onClick={() => setCol({ ...column, ty: suggested })}
+              onClick={() => setCol(edit.retypeColumn(column, suggested))}
             >
               {t("inspector.use")}
             </button>
@@ -645,7 +645,7 @@ function ScalarBody({
           <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
         </div>
         {column.ty === "enum" && <VariantsEditor column={column} setCol={setCol} />}
-        {SUBFIELD_TYPES.includes(column.ty) && (
+        {edit.SUBFIELD_TYPES.includes(column.ty) && (
           <OptOut
             value={column.subfields ?? true}
             label={t("inspector.subfields")}
@@ -665,18 +665,6 @@ function ScalarBody({
       </Block>
     </>
   );
-}
-
-/// The scalar types whose sink adds automatic subfields a field may turn off.
-const SUBFIELD_TYPES: FlussoType[] = ["text", "keyword", "uuid"];
-
-/// A new type drops the opt-outs it no longer takes, so a retyped field never
-/// carries a sibling the schema would reject.
-function retypeColumn(column: Column, ty: FlussoType): Column {
-  const next: Column = { ...column, ty };
-  if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
-  if (ty !== "json") delete next.indexed;
-  return next;
 }
 
 /// A checkbox for an on-by-default flag, with a hint naming what each state means.
