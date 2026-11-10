@@ -2,7 +2,7 @@
 //! root and as a `has_many` child, against a real Postgres 16.
 //!
 //! Starting from a publication that streams the partitions under their own
-//! names, `live` reroutes it via the partition root, so every change on a leaf
+//! names, `prepare` reroutes it via the partition root, so every change on a leaf
 //! arrives under the partitioned table's name and resolves to its document.
 //! `prepare` sets `REPLICA IDENTITY FULL` across the child's partition tree, so
 //! a deleted child row still reaches its old parent through the pre-image.
@@ -93,6 +93,14 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
     );
 
     capture.prepare().await.unwrap();
+    assert!(
+        capture
+            .inspect_coverage(&spec.all_tables())
+            .await
+            .unwrap()
+            .satisfied,
+        "prepare reroutes the publication via the partition root, before the slot",
+    );
     assert_eq!(
         identities(&pool, "orders%").await,
         [
@@ -128,14 +136,6 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
     );
 
     let mut stream = capture.live().await.unwrap();
-    assert!(
-        capture
-            .inspect_coverage(&spec.all_tables())
-            .await
-            .unwrap()
-            .satisfied,
-        "live reroutes the publication via the partition root",
-    );
 
     for statement in [
         "INSERT INTO events VALUES (2, 'new')",

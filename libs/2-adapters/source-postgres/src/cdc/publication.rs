@@ -80,18 +80,24 @@ fn publication_sql(
 const VIA_ROOT: &str = "publish_via_partition_root";
 
 /// Per required table: whether the role owns it, whether it is partitioned, and
-/// whether any of its leaf partitions is published (`pg_publication_tables`
-/// lists the leaves, not the parent, of a partitioned member while the
-/// publication doesn't publish via the root). No row when the table is absent.
+/// whether every one of its leaf partitions is published. While the
+/// publication doesn't publish via the root, `pg_publication_tables` lists a
+/// partitioned member's leaves, never the member itself, so all of them listed
+/// is how a member shows. (One leaf added on its own looks the same when it is
+/// the only leaf; once the option is set the parent is listed only if it really
+/// is a member, so [`super::WalChangeCapture`]'s re-check adds it then.) No row
+/// when the table is absent.
 const TABLE_SQL: &str = "SELECT pg_has_role(current_user, c.relowner, 'USAGE') AS owned, \
        c.relkind = 'p' AS partitioned, \
-       c.relkind = 'p' AND EXISTS ( \
+       c.relkind = 'p' \
+       AND EXISTS (SELECT 1 FROM pg_partition_tree(c.oid::regclass) t WHERE t.isleaf) \
+       AND NOT EXISTS ( \
          SELECT 1 FROM pg_partition_tree(c.oid::regclass) t \
          JOIN pg_class l ON l.oid = t.relid \
          JOIN pg_namespace ln ON ln.oid = l.relnamespace \
-         JOIN pg_publication_tables pt \
+         LEFT JOIN pg_publication_tables pt \
            ON pt.pubname = $3 AND pt.schemaname = ln.nspname AND pt.tablename = l.relname \
-         WHERE t.isleaf \
+         WHERE t.isleaf AND pt.tablename IS NULL \
        ) AS leaves_published \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')";
@@ -105,8 +111,7 @@ pub(crate) async fn inspect_publication(
     name: &str,
     required: &BTreeSet<QualifiedTable>,
 ) -> Result<CoverageReport> {
-    // Existence, ownership (needed to ALTER it), and the via-root option in one
-    // probe: a row iff the publication exists.
+    // A row iff the publication exists; owning it is what ALTER needs.
     let publication = sqlx::query(
         "SELECT pg_has_role(current_user, p.pubowner, 'USAGE') AS owned, \
                 p.pubviaroot AS via_root \
@@ -168,7 +173,7 @@ pub(crate) async fn inspect_publication(
             table.schema.as_ref().to_owned(),
             table.table.as_ref().to_owned(),
         );
-        if present_set.contains(&key) || leaves_published {
+        if present_set.contains(&key) || (!via_root && leaves_published) {
             present.push(table.clone());
         } else {
             missing.push(table.clone());

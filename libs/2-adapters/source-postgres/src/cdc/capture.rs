@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -40,7 +41,8 @@ use super::{backfill, publication, replica_identity, stream};
 /// The server must have `wal_level = logical`. The replication **slot** is
 /// created automatically by [`prepare`](ChangeCapture::prepare) (before the first
 /// backfill) if it does not exist yet, and the
-/// **publication** is created/extended to cover every table any index reads —
+/// **publication** is created/extended (also by `prepare`, before the slot) to
+/// cover every table any index reads —
 /// see [`CaptureProvisioning`] — when the role is privileged enough and
 /// management is not opted out; otherwise flusso warns with the SQL to run.
 #[derive(Debug, Clone)]
@@ -58,7 +60,7 @@ pub struct WalChangeCapture {
     /// Every table the enabled indexes read — the set the publication must
     /// cover. Empty unless set via [`with_publication_management`](Self::with_publication_management).
     required_tables: BTreeSet<QualifiedTable>,
-    /// Whether to auto-create/extend the publication on [`live`](Self::live).
+    /// Whether to auto-create/extend the publication in [`prepare`](ChangeCapture::prepare), before the slot.
     /// When false, a coverage gap is only reported, never provisioned.
     manage_publication: bool,
     /// Per table, the columns resolution needs from a pre-image. Ensured by
@@ -71,6 +73,9 @@ pub struct WalChangeCapture {
     /// The position bookkeeping of the open live stream, so `confirm` can reach
     /// it. Replaced each time `live` opens a stream; `None` before the first.
     positions: Arc<Mutex<Option<Arc<Positions>>>>,
+    /// Set by [`prepare`](ChangeCapture::prepare) once it has ensured coverage,
+    /// taken by the next [`live`](ChangeCapture::live) so it doesn't repeat it.
+    coverage_ensured: Arc<AtomicBool>,
 }
 
 impl WalChangeCapture {
@@ -90,11 +95,13 @@ impl WalChangeCapture {
             pre_image_columns: PreImageColumns::new(),
             manage_replica_identity: false,
             positions: Arc::new(Mutex::new(None)),
+            coverage_ensured: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Declare the tables the publication must cover and whether to provision
-    /// the gap automatically on [`live`](Self::live). `required` is typically
+    /// the gap automatically on [`prepare`](ChangeCapture::prepare) (or
+    /// [`live`](ChangeCapture::live), for a caller that skips it). `required` is typically
     /// [`SourceSpec::all_tables`](source::SourceSpec::all_tables); the
     /// composition root supplies it along with the `manage` opt-out.
     pub fn with_publication_management(
@@ -207,19 +214,26 @@ impl ChangeCapture for WalChangeCapture {
     #[tracing::instrument(name = "wal.prepare", skip_all, err)]
     async fn prepare(&self) -> Result<()> {
         // Before the slot: a change logged after the slot exists but before the
-        // ALTER would decode with the old identity and miss its old parent.
+        // ALTERs would decode with the old identity, or against the old
+        // publication (a missing table, a partition's name), and be lost.
         self.ensure_pre_images().await;
+        self.ensure_coverage(&self.required_tables, self.manage_publication)
+            .await?;
+        self.coverage_ensured.store(true, Ordering::SeqCst);
         self.ensure_slot().await
     }
 
-    /// Opens the replication stream. The slot check is repeated here (it is
-    /// idempotent) so `live` stays correct for a caller that never ran
+    /// Opens the replication stream. The slot check and, unless `prepare` just
+    /// did it, the coverage check are repeated here (both idempotent) so `live`
+    /// stays correct for a caller that never ran
     /// [`prepare`](ChangeCapture::prepare).
     #[tracing::instrument(name = "wal.live", skip_all, err)]
     async fn live(&self) -> Result<BoxStream<'static, Result<LiveChange>>> {
+        if !self.coverage_ensured.swap(false, Ordering::SeqCst) {
+            self.ensure_coverage(&self.required_tables, self.manage_publication)
+                .await?;
+        }
         self.ensure_slot().await?;
-        self.ensure_coverage(&self.required_tables, self.manage_publication)
-            .await?;
 
         let catalog = self.admin_pool().await?.clone();
         let client = ReplicationClient::connect(self.config.clone())
@@ -346,6 +360,21 @@ impl CaptureProvisioning for WalChangeCapture {
                 !report.misrouted.is_empty(),
             )
             .await?;
+            if !report.misrouted.is_empty() {
+                // Published via the root, a parent is listed only if it really
+                // is a member: one whose lone partition was added on its own
+                // shows up as missing only now.
+                let rerouted =
+                    publication::inspect_publication(pool, &self.config.publication, required)
+                        .await?;
+                publication::apply_publication(
+                    pool,
+                    &self.config.publication,
+                    &rerouted.missing,
+                    false,
+                )
+                .await?;
+            }
             tracing::info!(
                 publication = %self.config.publication,
                 tables = %missing,

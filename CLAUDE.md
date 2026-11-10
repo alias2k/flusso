@@ -429,7 +429,9 @@ source-neutral capability lives beside `validate_indexes`: `CaptureProvisioning`
 (`SourceSpec::all_tables`), a source reports coverage + a privilege verdict (`CoverageReport`)
 and, when allowed, provisions the gap. Postgres backs it with a **publication**
 (`libs/2-adapters/source-postgres/src/cdc/publication.rs`, `impl CaptureProvisioning for
-WalChangeCapture`): `run` auto-creates/extends it on `live` (after `ensure_slot`) when the role
+WalChangeCapture`): `run` auto-creates/extends it in `prepare()` **before the slot** (pgoutput
+decodes a change against the publication as of its WAL position; `live` repeats it only for a
+caller that skipped `prepare`) when the role
 is privileged enough and `manage_publication` isn't opted out, else warns with the exact SQL;
 `check` inspects read-only and prints the same. A partitioned table (issue #143) streams under
 each *partition's* name unless the publication sets `publish_via_partition_root`, and resolution

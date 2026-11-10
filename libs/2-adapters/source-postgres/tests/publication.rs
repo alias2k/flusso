@@ -273,6 +273,26 @@ async fn partitioned_tables_are_published_via_their_root() {
     admin.ensure_coverage(&both, true).await.unwrap();
     assert!(via_root(&pool).await);
     assert!(admin.inspect_coverage(&both).await.unwrap().satisfied);
+
+    // A lone partition published on its own looks like its parent until the
+    // option is set; then the parent is added too.
+    for statement in [
+        "CREATE TABLE solo (id int PRIMARY KEY) PARTITION BY RANGE (id)",
+        "CREATE TABLE solo_only PARTITION OF solo FOR VALUES FROM (0) TO (1000)",
+        "ALTER PUBLICATION flusso ADD TABLE solo_only",
+        "ALTER PUBLICATION flusso SET (publish_via_partition_root = false)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let all = required(&["users", "parted", "solo"]);
+    admin.ensure_coverage(&all, true).await.unwrap();
+    assert!(via_root(&pool).await);
+    assert!(
+        published_tables(&pool)
+            .await
+            .contains(&"public.solo".to_owned())
+    );
+    assert!(admin.inspect_coverage(&all).await.unwrap().satisfied);
 }
 
 /// `table → [link columns]` under `public`, as `SourceSpec::pre_image_columns`

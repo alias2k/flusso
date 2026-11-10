@@ -112,6 +112,25 @@ impl PgDocumentBuilder {
         }
     }
 
+    /// Warn, once per table, that a change arrived for a table no index reads —
+    /// so a change streamed under an unexpected name (a partition's, say) isn't
+    /// dropped silently.
+    fn warn_unread(&self, table: &TableName) {
+        let first = self
+            .unread_warned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(table.clone());
+        if first {
+            tracing::warn!(
+                table = %table,
+                "a change arrived for a table no index reads and was dropped; if it is a \
+                 partition, publish its partitioned table via the root \
+                 (publish_via_partition_root)",
+            );
+        }
+    }
+
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -356,27 +375,6 @@ impl PgDocumentBuilder {
             types.insert(key, sql_type);
         }
         Ok(())
-    }
-}
-
-impl PgDocumentBuilder {
-    /// Warn, once per table, that a change arrived for a table no index reads —
-    /// so a change streamed under an unexpected name (a partition's, say) isn't
-    /// dropped silently.
-    fn warn_unread(&self, table: &TableName) {
-        let first = self
-            .unread_warned
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(table.clone());
-        if first {
-            tracing::warn!(
-                table = %table,
-                "a change arrived for a table no index reads and was dropped; if it is a \
-                 partition, publish its partitioned table via the root \
-                 (publish_via_partition_root)",
-            );
-        }
     }
 }
 
