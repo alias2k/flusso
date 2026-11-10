@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 
-use kernel::{FailurePolicy, IndexSchema, PortEntry, common};
+use kernel::{FailurePolicy, IndexSchema, Options, PortEntry, common};
 use serde::{Deserialize, Serialize};
 
 use crate::toml::SinkEntry;
@@ -125,4 +125,9 @@ pub struct Index {
     /// mapping hash or trigger a reindex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_error: Option<FailurePolicy>,
+    /// Per-sink options for this index, keyed by sink name, uninterpreted
+    /// here: the composition root validates each against its sink's adapter.
+    /// Operational like `on_error`, so outside [`IndexSchema`] and the hash.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sinks: BTreeMap<common::SinkName, Options>,
 }

@@ -44,6 +44,7 @@ number_of_replicas = 1
 refresh_interval = "30s"
 text_analysis = "icu"
 auto_subfields = false
+index_settings = { "mapping.total_fields.limit" = 5000 }
 
 [sinks.audit]
 type = "stdout"
@@ -54,6 +55,9 @@ name = "catalog"
 schema = "catalog.schema.yml"
 enabled = true
 on_error = "stop"
+
+[index.sinks.primary]
+index_settings = { mapping = { nested_objects = { limit = 20000 } } }
 
 [[index]]
 name = "archive"

@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use kernel::common;
+use kernel::{Options, common};
 
 /// One `[[index]]` entry: an index to build from a schema file.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -19,4 +21,10 @@ pub struct IndexEntry {
     /// policy. Omitted inherits the global default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_error: Option<kernel::FailurePolicy>,
+    /// Per-sink options for this index only, keyed by sink name: each value
+    /// is that sink's per-index options (an OpenSearch sink takes
+    /// `index_settings`). The sink's adapter validates them; a name that is no
+    /// declared sink is an error.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sinks: BTreeMap<common::SinkName, Options>,
 }
