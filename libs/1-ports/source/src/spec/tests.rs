@@ -22,6 +22,8 @@ fn column_field(name: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }
@@ -46,6 +48,8 @@ fn schema(table: &str) -> IndexSchema {
                 transforms: Vec::new(),
                 default: None,
                 enum_order: Vec::new(),
+                subfields: true,
+                indexed: true,
             }),
         }],
     }
@@ -86,6 +90,7 @@ fn books() -> IndexSchema {
             order_by: None,
             limit: None,
             fields: vec![column_field("body")],
+            indexed: true,
         })),
     });
     books.fields.push(Field {
@@ -107,6 +112,7 @@ fn books() -> IndexSchema {
             order_by: None,
             limit: None,
             fields: vec![column_field("name")],
+            indexed: true,
         })),
     });
     books
@@ -172,6 +178,7 @@ fn pre_image_columns_carry_a_self_join_link_on_the_root_table() {
             order_by: None,
             limit: None,
             fields: vec![column_field("name")],
+            indexed: true,
         })),
     });
     let spec = SourceSpec::new(BTreeMap::from([(index_name("items"), items)]));

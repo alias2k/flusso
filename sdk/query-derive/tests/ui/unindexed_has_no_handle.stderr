@@ -1,0 +1,17 @@
+error[E0599]: no function or associated item named `variants` found for struct `Listing` in the current scope
+  --> tests/ui/unindexed_has_no_handle.rs:13:22
+   |
+ 8 | struct Listing {
+   | -------------- function or associated item `variants` not found for this struct
+...
+13 |     let _ = Listing::variants();
+   |                      ^^^^^^^^ function or associated item not found in `Listing`
+
+error[E0599]: no function or associated item named `snapshot` found for struct `Listing` in the current scope
+  --> tests/ui/unindexed_has_no_handle.rs:14:22
+   |
+ 8 | struct Listing {
+   | -------------- function or associated item `snapshot` not found for this struct
+...
+14 |     let _ = Listing::snapshot();
+   |                      ^^^^^^^^ function or associated item not found in `Listing`

@@ -98,7 +98,7 @@ If you use any join or aggregate, you **must** set `primary_key` — reverse res
 
 `decimal` → OpenSearch `double` is **lossy**; when exactness matters use a `custom` `scaled_float` (see `examples/aggregate.schema.yml`). A bare column with no type defaults to `keyword`.
 
-Scalar/`geo` siblings: `required`, `column` (source column, defaults to the document key), `transforms` (`lowercase`, `trim`), `default`, `options` (extra OpenSearch mapping props).
+Scalar/`geo` siblings: `required`, `column` (source column, defaults to the document key), `transforms` (`lowercase`, `trim`), `default`, `options` (extra OpenSearch mapping props). `subfields: false` (only `text`/`keyword`/`uuid`) maps that field without the sink's auto subfields — owned meaning: the [Field types reference](https://alias2k.github.io/flusso/reference/field-types.html#subfields).
 
 An `enum` takes an optional `variants:` list — its values in rank order (`variants: [low, medium, high]`). Given it, the field sorts by that order instead of alphabetically (the rank is prebaked into the index; the query side's `Enum` handle `.asc()`/`.desc()` uses it automatically). Omit it for a plain keyword-like enum. Variants must be unique and free of `=>`/newlines; a stored value not in the list sorts after the declared ones. Changing the list rotates the index like any schema change. (Read-side: a Rust enum may cover the list partially; `#[flusso(keyword, exhaustive)]` on it demands full coverage — see the flusso-query skill.)
 
@@ -112,6 +112,8 @@ An `enum` takes an optional `variants:` list — its values in rank order (`vari
 | `many_to_many` | a junction | `through: {table,left_key,right_key[,filters]}` | array, never null |
 
 **Key arity is strict:** a join takes *exactly* the key sibling its verb implies — nothing else. Every join also needs `table`, `primary_key`, and `fields` (the projection). `order_by`/`limit` apply to `has_many`/`many_to_many` (not `belongs_to`). See `examples/join.schema.yml`.
+
+`indexed: false` on any join (or a `json` field) keeps the subtree in the stored document but maps it as one disabled object: nothing under it is searchable, and it costs one mapping field. Use it for display-only content that would blow `index.mapping.total_fields.limit`. Owned meaning: the [Joins reference](https://alias2k.github.io/flusso/reference/joins.html#indexed); the trade-off: [Keep content without indexing it](https://alias2k.github.io/flusso/author/keep-content-unindexed.html).
 
 ## Aggregates — reduce a related table to a scalar. The op is the type key.
 

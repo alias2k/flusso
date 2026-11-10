@@ -201,6 +201,8 @@ impl DocumentBuilder for MockDocuments {
                     map_values: None,
                     decimal: false,
                     enum_order: None,
+                    subfields: true,
+                    indexed: true,
                 },
                 nullable: false,
                 array: false,

@@ -519,6 +519,7 @@ fn spec() -> SourceSpec {
             order_by: None,
             limit: None,
             fields: vec![col("headline", "headline")],
+            indexed: true,
         },
     );
 
@@ -551,9 +552,11 @@ fn spec() -> SourceSpec {
                         order_by: Some(vec![order_by("sku", Direction::Asc)]),
                         limit: None,
                         fields: vec![col("sku", "sku"), col("qty", "qty"), col("price", "price")],
+                        indexed: true,
                     },
                 ),
             ],
+            indexed: true,
         },
     );
 
@@ -575,6 +578,7 @@ fn spec() -> SourceSpec {
             order_by: Some(vec![order_by("label", Direction::Asc)]),
             limit: None,
             fields: vec![col("label", "label")],
+            indexed: true,
         },
     );
 
@@ -686,6 +690,8 @@ fn col_full(
             transforms,
             default,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }

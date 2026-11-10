@@ -109,7 +109,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   is_null` root filter: only top-level rows are documents across child/grandchild changes,
   re-parenting, promotion, and demotion). `sink-opensearch`'s `map_keys` binary (issue #177)
   proves on a live OpenSearch that map keys take their `values` type under the strict root and
-  inside a `nested` array, and that a value a plain field would refuse is an item-level rejection.
+  inside a `nested` array, and that a value a plain field would refuse is an item-level rejection;
+  its `an_unindexed_subtree_is_stored_but_not_searchable` (issue #170) proves an `indexed: false`
+  join/`json` lands in `_source`, matches no query, and accepts values a mapped field would refuse,
+  and that a `subfields: false` text field maps bare but stays searchable.
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
@@ -590,7 +593,16 @@ flags it). What an aggregate over `through` counts (`distinct`, `through.filters
 by the Aggregates reference. **The content hash is the physical index name**, so `Aggregate`
 and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters` when
 unset — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
-pins it. Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
+pins it. `Column` and `Join` do the same for the two mapping opt-outs (issue #170):
+`subfields: false` (`text`/`keyword`/`uuid` → `Column.subfields`, projected to
+`Mapping.subfields`; the sink drops the auto subfields, keeping a `text` field's analyzer) and
+`indexed: false` (`json` → `Column.indexed`, any join → `Join.indexed`, projected to
+`Mapping.indexed`). An unindexed field keeps its `mapping_type` and resolved children (the
+*stored* shape, so the derive still shape-checks a struct against it), but the OpenSearch sink
+renders it `{"type": "object", "enabled": false}` and `collect_enum_sorts`/`collect_map_templates`
+stop at it; descendants' mapping-only settings are accepted and ignored, `options` on the
+unindexed field itself is rejected. Guards: `a_schema_that_never_opts_out_keeps_its_content_hash`,
+`opting_out_of_subfields_or_indexing_changes_the_content_hash`. Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
 `json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
 injected into options (so runtime keys are accepted); the resolved `Mapping.map_values` is
 the **full `Mapping` every key gets** (what a plain field of `values` resolves to, incl.
@@ -732,6 +744,10 @@ normally legal, but the marker makes every embedding demand the schema's **whole
 `variants:` set (rides `FlussoValueMeta::EXHAUSTIVE` as const data; an untagged newtype
 forwards it; enum-only — on a newtype/`FlussoMap` it's a macro error, and at a field with no
 declared variants it's a const error, so a schema edit can't silently disarm it).
+An `indexed: false` field gets **no handle** (`emit_level` skips it) but still deserializes and is
+shape-checked; a `subfields: false` field is stamped `NoSubfields` like a sink with
+`auto_subfields` off (`ui/unindexed_has_no_handle.rs`, the `stored` fixture index in
+`derive.rs`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/

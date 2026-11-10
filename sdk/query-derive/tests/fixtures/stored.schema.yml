@@ -1,0 +1,29 @@
+version: 1
+table: listings
+primary_key: id
+
+# Content kept in the document without indexing it (issue #170).
+fields:
+  - keyword: id
+    required: true
+  - text: title
+    required: true
+  # A string field mapped without the sink's auto subfields.
+  - text: blurb
+    required: false
+    subfields: false
+  # A `json` blob stored in `_source`, not indexed.
+  - json: snapshot
+    required: false
+    indexed: false
+  # A to-many join kept for display only.
+  - has_many: variants
+    table: variants
+    foreign_key: listing_id
+    primary_key: id
+    indexed: false
+    fields:
+      - keyword: color
+        required: true
+      - double: price
+        required: false

@@ -29,6 +29,7 @@ fields:
   - text: description
     required: false
     default: ""
+    subfields: false
   - enum: status
     required: true
     variants: [draft, active, retired]
@@ -66,6 +67,9 @@ fields:
     required: false
   - json: attributes
     required: false
+  - json: snapshot
+    required: false
+    indexed: false
   - custom: rating
     column: rating_raw
     postgres: [numeric]
@@ -110,6 +114,7 @@ fields:
     table: product_details
     foreign_key: product_id
     primary_key: product_id
+    indexed: false
     fields:
       - text: longDescription
         column: long_description

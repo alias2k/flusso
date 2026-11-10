@@ -31,8 +31,8 @@ time and **with no database**:
    named index's mapping;
 2. validates each declared field against that mapping — exists, type matches,
    nullability matches — reporting every problem at once with precise spans;
-3. generates the typed query surface for the **whole index**: a handle for every field at
-   every level, through one generated namespace per container (`User::account().tier()`
+3. generates the typed query surface for the **whole index**: a handle for every indexed
+   field at every level (an `indexed: false` field is stored only, so it gets none), through one generated namespace per container (`User::account().tier()`
    for an object, `flusso_user_query::Orders::total()` for a `nested` array), plus `get`/`query` and
    `SCHEMA_HASH`;
 4. bakes the resolved mapping into const data and drives the check into every fragment it

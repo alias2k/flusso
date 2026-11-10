@@ -58,6 +58,8 @@ fn map_field(name: &str, values: &FlussoType) -> ResolvedField {
             map_values: Some(Box::new(Mapping::of_type(values))),
             decimal: false,
             enum_order: None,
+            subfields: true,
+            indexed: true,
         },
         nullable: true,
         array: false,

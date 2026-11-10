@@ -883,3 +883,46 @@ fn an_optional_nested_filter_means_different_things_inside_and_outside() -> Resu
 
     Ok(())
 }
+
+// Issue #170: content kept without indexing it. An `indexed: false` field gets no
+// handle but still deserializes (its shape still checked); a `subfields: false`
+// string field gets the `NoSubfields` type-state.
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "stored", config = "tests/fixtures/flusso.toml")]
+struct Listing {
+    id: String,
+    title: String,
+    blurb: Option<String>,
+    snapshot: Option<serde_json::Value>,
+    variants: Vec<Variant>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct Variant {
+    color: String,
+    price: Option<f64>,
+}
+
+#[test]
+fn opted_out_fields_deserialize_and_lose_only_what_the_index_lacks() -> Result {
+    let _: flusso_query::Text<flusso_query::Root, flusso_query::NoSubfields> = Listing::blurb();
+    let _: flusso_query::Text<flusso_query::Root, flusso_query::WithSubfields> = Listing::title();
+    let body = Listing::query()
+        .query(Listing::blurb().matches("cosy"))
+        .sorts([Listing::title().keyword().asc()])
+        .body()
+        .to_string();
+    assert!(body.contains(r#""blurb""#), "{body}");
+
+    let listing: Listing = serde_json::from_value(serde_json::json!({
+        "id": "l1",
+        "title": "Flat",
+        "blurb": null,
+        "snapshot": { "rooms": 3, "tags": ["a", 1] },
+        "variants": [{ "color": "red", "price": 9.5 }, { "color": "blue", "price": null }],
+    }))?;
+    assert_eq!(listing.variants.len(), 2);
+    assert_eq!(listing.variants[0].color, "red");
+    assert_eq!(listing.snapshot.unwrap()["rooms"], 3);
+    Ok(())
+}

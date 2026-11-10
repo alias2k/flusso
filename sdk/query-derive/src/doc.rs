@@ -683,7 +683,9 @@ impl Namespaces {
         receiver: Receiver,
     ) -> TokenStream {
         let mut handles = TokenStream::new();
-        for resolved in level {
+        // An `indexed: false` field has nothing in the index to query, so it
+        // gets no handle; its value still deserializes into the document type.
+        for resolved in level.iter().filter(|resolved| resolved.mapping.indexed) {
             let path = if prefix.is_empty() {
                 resolved.name.to_string()
             } else {
@@ -873,10 +875,12 @@ fn leaf_handle(
     };
     // A `text`/`keyword` handle carries flusso's auto subfields (`.keyword()` /
     // `.text()` / `.keyword_lowercase()`) only when the sink provisions them:
-    // `auto_subfields` on, a scalar field (no children), and no custom `fields`
-    // override (which replaces the defaults). Otherwise stamp `NoSubfields` so
-    // the accessors are a compile error rather than a runtime 400.
+    // `auto_subfields` on, a scalar field (no children) that did not opt out with
+    // `subfields: false`, and no custom `fields` override (which replaces the
+    // defaults). Otherwise stamp `NoSubfields` so the accessors are a compile
+    // error rather than a runtime 400.
     let subfielded = auto_subfields
+        && resolved.mapping.subfields
         && resolved.children.is_empty()
         && !resolved.mapping.extra.contains_key("fields");
     let string_handle = |ty: &str| {

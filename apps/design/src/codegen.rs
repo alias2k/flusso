@@ -132,6 +132,12 @@ fn column_field(name: &str, column: &Column, body: &mut Mapping) -> Result<&'sta
     if let Some(default) = &column.default {
         body.insert(Value::from("default"), serde_yaml::to_value(default)?);
     }
+    if !column.subfields {
+        body.insert(Value::from("subfields"), Value::from(false));
+    }
+    if !column.indexed {
+        body.insert(Value::from("indexed"), Value::from(false));
+    }
     Ok(tag)
 }
 
@@ -184,6 +190,9 @@ fn join_field(join: &Join, body: &mut Mapping) -> Result<&'static str> {
     }
     if let Some(limit) = join.limit {
         body.insert(Value::from("limit"), Value::from(limit));
+    }
+    if !join.indexed {
+        body.insert(Value::from("indexed"), Value::from(false));
     }
     body.insert(Value::from("fields"), fields_value(&join.fields)?);
     Ok(tag)

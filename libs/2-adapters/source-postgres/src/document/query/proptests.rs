@@ -235,6 +235,8 @@ fn field_source() -> impl Strategy<Value = FieldSource> {
                 transforms,
                 default,
                 enum_order: Vec::new(),
+                subfields: true,
+                indexed: true,
             })),
         (column(), column()).prop_map(|(lat, lon)| FieldSource::Geo(Geo {
             lat,
@@ -277,6 +279,7 @@ fn field_source() -> impl Strategy<Value = FieldSource> {
                             order_by,
                             limit,
                             fields,
+                            indexed: true,
                         }))
                     }
                 ),

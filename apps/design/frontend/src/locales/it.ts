@@ -238,6 +238,16 @@ export const it: Record<string, string> = {
   "inspector.distinctOn":
     "Ogni riga di destinazione conta una volta, indipendentemente da quante righe di giunzione la collegano.",
   "inspector.distinctOff": "Un valore per riga di giunzione: una destinazione collegata due volte conta due volte.",
+  "inspector.subfields": "Sottocampi automatici",
+  "inspector.subfieldsOn":
+    "Il sink aggiunge i sottocampi .keyword / .keyword_lowercase / .text (se il suo auto_subfields è attivo) per filtri esatti, ordinamento e aggregazioni.",
+  "inspector.subfieldsOff":
+    "Mappato senza sottocampi, qualunque cosa dica il sink. Risparmia campi di mapping; il campo non si può ordinare, aggregare né cercare in modo esatto.",
+  "inspector.indexed": "Indicizzato",
+  "inspector.indexedOn": "Ricercabile: ogni campo sotto di esso è mappato e interrogabile.",
+  "inspector.indexedOff":
+    "Memorizzato, non indicizzato: resta nel documento per la visualizzazione, mappato come un unico oggetto disabilitato. Niente sotto di esso si può cercare, filtrare o ordinare.",
+  "inspector.indexedOptions": "Un campo non indicizzato non accetta opzioni di mapping: rimuovile in Avanzate.",
   "inspector.softDelete": "eliminazione logica",
   "inspector.documentField": "campo del documento",
 
@@ -262,6 +272,7 @@ export const it: Record<string, string> = {
   "preview.title": "Anteprima",
   "preview.empty": "Seleziona o modifica un indice per visualizzarne l'anteprima.",
   "preview.parseError": "Questo schema non è analizzabile:",
+  "preview.notIndexed": "non indicizzato",
   "preview.document": "Documento",
   "preview.tabYaml": "YAML",
   "preview.tabMapping": "Mappatura",

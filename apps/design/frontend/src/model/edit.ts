@@ -1,7 +1,7 @@
 // Path-addressed, immutable edits on the schema tree. Every canvas/inspector
 // action funnels through one of these; each returns a fresh `IndexSchema`.
 
-import type { Field, FlussoType, IndexSchema } from "../api";
+import type { Column, Field, FlussoType, IndexSchema } from "../api";
 import { defaultField } from "../fields";
 import { stripFieldUids } from "./ids";
 import { carryUid, nodeFields, setNodeField, withNodeFields } from "./tree";
@@ -157,4 +157,17 @@ export function setRootMeta(
   patch: Partial<Pick<IndexSchema, "table" | "db_schema" | "primary_key">>,
 ): IndexSchema {
   return { ...schema, ...patch };
+}
+
+/// The scalar types whose sink adds automatic subfields a field may turn off.
+export const SUBFIELD_TYPES: FlussoType[] = ["text", "keyword", "uuid"];
+
+/// Give a column a new type, dropping the opt-outs it no longer takes, so a
+/// retyped field never carries a sibling the schema would reject. Every retype
+/// (the type picker, the suggested-type chip, "fix all") goes through here.
+export function retypeColumn(column: Column, ty: FlussoType): Column {
+  const next: Column = { ...column, ty };
+  if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
+  if (ty !== "json") delete next.indexed;
+  return next;
 }

@@ -57,6 +57,11 @@ export interface Column {
   // An enum's variants in rank order; omitted/empty for a bare enum or non-enum
   // column. When set, the field sorts by this order instead of alphabetically.
   enum_order?: string[];
+  // `false` maps a text/keyword/uuid field without the sink's auto subfields;
+  // omitted means on.
+  subfields?: boolean;
+  // `false` stores a json field without indexing it; omitted means indexed.
+  indexed?: boolean;
 }
 
 export interface Geo {
@@ -93,6 +98,8 @@ export interface Join {
   order_by?: OrderBy[];
   limit?: number;
   fields: Field[];
+  // `false` keeps the rows in the stored document without indexing them.
+  indexed?: boolean;
 }
 
 export type AggregateOp =
@@ -290,6 +297,8 @@ export interface DocumentNode {
   type: string;
   nullable: boolean;
   array: boolean;
+  // `false` when the field is stored but not indexed (omitted otherwise).
+  indexed?: boolean;
   children?: DocumentNode[];
 }
 

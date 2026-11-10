@@ -20,7 +20,13 @@ const ROW = "grid grid-cols-[minmax(11rem,max-content)_1fr] items-center gap-x-5
 /// teal for `nested`, object slate for `object`, the same hues as the canvas
 /// edges. Containment, not indentation, is what shows the nesting.
 function Node({ node }: { node: DocumentNode }) {
+  const { t } = useT();
   const suffix = `${node.array ? "[]" : ""}${node.nullable ? "?" : ""}`;
+  const stored = node.indexed === false && (
+    <span className="ml-2 rounded border border-border px-1 font-sans text-3xs text-muted-foreground">
+      {t("preview.notIndexed")}
+    </span>
+  );
   const [open, setOpen] = useState(true);
   if (node.children) {
     const nested = node.type.startsWith("nested");
@@ -46,6 +52,7 @@ function Node({ node }: { node: DocumentNode }) {
           <span className="justify-self-start font-mono text-2xs whitespace-nowrap text-muted-foreground">
             {node.type}
             {suffix} · {node.children.length}
+            {stored}
           </span>
         </button>
         {/* height-to-auto animation: the grid row interpolates 0fr ⇄ 1fr; the
@@ -85,6 +92,7 @@ function Node({ node }: { node: DocumentNode }) {
         {node.type}
         {suffix && <span className="opacity-60">{suffix}</span>}
       </span>
+      {stored}
     </div>
   );
 }

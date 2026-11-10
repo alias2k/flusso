@@ -33,6 +33,8 @@ fn col_field(name: &str, column: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }
@@ -191,6 +193,7 @@ fn has_many_with_order_and_limit() {
             }]),
             limit: Some(5),
             fields: vec![col_field("id", "id"), col_field("total", "total")],
+            indexed: true,
         })),
     };
     let schema = index(Some("id"), None, vec![orders]);
@@ -225,6 +228,7 @@ fn belongs_to_correlates_on_the_parent_column() {
             order_by: None,
             limit: None,
             fields: vec![col_field("name", "name")],
+            indexed: true,
         })),
     };
     let schema = index(Some("id"), None, vec![org]);
@@ -441,6 +445,7 @@ fn many_to_many_join_applies_junction_filters() {
             order_by: None,
             limit: None,
             fields: vec![col_field("name", "name")],
+            indexed: true,
         })),
     };
     let schema = index(Some("id"), None, vec![tags]);

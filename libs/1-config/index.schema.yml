@@ -161,6 +161,25 @@ definitions:
           the field sorts by this order instead of alphabetically (the rank is
           prebaked into the OpenSearch mapping). A stored value not in the list
           sorts after the declared ones. Omit for a plain keyword.
+      # text / keyword / uuid (rejected on any other type at conversion):
+      subfields:
+        type: boolean
+        default: true
+        description: >-
+          `false` maps the field without the sink's automatic subfields
+          (`.keyword`, `.keyword_lowercase`, `.text`), whatever the sink's
+          `auto_subfields` says. Only on `text`, `keyword` and `uuid`. Changing
+          it moves the index to a new physical index (rebuilt once).
+      # json / joins (rejected on any other type at conversion):
+      indexed:
+        type: boolean
+        default: true
+        description: >-
+          `false` keeps the value in the stored document but does not index it:
+          the field is mapped as one `object` with `enabled: false`, so nothing
+          under it is searchable, filterable or sortable. Only on `json` and the
+          joins (`belongs_to`/`has_one`/`has_many`/`many_to_many`); not with
+          `options`. Changing it moves the index to a new physical index.
       # custom:
       postgres:
         type: array

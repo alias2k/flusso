@@ -41,7 +41,11 @@ Per index, an `[[index]]` entry's `[index.sinks.<name>]` table takes `index_sett
   `map` field's runtime keys are mapped like a plain field of its `values` type
   through one `dynamic_templates` entry per map.
 - **Subfields.** Each `text`/`keyword` field gets `keyword` (exact),
-  `keyword_lowercase` (sortable), and `text` (searchable) subfields.
+  `keyword_lowercase` (sortable), and `text` (searchable) subfields, unless the
+  field says `subfields: false`.
+- **Stored, not indexed.** A join or `json` field with `indexed: false` is one
+  `{"type": "object", "enabled": false}`: kept in `_source`, nothing under it
+  mapped or searchable.
 - **Refresh.** Off during seeding; flips to `refresh_interval` once seeded; an
   immediate refresh on any caught-up flush.
 - **Seeding.** Persisted in a hidden `flusso_meta` index, so restarts skip a
@@ -82,8 +86,9 @@ fully-typed mapping ([`ensure_index`](OpensearchSink::ensure_index)).
 - **Production-ready defaults.** Every index ships the `flusso_*` analysis
   definitions, and (unless `auto_subfields` is off) each `text`/`keyword` field
   is enriched with a good case/accent-insensitive analyzer plus `keyword`
-  (exact), `keyword_lowercase` (sortable), and `text` (searchable) subfields. A
-  field's explicit mapping always wins. See the crate-private `build_analysis`
+  (exact), `keyword_lowercase` (sortable), and `text` (searchable) subfields; a
+  `subfields: false` field keeps the analyzer only. A field's explicit mapping
+  always wins. See the crate-private `build_analysis`
   and `build_property`.
 
 ## Refresh — adapts to backlog

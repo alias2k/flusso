@@ -136,6 +136,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
             order_by: None,
             limit: None,
             fields: vec![col("headline", "headline")],
+            indexed: true,
         },
     );
     // One-to-many, newest first, capped at 2; each order folds in its items.
@@ -173,9 +174,11 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                         }]),
                         limit: None,
                         fields: vec![col("sku", "sku"), col("qty", "qty")],
+                        indexed: true,
                     },
                 ),
             ],
+            indexed: true,
         },
     );
     // Many-to-many through the user_tags junction, labels A→Z.
@@ -200,6 +203,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
             }]),
             limit: None,
             fields: vec![col("label", "label")],
+            indexed: true,
         },
     );
 
@@ -617,6 +621,8 @@ async fn transforms_and_defaults_apply() {
             transforms: vec![Transform::Trim, Transform::Lowercase],
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
         ..base("email")
     };
@@ -628,6 +634,8 @@ async fn transforms_and_defaults_apply() {
             transforms: Vec::new(),
             default: Some(GenericValue::String("(no bio)".into())),
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
         ..base("bio")
     };
@@ -804,6 +812,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                 order_by: None,
                 limit: None,
                 fields: vec![col("headline", "headline")],
+                indexed: true,
             },
         ),
         join_field(
@@ -833,9 +842,11 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                             order_by: None,
                             limit: None,
                             fields: vec![col("sku", "sku")],
+                            indexed: true,
                         },
                     ),
                 ],
+                indexed: true,
             },
         ),
         join_field(
@@ -856,6 +867,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                 order_by: None,
                 limit: None,
                 fields: vec![col("label", "label")],
+                indexed: true,
             },
         ),
     ];
@@ -972,6 +984,7 @@ async fn belongs_to_assembles_and_reverse_resolves() {
                     order_by: None,
                     limit: None,
                     fields: vec![col("name", "name"), col("email", "email")],
+                    indexed: true,
                 },
             ),
         ],
@@ -1098,6 +1111,8 @@ fn col(name: &str, source_column: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
         ..base(name)
     }

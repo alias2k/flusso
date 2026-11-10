@@ -1320,6 +1320,7 @@ fn join_field(name: &str, table_name: &str, kind: JoinKind, fields: Vec<Field>) 
             order_by: None,
             limit: None,
             fields,
+            indexed: true,
         })),
     }
 }
@@ -1342,6 +1343,8 @@ fn column_field(name: &str, col: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }

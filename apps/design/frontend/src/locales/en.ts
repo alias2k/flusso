@@ -230,6 +230,16 @@ export const en: Record<string, string> = {
   "inspector.distinct": "Count each target row once",
   "inspector.distinctOn": "Each target row counts once, however many junction rows point at it.",
   "inspector.distinctOff": "One value per junction row: a target linked twice counts twice.",
+  "inspector.subfields": "Auto subfields",
+  "inspector.subfieldsOn":
+    "The sink adds .keyword / .keyword_lowercase / .text subfields (when its auto_subfields is on) for exact filters, sorting and aggregations.",
+  "inspector.subfieldsOff":
+    "Mapped bare: no subfields, whatever the sink says. Saves mapping fields; the field can't be sorted, aggregated or matched exactly.",
+  "inspector.indexed": "Indexed",
+  "inspector.indexedOn": "Searchable: every field under it is mapped and can be queried.",
+  "inspector.indexedOff":
+    "Stored, not indexed: kept in the document for display, mapped as one disabled object. Nothing under it can be searched, filtered or sorted.",
+  "inspector.indexedOptions": "A field that isn't indexed can't take mapping options — remove them under Advanced.",
   "inspector.softDelete": "soft delete",
   "inspector.documentField": "document field",
 
@@ -254,6 +264,7 @@ export const en: Record<string, string> = {
   "preview.title": "Preview",
   "preview.empty": "Select or edit an index to preview it.",
   "preview.parseError": "This schema does not parse:",
+  "preview.notIndexed": "not indexed",
   "preview.document": "Document",
   "preview.tabYaml": "YAML",
   "preview.tabMapping": "Mapping",

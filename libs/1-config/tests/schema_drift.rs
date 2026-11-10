@@ -204,6 +204,8 @@ fn body_sibling_keys() -> BTreeSet<String> {
             options: _,
             transforms: _,
             default: _,
+            subfields: _,
+            indexed: _,
         } = s;
         let config::yaml::EnumBody {
             field: _,
@@ -256,6 +258,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             limit: _,
             fields: _,
             options: _,
+            indexed: _,
         } = j;
         let config::yaml::AggregateBody {
             field: _,
@@ -295,6 +298,8 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "distinct",     // aggregate (over through)
         "values",       // map (value leaf type)
         "value",        // constant
+        "subfields",    // text / keyword / uuid
+        "indexed",      // json / joins
     ])
 }
 

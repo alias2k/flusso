@@ -142,8 +142,8 @@ default) with exact, sortable and searchable subfields, reachable with no string
 `User::full_name().keyword()` (exact, `wildcard`, `prefix`), `.keyword_lowercase()`
 (case-insensitive), `User::email().text()` (full-text over a keyword). A `wildcard` belongs on
 `.keyword()`, not the analyzed handle. **Compile-enforced:** the derive stamps a handle with
-subfields only when every OpenSearch sink has `auto_subfields` on and the field has no custom
-`fields`; otherwise the handle is `…<NoSubfields>` and the accessors don't exist.
+subfields only when every OpenSearch sink has `auto_subfields` on, the field doesn't say
+`subfields: false`, and it has no custom `fields`; otherwise the handle is `…<NoSubfields>` and the accessors don't exist.
 
 What only [`raw`](#the-raw-escape-hatch) reaches: `knn`/vector, `geo_shape`, span, and parent/child
 queries — types with no flusso field.
@@ -422,6 +422,7 @@ them can't silently disarm the guarantee.
 | `has_many` / `many_to_many` | `Vec<struct>` | `Nested<S,T>` |
 | `map` | `HashMap<String, V>` or a `#[derive(FlussoMap)]` type | see [`maps.md`](maps.md) |
 | `ids` aggregate | `Vec<i64>` / `Vec<String>` per `element_type` | `Number` / `Keyword` (term queries match arrays) |
+| any join or `json` with `indexed: false` | as above (still deserialized and shape-checked) | **none** — not in the index, so no handle; querying it is a compile error |
 
 Matching is by **leaf identifier and `Option` shape**: the macro compares the final type segment,
 not aliases. For exact money, declare a `custom` `scaled_float` in the schema and the derive accepts

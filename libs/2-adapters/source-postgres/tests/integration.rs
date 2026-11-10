@@ -263,6 +263,8 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     };
     let schema = IndexSchema {
@@ -601,6 +603,7 @@ fn join_field(name: &str, on: &str, kind: JoinKind) -> Field {
             order_by: None,
             limit: None,
             fields: vec![column_field("id", "id"), column_field("name", "name")],
+            indexed: true,
         })),
     }
 }
@@ -620,6 +623,7 @@ fn users_spec() -> SourceSpec {
             order_by: None,
             limit: None,
             fields: vec![column_field("id", "id"), column_field("total", "total")],
+            indexed: true,
         })),
     };
     let schema = IndexSchema {
@@ -653,6 +657,8 @@ fn column_field(name: &str, col: &str) -> Field {
             transforms: Vec::new(),
             default: None,
             enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
         }),
     }
 }

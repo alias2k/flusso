@@ -10,7 +10,7 @@ use super::Filter;
 /// names the relationship — which side carries the key, and whether one row or
 /// many fold in; `filters`, `order_by`, and `limit` narrow and shape the rows
 /// that come back.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Join {
     pub table: common::TableName,
     pub kind: JoinKind,
@@ -27,6 +27,44 @@ pub struct Join {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
     pub fields: Vec<Field>,
+    /// Whether a sink indexes the folded-in rows. `false` still builds them
+    /// into the stored document, but maps the whole subtree as one disabled
+    /// object: nothing under it is searchable, filterable or sortable, and it
+    /// costs one mapping field.
+    #[serde(
+        default = "super::field::enabled",
+        skip_serializing_if = "super::field::is_enabled"
+    )]
+    pub indexed: bool,
+}
+
+/// Hashes `indexed` only when turned off, so a schema that never opts out keeps
+/// the content hash (and so the physical index) it had before the field existed.
+impl Hash for Join {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self {
+            table,
+            kind,
+            primary_key,
+            nullable,
+            filters,
+            order_by,
+            limit,
+            fields,
+            indexed,
+        } = self;
+        table.hash(state);
+        kind.hash(state);
+        primary_key.hash(state);
+        nullable.hash(state);
+        filters.hash(state);
+        order_by.hash(state);
+        limit.hash(state);
+        fields.hash(state);
+        if !indexed {
+            "indexed".hash(state);
+        }
+    }
 }
 
 /// The relationship a join expresses. The verb carries both the cardinality
