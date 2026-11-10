@@ -78,12 +78,14 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   calls a regression only on two consecutive points past 25% (20% RSS), image-tag change restarts
   the window, one self-maintained issue. `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
-  `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, and `continuity` binaries
+  `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
   advancing from keepalives/filtered commits while watched tables are idle, so unrelated
   writes don't pin WAL retention — issue #111; `continuity`: `continuity()` is read-only and
-  reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120) plus
+  reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120;
+  `partitions`: a range-partitioned root and child stream under the parent's name via
+  `publish_via_partition_root`, resolve, and backfill through the parent — issue #143) plus
   `engine`'s `wal` and `pipeline`
   binaries (the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
@@ -433,9 +435,16 @@ source-neutral capability lives beside `validate_indexes`: `CaptureProvisioning`
 (`SourceSpec::all_tables`), a source reports coverage + a privilege verdict (`CoverageReport`)
 and, when allowed, provisions the gap. Postgres backs it with a **publication**
 (`libs/2-adapters/source-postgres/src/cdc/publication.rs`, `impl CaptureProvisioning for
-WalChangeCapture`): `run` auto-creates/extends it on `live` (after `ensure_slot`) when the role
+WalChangeCapture`): `run` auto-creates/extends it in `prepare()` **before the slot** (pgoutput
+decodes a change against the publication as of its WAL position; `live` repeats it only for a
+caller that skipped `prepare`) when the role
 is privileged enough and `manage_publication` isn't opted out, else warns with the exact SQL;
-`check` inspects read-only and prints the same. The trait/report never name "publication", so
+`check` inspects read-only and prints the same. A partitioned table (issue #143) streams under
+each *partition's* name unless the publication sets `publish_via_partition_root`, and resolution
+matches by name: a publication flusso creates always sets it, an existing one is `SET` (same
+privilege rule) only when an index reads a partitioned table — reported as
+`CoverageReport.misrouted` — and a change for a table no index reads warns once
+(`PgDocumentBuilder::resolve`). The trait/report never name "publication", so
 the daemon/CLI/printer stay backend-neutral. The same trait's read-only `inspect_pre_image`
 reports a second prerequisite (issue #140, ADR 0007): reverse resolution traces a deleted or
 re-parented child to its old parent through the change's **pre-image** (`ChangeEvent.before:
@@ -446,7 +455,8 @@ Postgres answers from `relreplident` (`cdc/replica_identity.rs`); `check` prints
 identity section (read-only); `run` **sets** `REPLICA IDENTITY FULL` in `prepare()`, **before
 the slot** (a change logged in between would decode with the old identity), via `ensure_pre_image`
 when `manage_replica_identity` (default on) and the role owns the table — under a 5 s
-`lock_timeout`; partitioned tables are reported, never altered; an unclosable gap is warned with
+`lock_timeout`; a partitioned table is set on the parent and every partition that misses the link
+(a partition added later is caught at the next start); an unclosable gap is warned with
 the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
 which mark every column under `FULL`. A third source-neutral capability is

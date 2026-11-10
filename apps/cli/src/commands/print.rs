@@ -101,28 +101,41 @@ pub(crate) fn coverage(
         return Ok(());
     }
 
-    writeln!(
-        out,
-        "  {} {} table(s) the indexes read are not yet streamed:",
-        pen.yellow("!"),
-        report.missing.len(),
-    )?;
-    for table in &report.missing {
-        writeln!(out, "    {} {}", pen.dim("•"), table)?;
+    if !report.missing.is_empty() {
+        writeln!(
+            out,
+            "  {} {} table(s) the indexes read are not yet streamed:",
+            pen.yellow("!"),
+            report.missing.len(),
+        )?;
+        for table in &report.missing {
+            writeln!(out, "    {} {}", pen.dim("•"), table)?;
+        }
+    }
+    if !report.misrouted.is_empty() {
+        writeln!(
+            out,
+            "  {} {} partitioned table(s) stream under their partitions' names, which no index reads:",
+            pen.yellow("!"),
+            report.misrouted.len(),
+        )?;
+        for table in &report.misrouted {
+            writeln!(out, "    {} {}", pen.dim("•"), table)?;
+        }
     }
 
     if report.manageable && manage {
         writeln!(
             out,
             "  {}",
-            pen.green("→ will be added automatically on the next `flusso run`"),
+            pen.green("→ will be fixed automatically on the next `flusso run`"),
         )?;
     } else if report.manageable {
         writeln!(
             out,
             "  {}",
             pen.yellow(
-                "→ the source role CAN add these, but automatic management is disabled \
+                "→ the source role CAN fix this, but automatic management is disabled \
                  (manage_publication = false) — run the SQL below",
             ),
         )?;
@@ -130,7 +143,7 @@ pub(crate) fn coverage(
         writeln!(
             out,
             "  {}",
-            pen.bold(&pen.yellow("→ flusso will NOT create these automatically:")),
+            pen.bold(&pen.yellow("→ flusso will NOT fix this automatically:")),
         )?;
         for blocker in &report.blockers {
             writeln!(out, "    {} {}", pen.dim("-"), blocker)?;

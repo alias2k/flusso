@@ -39,8 +39,11 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
 4. **Create the publication, or let flusso.** With a privileged role, `flusso run` creates and extends it. To do it yourself, take the table list from `flusso check`'s coverage report:
 
    ```sql
-   CREATE PUBLICATION flusso FOR TABLE users, orders, order_items;
+   CREATE PUBLICATION flusso FOR TABLE users, orders, order_items
+     WITH (publish_via_partition_root = true);
    ```
+
+   The option makes a partitioned table's changes arrive under its own name rather than each partition's; see [Capture](../reference/source-postgres.md#capture).
 
 5. **Prepare the OpenSearch user.** OpenSearch 2.x, reachable over HTTP(S), with a user that can create, alias, write, and delete flusso's indexes and the `flusso_meta` index. Verify the endpoint and credentials:
 

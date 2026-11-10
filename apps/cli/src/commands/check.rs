@@ -137,6 +137,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     "will_manage": manage,
                     "present": c.present.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
                     "missing": c.missing.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                    "misrouted": c.misrouted.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
                     "blockers": c.blockers,
                     "remediation": c.remediation,
                 })),

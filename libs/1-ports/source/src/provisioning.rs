@@ -35,21 +35,28 @@ use crate::{PreImageColumns, QualifiedTable, Result};
 ///
 /// `present` + `missing` partition the requested set. When `missing` is
 /// non-empty the source is not yet streaming every table an index reads (live
-/// changes to a `missing` table would be silently dropped); `manageable` says
+/// changes to a `missing` table would be silently dropped). `misrouted` cuts
+/// across both: tables whose changes arrive (or would, once added) under a
+/// name other than their own, so they match no index either. `manageable` says
 /// whether *this* source — with its current credentials — can close the gap
 /// itself, and `remediation` carries the steps to do so (the operator can run
 /// them by hand regardless of `manageable`). `blockers` explains a
 /// `manageable == false` verdict in human terms.
 #[derive(Debug, Clone, Default)]
 pub struct CoverageReport {
-    /// Every requested table is already streamable — nothing to do.
+    /// Every requested table is streamed under its own name — nothing to do.
     pub satisfied: bool,
     /// Requested tables the source already streams.
     pub present: Vec<QualifiedTable>,
     /// Requested tables not yet streamed.
     pub missing: Vec<QualifiedTable>,
-    /// Whether the source can provision the `missing` tables with its current
-    /// privileges. Meaningless when `missing` is empty.
+    /// Requested tables streamed, or to be streamed, under another name than
+    /// their own (for Postgres, a partitioned table whose changes arrive under
+    /// each partition's name), so their changes match no index.
+    pub misrouted: Vec<QualifiedTable>,
+    /// Whether the source can provision the `missing` tables and reroute the
+    /// `misrouted` ones with its current privileges. Meaningless when
+    /// `satisfied`.
     pub manageable: bool,
     /// Why `manageable` is false (e.g. "role does not own table public.orders").
     pub blockers: Vec<String>,
@@ -111,8 +118,8 @@ pub trait CaptureProvisioning: Send + Sync {
     async fn inspect_coverage(&self, required: &BTreeSet<QualifiedTable>)
     -> Result<CoverageReport>;
 
-    /// Provision any missing tables when `manage` is set and the gap is
-    /// manageable; otherwise a no-op. Returns the report as observed *before*
+    /// Provision any missing tables, and reroute any misrouted ones, when
+    /// `manage` is set and the gap is manageable; otherwise a no-op. Returns the report as observed *before*
     /// acting (so a caller can log what was — or would have been — done). A
     /// no-op for an already-satisfied set.
     async fn ensure_coverage(
