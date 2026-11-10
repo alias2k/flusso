@@ -382,13 +382,19 @@ fn flatten_resolved(fields: &[ResolvedField], depth: usize, rows: &mut Vec<Row>)
             name: field.name.to_string(),
             cells: vec![(type_label(&field.mapping), "36"), nullability],
         });
-        flatten_resolved(&field.children, depth + 1, rows);
+        if field.mapping.indexed {
+            flatten_resolved(&field.children, depth + 1, rows);
+        }
     }
 }
 
 /// A field's mapping type, with a map's key type: `map<text>` for a map whose
-/// every key is mapped as `text`.
+/// every key is mapped as `text`. A stored-only field reads `object (not
+/// indexed)`, the one property it maps to.
 fn type_label(mapping: &config::Mapping) -> String {
+    if !mapping.indexed {
+        return "object (not indexed)".to_owned();
+    }
     match &mapping.map_values {
         Some(values) => format!("map<{}>", values.mapping_type.name()),
         None => mapping.mapping_type.name().to_owned(),
@@ -534,5 +540,12 @@ mod tests {
         map.map_values = Some(Box::new(Mapping::of_type(&FlussoType::Text)));
         assert_eq!(type_label(&map), "map<text>");
         assert_eq!(type_label(&Mapping::of_type(&FlussoType::Long)), "long");
+    }
+
+    #[test]
+    fn a_stored_only_field_reads_as_an_unindexed_object() {
+        let mut stored = Mapping::of_type(&FlussoType::Json);
+        stored.indexed = false;
+        assert_eq!(type_label(&stored), "object (not indexed)");
     }
 }

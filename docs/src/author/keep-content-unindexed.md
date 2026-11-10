@@ -17,7 +17,7 @@ Raising the limit with [`index_settings`](../reference/sink-opensearch.md) is th
 
 ## Steps
 
-1. **Find the heavy fields.** `flusso check --offline` prints the mapping; a `text` or `keyword` with `fields` costs 3 mapping fields, a `nested` join costs one per field under it.
+1. **Find the heavy fields.** `GET <index>/_mapping` (or the designer's **Mapping** tab) shows the full mapping: a `text` or `keyword` with `fields` costs 3 mapping fields, a `nested` join one per field under it. `flusso check --offline` lists every field, an unindexed one as `object (not indexed)`.
 
 2. **Drop the subfields of a string you only match on.**
 
