@@ -189,3 +189,48 @@ fn a_table_without_a_primary_key_is_keyed_by_its_identity_columns() {
     assert_eq!(row_key(&rel, &old).unwrap().0.len(), 3);
     assert_eq!(pre_image(&rel, &old), None);
 }
+
+#[test]
+fn the_post_image_carries_the_new_values() {
+    let rel = keyed_child(b'f');
+    let old = child_delete(b'O', [text_cell("7"), text_cell("1"), text_cell("x")]);
+    let new = child_delete(b'O', [text_cell("7"), text_cell("3"), vec![b'n']]);
+    let image = post_image(&rel, &old, &new);
+    assert_eq!(
+        image.0,
+        vec![
+            (ColumnName::try_new("id").unwrap(), GenericValue::Int(7)),
+            (
+                ColumnName::try_new("parent_id").unwrap(),
+                GenericValue::Int(3)
+            ),
+            (ColumnName::try_new("label").unwrap(), GenericValue::Null),
+        ]
+    );
+}
+
+#[test]
+fn an_unchanged_toast_value_takes_the_old_value_in_the_post_image() {
+    let rel = keyed_child(b'f');
+    let old = child_delete(b'O', [text_cell("7"), text_cell("1"), text_cell("x")]);
+    let new = child_delete(b'O', [text_cell("7"), text_cell("1"), vec![b'u']]);
+    let label = ColumnName::try_new("label").unwrap();
+    assert_eq!(
+        post_image(&rel, &old, &new).get(&label),
+        pre_image(&rel, &old).unwrap().get(&label)
+    );
+}
+
+#[test]
+fn an_unchanged_toast_value_outside_the_identity_is_left_out_of_the_post_image() {
+    // `USING INDEX` on `(id, parent_id)`: `label`'s old cell is a placeholder.
+    let mut rel = keyed_child(b'i');
+    rel.columns
+        .iter_mut()
+        .for_each(|column| column.is_key = column.name.as_ref() != "label");
+    let old = child_delete(b'K', [text_cell("7"), text_cell("1"), vec![b'n']]);
+    let new = child_delete(b'K', [text_cell("7"), text_cell("1"), vec![b'u']]);
+    let image = post_image(&rel, &old, &new);
+    assert_eq!(image.get(&ColumnName::try_new("label").unwrap()), None);
+    assert_eq!(image.0.len(), 2);
+}

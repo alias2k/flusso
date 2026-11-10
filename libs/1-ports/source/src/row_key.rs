@@ -9,16 +9,18 @@ use kernel::{ColumnName, GenericValue};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RowKey(pub Vec<(ColumnName, GenericValue)>);
 
-/// A changed row's **pre-image**: its column values before an update or
-/// delete, as far as the change feed carried them.
+/// A changed row's column values, as far as the change feed carried them: the
+/// **pre-image** before an update or delete, or the **post-image** after an
+/// update.
 ///
-/// Used only to find the documents that embedded the row's old version (a
-/// deleted or re-parented child). Never used to build a document.
+/// The pre-image finds the documents that embedded the row's old version (a
+/// deleted or re-parented child); the two together tell which columns an update
+/// changed. Never used to build a document.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RowImage(pub Vec<(ColumnName, GenericValue)>);
 
 impl RowImage {
-    /// The old value of `column`, if the pre-image carried it.
+    /// The value of `column`, if the image carried it.
     pub fn get(&self, column: &ColumnName) -> Option<&GenericValue> {
         self.0
             .iter()

@@ -5,8 +5,9 @@
 //! bytes inside [`ReplicationEvent::XLogData`]. This module decodes the ones we
 //! care about — `Relation`, `Insert`, `Update`, `Delete`, `Truncate` — far
 //! enough to recover a row's primary key and, for an update or delete, its
-//! pre-image. Events are thin (see [`source::cdc::ChangeEvent`]): a document is
-//! always rebuilt from the current row, so only these two are extracted.
+//! pre-image (plus, for an update with one, its post-image). Events are thin
+//! (see [`source::cdc::ChangeEvent`]): a document is always rebuilt from the
+//! current row; the images only decide which documents to rebuild.
 //!
 //! ## Key vs replica identity
 //!
@@ -60,6 +61,12 @@ pub(crate) struct Relation {
     /// The table's primary-key columns, from the catalog. Empty until looked
     /// up, and for a table without one — then the identity columns key it.
     pub(crate) primary_key: Vec<ColumnName>,
+    /// Whether the table is partitioned, from the catalog. `None` until looked
+    /// up. A partitioned table's changes carry no post-image: its old tuples
+    /// are logged by each partition's own identity, while the `Relation`
+    /// describes the root's, so a partition not under `FULL` sends placeholder
+    /// nulls that read like real old values.
+    pub(crate) partitioned: Option<bool>,
 }
 
 impl Relation {
@@ -161,6 +168,32 @@ pub(crate) fn pre_image(rel: &Relation, old: &Tuple) -> Option<RowImage> {
         pairs.push((col.name.clone(), value));
     }
     beyond_key.then_some(RowImage(pairs))
+}
+
+/// The post-image of an update: its new tuple, typed, built only beside a
+/// pre-image (alone it can't show what changed).
+///
+/// An unchanged TOASTed value (`'u'`) takes the old tuple's value. That is
+/// exact: Postgres re-saves any external value an update writes, so `'u'` means
+/// the new row holds the old row's very TOAST pointer, and the old tuple carries
+/// the value itself when the column is in the replica identity (`FULL`
+/// flattens it). For a column outside the identity the old cell is a
+/// placeholder, so the column is left out — read downstream as changed.
+pub(crate) fn post_image(rel: &Relation, old: &Tuple, new: &Tuple) -> RowImage {
+    let mut pairs = Vec::with_capacity(new.len());
+    for ((col, old), new) in rel.columns.iter().zip(old.iter()).zip(new.iter()) {
+        let cell = match new {
+            Cell::Unchanged if col.is_key => old,
+            cell => cell,
+        };
+        let value = match cell {
+            Cell::Text(text) => typed_value(text, col.type_oid),
+            Cell::Null => GenericValue::Null,
+            Cell::Unchanged => continue,
+        };
+        pairs.push((col.name.clone(), value));
+    }
+    RowImage(pairs)
 }
 
 /// Interpret a pgoutput text value by its Postgres type OID.
@@ -312,6 +345,7 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
         table,
         columns,
         primary_key: Vec::new(),
+        partitioned: None,
     }))
 }
 

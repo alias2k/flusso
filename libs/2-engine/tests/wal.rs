@@ -1,6 +1,7 @@
 //! Full WAL pipeline e2e: a real Postgres (logical replication) → the ingest
 //! engine → a lane → a sink engine over a recording sink. Inserts and deletes
-//! on the source must surface as document upserts and tombstones.
+//! on the source must surface as document upserts and tombstones, and an
+//! update that changes no column a document reads must surface as nothing.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -17,8 +18,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
-    Column, ColumnName, DatabaseSchema, Envelope, Field, FieldName, FieldSource, FlussoType,
-    IndexName, IndexSchema, SinkName, TableName,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Envelope, Field,
+    FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, IndexName, IndexSchema,
+    Join, JoinKind, OrderBy, RawFilter, RawFilterValue, Relation, SinkName, TableName,
+    ValueOpFilter,
 };
 use sink::{Result as SinkResult, Sink};
 use source::SourceSpec;
@@ -32,16 +35,28 @@ use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
-/// A sink that records the operations it receives, for assertions.
+/// A sink that records the operations it receives, for assertions. A batch's
+/// operations become visible together at its flush, so seeing a later change
+/// means every operation of its batch is already recorded.
 #[derive(Debug)]
 struct RecordingSink {
     ops: Arc<Mutex<Vec<String>>>,
+    applied: Mutex<Vec<String>>,
+}
+
+impl RecordingSink {
+    fn new(ops: &Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            ops: Arc::clone(ops),
+            applied: Mutex::default(),
+        }
+    }
 }
 
 #[async_trait]
 impl Sink for RecordingSink {
     async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        self.ops.lock().unwrap().push(format!(
+        self.applied.lock().unwrap().push(format!(
             "{} {} {}",
             envelope.op,
             envelope.index.as_ref(),
@@ -51,6 +66,8 @@ impl Sink for RecordingSink {
     }
 
     async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
+        let applied = std::mem::take(&mut *self.applied.lock().unwrap());
+        self.ops.lock().unwrap().extend(applied);
         Ok(sink::FlushReport::clean())
     }
 }
@@ -106,9 +123,7 @@ async fn wal_changes_flow_through_the_engine() {
             .unwrap(),
     );
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(RecordingSink {
-        ops: Arc::clone(&recorded),
-    });
+    let sink = Arc::new(RecordingSink::new(&recorded));
     let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
@@ -181,9 +196,7 @@ async fn backfill_seeds_preexisting_rows() {
             .unwrap(),
     );
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(RecordingSink {
-        ops: Arc::clone(&recorded),
-    });
+    let sink = Arc::new(RecordingSink::new(&recorded));
     let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
@@ -193,6 +206,211 @@ async fn backfill_seeds_preexisting_rows() {
     // Both pre-existing rows are seeded by the backfill.
     expect_op(&mut engine, &recorded, "upsert users 1").await;
     expect_op(&mut engine, &recorded, "upsert users 2").await;
+
+    engine.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn an_update_of_unread_columns_rebuilds_nothing() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text, last_seen int)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int, total int, status text, \
+         placed_at int, note text)",
+        "CREATE TABLE payments (id int PRIMARY KEY, user_id int, amount int, memo text)",
+        // Left on the DEFAULT identity: an update carries no pre-image.
+        "CREATE TABLE visits (id int PRIMARY KEY, user_id int, path text, seen int)",
+        "ALTER TABLE users REPLICA IDENTITY FULL",
+        "ALTER TABLE orders REPLICA IDENTITY FULL",
+        "ALTER TABLE payments REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE users, orders, payments, visits",
+        // Seeded before the slot, so only the backfill emits them: nothing of
+        // the setup can arrive live after the checks below start.
+        "INSERT INTO users VALUES (1, 'ada@x.io', 0), (2, 'grace@x.io', 0)",
+        "INSERT INTO orders VALUES (10, 1, 5, 'open', 1, '')",
+        "INSERT INTO payments VALUES (20, 1, 7, '')",
+        "INSERT INTO visits VALUES (30, 1, '/', 0)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(users_with_relations_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
+        documents,
+        sink,
+    ));
+
+    let exec = |sql: &'static str| {
+        let pool = pool.clone();
+        async move { sqlx::raw_sql(sql).execute(&pool).await.unwrap() }
+    };
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+    expect_op(&mut engine, &recorded, "upsert users 2").await;
+
+    // Unread columns on the root, a joined child, and an aggregated child: no
+    // document is rebuilt. A marker user proves the stream got past them.
+    for (marker, sql) in [
+        (100, "UPDATE users SET last_seen = 1 WHERE id = 1"),
+        (101, "UPDATE orders SET note = 'gift' WHERE id = 10"),
+        (102, "UPDATE payments SET memo = 'card' WHERE id = 20"),
+    ] {
+        recorded.lock().unwrap().clear();
+        exec(sql).await;
+        sqlx::query("INSERT INTO users VALUES ($1, 'marker', 0)")
+            .bind(marker)
+            .execute(&pool)
+            .await
+            .unwrap();
+        expect_op(&mut engine, &recorded, &format!("upsert users {marker}")).await;
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![format!("upsert users {marker}")],
+            "`{sql}` changed no column the document reads"
+        );
+    }
+
+    // Every kind of read column still rebuilds, and so does an update on a
+    // table without a pre-image.
+    for (sql, rebuilt) in [
+        (
+            "UPDATE users SET email = 'ada@y.io' WHERE id = 1",
+            &["1"][..],
+        ),
+        ("UPDATE orders SET total = 6 WHERE id = 10", &["1"]),
+        ("UPDATE orders SET status = 'void' WHERE id = 10", &["1"]),
+        ("UPDATE orders SET placed_at = 2 WHERE id = 10", &["1"]),
+        ("UPDATE payments SET amount = 8 WHERE id = 20", &["1"]),
+        ("UPDATE visits SET seen = 1 WHERE id = 30", &["1"]),
+        ("UPDATE orders SET user_id = 2 WHERE id = 10", &["1", "2"]),
+    ] {
+        recorded.lock().unwrap().clear();
+        exec(sql).await;
+        for id in rebuilt {
+            expect_op(&mut engine, &recorded, &format!("upsert users {id}")).await;
+        }
+    }
+
+    engine.abort();
+}
+
+/// A raw filter is pasted into a correlated subquery, so it can read the root
+/// row: a change to that root column must rebuild even though no field reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_raw_filter_reading_the_root_row_rebuilds_on_that_column() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text, trial_start int)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int, total int, placed_at int)",
+        "ALTER TABLE users REPLICA IDENTITY FULL",
+        "ALTER TABLE orders REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE users, orders",
+        "INSERT INTO users VALUES (1, 'ada@x.io', 0)",
+        "INSERT INTO orders VALUES (10, 1, 5, 3)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(users_with_recent_orders_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
+        documents,
+        sink,
+    ));
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+
+    recorded.lock().unwrap().clear();
+    sqlx::query("UPDATE users SET trial_start = 5 WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users VALUES (100, 'marker', 0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    expect_op(&mut engine, &recorded, "upsert users 100").await;
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .contains(&"upsert users 1".to_owned()),
+        "the raw filter reads `root.trial_start`, so changing it rebuilds: {:?}",
+        recorded.lock().unwrap()
+    );
 
     engine.abort();
 }
@@ -263,6 +481,105 @@ fn users_spec() -> SourceSpec {
         soft_delete: None,
         filters: None,
         fields: vec![column_field("id", "id"), column_field("email", "email")],
+    };
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
+}
+
+/// `users` reading `email` from the root, `orders` (projecting `total`,
+/// filtered on `status`, ordered by `placed_at`), the sum of `payments.amount`,
+/// and `visits.path`.
+fn users_with_relations_spec() -> SourceSpec {
+    let has_many = |target: &str, fields: Vec<Field>| Join {
+        table: table(target),
+        kind: JoinKind::HasMany {
+            foreign_key: column("user_id"),
+        },
+        primary_key: column("id"),
+        nullable: false,
+        filters: None,
+        order_by: None,
+        limit: None,
+        indexed: true,
+        fields,
+    };
+    let relation = |name: &str, relation: Relation| Field {
+        field: field(name),
+        options: Default::default(),
+        source: FieldSource::Relation(relation),
+    };
+    let mut orders = has_many("orders", vec![column_field("total", "total")]);
+    orders.filters = Some(vec![Filter::ValueOp(ValueOpFilter {
+        column: column("status"),
+        op: FilterOp::Neq,
+        value: FilterValue::Single("void".into()),
+    })]);
+    orders.order_by = Some(vec![OrderBy {
+        column: column("placed_at"),
+        direction: None,
+    }]);
+    let paid = Relation::Aggregate(Aggregate {
+        table: table("payments"),
+        op: AggregateOp::Sum(column("amount")),
+        key: AggregateKey::Direct(column("user_id")),
+        value_type: Some(FlussoType::Long),
+        filters: None,
+        distinct: false,
+    });
+    let visits = has_many("visits", vec![column_field("path", "path")]);
+    let schema = IndexSchema {
+        version: 1,
+        table: table("users"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_field("id", "id"),
+            column_field("email", "email"),
+            relation("orders", Relation::Join(orders)),
+            relation("paid", paid),
+            relation("visits", Relation::Join(visits)),
+        ],
+    };
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
+}
+
+/// `users` reading `email` and the `orders` placed since the user's
+/// `trial_start`, through a raw filter on the root row.
+fn users_with_recent_orders_spec() -> SourceSpec {
+    let orders = Join {
+        table: table("orders"),
+        kind: JoinKind::HasMany {
+            foreign_key: column("user_id"),
+        },
+        primary_key: column("id"),
+        nullable: false,
+        filters: Some(vec![Filter::Raw(RawFilter {
+            raw: RawFilterValue::try_new("placed_at >= root.trial_start").unwrap(),
+        })]),
+        order_by: None,
+        limit: None,
+        indexed: true,
+        fields: vec![column_field("total", "total")],
+    };
+    let schema = IndexSchema {
+        version: 1,
+        table: table("users"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_field("id", "id"),
+            column_field("email", "email"),
+            Field {
+                field: field("orders"),
+                options: Default::default(),
+                source: FieldSource::Relation(Relation::Join(orders)),
+            },
+        ],
     };
     SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }

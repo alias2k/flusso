@@ -97,6 +97,7 @@ impl ChangeCapture for MockCapture {
                     table: table(),
                     key: key((i % DOCUMENTS) as i64),
                     before: None,
+                    after: None,
                 },
             ))
         }))))
@@ -114,6 +115,7 @@ impl ChangeCapture for MockCapture {
                 table: table(),
                 key: key(i as i64),
                 before: None,
+                after: None,
             })
         }))))
     }
@@ -161,6 +163,7 @@ impl DocumentBuilder for MockDocuments {
         _table: &TableName,
         key: &RowKey,
         _before: Option<&RowImage>,
+        _after: Option<&RowImage>,
     ) -> SourceResult<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: index(),

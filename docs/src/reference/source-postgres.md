@@ -97,7 +97,7 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 | `REPLICA IDENTITY` | Carries the link? |
 | --- | --- |
 | `DEFAULT` | Only when the link is in the primary key. |
-| `FULL` | Yes. Logs the whole old row, so the table's WAL grows. |
+| `FULL` | Yes. Logs the whole old row, so the table's WAL grows. Also lets an update that changes no column a document reads [rebuild nothing](#updates-that-change-nothing-a-document-reads). |
 | `USING INDEX` on a unique index that includes the primary key and the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`. The index's columns must be `NOT NULL`. |
 | `USING INDEX` on an index without the primary key (e.g. `UNIQUE (parent_id)`) | No: changes are then keyed by the index columns, so the old row adds nothing beyond its key. |
 | `NOTHING` | No. |
@@ -114,6 +114,37 @@ ALTER TABLE "public"."order_items" REPLICA IDENTITY FULL;
 - When the role can't (not the owner), or `manage_replica_identity = false`, flusso logs the statement and keeps running. It also warns once per table when such a delete or update arrives.
 - `flusso check` reports each child table read-only: whether the next `run` will set it, or the statement to run by hand.
 - A delete or re-parent that happened *before* the identity was set left its old parent stale; [`flusso reindex`](cli.md#reindex) the index to repair it.
+
+## Updates that change nothing a document reads
+
+An update rebuilds only the documents that read a column it changed. Bumping `last_seen_at` on a row that every document embeds, when no schema reads `last_seen_at`, writes nothing to any sink.
+
+A column counts as read by a part of the document when it is:
+
+| Read through | Columns |
+| --- | --- |
+| The root row's own document | its fields, the index `filters`, the `soft_delete` column and its `when` |
+| A join | its fields, `filters`, `order_by`, and the link (`foreign_key`) |
+| An aggregate | its input column (`sum`/`avg`/`min`/`max`), `filters`, and the link |
+| A `many_to_many` junction | `left_key`, `right_key`, and `through.filters` |
+| Any of them | the table's primary key, and a nested `belongs_to`'s `column` |
+
+- A column reached only through `filters` or `order_by` counts: changing it can move the row in or out of the document.
+- A `raw` filter can read any column of any table its SQL can name (the root row as `root`, a junction, an enclosing level), so an index with a `raw` filter anywhere (root `filters`, `soft_delete.when`, any join's or aggregate's `filters`, `through.filters`) rebuilds on every update, as it always has.
+- Each part is checked on its own. Changing a field the root projects rebuilds the row's own document but not the parents that embed it, unless they read it too.
+- Inserts and deletes always rebuild.
+
+The comparison needs the update's old row, so it applies only to tables under `REPLICA IDENTITY FULL`. Elsewhere every update rebuilds, as it always has. flusso sets `FULL` on child tables (see [Deleted and re-parented rows](#deleted-and-re-parented-rows)); a root table or a `belongs_to` target keeps its identity unless you set it:
+
+```sql
+ALTER TABLE "public"."users" REPLICA IDENTITY FULL;
+```
+
+- `USING INDEX` logs only the index's columns, so an update there rebuilds unless every read column is in the index.
+- A large value Postgres keeps out of line (TOAST) and the update didn't touch counts as unchanged.
+- Values are compared as values, not as text: a `numeric` whose scale alone changes (`1.0` → `1.00`) rebuilds nothing, so the document keeps the old scale until something it reads changes.
+- A join with a `limit` but no `order_by` that orders its rows totally picks rows in physical order. After a skipped update the document keeps its selection, where a rebuild might have picked different rows. Give a limited join a total `order_by` (end it with a unique column).
+- An update to a partitioned table always rebuilds, whatever you set. `ALTER TABLE … REPLICA IDENTITY FULL` on a partitioned parent doesn't reach its partitions, each partition logs its old rows by its own identity, and the stream can't show which identity logged a row, so flusso doesn't compare them. There is nothing to set for this; the partitions flusso does set are for [deleted and re-parented rows](#deleted-and-re-parented-rows).
 
 ## Example
 

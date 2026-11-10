@@ -533,6 +533,54 @@ fn documents_query_folds_soft_delete_into_where() {
     ));
 }
 
+/// A `soft_delete` `field` projected only inside a relation still reads that
+/// column on the root row: the predicate names `root."deleted_at"`.
+#[test]
+fn soft_delete_field_inside_a_relation_reads_the_root_column() {
+    let orders = Field {
+        field: f("orders"),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: t("orders"),
+            kind: JoinKind::HasMany {
+                foreign_key: c("user_id"),
+            },
+            primary_key: c("id"),
+            nullable: false,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![col_field("id", "id"), col_field("deleted_at", "deleted_at")],
+            indexed: true,
+        })),
+    };
+    let schema = index(
+        Some("id"),
+        Some(SoftDelete::Field(kernel::SoftDeleteField {
+            field: f("deleted_at"),
+            when: None,
+        })),
+        vec![col_field("id", "id"), orders],
+    );
+    let mut pks = HashMap::new();
+    pks.insert("orders".to_owned(), c("id"));
+    let (sql, _) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(1)],
+        &pks,
+        &id_types(),
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().ends_with(
+            r#"WHERE "root"."id" IN ($1::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        ),
+        "{}",
+        sql.as_str()
+    );
+}
+
 #[test]
 fn wide_document_chunks_into_jsonb_concatenation() {
     // Postgres caps a function call at 100 arguments; `json_build_object` spends

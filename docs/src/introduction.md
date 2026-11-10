@@ -11,7 +11,7 @@ flusso keeps an OpenSearch index in sync with Postgres from two declarative file
 
 Every field declares a **type** from a fixed set that bridges a Postgres column and an OpenSearch mapping. A schema is therefore self-describing: flusso derives the full index mapping and validates a deployment **without a database**.
 
-At run time flusso seeds each index from existing rows, then follows Postgres logical replication. Change a user *or one of their orders* and the whole `users` document is rebuilt and re-emitted. The schema says *what*; flusso works out *which* documents a changed row touches.
+At run time flusso seeds each index from existing rows, then follows Postgres logical replication. Change a user *or one of their orders* and the whole `users` document is rebuilt and re-emitted, unless the update changed nothing the document reads ([which updates rebuild](reference/source-postgres.md#updates-that-change-nothing-a-document-reads)). The schema says *what*; flusso works out *which* documents a changed row touches.
 
 ```yaml
 version: 1

@@ -40,6 +40,7 @@ fn upsert(id: i64) -> ChangeEvent {
         table: TableName::try_new("users").unwrap(),
         key: key(id),
         before: None,
+        after: None,
     }
 }
 
@@ -170,6 +171,7 @@ impl DocumentBuilder for MockDocuments {
         _table: &TableName,
         key: &RowKey,
         _before: Option<&RowImage>,
+        _after: Option<&RowImage>,
     ) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: users(),

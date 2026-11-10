@@ -42,6 +42,10 @@
 //!   the root table (issue #167): inserting, renaming, deleting, or re-parenting
 //!   a child or grandchild rebuilds every document that embeds it, to the
 //!   declared depth, while the row's own document still gets its own op.
+//! - [`an_update_of_an_unread_column_writes_nothing`] — in the same tree, an
+//!   update that changes only a column no document reads (issue #169) writes
+//!   neither the row's own document nor its parent's (their `_version`s hold),
+//!   while renaming the row still rewrites both.
 //! - [`a_root_filtered_tree_indexes_only_top_level_rows`] — the tree the
 //!   related-tables guide recommends: the same two levels plus a root filter
 //!   `parent_id is_null`. Only top-level rows get a document, through backfill,
@@ -597,6 +601,71 @@ async fn a_self_referencing_has_many_rebuilds_the_parent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
+async fn an_update_of_an_unread_column_writes_nothing() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    create_table(
+        &pg.pool,
+        "CREATE TABLE items (id int PRIMARY KEY, parent_id int REFERENCES items(id), \
+         name text, views int NOT NULL DEFAULT 0)",
+    )
+    .await;
+    let mut items = simple_schema("items", None);
+    items.fields.push(join_field(
+        "children",
+        "items",
+        JoinKind::HasMany {
+            foreign_key: column("parent_id"),
+        },
+        vec![column_field("label", "name")],
+    ));
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("items"), items)]));
+    let live = start_pipeline(&pg, &os, spec, &["items"]).await;
+    live.await_seeded(1).await;
+    let child_labels = |doc: &serde_json::Value| labels(doc.pointer("/children"));
+
+    exec(&pg.pool, "INSERT INTO items VALUES (1, NULL, 'p1')").await;
+    exec(&pg.pool, "INSERT INTO items VALUES (10, 1, 'kid')").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["kid"])
+        .await;
+    live.assert_eventually("items", "10", Some("kid"))
+        .await
+        .unwrap();
+    let parent = live.fetch_version("items", "1").await;
+    let child = live.fetch_version("items", "10").await;
+    assert!(parent.is_some() && child.is_some());
+
+    exec(&pg.pool, "UPDATE items SET views = views + 1 WHERE id = 10").await;
+    // A later change on the same stream: once it lands, the update is past.
+    exec(&pg.pool, "INSERT INTO items VALUES (50, NULL, 'marker')").await;
+    live.assert_eventually("items", "50", Some("marker"))
+        .await
+        .unwrap();
+    assert_eq!(
+        live.fetch_version("items", "1").await,
+        parent,
+        "parent rewritten"
+    );
+    assert_eq!(
+        live.fetch_version("items", "10").await,
+        child,
+        "row rewritten"
+    );
+
+    exec(&pg.pool, "UPDATE items SET name = 'renamed' WHERE id = 10").await;
+    live.assert_doc_eventually("items", "1", &child_labels, &["renamed"])
+        .await;
+    live.assert_eventually("items", "10", Some("renamed"))
+        .await
+        .unwrap();
+    assert!(live.fetch_version("items", "1").await > parent);
+    assert!(live.fetch_version("items", "10").await > child);
+
+    live.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
 async fn a_root_filtered_tree_indexes_only_top_level_rows() {
     let pg = start_postgres().await;
     let os = start_opensearch().await;
@@ -990,6 +1059,18 @@ impl Pipeline {
             );
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
+    }
+
+    /// Realtime `GET {index}/_doc/{id}`'s `_version`, which every write bumps.
+    async fn fetch_version(&self, index: &str, id: &str) -> Option<u64> {
+        let resp = self
+            .http
+            .get(format!("{}/{index}/_doc/{id}", self.os_url))
+            .send()
+            .await
+            .ok()?;
+        let body: serde_json::Value = resp.json().await.ok()?;
+        body.get("_version").and_then(serde_json::Value::as_u64)
     }
 
     /// Realtime `GET {index}/_doc/{id}`'s `_source`, `None` if absent.

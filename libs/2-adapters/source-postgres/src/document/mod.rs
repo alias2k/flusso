@@ -44,12 +44,24 @@
 //! current row is gone or names the new parent. That needs the table's replica
 //! identity to carry the link column; see [`resolve`].
 //!
+//! ## Updates that change nothing a document reads
+//!
+//! An update carries a pre- and post-image when the table's replica identity
+//! is `FULL`. Resolution then compares them: the root row's own document is
+//! emitted only if a column the index reads from the root changed, and a path
+//! back from a related row is walked only if a column that relation reads
+//! changed (fields, filters, `order_by`, aggregate input, link; see
+//! [`source::relation_columns`]). Without both images every path is walked,
+//! and an index with a raw filter anywhere walks every path. The column sets
+//! are derived once, when the builder is built.
+//!
 //! ## Remaining limits
 //!
 //! Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
 mod query;
+mod reads;
 mod resolve;
 pub(crate) mod value;
 
@@ -62,11 +74,12 @@ use kernel::{
 };
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{
-    Catalog, ColumnInfo, Result, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
+    Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
 };
 use sqlx::{PgPool, Row};
 
 use fields::find_paths;
+use reads::ReadColumns;
 
 /// Cache of each `(schema, table, column)`'s catalog metadata.
 type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
@@ -94,6 +107,8 @@ struct ColumnMeta {
 pub struct PgDocumentBuilder {
     pool: PgPool,
     spec: Arc<SourceSpec>,
+    /// The columns each index reads, per part, derived from `spec` once.
+    reads: Arc<ReadColumns>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
@@ -107,6 +122,7 @@ impl PgDocumentBuilder {
     pub fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
         Self {
             pool,
+            reads: Arc::new(ReadColumns::new(&spec)),
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -415,17 +431,32 @@ impl DocumentBuilder for PgDocumentBuilder {
         table: &TableName,
         key: &RowKey,
         before: Option<&RowImage>,
+        after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
         let mut ids = Vec::new();
         let mut read = false;
+        let mut skipped = 0_usize;
+        let diff = RowDiff::new(key, before, after);
         for (name, schema) in self.spec.indexes() {
             let is_root = schema.table == *table;
+            let mut seen = HashSet::new();
             if is_root {
                 read = true;
-                ids.push(DocumentId {
-                    index: name.clone(),
-                    key: key.clone(),
-                });
+                if self.reads.root(name).touched_by(&diff) {
+                    ids.push(DocumentId {
+                        index: name.clone(),
+                        key: key.clone(),
+                    });
+                    // A row that is its own ancestor must not re-emit this id.
+                    if let (Some(pk_column), [(column, own)]) =
+                        (&schema.primary_key, key.0.as_slice())
+                        && column == pk_column
+                    {
+                        seen.insert(own.clone());
+                    }
+                } else {
+                    skipped += 1;
+                }
             }
 
             let mut paths = Vec::new();
@@ -443,15 +474,11 @@ impl DocumentBuilder for PgDocumentBuilder {
                 continue;
             };
 
-            let mut seen = HashSet::new();
-            // A row that is its own ancestor must not re-emit the id pushed above.
-            if is_root
-                && let [(column, own)] = key.0.as_slice()
-                && *column == pk_column
-            {
-                seen.insert(own.clone());
-            }
-            for path in &paths {
+            for (n, path) in paths.iter().enumerate() {
+                if !self.reads.path(name, table, n).touched_by(&diff) {
+                    skipped += 1;
+                    continue;
+                }
                 for root in self.resolve_path(schema, table, key, before, path).await? {
                     if seen.insert(root.clone()) {
                         ids.push(DocumentId {
@@ -461,6 +488,9 @@ impl DocumentBuilder for PgDocumentBuilder {
                     }
                 }
             }
+        }
+        if skipped > 0 {
+            tracing::trace!(skipped, "update changed no column these documents read");
         }
         if !read {
             self.warn_unread(table);
@@ -643,3 +673,7 @@ pub(crate) async fn primary_key_column_names(
     }
     Ok(names)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;

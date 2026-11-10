@@ -441,6 +441,7 @@ impl DocumentBuilder for ScriptedDocuments {
         _table: &TableName,
         key: &RowKey,
         _before: Option<&RowImage>,
+        _after: Option<&RowImage>,
     ) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
             index: users(),
@@ -561,6 +562,7 @@ fn row_event(delete: bool, id: i64) -> ChangeEvent {
             table,
             key,
             before: None,
+            after: None,
         }
     }
 }

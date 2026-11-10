@@ -30,7 +30,7 @@ OpenSearch accepted a bulk request but refused one document: a value that doesn'
    increase(flusso_documents_quarantined_total[10m]) > 0
    ```
 
-5. **Get a quarantined document indexed.** It never lands until its source row changes again. Fix the cause, then touch the row (any update, or a no-op `UPDATE … SET col = col`) so the WAL carries a change and the document is rebuilt. For many rows, a reindex rebuilds them all; see [Reindex without downtime](reindex.md).
+5. **Get a quarantined document indexed.** It never lands until its source row changes again. Fix the cause, then update a column the document reads so the WAL carries a change and the document is rebuilt. On a `REPLICA IDENTITY FULL` table an update that changes nothing the document reads (a no-op `UPDATE … SET col = col` included) [rebuilds nothing](../reference/source-postgres.md#updates-that-change-nothing-a-document-reads). For many rows, a reindex rebuilds them all; see [Reindex without downtime](reindex.md).
 
 ## Options and variations
 

@@ -5,11 +5,13 @@
 //! arrives, tagged with the commit LSN. That gives every change a clean,
 //! commit-aligned position to acknowledge against, and matches logical
 //! decoding's "whole transactions only" model. Because events are thin (a table
-//! name, primary key, and at most a pre-image), buffering even a large
-//! transaction is cheap.
+//! name, primary key, and at most a pre- and post-image), buffering even a large
+//! transaction is cheap. An update's post-image is the one wider payload, and
+//! it is kept only beside a pre-image.
 //!
 //! Each `Relation` message is followed by a catalog lookup of the table's
-//! primary key, before the next replication event is read: a change is keyed by
+//! primary key (and whether it is partitioned, which withholds the post-image),
+//! before the next replication event is read: a change is keyed by
 //! its primary key, not by the replica-identity columns pgoutput flags (all of
 //! them, under `REPLICA IDENTITY FULL`). See [`pgoutput`].
 
@@ -148,6 +150,7 @@ async fn key_relations(
             super::quote_ident(relation.namespace.as_ref()),
             super::quote_ident(relation.table.as_ref())
         );
+        relation.partitioned = Some(is_partitioned(catalog, &qualified).await?);
         relation.primary_key = crate::document::primary_key_column_names(catalog, qualified)
             .await?
             .into_iter()
@@ -160,6 +163,15 @@ async fn key_relations(
         record_untraceable(state, oid);
     }
     Ok(())
+}
+
+/// Whether `qualified` names a partitioned table.
+async fn is_partitioned(catalog: &PgPool, qualified: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT relkind = 'p' FROM pg_class WHERE oid = $1::regclass")
+        .bind(qualified)
+        .fetch_one(catalog)
+        .await
+        .map_err(|e| SourceError::Query(e.to_string()))
 }
 
 /// Fold one replication event into the state, possibly queueing changes.
@@ -223,6 +235,7 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 table,
                 key,
                 before: None,
+                after: None,
             });
         }
         Decoded::Update { rel, old, new } => {
@@ -238,6 +251,10 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
             let before = old
                 .as_ref()
                 .and_then(|old| pgoutput::pre_image(relation, old));
+            let after = old
+                .as_ref()
+                .filter(|_| before.is_some() && relation.partitioned == Some(false))
+                .map(|old| pgoutput::post_image(relation, old, &new));
             if let Some(old_key) = old_key
                 && old_key.0 != new_key.0
             {
@@ -251,6 +268,7 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 table,
                 key: new_key,
                 before,
+                after,
             });
             warn_untraceable(state, rel);
         }
