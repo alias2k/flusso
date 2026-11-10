@@ -380,12 +380,18 @@ fn flatten_resolved(fields: &[ResolvedField], depth: usize, rows: &mut Vec<Row>)
         rows.push(Row {
             depth,
             name: field.name.to_string(),
-            cells: vec![
-                (field.mapping.mapping_type.name().to_owned(), "36"),
-                nullability,
-            ],
+            cells: vec![(type_label(&field.mapping), "36"), nullability],
         });
         flatten_resolved(&field.children, depth + 1, rows);
+    }
+}
+
+/// A field's mapping type, with a map's key type: `map<text>` for a map whose
+/// every key is mapped as `text`.
+fn type_label(mapping: &config::Mapping) -> String {
+    match &mapping.map_values {
+        Some(values) => format!("map<{}>", values.mapping_type.name()),
+        None => mapping.mapping_type.name().to_owned(),
     }
 }
 
@@ -514,4 +520,19 @@ fn redact_url(url: &str) -> String {
 /// back into the format width when the painted string is padded.
 fn pen_pad(pen: Pen, text: &str) -> usize {
     pen.bold(text).chars().count() - text.chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use config::{FlussoType, Mapping};
+
+    use super::type_label;
+
+    #[test]
+    fn a_map_reads_as_its_key_type() {
+        let mut map = Mapping::of_type(&FlussoType::Json);
+        map.map_values = Some(Box::new(Mapping::of_type(&FlussoType::Text)));
+        assert_eq!(type_label(&map), "map<text>");
+        assert_eq!(type_label(&Mapping::of_type(&FlussoType::Long)), "long");
+    }
 }
