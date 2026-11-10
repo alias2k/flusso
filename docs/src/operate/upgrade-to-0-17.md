@@ -64,7 +64,7 @@ Any deployment going from 0.16 to 0.17 whose schemas declare a [`map`](../refere
 
    `seeded` means the backfill finished and the hash alias serves a complete generation.
 
-6. **Deploy the consumers rebuilt against 0.17.** Rebuild them with `flusso-query` 0.17 (the source changes are in [Maps](../query/maps.md#upgrading-from-016)) and roll them out now, not earlier.
+6. **Deploy the consumers rebuilt against 0.17.** Rebuild them with `flusso-query` 0.17 (the source changes, including `TextMap::search` becoming `matches`, are in [Maps](../query/maps.md#upgrading-from-016)) and roll them out now, not earlier.
 
 7. **Delete the old index.** flusso never removes it: a rebuild only sweeps generations under its *own* hash alias, so `{prefix}{logical}_{oldhash}_{n}` keeps its disk until deleted by hand. List the aliases; the convenience alias `{logical}` points at the new generation, and the hash alias that points elsewhere is the old one:
 

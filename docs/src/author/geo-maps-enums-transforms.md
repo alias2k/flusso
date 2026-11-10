@@ -54,7 +54,7 @@ You're adding a location, a translations column, a status or severity with a mea
 - **Changing an enum's order** rewrites the mapping, so it rotates the index generation and re-seeds, like any schema change.
 - **A map's `values`** must be a leaf kind: string, numeric, or date. `boolean`, `json`, `geo`, and `custom` are rejected.
 - **A `custom` scaled_float** is the exact-decimal answer when `decimal`'s lossy `double` won't do. See [custom](../reference/field-types.md#custom).
-- **Query-side counterparts.** Maps get `.key("it")` and cross-key search ([Maps](../query/maps.md)); ordered enums get an `Enum` handle whose `.asc()` sorts by declared order ([Enums and custom values](../query/enums-and-values.md)).
+- **Query-side counterparts.** Maps get `.key("it")` and the plain-field operators across every key ([Maps](../query/maps.md)); ordered enums get an `Enum` handle whose `.asc()` sorts by declared order ([Enums and custom values](../query/enums-and-values.md)).
 
 ## Related
 

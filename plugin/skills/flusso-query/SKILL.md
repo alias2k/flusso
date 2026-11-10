@@ -131,7 +131,7 @@ compile error, not a 400.
 | object namespace | A same-doc sub-object or to-one join. Objects flatten, so the namespace **chains** from its parent: `User::account().tier()`, `User::account().exists()`. |
 | `Nested<S,T>` | `any(q)` / `all(q)` to match parents and **lift** a child query into scope `S`; `matching(q)` (+ `.sort`/`.size`/`.from`) to shape the returned array; `exists` |
 | `Geo` | `within(Distance::km(12.0), center)` `within_box` `within_polygon` `exists`; `distance_from(center)` / `distance_sort(center, order, DistanceUnit)`. The radius is a typed `Distance`, not a string. |
-| map handles | `TextMap` / `KeywordMap` / `NumberMap<K>` / `DateMap` → [`maps.md`](maps.md) |
+| map handles | `TextMap` / `KeywordMap` / `NumberMap<K>` / `DateMap`: one key, or the value kind's operators across every key → [`maps.md`](maps.md) |
 | `Binary` | `exists` (base64, not searchable) |
 | `Json` | `exists` `raw(serde_json::Value)` |
 

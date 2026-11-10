@@ -669,11 +669,23 @@ handle per value kind — `TextMap`/`KeywordMap`/`NumberMap`/`DateMap` — where
 the declared kind, since the sink maps every key like a plain field (#177): runtime keys,
 compile-time value type. `TextMap`/`KeywordMap` carry the `WithSubfields`/`NoSubfields`
 type-state (the derive stamps it via `string_handle`, same rule as a plain field) and hand it
-to their keys. `TextMap::search(q)` builds a `MapSearch` (a `multi_match` over `prefer`'d keys
-plus a `path.*` fallback, `best_fields` unless `.match_type(..)`) for cross-key search with
-per-key preference; `contains(part)` (string maps, subfields only) is a `MapContains`: a
+to their keys. **The map handle mirrors its values kind across every key** (issue #186): the
+plain handle's operators, same names/args, each a builder (`MapMatch`/`MapTerm`/`MapRange`/
+`MapPrefix`/`MapWildcard`/`MapRegexp`/`MapFuzzy`, one `CrossKey` body + `cross_key_builder!`)
+with `prefer(key, weight)` / `only_preferred()` over `KeyFields`. The analyzed family is a
+`multi_match` over `path.*` (which also reaches each key's subfields: an exact-value boost, by
+design; `match_phrase_prefix` renders `lenient: true` since a phrase prefix 400s on keyword
+subfields); everything else is a `query_string` over one pattern, the value escaped/quoted. A
+field pattern can't exclude a key's subfields, so the exact family (`eq`/`any_of`/`prefix`/
+`wildcard`/`regexp`/`fuzzy`) exists on `KeywordMap<_, NoSubfields>` only; with subfields the map
+mirrors the plain accessors as **views** (`TextMap::keyword()`/`keyword_lowercase()`,
+`KeywordMap::text()`/`keyword_lowercase()` → a map handle over `path.*.<subfield>`). `search` was
+removed (`matches` replaces it). `contains(part)` (string maps, subfields only) is a `MapContains`: a
 `query_string` of the escaped `*part*` over `path.*.keyword_lowercase`, a case/accent-folded
-substring match across keys; `has_key`/`exists` are presence checks. The
+substring match across keys; `has_key`/`exists` are presence checks. Guarded by the `*map*` unit
+tests in `sdk/query/src/tests.rs`, the `map_exact_needs_no_subfields`/`map_cross_key_gated` UI
+tests, and `map_cross_key_queries_match_the_per_key_or` (every family vs the per-key `or`) in the
+`map_keys` live e2e. The
 doc-side type is `HashMap<String, V>` or `BTreeMap<String, V>` (blanket `FlussoMap<K>` impls
 for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape** — newtype or
 named fields (e.g. a translations type with a `fallback` beside the language keys) with a

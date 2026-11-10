@@ -61,7 +61,7 @@ How: the map itself is an OpenSearch `object` with `dynamic: true`, so runtime k
 
 > ⚠️ **Warning** — before 0.17 the keys took OpenSearch's dynamic defaults. A schema with a `map` gets a new content hash in 0.17, so its index is rebuilt once, and the rebuild can refuse values 0.16 accepted. See [Upgrade to 0.17](../operate/upgrade-to-0-17.md).
 
-On the query side a map gets a typed handle: `.key("it")` returns a plain-field handle of the declared kind, and the string maps search, match part of a word, and sort across keys. See [Maps](../query/maps.md).
+On the query side a map gets a typed handle: `.key("it")` returns a plain-field handle of the declared kind, and the map handle runs that kind's operators across every key, with per-key preference. See [Maps](../query/maps.md).
 
 ## Example
 
