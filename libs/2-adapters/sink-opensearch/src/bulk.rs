@@ -2,6 +2,22 @@
 //! encoding, the byte/count-aware request chunking, and item-level rejection
 //! parsing — the low-level pieces `flush` and
 //! `send_bulk_chunk` are built from.
+//!
+//! An index action addressed to a hash alias carries `require_alias: true`
+//! per item, so a write to an alias that no longer exists fails instead of
+//! letting OpenSearch auto-create a dynamic-mapped index under that name. The
+//! flag is per item, not `?require_alias=true` on the URL, because one bulk
+//! request mixes alias targets (seeded indexes) and concrete generations
+//! (an unseeded rebuild), and the URL flag would fail the latter.
+//!
+//! ```text
+//! {"index":{"_index":"users_1a2b","_id":"42","require_alias":true}}
+//! {"email":"ada@x.io"}
+//! ```
+//!
+//! A response item reporting `index_not_found_exception` means the target is
+//! gone, which is the sink's problem rather than the document's: it fails the
+//! whole flush (see [`bulk_rejected`]).
 
 use serde_json::{Value, json};
 use sink::{RejectedDocument, Result, SinkError};
@@ -13,6 +29,8 @@ pub(crate) enum BulkAction {
         index: String,
         id: String,
         doc: Value,
+        /// `index` is an alias that must exist; never auto-create it.
+        require_alias: bool,
     },
     Delete {
         index: String,
@@ -69,9 +87,19 @@ pub(crate) fn build_bulk_body(actions: &[BulkAction]) -> Result<String> {
 pub(crate) fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
     let mut fragment = String::new();
     match action {
-        BulkAction::Index { index, id, doc } => {
-            let meta = serde_json::to_string(&json!({ "index": { "_index": index, "_id": id } }))
-                .map_err(|e| SinkError::Serialize(e.to_string()))?;
+        BulkAction::Index {
+            index,
+            id,
+            doc,
+            require_alias,
+        } => {
+            let meta = if *require_alias {
+                json!({ "index": { "_index": index, "_id": id, "require_alias": true } })
+            } else {
+                json!({ "index": { "_index": index, "_id": id } })
+            };
+            let meta =
+                serde_json::to_string(&meta).map_err(|e| SinkError::Serialize(e.to_string()))?;
             let source =
                 serde_json::to_string(doc).map_err(|e| SinkError::Serialize(e.to_string()))?;
             fragment.push_str(&meta);
@@ -124,17 +152,26 @@ pub(crate) fn plan_chunks(sizes: &[usize], batch_size: usize, max_bytes: usize) 
 /// (the bulk API preserves order), so the rejection carries the originating
 /// document's index and id; if the arrays ever disagree, the response's own
 /// `_index`/`_id` are used as a fallback. Returns empty when nothing failed.
-pub(crate) fn bulk_rejected(response: &Value, actions: &[BulkAction]) -> Vec<RejectedDocument> {
+///
+/// An item failing with `index_not_found_exception` is **not** a rejection: the
+/// target index or alias is gone (deleted while running), so every document
+/// bound for it would fail the same way. That returns a flush-wide `Err`, which
+/// stops the sink engine; its restart re-runs `ensure_index`, which recreates
+/// the generation and reseeds it.
+pub(crate) fn bulk_rejected(
+    response: &Value,
+    actions: &[BulkAction],
+) -> Result<Vec<RejectedDocument>> {
     let has_errors = response
         .get("errors")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if !has_errors {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let Some(items) = response.get("items").and_then(|v| v.as_array()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut rejected = Vec::new();
@@ -151,8 +188,8 @@ pub(crate) fn bulk_rejected(response: &Value, actions: &[BulkAction]) -> Vec<Rej
             continue;
         }
 
-        let reason = op
-            .get("error")
+        let error = op.get("error");
+        let reason = error
             .and_then(|e| e.get("reason"))
             .and_then(|r| r.as_str())
             .map(str::to_owned)
@@ -171,9 +208,17 @@ pub(crate) fn bulk_rejected(response: &Value, actions: &[BulkAction]) -> Vec<Rej
                     .to_owned(),
             ),
         };
+        if error.and_then(|e| e.get("type")).and_then(Value::as_str)
+            == Some("index_not_found_exception")
+        {
+            return Err(SinkError::Write(format!(
+                "bulk write target {index} is missing (deleted while running?); \
+                 failing the flush so a restart recreates it: {reason}"
+            )));
+        }
         rejected.push(RejectedDocument { index, id, reason });
     }
-    rejected
+    Ok(rejected)
 }
 
 #[cfg(test)]
