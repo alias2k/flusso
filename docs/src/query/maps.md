@@ -40,7 +40,7 @@ Product::query().query(
 Product::query().query(Product::name().contains("excav"))   // "Excavator", in any key
 ```
 
-`contains` (on `TextMap` and `KeywordMap`, with subfields) is a case- and accent-insensitive substring match over every key's `.keyword_lowercase`: a `query_string` of `*excav*` on `name.*.keyword_lowercase`, the value escaped so it's matched literally. `.prefer(key, weight)` and `.only_preferred()` work as on `search`. A leading wildcard scans the terms, so it's slower than `search` on a large index; a value over 256 characters isn't indexed in the subfield and never matches.
+`contains` (on `TextMap` and `KeywordMap`, with subfields) is a case- and accent-insensitive substring match over every key's `.keyword_lowercase`: a `query_string` of `*excav*` on `name.*.keyword_lowercase`, the value escaped so it's matched literally. `.prefer(key, weight)` and `.only_preferred()` work as on `search`. An empty or whitespace-only value matches nothing (it renders `match_none`), like a full-text query with no terms. A leading wildcard scans the terms, so it's slower than `search` on a large index; a value over 256 characters isn't indexed in the subfield and never matches.
 
 ## Document types
 
@@ -72,9 +72,10 @@ Use the derive rather than a hand-written `impl FlussoMap<K>`: a fragment valida
 - `MapKey` is gone: a key is a plain `Text`/`Keyword`. Code that named `Text<S, MapKey>` names `Text<S>` (or `Text<S, NoSubfields>`).
 - `TextMap`/`KeywordMap` take a second type parameter, the subfield marker, defaulting to `WithSubfields`.
 - A `decimal` map's keys take the decimal kind, like a plain `decimal` field: the handle is `NumberMap<kind::Decimal>` (was `kind::Double`) and the document type `HashMap<String, Decimal>`. A float no longer compiles: `Product::costs().key("eur").eq(9.99)` becomes `.eq(Decimal::new(999, 2))` (or an integer).
-- String map sorts read `.keyword_lowercase`, which exists only once the index is rebuilt with 0.17 (it is, once; see [Objects and maps](../reference/objects-and-maps.md#map)).
+- String map sorts read `.keyword_lowercase`, which exists only in the index 0.17 rebuilds. Deploy a rebuilt consumer once that index is seeded; the order is in [Upgrade to 0.17](../operate/upgrade-to-0-17.md).
 
 ## Related
 
 - [Objects and maps](../reference/objects-and-maps.md#map) for the schema side.
 - [Sorting](sorting.md).
+- [Upgrade to 0.17](../operate/upgrade-to-0-17.md) for the index rebuild and the consumer rollout.
