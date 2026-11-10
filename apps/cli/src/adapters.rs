@@ -134,7 +134,7 @@ pub(crate) fn stream_config(config: &Config) -> anyhow::Result<ChannelConfig> {
 /// One sink entry as its adapter's typed config.
 #[derive(Debug, Clone)]
 pub(crate) enum SinkConfig {
-    Opensearch(OpensearchConfig),
+    Opensearch(Box<OpensearchConfig>),
     Stdout(StdoutConfig),
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn sink_config(name: &SinkName, entry: &PortEntry) -> anyhow::Result<
     let table = format!("[sinks.{name}]");
     match entry.kind.as_str() {
         OpensearchConfig::KIND => OpensearchConfig::from_options(entry.options.clone())
-            .map(SinkConfig::Opensearch)
+            .map(|config| SinkConfig::Opensearch(Box::new(config)))
             .with_context(|| format!("{table} (type = \"{}\")", entry.kind)),
         StdoutConfig::KIND => StdoutConfig::from_options(entry.options.clone())
             .map(SinkConfig::Stdout)
