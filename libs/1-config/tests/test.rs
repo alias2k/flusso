@@ -166,3 +166,30 @@ type = "postgres"
     let config = config::from_bytes(text.as_bytes()).unwrap();
     assert_eq!(config.stream, PortEntry::new(config::DEFAULT_STREAM_KIND));
 }
+
+/// Index settings are operational, like `on_error`: they live outside the
+/// schema, so adding, changing, or removing them keeps every content hash and
+/// therefore every physical index name.
+#[test]
+fn index_settings_never_change_the_content_hash() {
+    let with = load(fixture("golden/flusso.toml")).unwrap();
+    assert!(
+        with.indexes.values().any(|index| !index.sinks.is_empty()),
+        "the golden fixture sets per-index sink options"
+    );
+    let mut without = with.clone();
+    for index in without.indexes.values_mut() {
+        index.sinks.clear();
+    }
+    for sink in without.sinks.values_mut() {
+        sink.options.0.remove("index_settings");
+    }
+    let hashes = |config: &config::Config| -> Vec<_> {
+        config
+            .resolve_mappings()
+            .into_iter()
+            .map(|mapping| (mapping.index, mapping.hash))
+            .collect()
+    };
+    assert_eq!(hashes(&with), hashes(&without));
+}
