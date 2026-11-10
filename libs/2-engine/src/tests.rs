@@ -952,7 +952,10 @@ impl Sink for RejectingSink {
                 reason: "simulated item-level rejection".to_owned(),
             })
             .collect();
-        Ok(FlushReport { rejected })
+        Ok(FlushReport {
+            rejected,
+            ..FlushReport::default()
+        })
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
