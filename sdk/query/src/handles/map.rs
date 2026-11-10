@@ -760,11 +760,16 @@ impl<S, Sub> TextMap<S, Sub> {
     }
 
     /// Analyzed phrase-prefix match (search-as-you-type) in any key.
+    ///
+    /// Renders `lenient: true`: OpenSearch refuses a phrase prefix on a
+    /// keyword field, and `path.*` reaches each key's keyword subfields, so
+    /// they are skipped instead of failing the query.
     pub fn match_phrase_prefix(&self, value: impl Into<String>) -> MapMatch<S> {
         MapMatch::new(
             self.keys
                 .multi_match(value.into(), MultiMatchType::PhrasePrefix),
         )
+        .lenient(true)
     }
 
     /// Bool-prefix match in any key: every term a `term` except the last,

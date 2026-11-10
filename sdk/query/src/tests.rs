@@ -1749,7 +1749,6 @@ fn text_map_analyzed_family_renders_a_multi_match_per_type() {
     for (query, kind) in [
         (title.matches("excav"), "best_fields"),
         (title.match_phrase("excav"), "phrase"),
-        (title.match_phrase_prefix("excav"), "phrase_prefix"),
         (title.match_bool_prefix("excav"), "bool_prefix"),
     ] {
         assert_eq!(
@@ -1757,6 +1756,12 @@ fn text_map_analyzed_family_renders_a_multi_match_per_type() {
             json!({ "multi_match": { "query": "excav", "type": kind, "fields": ["title.*"] } })
         );
     }
+    assert_eq!(
+        title.match_phrase_prefix("excav").to_value(),
+        json!({ "multi_match": {
+            "query": "excav", "type": "phrase_prefix", "lenient": true, "fields": ["title.*"]
+        } })
+    );
     assert_eq!(
         title.matches_fuzzy("excav").to_value(),
         json!({ "multi_match": {
