@@ -52,8 +52,9 @@ Product::prices().key("usd").gte(9.99)                          // number range
 (any key).
 
 **Every key**: the map handle has the operators of the plain handle of its value kind, same
-names and arguments, matching a document when any key matches (the same hits as an `or` of the
-operator on each key):
+names and arguments, matching a document when any key matches. Outside the analyzed family that
+is the same hits as an `or` of the operator on each key; the analyzed family also reaches the
+keys' subfields (below), so it can find a little more:
 
 ```rust
 Product::title().matches("ciao").prefer("it", 3.0).prefer("en", 2.0)  // TextMap, multi_match
@@ -71,9 +72,14 @@ Product::codes().keyword_lowercase().eq("sale")                       // case-in
 
 - `prefer(key, weight)` weights a key; `only_preferred()` drops the `path.*` fallback. Both exist on
   every cross-key query; on a filter (`between`, `eq`) `prefer` is accepted but scores nothing.
+  `only_preferred()` with no `prefer` matches nothing (`match_none`).
 - The analyzed family is a `multi_match` over `path.*`, which also reaches each key's subfields:
   an exact whole-value hit scores higher, by design. Everything else is a `query_string` over one
-  pattern, value escaped.
+  pattern, value escaped (a leading `AND` / `OR` / `NOT` too; a `wildcard` keeps `\x` escapes).
+- `match_phrase_prefix` runs `lenient`, skipping the keys' keyword subfields (no exact-value
+  boost). `fuzziness` on a phrase operator compiles but OpenSearch rejects it. A cluster with
+  `indices.query.query_string.allowLeadingWildcard=false` refuses a cross-key pattern starting with
+  `*` / `?` (every `contains`).
 - **A `KeywordMap` with subfields has no cross-key `eq`** (or `any_of` / `prefix` / `wildcard` /
   `regexp` / `fuzzy`): `codes.*` also hits each key's `.text` and `.keyword_lowercase`, so it would
   match `"big sale"` for `eq("sale")`. Calling one is a compile error, not a bug to work around.

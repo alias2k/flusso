@@ -26,7 +26,7 @@ Product::labels().key("color").eq("Dark Red")                     // exact term 
 
 ## Every key
 
-The map handle mirrors the plain handle of its value kind: same operator names, same arguments, applied across all keys. A document matches when **any** key matches, exactly as an `or` of the operator on each key would.
+The map handle mirrors the plain handle of its value kind: same operator names, same arguments, applied across all keys. A document matches when **any** key matches. For every operator except the analyzed family, that is exactly the documents an `or` of the operator on each key returns. The analyzed family (`matches`, the phrase and prefix forms, `matches_fuzzy`) also reaches each key's subfields by design, so it can find a little more; see [How it renders](#how-it-renders).
 
 | Handle | Across every key |
 | --- | --- |
@@ -43,7 +43,7 @@ Product::name().match_phrase("scarpe rosse").prefer("it", 1.0).only_preferred()
 ```
 
 - **`prefer(key, weight)`** weights one key (`name.it^3`). Add several to rank keys, the user's locale first. In a filter (a range, an exact value) it changes nothing; it only matters where the clause scores.
-- **`only_preferred()`** drops the all-keys fallback, so only the preferred keys are queried.
+- **`only_preferred()`** drops the all-keys fallback, so only the preferred keys are queried. With no `prefer`, nothing is left to query and the clause matches nothing (it renders `match_none`).
 
 The builders keep their plain counterpart's options where the underlying query has them: `operator`, `fuzziness`, `slop`, `minimum_should_match` on the analyzed family (plus `tie_breaker` and `match_type`), `time_zone` on ranges, `rewrite` on `prefix`/`wildcard`, `fuzziness`/`prefix_length`/`max_expansions`/`transpositions` on `fuzzy`. `case_insensitive` and the regex `flags` have no cross-key form; use a subfield view or `.key(..)`.
 
@@ -52,7 +52,13 @@ The builders keep their plain counterpart's options where the underlying query h
 Keys aren't known when the query is built, so each operator renders as a query that takes a field pattern:
 
 - **The analyzed family** is a `multi_match` over `name.*` (`best_fields`, `phrase`, `phrase_prefix`, `bool_prefix`), so the best-scoring key wins. The pattern also reaches each key's subfields, so a query equal to a whole value (`matches("Zebra red")`) gets an extra exact-match hit from `.keyword`/`.keyword_lowercase` and scores higher. That boost is intended. A phrase prefix renders `lenient: true`, because OpenSearch refuses a phrase prefix on a keyword subfield; those subfields are skipped.
-- **Every other operator** is a `query_string` over one explicit pattern, the value escaped so it's matched literally: `"a" OR "b"` for `eq`/`any_of`, `["10" TO "50"]` (or `{"3" TO *]`) for ranges, `v*` for `prefix`, `/re/` for `regexp`, `v~` for `fuzzy`. Date bounds take date math (`"now-1d"`).
+- **Every other operator** is a `query_string` over one explicit pattern, the value escaped so it's matched literally: `"a" OR "b"` for `eq`/`any_of`, `["10" TO "50"]` (or `{"3" TO *]`) for ranges, `v*` for `prefix`, `/re/` for `regexp`, `v~` for `fuzzy`. Date bounds take date math (`"now-1d"`). A value that starts with `AND`, `OR` or `NOT` gets its first letter escaped (`\AND~`), so it stays a value, not an operator. In a `wildcard` pattern, `\` escapes the next character as on one key, and a trailing lone `\` is a literal backslash. An empty `eq`/`fuzzy` value matches the empty value, as on one key.
+
+Edge cases worth knowing:
+
+- **`match_phrase_prefix` runs leniently.** The keys' keyword subfields are skipped rather than failing the query, so a phrase prefix gets no exact-value boost.
+- **`fuzziness` doesn't combine with the phrase operators.** The analyzed builders share one type, as on a plain `Text`, so `match_phrase(..).fuzziness(..)` compiles, but OpenSearch rejects the request. Use `fuzziness` with `matches` or `match_bool_prefix` only.
+- **A leading wildcard needs it allowed.** A cluster with `indices.query.query_string.allowLeadingWildcard=false` refuses a cross-key pattern starting with `*` or `?`: a `wildcard("*x")`, and every `contains`.
 
 A pattern that matches no field (a map with no keys indexed yet) matches nothing; it isn't an error. Inside a `nested` array the cross-key query lifts through `Nested::any`/`all` like any other.
 

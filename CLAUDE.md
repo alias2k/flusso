@@ -675,7 +675,10 @@ plain handle's operators, same names/args, each a builder (`MapMatch`/`MapTerm`/
 with `prefer(key, weight)` / `only_preferred()` over `KeyFields`. The analyzed family is a
 `multi_match` over `path.*` (which also reaches each key's subfields: an exact-value boost, by
 design; `match_phrase_prefix` renders `lenient: true` since a phrase prefix 400s on keyword
-subfields); everything else is a `query_string` over one pattern, the value escaped/quoted. A
+subfields); everything else is a `query_string` over one pattern, the value escaped/quoted (a
+bare term starting `AND`/`OR`/`NOT` gets `\` on its first letter, a `wildcard` copies a user `\x`
+pair through; `only_preferred()` with no `prefer` renders `match_none`, since empty `fields` falls
+back to every field). A
 field pattern can't exclude a key's subfields, so the exact family (`eq`/`any_of`/`prefix`/
 `wildcard`/`regexp`/`fuzzy`) exists on `KeywordMap<_, NoSubfields>` only; with subfields the map
 mirrors the plain accessors as **views** (`TextMap::keyword()`/`keyword_lowercase()`,
@@ -684,8 +687,9 @@ removed (`matches` replaces it). `contains(part)` (string maps, subfields only) 
 `query_string` of the escaped `*part*` over `path.*.keyword_lowercase`, a case/accent-folded
 substring match across keys; `has_key`/`exists` are presence checks. Guarded by the `*map*` unit
 tests in `sdk/query/src/tests.rs`, the `map_exact_needs_no_subfields`/`map_cross_key_gated` UI
-tests, and `map_cross_key_queries_match_the_per_key_or` (every family vs the per-key `or`) in the
-`map_keys` live e2e. The
+tests, and `map_cross_key_queries_match_the_per_key_or` (every family vs the per-key `or`) +
+`map_cross_key_adversarial_values_match_the_per_key_or` (operator words, backslashes, quotes,
+empty values) in the `map_keys` live e2e. The
 doc-side type is `HashMap<String, V>` or `BTreeMap<String, V>` (blanket `FlussoMap<K>` impls
 for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape** — newtype or
 named fields (e.g. a translations type with a `fallback` beside the language keys) with a
