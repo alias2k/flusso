@@ -9,7 +9,7 @@ Every port table (`[source]`, `[stream]`, `[sinks.<name>]`) has the same shape: 
 | `[source]` | table | — | The database rows come from. `type` selects the adapter; only `postgres` exists. See [Source: Postgres](source-postgres.md). |
 | `[stream]` | table | `type = "channel"` | The stream between the source side and the sinks. See [Stream: channel](stream-channel.md). |
 | `[sinks.<name>]` | table per sink | none | Named destinations. `<name>` is a [Postgres identifier](identifiers.md); `type` is `opensearch` or `stdout`; `backfill` is the one universal key (see [Several sinks](#several-sinks)). With no sinks, `run` adds a stdout sink named `stdout`. |
-| `[[index]]` | array of tables | none | One entry per index to build. See [Index entries and on_error](index-and-on-error.md). |
+| `[[index]]` | array of tables | none | One entry per index to build, with optional per-sink options under `[index.sinks.<name>]`. See [Index entries and on_error](index-and-on-error.md). |
 | `on_error` | `"stop"` \| `"skip"` | `"stop"` | Global item-rejection policy; each `[[index]]` may override it. See [on_error](index-and-on-error.md#on_error). |
 | `prefix` | string | `""` | Literal prefix prepended to every index name flusso owns. See [prefix](#prefix). |
 | `[batch]` | table | none | How live changes are grouped into a batch. See [batch](#batch). |

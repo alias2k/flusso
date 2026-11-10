@@ -1,6 +1,6 @@
 # Sink: OpenSearch
 
-A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk options, and how the sink names, maps, refreshes, and seeds the indexes it owns.
+A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk options, the index settings it applies, and how the sink names, maps, refreshes, and seeds the indexes it owns.
 
 {{#include generated/sink-opensearch.md}}
 
@@ -32,6 +32,45 @@ Writes to a **seeded** index go through the hash alias, each bulk item flagged `
 ## Mapping
 
 Each index is created up front from the resolved schema mapping with `dynamic: strict`: types come from the schema, and a document with an unmapped key is rejected. An index that already exists is left as is. The `on_error` policy decides what an item-level rejection does; see [Index entries and on_error](index-and-on-error.md#on_error).
+
+## Index settings
+
+`index_settings` adds OpenSearch index settings to the indexes the sink creates, in two places:
+
+| Where | Applies to |
+| --- | --- |
+| `index_settings` in `[sinks.<name>]` | Every index this sink creates. |
+| `index_settings` in an `[[index]]` entry's `[index.sinks.<name>]` | That index only, on that sink. |
+
+{{#include generated/sink-opensearch-index.md}}
+
+A key is a setting name, with or without the `index.` prefix (`"mapping.total_fields.limit"` = `index.mapping.total_fields.limit`); nested tables flatten to dotted keys. The typical use is raising the mapping limits a wide document hits: `index.mapping.total_fields.limit` (1000 by default, and each `text`/`keyword` field costs 3–4 fields with `auto_subfields` on), `index.mapping.nested_fields.limit`, `index.mapping.nested_objects.limit`.
+
+**Precedence**, highest first:
+
+1. Keys flusso owns. `index.refresh_interval` (see [Refresh](#refresh); set the `refresh_interval` option instead) and anything under `index.analysis` (the `flusso_*` components) are **rejected** by `build`, `check`, and `run`, not silently dropped.
+2. The index's own `index_settings`.
+3. The sink-wide `index_settings`.
+4. The typed `number_of_shards` and `number_of_replicas` options.
+
+A higher layer replaces the same key and any key nested under or above it. They also reject a key given twice (`mapping.x` and `index.mapping.x`), a key that is both a value and a table, an empty table, and `null`. Values pass through to OpenSearch as written; one it refuses fails index creation.
+
+**When settings apply.** Settings are read when a generation is **created**: the first seed, a schema change, or a [reindex](../operate/reindex.md). Changing them never updates a live index and never triggers a rebuild on its own, because they are not part of the content hash. To apply a change, run `flusso reindex <index>`: the new generation is created with the new settings and the alias flips to it.
+
+```toml
+[sinks.primary]
+type = "opensearch"
+url = "https://search.internal:9200"
+index_settings = { "mapping.total_fields.limit" = 2000 }
+
+[[index]]
+name = "orders"
+schema = "orders.schema.yml"
+enabled = true
+
+[index.sinks.primary]
+index_settings = { "mapping.total_fields.limit" = 5000, "mapping.nested_objects.limit" = 20000 }
+```
 
 ## Refresh
 

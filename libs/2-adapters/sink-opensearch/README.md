@@ -19,6 +19,14 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
 | `refresh_interval` | `"10s"` | steady-state `refresh_interval` after backfill (`"-1"` disables) |
 | `text_analysis` | `builtin` | analyzer toolkit — `builtin` or `icu` (needs `analysis-icu` plugin) |
 | `auto_subfields` | `true` | auto-enrich `text`/`keyword` fields with analyzer + subfields |
+| `index_settings` | none | extra index settings for every created index (e.g. `"mapping.total_fields.limit" = 5000`) |
+
+Per index, an `[[index]]` entry's `[index.sinks.<name>]` table takes `index_settings` too
+([`OpensearchIndexConfig`]), laid over the sink-wide ones; the composition root hands them over
+with [`with_index_settings`](OpensearchSink::with_index_settings). Precedence, highest first:
+flusso's own keys (`refresh_interval`, `analysis`, rejected if set) > per-index > sink-wide >
+`number_of_shards`/`number_of_replicas`. Settings apply when a generation is created, never to a
+live index, and never change the hash ([`IndexSettings`]).
 
 ## At a glance
 
