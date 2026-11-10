@@ -31,7 +31,7 @@ Every panel, control, and shortcut in `flusso design`, and how saving maps to fi
 | click an edge | select its join |
 | toolbar | zoom in/out, fit to view, lock/unlock layout, reset layout, minimap, collapse/expand all |
 
-Node positions live in the browser, not in the files. A node whose join is missing a required key is flagged until it's set in the inspector.
+Node positions and collapsed nodes live in the browser, per index, not in the files. They follow the node, so removing, adding, or duplicating a field elsewhere leaves them alone. A node whose join is missing a required key is flagged until it's set in the inspector.
 
 Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a nullable column; `=` = has a default; nothing = optional. A node header counts fields that disagree with the database after a validate.
 
