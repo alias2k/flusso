@@ -20,6 +20,8 @@ The two responsibilities each get their own module. Neither references the other
 
 [`cdc`] yields thin [`ChangeEvent`](cdc::ChangeEvent)s — table and key (plus an optional pre-image, which finds the documents a deleted or re-parented row used to sit in, and an update's post-image; together they show which columns changed), each tagged with a [`Position`](kernel::Position) — and the engine hands positions back through [`confirm`](cdc::ChangeCapture::confirm) once every sink has made the documents durable. Both halves of that contract are plain data, so a change can cross a process boundary. Logical replication (WAL) is the first mechanism; polling or triggers can follow.
 
+A mechanism can also translate progress back into the source's own terms. [`reached`](cdc::ChangeCapture::reached) answers, for the position a sink has processed through, the [`SourcePosition`](cdc::SourcePosition) that is fully covered: the point in the source's own change order (a WAL LSN, for Postgres) a client can read after its commit. That is what a fence compares, so a client can wait until its write has landed. It is optional: a mechanism that cannot answer keeps the default and fences are unavailable.
+
 [`validate_indexes`] leans on the fact that a self-describing schema states its own types, so the mapping derives without a database. A reachable database is used only to confirm the declared types and nullability match the real columns.
 
 [`CaptureProvisioning`] is mechanism-neutral by design — the daemon and CLI drive it without ever naming "publication" (Postgres's gap-filling mechanism). Given the tables an index reads ([`SourceSpec::all_tables`]), it reports coverage and provisions what's missing.

@@ -104,6 +104,13 @@ when idle but indexing stays cheap while a backlog drains. The
 `refresh_interval` only bounds staleness during sustained backlog, when a
 caught-up flush never happens.
 
+Every flush reports when its documents become searchable
+([`Visibility`](sink::Visibility)): at once when caught up, within
+`refresh_interval` otherwise. That report is what a `searchable` fence waits
+on. With `refresh_interval = "-1"` nothing would ever refresh a flush made
+during a backlog, so the sink remembers the indexes it wrote and the next
+caught-up flush refreshes them.
+
 Operations are buffered in memory until `flush` is called. Large flushes are
 chunked by `batch_size` to stay within OpenSearch request limits. Seeding state
 is persisted in a hidden `flusso_meta` index so restarts skip a completed
