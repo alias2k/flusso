@@ -34,16 +34,28 @@ use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
-/// A sink that records the operations it receives, for assertions.
+/// A sink that records the operations it receives, for assertions. A batch's
+/// operations become visible together at its flush, so seeing a later change
+/// means every operation of its batch is already recorded.
 #[derive(Debug)]
 struct RecordingSink {
     ops: Arc<Mutex<Vec<String>>>,
+    applied: Mutex<Vec<String>>,
+}
+
+impl RecordingSink {
+    fn new(ops: &Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            ops: Arc::clone(ops),
+            applied: Mutex::default(),
+        }
+    }
 }
 
 #[async_trait]
 impl Sink for RecordingSink {
     async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        self.ops.lock().unwrap().push(format!(
+        self.applied.lock().unwrap().push(format!(
             "{} {} {}",
             envelope.op,
             envelope.index.as_ref(),
@@ -53,6 +65,8 @@ impl Sink for RecordingSink {
     }
 
     async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
+        let applied = std::mem::take(&mut *self.applied.lock().unwrap());
+        self.ops.lock().unwrap().extend(applied);
         Ok(sink::FlushReport::clean())
     }
 }
@@ -108,9 +122,7 @@ async fn wal_changes_flow_through_the_engine() {
             .unwrap(),
     );
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(RecordingSink {
-        ops: Arc::clone(&recorded),
-    });
+    let sink = Arc::new(RecordingSink::new(&recorded));
     let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
@@ -183,9 +195,7 @@ async fn backfill_seeds_preexisting_rows() {
             .unwrap(),
     );
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(RecordingSink {
-        ops: Arc::clone(&recorded),
-    });
+    let sink = Arc::new(RecordingSink::new(&recorded));
     let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
@@ -260,9 +270,7 @@ async fn an_update_of_unread_columns_rebuilds_nothing() {
             .unwrap(),
     );
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(RecordingSink {
-        ops: Arc::clone(&recorded),
-    });
+    let sink = Arc::new(RecordingSink::new(&recorded));
     let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication, url.clone())),
         documents,
