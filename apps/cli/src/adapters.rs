@@ -7,9 +7,10 @@
 //!
 //! - [`validate`]: every entry instantiates its adapter config, and every
 //!   `[index.sinks.<name>]` table its sink's per-index config, without
-//!   connecting. `build`, `check`, `run`, and the designer call it right after
-//!   loading, so an unknown type, a misspelled option, or a wrong value fails
-//!   before any network call or lock write.
+//!   connecting. `build`, `check`, and `run` call it right after loading, so an
+//!   unknown type, a misspelled option, or a wrong value fails before any
+//!   network call or lock write. [`validate_draft`] is the same check over an
+//!   unsaved `flusso.toml`, for the designer.
 //! - the typed configs the composition root needs to build adapters
 //!   ([`source_config`], [`stream_config`], [`sink_config`]).
 //! - [`descriptions`]: what each adapter declares about its options, from which
@@ -58,17 +59,37 @@ fn known_kinds(port: Port) -> String {
         .join(", ")
 }
 
-/// Instantiate every port entry's adapter config without connecting.
+/// Instantiate every port entry's adapter config, and every index's per-sink
+/// config, without connecting.
 pub(crate) fn validate(config: &Config) -> anyhow::Result<()> {
-    source_config(config)?;
-    stream_config(config)?;
-    for (name, entry) in &config.sinks {
-        sink_config(name, entry)?;
-    }
+    validate_ports(config)?;
     for (index, entry) in &config.indexes {
         for (sink, options) in &entry.sinks {
             index_sink_config(config, index, sink, options)?;
         }
+    }
+    Ok(())
+}
+
+/// [`validate`] over a parsed but unloaded `flusso.toml`: the per-index sink
+/// options come from its `[[index]]` entries, with no schema file read.
+#[cfg(feature = "design")]
+pub(crate) fn validate_draft(draft: &config::toml::ConfigToml) -> anyhow::Result<()> {
+    let config = Config::from(draft.clone());
+    validate_ports(&config)?;
+    for entry in &draft.index {
+        for (sink, options) in &entry.sinks {
+            index_sink_config(&config, &entry.name, sink, options)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_ports(config: &Config) -> anyhow::Result<()> {
+    source_config(config)?;
+    stream_config(config)?;
+    for (name, entry) in &config.sinks {
+        sink_config(name, entry)?;
     }
     Ok(())
 }
