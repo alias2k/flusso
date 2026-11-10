@@ -111,9 +111,14 @@ loading on every later release in that major.
 
 ## Operational surface
 
-`--public-address` serves unauthenticated `/healthz`, `/readyz`, `/status`, `/metrics`. A private
-surface (`--private-address`, HTTP Basic) serves `/indexes` and `/reindex`; `flusso indexes` and
-`flusso reindex` are its clients.
+`--public-address` serves unauthenticated `/healthz`, `/readyz`, `/status`, `/metrics`, `/wait`. A
+private surface (`--private-address`, HTTP Basic) serves `/indexes` and `/reindex`; `flusso indexes`
+and `flusso reindex` are its clients.
+
+`/wait` is how an application reads its own write: it holds a request until a commit, named by the
+position read from Postgres after it, is in the index. It defaults to `127.0.0.1`, so bind the public
+address where the application can reach it. The read side owns the procedure: see the `flusso-query`
+skill's "Reading your own writes".
 
 ## Migrating from a hand-rolled indexer
 

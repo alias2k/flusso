@@ -1,13 +1,14 @@
 ---
 name: flusso-query
-description: Query a flusso index from Rust with `flusso-query` and `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]`. Use when writing or editing read-side code — document structs, typed queries, sorting, nested filtering, custom value types, multi-index search.
+description: Query a flusso index from Rust with `flusso-query` and `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]`. Use when writing or editing read-side code — document structs, typed queries, sorting, nested filtering, custom value types, multi-index search, reading a write right after making it.
 ---
 
 # Querying a flusso index
 
 flusso owns the **write** side: it builds an OpenSearch index to match the schema. `flusso-query` is
 the **read** side, a typed OpenSearch/Elasticsearch client. Reads go straight to OpenSearch, not
-through flusso.
+through flusso. The one thing a reader asks flusso is to wait for a commit
+([`## Reading your own writes`](#reading-your-own-writes--fence-never-sleep)).
 
 The contract is the schema. `#[derive(FlussoRoot)]` reads the resolved schema at compile time with
 no database, and:
@@ -48,7 +49,7 @@ level with `#[flusso(scope = "Purchases")]` on the root field, or the module wit
   `FlussoValue`, `FlussoMap`.
 - Optional features: **`derive`**, **`decimal`** (`rust_decimal::Decimal`), **`chrono`** / **`time`**
   (date leaves; pick one, or `String` for raw ISO-8601), **`uuid`** (`uuid::Uuid` as a `keyword`
-  value).
+  value), **`diesel`** / **`diesel-async`** (`position::…::current`, for fenced reads).
 
 ## The shape of a consumer
 
@@ -244,6 +245,7 @@ exists, state it in one line.
 | `match_phrase` / `matches` | check the field is **`text`** | keyword → `.eq()` / `.any_of()` |
 | a struct only holding filter inputs | wrapper-to-filter | filter via handles |
 | `.from(` on a list/scroll/export endpoint, or a hand-rolled `search_after` from `hit.sort` | offset paging on a live index | `.cursor(..)` ([`## Paging`](#paging--offset-or-cursor)) |
+| `sleep(` or a retry loop between a database write and a read of the index | guessing when the write arrives | `client.after(&position)` ([`## Reading your own writes`](#reading-your-own-writes--fence-never-sleep)) |
 
 ## Writing readable queries
 
@@ -369,6 +371,49 @@ page.next                            // Option<PageCursor>: opaque string, None 
   fetching the next page once the current one is consumed. `walk.cursor()` is the checkpoint; for a
   pinned walk, `close().await` / `into_cursor()` (keeps it open, the only way to resume it later) /
   drop (closes in the background) end it.
+
+## Reading your own writes — fence, never sleep
+
+The index trails the database, so a read right after a commit can miss it. Do not sleep or poll for
+the expected value. Read the database's position **after the commit**, then read through
+`client.after(..)`, which makes flusso hold each read until that commit is in the index.
+
+```rust
+let client = Client::connect(os_url)?
+    .flusso(flusso_url)?        // flusso's public address (serves /status and /wait)
+    .fence_sink("primary");     // the [sinks.<name>] feeding this cluster
+
+save(&mut conn, &user).await?;                                              // commits
+let position = flusso_query::position::diesel_async::current(&mut conn).await?;
+
+let fresh = client.after(&position);
+let user = User::get(&fresh, id).await?;            // waits until applied
+let page = User::query().filter(..).send(&fresh).await?;   // waits until searchable
+```
+
+- **The position** is `SELECT pg_current_wal_lsn()::text` (`position::CURRENT_SQL`). Helpers:
+  `position::diesel::current(&mut conn)` (feature `diesel`) and
+  `position::diesel_async::current(&mut conn).await` (feature `diesel-async`). With any other driver,
+  run `CURRENT_SQL` and read one `text` column.
+- **Read it after the commit, outside the transaction, on the primary.** Inside the transaction it
+  lies before the commit; on a replica it is the replica's own position. Both return a fence that
+  passes too early, with no error. This is the one way to get it wrong, so check it in review.
+- **Two levels, chosen by the read.** `get` waits until the write is *applied*; `send` / `ids` /
+  `count` / cursors / walks / `msearch` / combined search wait until it is *searchable*, which can
+  trail by the sink's `refresh_interval` while flusso drains a backlog. A fenced client waits once
+  per level and its clones share that.
+- `client.wait(&position).await?` (searchable) and `client.wait_applied(&position).await?` wait
+  explicitly, for reads made elsewhere.
+- **A fence never reads stale.** `Error::FenceTimeout { reached }` (default 5 s,
+  `.fence_timeout(d)`; flusso caps one wait at 60 s), `Error::FenceUnavailable` (no `.flusso(url)`,
+  flusso unreachable or not live yet; not retried), `Error::FenceRefused` (bad position, unknown
+  sink). Decide per endpoint what a timeout means: usually "saved, not indexed yet", not a 500.
+- Concurrent writers need no coordination: each fences on the position it read after its own commit.
+- Without `.fence_sink(..)` the wait covers every sink, so a stalled second sink blocks readers of a
+  healthy one.
+
+Not from Rust? The same wait is `GET {flusso}/wait?position=<lsn>&until=applied|searchable&sink=<name>&timeout_ms=<n>`:
+`200` reached, `408` timed out.
 
 ## Custom value types — `#[derive(FlussoValue)]`
 
