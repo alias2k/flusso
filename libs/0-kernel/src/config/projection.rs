@@ -58,7 +58,7 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
         map_values: map_value_type(field),
         decimal: is_decimal(field),
         enum_order: enum_order(field),
-        subfields: !matches!(&field.source, FieldSource::Column(column) if !column.subfields),
+        subfields: has_subfields(field),
         indexed: is_indexed(field),
     };
 
@@ -81,6 +81,15 @@ fn map_value_type(field: &Field) -> Option<Box<Mapping>> {
             ..
         }) => Some(Box::new(Mapping::of_type(values))),
         _ => None,
+    }
+}
+
+/// Whether a sink may add its automatic subfields: off only for a column that
+/// says `subfields: false`.
+fn has_subfields(field: &Field) -> bool {
+    match &field.source {
+        FieldSource::Column(column) => column.subfields,
+        _ => true,
     }
 }
 
