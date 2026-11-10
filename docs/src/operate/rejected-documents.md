@@ -10,7 +10,7 @@ OpenSearch accepted a bulk request but refused one document: a value that doesn'
 
 1. **Know your policy.** The default `on_error = "stop"` halts the run on the first rejection and leaves the batch unconfirmed, so it's redelivered on restart and the same document stops it again. That's deliberate: dropping data is opt-in.
 
-2. **Read the error.** With `stop`, the log names the index, the document id, and OpenSearch's reason. `/status` shows `phase: stopped` and `last_error`. Fix the source row or the schema (a `custom` type, a `default`, a wider type), then restart.
+2. **Read the error.** With `stop`, the log names the index, the document id, and OpenSearch's reason. `/status` shows `phase: stopped` and `last_error`. Fix the source row or the schema (a `custom` type, a `default`, a wider type), then restart. A `Limit of total fields … exceeded` reason is fixed in config instead: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md).
 
 3. **Opt into skipping where it's the right trade.** For an index where one bad row shouldn't stall the rest, set the policy per index:
 
