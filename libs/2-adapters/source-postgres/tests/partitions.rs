@@ -190,7 +190,12 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
         document_id("users", 1),
     ]) {
         let resolved = builder
-            .resolve(change.table(), change.key(), change.before())
+            .resolve(
+                change.table(),
+                change.key(),
+                change.before(),
+                change.after(),
+            )
             .await
             .unwrap();
         assert_eq!(resolved, [expected], "{change:?}");
@@ -198,7 +203,7 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
 
     // A change under a partition's own name is what no index reads.
     let dropped = builder
-        .resolve(&table("events_low"), &row_key(2), None)
+        .resolve(&table("events_low"), &row_key(2), None, None)
         .await
         .unwrap();
     assert!(dropped.is_empty());

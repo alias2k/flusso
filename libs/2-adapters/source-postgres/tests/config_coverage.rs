@@ -415,7 +415,7 @@ async fn aggregates_over_a_junction_entity_honour_distinct_and_both_filter_sets(
     // A junction row's own column changing resolves to its parent, and the
     // rebuilt document sees the junction filter flip.
     let parents = builder
-        .resolve(&table("purchases"), &row_key("id", 3), None)
+        .resolve(&table("purchases"), &row_key("id", 3), None, None)
         .await
         .unwrap();
     assert_eq!(parents.iter().map(id_of).collect::<Vec<_>>(), vec![1]);
@@ -877,7 +877,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // Root table: the key is the document id.
     assert_eq!(
         builder
-            .resolve(&table("users"), &key(1), None)
+            .resolve(&table("users"), &key(1), None, None)
             .await
             .unwrap(),
         vec![doc(1)],
@@ -886,7 +886,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // Direct FK: an order change resolves to its owning user.
     assert_eq!(
         builder
-            .resolve(&table("orders"), &key(10), None)
+            .resolve(&table("orders"), &key(10), None, None)
             .await
             .unwrap(),
         vec![doc(1)],
@@ -895,7 +895,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // One-to-one direct FK: a profile change resolves to its user.
     assert_eq!(
         builder
-            .resolve(&table("profiles"), &row_key("id", 100), None)
+            .resolve(&table("profiles"), &row_key("id", 100), None, None)
             .await
             .unwrap(),
         vec![doc(1)],
@@ -903,7 +903,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
 
     // Through, far side: tag 1 is held by users 1 and 2.
     let mut roots = builder
-        .resolve(&table("tags"), &key(1), None)
+        .resolve(&table("tags"), &key(1), None, None)
         .await
         .unwrap();
     roots.sort_by_key(id_of);
@@ -912,7 +912,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // Through, junction side: a user_tags row carrying user_id resolves directly.
     assert_eq!(
         builder
-            .resolve(&table("user_tags"), &row_key("user_id", 1), None)
+            .resolve(&table("user_tags"), &row_key("user_id", 1), None, None)
             .await
             .unwrap(),
         vec![doc(1)],
@@ -921,7 +921,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // Multi-hop: an item change walks order_items → orders → users.
     assert_eq!(
         builder
-            .resolve(&table("order_items"), &key(1002), None)
+            .resolve(&table("order_items"), &key(1002), None, None)
             .await
             .unwrap(),
         vec![doc(1)],
@@ -930,7 +930,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
     // A table the schema never references resolves to nothing.
     assert!(
         builder
-            .resolve(&table("tags"), &key(999), None)
+            .resolve(&table("tags"), &key(999), None, None)
             .await
             .unwrap()
             .is_empty()
@@ -1009,7 +1009,7 @@ async fn belongs_to_assembles_and_reverse_resolves() {
     // Reverse: a user change re-emits every order pointing at it — found on
     // the parent table itself (`WHERE user_id = 1`).
     let mut roots = builder
-        .resolve(&table("users"), &key(1), None)
+        .resolve(&table("users"), &key(1), None, None)
         .await
         .unwrap();
     roots.sort_by_key(id_of);
@@ -1019,7 +1019,7 @@ async fn belongs_to_assembles_and_reverse_resolves() {
     // resolve — they rebuild with a null object instead of going stale.
     assert_eq!(
         builder
-            .resolve(&table("users"), &key(999), None)
+            .resolve(&table("users"), &key(999), None, None)
             .await
             .unwrap(),
         vec![doc(30)],

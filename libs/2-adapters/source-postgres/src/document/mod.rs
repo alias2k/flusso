@@ -44,6 +44,15 @@
 //! current row is gone or names the new parent. That needs the table's replica
 //! identity to carry the link column; see [`resolve`].
 //!
+//! ## Updates that change nothing a document reads
+//!
+//! An update carries a pre- and post-image when the table's replica identity
+//! is `FULL`. Resolution then compares them: the root row's own document is
+//! emitted only if a column the index reads from the root changed, and a path
+//! back from a related row is walked only if a column that relation reads
+//! changed (fields, filters, `order_by`, aggregate input, link; see
+//! [`source::relation_columns`]). Without both images every path is walked.
+//!
 //! ## Remaining limits
 //!
 //! Multi-hop reverse resolution issues one query per hop.
@@ -63,6 +72,7 @@ use kernel::{
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{
     Catalog, ColumnInfo, Result, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
+    relation_columns, root_columns,
 };
 use sqlx::{PgPool, Row};
 
@@ -415,17 +425,31 @@ impl DocumentBuilder for PgDocumentBuilder {
         table: &TableName,
         key: &RowKey,
         before: Option<&RowImage>,
+        after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
         let mut ids = Vec::new();
         let mut read = false;
+        let mut skipped = 0_usize;
         for (name, schema) in self.spec.indexes() {
             let is_root = schema.table == *table;
+            let mut seen = HashSet::new();
             if is_root {
                 read = true;
-                ids.push(DocumentId {
-                    index: name.clone(),
-                    key: key.clone(),
-                });
+                if root_columns(schema).touched_by(key, before, after) {
+                    ids.push(DocumentId {
+                        index: name.clone(),
+                        key: key.clone(),
+                    });
+                    // A row that is its own ancestor must not re-emit this id.
+                    if let (Some(pk_column), [(column, own)]) =
+                        (&schema.primary_key, key.0.as_slice())
+                        && column == pk_column
+                    {
+                        seen.insert(own.clone());
+                    }
+                } else {
+                    skipped += 1;
+                }
             }
 
             let mut paths = Vec::new();
@@ -443,15 +467,14 @@ impl DocumentBuilder for PgDocumentBuilder {
                 continue;
             };
 
-            let mut seen = HashSet::new();
-            // A row that is its own ancestor must not re-emit the id pushed above.
-            if is_root
-                && let [(column, own)] = key.0.as_slice()
-                && *column == pk_column
-            {
-                seen.insert(own.clone());
-            }
             for path in &paths {
+                let touched = path.last().is_none_or(|relation| {
+                    relation_columns(relation, table).touched_by(key, before, after)
+                });
+                if !touched {
+                    skipped += 1;
+                    continue;
+                }
                 for root in self.resolve_path(schema, table, key, before, path).await? {
                     if seen.insert(root.clone()) {
                         ids.push(DocumentId {
@@ -461,6 +484,9 @@ impl DocumentBuilder for PgDocumentBuilder {
                     }
                 }
             }
+        }
+        if skipped > 0 {
+            tracing::trace!(skipped, "update changed no column these documents read");
         }
         if !read {
             self.warn_unread(table);
@@ -643,3 +669,7 @@ pub(crate) async fn primary_key_column_names(
     }
     Ok(names)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;

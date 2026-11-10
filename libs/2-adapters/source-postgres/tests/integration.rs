@@ -66,7 +66,7 @@ async fn assembles_documents_resolves_and_tombstones() {
 
     // resolve: a change to an order reverse-resolves to its user document.
     let affected = builder
-        .resolve(&table("orders"), &row_key(10), None)
+        .resolve(&table("orders"), &row_key(10), None, None)
         .await
         .unwrap();
     assert_eq!(affected, vec![document_id(1)]);
@@ -226,7 +226,7 @@ async fn uuid_keys_round_trip_through_build_build_many_and_resolve() {
     // resolve: a change to an order reverse-resolves to its user via the uuid FK
     // (`SELECT user_id FROM orders WHERE id = $1::uuid`).
     let affected = builder
-        .resolve(&table("orders"), &uuid_row_key(O1), None)
+        .resolve(&table("orders"), &uuid_row_key(O1), None, None)
         .await
         .unwrap();
     assert_eq!(affected, vec![uuid_document_id(U1)]);
@@ -357,7 +357,7 @@ async fn resolved_keys(
         ])
     });
     let ids = builder
-        .resolve(&table("items"), &row_key(id), before.as_ref())
+        .resolve(&table("items"), &row_key(id), before.as_ref(), None)
         .await
         .unwrap();
     let mut keys: Vec<i64> = ids
@@ -550,7 +550,7 @@ async fn a_root_change_without_a_self_join_resolves_only_its_own_document() {
         .unwrap();
 
     let affected = builder
-        .resolve(&table("users"), &row_key(1), None)
+        .resolve(&table("users"), &row_key(1), None, None)
         .await
         .unwrap();
 

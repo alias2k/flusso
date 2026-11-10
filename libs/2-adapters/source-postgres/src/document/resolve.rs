@@ -258,11 +258,9 @@ impl PgDocumentBuilder {
 /// link lives on that row: a direct child's `foreign_key`, or a junction's
 /// `left_key` when the junction itself changed.
 fn link_on_row<'a>(relation: &'a Relation, row_table: &TableName) -> Option<&'a ColumnName> {
-    match relation_target(relation).1 {
-        RelationKey::Direct(foreign_key) => Some(foreign_key),
-        RelationKey::Through(through) if *row_table == through.table => Some(&through.left_key),
-        RelationKey::Through(_) | RelationKey::Local(_) => None,
-    }
+    source::row_link(relation)
+        .filter(|(table, _)| *table == row_table)
+        .map(|(_, column)| column)
 }
 
 /// The parents found in the current database, plus the one the pre-image's
