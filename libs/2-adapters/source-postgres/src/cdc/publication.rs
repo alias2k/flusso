@@ -5,7 +5,14 @@
 //! publication, so "can flusso stream these tables?" becomes "does the
 //! publication cover them?". This module answers that read-only
 //! ([`inspect_publication`]) and, when the role is privileged enough, closes the
-//! gap ([`apply_publication`]). The neutral
+//! gap ([`apply_publication`]).
+//!
+//! A **partitioned** table needs one more thing: by default pgoutput streams
+//! its changes under each *partition's* name, which no index reads. A
+//! publication flusso creates sets `publish_via_partition_root = true`, so they
+//! arrive under the partitioned table's own name; an existing publication
+//! without it is altered (or reported) only when an index reads a partitioned
+//! table. The neutral
 //! [`CaptureProvisioning`](source::CaptureProvisioning) impl on
 //! [`WalChangeCapture`](super::WalChangeCapture) wraps both — callers never see
 //! the word "publication".
@@ -36,49 +43,88 @@ fn qualified_ident(table: &QualifiedTable) -> String {
     )
 }
 
-/// The DDL that would cover `missing`: `CREATE PUBLICATION … FOR TABLE …` when
-/// the publication does not exist yet, else `ALTER PUBLICATION … ADD TABLE …`.
-fn publication_sql(exists: bool, name: &str, missing: &[QualifiedTable]) -> String {
+/// The DDL that would cover `missing` and, when `reroute`, publish partitioned
+/// tables under their own name: `CREATE PUBLICATION … FOR TABLE … WITH
+/// (publish_via_partition_root = true)` when the publication does not exist
+/// yet (the option is always set on a new one), else `ALTER PUBLICATION … ADD
+/// TABLE …` and/or `ALTER PUBLICATION … SET (publish_via_partition_root = true)`.
+fn publication_sql(
+    exists: bool,
+    name: &str,
+    missing: &[QualifiedTable],
+    reroute: bool,
+) -> Vec<String> {
+    let name = quote_ident(name);
     let tables = missing
         .iter()
         .map(qualified_ident)
         .collect::<Vec<_>>()
         .join(", ");
-    if exists {
-        format!(
-            "ALTER PUBLICATION {} ADD TABLE {};",
-            quote_ident(name),
-            tables
-        )
-    } else {
-        format!(
-            "CREATE PUBLICATION {} FOR TABLE {};",
-            quote_ident(name),
-            tables
-        )
+    if !exists {
+        return vec![format!(
+            "CREATE PUBLICATION {name} FOR TABLE {tables} WITH ({VIA_ROOT} = true);"
+        )];
     }
+    let mut statements = Vec::new();
+    if !missing.is_empty() {
+        statements.push(format!("ALTER PUBLICATION {name} ADD TABLE {tables};"));
+    }
+    if reroute {
+        statements.push(format!("ALTER PUBLICATION {name} SET ({VIA_ROOT} = true);"));
+    }
+    statements
 }
 
+/// The publication option that streams a partitioned table's changes under the
+/// table's own name rather than each partition's.
+const VIA_ROOT: &str = "publish_via_partition_root";
+
+/// Per required table: whether the role owns it, whether it is partitioned, and
+/// whether any of its leaf partitions is published (`pg_publication_tables`
+/// lists the leaves, not the parent, of a partitioned member while the
+/// publication doesn't publish via the root). No row when the table is absent.
+const TABLE_SQL: &str = "SELECT pg_has_role(current_user, c.relowner, 'USAGE') AS owned, \
+       c.relkind = 'p' AS partitioned, \
+       c.relkind = 'p' AND EXISTS ( \
+         SELECT 1 FROM pg_partition_tree(c.oid::regclass) t \
+         JOIN pg_class l ON l.oid = t.relid \
+         JOIN pg_namespace ln ON ln.oid = l.relnamespace \
+         JOIN pg_publication_tables pt \
+           ON pt.pubname = $3 AND pt.schemaname = ln.nspname AND pt.tablename = l.relname \
+         WHERE t.isleaf \
+       ) AS leaves_published \
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')";
+
 /// Read-only coverage + privilege report for publication `name` against the
-/// `required` tables. Computes which tables are missing, whether the current
-/// role could provision them, and the SQL that would.
+/// `required` tables. Computes which tables are missing, which are misrouted
+/// (partitioned, under a publication that streams their partitions' names),
+/// whether the current role could fix both, and the SQL that would.
 pub(crate) async fn inspect_publication(
     pool: &PgPool,
     name: &str,
     required: &BTreeSet<QualifiedTable>,
 ) -> Result<CoverageReport> {
-    // Existence + ownership of the publication in one probe: a row iff it exists,
-    // the bool telling us whether the current role owns it (needed to ALTER it).
-    let owns_pub: Option<bool> = sqlx::query_scalar(
-        "SELECT pg_has_role(current_user, p.pubowner, 'USAGE') \
+    // Existence, ownership (needed to ALTER it), and the via-root option in one
+    // probe: a row iff the publication exists.
+    let publication = sqlx::query(
+        "SELECT pg_has_role(current_user, p.pubowner, 'USAGE') AS owned, \
+                p.pubviaroot AS via_root \
          FROM pg_publication p WHERE p.pubname = $1",
     )
     .bind(name)
     .fetch_optional(pool)
     .await
     .map_err(query_err)?;
-    let exists = owns_pub.is_some();
-    let owns_pub = owns_pub.unwrap_or(false);
+    let (exists, owns_pub, via_root) = match publication {
+        Some(row) => (
+            true,
+            row.try_get::<bool, _>("owned").map_err(query_err)?,
+            row.try_get::<bool, _>("via_root").map_err(query_err)?,
+        ),
+        // A publication flusso creates publishes via the root.
+        None => (false, false, true),
+    };
 
     // Tables the publication already streams (FOR ALL TABLES is expanded here).
     let present_rows =
@@ -94,21 +140,48 @@ pub(crate) async fn inspect_publication(
         present_set.insert((schema, table));
     }
 
-    // Partition the requested set (iterating the BTreeSet keeps both lists sorted).
+    // Partition the requested set (iterating the BTreeSet keeps the lists
+    // sorted), noting ownership of each missing table — required to add it.
     let mut present = Vec::new();
     let mut missing = Vec::new();
+    let mut misrouted = Vec::new();
+    let mut blockers = Vec::new();
+    let mut owns_all_missing = true;
     for table in required {
+        let row = sqlx::query(TABLE_SQL)
+            .bind(table.schema.as_ref())
+            .bind(table.table.as_ref())
+            .bind(name)
+            .fetch_optional(pool)
+            .await
+            .map_err(query_err)?;
+        let Some(row) = row else {
+            missing.push(table.clone());
+            owns_all_missing = false;
+            blockers.push(format!("table {table} does not exist"));
+            continue;
+        };
+        let owned: bool = row.try_get("owned").map_err(query_err)?;
+        let partitioned: bool = row.try_get("partitioned").map_err(query_err)?;
+        let leaves_published: bool = row.try_get("leaves_published").map_err(query_err)?;
         let key = (
             table.schema.as_ref().to_owned(),
             table.table.as_ref().to_owned(),
         );
-        if present_set.contains(&key) {
+        if present_set.contains(&key) || leaves_published {
             present.push(table.clone());
         } else {
             missing.push(table.clone());
+            if !owned {
+                owns_all_missing = false;
+                blockers.push(format!("role does not own table {table}"));
+            }
+        }
+        if partitioned && !via_root {
+            misrouted.push(table.clone());
         }
     }
-    let satisfied = missing.is_empty();
+    let satisfied = missing.is_empty() && misrouted.is_empty();
 
     let is_super: bool = sqlx::query_scalar(
         "SELECT COALESCE(rolsuper, false) FROM pg_roles WHERE rolname = current_user",
@@ -123,33 +196,6 @@ pub(crate) async fn inspect_publication(
     .fetch_one(pool)
     .await
     .map_err(query_err)?;
-
-    // Ownership of each missing table — required to add it to a publication.
-    let mut blockers = Vec::new();
-    let mut owns_all_missing = true;
-    for table in &missing {
-        let owned: Option<bool> = sqlx::query_scalar(
-            "SELECT pg_has_role(current_user, c.relowner, 'USAGE') \
-             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
-        )
-        .bind(table.schema.as_ref())
-        .bind(table.table.as_ref())
-        .fetch_optional(pool)
-        .await
-        .map_err(query_err)?;
-        match owned {
-            Some(true) => {}
-            Some(false) => {
-                owns_all_missing = false;
-                blockers.push(format!("role does not own table {table}"));
-            }
-            None => {
-                owns_all_missing = false;
-                blockers.push(format!("table {table} does not exist"));
-            }
-        }
-    }
 
     let manageable = if satisfied || is_super {
         true
@@ -172,29 +218,32 @@ pub(crate) async fn inspect_publication(
     let remediation = if satisfied {
         Vec::new()
     } else {
-        vec![publication_sql(exists, name, &missing)]
+        publication_sql(exists, name, &missing, !misrouted.is_empty())
     };
 
     Ok(CoverageReport {
         satisfied,
         present,
         missing,
+        misrouted,
         manageable,
         blockers,
         remediation,
     })
 }
 
-/// Provision `missing` into publication `name`: create it `FOR TABLE …` when it
-/// does not exist, else `ALTER … ADD TABLE …`. Idempotent — a no-op when
-/// `missing` is empty. The caller is responsible for having checked privilege
-/// (a denied grant surfaces here as a [`SourceError::Setup`]).
+/// Provision `missing` into publication `name` and, when `reroute`, publish
+/// partitioned tables via their root: create the publication when it does not
+/// exist, else alter it — in one transaction. A no-op when there is nothing to
+/// do. The caller is responsible for having checked privilege (a denied grant
+/// surfaces here as a [`SourceError::Setup`]).
 pub(crate) async fn apply_publication(
     pool: &PgPool,
     name: &str,
     missing: &[QualifiedTable],
+    reroute: bool,
 ) -> Result<()> {
-    if missing.is_empty() {
+    if missing.is_empty() && !reroute {
         return Ok(());
     }
     let exists: bool =
@@ -203,19 +252,22 @@ pub(crate) async fn apply_publication(
             .fetch_one(pool)
             .await
             .map_err(query_err)?;
+    let setup = |e: sqlx::Error| {
+        SourceError::Setup(format!(
+            "failed to {} publication '{name}': {e}",
+            if exists { "alter" } else { "create" },
+        ))
+    };
+    let mut tx = pool.begin().await.map_err(setup)?;
     // The SQL is assembled from `nutype`-validated, double-quoted identifiers
     // (no user free-text reaches it), so it is safe to run as a dynamic string.
-    let sql = publication_sql(exists, name, missing);
-    sqlx::query(AssertSqlSafe(sql))
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            SourceError::Setup(format!(
-                "failed to {} publication '{name}': {e}",
-                if exists { "extend" } else { "create" },
-            ))
-        })?;
-    Ok(())
+    for statement in publication_sql(exists, name, missing, reroute) {
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(&mut *tx)
+            .await
+            .map_err(setup)?;
+    }
+    tx.commit().await.map_err(setup)
 }
 
 #[cfg(test)]

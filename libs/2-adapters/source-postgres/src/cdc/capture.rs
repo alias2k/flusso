@@ -328,19 +328,29 @@ impl CaptureProvisioning for WalChangeCapture {
             return Ok(report);
         }
 
-        let missing = report
-            .missing
-            .iter()
-            .map(|table| table.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let join = |tables: &[QualifiedTable]| {
+            tables
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let missing = join(&report.missing);
+        let misrouted = join(&report.misrouted);
 
         if manage && report.manageable {
-            publication::apply_publication(pool, &self.config.publication, &report.missing).await?;
+            publication::apply_publication(
+                pool,
+                &self.config.publication,
+                &report.missing,
+                !report.misrouted.is_empty(),
+            )
+            .await?;
             tracing::info!(
                 publication = %self.config.publication,
                 tables = %missing,
-                "provisioned publication for missing tables",
+                partitioned = %misrouted,
+                "provisioned publication for missing tables and partitioned tables",
             );
         } else {
             let reason = if !manage {
@@ -351,10 +361,12 @@ impl CaptureProvisioning for WalChangeCapture {
             tracing::warn!(
                 publication = %self.config.publication,
                 missing = %missing,
+                partitioned = %misrouted,
                 reason = %reason,
                 remediation = %report.remediation.join(" "),
-                "publication is missing tables and flusso will not create them automatically; \
-                 run the printed SQL to stream every table (changes to missing tables are dropped)",
+                "publication is missing tables, or streams partitioned tables under their \
+                 partitions' names, and flusso will not fix it automatically; run the printed \
+                 SQL (until then, changes to those tables are dropped)",
             );
         }
 
