@@ -229,21 +229,23 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
         self
     }
 
-    /// Page the blended list by **cursor** instead of offset — one consistent
-    /// snapshot across every index of the union, unaffected by later writes or
-    /// a reindex. `None` starts a new walk; pass the previous page's
-    /// [`SearchResponse::next`] to continue (see
-    /// [`PageCursor`]).
+    /// Page the blended list by **cursor** instead of offset: each page resumes
+    /// right after the previous page's last hit, so inserts and deletes ahead of
+    /// it never shift the walk, and a reindex mid-walk repeats nothing. `None`
+    /// starts a new walk; pass the previous page's [`SearchResponse::next`] to
+    /// continue (see [`PageCursor`]). Live by default;
+    /// [`point_in_time`](MultiCursorSearch::point_in_time) pins one fixed view.
     ///
     /// The sort is made total by appending `_index` then `_id` ascending
     /// (ids collide across indexes) unless it already sorts on them. A
     /// [`from`](Self::from) makes the cursor search fail with
-    /// [`Error::Cursor`]. Needs OpenSearch ≥ 2.4.
+    /// [`Error::Cursor`].
     #[must_use]
     pub fn cursor(self, cursor: impl Into<Option<PageCursor>>) -> MultiCursorSearch<U> {
         MultiCursorSearch {
             search: self,
             cursor: cursor.into(),
+            pinned: false,
             keep_alive: crate::cursor::DEFAULT_KEEP_ALIVE,
         }
     }
@@ -355,6 +357,7 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
 pub struct MultiCursorSearch<U> {
     search: MultiSearch<U>,
     cursor: Option<PageCursor>,
+    pinned: bool,
     keep_alive: Duration,
 }
 
@@ -363,11 +366,24 @@ pub struct MultiCursorSearch<U> {
 const UNION_TIEBREAK: &[&str] = &["_index", "_id"];
 
 impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
-    /// How long the snapshot stays open between two pages (default one
-    /// minute). Every page renews it; once it lapses the next page fails with
-    /// [`Error::CursorExpired`].
+    /// Pin the walk to one OpenSearch **point-in-time**: every page reads the
+    /// index as it was on the first page — no later write, no reindex — at the
+    /// cost of a server-side context per walk (OpenSearch ≥ 2.4). Without it,
+    /// the walk is live: fresh results, nothing held open. A resumed walk keeps
+    /// whichever mode its cursor started in.
+    #[must_use]
+    pub fn point_in_time(mut self) -> Self {
+        self.pinned = true;
+        self
+    }
+
+    /// How long a pinned walk's point-in-time stays open between two pages
+    /// (default one minute; every page renews it). Implies
+    /// [`point_in_time`](Self::point_in_time). Once it lapses, the next page
+    /// fails with [`Error::CursorExpired`].
     #[must_use]
     pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.pinned = true;
         self.keep_alive = keep_alive;
         self
     }
@@ -386,7 +402,12 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
             path: &self.search.path,
             body,
             tiebreak: UNION_TIEBREAK,
+            targets: U::TARGETS
+                .iter()
+                .map(|(index, hash)| format!("{index}_{hash}"))
+                .collect(),
             cursor: self.cursor.as_ref(),
+            pinned: self.pinned,
             keep_alive: self.keep_alive,
         })
     }
@@ -494,7 +515,7 @@ fn dispatch_index<U: FlussoMultiDocument>(stripped: &str) -> Cow<'_, str> {
 /// Whether `name` is `{physical}_{digits}` — a concrete generation of the hash
 /// alias `physical`. The remainder after `physical_` must be a non-empty run of
 /// ASCII digits (the sink's generation counter).
-fn is_generation_of(name: &str, physical: &str) -> bool {
+pub(crate) fn is_generation_of(name: &str, physical: &str) -> bool {
     name.strip_prefix(physical)
         .and_then(|rest| rest.strip_prefix('_'))
         .is_some_and(|generation| {

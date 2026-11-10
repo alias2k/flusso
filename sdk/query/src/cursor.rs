@@ -1,32 +1,32 @@
-//! Page cursors: resume an ordered result list right after a page's last hit,
-//! reading **one consistent snapshot** of the index.
+//! Page cursors: resume an ordered result list right after a page's last hit.
 //!
-//! Offset paging (`from`/`size`) re-runs the query on every page, so on an
-//! index flusso keeps current from the WAL it drifts: a write ahead of the
-//! window shifts every later page, a reindex swaps the generation under it, and
-//! `from + size` stops at `index.max_result_window`. A page cursor fixes all
-//! three (ADR 0008):
+//! Offset paging (`from`/`size`) re-runs the query and skips `from` hits, so on
+//! an index flusso keeps current from the WAL it drifts: an insert or delete
+//! ahead of the window shifts every later page, and `from + size` stops at
+//! `index.max_result_window`. A page cursor resumes *after a sort position*
+//! instead (ADR 0008):
 //!
-//! - The first page opens an OpenSearch **point-in-time** (PIT) over the index.
-//!   Every page searches that PIT, so it sees neither later writes nor the
-//!   generation swap of a reindex.
-//! - Each page resumes with `search_after` the previous page's last sort values.
-//!   The sort is made total by appending `_id` (and `_index` for a combined
-//!   search) unless the caller's sort already holds it; an unsorted search
-//!   keeps relevance order, with `_score` descending first.
-//! - The [`PageCursor`] handed back in [`SearchResponse::next`] carries the PIT
-//!   id and those sort values as an **opaque string**, safe to pass through an
-//!   HTTP API and back.
-//!
-//! The public face is [`PageCursor`], whose docs carry the walk example.
-//!
-//! Cursors need **OpenSearch ≥ 2.4**. The snapshot lives for the
-//! [`keep_alive`](crate::CursorSearch::keep_alive), renewed by every page; once
-//! it lapses, or a reindex drops the generation it pinned, the next page fails
-//! with [`Error::CursorExpired`] and the walk restarts from page one.
+//! - Each page searches with `search_after` the previous page's last sort
+//!   values. The sort is made total by appending `_id` (and `_index` for a
+//!   combined search) unless the caller's sort already holds it; an unsorted
+//!   search keeps relevance order, with `_score` descending first.
+//! - **Live** (the default): every page reads the index as it is now. Inserts
+//!   and deletes ahead of the position never shift the walk, nothing is held
+//!   open on the server, and nothing expires. A resumed union walk first
+//!   points its `_index` values at the generation each hash alias serves now,
+//!   so a reindex mid-walk repeats nothing.
+//! - **Pinned** ([`point_in_time`](crate::CursorSearch::point_in_time)): the
+//!   first page opens an OpenSearch point-in-time and every page reads it — no
+//!   later write, no reindex — until the last page closes it or its keep-alive
+//!   lapses ([`Error::CursorExpired`]).
+//! - The [`PageCursor`] handed back in [`SearchResponse::next`] carries the
+//!   sort values (and a pinned walk's point-in-time id) as an **opaque
+//!   string**, safe to pass through an HTTP API and back. Its docs carry the
+//!   walk example.
 //!
 //! [`SearchResponse::next`]: crate::SearchResponse::next
 
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -42,7 +42,7 @@ use crate::error::{Error, Result};
 /// The token version this crate writes and reads.
 const VERSION: u8 = 1;
 
-/// How long the snapshot behind a cursor walk stays open between two pages,
+/// How long a pinned walk's point-in-time stays open between two pages,
 /// unless [`keep_alive`](crate::CursorSearch::keep_alive) says otherwise.
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(60);
 
@@ -86,13 +86,17 @@ const DEFAULT_SIZE: u64 = 10;
 /// # }
 /// ```
 ///
-/// Every page reads the snapshot the first page opened (OpenSearch ≥ 2.4). It
-/// lives for the [`keep_alive`](crate::CursorSearch::keep_alive), renewed by each
-/// page; once it lapses, or a reindex drops the generation it pinned, the next
-/// page is [`Error::CursorExpired`]: start the walk again.
+/// A walk is **live** by default: each page reads the index as it is now, and
+/// a cursor never expires. A document whose *sort value* changes mid-walk can
+/// show twice or not at all. To read one fixed view instead, pin the walk with
+/// [`point_in_time`](crate::CursorSearch::point_in_time) (OpenSearch ≥ 2.4): it
+/// lives for the [`keep_alive`](crate::CursorSearch::keep_alive), renewed by
+/// each page; once it lapses, or a reindex drops the generation it pinned, the
+/// next page is [`Error::CursorExpired`]: start the walk again.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageCursor {
-    pit: String,
+    /// The point-in-time a pinned walk reads; `None` for a live walk.
+    pit: Option<String>,
     after: Vec<Value>,
     fingerprint: u64,
 }
@@ -100,13 +104,14 @@ pub struct PageCursor {
 #[derive(Serialize, Deserialize)]
 struct Token {
     v: u8,
-    pit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pit: Option<String>,
     after: Vec<Value>,
     fp: String,
 }
 
 impl PageCursor {
-    pub(crate) fn new(pit: String, after: Vec<Value>, fingerprint: u64) -> Self {
+    pub(crate) fn new(pit: Option<String>, after: Vec<Value>, fingerprint: u64) -> Self {
         Self {
             pit,
             after,
@@ -114,19 +119,22 @@ impl PageCursor {
         }
     }
 
-    /// Close the snapshot behind this walk now, instead of letting it expire.
-    /// The last page of a walk closes it on its own; call this when a walk is
-    /// abandoned early. Closing an already-expired snapshot is not an error.
+    /// End a [pinned](crate::CursorSearch::point_in_time) walk now: close its
+    /// point-in-time instead of letting it expire. The last page closes it on
+    /// its own; call this when a pinned walk is abandoned early. A live walk
+    /// holds nothing, so this is a no-op; closing an expired point-in-time is
+    /// not an error either.
     pub async fn close(&self, client: &Client) -> Result<()> {
-        client.close_pit(&self.pit).await
+        match &self.pit {
+            Some(pit) => client.close_pit(pit).await,
+            None => Ok(()),
+        }
     }
 
-    pub(crate) fn pit(&self) -> &str {
-        &self.pit
-    }
-
-    pub(crate) fn after(&self) -> &[Value] {
-        &self.after
+    /// Whether this walk is pinned to a point-in-time.
+    #[must_use]
+    pub fn is_pinned(&self) -> bool {
+        self.pit.is_some()
     }
 
     /// Reject a cursor handed back with a different query than the one that
@@ -215,7 +223,14 @@ pub(crate) struct PageRequest<'a> {
     pub(crate) body: Map<String, Value>,
     /// Sort keys appended, in order, when the caller's sort lacks them.
     pub(crate) tiebreak: &'static [&'static str],
+    /// The unprefixed physical index of every target the path addresses
+    /// (`{INDEX}_{SCHEMA_HASH}`), for rewriting `_index` sort values to the
+    /// current generation on a live resume.
+    pub(crate) targets: Vec<String>,
     pub(crate) cursor: Option<&'a PageCursor>,
+    /// Open a point-in-time on the first page. A resumed walk follows its
+    /// cursor instead.
+    pub(crate) pinned: bool,
     pub(crate) keep_alive: Duration,
 }
 
@@ -269,45 +284,84 @@ pub(crate) struct PageBody {
     pub(crate) fingerprint: u64,
 }
 
-/// The body a cursor page POSTs to `/_search`: the search's body with the total
-/// sort, the PIT, and (when resuming) `search_after`. `bound_path` is the
-/// physical path as requested (prefix applied), so a cursor can't cross
-/// deployments.
-///
-/// With no sort, the walk keeps relevance order: `_score` descending leads the
-/// tiebreak, exactly what an unsorted search ranks by.
-pub(crate) fn page_body(request: &PageRequest<'_>, pit: &str, bound_path: &str) -> PageBody {
-    let mut body = request.body.clone();
-    let sort = match body.remove("sort") {
-        Some(Value::Array(sort)) if !sort.is_empty() => sort,
+/// The sort a cursor page runs with: the search's own, made total with the
+/// tiebreak. With no sort, the walk keeps relevance order: `_score`
+/// descending leads, exactly what an unsorted search ranks by.
+pub(crate) fn effective_sort(request: &PageRequest<'_>) -> Vec<Value> {
+    let sort = match request.body.get("sort") {
+        Some(Value::Array(sort)) if !sort.is_empty() => sort.clone(),
         _ => vec![crate::handles::Sort::score().to_value()],
     };
-    body.insert(
-        "sort".to_string(),
-        Value::Array(total_sort(sort, request.tiebreak)),
-    );
+    total_sort(sort, request.tiebreak)
+}
+
+/// The body a cursor page POSTs: the search's body with the total `sort`,
+/// the point-in-time when pinned, and `search_after` when resuming.
+/// `bound_path` is the physical path as requested (prefix applied), so a
+/// cursor can't cross deployments.
+pub(crate) fn page_body(
+    request: &PageRequest<'_>,
+    pit: Option<&str>,
+    bound_path: &str,
+    after: Option<Vec<Value>>,
+) -> PageBody {
+    let mut body = request.body.clone();
+    body.insert("sort".to_string(), Value::Array(effective_sort(request)));
     let mut bound = body.clone();
     for key in UNBOUND_KEYS {
         bound.remove(*key);
     }
     let fingerprint = fingerprint(&Value::Object(bound), bound_path);
 
-    let mut pit_clause = Map::new();
-    pit_clause.insert("id".to_string(), Value::String(pit.to_owned()));
-    pit_clause.insert(
-        "keep_alive".to_string(),
-        Value::String(keep_alive_param(request.keep_alive)),
-    );
-    body.insert("pit".to_string(), Value::Object(pit_clause));
-    if let Some(cursor) = request.cursor {
-        body.insert(
-            "search_after".to_string(),
-            Value::Array(cursor.after().to_vec()),
+    if let Some(pit) = pit {
+        let mut pit_clause = Map::new();
+        pit_clause.insert("id".to_string(), Value::String(pit.to_owned()));
+        pit_clause.insert(
+            "keep_alive".to_string(),
+            Value::String(keep_alive_param(request.keep_alive)),
         );
+        body.insert("pit".to_string(), Value::Object(pit_clause));
+    }
+    if let Some(after) = after {
+        body.insert("search_after".to_string(), Value::Array(after));
     }
     PageBody {
         body: Value::Object(body),
         fingerprint,
+    }
+}
+
+/// Point each `_index` value of a live cursor's `search_after` at the
+/// generation its hash alias serves **now**.
+///
+/// A hit's `_index` is the concrete generation (`users_x_1`). After a reindex
+/// the alias serves `users_x_2`, and resuming after `users_x_1` would repeat
+/// every hit tied on the leading keys. `current` maps each prefixed hash alias
+/// to its concrete index; a value whose target is unknown, or whose alias
+/// isn't listed (an un-aliased legacy index), is left alone.
+pub(crate) fn rewrite_generations(
+    after: &mut [Value],
+    sort: &[Value],
+    targets: &[String],
+    prefix: &str,
+    current: &HashMap<String, String>,
+) {
+    let positions = sort
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| sort_key(entry) == Some("_index"))
+        .map(|(position, _)| position);
+    for position in positions {
+        let Some(Value::String(concrete)) = after.get_mut(position) else {
+            continue;
+        };
+        let stripped = concrete.strip_prefix(prefix).unwrap_or(concrete);
+        let target = targets.iter().find(|target| {
+            stripped == target.as_str() || crate::multi::is_generation_of(stripped, target)
+        });
+        if let Some(now) = target.and_then(|target| current.get(&format!("{prefix}{target}"))) {
+            concrete.clone_from(now);
+        }
     }
 }
 
@@ -316,19 +370,44 @@ pub(crate) fn keep_alive_param(keep_alive: Duration) -> String {
     format!("{}ms", keep_alive.as_millis().max(1))
 }
 
-/// Run one cursor page: open the snapshot (first page) or check the cursor
-/// (later pages), search it, and work out `next`. The last page closes the
-/// snapshot, best-effort.
+/// Run one cursor page.
+///
+/// - **Live** (the default): a plain `search_after` search on the path. A
+///   resumed union walk first rewrites its `_index` values to the current
+///   generations ([`rewrite_generations`]).
+/// - **Pinned**: open the point-in-time (first page) or follow the cursor's,
+///   search it, and close it after the last page — or after a first page that
+///   fails, which would otherwise hold it until the keep-alive lapses.
 pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Result<FetchedPage> {
     let bound_path = client.prefixed(request.path);
     let (pit, opened) = match request.cursor {
-        Some(cursor) => (cursor.pit().to_owned(), false),
-        None => (
-            client.open_pit(request.path, request.keep_alive).await?,
+        Some(cursor) => (cursor.pit.clone(), false),
+        None if request.pinned => (
+            Some(client.open_pit(request.path, request.keep_alive).await?),
             true,
         ),
+        None => (None, false),
     };
-    let PageBody { body, fingerprint } = page_body(&request, &pit, &bound_path);
+    let after = match request.cursor {
+        None => None,
+        Some(cursor) => {
+            let mut after = cursor.after.clone();
+            let sort = effective_sort(&request);
+            let sorts_on_index = sort.iter().any(|entry| sort_key(entry) == Some("_index"));
+            if cursor.pit.is_none() && sorts_on_index {
+                let current = client.current_generations(request.path).await?;
+                rewrite_generations(
+                    &mut after,
+                    &sort,
+                    &request.targets,
+                    &client.index_prefix,
+                    &current,
+                );
+            }
+            Some(after)
+        }
+    };
+    let PageBody { body, fingerprint } = page_body(&request, pit.as_deref(), &bound_path, after);
     if let Some(cursor) = request.cursor {
         cursor.check(fingerprint)?;
     }
@@ -336,36 +415,42 @@ pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Res
         .get("size")
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_SIZE);
-    let response = match client.search_pit(&body).await {
+    let searched = match &pit {
+        Some(_) => client.search_pit(&body).await,
+        None => client.search_at(request.path, &body).await,
+    };
+    let response = match searched {
         Ok(response) => response,
         Err(error) => {
-            // A first page that fails would otherwise hold its fresh snapshot
-            // open until the keep-alive lapses.
-            if opened {
-                close_quietly(client, &pit).await;
+            if let (true, Some(pit)) = (opened, &pit) {
+                close_quietly(client, pit).await;
             }
             return Err(error);
         }
     };
-    let pit = response
-        .get("pit_id")
-        .and_then(Value::as_str)
-        .map_or(pit, str::to_owned);
+    let pit = pit.map(|pit| {
+        response
+            .get("pit_id")
+            .and_then(Value::as_str)
+            .map_or(pit, str::to_owned)
+    });
     let next = match next_after(&response, size) {
         Some(after) => Some(PageCursor::new(pit, after, fingerprint)),
         None => {
-            close_quietly(client, &pit).await;
+            if let Some(pit) = &pit {
+                close_quietly(client, pit).await;
+            }
             None
         }
     };
     Ok(FetchedPage { response, next })
 }
 
-/// Close a snapshot best-effort: a failure only costs a context until its
+/// Close a point-in-time best-effort: a failure only costs a context until its
 /// keep-alive lapses, so it is logged, not returned.
 async fn close_quietly(client: &Client, pit: &str) {
     if let Err(error) = client.close_pit(pit).await {
-        tracing::warn!(%error, "closing a cursor walk's snapshot failed");
+        tracing::warn!(%error, "closing a pinned cursor walk's point-in-time failed");
     }
 }
 

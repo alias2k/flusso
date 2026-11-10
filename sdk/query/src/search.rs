@@ -275,22 +275,23 @@ impl<T> Search<T> {
         self
     }
 
-    /// Page this search by **cursor** instead of offset: every page reads one
-    /// consistent snapshot of the index, unaffected by later writes or a
-    /// reindex, and comes back with a [`SearchResponse::next`] cursor that
-    /// resumes right after it. `None` starts a new walk; pass the previous
-    /// page's `next` to continue (see [`PageCursor`]).
+    /// Page this search by **cursor** instead of offset: each page comes back
+    /// with a [`SearchResponse::next`] cursor that resumes right after its last
+    /// hit, so inserts and deletes ahead of it never shift the walk and depth is
+    /// unlimited. `None` starts a new walk; pass the previous page's `next` to
+    /// continue (see [`PageCursor`]). Live by default;
+    /// [`point_in_time`](CursorSearch::point_in_time) pins one fixed view.
     ///
     /// The sort is made total by appending `_id` ascending unless it already
     /// sorts on `_id`. A [`from`](Self::from) or raw
     /// [`search_after`](Self::search_after) makes the cursor search fail with
     /// [`Error::Cursor`]: the cursor owns the position.
-    /// Needs OpenSearch ≥ 2.4.
     #[must_use]
     pub fn cursor(self, cursor: impl Into<Option<PageCursor>>) -> CursorSearch<T> {
         CursorSearch {
             search: self,
             cursor: cursor.into(),
+            pinned: false,
             keep_alive: crate::cursor::DEFAULT_KEEP_ALIVE,
         }
     }
@@ -512,6 +513,7 @@ where
 pub struct CursorSearch<T> {
     search: Search<T>,
     cursor: Option<PageCursor>,
+    pinned: bool,
     keep_alive: Duration,
 }
 
@@ -530,11 +532,24 @@ pub struct IdsPage {
 const SINGLE_INDEX_TIEBREAK: &[&str] = &["_id"];
 
 impl<T> CursorSearch<T> {
-    /// How long the snapshot stays open between two pages (default one
-    /// minute). Every page renews it; once it lapses the next page fails with
-    /// [`Error::CursorExpired`].
+    /// Pin the walk to one OpenSearch **point-in-time**: every page reads the
+    /// index as it was on the first page — no later write, no reindex — at the
+    /// cost of a server-side context per walk (OpenSearch ≥ 2.4). Without it,
+    /// the walk is live: fresh results, nothing held open. A resumed walk keeps
+    /// whichever mode its cursor started in.
+    #[must_use]
+    pub fn point_in_time(mut self) -> Self {
+        self.pinned = true;
+        self
+    }
+
+    /// How long a pinned walk's point-in-time stays open between two pages
+    /// (default one minute; every page renews it). Implies
+    /// [`point_in_time`](Self::point_in_time). Once it lapses, the next page
+    /// fails with [`Error::CursorExpired`].
     #[must_use]
     pub fn keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.pinned = true;
         self.keep_alive = keep_alive;
         self
     }
@@ -559,7 +574,9 @@ impl<T> CursorSearch<T> {
             path,
             body,
             tiebreak: SINGLE_INDEX_TIEBREAK,
+            targets: vec![self.search.physical_index()],
             cursor: self.cursor.as_ref(),
+            pinned: self.pinned,
             keep_alive: self.keep_alive,
         })
     }

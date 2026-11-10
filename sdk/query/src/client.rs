@@ -1,6 +1,7 @@
 //! The [`Client`] transport. Points at OpenSearch (not at flusso — the engine
 //! is write-only; reads go straight to the index it maintains).
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -143,7 +144,7 @@ impl Client {
     }
 
     /// POST a point-in-time search to `/_search` (no index path: the PIT names
-    /// the indexes, and OpenSearch refuses both). A gone snapshot — expired,
+    /// the indexes, and OpenSearch refuses both). A gone point-in-time — expired,
     /// closed, or its generation dropped by a reindex — is
     /// [`Error::CursorExpired`].
     #[tracing::instrument(
@@ -162,6 +163,32 @@ impl Client {
                 Error::Status { body, .. } if snapshot_gone(&body) => Error::CursorExpired { body },
                 other => other,
             })
+    }
+
+    /// Which concrete index each alias on `path` (prefixed here) points at
+    /// now, keyed by the prefixed alias name: `users_x` → `users_x_2`. A live
+    /// union walk reads it to follow a reindex. Crate-internal.
+    #[tracing::instrument(
+        name = "alias.current",
+        level = "debug",
+        skip_all,
+        fields(path, status = tracing::field::Empty),
+        err,
+    )]
+    pub(crate) async fn current_generations(&self, path: &str) -> Result<HashMap<String, String>> {
+        let endpoint = format!("{}/{}/_alias", self.base, self.prefixed(path));
+        tracing::debug!(%endpoint, "GET _alias");
+        let response = self.execute_json(self.http.get(&endpoint)).await?;
+        let indexes: HashMap<String, IndexAliases> = serde_json::from_value(response)?;
+        Ok(indexes
+            .into_iter()
+            .flat_map(|(concrete, entry)| {
+                entry
+                    .aliases
+                    .into_keys()
+                    .map(move |alias| (alias, concrete.clone()))
+            })
+            .collect())
     }
 
     /// Close a point-in-time. Closing one that already expired is not an
@@ -292,6 +319,12 @@ impl Client {
 /// proxy) stays a plain [`Error::Status`].
 fn snapshot_gone(body: &str) -> bool {
     body.contains("search_context_missing_exception") || body.contains("index_not_found_exception")
+}
+
+#[derive(Deserialize)]
+struct IndexAliases {
+    #[serde(default)]
+    aliases: HashMap<String, serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]

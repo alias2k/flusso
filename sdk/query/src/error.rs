@@ -58,9 +58,9 @@ pub enum Error {
     #[error("page cursor belongs to a different query")]
     CursorMismatch,
 
-    /// The snapshot behind a [`PageCursor`](crate::PageCursor) is gone: its
-    /// keep-alive lapsed, it was closed, or a reindex dropped the generation it
-    /// pinned. Restart the walk from page one.
+    /// A pinned walk's point-in-time is gone: its keep-alive lapsed, it was
+    /// closed, or a reindex dropped the generation it pinned. Restart the walk
+    /// from page one. A live walk never expires.
     #[error("page cursor expired: {body}")]
     CursorExpired {
         /// OpenSearch's error body, for diagnostics.
