@@ -206,6 +206,20 @@
             }
           ],
           "description": "Per-index override of the global [`on_error`](crate::toml::ConfigToml::on_error)\npolicy. Omitted inherits the global default."
+        },
+        "sinks": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "$ref": "#/definitions/sink_opensearch_index"
+              }
+            ]
+          },
+          "description": "Per-sink options for this index only, keyed by sink name: each value\nis that sink's per-index options (an OpenSearch sink takes\n`index_settings`). The sink's adapter validates them; a name that is no\ndeclared sink is an error.",
+          "propertyNames": {
+            "$ref": "#/definitions/SinkName"
+          }
         }
       },
       "required": [
@@ -452,6 +466,10 @@
       ],
       "description": "Which analyzer toolkit the sink wires its `flusso_*` analyzers onto."
     },
+    "sink_opensearch_IndexSettings": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "sink_opensearch": {
       "type": "object",
       "additionalProperties": false,
@@ -563,6 +581,14 @@
           "type": "boolean",
           "description": "Whether `text`/`keyword` fields are enriched with a good analyzer and the\n`keyword` / `keyword_lowercase` / `text` subfields. A field's explicit\nmapping always wins.",
           "default": true
+        },
+        "index_settings": {
+          "description": "Extra OpenSearch index settings for every index this sink creates, e.g.\n`{ \"mapping.total_fields.limit\" = 5000 }`. Keys may omit the `index.`\nprefix; nested tables are flattened. They override `number_of_shards`\nand `number_of_replicas`, and an `[[index]]` entry's own\n`index_settings` override them. `refresh_interval` and `analysis` are\nflusso's and rejected. Applied when an index generation is created.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/sink_opensearch_IndexSettings"
+            }
+          ]
         }
       },
       "required": [
@@ -592,6 +618,26 @@
       "required": [
         "type"
       ]
+    },
+    "sink_opensearch_index_IndexSettings": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "sink_opensearch_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "index_settings": {
+          "description": "OpenSearch index settings for this index only, laid over the sink's\n`index_settings`. Same keys and rules.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/sink_opensearch_index_IndexSettings"
+            }
+          ]
+        }
+      },
+      "description": "The options an OpenSearch sink takes per index: an `[[index]]` entry's\n`[index.sinks.<name>]` table, where `<name>` is the OpenSearch sink.",
+      "title": "opensearch (per index)"
     }
   }
 }
