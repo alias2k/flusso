@@ -95,7 +95,38 @@ A search document needs more than its root row: a user with their orders, a prod
          - { column: status, op: neq, value: cancelled }
    ```
 
-6. **Check publication coverage.** Every table a join or aggregate reads must be in the publication, or its changes never reach flusso.
+6. **Nest a tree with a join back at the same table.** A `has_many` can read the index's own table, so a row carries its children. Each level is declared explicitly: a two-level tree is a `has_many` nested in a `has_many`.
+
+   ```yaml
+   version: 1
+   table: items
+   primary_key: id
+   filters:
+     - { column: parent_id, op: is_null }
+   fields:
+     - text: name
+     - has_many: children
+       table: items
+       foreign_key: parent_id
+       primary_key: id
+       fields:
+         - text: name
+         - has_many: children
+           table: items
+           foreign_key: parent_id
+           primary_key: id
+           fields:
+             - text: name
+   ```
+
+   A child change rebuilds its parent's document, and its grandparent's, up to the depth declared and no further.
+
+   - **Every row is still its own document.** Without the root filter above, each child gets a document too. `{ column: parent_id, op: is_null }` keeps only top-level rows; see [Root filters](../reference/filters-and-soft-delete.md#root-filters).
+   - **Deletes and re-parenting need the link in the WAL.** The table's replica identity must carry `parent_id`, as for any child table; see [Hard deletes of joined rows](filters-and-soft-delete.md#options-and-variations) and [Deleted and re-parented rows](../reference/source-postgres.md#deleted-and-re-parented-rows).
+
+   The rules, including how `soft_delete` applies here, are in [Joins](../reference/joins.md#what-a-related-change-rebuilds).
+
+7. **Check publication coverage.** Every table a join or aggregate reads must be in the publication, or its changes never reach flusso.
 
    ```sh
    flusso check --config flusso.toml
