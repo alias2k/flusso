@@ -157,11 +157,11 @@ open = "5.*"
 # OpenTelemetry stack, shared by the CLI (traces) and the daemon (metrics).
 # Per-crate feature sets differ and are added at the use site; Cargo unifies
 # them. Keep these versions in lockstep — the otel crates release together.
-opentelemetry = { version = "0.32.*" }
-opentelemetry_sdk = { version = "0.32.*" }
-opentelemetry-otlp = { version = "0.32.*" }
-opentelemetry-prometheus = { version = "0.32.*" }
-tracing-opentelemetry = { version = "0.33.*" }
+opentelemetry = { version = "0.33.*" }
+opentelemetry_sdk = { version = "0.33.*" }
+opentelemetry-otlp = { version = "0.33.*" }
+opentelemetry-prometheus = { version = "0.33.*" }
+tracing-opentelemetry = { version = "0.34.*" }
 prometheus = { version = "0.14.*" }
 # Script fields. `sync`: one engine shared across tasks; `decimal`: a `decimal`
 # field round-trips exactly; `no_time`/`no_module`: no clock, no imports, so a
