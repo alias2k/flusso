@@ -659,8 +659,10 @@ only to be rejected), its own key then pointing at the last hop. `Relation::via(
 everything that walks relations must cover it: the SQL ties the key to the last hop through
 nested `IN` levels (`Builder::parent_match`), reverse resolution walks one `Step::Via` per hop
 (`document/fields.rs`), `via_columns` is the hop's #169 read set, and `all_tables` /
-`pre_image_columns` include each hop. Guards: `an_aggregate_via_hops_rebuilds_its_parent_from_every_hop`
-(`wal`), `an_aggregate_via_hops_adds_one_step_per_hop`, the `*via*` SQL tests.
+`pre_image_columns` include each hop. Guards: `an_aggregate_via_hops_rebuilds_its_parent_from_every_hop`,
+`a_self_reaching_via_rebuilds_every_ancestor_it_reaches` (a hop back into the root's own table),
+`a_via_under_a_nested_relation_rebuilds_the_root_from_every_hop` (a table that is both a relation
+and a hop) (all `wal`), `an_aggregate_via_hops_adds_one_step_per_hop`, the `*via*` SQL tests.
 **The content hash is the physical index name**, so `Aggregate`
 and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via` when
 unset — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`

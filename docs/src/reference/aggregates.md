@@ -47,6 +47,7 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 - **Hops go down foreign keys only.** Each hop's table holds the key. A `column` on a hop (the `belongs_to` direction) and a `through` on a hop (a junction in the middle) are rejected at load.
 - **The last hop can still be a junction.** Write it as the aggregate's own `through`, whose `left_key` then points at the last `via` table.
 - **Each row counts once.** A row has one parent along a foreign-key chain, so no path reaches it twice; that's why `distinct` stays rejected without `through`. A final junction can reach a target row once per junction row, so `distinct: true` keeps its meaning there: each target row once.
+- **[`flusso check`](cli.md#check) doesn't verify the hops.** It doesn't check that a hop's `table`, `foreign_key`, or filter columns exist, same as a one-hop `foreign_key`, so a typo surfaces when a document is built.
 - **Every hop rebuilds the parent.** Inserting, deleting, or re-parenting a row on any hop, or changing a column a hop's `filters` read, rebuilds the parent document, the old parent included (each hop's `foreign_key` must be in its table's replica identity; see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)).
 
 ```yaml
