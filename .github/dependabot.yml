@@ -1,0 +1,77 @@
+# Dependabot version updates — weekly, grouped so a normal week is a handful of PRs.
+# What the bot opens and what a bump needs before merge: docs/src/contribute/dependencies.md.
+#
+# Not covered on purpose:
+#   * rust-toolchain.toml — pinned for the trybuild diagnostics (see the file). Only the
+#     separate `rust-toolchain` ecosystem updates it, and it is not configured here.
+#   * libs/2-adapters/source-postgres/fuzz — its own workspace with no committed
+#     Cargo.lock, so every fuzz run already resolves the newest compatible versions.
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # Leave a requirement alone when it already allows the new version (a compatible
+    # update is a Cargo.lock-only PR); rewrite it only for a breaking one, keeping
+    # its shape ("0.12.*" -> "0.13.*"). The cargo default, stated so it can't drift.
+    versioning-strategy: increase-if-necessary
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      # The otel crates release together and must move in lockstep (root Cargo.toml).
+      # Listed first: a dependency joins the first group it matches.
+      opentelemetry:
+        patterns:
+          - opentelemetry*
+          - tracing-opentelemetry
+      # Semver-compatible only. Cargo's rules: a 0.x minor is breaking, so it counts
+      # as major here and gets its own PR.
+      cargo-compatible:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # flusso's own crates: path dependencies with minor-precision requirements that
+      # release-plz owns (release-plz.toml, "three independent trains"). Dependabot
+      # already skips path and renamed dependencies; this keeps it that way.
+      - dependency-name: flusso-*
+    # reqwest stays on 0.12 for now (root Cargo.toml); issue #218 moves it to 0.13,
+    # so a 0.13 PR is left proposable rather than ignored.
+
+  - package-ecosystem: npm
+    directory: /apps/design/frontend
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      npm-compatible:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # ESLint stays on 9: eslint-plugin-react and eslint-plugin-jsx-a11y don't
+      # support 10 yet (CLAUDE.md, the designer-frontend job). @eslint/js versions
+      # with eslint.
+      - dependency-name: eslint
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@eslint/js"
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      github-actions:
+        patterns:
+          - "*"
