@@ -1206,6 +1206,7 @@ dependencies = [
  "flusso-daemon",
  "flusso-design",
  "flusso-kernel",
+ "flusso-script",
  "flusso-sink",
  "flusso-sink-opensearch",
  "flusso-sink-stdout",
@@ -1226,6 +1227,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -52,6 +52,25 @@ fields:
       - keyword: currency
         required: true
 
+  # Script fields: computed from the built document by a Rhai script, typed
+  # like any other field. `this` is the object at the field's level, `root`
+  # the whole document. `rawPrice` is input-only (`emit: false`): fetched so
+  # the scripts can read it, never indexed.
+  - decimal: rawPrice
+    column: price
+    required: true
+    emit: false
+  - keyword: label
+    required: true
+    script: |
+      `${this.sku} — ${this.name}`
+  - enum: priceBand
+    variants: [budget, mid, premium]
+    required: true
+    script: |
+      let price = this.rawPrice;
+      if price < 20 { "budget" } else if price < 100 { "mid" } else { "premium" }
+
   # Many-to-many through the product_tags junction.
   - many_to_many: tags
     table: tags
@@ -76,6 +95,9 @@ fields:
     fields:
       - short: rating
         required: true
+      - boolean: positive # one per review, from that review's own rating
+        required: true
+        script: this.rating >= 4
       - text: body
         required: false
       - integer: userId

@@ -58,6 +58,18 @@ impl Pen {
     }
 }
 
+/// A bold section heading with a dim note beside it.
+pub(crate) fn heading(out: &mut impl Write, pen: Pen, title: &str, note: &str) -> Result<()> {
+    writeln!(out, "\n{} {}", pen.bold(title), pen.dim(note))?;
+    Ok(())
+}
+
+/// A red cross followed by the failure, its excerpt lines kept as they are.
+pub(crate) fn failure(out: &mut impl Write, pen: Pen, message: &str) -> Result<()> {
+    writeln!(out, "{} {}", pen.paint("31", "✗"), message)?;
+    Ok(())
+}
+
 /// A green check mark followed by a bold message.
 pub(crate) fn success(out: &mut impl Write, pen: Pen, message: &str) -> Result<()> {
     writeln!(out, "{} {}", pen.green("✓"), pen.bold(message))?;

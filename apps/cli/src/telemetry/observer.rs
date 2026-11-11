@@ -9,6 +9,9 @@ use daemon::{BuildStats, CommitStats, EngineId, IndexName, Observer, SinkName};
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
+use source::document::BuildFailure;
+
+use super::script_log::field_label;
 
 #[derive(Debug)]
 pub(crate) struct OtelObserver {
@@ -18,6 +21,7 @@ pub(crate) struct OtelObserver {
     batches: Counter<u64>,
     indexes_seeded: Counter<u64>,
     documents_quarantined: Counter<u64>,
+    script_failures: Counter<u64>,
     errors: Counter<u64>,
     flush_duration: Histogram<f64>,
     slot_lag: Gauge<u64>,
@@ -55,6 +59,14 @@ impl OtelObserver {
                 .with_description(
                     "Documents a sink rejected and its engine skipped (on_error = skip). \
                      A non-zero value means data is being dropped — alert on it.",
+                )
+                .build(),
+            script_failures: meter
+                .u64_counter("flusso.script.failures")
+                .with_description(
+                    "Documents a script failed on, left at their indexed version (on_error = \
+                     skip). Labelled by index and field path (array positions folded to `[]`). \
+                     A non-zero value means documents are going stale — alert on it.",
                 )
                 .build(),
             errors: meter
@@ -123,6 +135,16 @@ impl Observer for OtelObserver {
         self.documents_quarantined.add(
             1,
             &[sink_label(sink), KeyValue::new("index", index.to_owned())],
+        );
+    }
+
+    fn on_document_failed(&self, index: &IndexName, _id: &str, failure: &BuildFailure) {
+        self.script_failures.add(
+            1,
+            &[
+                KeyValue::new("index", index.as_ref().to_owned()),
+                KeyValue::new("field", field_label(&failure.field)),
+            ],
         );
     }
 

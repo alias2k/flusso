@@ -26,6 +26,8 @@ use source_postgres::{
 use stream::Stream;
 use stream_channel::ChannelStream;
 
+use script::{ScriptedBuilder, Scripts};
+
 use crate::adapters::{self, IndexSinkConfig, SinkConfig};
 
 /// The one [`Backends`] implementation: the composition root's choice of
@@ -36,7 +38,9 @@ pub(crate) struct FlussoBackends;
 #[async_trait]
 impl Backends for FlussoBackends {
     fn validate(&self, config: &Config) -> anyhow::Result<()> {
-        adapters::validate(config)
+        adapters::validate(config)?;
+        compile_scripts(config)?;
+        Ok(())
     }
 
     async fn source(
@@ -118,11 +122,17 @@ async fn build_documents(
     connection_url: &str,
     config: &Config,
 ) -> anyhow::Result<Arc<dyn DocumentBuilder>> {
+    let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
     let builder = PgDocumentBuilder::connect(connection_url, spec)
         .await
         .context("connecting to Postgres")?;
-    Ok(Arc::new(builder))
+    Ok(ScriptedBuilder::wrap(Arc::new(builder), scripts))
+}
+
+/// Compile every script field of the enabled indexes, reporting all that fail.
+pub(crate) fn compile_scripts(config: &Config) -> anyhow::Result<Scripts> {
+    Scripts::compile(&source_spec(config)).map_err(|errors| anyhow::anyhow!("{errors}"))
 }
 
 /// The enabled indexes and their schemas: the source-facing subset of a
