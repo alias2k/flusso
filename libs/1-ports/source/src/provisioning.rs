@@ -123,7 +123,7 @@ pub struct PreImageGap {
     /// opaque, shown verbatim (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`).
     pub remediation: String,
     /// Why the source leaves this table as it is on purpose, even when told to
-    /// manage it: the operator chose a setting that already carries every link
+    /// manage it: the operator chose a setting that already carries the row's key and every link
     /// (for Postgres, a replica identity on an index). Only ever on a
     /// [`partial`](PreImageReport::partial) entry; `remediation` still names
     /// the step for an operator who wants the whole row anyway.

@@ -42,7 +42,7 @@
 //! existing partitions, nor to ones created or attached later. So every member
 //! that isn't `FULL` is altered, and a partition added later is caught at the
 //! next start. The kept rule is per member: a parent or partition whose
-//! identity index carries every link stays as it is while its siblings that
+//! identity index carries its primary key and every link stays as it is while its siblings that
 //! miss one are set. A partitioned table with no gap is left alone whatever
 //! its members' identities: its updates carry no post-image, so the whole
 //! row would buy nothing.
