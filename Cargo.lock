@@ -1161,7 +1161,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "flusso-config",
  "flusso-daemon",
@@ -1331,7 +1331,7 @@ dependencies = [
 name = "flusso-query"
 version = "0.16.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "diesel",
  "diesel-async",

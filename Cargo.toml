@@ -146,7 +146,7 @@ testcontainers-modules = { version = "0.15.*" }
 criterion = { version = "0.8.*", features = ["async_tokio"] }
 proptest = { version = "1.*" }
 axum = { version = "0.8.*" }
-base64 = "0.22"
+base64 = "0.23"
 # Embeds the schema designer's built SPA (`apps/design/dist/`) into the binary.
 # `debug-embed` embeds in debug builds too, so the served assets don't depend on
 # the working directory and tests are reproducible.
