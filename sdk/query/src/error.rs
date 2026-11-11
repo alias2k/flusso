@@ -67,6 +67,32 @@ pub enum Error {
         body: String,
     },
 
+    /// A fence ran out of time: the position was not readable within the
+    /// client's [`fence_timeout`](crate::Client::fence_timeout). Nothing was
+    /// read. `reached` is how far the sink had got, when flusso reported it.
+    #[error("fence timed out before the position was readable (reached {reached:?})")]
+    FenceTimeout {
+        /// The source position the sink had reached, in the source's text form.
+        reached: Option<String>,
+    },
+
+    /// A fence could not be asked: no flusso endpoint is configured
+    /// ([`Client::flusso`](crate::Client::flusso)), flusso is unreachable, or
+    /// it is not following the source yet. Nothing was read and nothing is
+    /// retried.
+    #[error("fence unavailable: {0}")]
+    FenceUnavailable(String),
+
+    /// flusso refused the wait: a position it cannot read, or a sink it does
+    /// not have.
+    #[error("flusso refused the fence (status {status}): {reason}")]
+    FenceRefused {
+        /// The HTTP status flusso answered with.
+        status: u16,
+        /// Why, in flusso's words.
+        reason: String,
+    },
+
     /// A response could not be decoded into the expected shape.
     #[error("decoding response: {0}")]
     Decode(#[from] serde_json::Error),

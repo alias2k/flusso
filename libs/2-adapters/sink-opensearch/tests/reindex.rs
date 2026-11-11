@@ -17,7 +17,10 @@
 //! orphan generations (#121). The last covers `index_settings` (#168): the
 //! sink-wide and per-index settings land on the created generation, the
 //! per-index one winning, and a raised `total_fields.limit` admits a mapping
-//! past OpenSearch's 1000-field default.
+//! past OpenSearch's 1000-field default. And one covers the visibility a flush
+//! reports (issue #136): searchable at once when caught up, within
+//! `refresh_interval` otherwise, and deferred to the next caught-up flush,
+//! which then really makes it searchable, when automatic refresh is off.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -721,6 +724,130 @@ async fn index_settings_land_on_the_created_generation_per_index_winning() {
 }
 
 /// The settings of `index` as flat dotted keys.
+/// How many documents a search through `target` matches right now.
+async fn search_count(client: &reqwest::Client, base: &str, target: &str) -> u64 {
+    let body: Value = client
+        .get(format!("{base}/{target}/_count"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["count"].as_u64().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_flush_reports_when_its_documents_become_searchable() {
+    use sink::Visibility;
+
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+
+    // ── A refresh interval: an unforced flush is searchable within it ────────
+    let periodic = sink(&base);
+    periodic.ensure_index(&mapping).await.unwrap();
+    periodic.mark_seeded(&index).await.unwrap();
+    periodic
+        .apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    assert_eq!(
+        periodic.flush(false).await.unwrap().visibility,
+        Visibility::Within(Duration::from_secs(10)),
+    );
+    assert_eq!(
+        periodic.flush(false).await.unwrap().visibility,
+        Visibility::Immediate,
+        "a flush that wrote nothing has nothing to wait for",
+    );
+    periodic
+        .apply(&upsert(&index, "2", &document(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        periodic.flush(true).await.unwrap().visibility,
+        Visibility::Immediate,
+    );
+
+    // ── Automatic refresh off: deferred until a caught-up flush ──────────────
+    let manual = OpensearchSink::from_config(
+        &kernel::SinkName::try_new("test").unwrap(),
+        &sink_opensearch::OpensearchConfig {
+            refresh_interval: "-1".to_owned(),
+            ..sink_config(&base)
+        },
+    )
+    .unwrap();
+    manual.ensure_index(&mapping).await.unwrap();
+    manual.mark_seeded(&index).await.unwrap();
+    client
+        .post(format!("{base}/{hash_alias}/_refresh"))
+        .send()
+        .await
+        .unwrap();
+    let before = search_count(&client, &base, &hash_alias).await;
+
+    manual
+        .apply(&upsert(&index, "3", &document(3)))
+        .await
+        .unwrap();
+    assert_eq!(
+        manual.flush(false).await.unwrap().visibility,
+        Visibility::Deferred,
+    );
+    assert_eq!(
+        manual.flush(false).await.unwrap().visibility,
+        Visibility::Deferred,
+        "an empty flush must not release what is still unrefreshed",
+    );
+    assert!(
+        doc_exists(&client, &base, &hash_alias, "3").await,
+        "applied: a get by id sees it",
+    );
+    assert_eq!(
+        search_count(&client, &base, &hash_alias).await,
+        before,
+        "not searchable: nothing refreshed it",
+    );
+
+    assert_eq!(
+        manual.flush(true).await.unwrap().visibility,
+        Visibility::Immediate,
+        "the caught-up flush refreshes what the earlier one left",
+    );
+    assert_eq!(search_count(&client, &base, &hash_alias).await, before + 1);
+
+    // ── A restart forgets what was left unrefreshed, so staging refreshes ────
+    manual
+        .apply(&upsert(&index, "4", &document(4)))
+        .await
+        .unwrap();
+    assert_eq!(
+        manual.flush(false).await.unwrap().visibility,
+        Visibility::Deferred,
+    );
+    assert_eq!(search_count(&client, &base, &hash_alias).await, before + 1);
+    let restarted = OpensearchSink::from_config(
+        &kernel::SinkName::try_new("test").unwrap(),
+        &sink_opensearch::OpensearchConfig {
+            refresh_interval: "-1".to_owned(),
+            ..sink_config(&base)
+        },
+    )
+    .unwrap();
+    restarted.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        search_count(&client, &base, &hash_alias).await,
+        before + 2,
+        "a new run starts with everything written so far searchable",
+    );
+}
+
 async fn flat_settings(client: &reqwest::Client, base: &str, index: &str) -> Value {
     let body: Value = client
         .get(format!("{base}/{index}/_settings?flat_settings=true"))

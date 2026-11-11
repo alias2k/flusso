@@ -1,12 +1,18 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(test, allow(unused_crate_dependencies))]
 
 mod backends;
+mod fence;
 mod lag;
 mod observer;
 pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
+pub use fence::{
+    Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
+    SinkPositions,
+};
 pub use observer::StatusObserver;
 pub use status::{IndexState, Phase, SinkPhase, SinkSnapshot, Status, StatusSnapshot};
 pub use supervise::{ControlError, DaemonControl};
@@ -140,13 +146,19 @@ impl Daemon {
             .await
             .context("resolving the index mappings")?;
 
-        let status = Arc::new(Status::new(
-            config.indexes.keys().cloned(),
-            sink_names.iter().cloned(),
-            Instant::now(),
-        ));
-        let mut observers: Vec<Arc<dyn Observer>> =
-            vec![Arc::new(StatusObserver::new(Arc::clone(&status)))];
+        let fence = Fence::new(Arc::clone(&capture), sink_names.iter().cloned());
+        let status = Arc::new(
+            Status::new(
+                config.indexes.keys().cloned(),
+                sink_names.iter().cloned(),
+                Instant::now(),
+            )
+            .with_fence(fence.clone()),
+        );
+        let mut observers: Vec<Arc<dyn Observer>> = vec![
+            Arc::new(StatusObserver::new(Arc::clone(&status))),
+            Arc::new(FenceObserver::new(fence.clone())),
+        ];
         observers.extend(extra_observers);
         let observer: Arc<dyn Observer> = Arc::new(FanOut::new(observers));
 
@@ -190,6 +202,7 @@ impl Daemon {
         let (control, control_receivers) = DaemonControl::new(&sink_names);
         Ok(RunningDaemon {
             status,
+            fence,
             control,
             control_receivers,
             ingest,
@@ -208,6 +221,7 @@ impl Daemon {
 #[derive(Debug)]
 pub struct RunningDaemon {
     status: Arc<Status>,
+    fence: Fence,
     control: DaemonControl,
     control_receivers: ControlReceivers,
     ingest: IngestEngine,
@@ -226,6 +240,12 @@ impl RunningDaemon {
         Arc::clone(&self.status)
     }
 
+    /// The fence: what a transport waits on so a client can read its own
+    /// write (see [`Fence`]). Cheap to clone.
+    pub fn fence(&self) -> Fence {
+        self.fence.clone()
+    }
+
     /// The operations handle: what a transport calls to act on the running
     /// deployment (a reindex). Cheap to clone.
     pub fn control(&self) -> DaemonControl {
@@ -241,6 +261,7 @@ impl RunningDaemon {
     pub async fn run(self, shutdown: impl Future<Output = ()> + Send) -> anyhow::Result<()> {
         let RunningDaemon {
             status,
+            fence: _,
             control: _,
             control_receivers,
             ingest,

@@ -46,7 +46,7 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
     Ok(body)
 }
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
 use std::time::Duration;
 
@@ -105,6 +105,11 @@ pub struct OpensearchSink {
     pub(crate) index_prefix: String,
     /// In-flight operations, shared across clones.
     pub(crate) buffer: Arc<Mutex<Vec<BulkAction>>>,
+    /// Indexes written by a flush that forced no refresh while automatic
+    /// refresh is off (`refresh_interval = "-1"`): nothing else will make them
+    /// searchable, so the next caught-up flush refreshes them. Empty whenever a
+    /// refresh interval is set. Shared across clones.
+    pub(crate) unrefreshed: Arc<SyncMutex<BTreeSet<String>>>,
     /// Logical index name → where it lives and where its writes go, learned
     /// from [`ensure_index`](OpensearchSink::ensure_index) and updated by
     /// [`mark_seeded`](OpensearchSink::mark_seeded). Shared across clones.
@@ -192,6 +197,7 @@ impl OpensearchSink {
             per_index_settings: Arc::new(HashMap::new()),
             index_prefix: String::new(),
             buffer: Arc::new(Mutex::new(Vec::new())),
+            unrefreshed: Arc::new(SyncMutex::new(BTreeSet::new())),
             targets: Arc::new(SyncMutex::new(HashMap::new())),
         })
     }
@@ -225,6 +231,14 @@ impl OpensearchSink {
             options.settings = options.settings.layered(own);
         }
         options
+    }
+
+    /// How often OpenSearch refreshes a seeded index by itself: the
+    /// configured `refresh_interval`. `None` when automatic refresh is off, or
+    /// the value is not a duration this sink can read (which must not be
+    /// reported as sooner than it is).
+    pub(crate) fn refresh_period(&self) -> Option<Duration> {
+        parse_time_value(&self.refresh_interval)
     }
 
     /// The stable hash alias `{prefix}{logical}_{hash}` an index is addressed
@@ -287,5 +301,45 @@ impl OpensearchSink {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(logical.to_owned(), target);
+    }
+}
+
+/// An OpenSearch time value (`10s`, `500ms`, `1m`) as a duration. `None` for
+/// `-1` (disabled) and for anything unreadable.
+pub(crate) fn parse_time_value(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    let split = value.find(|c: char| !c.is_ascii_digit())?;
+    let (digits, unit) = value.split_at(split);
+    let amount: u64 = digits.parse().ok()?;
+    match unit {
+        "nanos" => Some(Duration::from_nanos(amount)),
+        "micros" => Some(Duration::from_micros(amount)),
+        "ms" => Some(Duration::from_millis(amount)),
+        "s" => Some(Duration::from_secs(amount)),
+        "m" => amount.checked_mul(60).map(Duration::from_secs),
+        "h" => amount.checked_mul(3_600).map(Duration::from_secs),
+        "d" => amount.checked_mul(86_400).map(Duration::from_secs),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod time_value_tests {
+    use super::*;
+
+    #[test]
+    fn reads_opensearch_time_units() {
+        assert_eq!(parse_time_value("10s"), Some(Duration::from_secs(10)));
+        assert_eq!(parse_time_value("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_time_value("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_time_value(" 1h "), Some(Duration::from_secs(3_600)));
+    }
+
+    #[test]
+    fn disabled_or_unreadable_is_none() {
+        assert_eq!(parse_time_value("-1"), None);
+        assert_eq!(parse_time_value("10"), None);
+        assert_eq!(parse_time_value("ten seconds"), None);
+        assert_eq!(parse_time_value(""), None);
     }
 }

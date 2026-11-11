@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kernel::{IndexName, SinkName};
+use kernel::{IndexName, Position, SinkName};
 
 /// What one ingest commit produced: how many changes it covered, how many
 /// documents it built (deduplicated), per index, and how long the build took.
@@ -113,6 +113,25 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, index, id, reason);
     }
 
+    /// `sink` flushed every live change up to and including `position`: a
+    /// fetch by id at the destination now sees them. Reported as the flush
+    /// returns and *before* the batch is acknowledged, so whoever listens
+    /// knows of a position before the source can be told it is confirmed. A
+    /// redelivered batch can repeat an earlier position; keep the highest.
+    fn on_position_applied(&self, sink: &SinkName, position: Position) {
+        let _ = (sink, position);
+    }
+
+    /// Every live change up to and including `position` can now be *searched*
+    /// at `sink`'s destination, as its flushes reported
+    /// ([`Visibility`](sink::Visibility)). Trails
+    /// [`on_position_applied`](Self::on_position_applied) by however long the
+    /// destination takes to refresh. A redelivered batch can repeat an earlier
+    /// position; keep the highest.
+    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
+        let _ = (sink, position);
+    }
+
     /// An engine stopped on an error. The daemon decides whether it restarts.
     fn on_engine_error(&self, engine: &EngineId, error: &str) {
         let _ = (engine, error);
@@ -213,6 +232,18 @@ impl Observer for FanOut {
     fn on_document_quarantined(&self, sink: &SinkName, index: &str, id: &str, reason: &str) {
         for observer in &self.observers {
             observer.on_document_quarantined(sink, index, id, reason);
+        }
+    }
+
+    fn on_position_applied(&self, sink: &SinkName, position: Position) {
+        for observer in &self.observers {
+            observer.on_position_applied(sink, position);
+        }
+    }
+
+    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
+        for observer in &self.observers {
+            observer.on_position_searchable(sink, position);
         }
     }
 

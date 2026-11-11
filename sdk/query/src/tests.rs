@@ -2994,3 +2994,233 @@ mod walk {
         Ok(())
     }
 }
+
+mod fence {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use serde::Deserialize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use crate::{Client, Error, Search};
+
+    type Result = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Debug, Deserialize)]
+    struct Doc {}
+
+    /// One HTTP server standing in for both flusso and OpenSearch: every
+    /// request line is recorded, `/wait` answers with `wait` (status, body),
+    /// anything else with an empty search result.
+    async fn stub(wait: (u16, &'static str)) -> std::io::Result<(String, Arc<Mutex<Vec<String>>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let recorded = Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 16 * 1024];
+                    let mut read = 0;
+                    // Enough to hold the head and the small bodies these
+                    // tests send; a request is complete once its head is.
+                    while let Some(spare) = buffer.get_mut(read..) {
+                        let Ok(n) = socket.read(spare).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        read += n;
+                        if buffer
+                            .get(..read)
+                            .is_some_and(|b| b.windows(4).any(|w| w == b"\r\n\r\n"))
+                        {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(buffer.get(..read).unwrap_or_default())
+                        .into_owned();
+                    let line = head.lines().next().unwrap_or_default().to_owned();
+                    let (status, body) = if line.contains(" /wait?") {
+                        wait
+                    } else {
+                        (200, r#"{"found":false,"hits":{"hits":[]},"count":0}"#)
+                    };
+                    if let Ok(mut seen) = recorded.lock() {
+                        seen.push(line);
+                    }
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        Ok((base, seen))
+    }
+
+    fn requests(seen: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        seen.lock().map(|seen| seen.clone()).unwrap_or_default()
+    }
+
+    const REACHED: (u16, &str) = (200, r#"{"reached":true,"position":"0/20"}"#);
+
+    #[tokio::test]
+    async fn a_get_waits_until_applied_then_reads() -> Result {
+        let (base, seen) = stub(REACHED).await?;
+        let client = Client::connect(&base)?.flusso(&base)?;
+
+        let found: Option<Doc> = client.after("0/10").get_one("users", "abc", 7).await?;
+        assert!(found.is_none());
+        assert_eq!(
+            requests(&seen),
+            vec![
+                "GET /wait?position=0%2F10&until=applied&timeout_ms=5000 HTTP/1.1",
+                "GET /users_abc/_doc/7 HTTP/1.1",
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_search_waits_until_searchable_on_the_configured_sink() -> Result {
+        let (base, seen) = stub(REACHED).await?;
+        let client = Client::connect(&base)?
+            .flusso(&base)?
+            .fence_sink("primary")
+            .fence_timeout(Duration::from_millis(1500));
+
+        Search::<Doc>::new("users", "abc")
+            .count(&client.after("0/10"))
+            .await?;
+        assert_eq!(
+            requests(&seen),
+            vec![
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=1500&sink=primary HTTP/1.1",
+                "POST /users_abc/_count HTTP/1.1",
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_fenced_client_waits_once_per_level() -> Result {
+        let (base, seen) = stub(REACHED).await?;
+        let client = Client::connect(&base)?.flusso(&base)?;
+        let fresh = client.after("0/10");
+
+        let _: Option<Doc> = fresh.get_one("users", "abc", 1).await?;
+        let _: Option<Doc> = fresh.clone().get_one("users", "abc", 2).await?;
+        Search::<Doc>::new("users", "abc").count(&fresh).await?;
+        Search::<Doc>::new("users", "abc").count(&fresh).await?;
+        let _: Option<Doc> = fresh.get_one("users", "abc", 3).await?;
+
+        let waits: Vec<String> = requests(&seen)
+            .into_iter()
+            .filter(|line| line.contains("/wait?"))
+            .collect();
+        assert_eq!(
+            waits,
+            vec![
+                "GET /wait?position=0%2F10&until=applied&timeout_ms=5000 HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=5000 HTTP/1.1",
+            ],
+            "searchable covers applied, and neither is asked twice"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unfenced_client_never_asks_flusso() -> Result {
+        let (base, seen) = stub(REACHED).await?;
+        let client = Client::connect(&base)?.flusso(&base)?;
+        let _: Option<Doc> = client.get_one("users", "abc", 1).await?;
+        assert_eq!(requests(&seen), vec!["GET /users_abc/_doc/1 HTTP/1.1"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_timeout_fails_the_read_and_reads_nothing() -> Result {
+        let (base, seen) = stub((408, r#"{"reached":false,"position":"0/8"}"#)).await?;
+        let client = Client::connect(&base)?.flusso(&base)?;
+
+        let error = client
+            .after("0/10")
+            .get_one::<Doc>("users", "abc", 7)
+            .await
+            .err()
+            .ok_or("the read must fail")?;
+        assert!(
+            matches!(&error, Error::FenceTimeout { reached: Some(reached) } if reached == "0/8"),
+            "{error}"
+        );
+        assert_eq!(requests(&seen).len(), 1, "OpenSearch was never asked");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_refusal_and_an_unready_daemon_are_distinct_errors() -> Result {
+        let (base, _) = stub((404, r#"{"error":"unknown sink `audit`"}"#)).await?;
+        let error = Client::connect(&base)?
+            .flusso(&base)?
+            .wait("0/10")
+            .await
+            .err()
+            .ok_or("must fail")?;
+        assert!(
+            matches!(&error, Error::FenceRefused { status: 404, reason } if reason.contains("audit")),
+            "{error}"
+        );
+
+        let (base, _) = stub((503, r#"{"error":"not live yet"}"#)).await?;
+        let error = Client::connect(&base)?
+            .flusso(&base)?
+            .wait_applied("0/10")
+            .await
+            .err()
+            .ok_or("must fail")?;
+        assert!(
+            matches!(&error, Error::FenceUnavailable(reason) if reason == "not live yet"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fencing_without_a_reachable_flusso_fails_without_reading() -> Result {
+        let (base, seen) = stub(REACHED).await?;
+
+        let unconfigured = Client::connect(&base)?;
+        let error = unconfigured.wait("0/10").await.err().ok_or("must fail")?;
+        assert!(matches!(error, Error::FenceUnavailable(_)), "{error}");
+
+        // A port nothing listens on.
+        let closed = TcpListener::bind("127.0.0.1:0").await?;
+        let dead = format!("http://{}", closed.local_addr()?);
+        drop(closed);
+        let error = Client::connect(&base)?
+            .flusso(&dead)?
+            .after("0/10")
+            .get_one::<Doc>("users", "abc", 7)
+            .await
+            .err()
+            .ok_or("must fail")?;
+        assert!(matches!(error, Error::FenceUnavailable(_)), "{error}");
+        assert!(requests(&seen).is_empty(), "nothing was read");
+        Ok(())
+    }
+
+    #[test]
+    fn the_flusso_endpoint_must_be_an_http_url() {
+        let client = Client::connect("http://localhost:9200");
+        assert!(
+            client
+                .and_then(|client| client.flusso("ftp://flusso"))
+                .is_err()
+        );
+    }
+}

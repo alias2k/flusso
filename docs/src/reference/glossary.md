@@ -5,10 +5,12 @@ The project's nouns, each with a pointer to the page that owns it.
 | Term | Means | Home |
 | --- | --- | --- |
 | **backfill** | Seeding an unseeded index by snapshotting its root table through the normal pipeline, before live capture. | [How flusso works](../start/how-it-works.md#seeding-and-continuity) |
+| **applied** | A fence level: the sink's flush for a change has returned, so a fetch by id sees it. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **batch** | The changes grouped into one build and sink flush: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`. | [batch](config-toml.md#batch) |
 | **convenience alias** | The bare logical name (`users`) kept as an alias on the current generation, for humans and dashboards. Best-effort. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
 | **continuity** | Whether the source's resume point (the slot) survived from the last run. `Resumed` or `Fresh`. | [Recover from a dropped slot](../operate/dropped-slot.md) |
 | **document** | One search record, assembled from a root row plus its joins and aggregates, written by a deterministic id. | [How flusso works](../start/how-it-works.md#documents-are-assembled-not-copied) |
+| **fence** | A wait until a sink has reached a source position, so a client can read its own write. It only observes. | [Read your own writes](../operate/read-your-writes.md) |
 | **flush-wide error** | The whole bulk request failed. Always stops the run; the batch is redelivered. | [Index entries and on_error](index-and-on-error.md#on_error) |
 | **generation** | A concrete OpenSearch index `{logical}_{hash}_{n}` holding data behind the hash alias. Reindex builds `n+1`. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
 | **hash alias** | `{logical}_{hash}`: the addressable name flusso and `flusso-query` use. The hash derives from the schema. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
@@ -22,10 +24,12 @@ The project's nouns, each with a pointer to the page that owns it.
 | **reindex** | Rebuilding one index into a fresh generation while the current one serves, then swapping the alias. | [Reindex without downtime](../operate/reindex.md) |
 | **reverse resolution** | Mapping a changed related row back to the parent documents it affects. | [Joins](joins.md#what-a-related-change-rebuilds) |
 | **root table** | The table a schema's documents are built from; one document per row (subject to root filters). | [Schema top-level keys](schema-top-level.md) |
+| **searchable** | A fence level: a search at the destination sees the change. Trails applied by the destination's refresh while a backlog drains. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **seed marker** | The `flusso_meta` record saying an index's generation is fully backfilled. | [Sink: OpenSearch](sink-opensearch.md#seeding) |
 | **sink** | A destination: OpenSearch or stdout. Each runs its own engine over its own lane; `backfill = false` opts a stateless one out of seeding. | [flusso.toml top level](config-toml.md#several-sinks) |
 | **slot** | The Postgres logical replication slot flusso consumes. Its confirmed position is the resume point. | [Source: Postgres](source-postgres.md#capture) |
 | **slot lag** | Bytes between the WAL head and the slot's confirmed position. | [Metrics](metrics.md) |
 | **soft-delete** | A row marked deleted by a column or field rather than a `DELETE`; emits a tombstone. | [Filters and soft_delete](filters-and-soft-delete.md#soft_delete) |
+| **source position** | A point in the source's own change order, as a client reads it after a commit (Postgres: `pg_current_wal_lsn()`). What a fence waits for. | [Read your own writes](../operate/read-your-writes.md) |
 | **tombstone** | A `delete` operation for a document whose row was deleted, soft-deleted, or left the root filter set. | [Filters and soft_delete](filters-and-soft-delete.md) |
 | **type-first** | The schema's field grammar: `- <type>: <name>` plus siblings. | [Schema top-level keys](schema-top-level.md#fields) |

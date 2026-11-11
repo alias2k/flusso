@@ -58,6 +58,7 @@ home; everything else points at it.
 | Dynamic-key `map` fields | `skills/flusso-query/maps.md` |
 | Sorting rules (every kind, including ordered enums and map-key fallback) | `skills/flusso-query/SKILL.md`, one `## Sorting` section |
 | Paging (offset vs page cursor) | `skills/flusso-query/SKILL.md`, one `## Paging` section |
+| Reading a write right after making it (fences: the position, the two levels, the errors) | `skills/flusso-query/SKILL.md`, one `## Reading your own writes` section |
 | `*.schema.yml` / `flusso.toml` authoring | `skills/flusso-schema/SKILL.md` |
 | Postgres source behavior (slot, publication, row identity, privileges, TLS) | `skills/flusso-postgres/SKILL.md` |
 | OpenSearch sink behavior (mapping ownership, generations, analyzers, subfields, refresh) | `skills/flusso-opensearch/SKILL.md` |

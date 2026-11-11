@@ -16,16 +16,25 @@
 //! watermark. A `SnapshotComplete` marker records its indexes as seeded. A
 //! reindex arrives as a control message and is staged between two batches:
 //! `reindex` + `ensure_index` on the sink, then a fresh `Backfill` request.
+//!
+//! The loop also reports the sink's two **fence levels** to the observer.
+//! *Applied* is the position of the batch just flushed, reported before its
+//! acknowledgement (see the loop for why the order matters). *Searchable*
+//! trails it by what each flush reported ([`Visibility`]): the engine queues
+//! every positioned flush with the moment it becomes searchable and reports the
+//! position of the last one that has, in order, so a searchable position always
+//! means "this and everything before it". The engine only observes; nothing
+//! here asks the sink to refresh.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use kernel::{IndexMapping, IndexName, SinkName};
-use sink::{Sink, SinkOptions};
+use kernel::{IndexMapping, IndexName, Position, SinkName};
+use sink::{Sink, SinkOptions, Visibility};
 use source::cdc::Continuity;
 use stream::{LaneItem, Request, Stream};
 use tokio::sync::mpsc;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep_until};
 
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, EngineId, NoopObserver, Observer};
@@ -54,6 +63,19 @@ pub struct SinkEngine {
     /// received yet. Survives a restart of this engine's run, so re-staging
     /// doesn't ask for a snapshot the ingest engine is already serving.
     outstanding: Mutex<BTreeSet<IndexName>>,
+    /// Flushed positions not yet reported as searchable,
+    /// oldest first. Survives a restart of this engine's run, so a position
+    /// flushed before a failure is still reported once its time comes.
+    unsearchable: Mutex<VecDeque<(Position, Searchable)>>,
+}
+
+/// When a flushed position becomes searchable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Searchable {
+    /// At this instant (already passed for an immediate flush).
+    At(Instant),
+    /// When a later flush of this sink reports [`Visibility::Immediate`].
+    WithNextImmediate,
 }
 
 impl SinkEngine {
@@ -75,6 +97,7 @@ impl SinkEngine {
             failure_policies: FailurePolicies::default(),
             skip_backfill: false,
             outstanding: Mutex::new(BTreeSet::new()),
+            unsearchable: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -238,14 +261,16 @@ impl SinkEngine {
         let mut lane = self.stream.lane(&self.name)?.consumer;
         let mut control_open = true;
         loop {
+            let next_searchable = self.next_searchable_at();
             tokio::select! {
                 delivery = lane.recv() => match delivery? {
                     None => return Ok(()),
                     Some(delivery) => {
                         let (item, handle) = delivery.into_parts();
-                        match item {
+                        let flushed = match item {
                             LaneItem::Batch(batch) => {
-                                self.commit(&batch, lane.is_empty()).await?;
+                                let visibility = self.commit(&batch, lane.is_empty()).await?;
+                                Some((batch.position, visibility))
                             }
                             LaneItem::SnapshotComplete { indexes } => {
                                 for index in &indexes {
@@ -257,7 +282,15 @@ impl SinkEngine {
                                     outstanding.remove(index);
                                 }
                                 tracing::info!(indexes = indexes.len(), "backfill complete");
+                                None
                             }
+                        };
+                        // Before the acknowledgement: applied is a fact about
+                        // the destination, and a listener must hear of it
+                        // before the source can be told the position is
+                        // confirmed and forget it.
+                        if let Some((position, visibility)) = flushed {
+                            self.report_positions(position, visibility);
                         }
                         handle.ack().await?;
                     }
@@ -266,17 +299,95 @@ impl SinkEngine {
                     None => control_open = false,
                     Some(SinkControl::Reindex { indexes }) => self.reindex(indexes).await?,
                 },
+                () = until(next_searchable) => self.report_searchable(),
             }
         }
+    }
+
+    /// Report a flush that returned: its position is applied, and it joins the
+    /// queue of positions waiting to become searchable. A snapshot batch has no
+    /// position, but an immediate flush of one still releases what earlier
+    /// flushes deferred.
+    fn report_positions(&self, position: Option<Position>, visibility: Visibility) {
+        // The caught-up path, and the hot one: nothing is waiting and this
+        // flush is searchable already, so there is nothing to queue.
+        if visibility == Visibility::Immediate && self.lock_unsearchable().is_empty() {
+            if let Some(position) = position {
+                self.observer.on_position_applied(&self.name, position);
+                self.observer.on_position_searchable(&self.name, position);
+            }
+            return;
+        }
+        let now = Instant::now();
+        {
+            let mut queue = self.lock_unsearchable();
+            if visibility == Visibility::Immediate {
+                for (_, due) in queue.iter_mut() {
+                    if *due == Searchable::WithNextImmediate {
+                        *due = Searchable::At(now);
+                    }
+                }
+            }
+            if let Some(position) = position {
+                queue.push_back((
+                    position,
+                    match visibility {
+                        Visibility::Immediate => Searchable::At(now),
+                        Visibility::Within(delay) => Searchable::At(now + delay),
+                        Visibility::Deferred => Searchable::WithNextImmediate,
+                    },
+                ));
+            }
+        }
+        if let Some(position) = position {
+            self.observer.on_position_applied(&self.name, position);
+        }
+        self.report_searchable();
+    }
+
+    /// Report the last queued position whose time has come, and drop it and
+    /// everything before it. In order: a position that is not searchable yet
+    /// holds back the ones behind it.
+    fn report_searchable(&self) {
+        let now = Instant::now();
+        let mut reached = None;
+        {
+            let mut queue = self.lock_unsearchable();
+            while let Some((position, Searchable::At(due))) = queue.front().copied() {
+                if due > now {
+                    break;
+                }
+                reached = Some(position);
+                queue.pop_front();
+            }
+        }
+        if let Some(position) = reached {
+            self.observer.on_position_searchable(&self.name, position);
+        }
+    }
+
+    /// When the oldest queued position becomes searchable, if that is a matter
+    /// of time.
+    fn next_searchable_at(&self) -> Option<Instant> {
+        match self.lock_unsearchable().front() {
+            Some((_, Searchable::At(due))) => Some(*due),
+            _ => None,
+        }
+    }
+
+    fn lock_unsearchable(&self) -> std::sync::MutexGuard<'_, VecDeque<(Position, Searchable)>> {
+        self.unsearchable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Apply every envelope, flush once, decide rejections by policy. The
     /// caller acknowledges only after this returns `Ok`: a crash before the
     /// flush leaves the batch unacknowledged and redelivered, re-applied
     /// idempotently; a `stop` rejection returns `Err` with the batch still
-    /// unacknowledged.
+    /// unacknowledged. Returns when the flush's documents become searchable.
     #[tracing::instrument(name = "sink.commit", level = "debug", skip_all, fields(envelopes = batch.envelopes.len(), caught_up))]
-    async fn commit(&self, batch: &stream::Batch, caught_up: bool) -> Result<()> {
+    async fn commit(&self, batch: &stream::Batch, caught_up: bool) -> Result<Visibility> {
         for envelope in batch.envelopes.iter() {
             self.sink.apply(envelope).await?;
         }
@@ -321,7 +432,7 @@ impl SinkEngine {
                 flush,
             },
         );
-        Ok(())
+        Ok(report.visibility)
     }
 
     /// Stage a rebuild of `indexes` and request their snapshot. The current
@@ -353,5 +464,14 @@ impl SinkEngine {
             self.request_backfill(staged).await?;
         }
         Ok(())
+    }
+}
+
+/// Sleep until `at`; never, when nothing is waiting on time. Keeps the loop
+/// from building a timer on every pass just to leave it unpolled.
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }

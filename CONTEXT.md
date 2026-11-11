@@ -102,9 +102,21 @@ _Avoid_: low-water mark, min ack, commit point
 The live stream having no change ready right now. A change arriving on a quiet stream has nothing to batch with.
 _Avoid_: idle, empty, drained (that is the lanes)
 
+**Source position**:
+A point in the source's own change order, as a client can read it from the source itself after a commit (Postgres: the WAL LSN `pg_current_wal_lsn()` returns). Ordered: every commit made before it was read lies at or before it. Unlike a position, it is meaningful outside the source, so it is what a client hands to a fence.
+_Avoid_: token, LSN (outside the Postgres adapter), cursor, checkpoint, offset
+
 **Fence**:
-A wait until the watermark has passed a caller-supplied position, after which every sink reflects everything up to it, related-table rebuilds included. What a client uses to read its own writes.
+A wait until a sink, or every sink, has reached a caller-supplied source position at a chosen level, applied or searchable, related-table rebuilds included. It only observes: nothing is flushed or refreshed because a client waits. Covers live changes only, not a backfill. What a client uses to read its own writes.
 _Avoid_: barrier, sync point, flush wait
+
+**Applied**:
+The fence level at which a sink's flush for a change has returned, so a fetch by id at the destination sees it. A sink has applied a source position when every source commit at or before it is applied.
+_Avoid_: flushed, durable, committed, written
+
+**Searchable**:
+The fence level at which a search at the destination also sees the change. It trails applied by the destination's refresh while a backlog drains; a sink reports when each flush becomes searchable and is never asked to refresh.
+_Avoid_: refreshed, indexed
 
 **Document**:
 One denormalized, typed search record built from a root row and its joins and aggregates, keyed by a deterministic id. Built once, on the ingest side.

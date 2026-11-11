@@ -19,12 +19,54 @@ use crate::Result;
 pub struct FlushReport {
     /// Documents the destination accepted the batch but rejected individually.
     pub rejected: Vec<RejectedDocument>,
+    /// When what this flush wrote can be *searched*, as opposed to fetched by
+    /// id. The sink only reports what its flush did; the sink engine turns the
+    /// reports into the sink's searchable position.
+    pub visibility: Visibility,
+}
+
+/// When the documents of one [`flush`](Sink::flush) become searchable.
+///
+/// Applied and searchable are different moments for a destination that
+/// refreshes on a schedule: a flushed document is fetched by id at once but
+/// matched by a search only after the next refresh. A sink reports which of
+/// the three applies to the flush it just did; it never refreshes because
+/// somebody is waiting.
+///
+/// ```
+/// use sink::{FlushReport, Visibility};
+/// use std::time::Duration;
+///
+/// assert_eq!(FlushReport::clean().visibility, Visibility::Immediate);
+/// let lagging = FlushReport::clean().visible(Visibility::Within(Duration::from_secs(10)));
+/// assert_eq!(lagging.visibility, Visibility::Within(Duration::from_secs(10)));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    /// Searchable as the flush returned. The default: right for a destination
+    /// with no such distinction, and for a flush that wrote nothing.
+    #[default]
+    Immediate,
+    /// Searchable within this long of the flush returning (the destination's
+    /// own periodic refresh).
+    Within(std::time::Duration),
+    /// Not searchable until a later flush of this sink reports
+    /// [`Immediate`](Self::Immediate), which then covers this one too. A sink
+    /// that reports this must make that true.
+    Deferred,
 }
 
 impl FlushReport {
     /// A report with no rejections — everything in the flush was applied.
     pub fn clean() -> Self {
         Self::default()
+    }
+
+    /// Set when the flush's documents become searchable.
+    #[must_use]
+    pub fn visible(mut self, visibility: Visibility) -> Self {
+        self.visibility = visibility;
+        self
     }
 
     /// Whether the flush applied every buffered document (no item-level

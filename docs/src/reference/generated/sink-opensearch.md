@@ -13,7 +13,7 @@
 | `pipeline` | string | none | An ingest pipeline applied to every indexed document. |
 | `number_of_shards` | int | `1` | Primary shards for each index flusso creates. |
 | `number_of_replicas` | int | `1` | Replica shards for each index flusso creates. |
-| `refresh_interval` | string | `"10s"` | The `refresh_interval` applied to each index once its backfill completes: the steady-state visibility ceiling (`"10s"`, `"1s"`, or `"-1"` to disable automatic refresh). Indexes are seeded with refresh off and handed this value afterwards; a flush that catches the pipeline up forces an immediate refresh, so this only bounds staleness while a backlog drains. |
+| `refresh_interval` | string | `"10s"` | The `refresh_interval` applied to each index once its backfill completes: the steady-state visibility ceiling (`"10s"`, `"1s"`, or `"-1"` to disable automatic refresh). Indexes are seeded with refresh off and handed this value afterwards; a flush that catches the pipeline up forces an immediate refresh, so this only bounds staleness while a backlog drains. With `"-1"`, that catching-up flush also refreshes what the backlog wrote. |
 | `text_analysis` | `builtin` \| `icu` | `"builtin"` | Which analysis toolkit the built-in `flusso_*` analyzers use. |
 | `auto_subfields` | bool | `true` | Whether `text`/`keyword` fields are enriched with a good analyzer and the `keyword` / `keyword_lowercase` / `text` subfields. A field's explicit mapping always wins. |
 | `index_settings` | table | none | Extra OpenSearch index settings for every index this sink creates, e.g. `{ "mapping.total_fields.limit" = 5000 }`. Applied when an index generation is created. Keys, precedence, and the keys flusso owns are in the Sink: OpenSearch reference, under Index settings. |

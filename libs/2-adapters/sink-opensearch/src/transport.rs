@@ -4,6 +4,7 @@
 //! listing). Higher layers ([`generations`](crate) and the [`Sink`](crate) impl)
 //! build on these.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use kernel::IndexMapping;
@@ -188,6 +189,25 @@ impl OpensearchSink {
         self.send_ok(self.client.post(&url), "refresh failed")
             .await?;
         debug!(index, "refreshed index");
+        Ok(())
+    }
+
+    /// Refresh several indexes in one request. A name that no longer exists (a
+    /// generation a reindex dropped) is skipped: there is nothing left of it
+    /// to make searchable.
+    pub(crate) async fn refresh_indexes(&self, indexes: &BTreeSet<String>) -> Result<()> {
+        let names: Vec<&str> = indexes.iter().map(String::as_str).collect();
+        let url = format!(
+            "{}/{}/_refresh?ignore_unavailable=true",
+            self.base_url,
+            names.join(",")
+        );
+        self.send_ok(self.client.post(&url), "refresh failed")
+            .await?;
+        debug!(
+            indexes = names.len(),
+            "refreshed indexes written without a refresh"
+        );
         Ok(())
     }
 

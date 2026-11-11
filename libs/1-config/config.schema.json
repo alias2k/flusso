@@ -565,7 +565,7 @@
         },
         "refresh_interval": {
           "type": "string",
-          "description": "The `refresh_interval` applied to each index once its backfill completes:\nthe steady-state visibility ceiling (`\"10s\"`, `\"1s\"`, or `\"-1\"` to\ndisable automatic refresh). Indexes are seeded with refresh off and\nhanded this value afterwards; a flush that catches the pipeline up\nforces an immediate refresh, so this only bounds staleness while a\nbacklog drains.",
+          "description": "The `refresh_interval` applied to each index once its backfill completes:\nthe steady-state visibility ceiling (`\"10s\"`, `\"1s\"`, or `\"-1\"` to\ndisable automatic refresh). Indexes are seeded with refresh off and\nhanded this value afterwards; a flush that catches the pipeline up\nforces an immediate refresh, so this only bounds staleness while a\nbacklog drains. With `\"-1\"`, that catching-up flush also refreshes\nwhat the backlog wrote.",
           "default": "10s"
         },
         "text_analysis": {

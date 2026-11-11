@@ -49,6 +49,8 @@ flusso creates every index with a tuned `analysis` block and well-shaped fields.
 
 Indexes are created with auto-refresh **disabled** (`refresh_interval: -1`) for fast bulk seeding, then handed the configured `refresh_interval` (default `"10s"`) once seeded. A `flush` also **forces an immediate refresh whenever the pipeline has caught up** (no backlog) — so search is fresh under light traffic, while bulk indexing stays cheap when a backlog is draining. `refresh_interval` only bounds staleness *during sustained backlog*: raise it for write throughput under load, lower it (toward `1s`) for fresher search while behind.
 
+Each flush reports when its documents become searchable (at once when caught up, within `refresh_interval` otherwise); a `searchable` fence waits on that report and flusso never refreshes because a reader waits. With `refresh_interval = "-1"`, the next caught-up flush refreshes whatever the backlog wrote.
+
 ## Sink config keys (`[sinks.<name>]`, `type = "opensearch"`)
 
 | Key | Default | Note |

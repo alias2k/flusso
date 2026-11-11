@@ -67,7 +67,7 @@ What won't compile: `User::email().matches(..)` (a text operator on a keyword), 
 flusso-query = { version = "…", features = ["derive"] }
 ```
 
-Optional features: `decimal` (`rust_decimal::Decimal` as a decimal value), `uuid` (`uuid::Uuid` as a keyword), and a date crate, `time` or `chrono`. The crate targets OpenSearch and Elasticsearch 7.x, which share the query DSL; a [pinned cursor walk](paging.md#pinned-walks) needs OpenSearch ≥ 2.4.
+Optional features: `decimal` (`rust_decimal::Decimal` as a decimal value), `uuid` (`uuid::Uuid` as a keyword), a date crate, `time` or `chrono`, and `diesel` / `diesel-async` (read the position a [fenced read](read-your-writes.md) waits on). The crate targets OpenSearch and Elasticsearch 7.x, which share the query DSL; a [pinned cursor walk](paging.md#pinned-walks) needs OpenSearch ≥ 2.4.
 
 ## Where to next
 
@@ -82,5 +82,7 @@ Optional features: `decimal` (`rust_decimal::Decimal` as a decimal value), `uuid
 | Rust enums and newtypes as values | [Enums and custom values](enums-and-values.md) |
 | several indexes in one call | [Several indexes](several-indexes.md) |
 | the response, and the DSL hatch | [Results and the escape hatch](results-and-escape-hatch.md) |
+| page through results, or stream them | [Paging](paging.md), [Streaming a walk](streaming.md) |
+| read a write you just made | [Reading your own writes](read-your-writes.md) |
 | how the derive finds and checks the schema | [Binding to the schema](binding.md) |
 | coming from `path = "…"` | [Migrating from path](migrating-from-path.md) |

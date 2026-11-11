@@ -77,7 +77,8 @@ pub struct OpensearchConfig {
     /// disable automatic refresh). Indexes are seeded with refresh off and
     /// handed this value afterwards; a flush that catches the pipeline up
     /// forces an immediate refresh, so this only bounds staleness while a
-    /// backlog drains.
+    /// backlog drains. With `"-1"`, that catching-up flush also refreshes
+    /// what the backlog wrote.
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval: String,
     /// Which analysis toolkit the built-in `flusso_*` analyzers use.

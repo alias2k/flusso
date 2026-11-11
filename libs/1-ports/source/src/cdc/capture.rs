@@ -1,13 +1,29 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use kernel::Position;
 
-use crate::{Result, SnapshotTable};
+use crate::{Result, SnapshotTable, SourceError};
 
 use super::ChangeEvent;
 
 /// A live change: the position the source assigned it, and what changed.
 pub type LiveChange = (Position, ChangeEvent);
+
+/// A point in the source's own change order, as a client can read it from the
+/// source itself (Postgres: a WAL LSN).
+///
+/// Unlike a [`Position`], which the mechanism assigns and nobody outside it
+/// can interpret, this is what a client holds after its own commit and hands
+/// back to wait on. Ordered: a later commit never has a lower one. Only the
+/// mechanism parses and prints it ([`ChangeCapture::parse_position`],
+/// [`ChangeCapture::format_position`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourcePosition(pub u64);
+
+/// Called by a mechanism when [`ChangeCapture::reached`] may answer further.
+pub type AdvanceListener = Arc<dyn Fn() + Send + Sync>;
 
 /// Whether a [`ChangeCapture`]'s durable resume point survived from the
 /// previous run — the answer to [`ChangeCapture::continuity`].
@@ -55,6 +71,12 @@ pub enum Continuity {
 ///   *needed* is not the mechanism's call: each sink engine asks its **sink**
 ///   whether an index is seeded and requests a snapshot only then. A mechanism
 ///   that cannot snapshot keeps the default (an empty stream).
+///
+/// - [`reached`](Self::reached) translates progress back into the source's own
+///   terms: given the stream position a sink has processed through, the
+///   [`SourcePosition`] that is fully covered. It is what a fence compares a
+///   client's position with. A mechanism that cannot answer keeps the default
+///   (`None`) and fences are unavailable.
 ///
 /// Returned streams are `'static` and `Send`: an implementation moves whatever
 /// it needs (its connection, its position bookkeeping) into the stream rather
@@ -122,5 +144,43 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     /// that have no notion of lag (e.g. a finite snapshot-only source).
     async fn lag(&self) -> Result<Option<u64>> {
         Ok(None)
+    }
+
+    /// Parse a position a client read from the source (Postgres: the text of
+    /// `pg_current_wal_lsn()`). The default refuses: the mechanism has no
+    /// position a client could read.
+    fn parse_position(&self, text: &str) -> Result<SourcePosition> {
+        let _ = text;
+        Err(SourceError::Unsupported(
+            "this source has no position a client can wait on".to_owned(),
+        ))
+    }
+
+    /// Print `position` the way the source itself does, so it round-trips
+    /// through [`parse_position`](Self::parse_position).
+    fn format_position(&self, position: SourcePosition) -> String {
+        position.0.to_string()
+    }
+
+    /// How far the source's own order is covered once every change up to and
+    /// including `position` has been processed downstream: every source commit
+    /// at or before the returned position is among them. `None` for `position`
+    /// means "nothing processed since the stream opened".
+    ///
+    /// The answer keeps moving while the watched tables are idle: with no
+    /// change outstanding past `position`, it follows what the mechanism has
+    /// read. Returns `None` while the mechanism cannot tell (no live stream
+    /// yet, or no notion of a source position at all — the default).
+    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
+        let _ = position;
+        None
+    }
+
+    /// Register `listener`, called whenever [`reached`](Self::reached) may
+    /// answer further for an unchanged `position` (the mechanism read on with
+    /// nothing new to deliver). Cheap and non-blocking for the mechanism: the
+    /// listener must only wake something. The default never calls it.
+    fn on_advance(&self, listener: AdvanceListener) {
+        let _ = listener;
     }
 }

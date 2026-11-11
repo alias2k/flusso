@@ -27,6 +27,7 @@ ChangeCapture ─▶ IngestEngine ─┤                                        
 | **A seed is only as good as the stream behind it** | a missing resume point invalidates every earlier seed — those indexes are rebuilt, staged *before* the point is created | `continuity` → stage → `prepare` → snapshot |
 | **Requests are at-least-once** | a crash mid-snapshot redelivers the request; ten concurrent requests for one index are one pass over the table | ack after `SnapshotComplete`, coalescing |
 | **Item rejections vs flush errors** | one poison doc doesn't have to stop the run — or the other sinks | [`FailurePolicies`] per sink engine |
+| **Applied, then searchable, per sink** | a fence can tell "a get sees it" from "a search sees it" without anyone forcing a refresh | [`Observer::on_position_applied`] before the ack, [`Observer::on_position_searchable`] from each flush's reported visibility |
 
 ## The ingest engine
 
@@ -59,6 +60,13 @@ unacknowledged; `skip` → quarantine and continue), and acks. A
 `SnapshotComplete` marks its indexes seeded. A reindex reaches a running sink
 engine as a control message and is staged between two batches: `reindex` +
 `ensure_index`, then a fresh `Backfill` request. Nothing restarts.
+
+The loop also reports where the sink stands. When a positioned batch's flush
+returns, and before it is acknowledged, its position is **applied**. Each
+flush says when its documents become searchable; the engine queues the
+position with that moment and reports it **searchable** once it, and every
+position before it, is due. Both go to the [`Observer`], which is how the
+daemon's fence learns of them.
 
 ## Continuity first, then stage, then prepare
 
