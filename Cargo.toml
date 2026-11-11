@@ -107,7 +107,7 @@ serde_yaml = { version = "0.9.*" }
 thiserror = { version = "2.0.*" }
 anyhow = { version = "1.0.*", features = ["backtrace"] }
 toml = { version = "1.1.*", features = ["preserve_order"] }
-nutype = { version = "0.7.*", features = ["serde", "regex"] }
+nutype = { version = "0.8.*", features = ["serde", "regex"] }
 regex = { version = "1.12.*" }
 bon = { version = "3.*" }
 rust_decimal = { version = "1.*", features = ["serde-with-str"] }
@@ -146,7 +146,7 @@ testcontainers-modules = { version = "0.15.*" }
 criterion = { version = "0.8.*", features = ["async_tokio"] }
 proptest = { version = "1.*" }
 axum = { version = "0.8.*" }
-base64 = "0.22"
+base64 = "0.23"
 # Embeds the schema designer's built SPA (`apps/design/dist/`) into the binary.
 # `debug-embed` embeds in debug builds too, so the served assets don't depend on
 # the working directory and tests are reproducible.
