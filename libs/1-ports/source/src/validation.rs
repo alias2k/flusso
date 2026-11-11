@@ -201,7 +201,7 @@ async fn validate_field(
         FieldSource::Geo(geo) => {
             validate_geo(index, db_schema, table, &field.field, geo, catalog, out).await?;
         }
-        FieldSource::Constant(_) => {}
+        FieldSource::Constant(_) | FieldSource::Script(_) => {}
     }
     Ok(())
 }

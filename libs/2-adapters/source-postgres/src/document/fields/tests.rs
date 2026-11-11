@@ -14,6 +14,7 @@ fn id_field() -> Field {
     Field {
         field: FieldName::try_new("id").unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: column("id"),
             ty: FlussoType::Keyword,
@@ -31,6 +32,7 @@ fn join(name: &str, on: &str, kind: JoinKind, fields: Vec<Field>) -> Field {
     Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: table(on),
             kind,
@@ -109,6 +111,7 @@ fn an_aggregate_via_hops_adds_one_step_per_hop() {
     let task_count = Field {
         field: FieldName::try_new("taskCount").unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(kernel::Aggregate {
             table: table("tasks"),
             op: kernel::AggregateOp::Count,

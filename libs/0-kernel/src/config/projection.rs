@@ -13,7 +13,7 @@ use crate::common::{ColumnName, GenericValue, IndexName};
 
 use super::{
     Aggregate, AggregateOp, Column, ContentHash, Field, FieldSource, FlussoType, IndexMapping,
-    IndexSchema, Mapping, MappingType, Relation, ResolvedField,
+    IndexSchema, Mapping, MappingType, Relation, ResolvedField, Script,
 };
 
 impl IndexSchema {
@@ -35,10 +35,12 @@ fn resolve_index(index: IndexName, schema: &IndexSchema) -> IndexMapping {
 
 /// Resolve a list of fields. `primary_key` is the root table's key while we are
 /// still on the root row (it passes through groups, which stay on the same row);
-/// it is `None` once we cross into a related table via a join.
+/// it is `None` once we cross into a related table via a join. An input-only
+/// (`emit: false`) field never reaches the document, so it has no mapping.
 fn resolve_fields(fields: &[Field], primary_key: Option<&ColumnName>) -> Vec<ResolvedField> {
     fields
         .iter()
+        .filter(|field| field.emit)
         .map(|field| resolve_field(field, primary_key))
         .collect()
 }
@@ -89,6 +91,7 @@ fn map_value_type(field: &Field) -> Option<Box<Mapping>> {
 fn has_subfields(field: &Field) -> bool {
     match &field.source {
         FieldSource::Column(column) => column.subfields,
+        FieldSource::Script(script) => script.subfields,
         _ => true,
     }
 }
@@ -112,6 +115,11 @@ fn enum_order(field: &Field) -> Option<Vec<String>> {
             ty: FlussoType::Enum,
             enum_order,
             ..
+        })
+        | FieldSource::Script(Script {
+            ty: FlussoType::Enum,
+            enum_order,
+            ..
         }) if !enum_order.is_empty() => Some(enum_order.clone()),
         _ => None,
     }
@@ -124,7 +132,9 @@ fn enum_order(field: &Field) -> Option<Vec<String>> {
 fn is_decimal(field: &Field) -> bool {
     let ty_is_decimal = |ty: &FlussoType| matches!(ty, FlussoType::Decimal);
     match &field.source {
-        FieldSource::Column(Column { ty, .. }) => ty_is_decimal(ty),
+        FieldSource::Column(Column { ty, .. }) | FieldSource::Script(Script { ty, .. }) => {
+            ty_is_decimal(ty)
+        }
         FieldSource::Constant(GenericValue::Decimal(_)) => true,
         FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
             AggregateOp::Sum(_) | AggregateOp::Min(_) | AggregateOp::Max(_) => {
@@ -138,7 +148,8 @@ fn is_decimal(field: &Field) -> bool {
 }
 
 /// Returns `(mapping_type, nullable, array)`. `array` is true only for an `ids`
-/// aggregate, whose `mapping_type` is then the element type.
+/// aggregate or an array-returning script, whose `mapping_type` is then the
+/// element type.
 fn type_and_nullability(
     field: &Field,
     primary_key: Option<&ColumnName>,
@@ -174,6 +185,7 @@ fn type_and_nullability(
             (mapping_type, join.nullable, false)
         }
         FieldSource::Relation(Relation::Aggregate(aggregate)) => aggregate_type(aggregate),
+        FieldSource::Script(script) => (script.ty.opensearch(), script.nullable, script.array),
     }
 }
 

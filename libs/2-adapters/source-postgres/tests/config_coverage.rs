@@ -1111,6 +1111,7 @@ fn base(name: &str) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Constant(GenericValue::Null),
     }
 }

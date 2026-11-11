@@ -25,8 +25,8 @@ use anyhow::Result;
 use config::toml::ConfigToml;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnPair, Field, FieldSource, Filter,
-    FilterValue, Geo, IndexSchema, Join, JoinKind, NullOp, OrderBy, Relation, SoftDelete, Through,
-    Transform, ViaHop,
+    FilterValue, Geo, IndexSchema, Join, JoinKind, NullOp, OrderBy, Relation, Script, SoftDelete,
+    Through, Transform, ViaHop,
 };
 use kernel::{FlussoType, GenericValue};
 use serde_yaml::{Mapping, Value};
@@ -82,9 +82,13 @@ fn field_value(field: &Field) -> Result<Value> {
             body.insert(Value::from("value"), serde_yaml::to_value(value)?);
             "constant"
         }
+        FieldSource::Script(script) => script_field(script, &mut body)?,
     };
     if !field.options.is_empty() {
         body.insert(Value::from("options"), options_value(&field.options)?);
+    }
+    if !field.emit {
+        body.insert(Value::from("emit"), Value::from(false));
     }
     // The tag's value is the document key; everything else is a sibling. Build a
     // single-entry mapping with the tag first so the file reads `- <type>: name`.
@@ -140,6 +144,24 @@ fn column_field(name: &str, column: &Column, body: &mut Mapping) -> Result<&'sta
         body.insert(Value::from("indexed"), Value::from(false));
     }
     Ok(tag)
+}
+
+fn script_field(script: &Script, body: &mut Mapping) -> Result<&'static str> {
+    body.insert(Value::from("required"), Value::from(!script.nullable));
+    if !script.enum_order.is_empty() {
+        body.insert(
+            Value::from("variants"),
+            serde_yaml::to_value(&script.enum_order)?,
+        );
+    }
+    if script.array {
+        body.insert(Value::from("array"), Value::from(true));
+    }
+    if !script.subfields {
+        body.insert(Value::from("subfields"), Value::from(false));
+    }
+    body.insert(Value::from("script"), Value::from(script.source.as_str()));
+    Ok(scalar_tag(&script.ty))
 }
 
 fn geo_field(geo: &Geo, body: &mut Mapping) -> &'static str {

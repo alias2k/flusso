@@ -27,6 +27,7 @@ fn builder() -> PgDocumentBuilder {
         fields: vec![Field {
             field: FieldName::try_new("email").unwrap(),
             options: Default::default(),
+            emit: true,
             source: FieldSource::Column(Column {
                 column: column("email"),
                 ty: FlussoType::Keyword,

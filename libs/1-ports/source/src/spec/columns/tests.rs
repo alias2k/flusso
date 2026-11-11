@@ -22,6 +22,7 @@ fn field(name: &str) -> Field {
     Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: column(name),
             ty: FlussoType::Keyword,
@@ -39,6 +40,7 @@ fn relation_field(name: &str, relation: Relation) -> Field {
     Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(relation),
     }
 }

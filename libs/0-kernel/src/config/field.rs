@@ -16,14 +16,38 @@ use super::{
 /// [`Column`]'s [`ty`](Column::ty), an [`Aggregate`]'s
 /// [`value_type`](Aggregate::value_type)) so the document shape is known without
 /// a database.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Field {
     pub field: common::FieldName,
     /// Extra OpenSearch mapping properties merged beside the derived `type`
     /// (e.g. `analyzer`, `scaling_factor`). Empty for most fields.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, common::GenericValue>,
+    /// Whether the field reaches the emitted document. `false` makes it
+    /// input-only: fetched so a [`Script`] can read it, then stripped, and left
+    /// out of the mapping.
+    #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
+    pub emit: bool,
     pub source: FieldSource,
+}
+
+/// Hashes `emit` only when it is off, so a schema with no input-only field
+/// keeps the content hash it had before `emit` existed.
+impl Hash for Field {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self {
+            field,
+            options,
+            emit,
+            source,
+        } = self;
+        field.hash(state);
+        options.hash(state);
+        source.hash(state);
+        if !emit {
+            "emit".hash(state);
+        }
+    }
 }
 
 /// Where a field's value comes from. The shapes are mutually exclusive — a field
@@ -47,6 +71,29 @@ pub enum FieldSource {
     Relation(Relation),
     /// A constant value with no database source — `None` renders as null.
     Constant(common::GenericValue),
+    /// A value computed by a script from the built document.
+    Script(Script),
+}
+
+/// A computed field: a script run over the built document, returning a value of
+/// the declared leaf type (or an array of it).
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+pub struct Script {
+    /// The script source (Rhai).
+    pub source: String,
+    /// The declared leaf type of the result.
+    pub ty: FlussoType,
+    /// Whether the script may return null (`()`).
+    pub nullable: bool,
+    /// Whether the script returns an array of [`ty`](Self::ty).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub array: bool,
+    /// For an [`Enum`](FlussoType::Enum) result, its variants in rank order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_order: Vec<String>,
+    /// Whether a sink may add its automatic subfields (as on a [`Column`]).
+    #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
+    pub subfields: bool,
 }
 
 /// A column-backed field: the column to read, its declared type and nullability,
@@ -167,7 +214,7 @@ pub enum Relation {
 impl Field {
     /// The fields nested directly under this one: a [`Group`](FieldSource::Group)'s
     /// members or a [`Join`](Relation::Join)'s projection. Columns, aggregates,
-    /// and constants have none.
+    /// constants, and scripts have none.
     pub fn children(&self) -> &[Field] {
         match &self.source {
             FieldSource::Group(fields) => fields,
@@ -175,7 +222,8 @@ impl Field {
             FieldSource::Column(_)
             | FieldSource::Geo(_)
             | FieldSource::Relation(Relation::Aggregate(_))
-            | FieldSource::Constant(_) => &[],
+            | FieldSource::Constant(_)
+            | FieldSource::Script(_) => &[],
         }
     }
 

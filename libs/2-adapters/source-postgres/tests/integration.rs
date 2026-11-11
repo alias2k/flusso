@@ -256,6 +256,7 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
     let typed_field = |name: &str, ty: FlussoType| Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: column(name),
             ty,
@@ -524,6 +525,7 @@ async fn an_aggregate_over_the_root_table_rebuilds_the_parent() {
     let child_count = Field {
         field: field("childCount"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(Aggregate {
             table: table("items"),
             op: AggregateOp::Count,
@@ -596,6 +598,7 @@ fn join_field(name: &str, on: &str, kind: JoinKind) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: table(on),
             primary_key: column("id"),
@@ -615,6 +618,7 @@ fn users_spec() -> SourceSpec {
     let orders = Field {
         field: field("orders"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: table("orders"),
             primary_key: column("id"),
@@ -654,6 +658,7 @@ fn column_field(name: &str, col: &str) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: column(col),
             ty: FlussoType::Keyword,

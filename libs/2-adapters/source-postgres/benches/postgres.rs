@@ -191,6 +191,7 @@ fn spec() -> SourceSpec {
     let orders = Field {
         field: field("orders"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: table("orders"),
             primary_key: column("id"),
@@ -235,6 +236,7 @@ fn column_field(name: &str, col: &str) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: column(col),
             ty: FlussoType::Keyword,

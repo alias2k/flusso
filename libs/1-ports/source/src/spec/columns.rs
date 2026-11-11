@@ -192,7 +192,7 @@ impl Collector {
                     }
                     self.locals(relation.parent_on());
                 }
-                FieldSource::Constant(_) => {}
+                FieldSource::Constant(_) | FieldSource::Script(_) => {}
             }
         }
     }

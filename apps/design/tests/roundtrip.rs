@@ -426,6 +426,7 @@ fn fields(depth: u32) -> BoxedStrategy<Vec<Field>> {
                 .map(|(i, source)| Field {
                     field: FieldName::try_new(format!("f{i}")).unwrap(),
                     options: options_for(&source),
+                    emit: true,
                     source,
                 })
                 .collect()

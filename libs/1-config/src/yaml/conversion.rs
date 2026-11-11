@@ -26,6 +26,7 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
             Ok(Field {
                 field: body.field,
                 options: convert_options(body.options),
+                emit: true,
                 source: FieldSource::Group(fields),
             })
         }
@@ -35,6 +36,7 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
         entities::Field::Constant(body) => Ok(Field {
             field: body.field,
             options: BTreeMap::new(),
+            emit: true,
             source: FieldSource::Constant(yaml_to_generic(body.value)),
         }),
     }
@@ -84,6 +86,7 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source: FieldSource::Column(Column {
             column,
             ty,
@@ -143,6 +146,7 @@ fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source: FieldSource::Column(Column {
             column,
             ty: FlussoType::Map {
@@ -175,6 +179,7 @@ fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source: FieldSource::Column(Column {
             column,
             ty,
@@ -268,6 +273,7 @@ fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source,
     })
 }
@@ -338,6 +344,7 @@ fn convert_join_field(
     Ok(Field {
         field: body.field,
         options: convert_options(body.options),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(join)),
     })
 }
@@ -466,6 +473,7 @@ fn convert_aggregate_field(
     Ok(Field {
         field: body.field,
         options: convert_options(body.options),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     })
 }
