@@ -1,18 +1,31 @@
 name: pages
 
-# Publish the GitHub Pages site at https://alias2k.github.io/flusso/. It has two parts:
+# Publish the GitHub Pages site at https://alias2k.github.io/flusso/. Its parts:
 #
-#   /            the mdBook user manual (built from docs/), single `latest`, tracks main
+#   /            the mdBook user manual as of the newest release (any train)
+#   /main/       the same manual as of main's tip: unreleased, banner + noindex
 #   /schemas/    the editor-assist JSON Schemas, one immutable directory per release
 #   /bench/      the benchmark history dashboards, from the `benchmarks` data branch
 #
-# The manual is rebuilt on every push to `main` (and on schema-release tags) so it
-# tracks the current code; the schema tree is rebuilt from EVERY release tag on every
+# Every run rebuilds the whole site, whatever fired it (GitHub Pages deploys one
+# artifact). The two manuals come from .github/scripts/build-manuals.sh: the root
+# from `docs/` at the newest stable `flusso-{config,cli,query}-v*` tag by creation
+# date, `/main/` from `docs/` at origin/main. The overlays that add the banner and
+# the cross links live in docs/channels/ and are taken from main, so an old tag
+# builds unchanged. The schema tree is rebuilt from EVERY release tag on every
 # run (idempotent), so a new release never drops older versions.
+#
+# A release redeploys the site through the tag triggers below: release-plz pushes
+# its tags with a GitHub App token (release-plz.yml), and an App-pushed tag fires
+# workflows (the default GITHUB_TOKEN's would not). The `github-pages`
+# environment deploys only from main, so a run fired from any other ref (a tag,
+# the `benchmarks` branch) deploys nothing itself: it dispatches this workflow on
+# main, which rebuilds everything. A dispatch made with GITHUB_TOKEN does fire.
 #
 # The manual used to live under /docs/ (issue #117 moved it to the root so the
 # deep links across the repo and the crate docs resolve). Redirect stubs are
-# written at the old /docs/… paths so links published before the move still land.
+# written at the old /docs/… paths so links published before the move still land;
+# they point at the released manual.
 #
 # Schema pinning — a `# yaml-language-server: $schema=…` modeline (and the `.taplo.toml`
 # rule) can target the schema matching the running flusso:
@@ -22,9 +35,9 @@ name: pages
 #   schemas/latest/index.schema.yml   newest version overall
 #   (same three forms for config.schema.json)
 #
-# The two schema parser crates sit in the same `libs` version group
-# (release-plz.toml), so their tags move together even though the workspace
-# releases as independent trains. Versions
+# The schema files live in the config crate, so the schema tree follows the
+# `libs` train's `flusso-config-v*` tags (pre-0.16, the two parser crates'
+# `flusso-schema-*` tags). Versions
 # whose tag predates the in-crate schema layout are skipped (their files lived elsewhere)
 # — the schema tree effectively starts at the first release after that move.
 
@@ -34,31 +47,51 @@ on:
       - main
       # The bench workflow pushes each main run's data points here. A push made
       # with the workflow token does not fire this trigger, so bench.yml also
-      # dispatches this workflow explicitly; the trigger covers manual pushes.
+      # dispatches this workflow explicitly; the trigger covers manual pushes
+      # (and redeploys through main, like a tag).
       - benchmarks
+    # One crate per release train; its tag changes the root manual (and, for
+    # flusso-config, the schema tree).
     tags:
-      - 'flusso-schema-index-yaml-v[0-9]+.[0-9]+.[0-9]+'
-      - 'flusso-schema-config-toml-v[0-9]+.[0-9]+.[0-9]+'
+      - 'flusso-config-v[0-9]+.[0-9]+.[0-9]+'
+      - 'flusso-cli-v[0-9]+.[0-9]+.[0-9]+'
+      - 'flusso-query-v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-# Both schema tags push together on a release; serialize the runs (the build is
-# idempotent — each rebuilds the full site from all tags).
-concurrency:
-  group: pages
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  deploy:
+  redeploy-from-main:
+    if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the deploy on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run pages.yml --ref main
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # A release pushes up to three of those tags seconds apart, each dispatching
+    # a deploy; serialize the deploys (idempotent: each rebuilds the full site
+    # from all tags, and a newer pending run replaces an older one). Only this
+    # job, so a pending dispatch is never the run that gets replaced.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # Tags and branches (origin/main, origin/benchmarks) come with fetch-depth 0.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -67,12 +100,8 @@ jobs:
         with:
           tool: mdbook
 
-      - name: Build the mdBook manual at the site root
-        run: |
-          set -euo pipefail
-          mdbook build docs
-          mkdir -p site
-          cp -r docs/book/. site/
+      - name: Build the released manual at the root and main's under /main/
+        run: .github/scripts/build-manuals.sh site origin/main
 
       - name: Redirect the pre-#117 /docs/ paths
         run: |

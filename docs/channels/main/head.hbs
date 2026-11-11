@@ -1,0 +1,22 @@
+<meta name="robots" content="noindex">
+<style>
+  .flusso-channel-main {
+    margin: 0 0 1.5em;
+    padding: 0.6em 1em;
+    border-inline-start: 0.25em solid var(--warning-border, #ff8e00);
+    background: var(--quote-bg, rgba(255, 142, 0, 0.08));
+  }
+</style>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var main = document.querySelector("main");
+    if (!main) return;
+    var note = document.createElement("div");
+    note.className = "flusso-channel-main";
+    note.setAttribute("role", "note");
+    note.innerHTML =
+      "This manual documents unreleased <code>main</code>: some keys and flags here are not in any release yet. " +
+      'For the version you run, read the <a href="{{ path_to_root }}../">released manual</a>.';
+    main.prepend(note);
+  });
+</script>

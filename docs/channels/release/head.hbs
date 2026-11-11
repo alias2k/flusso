@@ -1,0 +1,17 @@
+<style>
+  .flusso-channel-release {
+    margin: 0 0 1em;
+    text-align: end;
+    font-size: 0.85em;
+  }
+</style>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var main = document.querySelector("main");
+    if (!main) return;
+    var link = document.createElement("p");
+    link.className = "flusso-channel-release";
+    link.innerHTML = '<a href="{{ path_to_root }}main/">Docs for unreleased main</a>';
+    main.prepend(link);
+  });
+</script>
