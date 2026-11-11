@@ -4,8 +4,9 @@ name: bench
 #
 #   in-process   PR gate. The four no-Docker Criterion benches (engine loop,
 #                pgoutput decode, sink render, script fields) run twice on the same runner —
-#                the PR's base, then the PR — and the job fails when any bench
-#                is more than 10% slower. Same runner, so no cross-run noise.
+#                the PR's base, then the PR. A bench more than 10% slower is
+#                re-measured on its own (base, then PR) and the job fails only
+#                when it is past 10% again: one noisy sample doesn't fail a PR.
 #
 #   scenarios    History. On every push to main: the in-process benches, the
 #                three Docker-backed component benches, and the two flusso-bench
@@ -34,7 +35,12 @@ jobs:
     name: in-process (A/B vs base)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      # One target dir for both trees: the base worktree and the PR checkout
+      # build side by side (path-keyed artifacts), and Criterion keeps every
+      # saved baseline under target/criterion for the comparison.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,28 +52,23 @@ jobs:
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # Criterion keeps every saved baseline under target/criterion, so both
-      # sides of the comparison survive the checkout switch. The runner script
-      # is taken from the PR, since the base may predate it; a base without
-      # these bench targets yields no baseline, and the compare step then
+      # The base gets its own worktree, kept for the whole job so the gate can
+      # re-measure a breach on it without rebuilding either side. The runner
+      # script is taken from the PR, since the base may predate it; a base
+      # without these bench targets yields no baseline, and the gate then
       # reports that instead of failing (nothing to gate against yet).
       - name: Bench the base (baseline `base`)
         run: |
           set -euo pipefail
-          head=$(git rev-parse HEAD)
-          echo "head=$head" >> "$GITHUB_ENV"
-          cp .github/scripts/bench-in-process.sh /tmp/bench-in-process.sh
-          git checkout --quiet ${{ github.event.pull_request.base.sha }}
-          /tmp/bench-in-process.sh base || echo "::warning::the base has no in-process benches; no baseline to compare against"
+          git worktree add --detach "$RUNNER_TEMP/base" ${{ github.event.pull_request.base.sha }}
+          cd "$RUNNER_TEMP/base"
+          "$GITHUB_WORKSPACE/.github/scripts/bench-in-process.sh" base || echo "::warning::the base has no in-process benches; no baseline to compare against"
 
       - name: Bench the PR (baseline `pr`)
-        run: |
-          set -euo pipefail
-          git checkout --quiet "$head"
-          .github/scripts/bench-in-process.sh pr
+        run: .github/scripts/bench-in-process.sh pr
 
-      - name: Compare (fail past 10% slower)
-        run: python3 .github/scripts/bench-compare.py target/criterion base pr 10
+      - name: Compare (fail past 10% slower, confirmed by a re-run)
+        run: .github/scripts/bench-gate.sh "$RUNNER_TEMP/base" 10
 
   scenarios:
     name: scenarios + components (history)

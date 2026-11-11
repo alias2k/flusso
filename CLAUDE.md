@@ -81,8 +81,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   API, no feature; `bench-in-process.sh` skips it on a PR base that predates the crate). `pgoutput` and `render` sit behind each
   crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
   `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
-  on a PR, `in-process` runs the three benches on the base then the PR (same runner) and fails past
-  10% slower (`bench-compare.py`); on a `main` push, `scenarios` runs everything and stores the
+  on a PR, `in-process` runs the in-process benches on the base (its own worktree) then the PR (same
+  runner, one target dir), and `bench-gate.sh` re-measures each bench past 10% slower (`bench-compare.py`)
+  on its own, base then PR (`--exact`), failing only when it breaches again; on a `main` push, `scenarios` runs everything and stores the
   points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
   `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
   calls a regression only on two consecutive points past 25% (20% RSS), image-tag change restarts
