@@ -262,6 +262,15 @@ export const it: Record<string, string> = {
   "inspector.indexedOff":
     "Memorizzato, non indicizzato: resta nel documento per la visualizzazione, mappato come un unico oggetto disabilitato. Niente sotto di esso si può cercare, filtrare o ordinare.",
   "inspector.indexedOptions": "Un campo non indicizzato non accetta opzioni di mapping: rimuovile in Avanzate.",
+  "inspector.emit": "Emesso",
+  "inspector.emitOn": "Nel documento e nel mapping.",
+  "inspector.emitOff":
+    "Solo input: letto perché gli script possano usarlo, poi rimosso. Non è nel documento né nel mapping.",
+  "inspector.script": "Script",
+  "inspector.scriptHint":
+    "Rhai. `this` è l'oggetto a questo livello (un elemento dentro un has_many), `root` l'intero documento. Restituisci il tipo del campo, oppure () per null.",
+  "inspector.scriptArray": "Restituisce un array",
+  "inspector.scriptEmpty": "Scrivi lo script che calcola questo campo.",
   "inspector.softDelete": "eliminazione logica",
   "inspector.documentField": "campo del documento",
 
@@ -284,6 +293,7 @@ export const it: Record<string, string> = {
   "kindHelp.constant": "Un valore fisso incluso in ogni documento.",
 
   // preview
+  "kindHelp.script": "Un valore calcolato da uno script a partire dal documento costruito.",
   "preview.title": "Anteprima",
   "preview.empty": "Seleziona o modifica un indice per visualizzarne l'anteprima.",
   "preview.parseError": "Questo schema non è analizzabile:",
@@ -303,6 +313,12 @@ export const it: Record<string, string> = {
   "preview.sampleHint": "Costruisci un documento da una riga reale del database — esattamente ciò che scrive il sink.",
 
   // catalog browser
+  "preview.printed": "Stampato",
+  "preview.rowId": "Id riga",
+  "preview.rowIdPlaceholder": "prima riga",
+  "preview.scriptFailed": "Lo script `{field}` è fallito:",
+  "preview.scriptFailedHint":
+    "Mostra la riga come costruita, prima degli script. In esecuzione decide on_error: fermarsi, oppure saltare e mantenere la versione indicizzata.",
   "catalog.title": "{n, plural, one {Database (# tabella)} other {Database (# tabelle)}}",
   "catalog.dbError": "Database non raggiungibile — {err}",
   "catalog.filter": "Filtra tabelle e colonne…",
@@ -334,6 +350,7 @@ export const it: Record<string, string> = {
   "node.reqOverride": "obbligatorio — forza una colonna che ammette null",
   "node.colDefault": "ha un valore predefinito",
   "node.incomplete": "incompleto — imposta la sua chiave/colonna nell'ispettore",
+  "node.inputOnly": "solo input: letto per gli script, non emesso",
   "node.addJoin": "+ relazione",
   "node.addField": "+ campo",
   "node.addColumn": "+ nome colonna, Invio",
