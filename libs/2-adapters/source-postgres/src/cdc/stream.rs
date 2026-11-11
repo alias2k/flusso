@@ -47,7 +47,7 @@ pub(crate) trait Replication: Send + 'static {
     ) -> impl Future<Output = std::result::Result<Option<ReplicationEvent>, PgWireError>> + Send;
 
     /// Report everything through `lsn` as applied. Monotonic; the client
-    /// sends it to the server on its own schedule.
+    /// sends a raised LSN to the server within its status interval.
     fn update_applied_lsn(&self, lsn: Lsn);
 }
 
@@ -430,6 +430,14 @@ fn map_pgwire(error: PgWireError) -> SourceError {
             SourceError::Setup(error.to_string())
         }
         PgWireError::Protocol(_) => SourceError::Decode(error.to_string()),
+        PgWireError::MessageTooLarge {
+            payload_bytes,
+            limit_bytes,
+        } => SourceError::Setup(format!(
+            "the server sent a replication message of {payload_bytes} bytes, past the \
+             {limit_bytes}-byte limit; the stream cannot read past it, so every restart stops \
+             at the same message (a corrupt stream or an oversized change)"
+        )),
         other => SourceError::Connection(other.to_string()),
     }
 }

@@ -18,7 +18,7 @@ fn replication_config_keeps_the_url_parts() {
     assert_eq!(config.password, "pw");
     assert_eq!(config.database, "appdb");
     assert_eq!(config.slot, "myslot");
-    assert_eq!(config.publication, "mypub");
+    assert_eq!(config.publication.names(), ["mypub"]);
 }
 
 #[test]

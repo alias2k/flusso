@@ -111,7 +111,7 @@ nutype = { version = "0.7.*", features = ["serde", "regex"] }
 regex = { version = "1.12.*" }
 bon = { version = "3.*" }
 rust_decimal = { version = "1.*", features = ["serde-with-str"] }
-pgwire-replication = { version = "0.3.*", features = ["md5"] }
+pgwire-replication = { version = "0.5", features = ["md5"] }
 async-trait = { version = "0.1.*" }
 futures = { version = "0.3.*" }
 futures-core = { version = "0.3.*" }

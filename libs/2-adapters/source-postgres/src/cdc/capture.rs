@@ -26,6 +26,10 @@ use super::{backfill, publication, replica_identity, stream};
 /// releases WAL within about this long after the last sink flush.
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The replication connection's `application_name`, shown in
+/// `pg_stat_replication` and `pg_stat_activity`, unless the caller set one.
+const APPLICATION_NAME: &str = "flusso";
+
 /// Postgres change capture over logical replication (pgoutput).
 ///
 /// Exposes the three [`ChangeCapture`] capabilities the engine orchestrates:
@@ -98,12 +102,23 @@ impl WalChangeCapture {
     ///
     /// Leave `config.start_lsn` at [`Lsn::ZERO`](pgwire_replication::Lsn::ZERO)
     /// to resume from the slot's `confirmed_flush_lsn` — the usual choice.
+    /// A non-zero `start_lsn` is taken as already confirmed by every sink.
     /// The client reports its position to the server every second, idle or not.
+    ///
+    /// `config.publication` names one publication: the one
+    /// [`CaptureProvisioning`] inspects and provisions. Without an
+    /// `application_name`, the connection reports itself as `flusso`.
     pub fn new(config: ReplicationConfig, connection_url: impl Into<String>) -> Self {
+        let named = config.application_name.is_some();
+        let config = config
+            .with_status_interval(STATUS_INTERVAL)
+            .with_wakeup_interval(STATUS_INTERVAL);
         Self {
-            config: config
-                .with_status_interval(STATUS_INTERVAL)
-                .with_wakeup_interval(STATUS_INTERVAL),
+            config: if named {
+                config
+            } else {
+                config.with_application_name(APPLICATION_NAME)
+            },
             connection_url: connection_url.into(),
             admin_pool: Arc::new(OnceCell::new()),
             required_tables: BTreeSet::new(),
@@ -407,7 +422,7 @@ impl CaptureProvisioning for WalChangeCapture {
         required: &BTreeSet<QualifiedTable>,
     ) -> Result<CoverageReport> {
         let pool = self.admin_pool().await?;
-        publication::inspect_publication(pool, &self.config.publication, required).await
+        publication::inspect_publication(pool, &self.config.publication.to_string(), required).await
     }
 
     #[tracing::instrument(name = "wal.ensure_coverage", skip_all, err)]
@@ -418,7 +433,8 @@ impl CaptureProvisioning for WalChangeCapture {
     ) -> Result<CoverageReport> {
         let pool = self.admin_pool().await?;
         let report =
-            publication::inspect_publication(pool, &self.config.publication, required).await?;
+            publication::inspect_publication(pool, &self.config.publication.to_string(), required)
+                .await?;
 
         if report.satisfied {
             tracing::debug!(
@@ -441,7 +457,7 @@ impl CaptureProvisioning for WalChangeCapture {
         if manage && report.manageable {
             publication::apply_publication(
                 pool,
-                &self.config.publication,
+                &self.config.publication.to_string(),
                 &report.missing,
                 !report.misrouted.is_empty(),
             )
@@ -531,5 +547,27 @@ impl CaptureProvisioning for WalChangeCapture {
             );
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ReplicationConfig {
+        ReplicationConfig::new("localhost", "app", "pw", "db", "slot", "pub")
+    }
+
+    #[test]
+    fn the_replication_connection_is_named_flusso_unless_the_caller_named_it() {
+        let capture = WalChangeCapture::new(config(), "postgres://app@localhost/db");
+        assert_eq!(capture.config.application_name.as_deref(), Some("flusso"));
+
+        let named = config().with_application_name("search-sync");
+        let capture = WalChangeCapture::new(named, "postgres://app@localhost/db");
+        assert_eq!(
+            capture.config.application_name.as_deref(),
+            Some("search-sync")
+        );
     }
 }

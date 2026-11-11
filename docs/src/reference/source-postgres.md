@@ -73,6 +73,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
   - Postgres can recycle that WAL (the slot's `restart_lsn` moves) once it has logged its next periodic snapshot record, typically within about 15 seconds.
 
   A slow or stalled sink still holds the slot back: the confirmed position is the slowest sink's.
+- **The replication connection is named `flusso`.** It shows as `application_name = 'flusso'` in `pg_stat_replication` and `pg_stat_activity`, so its walsender is easy to tell from other consumers'. The SQL connections keep whatever `application_name` the `connection_url` sets.
 - **Backfill** snapshots the root tables of unseeded indexes before live capture. `--skip-backfill` skips it. A partitioned root is read through the parent, every partition included.
 
 ## Server requirements
