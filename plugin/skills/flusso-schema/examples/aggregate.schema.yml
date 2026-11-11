@@ -8,6 +8,7 @@ primary_key: id
 
 fields:
   - integer: id
+    required: true
   - keyword: email
     required: true
 
@@ -95,6 +96,7 @@ fields:
 
   # Exact money: decimal -> double loses precision, so declare a custom field.
   - custom: balance
+    required: false
     postgres: [numeric]
     opensearch: scaled_float
     options: { scaling_factor: 100 }
