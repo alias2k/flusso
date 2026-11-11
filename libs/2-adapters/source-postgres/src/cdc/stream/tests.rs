@@ -456,3 +456,28 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     assert!(!reader.is_finished(), "no replication event was emitted");
     reader.abort();
 }
+
+#[test]
+fn an_oversized_message_is_a_setup_error_naming_both_sizes() {
+    let error = map_pgwire(PgWireError::MessageTooLarge {
+        payload_bytes: 2_000,
+        limit_bytes: 1_000,
+    });
+    let SourceError::Setup(message) = error else {
+        panic!("expected a setup error, got {error:?}");
+    };
+    assert!(message.contains("2000 bytes"), "{message}");
+    assert!(message.contains("1000-byte limit"), "{message}");
+}
+
+#[test]
+fn transport_errors_stay_transient_and_framing_errors_are_decode_errors() {
+    let io = PgWireError::Io(Arc::new(std::io::Error::from(
+        std::io::ErrorKind::ConnectionReset,
+    )));
+    assert!(matches!(map_pgwire(io), SourceError::Connection(_)));
+    assert!(matches!(
+        map_pgwire(PgWireError::Protocol("bad frame".into())),
+        SourceError::Decode(_)
+    ));
+}

@@ -372,7 +372,11 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once instead of
   at the next replication event, and `WalChangeCapture::new` sets the client's status and idle
   wake-up intervals to 1 s (`STATUS_INTERVAL`, fixed, no option). `Positions` stays the one place
-  that computes what may be confirmed; only the moment of hand-over is new. Guards:
+  that computes what may be confirmed; only the moment of hand-over is new. `pgwire-replication`
+  0.5 sends a raised LSN within its status interval on its own (issue #215), but only once
+  `update_applied_lsn` is called, which only the stream loop can do (`recv` takes `&mut`), so the
+  wake-up stays: without it a confirm waits for the next replication event (measured +1 s quiet,
+  up to +1 s under a trickle). Guards:
   `a_confirmation_reaches_the_client_without_a_replication_event` (`cdc::stream` unit, over the
   `Replication` seam) and `wal_release`'s `the_slot_confirms_within_seconds_of_the_last_flush` (`CONFIRM_BOUND`, 5 s). A sink engine that dies before
   its flush leaves the item unacked; the lane redelivers it to the restarted engine (idempotent
