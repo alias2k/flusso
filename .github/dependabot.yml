@@ -14,11 +14,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    # Leave a requirement alone when it already allows the new version (a compatible
-    # update is a Cargo.lock-only PR); rewrite it only for a breaking one, keeping
-    # its shape ("0.12.*" -> "0.13.*"). What dependabot-core does for cargo anyway,
-    # stated so it can't drift.
-    versioning-strategy: increase-if-necessary
+    # No `versioning-strategy`: cargo accepts only `auto` (the default) and
+    # `lockfile-only`. `auto` leaves a requirement alone when it already allows the
+    # new version (a compatible update is a Cargo.lock-only PR) and rewrites it only
+    # for a breaking one; `lockfile-only` would never propose a breaking update.
     commit-message:
       prefix: chore(deps)
     groups:
