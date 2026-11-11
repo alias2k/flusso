@@ -121,12 +121,8 @@ pub enum ConversionError {
          `related` (a column of the hop's table)"
     )]
     OnIncompletePair { context: String },
-    #[error("{context}: the `on` pair `{local}` = `{related}` is listed more than once")]
-    OnDuplicatePair {
-        context: String,
-        local: String,
-        related: String,
-    },
+    #[error("{context}: the `on` pair {pair} is listed more than once")]
+    OnDuplicatePair { context: String, pair: String },
     #[error("aggregate does not take `{sibling}` (only `ids` does)")]
     UnexpectedAggregateSibling { sibling: &'static str },
     #[error(

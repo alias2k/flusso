@@ -1133,7 +1133,7 @@ fn a_duplicate_on_pair_is_rejected() {
     ))
     .unwrap_err();
     assert!(
-        matches!(err, ConversionError::OnDuplicatePair { ref local, ref related, .. } if local == "tenant_id" && related == "tenant_id")
+        matches!(err, ConversionError::OnDuplicatePair { ref pair, .. } if pair == "`tenant_id` = `tenant_id`")
     );
     assert!(err.to_string().starts_with("aggregate `lines`"), "{err}");
 }

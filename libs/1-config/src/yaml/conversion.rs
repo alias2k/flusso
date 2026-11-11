@@ -589,8 +589,7 @@ fn convert_on(
         if pairs.contains(&pair) {
             return Err(ConversionError::OnDuplicatePair {
                 context: context.to_owned(),
-                local: pair.local.to_string(),
-                related: pair.related.to_string(),
+                pair: format!("`{}` = `{}`", pair.local, pair.related),
             });
         }
         pairs.push(pair);
