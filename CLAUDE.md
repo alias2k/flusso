@@ -533,7 +533,12 @@ predicate uses too) are the one derivation of "which columns a path reads" — f
 index "all" (raw SQL is pasted into a correlated subquery and can read `root.…`, a junction, an
 enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_that_column`). A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers
-"the type of *this* column" and `CaptureProvisioning` answers "is this table set coverable",
+"the type of *this* column" (and "does *this* table exist": `validate_indexes` walks every
+relation at any depth and looks up its table, key, junction keys, `via` hops, both sides of each
+`on:` pair, value/null-check filter columns, `order_by` and a join's `primary_key` on the table
+each lives on — issue #202; a missing table is a `SourceError::UnknownTable` diagnostic, reported
+once per relation; `Diagnostic.path` is the field path; guards: the `validation::tests` mock-catalog
+cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position`) and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
 columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven tooling can pick
 from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m

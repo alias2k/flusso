@@ -50,7 +50,23 @@ The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-
 
 ## check
 
-Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also confirms every declared type and nullability against the live columns and prints the publication coverage report and the child tables whose replica identity misses their parent link (see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)), each saying whether `run` will fix it or giving the exact SQL. `check` never mutates the database.
+Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also checks the schemas against the live database, then prints the publication coverage report and the child tables whose replica identity misses their parent link (see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)), each saying whether `run` will fix it or giving the exact SQL. `check` never mutates the database.
+
+**What the database check verifies.** Every problem of one run is listed together, each naming the index, the field path (`users.orders.items`), and the missing table or column, with the schema key that names it (`` `foreign_key` references unknown column `public.orders.userid` ``).
+
+- **Fields.** Each column a field reads exists, and its database type is one the declared type accepts. A field declared `required` over a nullable column is a warning.
+- **Geo points.** Both coordinate columns exist and are numeric.
+- **Aggregate input.** A `sum`/`min`/`max` column's type is one `value_type` accepts; each column of an [expression](aggregates.md#arithmetic-input) exists and is numeric.
+- **Relations, at any depth.** For every join and aggregate:
+  - the related `table`;
+  - the key: a `belongs_to` `column` on the table that holds the field, a `has_one`/`has_many`/aggregate `foreign_key` on the related table;
+  - a junction's `table`, `left_key`, and `right_key`;
+  - each `via` hop's `table` and `foreign_key`;
+  - both sides of every `on:` pair: `local` on the table before the hop, `related` on the hop's table;
+  - the columns of the value and null-check `filters` on the relation, its junction, and each hop (a `raw` filter is passed to the database unread, so it isn't checked);
+  - every `order_by` column, and a join's `primary_key`.
+
+  A missing table is reported once, and nothing on it is looked up.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
