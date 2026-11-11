@@ -47,6 +47,7 @@ The `#[ignore]`d suites spin up containers with `testcontainers`. They're legiti
 | `source-postgres` | `continuity` | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |
 | `source-postgres` | `record_pgoutput` | not a test: re-records the decode bench's fixture from a real Postgres (see [Benchmarks](benchmarks.md#re-recording-the-pgoutput-fixture)) |
 | `engine` | `wal` | which op the engine emits per change, against a recording sink, including none for an update of columns no document reads |
+| `engine` | `wal_release` | the slot releases WAL that produces no document (unread tables and columns, filtered, soft-deleted and orphaned rows, large and split transactions, idle WAL) and the sinks get exactly the expected ops; a stalled sink pins the slot until it flushes, a `backfill = false` sink does not |
 | `engine` | `pipeline` | the full source to OpenSearch path, reading the index back over HTTP: live insert/update/delete across key types, soft-delete tombstoning, backfill, the two seed-marker contradictions, and an unread-column update leaving `_version` alone |
 | `sink-opensearch` | `reindex` | generations, alias swap, retracted markers |
 | `flusso-query-e2e` | `combined_search` | generation-suffix normalization against a real cluster |

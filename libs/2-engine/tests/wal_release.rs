@@ -74,7 +74,8 @@ use common::{column, column_field, field, index_name, start_postgres, table, use
 /// Generous on purpose: today the replication client reports its position on
 /// a ~10 s status interval, and `restart_lsn` only moves past a
 /// `running_xacts` record Postgres logs every ~15 s, so a release takes up to
-/// ~20 s. This is the bound to tighten when release latency is fixed.
+/// ~25 s. Issue #205 shortens release latency and tightens this constant to
+/// match; until then it is 45 s.
 const RELEASE_BOUND: Duration = Duration::from_secs(45);
 
 /// How long a stalled sink is given to (wrongly) let the slot advance: several
