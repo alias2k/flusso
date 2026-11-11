@@ -92,8 +92,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   `confirmed_flush_lsn` and `restart_lsn` pass the WAL written by changes that produce no document
   — an unread table under `FOR ALL TABLES`, unread-column updates, filtered/soft-deleted/orphaned
   rows, a large and a split mixed transaction, idle WAL after a burst — `confirmed_flush_lsn` within
-  `CONFIRM_BOUND` (what flusso controls), `restart_lsn` within `RELEASE_BOUND` (also waits on
-  Postgres's next `running_xacts` record), and the sinks got exactly the expected ops; a stalled sink
+  `CONFIRM_BOUND` (5 s, what flusso controls; also from the last sink flush for bursts and lone
+  changes that produce documents, issue #205), `restart_lsn` within `RELEASE_BOUND` (45 s, also
+  waits on Postgres's next `running_xacts` record), and the sinks got exactly the expected ops; a stalled sink
   pins the slot at its last flushed position (the watermark's minimum over lanes) until it catches
   up, a `backfill = false` sink does not; the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
@@ -346,14 +347,14 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   after* the `Sink::flush` that made its documents durable; acking a positioned batch records
   that position for the lane, `Stream::watermark()` is the **minimum** over lanes, and the ingest
   engine hands it to `ChangeCapture::confirm` after each commit (and on a 1 s tick), so the slot
-  advances past a change exactly when *every* sink has landed it. The Postgres capture releases WAL
-  within ~2 s of the last flush (issue #205): `Positions::confirm` wakes the stream loop
+  advances past a change exactly when *every* sink has landed it. The Postgres capture confirms
+  within ~1 s of the last flush (issue #205): `Positions::confirm` wakes the stream loop
   (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once instead of
   at the next replication event, and `WalChangeCapture::new` sets the client's status and idle
   wake-up intervals to 1 s (`STATUS_INTERVAL`, fixed, no option). `Positions` stays the one place
   that computes what may be confirmed; only the moment of hand-over is new. Guards:
   `a_confirmation_reaches_the_client_without_a_replication_event` (`cdc::stream` unit, over the
-  `Replication` seam) and `wal`'s `wal_is_released_within_seconds_of_the_last_flush` (5 s bound). A sink engine that dies before
+  `Replication` seam) and `wal_release`'s `the_slot_confirms_within_seconds_of_the_last_flush` (`CONFIRM_BOUND`, 5 s). A sink engine that dies before
   its flush leaves the item unacked; the lane redelivers it to the restarted engine (idempotent
   rebuild, deterministic id). Positions are monotonic for the life of the source across
   reopened streams (`Positions::new(start_lsn, first_seq)` continues from the previous map), so
