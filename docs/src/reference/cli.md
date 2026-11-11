@@ -34,7 +34,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--slot <name>` | `[source] slot`, else `flusso` | Replication slot to consume. Created when missing. |
 | `--publication <name>` | `[source] publication`, else `flusso` | Publication to subscribe to. Created or extended when allowed. |
 | `--manage-publication <bool>` | `[source] manage_publication`, else `true` | Whether flusso may issue publication DDL. |
-| `--manage-replica-identity <bool>` | `[source] manage_replica_identity`, else `true` | Whether flusso may set `REPLICA IDENTITY FULL` on every table an index reads. |
+| `--manage-replica-identity <bool>` | `[source] manage_replica_identity`, else `true` | Whether flusso may set `REPLICA IDENTITY FULL` on every table an index reads (a `USING INDEX` identity carrying every parent link is kept). |
 | `--skip-backfill` | off | Resume live capture only. A fresh slot then only warns instead of rebuilding. |
 | `--pretty` | off | Pretty-print every stdout sink's output (the default sink included). |
 | `--queue-capacity <n>` | `[stream] capacity`, else `1024` | Changes buffered between capture and processing. |

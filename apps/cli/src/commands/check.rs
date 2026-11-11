@@ -152,6 +152,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                         "will_manage": gap.will_manage(postgres.manage_replica_identity),
                         "blockers": gap.blockers,
                         "remediation": gap.remediation,
+                        "kept": gap.kept,
                     })).collect::<Vec<_>>();
                     serde_json::json!({
                         "satisfied": p.satisfied(),

@@ -8,6 +8,8 @@
 //! change on either side of a pair. An aggregate over an arithmetic
 //! expression rebuilds from a change to any of its operands, and from nothing
 //! else.
+//! A child kept on a `USING INDEX` identity carrying its link still traces
+//! deleted and re-parented rows to the old parent.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -443,6 +445,124 @@ async fn managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs
     assert_eq!(
         rebuilt("UPDATE users SET email = 'ada@y.io' WHERE id = 1").await,
         sorted(&["upsert users 1"])
+    );
+
+    engine.abort();
+}
+
+/// A child table whose `USING INDEX` identity already carries its parent link
+/// is kept as it is by replica identity management, while its siblings are set
+/// to `FULL`. Its deletes and re-parents still reach the old parent through
+/// the identity index; only the unread-column skip is lost there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_kept_identity_index_still_traces_deleted_and_reparented_rows() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text, last_seen int)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL, total int, \
+         status text, placed_at int, note text)",
+        "CREATE UNIQUE INDEX orders_identity ON orders (id, user_id)",
+        "ALTER TABLE orders REPLICA IDENTITY USING INDEX orders_identity",
+        "CREATE TABLE payments (id int PRIMARY KEY, user_id int, amount int, memo text)",
+        "CREATE TABLE visits (id int PRIMARY KEY, user_id int, path text, seen int)",
+        "CREATE PUBLICATION flusso FOR TABLE users, orders, payments, visits",
+        "INSERT INTO users VALUES (1, 'ada@x.io', 0), (2, 'grace@x.io', 0)",
+        "INSERT INTO orders VALUES (10, 1, 5, 'open', 1, ''), (11, 1, 6, 'open', 2, '')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let spec = users_with_relations_spec();
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let capture = WalChangeCapture::new(replication, url.clone())
+        .with_pre_image_management(spec.pre_images(), true);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(spec))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(Arc::new(capture), documents, sink));
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+    expect_op(&mut engine, &recorded, "upsert users 2").await;
+
+    let identities: Vec<(String, String)> = sqlx::query_as(
+        "SELECT relname::text, relreplident::text FROM pg_class \
+         WHERE relname IN ('users', 'orders', 'payments', 'visits') ORDER BY relname",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let identities: Vec<(&str, &str)> = identities
+        .iter()
+        .map(|(name, identity)| (name.as_str(), identity.as_str()))
+        .collect();
+    assert_eq!(
+        identities,
+        [
+            ("orders", "i"),
+            ("payments", "f"),
+            ("users", "f"),
+            ("visits", "f")
+        ]
+    );
+
+    let marker_sql = "INSERT INTO users (id) VALUES ($1)";
+    let mut marker = 100;
+    let mut rebuilt = async |sql: &'static str| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            sql,
+            marker_sql,
+            marker,
+            &format!("upsert users {marker}"),
+        )
+        .await
+    };
+    assert_eq!(
+        rebuilt("UPDATE orders SET user_id = 2 WHERE id = 10").await,
+        sorted(&["upsert users 1", "upsert users 2"]),
+        "the re-parented order leaves its old parent"
+    );
+    assert_eq!(
+        rebuilt("DELETE FROM orders WHERE id = 11").await,
+        sorted(&["upsert users 1"]),
+        "the deleted order leaves its parent"
+    );
+    assert_eq!(
+        rebuilt("UPDATE orders SET note = 'gift' WHERE id = 10").await,
+        sorted(&["upsert users 2"]),
+        "no whole old row, so an unread column still rebuilds"
     );
 
     engine.abort();

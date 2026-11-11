@@ -549,18 +549,23 @@ every table an index reads should log its **whole** old row, for the #169 skip b
 `SourceSpec::pre_images` lists every `all_tables` entry with its links (mostly none); the CLI hands
 it to `run` and `check`. `PreImageReport` keeps two severities apart: `gaps` (a link column is
 missing: correctness — a loud warning with the SQL, and the stream warns once per table) and
-`partial` (only the rest of the row: the skip is lost — one info line per start). Postgres answers
+`partial` (only the rest of the row: the skip is lost — one info line per start); a `partial` entry
+with `PreImageGap.kept` set is one the source leaves on purpose (`will_manage` is then false, its own
+info line, `check` says "kept as is" and prints no SQL for it). Postgres answers
 from `relreplident` (`cdc/replica_identity.rs`, `shortfall`); `check` prints a Replica identity
 section with both groups (read-only); `run` **sets** `REPLICA IDENTITY FULL` on every member that
-isn't `FULL` in `prepare()`, **before the slot** (a change logged in between would decode with the
+isn't `FULL` and isn't **kept** — a `USING INDEX` identity carrying every link (issue #212; `Member::kept`,
+per member, so a carrying partition stays while a sibling missing the link is set) — in `prepare()`, **before the slot** (a change logged in between would decode with the
 old identity), via `ensure_pre_image` when `manage_replica_identity` (default on; `false` alters
 nothing) and the role owns the table — each relation in its own transaction under a 5 s
 `lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned
 table is set on the parent and every partition (a partition added later is caught at the next
 start), but only when it misses a link: its updates carry no post-image, so `partial` never lists it. Guards: `replica_identity::tests` (`shortfall`), `publication`'s
 `every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on
-one table) and `a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s
-`managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target`. The WAL decoder keys a change by the table's **catalog
+one table), `an_identity_index_carrying_the_link_is_kept_and_the_rest_are_set_to_full`, and
+`a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s
+`managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target` and
+`a_kept_identity_index_still_traces_deleted_and_reparented_rows`. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
 which mark every column under `FULL`. **An update that changes no column a document reads rebuilds nothing**
 (issue #169): an update with a pre-image also carries a post-image (`ChangeEvent::Upsert.after`,

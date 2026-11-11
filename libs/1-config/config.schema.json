@@ -369,7 +369,7 @@
         },
         "manage_replica_identity": {
           "type": "boolean",
-          "description": "Whether flusso may set `REPLICA IDENTITY FULL` on every table an index\nreads, before the slot is created: a child table then carries its parent\nlink (a deleted or re-parented row rebuilds its old parent), and an\nupdate that changes no column a document reads rebuilds nothing. Needs\nownership of the table; every update and delete then logs the whole old\nrow (more WAL). `false` makes flusso only report and never issue the\n`ALTER`.",
+          "description": "Whether flusso may set `REPLICA IDENTITY FULL` on every table an index\nreads, before the slot is created: a child table then carries its parent\nlink (a deleted or re-parented row rebuilds its old parent), and an\nupdate that changes no column a document reads rebuilds nothing. Needs\nownership of the table; every update and delete then logs the whole old\nrow (more WAL). A `USING INDEX` identity whose index already carries\nevery parent link is kept as it is. `false` makes flusso only report and\nnever issue the `ALTER`.",
           "default": true
         },
         "slot": {
