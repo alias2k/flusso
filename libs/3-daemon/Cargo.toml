@@ -22,6 +22,7 @@ config.workspace = true
 kernel.workspace = true
 engine.workspace = true
 source.workspace = true
+chrono = { workspace = true, features = ["clock"] }
 stream.workspace = true
 sink.workspace = true
 anyhow.workspace = true

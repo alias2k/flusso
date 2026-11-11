@@ -25,6 +25,8 @@ pub(crate) fn execute(args: BuildArgs) -> anyhow::Result<()> {
         .with_context(|| format!("compiling config from {}", args.config.display()))?;
     crate::adapters::validate(&compiled.config)
         .with_context(|| format!("validating {}", args.config.display()))?;
+    crate::backends::compile_scripts(&compiled.config)
+        .with_context(|| format!("compiling the scripts of {}", args.config.display()))?;
     config::write(&compiled, &args.out)
         .with_context(|| format!("writing compiled artifact to {}", args.out.display()))?;
 

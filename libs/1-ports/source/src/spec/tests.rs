@@ -15,6 +15,7 @@ fn column_field(name: &str) -> Field {
     Field {
         field: kernel::FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: kernel::ColumnName::try_new(name).unwrap(),
             ty: FlussoType::Keyword,
@@ -41,6 +42,7 @@ fn schema(table: &str) -> IndexSchema {
         fields: vec![Field {
             field: kernel::FieldName::try_new("id").unwrap(),
             options: Default::default(),
+            emit: true,
             source: FieldSource::Column(Column {
                 column: kernel::ColumnName::try_new("id").unwrap(),
                 ty: FlussoType::Keyword,
@@ -79,6 +81,7 @@ fn books() -> IndexSchema {
     books.fields.push(Field {
         field: kernel::FieldName::try_new("reviews").unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: TableName::try_new("reviews").unwrap(),
             kind: JoinKind::HasMany {
@@ -97,6 +100,7 @@ fn books() -> IndexSchema {
     books.fields.push(Field {
         field: kernel::FieldName::try_new("tags").unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: TableName::try_new("tags").unwrap(),
             kind: JoinKind::ManyToMany {
@@ -198,6 +202,7 @@ fn pre_image_columns_carry_a_self_join_link_on_the_root_table() {
     items.fields.push(Field {
         field: kernel::FieldName::try_new("children").unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: TableName::try_new("items").unwrap(),
             kind: JoinKind::HasMany {
@@ -237,6 +242,7 @@ fn users_with_task_count() -> IndexSchema {
     users.fields.push(Field {
         field: kernel::FieldName::try_new("taskCount").unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(kernel::Aggregate {
             table: TableName::try_new("tasks").unwrap(),
             op: kernel::AggregateOp::Count,

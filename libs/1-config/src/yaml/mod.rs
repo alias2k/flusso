@@ -176,6 +176,24 @@ pub enum ConversionError {
          mapped as one disabled object, so mapping options cannot apply; remove `options`"
     )]
     OptionsOnUnindexed { field: String },
+    #[error(
+        "`{tag}` field `{field}` has a `script` and `{key}` — a script computes the value from \
+         the built document, so it reads no column; remove `{key}`"
+    )]
+    ScriptWithColumnKey {
+        tag: String,
+        field: String,
+        key: &'static str,
+    },
+    #[error(
+        "`{tag}` field `{field}` cannot be computed by a script — a script returns a text, \
+         keyword, enum, uuid, boolean, numeric, date or timestamp value"
+    )]
+    ScriptTypeNotAllowed { tag: String, field: String },
+    #[error("field `{field}` has an empty `script`")]
+    EmptyScript { field: String },
+    #[error("field `{field}` has `array` without a `script` — only a script can return an array")]
+    ArrayWithoutScript { field: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]

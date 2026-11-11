@@ -9,6 +9,7 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.changes.in_flight` | gauge | | `sink` | Captured minus that sink's committed: the back-pressure signal per sink. Read from status at scrape time, so it stays current while a sink is stalled. |
 | `flusso.documents.built` | counter | | `index` | Documents assembled by the ingest engine, once for every sink. The unlabeled total is the sum. |
 | `flusso.documents.quarantined` | counter | | `sink`, `index` | Documents that sink rejected and its engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
+| `flusso.script.failures` | counter | | `index`, `field`, `policy` | Documents a script failed on. `field` is the path with array positions folded (`variants[].gross`); `policy` is `skip` (the document kept its indexed version) or `stop` (the ingest engine stopped; each retry counts). Non-zero means documents are going stale. Alert on it. See [Script fields](scripts.md#failures). |
 | `flusso.batches` | counter | | `sink` | Batches that sink flushed. |
 | `flusso.flush.duration` | histogram | s | `sink` | Time per flush at that sink. Buckets from 1 ms to 10 s. |
 | `flusso.indexes` | gauge | | `sink` | Indexes ensured at that sink this run. |
@@ -27,6 +28,7 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.changes.in_flight` | `flusso_changes_in_flight{sink}` |
 | `flusso.documents.built` | `flusso_documents_built_total{index}` |
 | `flusso.documents.quarantined` | `flusso_documents_quarantined_total{sink,index}` |
+| `flusso.script.failures` | `flusso_script_failures_total{index,field,policy}` |
 | `flusso.batches` | `flusso_batches_total{sink}` |
 | `flusso.flush.duration` | `flusso_flush_duration_seconds_bucket{sink}`, `_sum`, `_count` |
 | `flusso.indexes` | `flusso_indexes{sink}` |

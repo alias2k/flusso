@@ -6,9 +6,13 @@
 //! sink is visible on its own.
 
 use daemon::{BuildStats, CommitStats, EngineId, IndexName, Observer, SinkName};
+use kernel::FailurePolicy;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
+use source::document::BuildFailure;
+
+use super::script_log::field_label;
 
 #[derive(Debug)]
 pub(crate) struct OtelObserver {
@@ -18,6 +22,7 @@ pub(crate) struct OtelObserver {
     batches: Counter<u64>,
     indexes_seeded: Counter<u64>,
     documents_quarantined: Counter<u64>,
+    script_failures: Counter<u64>,
     errors: Counter<u64>,
     flush_duration: Histogram<f64>,
     slot_lag: Gauge<u64>,
@@ -55,6 +60,15 @@ impl OtelObserver {
                 .with_description(
                     "Documents a sink rejected and its engine skipped (on_error = skip). \
                      A non-zero value means data is being dropped — alert on it.",
+                )
+                .build(),
+            script_failures: meter
+                .u64_counter("flusso.script.failures")
+                .with_description(
+                    "Documents a script failed on, by index, field path (array positions folded \
+                     to `[]`) and policy: `skip` left the document at its indexed version, \
+                     `stop` stopped the ingest engine. A non-zero value means documents are \
+                     going stale — alert on it.",
                 )
                 .build(),
             errors: meter
@@ -126,6 +140,23 @@ impl Observer for OtelObserver {
         );
     }
 
+    fn on_document_failed(
+        &self,
+        index: &IndexName,
+        _id: &str,
+        failure: &BuildFailure,
+        policy: FailurePolicy,
+    ) {
+        self.script_failures.add(
+            1,
+            &[
+                KeyValue::new("index", index.as_ref().to_owned()),
+                KeyValue::new("field", field_label(&failure.field)),
+                KeyValue::new("policy", policy_label(policy)),
+            ],
+        );
+    }
+
     fn on_slot_lag(&self, bytes: u64) {
         self.slot_lag.record(bytes, &[]);
     }
@@ -136,5 +167,12 @@ impl Observer for OtelObserver {
             EngineId::Sink(sink) => KeyValue::new("engine", format!("sink:{sink}")),
         };
         self.errors.add(1, &[label]);
+    }
+}
+
+fn policy_label(policy: FailurePolicy) -> &'static str {
+    match policy {
+        FailurePolicy::Stop => "stop",
+        FailurePolicy::Skip => "skip",
     }
 }

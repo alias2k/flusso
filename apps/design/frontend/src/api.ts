@@ -67,6 +67,35 @@ export interface Column {
   indexed?: boolean;
 }
 
+/// The leaf types a script field may return.
+export const SCRIPT_TYPES: FlussoType[] = [
+  "text",
+  "identifier",
+  "keyword",
+  "enum",
+  "uuid",
+  "boolean",
+  "short",
+  "integer",
+  "long",
+  "float",
+  "double",
+  "decimal",
+  "date",
+  "timestamp",
+];
+
+/// A field computed by a Rhai script from the built document.
+export interface Script {
+  source: string;
+  ty: FlussoType;
+  nullable: boolean;
+  // `true` returns an array of `ty`; omitted means a single value.
+  array?: boolean;
+  enum_order?: string[];
+  subfields?: boolean;
+}
+
 export interface Geo {
   lat: string;
   lon: string;
@@ -149,11 +178,18 @@ export interface ViaHop {
 export type Relation = { join: Join } | { aggregate: Aggregate };
 
 export type FieldSource =
-  { column: Column } | { group: Field[] } | { geo: Geo } | { relation: Relation } | { constant: unknown };
+  | { column: Column }
+  | { group: Field[] }
+  | { geo: Geo }
+  | { relation: Relation }
+  | { constant: unknown }
+  | { script: Script };
 
 export interface Field {
   field: string;
   options?: Record<string, unknown>;
+  // `false` makes the field input-only: fetched for scripts, never emitted.
+  emit?: boolean;
   source: FieldSource;
   /// Client-only stable id of a container field (object group or join): the
   /// canvas node id that collapse state and manual positions key on, so they
@@ -331,6 +367,18 @@ export interface PreviewResponse {
   preview: { mapping: unknown; document: DocumentNode[] };
   parse_ok: boolean;
   parse_error?: string;
+  // Every script field that does not compile.
+  script_errors?: ScriptErrorDto[];
+}
+
+/// A script failure: a compile error, or one raised on a sample row.
+export interface ScriptErrorDto {
+  /// The field path, e.g. `variants[2].grossPrice` (`[]` in a compile error).
+  field: string;
+  message: string;
+  line?: number;
+  column?: number;
+  excerpt?: string;
 }
 
 export interface DiagnosticDto {
@@ -352,6 +400,10 @@ export interface SampleResponse {
   db_reachable: boolean;
   note?: string;
   error?: string;
+  // A script that failed on the sample; `document` is then the row as built.
+  script_failure?: ScriptErrorDto;
+  // What the scripts printed, as `field: text`.
+  printed?: string[];
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -473,11 +525,11 @@ export const api = {
         indexes: indexes.map((i) => ({ ...i, schema: stripUids(i.schema) })),
       }),
     }).then((r) => json<ValidateResponse>(r)),
-  sample: (config: ConfigToml, name: string, schema: IndexSchema) =>
+  sample: (config: ConfigToml, name: string, schema: IndexSchema, id?: string) =>
     fetch("/api/sample", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), name, schema: stripUids(schema) }),
+      body: JSON.stringify({ config: stripIds(config), name, schema: stripUids(schema), id }),
     }).then((r) => json<SampleResponse>(r)),
   diff: (config: ConfigToml, ops: FileOp[]) =>
     fetch("/api/diff", {

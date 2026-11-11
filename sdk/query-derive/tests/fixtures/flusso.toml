@@ -24,3 +24,8 @@ enabled = true
 name = "flags"
 schema = "flags.schema.yml"
 enabled = true
+
+[[index]]
+name = "computed"
+schema = "computed.schema.yml"
+enabled = true

@@ -273,6 +273,14 @@ export const en: Record<string, string> = {
   "inspector.indexedOff":
     "Stored, not indexed: kept in the document for display, mapped as one disabled object. Nothing under it can be searched, filtered or sorted.",
   "inspector.indexedOptions": "A field that isn't indexed can't take mapping options — remove them under Advanced.",
+  "inspector.emit": "Emitted",
+  "inspector.emitOn": "In the document and the mapping.",
+  "inspector.emitOff": "Input-only: fetched so scripts can read it, then stripped. Not in the document or the mapping.",
+  "inspector.script": "Script",
+  "inspector.scriptHint":
+    "Rhai. `this` is the object at this level (one element inside a has_many), `root` the whole document. Return the field's type, or () for null.",
+  "inspector.scriptArray": "Returns an array",
+  "inspector.scriptEmpty": "Write the script that computes this field.",
   "inspector.softDelete": "soft delete",
   "inspector.documentField": "document field",
 
@@ -295,6 +303,7 @@ export const en: Record<string, string> = {
   "kindHelp.constant": "A fixed value baked into every document.",
 
   // preview
+  "kindHelp.script": "A value computed by a script from the built document.",
   "preview.title": "Preview",
   "preview.empty": "Select or edit an index to preview it.",
   "preview.parseError": "This schema does not parse:",
@@ -314,6 +323,12 @@ export const en: Record<string, string> = {
   "preview.sampleHint": "Build a document from a live database row — exactly what the sink writes.",
 
   // catalog browser
+  "preview.printed": "Printed",
+  "preview.rowId": "Row id",
+  "preview.rowIdPlaceholder": "first row",
+  "preview.scriptFailed": "Script `{field}` failed:",
+  "preview.scriptFailedHint":
+    "Showing the row as built, before the scripts ran. In a run, on_error decides: stop, or skip and keep the indexed version.",
   "catalog.title": "{n, plural, one {Database (# table)} other {Database (# tables)}}",
   "catalog.dbError": "Database not reachable — {err}",
   "catalog.filter": "Filter tables & columns…",
@@ -345,6 +360,7 @@ export const en: Record<string, string> = {
   "node.reqOverride": "required — overrides a nullable column",
   "node.colDefault": "has a default value",
   "node.incomplete": "incomplete — set its key/column in the inspector",
+  "node.inputOnly": "input-only: fetched for scripts, not emitted",
   "node.addJoin": "+ join",
   "node.addField": "+ field",
   "node.addColumn": "+ column name, Enter",

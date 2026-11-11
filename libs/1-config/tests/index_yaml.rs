@@ -1238,3 +1238,122 @@ fn an_unknown_key_in_an_on_pair_is_a_parse_error() {
         .is_err()
     );
 }
+
+// ── script fields + input-only fields ────────────────────────────────────────
+
+fn script(schema: &IndexSchema, name: &str) -> kernel::Script {
+    match &field(schema, name).source {
+        FieldSource::Script(script) => script.clone(),
+        other => panic!("`{name}` should be a script, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_script_field_converts_to_a_typed_script() {
+    let schema = convert(
+        "version: 1\ntable: users\nfields:\n  \
+         - keyword: first\n    required: true\n    emit: false\n  \
+         - keyword: label\n    required: true\n    script: this.first.to_upper()\n  \
+         - decimal: prices\n    required: false\n    array: true\n    script: \"[1.5]\"\n  \
+         - enum: tier\n    required: true\n    variants: [gold, silver]\n    script: '\"gold\"'\n  \
+         - text: blurb\n    required: true\n    subfields: false\n    script: '\"x\"'",
+    )
+    .unwrap();
+    assert!(!field(&schema, "first").emit);
+    assert!(field(&schema, "label").emit);
+
+    let label = script(&schema, "label");
+    assert_eq!(label.source, "this.first.to_upper()");
+    assert_eq!(label.ty, FlussoType::Keyword);
+    assert!(!label.nullable);
+    assert!(!label.array);
+
+    let prices = script(&schema, "prices");
+    assert!(prices.nullable);
+    assert!(prices.array);
+
+    assert_eq!(script(&schema, "tier").enum_order, ["gold", "silver"]);
+    assert!(!script(&schema, "blurb").subfields);
+}
+
+#[test]
+fn a_script_rejects_every_column_sibling() {
+    for (key, sibling) in [
+        ("column", "column: name"),
+        ("transforms", "transforms: [lowercase]"),
+        ("default", "default: x"),
+    ] {
+        let err = convert(&format!(
+            "version: 1\ntable: users\nfields:\n  - keyword: label\n    required: true\n    {sibling}\n    script: '\"x\"'"
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConversionError::ScriptWithColumnKey { key: k, field, .. } if *k == key && field == "label"),
+            "{key}: got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_script_only_returns_a_plain_leaf() {
+    for tag in ["json", "binary"] {
+        let err = convert(&format!(
+            "version: 1\ntable: users\nfields:\n  - {tag}: x\n    required: true\n    script: '()'"
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConversionError::ScriptTypeNotAllowed { .. }),
+            "{tag}: got {err:?}"
+        );
+    }
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - keyword: x\n    required: true\n    indexed: false\n    script: '()'",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, ConversionError::IndexedNotAllowed { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn an_empty_script_or_an_array_without_one_is_rejected() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - keyword: x\n    required: true\n    script: '  '",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, ConversionError::EmptyScript { .. }),
+        "got {err:?}"
+    );
+
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - keyword: x\n    required: true\n    array: true",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, ConversionError::ArrayWithoutScript { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn emit_is_accepted_on_any_field_and_must_be_a_bool() {
+    let schema = convert(
+        "version: 1\ntable: users\nfields:\n  \
+         - has_many: orders\n    table: orders\n    primary_key: id\n    foreign_key: user_id\n    emit: false\n    fields:\n      - double: total\n        required: true\n  \
+         - count: orderCount\n    table: orders\n    foreign_key: user_id\n    emit: false",
+    )
+    .unwrap();
+    assert!(!field(&schema, "orders").emit);
+    assert!(!field(&schema, "orderCount").emit);
+
+    let err = parse(
+        "version: 1\ntable: users\nfields:\n  - keyword: x\n    required: true\n    emit: maybe",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("`emit` must be `true` or `false`"),
+        "got {err}"
+    );
+}

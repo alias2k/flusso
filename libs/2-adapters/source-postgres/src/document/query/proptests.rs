@@ -278,6 +278,7 @@ fn field_source() -> impl Strategy<Value = FieldSource> {
             let child = (field_name(), inner.clone()).prop_map(|(field, source)| Field {
                 field,
                 options: Default::default(),
+                emit: true,
                 source,
             });
             prop::collection::vec(child, 1..4)
@@ -317,6 +318,7 @@ fn field() -> impl Strategy<Value = Field> {
     (field_name(), field_source()).prop_map(|(field, source)| Field {
         field,
         options: Default::default(),
+        emit: true,
         source,
     })
 }

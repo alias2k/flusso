@@ -9,6 +9,8 @@ import { suggestRelations, type RelationSuggestion } from "../model/relations";
 import { fieldAtPath, nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useT } from "../i18n";
 import { useDesign } from "../state";
+import { errorsFor, scriptIncomplete, scriptPath } from "../model/scripts";
+import { useDesignStore } from "../store/design";
 import { kindColorClass, typeClass } from "../theme";
 import { Hint } from "./Hint";
 import { Icon } from "./Icon";
@@ -18,7 +20,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
-const FIELD_KINDS = ["object", "geo", "map", "custom", "constant"] as const;
+const FIELD_KINDS = ["object", "geo", "map", "custom", "constant", "script"] as const;
 const AGG_KINDS = ["count", "exists", "sum", "avg", "min", "max", "ids"] as const;
 const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as const;
 // Order the FK-suggestion groups by how the document usually reads: the tables
@@ -64,6 +66,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
   // Diagnostics are reported by field name (no path), so match by name. Build a
   // lookup once; a node shows a count badge, a row shows its message on hover.
   const diagByField = new Map(diagnostics.map((d) => [d.field, d]));
+  const preview = useDesignStore((st) => st.preview);
   const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
   const selfIncomplete = joinIncomplete(fieldAtPath(schema, node.path));
 
@@ -319,6 +322,11 @@ export function DocNodeView({ data, selected }: NodeProps) {
                           =
                         </span>
                       )}
+                      {field?.emit === false && (
+                        <span className="col-hidden text-2xs text-muted-foreground" title={t("node.inputOnly")}>
+                          ⊘
+                        </span>
+                      )}
                       {(() => {
                         const label = inc ? (inc.ty as string) : typeLabel(c.suggested_type);
                         return <span className={`col-type ${typeClass(label)}`}>{label}</span>;
@@ -329,13 +337,20 @@ export function DocNodeView({ data, selected }: NodeProps) {
 
                 {visibleLeaves.map((l) => {
                   const diag = diagByField.get(l.name);
-                  const incomplete = aggregateIncomplete(fields[l.index]);
+                  const leaf = fields[l.index];
+                  const incomplete = aggregateIncomplete(leaf) || scriptIncomplete(leaf);
+                  const scriptErrors = errorsFor(preview?.script_errors, scriptPath(schema, node.path, l.index));
+                  const hidden = leaf?.emit === false;
+                  const rowTitle =
+                    diag?.message ??
+                    scriptErrors[0]?.message ??
+                    (incomplete ? t("node.incomplete") : hidden ? t("node.inputOnly") : undefined);
                   const leafSelected = rowsSelected.includes(l.name) || fieldSelected(l.index);
                   return (
                     <div
-                      className={`col-row special${leafSelected ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${incomplete ? " diag-warning" : ""}`}
+                      className={`col-row special${leafSelected ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${scriptErrors.length ? " diag-error" : ""}${incomplete ? " diag-warning" : ""}${hidden ? " opacity-60" : ""}`}
                       key={`x${l.index}`}
-                      title={diag?.message ?? (incomplete ? t("node.incomplete") : undefined)}
+                      title={rowTitle}
                       onPointerDown={rowPointerDown}
                       onClick={(e) => selectRow(l.name, e, l.index)}
                     >

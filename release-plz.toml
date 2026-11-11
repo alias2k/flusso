@@ -97,6 +97,10 @@ name = "flusso-engine"
 version_group = "libs"
 
 [[package]]
+name = "flusso-script"
+version_group = "libs"
+
+[[package]]
 name = "flusso-daemon"
 version_group = "libs"
 

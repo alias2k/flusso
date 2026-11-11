@@ -35,6 +35,20 @@ fields:
     variants: [draft, active, retired]
   - enum: condition
     required: false
+  - keyword: internalCode
+    column: internal_code
+    required: false
+    emit: false
+  - keyword: label
+    required: true
+    subfields: false
+    script: |
+      `${this.sku} ${this.name}`
+  - enum: grade
+    required: false
+    variants: [low, high]
+    array: true
+    script: '["low"]'
   - uuid: externalId
     column: external_id
     required: false

@@ -282,3 +282,34 @@ fn list_dirs_walks_subfolders_and_skips_noise() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The preview compiles the schema's scripts: a broken one comes back with its
+/// field and position, and input-only fields are left out of the document tree.
+#[test]
+fn preview_reports_script_compile_errors_and_drops_input_only_fields() {
+    let yaml = "version: 1\ntable: products\nprimary_key: id\nfields:\n  \
+                - integer: id\n    required: true\n  \
+                - keyword: sku\n    required: true\n    emit: false\n  \
+                - keyword: label\n    required: true\n    script: |\n      let a = 1;\n      a +\n";
+    let schema = api::parse_index(&api::ParseRequest {
+        yaml: yaml.to_owned(),
+    })
+    .schema
+    .unwrap();
+    let response = api::build_preview(PreviewRequest {
+        index: IndexName::try_new("products").unwrap(),
+        schema,
+    })
+    .unwrap();
+    assert_eq!(response.script_errors.len(), 1);
+    let error = &response.script_errors[0];
+    assert_eq!(error.field, "label");
+    assert!(error.line.is_some(), "{error:?}");
+    let names: Vec<&str> = response
+        .preview
+        .document
+        .iter()
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(names, ["id", "label"]);
+}

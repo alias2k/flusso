@@ -231,7 +231,7 @@ impl Checker<'_> {
             FieldSource::Relation(Relation::Join(join)) => self.join(table, join).await,
             FieldSource::Group(fields) => self.fields(table, fields, primary_key).await,
             FieldSource::Geo(geo) => self.geo(table, geo).await,
-            FieldSource::Constant(_) => Ok(()),
+            FieldSource::Constant(_) | FieldSource::Script(_) => Ok(()),
         }
     }
 

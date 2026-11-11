@@ -14,6 +14,7 @@ The project's nouns, each with a pointer to the page that owns it.
 | **flush-wide error** | The whole bulk request failed. Always stops the run; the batch is redelivered. | [Index entries and on_error](index-and-on-error.md#on_error) |
 | **generation** | A concrete OpenSearch index `{logical}_{hash}_{n}` holding data behind the hash alias. Reindex builds `n+1`. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
 | **hash alias** | `{logical}_{hash}`: the addressable name flusso and `flusso-query` use. The hash derives from the schema. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
+| **input-only field** | A field with `emit: false`: fetched and built so scripts can read it, then stripped from the document and the mapping. | [Script fields](scripts.md#emit) |
 | **item-level rejection** | The bulk request was applied but one document was refused. Decided by `on_error`. | [Index entries and on_error](index-and-on-error.md#on_error) |
 | **lock** | `flusso.lock`: the compiled, deterministic, secret-free deployment file. | [flusso.lock](lock.md) |
 | **logical name** | The `name` in an `[[index]]` entry: the index's stable identity across schema changes. | [Index entries and on_error](index-and-on-error.md) |
@@ -24,6 +25,7 @@ The project's nouns, each with a pointer to the page that owns it.
 | **reindex** | Rebuilding one index into a fresh generation while the current one serves, then swapping the alias. | [Reindex without downtime](../operate/reindex.md) |
 | **reverse resolution** | Mapping a changed related row back to the parent documents it affects. | [Joins](joins.md#what-a-related-change-rebuilds) |
 | **root table** | The table a schema's documents are built from; one document per row (subject to root filters). | [Schema top-level keys](schema-top-level.md) |
+| **script field** | A leaf computed by a Rhai script from the built document (`this` and `root`), typed by its type key like any field. | [Script fields](scripts.md) |
 | **searchable** | A fence level: a search at the destination sees the change. Trails applied by the destination's refresh while a backlog drains. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **seed marker** | The `flusso_meta` record saying an index's generation is fully backfilled. | [Sink: OpenSearch](sink-opensearch.md#seeding) |
 | **sink** | A destination: OpenSearch or stdout. Each runs its own engine over its own lane; `backfill = false` opts a stateless one out of seeding. | [flusso.toml top level](config-toml.md#several-sinks) |

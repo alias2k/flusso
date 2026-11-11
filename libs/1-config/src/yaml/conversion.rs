@@ -4,8 +4,8 @@ use std::str::FromStr;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, Direction, Expression,
     Field, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join,
-    JoinKind, NullCheckFilter, NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn,
-    SoftDeleteField, Through, Transform, ValueOpFilter, ViaHop,
+    JoinKind, NullCheckFilter, NullOp, OrderBy, RawFilter, Relation, Script, SoftDelete,
+    SoftDeleteColumn, SoftDeleteField, Through, Transform, ValueOpFilter, ViaHop,
 };
 use rust_decimal::Decimal;
 
@@ -13,11 +13,19 @@ use super::ConversionError;
 use super::entities;
 
 pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError> {
-    match f {
-        entities::Field::Scalar(ty, body) => convert_scalar(ty, body),
-        entities::Field::Enum(body) => convert_enum(body),
-        entities::Field::Geo(body) => convert_geo(body),
-        entities::Field::Object(body) => {
+    let mut field = convert_field_kind(f.kind)?;
+    if let Some(emit) = f.emit {
+        field.emit = emit;
+    }
+    Ok(field)
+}
+
+fn convert_field_kind(kind: entities::FieldKind) -> Result<Field, ConversionError> {
+    match kind {
+        entities::FieldKind::Scalar(ty, body) => convert_scalar(ty, body),
+        entities::FieldKind::Enum(body) => convert_enum(body),
+        entities::FieldKind::Geo(body) => convert_geo(body),
+        entities::FieldKind::Object(body) => {
             let fields = body
                 .fields
                 .into_iter()
@@ -26,22 +34,55 @@ pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError
             Ok(Field {
                 field: body.field,
                 options: convert_options(body.options),
+                emit: true,
                 source: FieldSource::Group(fields),
             })
         }
-        entities::Field::Map(body) => convert_map(body),
-        entities::Field::Join(verb, body) => convert_join_field(verb, *body),
-        entities::Field::Aggregate(op, body) => convert_aggregate_field(op, *body),
-        entities::Field::Constant(body) => Ok(Field {
+        entities::FieldKind::Map(body) => convert_map(body),
+        entities::FieldKind::Join(verb, body) => convert_join_field(verb, *body),
+        entities::FieldKind::Aggregate(op, body) => convert_aggregate_field(op, *body),
+        entities::FieldKind::Constant(body) => Ok(Field {
             field: body.field,
             options: BTreeMap::new(),
+            emit: true,
             source: FieldSource::Constant(yaml_to_generic(body.value)),
         }),
     }
 }
 
-/// A scalar leaf: a column with a declared type and nullability.
+/// A scalar leaf: a column with a declared type and nullability, or a script
+/// computing a value of that type.
 fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, ConversionError> {
+    if let Some(source) = body.script {
+        if body.indexed.is_some() {
+            return Err(ConversionError::IndexedNotAllowed {
+                tag: scalar_tag(&ty),
+                field: body.field.to_string(),
+            });
+        }
+        return convert_script(
+            ScriptParts {
+                field: body.field,
+                ty,
+                source,
+                required: body.required,
+                array: body.array,
+                enum_order: Vec::new(),
+                subfields: body.subfields,
+                options: body.options,
+            },
+            [
+                ("column", body.column.is_some()),
+                ("transforms", body.transforms.is_some()),
+                ("default", body.default.is_some()),
+            ],
+        );
+    }
+    if body.array.is_some() {
+        return Err(ConversionError::ArrayWithoutScript {
+            field: body.field.to_string(),
+        });
+    }
     let column = match body.column {
         Some(column) => column,
         None => default_column(&body.field)?,
@@ -84,6 +125,7 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source: FieldSource::Column(Column {
             column,
             ty,
@@ -95,6 +137,83 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             indexed,
         }),
     })
+}
+
+/// A script field's parts, gathered from a scalar or `enum:` body.
+struct ScriptParts {
+    field: kernel::FieldName,
+    ty: FlussoType,
+    source: String,
+    required: bool,
+    array: Option<bool>,
+    enum_order: Vec<String>,
+    subfields: Option<bool>,
+    options: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// A script field: a typed leaf computed from the built document. It reads no
+/// column, so each column sibling in `column_keys` that was set is an error.
+fn convert_script<const N: usize>(
+    parts: ScriptParts,
+    column_keys: [(&'static str, bool); N],
+) -> Result<Field, ConversionError> {
+    let tag = scalar_tag(&parts.ty);
+    let field = parts.field.to_string();
+    if let Some((key, _)) = column_keys.into_iter().find(|(_, set)| *set) {
+        return Err(ConversionError::ScriptWithColumnKey { tag, field, key });
+    }
+    if !is_script_type(&parts.ty) {
+        return Err(ConversionError::ScriptTypeNotAllowed { tag, field });
+    }
+    if parts.source.trim().is_empty() {
+        return Err(ConversionError::EmptyScript { field });
+    }
+    let subfields = match parts.subfields {
+        Some(_)
+            if !matches!(
+                parts.ty,
+                FlussoType::Text | FlussoType::Keyword | FlussoType::Uuid
+            ) =>
+        {
+            return Err(ConversionError::SubfieldsNotAllowed { tag, field });
+        }
+        subfields => subfields.unwrap_or(true),
+    };
+    let (ty, options) = resolve_column_type(parts.ty, convert_options(parts.options));
+    Ok(Field {
+        field: parts.field,
+        options,
+        emit: true,
+        source: FieldSource::Script(Script {
+            source: parts.source,
+            ty,
+            nullable: !parts.required,
+            array: parts.array.unwrap_or(false),
+            enum_order: parts.enum_order,
+            subfields,
+        }),
+    })
+}
+
+/// Whether a script may return this type: a leaf with a plain value form.
+fn is_script_type(ty: &FlussoType) -> bool {
+    matches!(
+        ty,
+        FlussoType::Text
+            | FlussoType::Identifier
+            | FlussoType::Keyword
+            | FlussoType::Enum
+            | FlussoType::Uuid
+            | FlussoType::Boolean
+            | FlussoType::Short
+            | FlussoType::Integer
+            | FlussoType::Long
+            | FlussoType::Float
+            | FlussoType::Double
+            | FlussoType::Decimal
+            | FlussoType::Date
+            | FlussoType::Timestamp
+    )
 }
 
 /// The YAML type tag a scalar type is written with, for error messages.
@@ -143,6 +262,7 @@ fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source: FieldSource::Column(Column {
             column,
             ty: FlussoType::Map {
@@ -163,6 +283,30 @@ fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
 /// is a normal scalar leaf.
 fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
     validate_enum_order(&body.variants)?;
+    if let Some(source) = body.script {
+        return convert_script(
+            ScriptParts {
+                field: body.field,
+                ty: FlussoType::Enum,
+                source,
+                required: body.required,
+                array: body.array,
+                enum_order: body.variants,
+                subfields: None,
+                options: body.options,
+            },
+            [
+                ("column", body.column.is_some()),
+                ("transforms", body.transforms.is_some()),
+                ("default", body.default.is_some()),
+            ],
+        );
+    }
+    if body.array.is_some() {
+        return Err(ConversionError::ArrayWithoutScript {
+            field: body.field.to_string(),
+        });
+    }
     let column = match body.column {
         Some(column) => column,
         None => default_column(&body.field)?,
@@ -175,6 +319,7 @@ fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source: FieldSource::Column(Column {
             column,
             ty,
@@ -268,6 +413,7 @@ fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
     Ok(Field {
         field: body.field,
         options,
+        emit: true,
         source,
     })
 }
@@ -338,6 +484,7 @@ fn convert_join_field(
     Ok(Field {
         field: body.field,
         options: convert_options(body.options),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(join)),
     })
 }
@@ -466,6 +613,7 @@ fn convert_aggregate_field(
     Ok(Field {
         field: body.field,
         options: convert_options(body.options),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     })
 }

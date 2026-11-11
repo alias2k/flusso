@@ -18,6 +18,7 @@ fn ids_schema(element_type: FlussoType) -> IndexSchema {
         fields: vec![Field {
             field: FieldName::try_new("orderIds").unwrap(),
             options: Default::default(),
+            emit: true,
             source: FieldSource::Relation(Relation::Aggregate(Aggregate {
                 table: TableName::try_new("orders").unwrap(),
                 op: AggregateOp::Ids { element_type },
@@ -44,6 +45,7 @@ fn belongs_to_schema(nullable: bool) -> IndexSchema {
         fields: vec![Field {
             field: FieldName::try_new("author").unwrap(),
             options: Default::default(),
+            emit: true,
             source: FieldSource::Relation(Relation::Join(Join {
                 table: TableName::try_new("users").unwrap(),
                 kind: JoinKind::BelongsTo {
@@ -87,6 +89,7 @@ fn column_schema(name: &str, ty: FlussoType) -> IndexSchema {
         fields: vec![Field {
             field: FieldName::try_new(name).unwrap(),
             options: Default::default(),
+            emit: true,
             source: FieldSource::Column(crate::config::Column {
                 column: ColumnName::try_new(name).unwrap(),
                 ty,
@@ -129,6 +132,7 @@ fn enum_schema(name: &str, order: Vec<String>) -> IndexSchema {
         fields: vec![Field {
             field: FieldName::try_new(name).unwrap(),
             options: Default::default(),
+            emit: true,
             source: FieldSource::Column(crate::config::Column {
                 column: ColumnName::try_new(name).unwrap(),
                 ty: FlussoType::Enum,
@@ -193,6 +197,7 @@ fn through_schema() -> IndexSchema {
             Field {
                 field: FieldName::try_new("totalWeight").unwrap(),
                 options: Default::default(),
+                emit: true,
                 source: FieldSource::Relation(Relation::Aggregate(Aggregate {
                     table: TableName::try_new("products").unwrap(),
                     op: AggregateOp::Sum(ColumnName::try_new("weight").unwrap().into()),
@@ -207,6 +212,7 @@ fn through_schema() -> IndexSchema {
             Field {
                 field: FieldName::try_new("products").unwrap(),
                 options: Default::default(),
+                emit: true,
                 source: FieldSource::Relation(Relation::Join(Join {
                     table: TableName::try_new("products").unwrap(),
                     kind: JoinKind::ManyToMany { through: through() },
@@ -281,6 +287,7 @@ fn aggregate_field(name: &str, op: AggregateOp, value_type: Option<FlussoType>) 
     Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(Aggregate {
             table: TableName::try_new("tasks").unwrap(),
             op,
@@ -386,6 +393,7 @@ fn column_field(name: &str, ty: FlussoType) -> Field {
     Field {
         field: FieldName::try_new(name).unwrap(),
         options,
+        emit: true,
         source: FieldSource::Column(crate::config::Column {
             column: ColumnName::try_new(name).unwrap(),
             ty,
@@ -600,6 +608,7 @@ fn relations_without_on_schema() -> IndexSchema {
     let join = |name: &str, kind: JoinKind| Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: TableName::try_new("orders").unwrap(),
             kind,
@@ -672,6 +681,86 @@ fn on_pairs_change_the_content_hash() {
             assert_ne!(a, b);
         }
     }
+}
+
+fn script_field(name: &str, ty: FlussoType, array: bool) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Script(crate::config::Script {
+            source: "this.name".to_owned(),
+            ty,
+            nullable: false,
+            array,
+            enum_order: vec![],
+            subfields: true,
+        }),
+    }
+}
+
+#[test]
+fn a_script_resolves_to_its_declared_leaf_type() {
+    let mut fields = vec![column_field("name", FlussoType::Text)];
+    fields.push(script_field("label", FlussoType::Keyword, false));
+    fields.push(script_field("prices", FlussoType::Decimal, true));
+    let mapping = columns_schema(fields).resolve(IndexName::try_new("products").unwrap());
+
+    let label = &mapping.fields[1];
+    assert_eq!(label.mapping.mapping_type, MappingType::Keyword);
+    assert!(!label.nullable);
+    assert!(!label.array);
+
+    let prices = &mapping.fields[2];
+    assert_eq!(prices.mapping.mapping_type, MappingType::Double);
+    assert!(prices.mapping.decimal);
+    assert!(prices.array);
+}
+
+#[test]
+fn an_input_only_field_has_no_mapping() {
+    let mut hidden = column_field("cost", FlussoType::Double);
+    hidden.emit = false;
+    let schema = columns_schema(vec![column_field("name", FlussoType::Text), hidden]);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let names: Vec<&str> = mapping.fields.iter().map(|f| f.name.as_ref()).collect();
+    assert_eq!(names, ["name"]);
+}
+
+#[test]
+fn scripts_and_input_only_fields_change_the_content_hash() {
+    let products = IndexName::try_new("products").unwrap();
+    let base = mapless_schema().resolve(products.clone()).hash;
+
+    let mut hidden = mapless_schema();
+    hidden.fields[0].emit = false;
+    let hidden = hidden.resolve(products.clone()).hash;
+
+    let mut scripted = mapless_schema();
+    scripted
+        .fields
+        .push(script_field("label", FlussoType::Keyword, false));
+    let scripted_hash = scripted.resolve(products.clone()).hash;
+
+    let mut edited = scripted.clone();
+    if let FieldSource::Script(script) = &mut edited.fields.last_mut().unwrap().source {
+        script.source = "this.code".to_owned();
+    }
+    let edited = edited.resolve(products).hash;
+
+    assert_ne!(base, hidden);
+    assert_ne!(base, scripted_hash);
+    assert_ne!(scripted_hash, edited);
+}
+
+#[test]
+fn emit_serializes_only_when_off() {
+    let mut field = column_field("cost", FlussoType::Double);
+    let on = serde_json::to_value(&field).unwrap();
+    assert!(on.get("emit").is_none());
+    field.emit = false;
+    let off = serde_json::to_value(&field).unwrap();
+    assert_eq!(off["emit"], serde_json::Value::Bool(false));
 }
 
 fn plain_column_aggregates_schema() -> IndexSchema {

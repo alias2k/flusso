@@ -1,6 +1,6 @@
 # CLI
 
-The `flusso` binary has seven subcommands. Five work locally; `indexes` and `reindex` are HTTP clients for a running server's private surface. Every flag also reads a `FLUSSO_*` variable, listed in [Environment variables](environment.md#cli-flags); the flag wins.
+The `flusso` binary has eight subcommands. Six work locally; `indexes` and `reindex` are HTTP clients for a running server's private surface. Every flag also reads a `FLUSSO_*` variable, listed in [Environment variables](environment.md#cli-flags); the flag wins.
 
 | Command | Does | Needs a database? |
 | --- | --- | --- |
@@ -9,6 +9,7 @@ The `flusso` binary has seven subcommands. Five work locally; `indexes` and `rei
 | [`check`](#check) | Validate and print the typed mapping; confirm against live columns. | optional |
 | [`design`](#design) | Open the visual designer. | optional |
 | [`schema`](#schema) | Print an editor-assist JSON Schema, or the adapters' Reference option tables. | no |
+| [`script run`](#script) | Run an index's script fields over one document. | optional |
 | [`indexes`](#indexes) | List a running server's indexes and states. | no (a running flusso) |
 | [`reindex`](#reindex) | Rebuild one index on a running server. | no (a running flusso) |
 
@@ -100,6 +101,19 @@ Prints an artifact for editor assist or the docs. No database.
 | `docs` | One Markdown option table per registered adapter, the tables the Reference pages include. `--out <dir>` writes them as `<port>-<kind>.md` files instead. |
 
 Both schemas are also published per release at `https://alias2k.github.io/flusso/schemas/<ref>/`, so an editor modeline can pin the version you run; see [Write your first schema](../author/first-schema.md).
+
+## script
+
+`script run` builds one document, runs its index's [script fields](scripts.md) over it, and prints the document as built, what the scripts printed, and the finished document. On a failure it prints the field, the message, and the script line with a caret, and exits non-zero. The scripts are compiled exactly as `run` compiles them.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-c`, `--config <path>` | `flusso.toml` | Deployment to read. |
+| `--index <name>` | — | The index whose scripts to run. Required. |
+| `--id <key>` | the first row | The root row's primary key, built from the database. Read as an integer, else a uuid, else text. |
+| `--input <file.json>` | none | Run over this JSON document instead; no database. Whole numbers are integers, other numbers doubles. Conflicts with `--id`. |
+| `--field <path>` | none | Print only this field of the finished document: `label`, `variants[0].gross`. |
+| `--watch` | off | Re-run whenever a `.toml`/`.yml`/`.yaml` file under the config's directory changes (two levels deep). |
 
 ## indexes
 

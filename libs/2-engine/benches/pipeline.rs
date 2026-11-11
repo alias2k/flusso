@@ -423,6 +423,7 @@ async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
             Document::Delete { id } => {
                 Envelope::delete(id.index.clone(), document_id(&id), None, ts)
             }
+            Document::Failed { failure, .. } => panic!("the bench schema has no script: {failure}"),
         };
         services.sink.apply(&envelope).await.unwrap();
     }
@@ -694,6 +695,7 @@ fn col_full(
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: column(source_column),
             ty: FlussoType::Keyword,
@@ -711,6 +713,7 @@ fn group_field(name: &str, fields: Vec<Field>) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Group(fields),
     }
 }
@@ -719,6 +722,7 @@ fn constant_field(name: &str, value: GenericValue) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Constant(value),
     }
 }
@@ -727,6 +731,7 @@ fn join_field(name: &str, join: Join) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(join)),
     }
 }
@@ -735,6 +740,7 @@ fn agg_field(name: &str, aggregate: Aggregate) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     }
 }

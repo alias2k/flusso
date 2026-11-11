@@ -109,6 +109,33 @@ fn observer_drives_status_through_its_lifecycle() {
     assert_eq!(json["sinks"]["primary"]["changes_committed"], 3);
 }
 
+/// A script failure the `skip` policy left out shows on `/status` under its
+/// index, with a count and the last failure; an index without one is absent.
+#[test]
+fn status_reports_script_failures_per_index() {
+    let status = Arc::new(Status::new([users()], [primary()], Instant::now()));
+    let observer = StatusObserver::new(Arc::clone(&status));
+    assert!(
+        serde_json::to_value(status.snapshot()).unwrap()["script_failures"].is_null(),
+        "absent until a script fails"
+    );
+
+    let failure = source::document::BuildFailure {
+        field: "label".to_owned(),
+        message: "boom".to_owned(),
+        position: None,
+    };
+    observer.on_document_failed(&users(), "7", &failure, engine::FailurePolicy::Skip);
+    observer.on_document_failed(&users(), "9", &failure, engine::FailurePolicy::Stop);
+
+    let json = serde_json::to_value(status.snapshot()).unwrap();
+    let users = &json["script_failures"]["users"];
+    assert_eq!(users["count"], 2);
+    assert_eq!(users["last"]["id"], "9");
+    assert_eq!(users["last"]["field"], "label");
+    assert_eq!(users["last"]["message"], "boom");
+}
+
 /// With two sinks, the deployment is `backfilling` while either sink still
 /// seeds, in-flight is measured against the slowest sink, and a failing sink
 /// is visible on its own without stopping the deployment.

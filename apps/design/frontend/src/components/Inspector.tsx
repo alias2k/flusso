@@ -1,9 +1,10 @@
 import { ChevronDown, ChevronUp, Copy, Trash2, X } from "lucide-react";
 import pluralize from "pluralize";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   NUMERIC_TYPES,
   SCALAR_TYPES,
+  SCRIPT_TYPES,
   api,
   type Aggregate,
   type AggregateKey,
@@ -17,6 +18,7 @@ import {
   type FlussoType,
   type Join,
   type JoinKind,
+  type Script,
   type SoftDelete,
   type Through,
   type ViaHop,
@@ -24,6 +26,8 @@ import {
 import { AGGREGATE_OPS, KIND_HELP, LEAF_TYPES, withAggregateOp } from "../fields";
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
+import { errorsFor, retypeScript, scriptPath } from "../model/scripts";
+import { useDesignStore } from "../store/design";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
 import { useDesign } from "../state";
 import { LABEL } from "../styles";
@@ -51,6 +55,9 @@ import {
 
 /// The verb-agnostic view of an [`AggregateOp`]: which op it is, and the column
 /// it reads (null for `count`/`exists`/`ids`, which read no column).
+// CodeMirror loads with the first script field opened, not with the app.
+const ScriptEditor = lazy(() => import("./ScriptEditor").then((m) => ({ default: m.ScriptEditor })));
+
 function aggOpKind(op: AggregateOp): "count" | "exists" | "sum" | "avg" | "min" | "max" | "ids" {
   if (typeof op === "string") return op;
   if ("sum" in op) return "sum";
@@ -354,6 +361,7 @@ function NodeInspector({ path }: { path: number[] }) {
         <div className="no-source">⊘ {t("inspector.groupHint")}</div>
         <Block variant="doc" title={t("inspector.inDoc")}>
           <NameField field={field} set={setField} />
+          <EmitToggle field={field} set={setField} />
         </Block>
       </div>
     );
@@ -478,6 +486,7 @@ function NodeInspector({ path }: { path: number[] }) {
           hasOptions={Object.keys(field.options ?? {}).length > 0}
           onChange={(on) => setJoin({ ...join, indexed: on ? undefined : false })}
         />
+        <EmitToggle field={field} set={setField} />
       </Block>
       <Drawer title={t("inspector.filters")} count={(join.filters ?? []).length}>
         <Filters
@@ -540,6 +549,9 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
       )}
       {"geo" in s && <GeoBody field={field} set={set} columns={colShapes} />}
       {"constant" in s && <ConstantBody field={field} set={set} value={s.constant} />}
+      {"script" in s && (
+        <ScriptBody field={field} script={s.script} errorPath={scriptPath(schema, path, index)} set={set} />
+      )}
       {"relation" in s && "aggregate" in s.relation && (
         <AggregateBody
           field={field}
@@ -551,8 +563,105 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
         />
       )}
 
+      <EmitToggle field={field} set={set} />
       <OptionsEditor field={field} set={set} />
     </div>
+  );
+}
+
+/// The input-only switch every field has: off, the field is fetched so scripts
+/// can read it, then stripped from the document and the mapping.
+function EmitToggle({ field, set }: { field: Field; set: (f: Field) => void }) {
+  const { t } = useT();
+  return (
+    <OptOut
+      value={field.emit ?? true}
+      label={t("inspector.emit")}
+      on={t("inspector.emitOn")}
+      off={t("inspector.emitOff")}
+      onChange={(on) => set({ ...field, emit: on ? undefined : false })}
+    />
+  );
+}
+
+/// A script field: what it returns, and the Rhai source that computes it from
+/// the built document. Compile errors from the live preview are listed under
+/// the editor and underlined in it.
+function ScriptBody({
+  field,
+  script,
+  errorPath,
+  set,
+}: {
+  field: Field;
+  script: Script;
+  errorPath: string;
+  set: (f: Field) => void;
+}) {
+  const { t } = useT();
+  const preview = useDesignStore((s) => s.preview);
+  const errors = errorsFor(preview?.script_errors, errorPath);
+  const setScript = (next: Script) => set({ ...field, source: { script: next } });
+  const options = scalarTypeOptions(t).filter((o) => SCRIPT_TYPES.includes(o.value as FlussoType));
+  return (
+    <Block variant="doc" title={t("inspector.inDoc")}>
+      <NameField field={field} set={set} />
+      <Row label={t("inspector.type")}>
+        <Select
+          value={script.ty as string}
+          options={options}
+          onChange={(ty) => setScript(retypeScript(script, ty as FlussoType))}
+          className={`font-mono ${typeClass(script.ty as string)}`}
+        />
+      </Row>
+      <div className="check-row my-1.5 flex flex-wrap gap-4">
+        <Check
+          value={!script.nullable}
+          label={t("inspector.required")}
+          onChange={(req) => setScript({ ...script, nullable: !req })}
+        />
+        <Check
+          value={script.array ?? false}
+          label={t("inspector.scriptArray")}
+          onChange={(on) => setScript({ ...script, array: on ? true : undefined })}
+        />
+      </div>
+      {script.ty === "enum" && (
+        <VariantsEditor
+          variants={script.enum_order ?? []}
+          onChange={(enum_order) => setScript({ ...script, enum_order })}
+        />
+      )}
+      {edit.SUBFIELD_TYPES.includes(script.ty) && (
+        <OptOut
+          value={script.subfields ?? true}
+          label={t("inspector.subfields")}
+          on={t("inspector.subfieldsOn")}
+          off={t("inspector.subfieldsOff")}
+          onChange={(on) => setScript({ ...script, subfields: on ? undefined : false })}
+        />
+      )}
+      <Row label={t("inspector.script")}>
+        <p className="-mt-0.5 mb-1 text-2xs leading-snug text-muted-foreground">{t("inspector.scriptHint")}</p>
+        <Suspense fallback={<div className="min-h-24 rounded-md border border-border" />}>
+          <ScriptEditor
+            value={script.source}
+            errors={errors}
+            label={t("inspector.script")}
+            onChange={(source) => setScript({ ...script, source })}
+          />
+        </Suspense>
+      </Row>
+      {!script.source.trim() && (
+        <p className="error-hint mt-0.5 mb-1.5 text-xs text-destructive">{t("inspector.scriptEmpty")}</p>
+      )}
+      {errors.map((e, i) => (
+        <p key={i} className="error-hint mt-0.5 mb-1.5 font-mono text-xs text-destructive">
+          {e.line ? `${e.line}:${e.column ?? 1} ` : ""}
+          {e.message}
+        </p>
+      ))}
+    </Block>
   );
 }
 
@@ -665,7 +774,12 @@ function ScalarBody({
           <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
           <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
         </div>
-        {column.ty === "enum" && <VariantsEditor column={column} setCol={setCol} />}
+        {column.ty === "enum" && (
+          <VariantsEditor
+            variants={column.enum_order ?? []}
+            onChange={(enum_order) => setCol({ ...column, enum_order })}
+          />
+        )}
         {edit.SUBFIELD_TYPES.includes(column.ty) && (
           <OptOut
             value={column.subfields ?? true}
@@ -742,12 +856,17 @@ function IndexedOptOut({
 /// by this order instead of alphabetically. Empty (all removed) is a plain
 /// keyword-like enum. Add, remove, reorder (↑/↓), and rename inline; a stored
 /// value not in the list sorts after the declared ones.
-function VariantsEditor({ column, setCol }: { column: Column; setCol: (c: Column) => void }) {
+function VariantsEditor({
+  variants,
+  onChange,
+}: {
+  variants: string[];
+  onChange: (next: string[] | undefined) => void;
+}) {
   const { t } = useT();
   const [draft, setDraft] = useState("");
-  const variants = column.enum_order ?? [];
 
-  const commit = (next: string[]) => setCol({ ...column, enum_order: next.length ? next : undefined });
+  const commit = (next: string[]) => onChange(next.length ? next : undefined);
   const add = () => {
     const v = draft.trim();
     if (!v || variants.includes(v)) return;
@@ -1763,6 +1882,7 @@ function joinVerb(kind: JoinKind): "belongs_to" | "has_one" | "has_many" | "many
 function fieldHelpKind(s: FieldSource): string {
   if ("geo" in s) return "geo";
   if ("constant" in s) return "constant";
+  if ("script" in s) return "script";
   if ("column" in s && typeof s.column.ty !== "string") return "map" in s.column.ty ? "map" : "custom";
   if ("relation" in s && "aggregate" in s.relation) return aggOpKind(s.relation.aggregate.op);
   return "";

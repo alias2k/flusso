@@ -190,7 +190,7 @@ ci: lint test-all doc
 
 # ── benchmarks (docs/src/contribute/benchmarks.md) ─────────────────────────────
 
-# The in-process component benches (engine loop, pgoutput decode, sink render):
+# The in-process component benches (engine loop, pgoutput decode, sink render, script fields):
 # no Docker, under two minutes. This is what gates a PR. Pass a name to save the
 # results as a Criterion baseline for `just bench-compare`.
 bench baseline="":
@@ -202,6 +202,7 @@ bench baseline="":
       cargo bench -p flusso-engine --bench engine
       cargo bench -p flusso-source-postgres --bench pgoutput --features bench
       cargo bench -p flusso-sink-opensearch --bench render --features bench
+      cargo bench -p flusso-script --bench scripted
     fi
 
 # Compare two saved in-process baselines; fails past 10% slower (what CI does

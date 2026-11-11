@@ -75,6 +75,8 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     // Every entry must instantiate its adapter config, offline or not: a
     // misspelled sink option is a config error, and `check` exists to catch it.
     adapters::validate(&config).with_context(|| format!("validating {}", args.config.display()))?;
+    crate::backends::compile_scripts(&config)
+        .with_context(|| format!("compiling the scripts of {}", args.config.display()))?;
     let config = Arc::new(config);
 
     let mappings = config.resolve_mappings();

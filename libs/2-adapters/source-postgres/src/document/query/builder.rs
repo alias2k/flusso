@@ -110,6 +110,7 @@ impl Builder<'_> {
             FieldSource::Group(nested) => self.object(nested, parent_alias, parent_pk),
             FieldSource::Geo(geo) => Ok(geo_value(geo, parent_alias)),
             FieldSource::Constant(value) => Ok(literal_or_null(value)),
+            FieldSource::Script(_) => Ok("NULL".to_owned()),
         }
     }
 

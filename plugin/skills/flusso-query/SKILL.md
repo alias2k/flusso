@@ -469,6 +469,8 @@ them can't silently disarm the guarantee.
 | `ids` aggregate | `Vec<i64>` / `Vec<String>` per `element_type` | `Number` / `Keyword` (term queries match arrays) |
 | `exists` aggregate | `bool` (never null) | `Bool` |
 | any join or `json` with `indexed: false` | as above (still deserialized and shape-checked) | **none** — not in the index, so no handle; querying it is a compile error |
+| a `script:` field | as for its type key (`array: true` → `Vec<…>`) | as for its type key |
+| any field with `emit: false` | **none**: not in the document; projecting it is an unknown-field compile error | **none** |
 
 Matching is by **leaf identifier and `Option` shape**: the macro compares the final type segment,
 not aliases. For exact money, declare a `custom` `scaled_float` in the schema and the derive accepts

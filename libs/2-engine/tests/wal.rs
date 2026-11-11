@@ -1627,6 +1627,7 @@ fn users_with_relations_spec() -> SourceSpec {
     let relation = |name: &str, relation: Relation| Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(relation),
     };
     let mut orders = has_many("orders", vec![column_field("total", "total")]);
@@ -1702,6 +1703,7 @@ fn users_with_recent_orders_spec() -> SourceSpec {
             Field {
                 field: field("orders"),
                 options: Default::default(),
+                emit: true,
                 source: FieldSource::Relation(Relation::Join(orders)),
             },
         ],
@@ -1731,6 +1733,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
     let aggregate = |name: &str, aggregate: Aggregate| Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     };
     let has_team = Aggregate {
@@ -1882,6 +1885,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
             Field {
                 field: field("id"),
                 options: Default::default(),
+                emit: true,
                 source: FieldSource::Column(Column {
                     column: column("id"),
                     ty: FlussoType::Long,
@@ -1918,6 +1922,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
             Field {
                 field: field("orgs"),
                 options: Default::default(),
+                emit: true,
                 source: FieldSource::Relation(Relation::Join(orgs)),
             },
             aggregate_field(
@@ -1998,6 +2003,7 @@ fn tenant_orders_spec() -> SourceSpec {
     let relation = |name: &str, relation: Relation| Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(relation),
     };
     let schema = IndexSchema {
@@ -2048,6 +2054,7 @@ fn users_with_team_spec() -> SourceSpec {
             Field {
                 field: field("team"),
                 options: Default::default(),
+                emit: true,
                 source: FieldSource::Relation(Relation::Join(team)),
             },
         ],
@@ -2159,6 +2166,7 @@ fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     }
 }
@@ -2167,6 +2175,7 @@ fn column_field(name: &str, col: &str) -> Field {
     Field {
         field: field(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: column(col),
             ty: FlussoType::Keyword,

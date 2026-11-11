@@ -32,6 +32,7 @@ use crate::adapters;
 use crate::backends::FlussoBackends;
 use crate::http::{self, BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
 use crate::telemetry::observer::OtelObserver;
+use crate::telemetry::script_log::ScriptFailureLog;
 use crate::telemetry::{self, metrics};
 
 /// Default bind address for the public surface — localhost, so an unconfigured
@@ -180,6 +181,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         },
     );
     adapters::validate(&config)?;
+    crate::backends::compile_scripts(&config).context("compiling the scripts")?;
 
     let public_addr = args
         .public_address
@@ -221,6 +223,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let running = Daemon::new(config, Arc::clone(&backends))
         .with_options(options)
         .with_observer(otel_observer)
+        .with_observer(Arc::new(ScriptFailureLog::default()))
         .start()
         .await?;
     let status = running.status();

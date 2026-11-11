@@ -41,12 +41,14 @@ impl Default for BatchPolicy {
     }
 }
 
-/// How the engine resolves the [`FailurePolicy`] for a rejected document: a
+/// How the engines resolve the [`FailurePolicy`] for a failed document: a
 /// global `default` plus per-index overrides, keyed by **logical** index name.
 ///
-/// The engine governs only *item-level rejections* (a sink accepted the batch
-/// but refused specific documents). Transport failures, a source decode error,
-/// or a flush returning `Err` always stop the run regardless of this.
+/// It governs only *per-document* failures: an item-level rejection (a sink
+/// accepted the batch but refused specific documents) and a document that
+/// could not be built (a script failed on it). Transport failures, a source
+/// decode error, or a flush returning `Err` always stop the run regardless of
+/// this.
 #[derive(Debug, Clone, Default)]
 pub struct FailurePolicies {
     default: FailurePolicy,

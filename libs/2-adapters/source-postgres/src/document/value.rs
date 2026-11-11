@@ -173,8 +173,11 @@ fn coerce_field(json: serde_json::Value, source: &FieldSource) -> GenericValue {
         FieldSource::Relation(Relation::Join(join)) => coerce_relation(json, &join.fields),
         FieldSource::Relation(Relation::Aggregate(aggregate)) => coerce_aggregate(json, aggregate),
         // A geo point ({lat,lon} / [lon,lat] / "lat,lon") and a bare constant
-        // carry no scalar type to coerce to; keep their natural JSON shape.
-        FieldSource::Geo(_) | FieldSource::Constant(_) => json_to_generic(json),
+        // carry no scalar type to coerce to; keep their natural JSON shape. A
+        // script field is a placeholder null, computed after the build.
+        FieldSource::Geo(_) | FieldSource::Constant(_) | FieldSource::Script(_) => {
+            json_to_generic(json)
+        }
     }
 }
 

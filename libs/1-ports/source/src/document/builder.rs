@@ -13,22 +13,120 @@ pub struct DocumentId {
     pub key: RowKey,
 }
 
-/// The result of assembling a document: a body to upsert into the index, or a
-/// tombstone when the root row is gone (or soft-deleted).
+impl DocumentId {
+    /// The key as the sink's document `_id`: each part as text, composite keys
+    /// joined with `:`.
+    pub fn rendered(&self) -> String {
+        self.key
+            .0
+            .iter()
+            .map(|(_, value)| key_part(value))
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+}
+
+fn key_part(value: &GenericValue) -> String {
+    match value {
+        GenericValue::Bool(b) => b.to_string(),
+        GenericValue::SmallInt(i) => i.to_string(),
+        GenericValue::Int(i) => i.to_string(),
+        GenericValue::BigInt(i) => i.to_string(),
+        GenericValue::Float(f) => f.to_string(),
+        GenericValue::Double(f) => f.to_string(),
+        GenericValue::Decimal(d) => d.to_string(),
+        GenericValue::String(s) => s.clone(),
+        GenericValue::Uuid(u) => u.to_string(),
+        GenericValue::Date(d) => d.to_string(),
+        GenericValue::Time(t) => t.to_string(),
+        GenericValue::Timestamp(ts) => ts.to_string(),
+        GenericValue::TimestampTz(ts) => ts.to_rfc3339(),
+        // `\x`-prefixed lowercase hex, matching Postgres's `bytea` text output,
+        // so a snapshot key and a WAL key for the same row agree.
+        GenericValue::Bytes(bytes) => {
+            let mut out = String::with_capacity(2 + bytes.len() * 2);
+            out.push_str("\\x");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out
+        }
+        GenericValue::Null => "null".to_owned(),
+        GenericValue::Array(_) | GenericValue::Map(_) => String::new(),
+    }
+}
+
+/// The result of assembling a document: a body to upsert into the index, a
+/// tombstone when the root row is gone (or soft-deleted), or a document that
+/// could not be finished (a script failed on it).
 #[derive(Debug, Clone)]
 pub enum Document {
     /// Upsert the assembled body under [`id`](Self::Upsert::id).
     Upsert { id: DocumentId, body: GenericValue },
     /// Remove the document from the index.
     Delete { id: DocumentId },
+    /// The document could not be finished. The engine's failure policy decides
+    /// whether this stops it or skips the document (leaving the indexed version
+    /// as it was).
+    Failed {
+        id: DocumentId,
+        failure: BuildFailure,
+    },
 }
 
 impl Document {
     /// The id this outcome addresses, whichever variant it is.
     pub fn id(&self) -> &DocumentId {
         match self {
-            Document::Upsert { id, .. } | Document::Delete { id } => id,
+            Document::Upsert { id, .. } | Document::Delete { id } | Document::Failed { id, .. } => {
+                id
+            }
         }
+    }
+}
+
+/// Why a document could not be finished: which field failed, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildFailure {
+    /// The failing field's path in the document, e.g. `variants[2].grossPrice`.
+    pub field: String,
+    /// What went wrong, in one line.
+    pub message: String,
+    /// The position in the field's script, when the failure has one.
+    pub position: Option<ScriptPosition>,
+}
+
+impl std::error::Error for BuildFailure {}
+
+/// A 1-based line and column in a script, with that line's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptPosition {
+    /// 1-based line in the script.
+    pub line: usize,
+    /// 1-based column in that line, in characters.
+    pub column: usize,
+    /// The script line the position points into.
+    pub excerpt: String,
+}
+
+impl std::fmt::Display for BuildFailure {
+    /// `field: message`, then the excerpt with a caret under the position.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}`: {}", self.field, self.message)?;
+        if let Some(position) = &self.position {
+            let gutter = position.line.to_string();
+            write!(
+                f,
+                "\n  --> line {}, column {}\n{} | {}\n{} | {}^",
+                position.line,
+                position.column,
+                gutter,
+                position.excerpt,
+                " ".repeat(gutter.len()),
+                " ".repeat(position.column.saturating_sub(1)),
+            )?;
+        }
+        Ok(())
     }
 }
 

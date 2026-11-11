@@ -28,6 +28,7 @@ export const KIND_HELP: Record<string, string> = {
   map: "kindHelp.map",
   custom: "kindHelp.custom",
   constant: "kindHelp.constant",
+  script: "kindHelp.script",
 };
 export const AGGREGATE_OPS = ["count", "exists", "sum", "avg", "min", "max", "ids"] as const;
 export const LEAF_TYPES: FlussoType[] = ["text", "keyword", "integer", "long", "double", "date"];
@@ -37,7 +38,7 @@ export type FieldKind = string;
 /// Every kind the kind-picker offers, grouped for the dropdown.
 export const KIND_GROUPS: { label: string; kinds: FieldKind[] }[] = [
   { label: "Scalar", kinds: SCALAR_TYPES as string[] },
-  { label: "Structured", kinds: ["map", "custom", "geo", "object", "constant"] },
+  { label: "Structured", kinds: ["map", "custom", "geo", "object", "constant", "script"] },
   { label: "Join", kinds: [...JOIN_KINDS] },
   { label: "Aggregate", kinds: [...AGGREGATE_OPS] },
 ];
@@ -60,6 +61,7 @@ export function fieldKind(field: Field): FieldKind {
   if ("geo" in s) return "geo";
   if ("group" in s) return "object";
   if ("constant" in s) return "constant";
+  if ("script" in s) return "script";
   if ("relation" in s) {
     const r = s.relation;
     if ("join" in r) return joinVerb(r.join.kind);
@@ -109,6 +111,8 @@ function defaultSource(name: string, kind: FieldKind, table: string): FieldSourc
       return { group: [] };
     case "constant":
       return { constant: "" };
+    case "script":
+      return { script: { source: "", ty: "keyword", nullable: false } };
     case "belongs_to":
     case "has_one":
     case "has_many":

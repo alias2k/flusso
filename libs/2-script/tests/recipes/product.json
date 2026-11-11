@@ -1,0 +1,19 @@
+{
+  "id": 7,
+  "sku": "  ab-12 ",
+  "name": "Red Mug",
+  "nickname": null,
+  "brand": "Acme",
+  "price": "12.50",
+  "stock": 3,
+  "createdAt": "2024-05-01T10:00:00Z",
+  "reviewCount": 4,
+  "avgRating": 4.25,
+  "title": { "en": "Mug", "it": "Tazza" },
+  "tags": [{ "label": "kitchen" }, { "label": "sale" }, { "label": "kitchen" }],
+  "variants": [
+    { "color": "red", "price": "14.00", "stock": 0 },
+    { "color": "blue", "price": "9.50", "stock": 4 },
+    { "color": "green", "price": "11.00", "stock": 2 }
+  ]
+}

@@ -7,14 +7,14 @@ An `[[index]]` entry names one index, points at its schema, and may override the
 | `name` | [Postgres identifier](identifiers.md) | — | The logical index name, the pipeline's stable identity. |
 | `schema` | relative path ending `.yml`/`.yaml` | — | The `*.schema.yml`, resolved from the config file's directory. |
 | `enabled` | bool | — | Whether this index is built on this run. A disabled index is left untouched at the sink. |
-| `on_error` | `"stop"` \| `"skip"` | the global `on_error` | Per-index override of the item-rejection policy. |
+| `on_error` | `"stop"` \| `"skip"` | the global `on_error` | Per-index override of the per-document failure policy. |
 | `[index.sinks.<name>]` | table per sink | none | This index's options on the sink named `<name>`. See [sinks](#sinks). |
 
 All three of `name`, `schema`, and `enabled` are required.
 
 ## on_error
 
-`on_error` governs **item-level rejections** only: the sink applied a bulk request, but the destination refused one document (a mapping conflict, a value it can't index). A flush-wide failure (destination unreachable, whole request refused, or the OpenSearch sink's [target index deleted while running](sink-opensearch.md#seeding)) always stops the run and the batch is redelivered on restart.
+`on_error` governs **per-document failures** only: an **item-level rejection** (the sink applied a bulk request, but the destination refused one document: a mapping conflict, a value it can't index), and a document a [script failed on](scripts.md#failures). A flush-wide failure (destination unreachable, whole request refused, or the OpenSearch sink's [target index deleted while running](sink-opensearch.md#seeding)) always stops the run and the batch is redelivered on restart.
 
 | Value | Behavior |
 | --- | --- |

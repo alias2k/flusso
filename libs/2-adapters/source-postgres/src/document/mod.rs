@@ -159,6 +159,32 @@ impl PgDocumentBuilder {
         Ok(Self::new(pool, spec))
     }
 
+    /// Build the document of the root row whose primary key reads as `id` (typed
+    /// by [`RowKey::from_text`]), through the normal [`build`](DocumentBuilder::build)
+    /// path. `Ok(None)` when the row is missing or soft-deleted; an error when
+    /// the index has no single-column primary key.
+    pub async fn document_by_id(
+        &self,
+        index: &IndexName,
+        id: &str,
+    ) -> Result<Option<kernel::GenericValue>> {
+        let primary_key = self
+            .spec
+            .schema(index)
+            .and_then(|schema| schema.primary_key.clone())
+            .ok_or_else(|| {
+                SourceError::Query(format!("index `{index}` has no single-column primary key"))
+            })?;
+        let document = DocumentId {
+            index: index.clone(),
+            key: RowKey::from_text(primary_key, id),
+        };
+        match self.build(&document).await? {
+            Document::Upsert { body, .. } => Ok(Some(body)),
+            Document::Delete { .. } | Document::Failed { .. } => Ok(None),
+        }
+    }
+
     /// Build a real document for one arbitrary row of an index's root table —
     /// exactly what the sink would write, for previewing a schema against live
     /// data. Picks any row with a non-null primary key, then runs it through the
@@ -195,7 +221,7 @@ impl PgDocumentBuilder {
         };
         match self.build(&id).await? {
             Document::Upsert { body, .. } => Ok(Some(body)),
-            Document::Delete { .. } => Ok(None),
+            Document::Delete { .. } | Document::Failed { .. } => Ok(None),
         }
     }
 

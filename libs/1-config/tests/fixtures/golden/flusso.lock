@@ -179,6 +179,36 @@ ty = "enum"
 nullable = true
 
 [[config.indexes.catalog.schema.fields]]
+field = "internalCode"
+emit = false
+
+[config.indexes.catalog.schema.fields.source.column]
+column = "internal_code"
+ty = "keyword"
+nullable = true
+
+[[config.indexes.catalog.schema.fields]]
+field = "label"
+
+[config.indexes.catalog.schema.fields.source.script]
+source = """
+`${this.sku} ${this.name}`
+"""
+ty = "keyword"
+nullable = false
+subfields = false
+
+[[config.indexes.catalog.schema.fields]]
+field = "grade"
+
+[config.indexes.catalog.schema.fields.source.script]
+source = '["low"]'
+ty = "enum"
+nullable = true
+array = true
+enum_order = ["low", "high"]
+
+[[config.indexes.catalog.schema.fields]]
 field = "externalId"
 
 [config.indexes.catalog.schema.fields.source.column]

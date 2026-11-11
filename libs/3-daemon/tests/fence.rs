@@ -365,6 +365,7 @@ fn schema() -> IndexSchema {
     let keyword = |name: &str| Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: ColumnName::try_new(name).unwrap(),
             ty: FlussoType::Keyword,

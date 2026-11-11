@@ -35,16 +35,16 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use kernel::{Envelope, GenericValue, IndexName, Position, SinkName};
+use kernel::{Envelope, IndexName, Position, SinkName};
 use source::cdc::{ChangeCapture, ChangeEvent, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId};
+use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
 use source::{SnapshotTable, SourceError};
 use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
 use tokio::time::{Duration, Instant, sleep_until, timeout_at};
 
 use crate::error::{EngineError, Result};
 use crate::observer::{BuildStats, EngineId, NoopObserver, Observer};
-use crate::policy::BatchPolicy;
+use crate::policy::{BatchPolicy, FailurePolicies, FailurePolicy};
 
 /// How often the watermark is confirmed to the source while no commit happens,
 /// so acknowledgements that arrive during a quiet period still advance it.
@@ -65,6 +65,7 @@ pub struct IngestEngine {
     sinks: Vec<SinkName>,
     observer: Arc<dyn Observer>,
     batch: BatchPolicy,
+    failure_policies: FailurePolicies,
 }
 
 impl IngestEngine {
@@ -82,12 +83,21 @@ impl IngestEngine {
             sinks,
             observer: Arc::new(NoopObserver),
             batch: BatchPolicy::default(),
+            failure_policies: FailurePolicies::default(),
         }
     }
 
     /// Report lifecycle and progress to `observer`.
     pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    /// How a document that could not be built is handled, per index: `stop`
+    /// errors the engine out (the change is retried after a restart), `skip`
+    /// reports it and publishes nothing for it.
+    pub fn with_failure_policies(mut self, policies: FailurePolicies) -> Self {
+        self.failure_policies = policies;
         self
     }
 
@@ -291,18 +301,40 @@ impl IngestEngine {
         let mut envelopes = Vec::with_capacity(ids.len());
         let ts = Utc::now();
         for document in self.documents.build_many(ids).await? {
-            let id = document.id().clone();
-            *by_index.entry(id.index.clone()).or_insert(0) += 1;
-            envelopes.push(match document {
+            let envelope = match document {
                 Document::Upsert { id, body } => {
                     Envelope::upsert(id.index.clone(), document_id(&id), body, position, ts)
                 }
                 Document::Delete { id } => {
                     Envelope::delete(id.index.clone(), document_id(&id), position, ts)
                 }
-            });
+                Document::Failed { id, failure } => {
+                    self.document_failed(&id, failure)?;
+                    continue;
+                }
+            };
+            *by_index.entry(envelope.index.clone()).or_insert(0) += 1;
+            envelopes.push(envelope);
         }
         Ok((envelopes, by_index))
+    }
+
+    /// Report a document that could not be built, then apply its policy: `stop`
+    /// fails the batch (nothing in it is published, so the change is retried),
+    /// `skip` leaves every sink's indexed version alone.
+    fn document_failed(&self, id: &DocumentId, failure: BuildFailure) -> Result<()> {
+        let rendered = document_id(id);
+        let policy = self.failure_policies.resolve(id.index.as_ref());
+        self.observer
+            .on_document_failed(&id.index, &rendered, &failure, policy);
+        match policy {
+            FailurePolicy::Stop => Err(EngineError::DocumentFailed {
+                index: id.index.to_string(),
+                id: rendered,
+                failure: Box::new(failure),
+            }),
+            FailurePolicy::Skip => Ok(()),
+        }
     }
 
     /// Gather the requests one snapshot will serve: everything already queued
@@ -586,42 +618,7 @@ impl Consumer<Request> for ClosedConsumer {
 /// The sink's document `_id`, derived from the document key (the root primary
 /// key); composite keys join their parts with `:`.
 pub fn document_id(id: &DocumentId) -> String {
-    id.key
-        .0
-        .iter()
-        .map(|(_, value)| value_to_string(value))
-        .collect::<Vec<_>>()
-        .join(":")
-}
-
-fn value_to_string(value: &GenericValue) -> String {
-    match value {
-        GenericValue::Bool(b) => b.to_string(),
-        GenericValue::SmallInt(i) => i.to_string(),
-        GenericValue::Int(i) => i.to_string(),
-        GenericValue::BigInt(i) => i.to_string(),
-        GenericValue::Float(f) => f.to_string(),
-        GenericValue::Double(f) => f.to_string(),
-        GenericValue::Decimal(d) => d.to_string(),
-        GenericValue::String(s) => s.clone(),
-        GenericValue::Uuid(u) => u.to_string(),
-        GenericValue::Date(d) => d.to_string(),
-        GenericValue::Time(t) => t.to_string(),
-        GenericValue::Timestamp(ts) => ts.to_string(),
-        GenericValue::TimestampTz(ts) => ts.to_rfc3339(),
-        // `\x`-prefixed lowercase hex, matching Postgres's `bytea` text output,
-        // so a snapshot key and a WAL key for the same row agree.
-        GenericValue::Bytes(bytes) => {
-            let mut out = String::with_capacity(2 + bytes.len() * 2);
-            out.push_str("\\x");
-            for byte in bytes {
-                out.push_str(&format!("{byte:02x}"));
-            }
-            out
-        }
-        GenericValue::Null => "null".to_owned(),
-        GenericValue::Array(_) | GenericValue::Map(_) => String::new(),
-    }
+    id.rendered()
 }
 
 impl From<SourceError> for EngineError {

@@ -85,6 +85,7 @@ function prunedField(input: Field): Field | null {
     return { ...field, source: { group: s.group.map(prunedField).filter((x): x is Field => x !== null) } };
   }
   if ("column" in s && !s.column.column) return null;
+  if ("script" in s && !s.script.source.trim()) return null;
   if ("geo" in s && (!s.geo.lat || !s.geo.lon)) return null;
   return field;
 }

@@ -159,6 +159,23 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 9,
+      "title": "Script failures",
+      "description": "Documents a script failed on, by index and field. Under on_error = skip each one keeps its previously indexed version; anything above zero means documents are going stale. Debug with `flusso script run`.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "red" } }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (index, field) (increase(flusso_script_failures_total[5m]))",
+          "legendFormat": "{{index}} · {{field}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

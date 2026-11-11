@@ -1213,7 +1213,9 @@ export default function App() {
                 preview={preview}
                 diagnostics={allDiagnostics.filter((d) => d.index === active)}
                 onSample={
-                  doc && schema && active !== "config" ? () => api.sample(doc.config, active, schema) : undefined
+                  doc && schema && active !== "config"
+                    ? (id?: string) => api.sample(doc.config, active, schema, id)
+                    : undefined
                 }
               />
             </DrawerContent>

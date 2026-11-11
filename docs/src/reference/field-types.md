@@ -30,6 +30,8 @@ With `auto_subfields` on (the default), `text`/`identifier`/`keyword`/`enum`/`uu
 | `subfields` | bool | `true` | `text`, `keyword`, `uuid` | `false` maps the field without the sink's automatic subfields. See [subfields](#subfields). |
 | `indexed` | bool | `true` | `json` (and every join) | `false` stores the value without indexing it. See [Joins: indexed](joins.md#indexed). |
 
+A leaf can also be computed from the built document instead of read from a column: see [Script fields](scripts.md). Any field, leaf or not, can be made input-only with [`emit: false`](scripts.md#emit).
+
 ## subfields
 
 `subfields: false` maps one string field bare: no `.keyword`, `.keyword_lowercase` or `.text`, whatever the sink's `auto_subfields` says. A `text` field keeps its `flusso_text` analyzer, so it's still full-text searchable.

@@ -19,6 +19,7 @@ The numeric prefix on each directory **is** the dependency layer. A crate depend
 | 1 | config | `config` | The `flusso.toml` and `*.schema.yml` parsers as modules, the assembled `Config`, the `flusso.lock` compiler. Depends only on the kernel. |
 | 2 | adapter | `source_postgres`, `stream_channel`, `sink_opensearch`, `sink_stdout` | One implementation of one port for one technology, each owning its configuration type. |
 | 2 | engine | `engine` | The generic loop that drives the ports: capture, buffer, resolve, build, sink, flush, ack. |
+| 2 | script | `script` | Script fields: compiles the deployment's Rhai scripts and decorates any `DocumentBuilder` so each document is finished by them before it is published. |
 | 3 | daemon | `daemon` | Assembles one deployment from a `Config` through the `Backends` seam and exposes live `Status`. Names no adapter. |
 | apps | | `flusso-cli` | The binary: the adapter registry and the `Backends` implementation, telemetry, HTTP surfaces, signals. |
 | apps | | `flusso-design` | The visual designer: axum API plus the embedded SPA. Renders its forms from the adapter descriptions the CLI hands it. |

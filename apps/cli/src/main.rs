@@ -45,6 +45,7 @@ use commands::check::CheckArgs;
 use commands::design::DesignArgs;
 use commands::run::RunArgs;
 use commands::schema_cmd::SchemaArgs;
+use commands::script::ScriptArgs;
 
 /// The default config-file path, by convention `flusso.toml`.
 pub(crate) const DEFAULT_CONFIG: &str = "flusso.toml";
@@ -74,6 +75,8 @@ enum Command {
     Design(DesignArgs),
     /// Print an embedded JSON Schema for editor assist.
     Schema(SchemaArgs),
+    /// Run an index's script fields over one document, to write and debug them.
+    Script(ScriptArgs),
     /// List a running server's indexes and their state.
     Indexes(IndexesArgs),
     /// Trigger a from-scratch rebuild of one index on a running server.
@@ -89,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "design")]
         Command::Design(args) => commands::design::execute(args).await,
         Command::Schema(args) => commands::schema_cmd::execute(args),
+        Command::Script(args) => commands::script::execute(args).await,
         Command::Indexes(args) => commands::admin::indexes(args).await,
         Command::Reindex(args) => commands::admin::reindex(args).await,
     }

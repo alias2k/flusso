@@ -18,6 +18,7 @@ name = "source"
 workspace = true
 
 [dependencies]
+uuid.workspace = true
 kernel.workspace = true
 async-trait.workspace = true
 futures.workspace = true

@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use kernel::{IndexName, SinkName};
 use serde::Serialize;
+use source::document::BuildFailure;
 
 use crate::fence::{Fence, FencePositions, SinkPositions};
 
@@ -76,6 +77,7 @@ pub struct Status {
     slot_lag_known: AtomicBool,
     errors: AtomicU64,
     last_error: Mutex<Option<String>>,
+    script_failures: Mutex<BTreeMap<IndexName, ScriptFailures>>,
     sinks: BTreeMap<SinkName, SinkStatus>,
     indexes: Vec<IndexName>,
     /// Where the fence positions come from; `None` reports none.
@@ -150,6 +152,7 @@ impl Status {
             slot_lag_known: AtomicBool::new(false),
             errors: AtomicU64::new(0),
             last_error: Mutex::new(None),
+            script_failures: Mutex::new(BTreeMap::new()),
             sinks: sinks
                 .into_iter()
                 .map(|sink| (sink, SinkStatus::new(&indexes)))
@@ -298,6 +301,25 @@ impl Status {
         }
     }
 
+    pub(crate) fn record_script_failure(
+        &self,
+        index: &IndexName,
+        id: &str,
+        failure: &BuildFailure,
+    ) {
+        let mut failures = lock(&self.script_failures);
+        let entry = failures.entry(index.clone()).or_default();
+        entry.count += 1;
+        entry.last = Some(LastScriptFailure {
+            id: id.to_owned(),
+            field: failure.field.clone(),
+            message: failure.message.clone(),
+            line: failure.position.as_ref().map(|at| at.line),
+            column: failure.position.as_ref().map(|at| at.column),
+            at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        });
+    }
+
     pub(crate) fn record_lag(&self, bytes: u64) {
         self.slot_lag_bytes.store(bytes, Ordering::Relaxed);
         self.slot_lag_known.store(true, Ordering::Relaxed);
@@ -397,6 +419,10 @@ impl Status {
             searchable_position: positions.searchable,
             errors: self.errors.load(Ordering::Relaxed),
             last_error: lock(&self.last_error).clone(),
+            script_failures: lock(&self.script_failures)
+                .iter()
+                .map(|(index, failures)| (index.as_ref().to_owned(), failures.clone()))
+                .collect(),
             sinks,
         }
     }
@@ -432,7 +458,37 @@ pub struct StatusSnapshot {
     pub errors: u64,
     /// The most recent engine error.
     pub last_error: Option<String>,
+    /// Per index, the documents a script failed on, under either policy. Only
+    /// indexes with a failure appear.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub script_failures: BTreeMap<String, ScriptFailures>,
     pub sinks: BTreeMap<String, SinkSnapshot>,
+}
+
+/// Script failures on one index since the daemon started.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScriptFailures {
+    /// Documents a script failed on (a `stop` index counts each retry).
+    pub count: u64,
+    /// The most recent one.
+    pub last: Option<LastScriptFailure>,
+}
+
+/// The most recent script failure on an index.
+#[derive(Debug, Clone, Serialize)]
+pub struct LastScriptFailure {
+    /// The document id.
+    pub id: String,
+    /// The failing field's path, e.g. `variants[2].grossPrice`.
+    pub field: String,
+    /// What went wrong, in one line.
+    pub message: String,
+    /// The line in the field's script, when the failure has a position.
+    pub line: Option<usize>,
+    /// The column in that line.
+    pub column: Option<usize>,
+    /// When it happened (RFC 3339, UTC).
+    pub at: String,
 }
 
 /// One sink's slice of the `/status` document.

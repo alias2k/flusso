@@ -26,6 +26,7 @@ fn col_field(name: &str, column: &str) -> Field {
     Field {
         field: f(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(kernel::Column {
             column: c(column),
             ty: kernel::FlussoType::Keyword,
@@ -179,6 +180,7 @@ fn has_many_with_order_and_limit() {
     let orders = Field {
         field: f("orders"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: t("orders"),
             kind: JoinKind::HasMany {
@@ -218,6 +220,7 @@ fn belongs_to_correlates_on_the_parent_column() {
     let org = Field {
         field: f("org"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: t("orgs"),
             kind: JoinKind::BelongsTo {
@@ -256,6 +259,7 @@ fn aggregate_count() {
     let count = Field {
         field: f("order_count"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(Aggregate {
             table: t("orders"),
             op: AggregateOp::Count,
@@ -286,6 +290,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
     let ids = Field {
         field: f("order_ids"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(Aggregate {
             table: t("orders"),
             op: AggregateOp::Ids {
@@ -332,6 +337,7 @@ fn through_aggregate_sql(
     let aggregate = Field {
         field: f("agg"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(Aggregate {
             table: t("products"),
             op,
@@ -437,6 +443,7 @@ fn many_to_many_join_applies_junction_filters() {
     let tags = Field {
         field: f("tags"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: t("tags"),
             kind: JoinKind::ManyToMany {
@@ -549,6 +556,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     let orders = Field {
         field: f("orders"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: t("orders"),
             kind: JoinKind::HasMany {
@@ -678,6 +686,7 @@ fn aggregate_sql(aggregate: Aggregate) -> String {
     let field = Field {
         field: f("agg"),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     };
     let schema = index(Some("id"), None, vec![field]);
@@ -838,6 +847,7 @@ fn join_field(
     Field {
         field: f(name),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: t(table),
             kind,

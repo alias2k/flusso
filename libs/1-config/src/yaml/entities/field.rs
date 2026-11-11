@@ -9,6 +9,8 @@
 //! `Deserialize` for [`Field`] finds the one recognized type tag among the
 //! mapping's keys (order-independent, and a typo'd tag is reported), moves its
 //! value under a `field` key, and deserializes the rest straight into that body.
+//! `emit` is the one sibling every type takes, so it is lifted out before the
+//! body is read and lands on [`Field`] beside the type-specific [`FieldKind`].
 
 use std::collections::BTreeMap;
 
@@ -20,10 +22,19 @@ use kernel::{Expression, FlussoType};
 
 use super::{AggregateOp, ColumnPair, Filter, JoinVerb, OrderBy, Through, Transform, ViaHop};
 
-/// One field of a document, parsed from the type-as-key form. Each variant
-/// carries the type/op the tag denoted plus a body holding the rest.
+/// One field of a document, parsed from the type-as-key form: what its tag
+/// declared plus the `emit` sibling every type takes.
 #[derive(Debug, Clone)]
-pub enum Field {
+pub struct Field {
+    pub kind: FieldKind,
+    /// `false` makes the field input-only: fetched for scripts, never emitted.
+    pub emit: Option<bool>,
+}
+
+/// What a field's type tag declared. Each variant carries the type/op the tag
+/// denoted plus a body holding the rest.
+#[derive(Debug, Clone)]
+pub enum FieldKind {
     /// A scalar leaf reading a column, with its declared [`FlussoType`].
     Scalar(FlussoType, ScalarBody),
     /// An `enum:` scalar with an optional declared variant order.
@@ -65,10 +76,19 @@ pub struct ScalarBody {
     /// at conversion.
     #[serde(default)]
     pub indexed: Option<bool>,
+    /// A script computing the value from the built document, in place of a
+    /// column. Excludes `column`, `transforms` and `default` — enforced at
+    /// conversion.
+    #[serde(default)]
+    pub script: Option<String>,
+    /// `true` makes a script return an array of the field's type. Only with
+    /// `script` — enforced at conversion.
+    #[serde(default)]
+    pub array: Option<bool>,
 }
 
 /// An `enum:` scalar — a closed set of string values with an optional declared
-/// `variants` order. Converted into a [`Field::Scalar`] with a
+/// `variants` order. Converted into a [`FieldKind::Scalar`] with a
 /// [`FlussoType::Enum`]; an empty `variants` is a plain keyword alias.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,10 +107,16 @@ pub struct EnumBody {
     pub transforms: Option<Vec<Transform>>,
     #[serde(default)]
     pub default: Option<serde_yaml::Value>,
+    /// A script computing the variant, in place of a column.
+    #[serde(default)]
+    pub script: Option<String>,
+    /// `true` makes a script return an array of variants.
+    #[serde(default)]
+    pub array: Option<bool>,
 }
 
 /// A `custom:` scalar — an explicit Postgres/OpenSearch type pair. Converted
-/// into a [`Field::Scalar`] with a [`FlussoType::Custom`].
+/// into a [`FieldKind::Scalar`] with a [`FlussoType::Custom`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomBody {
@@ -363,6 +389,19 @@ impl<'de> Deserialize<'de> for Field {
     {
         let mut map = serde_yaml::Mapping::deserialize(deserializer)?;
         let (tag_key, kind) = find_tag::<D::Error>(&map)?;
+        let emit = match map.remove(serde_yaml::Value::String("emit".to_owned())) {
+            None => None,
+            Some(serde_yaml::Value::Bool(emit)) => Some(emit),
+            Some(other) => {
+                let name = map
+                    .get(serde_yaml::Value::String(tag_key.clone()))
+                    .map(field_name)
+                    .unwrap_or_default();
+                return Err(de::Error::custom(format!(
+                    "`{tag_key}` field `{name}`: `emit` must be `true` or `false`, got {other:?}"
+                )));
+            }
+        };
 
         // Move the tag's value (the document key) under `field`, so the body —
         // which owns a `field` member — deserializes the whole mapping directly.
@@ -374,12 +413,12 @@ impl<'de> Deserialize<'de> for Field {
         map.insert(serde_yaml::Value::String("field".to_owned()), name);
         let body = serde_yaml::Value::Mapping(map);
 
-        Ok(match kind {
-            TagKind::Scalar(ty) => Field::Scalar(ty, body_from(body, tag, &name_str)?),
-            TagKind::Enum => Field::Enum(body_from(body, tag, &name_str)?),
+        let kind = match kind {
+            TagKind::Scalar(ty) => FieldKind::Scalar(ty, body_from(body, tag, &name_str)?),
+            TagKind::Enum => FieldKind::Enum(body_from(body, tag, &name_str)?),
             TagKind::Custom => {
                 let c: CustomBody = body_from(body, tag, &name_str)?;
-                Field::Scalar(
+                FieldKind::Scalar(
                     FlussoType::Custom {
                         postgres: c.postgres,
                         opensearch: c.opensearch,
@@ -393,19 +432,22 @@ impl<'de> Deserialize<'de> for Field {
                         default: c.default,
                         subfields: None,
                         indexed: None,
+                        script: None,
+                        array: None,
                     },
                 )
             }
-            TagKind::Geo => Field::Geo(body_from(body, tag, &name_str)?),
-            TagKind::Object => Field::Object(body_from(body, tag, &name_str)?),
-            TagKind::Map => Field::Map(body_from(body, tag, &name_str)?),
+            TagKind::Geo => FieldKind::Geo(body_from(body, tag, &name_str)?),
+            TagKind::Object => FieldKind::Object(body_from(body, tag, &name_str)?),
+            TagKind::Map => FieldKind::Map(body_from(body, tag, &name_str)?),
             TagKind::Join(join_type) => {
-                Field::Join(join_type, Box::new(body_from(body, tag, &name_str)?))
+                FieldKind::Join(join_type, Box::new(body_from(body, tag, &name_str)?))
             }
             TagKind::Aggregate(op) => {
-                Field::Aggregate(op, Box::new(body_from(body, tag, &name_str)?))
+                FieldKind::Aggregate(op, Box::new(body_from(body, tag, &name_str)?))
             }
-            TagKind::Constant => Field::Constant(body_from(body, tag, &name_str)?),
-        })
+            TagKind::Constant => FieldKind::Constant(body_from(body, tag, &name_str)?),
+        };
+        Ok(Field { kind, emit })
     }
 }

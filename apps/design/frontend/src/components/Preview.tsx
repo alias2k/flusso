@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { ChevronDown, Database, Play } from "lucide-react";
-import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse } from "../api";
+import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse, ScriptErrorDto } from "../api";
 import { useT } from "../i18n";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
+import { Text } from "./widgets";
 
 type Tab = "document" | "yaml" | "mapping" | "sample";
 
@@ -110,7 +111,7 @@ export function Preview({
   index: string;
   preview: PreviewResponse | null;
   diagnostics: DiagnosticDto[] | null;
-  onSample?: () => Promise<SampleResponse>;
+  onSample?: (id?: string) => Promise<SampleResponse>;
 }) {
   const { t } = useT();
   const [tab, setTab] = useState<Tab>("document");
@@ -207,16 +208,17 @@ export function Preview({
 
 /// Fetches a real document built from one live row — exactly what the sink would
 /// write — on demand, so you can sanity-check the schema against actual data.
-function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
+function SampleDoc({ onSample }: { onSample: (id?: string) => Promise<SampleResponse> }) {
   const { t } = useT();
   const [result, setResult] = useState<SampleResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rowId, setRowId] = useState("");
 
   const fetchSample = () => {
     setLoading(true);
     setError(null);
-    onSample()
+    onSample(rowId.trim() || undefined)
       .then(setResult)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
@@ -231,6 +233,18 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
     const caption = Boolean(result?.synthetic) || Boolean(result?.note);
     return (
       <div>
+        <RowPicker value={rowId} onChange={setRowId} onFetch={fetchSample} />
+        {result?.script_failure && <ScriptFailure failure={result.script_failure} />}
+        {(result?.printed ?? []).length > 0 && (
+          <div className="mb-2 rounded-md border border-border bg-secondary p-2">
+            <p className="mb-1 text-2xs uppercase tracking-caps text-muted-foreground">{t("preview.printed")}</p>
+            {result?.printed?.map((line, i) => (
+              <p key={i} className="font-mono text-xs">
+                {line}
+              </p>
+            ))}
+          </div>
+        )}
         {caption && (
           <div className="mb-2 flex items-center gap-2 text-2xs text-muted-foreground">
             {result?.synthetic && <span className="badge object">{t("preview.example")}</span>}
@@ -253,10 +267,62 @@ function SampleDoc({ onSample }: { onSample: () => Promise<SampleResponse> }) {
         <p className="mx-auto mt-1 max-w-xs text-xs text-muted-foreground">{t("preview.sampleHint")}</p>
       </div>
       {errorText && <p className="max-w-sm text-xs text-destructive">{errorText}</p>}
+      {result?.note && !errorText && <p className="max-w-sm text-xs text-muted-foreground">{result.note}</p>}
+      <RowPicker value={rowId} onChange={setRowId} onFetch={fetchSample} />
       <Button size="sm" className="gap-1.5" onClick={fetchSample} disabled={loading}>
         {loading ? <span className="spinner" /> : <Play className="size-3.5" />}
         {loading ? t("preview.building") : t("preview.fetch")}
       </Button>
+    </div>
+  );
+}
+
+/// Which root row to build: blank builds the first row.
+function RowPicker({
+  value,
+  onChange,
+  onFetch,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onFetch: () => void;
+}) {
+  const { t } = useT();
+  return (
+    <div className="mb-2 flex w-full max-w-xs items-center gap-2">
+      <span className="shrink-0 text-2xs text-muted-foreground">{t("preview.rowId")}</span>
+      <Text
+        value={value}
+        onChange={onChange}
+        placeholder={t("preview.rowIdPlaceholder")}
+        className="font-mono text-xs"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onFetch();
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+/// A script that failed on the sample row: the field, the message, and the
+/// script line with a caret under the column.
+function ScriptFailure({ failure }: { failure: ScriptErrorDto }) {
+  const { t } = useT();
+  const gutter = String(failure.line ?? "");
+  return (
+    <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs">
+      <p className="text-destructive">
+        <strong>{t("preview.scriptFailed", { field: failure.field })}</strong> {failure.message}
+      </p>
+      {failure.excerpt !== undefined && (
+        <pre className="mt-1 overflow-x-auto font-mono text-2xs leading-snug text-foreground">
+          {`${gutter} | ${failure.excerpt}\n${" ".repeat(gutter.length)} | ${" ".repeat(Math.max((failure.column ?? 1) - 1, 0))}^`}
+        </pre>
+      )}
+      <p className="mt-1 text-2xs text-muted-foreground">{t("preview.scriptFailedHint")}</p>
     </div>
   );
 }

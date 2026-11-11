@@ -523,6 +523,7 @@ fn column_field(name: &str) -> Field {
     Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Column(Column {
             column: ColumnName::try_new(name).unwrap(),
             ty: FlussoType::Keyword,
@@ -540,6 +541,7 @@ fn join_field(name: &str, table: &str, kind: JoinKind) -> Field {
     Field {
         field: FieldName::try_new(name).unwrap(),
         options: Default::default(),
+        emit: true,
         source: FieldSource::Relation(Relation::Join(Join {
             table: TableName::try_new(table).unwrap(),
             kind,
