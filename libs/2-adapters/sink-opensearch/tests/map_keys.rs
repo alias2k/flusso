@@ -7,6 +7,9 @@
 //!   map inside a `nested` array and a `double` map inside an `object` all get
 //!   their declared type, analyzer and subfields from the sink's
 //!   `dynamic_templates`, while an unknown root field is still refused.
+//! - **A keyword key has an exact `.keyword` subfield** (issue #191): the
+//!   pattern `labels.*.keyword` matches the exact value, never its analyzed or
+//!   folded forms.
 //! - **The declared type wins over the first value**: a `double` key whose first
 //!   value is integral stays `double`, so a later fraction keeps its precision.
 //! - **Mismatched values behave like a plain field**: a number in a `text` map is
@@ -280,6 +283,7 @@ async fn map_keys_are_typed_like_plain_fields_of_their_values() {
     let label = &properties["orders"]["properties"]["labels"]["properties"]["kind"];
     assert_eq!(label["type"], "keyword");
     assert_eq!(label["fields"]["text"]["analyzer"], "flusso_code");
+    assert_eq!(label["fields"]["keyword"], json!({ "type": "keyword" }));
     let usd = &properties["meta"]["properties"]["prices"]["properties"]["usd"];
     assert_eq!(usd["type"], "double");
 
@@ -303,6 +307,18 @@ async fn map_keys_are_typed_like_plain_fields_of_their_values() {
         .await,
         ["1"]
     );
+    let exact = |value: &str| {
+        json!({ "nested": { "path": "orders", "query": {
+            "query_string": { "query": format!("\"{value}\""), "fields": ["orders.labels.*.keyword"] }
+        } } })
+    };
+    assert_eq!(search(&base, exact("Foo Bar")).await, ["1"]);
+    for not_exact in ["foo bar", "Foo"] {
+        assert!(
+            search(&base, exact(not_exact)).await.is_empty(),
+            "{not_exact}"
+        );
+    }
 
     upsert(&sink, "5", json!({ "unknown": "field" })).await;
     let report = sink.flush(true).await.unwrap();
