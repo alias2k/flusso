@@ -24,8 +24,9 @@
 use anyhow::Result;
 use config::toml::ConfigToml;
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, Field, FieldSource, Filter, FilterValue, Geo,
-    IndexSchema, Join, JoinKind, NullOp, OrderBy, Relation, SoftDelete, Through, Transform, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnPair, Field, FieldSource, Filter,
+    FilterValue, Geo, IndexSchema, Join, JoinKind, NullOp, OrderBy, Relation, SoftDelete, Through,
+    Transform, ViaHop,
 };
 use kernel::{FlussoType, GenericValue};
 use serde_yaml::{Mapping, Value};
@@ -194,6 +195,7 @@ fn join_field(join: &Join, body: &mut Mapping) -> Result<&'static str> {
     if !join.indexed {
         body.insert(Value::from("indexed"), Value::from(false));
     }
+    insert_on(body, &join.on);
     body.insert(Value::from("fields"), fields_value(&join.fields)?);
     Ok(tag)
 }
@@ -250,7 +252,25 @@ fn aggregate_field(agg: &Aggregate, body: &mut Mapping) -> Result<&'static str> 
         let hops = agg.via.iter().map(via_value).collect::<Result<_>>()?;
         body.insert(Value::from("via"), Value::Sequence(hops));
     }
+    insert_on(body, &agg.on);
     Ok(tag)
+}
+
+/// `on:` as a list of `{ local, related }` flow maps, left out when empty.
+fn insert_on(body: &mut Mapping, on: &[ColumnPair]) {
+    if on.is_empty() {
+        return;
+    }
+    let pairs = on
+        .iter()
+        .map(|pair| {
+            let mut map = Mapping::new();
+            map.insert(Value::from("local"), Value::from(pair.local.as_ref()));
+            map.insert(Value::from("related"), Value::from(pair.related.as_ref()));
+            Value::Mapping(map)
+        })
+        .collect();
+    body.insert(Value::from("on"), Value::Sequence(pairs));
 }
 
 fn via_value(hop: &ViaHop) -> Result<Value> {
@@ -263,6 +283,7 @@ fn via_value(hop: &ViaHop) -> Result<Value> {
     if let Some(filters) = &hop.filters {
         map.insert(Value::from("filters"), filters_value(filters)?);
     }
+    insert_on(&mut map, &hop.on);
     Ok(Value::Mapping(map))
 }
 

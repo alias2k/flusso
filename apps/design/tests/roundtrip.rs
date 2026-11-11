@@ -22,9 +22,9 @@ use std::collections::BTreeMap;
 use config::yaml::SchemaYaml;
 use kernel::common::ColumnName;
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, DatabaseSchema, Field, FieldName, FieldSource,
-    Filter, FlussoType, GenericValue, Geo, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp,
-    OrderBy, ParseFrom, Relation, TableName, Through, Transform, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnPair, DatabaseSchema, Field, FieldName,
+    FieldSource, Filter, FlussoType, GenericValue, Geo, IndexSchema, Join, JoinKind,
+    NullCheckFilter, NullOp, OrderBy, ParseFrom, Relation, TableName, Through, Transform, ViaHop,
 };
 use proptest::prelude::*;
 
@@ -83,14 +83,28 @@ fn through() -> impl Strategy<Value = Through> {
         }
     })
 }
+/// Up to two distinct `on` pairs (a duplicate is rejected at load).
+fn on_pairs() -> impl Strategy<Value = Vec<ColumnPair>> {
+    prop::collection::vec((col(), col()), 0..=2).prop_map(|pairs| {
+        let mut on: Vec<ColumnPair> = Vec::new();
+        for (local, related) in pairs {
+            let pair = ColumnPair { local, related };
+            if !on.contains(&pair) {
+                on.push(pair);
+            }
+        }
+        on
+    })
+}
 fn via() -> impl Strategy<Value = Vec<ViaHop>> {
-    let hop =
-        (table(), col(), junction_filters()).prop_map(|(table, foreign_key, filters)| ViaHop {
+    let hop = (table(), col(), junction_filters(), on_pairs()).prop_map(
+        |(table, foreign_key, filters, on)| ViaHop {
             table,
             foreign_key,
             filters,
-            on: vec![],
-        });
+            on,
+        },
+    );
     prop::collection::vec(hop, 0..=2)
 }
 fn agg_key() -> impl Strategy<Value = AggregateKey> {
@@ -248,11 +262,15 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
             None
         )),
     ];
-    (ops, any::<bool>(), via())
-        .prop_map(|(mut source, distinct, via)| {
+    (ops, any::<bool>(), via(), on_pairs())
+        .prop_map(|(mut source, distinct, via, on)| {
             if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut source {
-                aggregate.distinct = distinct && matches!(aggregate.key, AggregateKey::Through(_));
+                let direct = matches!(aggregate.key, AggregateKey::Direct(_));
+                aggregate.distinct = distinct && !direct;
                 aggregate.via = via;
+                if direct {
+                    aggregate.on = on;
+                }
             }
             source
         })
@@ -260,10 +278,13 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
 }
 
 fn join_source(depth: u32) -> BoxedStrategy<FieldSource> {
-    (join_shape(depth), any::<bool>())
-        .prop_map(|(mut source, indexed)| {
+    (join_shape(depth), any::<bool>(), on_pairs())
+        .prop_map(|(mut source, indexed, on)| {
             if let FieldSource::Relation(Relation::Join(join)) = &mut source {
                 join.indexed = indexed;
+                if !matches!(join.kind, JoinKind::ManyToMany { .. }) {
+                    join.on = on;
+                }
             }
             source
         })

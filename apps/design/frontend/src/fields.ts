@@ -150,7 +150,7 @@ function defaultAggregate(kind: FieldKind, table: string): Aggregate {
 }
 
 /// Switch an aggregate to the op `kind`, keeping what every op shares: its
-/// table, key, filters and `via` hops. Only the old op's own parts reset: the
+/// table, key, filters, `via` hops and `on` pairs. Only the old op's own parts reset: the
 /// column it read, its `value_type` or `element_type`, and `distinct` once the
 /// key no longer goes `through` a junction.
 export function withAggregateOp(agg: Aggregate, kind: FieldKind): Aggregate {
@@ -180,6 +180,7 @@ export function withAggregateOp(agg: Aggregate, kind: FieldKind): Aggregate {
   const next: Aggregate = { table: agg.table, op, key: agg.key };
   if (agg.filters) next.filters = agg.filters;
   if (agg.via) next.via = agg.via;
+  if (agg.on) next.on = agg.on;
   if (kind === "sum" || kind === "min" || kind === "max") next.value_type = "integer";
   if (agg.distinct && "through" in agg.key) next.distinct = agg.distinct;
   return next;

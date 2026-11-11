@@ -100,6 +100,14 @@ export interface Join {
   fields: Field[];
   // `false` keeps the rows in the stored document without indexing them.
   indexed?: boolean;
+  // Extra column equalities on the hop; not on `many_to_many`.
+  on?: ColumnPair[];
+}
+
+/// One `on` pair: `local` on the table before the hop, `related` on the hop's table.
+export interface ColumnPair {
+  local: string;
+  related: string;
 }
 
 export type AggregateOp =
@@ -123,6 +131,8 @@ export interface Aggregate {
   distinct?: boolean;
   // The tables between the parent and `table`, in order from the parent.
   via?: ViaHop[];
+  // Extra column equalities with the table before `table`; only with a direct key.
+  on?: ColumnPair[];
 }
 
 /// One table an aggregate passes through: its `foreign_key` points at the table before it.
@@ -130,6 +140,7 @@ export interface ViaHop {
   table: string;
   foreign_key: string;
   filters?: Filter[];
+  on?: ColumnPair[];
 }
 
 export type Relation = { join: Join } | { aggregate: Aggregate };
