@@ -20,7 +20,8 @@ const prunedThrough = (through: Through): Through => ({ ...through, filters: pru
 
 function prunedAggregate(agg: Aggregate): Aggregate {
   const key = "through" in agg.key ? { through: prunedThrough(agg.key.through) } : agg.key;
-  return { ...agg, key, filters: prunedFilters(agg.filters) };
+  const via = agg.via?.map((hop) => ({ ...hop, filters: prunedFilters(hop.filters) }));
+  return { ...agg, key, filters: prunedFilters(agg.filters), via: via?.length ? via : undefined };
 }
 
 function prunedField(field: Field): Field | null {

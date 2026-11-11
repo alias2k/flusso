@@ -40,6 +40,7 @@ const FIELD_TAGS = new Set<string>([
   "min",
   "max",
   "ids",
+  "exists",
 ]);
 
 const spanOf = (node: unknown): Span | null => {

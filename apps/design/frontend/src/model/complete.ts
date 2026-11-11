@@ -25,7 +25,8 @@ export function joinIncomplete(field: Field | null): boolean {
   return !t.table || !t.left_key || !t.right_key;
 }
 
-/// Is this aggregate field missing its table, key, column, or result type?
+/// Is this aggregate field missing its table, key, a `via` hop's table or key,
+/// its column, or its result type?
 /// Tolerates `undefined` — a just-removed node briefly re-renders against the
 /// new, shorter tree (see `nodeFields`).
 export function aggregateIncomplete(field: Field | undefined): boolean {
@@ -34,8 +35,9 @@ export function aggregateIncomplete(field: Field | undefined): boolean {
   if (!("relation" in s) || !("aggregate" in s.relation)) return false;
   const agg: Aggregate = s.relation.aggregate;
   if (!agg.table || keyIncomplete(agg.key)) return true;
+  if ((agg.via ?? []).some((hop) => !hop.table || !hop.foreign_key)) return true;
   const op = agg.op;
-  if (typeof op === "string") return false; // count
+  if (typeof op === "string") return false; // count / exists
   if ("ids" in op) return false;
   if ("avg" in op) return !op.avg;
   if ("sum" in op) return !op.sum || !agg.value_type;

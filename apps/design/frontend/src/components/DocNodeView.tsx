@@ -19,7 +19,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { cn } from "@/lib/utils";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant"] as const;
-const AGG_KINDS = ["count", "sum", "avg", "min", "max", "ids"] as const;
+const AGG_KINDS = ["count", "exists", "sum", "avg", "min", "max", "ids"] as const;
 const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as const;
 // Order the FK-suggestion groups by how the document usually reads: the tables
 // this one points at first, then its back-references, then the m2m sets.

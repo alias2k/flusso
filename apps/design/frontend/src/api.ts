@@ -104,6 +104,7 @@ export interface Join {
 
 export type AggregateOp =
   | "count"
+  | "exists"
   | { sum: string }
   | { avg: string }
   | { min: string }
@@ -120,6 +121,15 @@ export interface Aggregate {
   filters?: Filter[];
   // Over `through` only: count each target row once instead of once per junction row.
   distinct?: boolean;
+  // The tables between the parent and `table`, in order from the parent.
+  via?: ViaHop[];
+}
+
+/// One table an aggregate passes through: its `foreign_key` points at the table before it.
+export interface ViaHop {
+  table: string;
+  foreign_key: string;
+  filters?: Filter[];
 }
 
 export type Relation = { join: Join } | { aggregate: Aggregate };

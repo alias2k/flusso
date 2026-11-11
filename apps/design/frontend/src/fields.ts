@@ -1,7 +1,7 @@
 // Helpers for editing the field model: classifying a field into the UI "kind"
 // it should be edited as, and producing a fresh default field for a chosen kind
 // while preserving the field name. The kind is the union of every authorable
-// shape — scalar types, map/custom/geo/object, the four join verbs, the six
+// shape — scalar types, map/custom/geo/object, the four join verbs, the seven
 // aggregate ops, and constant.
 
 import type { Aggregate, AggregateOp, Field, FieldSource, FlussoType, Join, JoinKind } from "./api";
@@ -23,12 +23,13 @@ export const KIND_HELP: Record<string, string> = {
   min: "kindHelp.min",
   max: "kindHelp.max",
   ids: "kindHelp.ids",
+  exists: "kindHelp.exists",
   geo: "kindHelp.geo",
   map: "kindHelp.map",
   custom: "kindHelp.custom",
   constant: "kindHelp.constant",
 };
-export const AGGREGATE_OPS = ["count", "sum", "avg", "min", "max", "ids"] as const;
+export const AGGREGATE_OPS = ["count", "exists", "sum", "avg", "min", "max", "ids"] as const;
 export const LEAF_TYPES: FlussoType[] = ["text", "keyword", "integer", "long", "double", "date"];
 
 export type FieldKind = string;
@@ -76,6 +77,7 @@ function joinVerb(kind: JoinKind): FieldKind {
 
 function aggOp(op: AggregateOp): FieldKind {
   if (op === "count") return "count";
+  if (op === "exists") return "exists";
   if ("sum" in op) return "sum";
   if ("avg" in op) return "avg";
   if ("min" in op) return "min";
@@ -113,6 +115,7 @@ function defaultSource(name: string, kind: FieldKind, table: string): FieldSourc
     case "many_to_many":
       return { relation: { join: defaultJoin(kind, table) } };
     case "count":
+    case "exists":
     case "sum":
     case "avg":
     case "min":
@@ -147,6 +150,9 @@ function defaultAggregate(kind: FieldKind, table: string): Aggregate {
   switch (kind) {
     case "count":
       op = "count";
+      break;
+    case "exists":
+      op = "exists";
       break;
     case "sum":
       op = { sum: "" };
