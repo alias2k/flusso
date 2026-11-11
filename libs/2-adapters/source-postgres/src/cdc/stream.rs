@@ -436,7 +436,7 @@ fn map_pgwire(error: PgWireError) -> SourceError {
         } => SourceError::Setup(format!(
             "the server sent a replication message of {payload_bytes} bytes, past the \
              {limit_bytes}-byte limit; the stream cannot read past it, so every restart stops \
-             at the same message (a corrupt stream or an oversized change)"
+             at the same message (almost certainly a corrupt stream, or a proxy mangling it)"
         )),
         other => SourceError::Connection(other.to_string()),
     }
