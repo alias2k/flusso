@@ -60,7 +60,7 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 > ⚠️ **Warning** — a runtime arithmetic error stalls the whole deployment. Division by zero, or an integer result past its type (`integer * integer` beyond 2³¹), makes Postgres fail the document query. That fails the whole batch: the ingest engine restarts and retries it, every index stalls, and WAL stays pinned until the offending row changes. A backfill over such a row fails the same way. Rule it out in the schema:
 >
 > - **A zero divisor** — exclude it with a `filters` entry on the aggregate, e.g. `{ column: quantity, op: neq, value: 0 }` for `total / quantity`.
-> - **Overflow** — widen the column type (`bigint`, `numeric`) in Postgres, or multiply by a decimal literal (`* 1.0`) so the arithmetic runs in `numeric`.
+> - **Overflow** — widen the column type (`bigint`, `numeric`) in Postgres, or lead with a decimal literal (`1.0 * quantity * unit_price`) so every step runs in `numeric`; a trailing `* 1.0` is too late, since operators group left to right.
 
 - **Every column in the expression rebuilds the parent.** Changing any of them on an aggregated row rebuilds its parent document; an update that changes none of them, nor the aggregate's key or filter columns, rebuilds nothing.
 - **[`flusso check`](cli.md#check) verifies the columns.** Each column the expression names must exist on `table` and be numeric. A plain column keeps its own check: the declared `value_type` must accept its database type.

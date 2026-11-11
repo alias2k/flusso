@@ -1365,9 +1365,6 @@ function AggregateInput({
 /// How long typing pauses before an expression is checked.
 const CHECK_DELAY_MS = 250;
 
-/// Whether `input` is a lone name (letters, digits, `_`): the column view shows
-/// it, anything else opens in the expression view. Only picks the initial
-/// view; the server's parser decides what is valid.
 /// A plain column, not an expression: the loader takes any scalar `value_type`
 /// for one, but only a numeric one over arithmetic.
 function isPlainColumn(input: string): boolean {
@@ -1382,6 +1379,9 @@ function inputValueType(input: string, current: FlussoType | undefined): FlussoT
   return "double";
 }
 
+/// Whether `input` is a lone name (letters, digits, `_`): the column view shows
+/// it, anything else opens in the expression view. Only picks the initial
+/// view; the server's parser decides what is valid.
 function isColumnName(input: string): boolean {
   return [...input.trim()].every(
     (c) => c === "_" || (c >= "0" && c <= "9") || (c.toLowerCase() >= "a" && c.toLowerCase() <= "z"),
