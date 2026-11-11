@@ -473,6 +473,25 @@ fn a_map_schema_moves_off_its_dynamically_mapped_hash() {
     }
 }
 
+/// Where map schemas live at `MAP_KEY_MAPPING_REVISION` 2: moving these moves
+/// every map index to a new physical index.
+#[test]
+fn a_map_schema_keeps_its_revision_two_content_hash() {
+    let hashes: Vec<String> = [FlussoType::Text, FlussoType::Keyword, FlussoType::Double]
+        .into_iter()
+        .map(|values| {
+            columns_schema(vec![
+                column_field("name", FlussoType::Text),
+                column_field("title", map_of(values)),
+            ])
+            .resolve(IndexName::try_new("products").unwrap())
+            .hash
+            .to_string()
+        })
+        .collect();
+    assert_eq!(hashes, ["d6964182", "e1ee0108", "a48ee9c0"]);
+}
+
 #[test]
 fn a_map_key_maps_like_a_plain_field_of_its_values_type() {
     for values in [
