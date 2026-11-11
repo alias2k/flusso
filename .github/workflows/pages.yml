@@ -92,7 +92,7 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       # Tags and branches (origin/main, origin/benchmarks) come with fetch-depth 0.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -195,18 +195,18 @@ jobs:
             echo "</ul>"
           } > site/schemas/index.html
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         with:
           enablement: true
 
       # One artifact name per attempt: a re-run keeps the earlier attempt's
       # artifact, and deploy-pages refuses a name that matches two.
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
           name: github-pages-${{ github.run_attempt }}
 
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
         with:
           artifact_name: github-pages-${{ github.run_attempt }}

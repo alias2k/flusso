@@ -20,7 +20,7 @@ jobs:
     # GitHub-hosted ubuntu runners ship a running Docker daemon, which the
     # Postgres e2e tests (testcontainers) need.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -101,7 +101,7 @@ jobs:
 
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nextest-junit
           path: target/nextest/ci/junit.xml
@@ -111,7 +111,7 @@ jobs:
     name: manual (build + links)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: taiki-e/install-action@v2
         with:
@@ -144,7 +144,7 @@ jobs:
     name: fuzz (pgoutput decoder)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # cargo-fuzz needs nightly (sanitizer/coverage instrumentation). The
       # repo's rust-toolchain.toml pins stable; the explicit `+nightly` below
@@ -186,7 +186,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
           path: libs/2-adapters/source-postgres/fuzz/artifacts/
@@ -196,10 +196,10 @@ jobs:
     name: designer SPA (build + no drift)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
