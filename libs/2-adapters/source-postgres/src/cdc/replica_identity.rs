@@ -52,7 +52,7 @@ const MEMBERS_SQL: &str = "WITH target AS ( \
          WHERE t.level > 0 \
        ) \
      SELECT n.nspname::text AS schema, c.relname::text AS name, \
-       c.relreplident::text AS identity, \
+       c.relreplident::text AS identity, c.relkind = 'p' AS partitioned, \
        ARRAY(SELECT a.attname::text FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
              WHERE i.indrelid = c.oid \
@@ -74,6 +74,7 @@ struct Member {
     schema: String,
     name: String,
     identity: ReplicaIdentity,
+    partitioned: bool,
     carried: Vec<String>,
     primary_key: Vec<String>,
     owned: bool,
@@ -113,6 +114,7 @@ async fn members<'e>(
                 schema: row.try_get("schema")?,
                 name: row.try_get("name")?,
                 identity: ReplicaIdentity::from_code(&row.try_get::<String, _>("identity")?),
+                partitioned: row.try_get("partitioned")?,
                 carried: row.try_get("columns")?,
                 primary_key: row.try_get("primary_key")?,
                 owned: row.try_get("owned")?,
@@ -148,7 +150,9 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
 /// What `table` (its `members`) falls short of a `FULL` identity throughout:
 /// the `required` link columns some member's old tuple misses, the members the
 /// role can't alter, and the statements for every member that isn't `FULL`.
-/// `None` when every member is `FULL`.
+/// `None` when every member is `FULL`, and for a partitioned table that misses
+/// no link: its updates always rebuild (they carry no post-image), so the
+/// rest of the row would buy nothing.
 fn shortfall(
     table: &QualifiedTable,
     required: &[ColumnName],
@@ -169,7 +173,11 @@ fn shortfall(
                 .any(|member| member.uncarried(required).contains(column))
         })
         .cloned()
-        .collect();
+        .collect::<Vec<_>>();
+    let partitioned = members.first().is_some_and(|root| root.partitioned);
+    if missing.is_empty() && partitioned {
+        return None;
+    }
     let blockers: Vec<String> = short
         .iter()
         .filter(|member| !member.owned)

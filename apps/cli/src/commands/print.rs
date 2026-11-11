@@ -189,7 +189,7 @@ pub(crate) fn pre_image(
             pen.yellow("→ the role CAN set it, but manage_replica_identity = false")
         } else {
             pen.yellow(&format!(
-                "→ flusso will NOT set it: {}",
+                "→ flusso will NOT set it where: {}",
                 gap.blockers.join("; ")
             ))
         }

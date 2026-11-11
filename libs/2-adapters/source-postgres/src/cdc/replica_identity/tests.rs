@@ -87,6 +87,7 @@ fn member(name: &str, identity: ReplicaIdentity, owned: bool) -> Member {
         schema: "public".to_owned(),
         name: name.to_owned(),
         identity,
+        partitioned: false,
         carried: vec!["id".to_owned()],
         primary_key: vec!["id".to_owned()],
         owned,
@@ -139,6 +140,29 @@ fn every_member_short_of_full_is_listed_and_unowned_ones_block() {
     assert_eq!(
         gap.remediation,
         "ALTER TABLE \"public\".\"orders_2025\" REPLICA IDENTITY FULL; \
+         ALTER TABLE \"public\".\"orders_2026\" REPLICA IDENTITY FULL;"
+    );
+}
+
+#[test]
+fn a_partitioned_table_without_a_link_is_left_alone() {
+    let members = [
+        Member {
+            partitioned: true,
+            ..member("orders", ReplicaIdentity::Default, true)
+        },
+        member("orders_2026", ReplicaIdentity::Default, true),
+    ];
+    assert_eq!(
+        shortfall(&orders(), &[], &members),
+        None,
+        "its updates always rebuild"
+    );
+    let gap = shortfall(&orders(), &columns(&["user_id"]), &members).unwrap();
+    assert_eq!(gap.missing, columns(&["user_id"]));
+    assert_eq!(
+        gap.remediation,
+        "ALTER TABLE \"public\".\"orders\" REPLICA IDENTITY FULL; \
          ALTER TABLE \"public\".\"orders_2026\" REPLICA IDENTITY FULL;"
     );
 }

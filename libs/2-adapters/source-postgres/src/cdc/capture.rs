@@ -10,8 +10,8 @@ use source::cdc::{
     AdvanceListener, ChangeCapture, ChangeEvent, Continuity, LiveChange, SourcePosition,
 };
 use source::{
-    CaptureProvisioning, CoverageReport, PreImageColumns, PreImageGap, PreImageReport,
-    QualifiedTable, Result, SnapshotTable, SourceError,
+    CaptureProvisioning, CoverageReport, PreImageColumns, PreImageReport, QualifiedTable, Result,
+    SnapshotTable, SourceError,
 };
 use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
@@ -508,13 +508,13 @@ impl CaptureProvisioning for WalChangeCapture {
             }
         }
         if !unset.is_empty() {
-            let list = |part: fn(&(&PreImageGap, String)) -> String| {
-                unset.iter().map(part).collect::<Vec<_>>().join("; ")
-            };
+            let tables = unset
+                .iter()
+                .map(|(gap, reason)| format!("{} ({reason}): {}", gap.table, gap.remediation))
+                .collect::<Vec<_>>()
+                .join("; ");
             tracing::info!(
-                tables = %list(|(gap, _)| gap.table.to_string()),
-                reason = %list(|(gap, reason)| format!("{}: {reason}", gap.table)),
-                remediation = %list(|(gap, _)| gap.remediation.clone()),
+                %tables,
                 "replica identity is not FULL on these tables, so an update there rebuilds every \
                  document that reads the table even when it changes no column a document reads; \
                  run the printed SQL to skip those",

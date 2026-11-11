@@ -521,7 +521,7 @@ old identity), via `ensure_pre_image` when `manage_replica_identity` (default on
 nothing) and the role owns the table — each relation in its own transaction under a 5 s
 `lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned
 table is set on the parent and every partition (a partition added later is caught at the next
-start). Guards: `replica_identity::tests` (`shortfall`), `publication`'s
+start), but only when it misses a link: its updates carry no post-image, so `partial` never lists it. Guards: `replica_identity::tests` (`shortfall`), `publication`'s
 `every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on
 one table) and `a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s
 `managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target`. The WAL decoder keys a change by the table's **catalog
