@@ -595,13 +595,29 @@ enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_t
 relation at any depth and looks up its table, key, junction keys, `via` hops, both sides of each
 `on:` pair, value/null-check filter columns, `order_by` and a join's `primary_key` on the table
 each lives on — issue #202; a missing table is a `SourceError::UnknownTable` diagnostic, reported
-once per relation; `Diagnostic.path` is the field path; guards: the `validation::tests` mock-catalog
-cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position`) and `CaptureProvisioning` answers "is this table set coverable",
+once per relation; `Diagnostic.path` is the field path; and on the root table the root `filters`
+and the `soft_delete` marker's column, `when` and `field` (issue #211; anchored at the key name,
+`filters`/`soft_delete`; a `field` that reads no column — `source::soft_delete_column` is `None`,
+which the document query silently skips — is an error that `validate_spec` reports with no
+database, so `check --offline` shows it; guards: the `validation::tests` mock-catalog
+cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position` /
+`validation_reports_a_typo_in_every_root_position`). Every `Diagnostic` carries a
+`DiagnosticKind`, which fixes its `Severity`; a join `primary_key` naming no column is the
+`IgnoredPrimaryKey` warning, since relations key on the catalog primary key) and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
 columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven tooling can pick
 from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m
 junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual designer
-(`apps/design`) is its first consumer. The daemon
+(`apps/design`) is its first consumer. **`run` validates at start** (issue #211):
+`backends.rs`'s `build_documents` runs `validate_indexes` on the document builder's own connection
+inside `Backends::source`, before anything is staged (`--locked` included; an unreachable database
+still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer,
+and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
+`DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker` stop;
+type, numeric, nullability and ignored-primary-key findings print and start, as they built in
+0.16), so a new kind forces a decision there. `check` still fails on every `Error`. No opt-out
+flag. Guards: `backends::tests` (one per kind) and `config_coverage`'s
+`an_enum_or_domain_column_is_a_type_mismatch_that_still_builds`. The daemon
 wires a `StatusObserver` (`observer.rs`) that updates a shared per-sink `Status` (`status.rs`),
 runs the engines under `supervise.rs` (stage every sink engine → spawn them + the ingest engine
 as independent tasks → restart a failed one with backoff while the others keep going; the

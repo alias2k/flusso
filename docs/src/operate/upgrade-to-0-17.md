@@ -95,6 +95,10 @@ Any deployment going from 0.16 to 0.17. Step 1 applies to every deployment with 
 
 ## Options and variations
 
+- **A wrong table or column name now stops the start.** 0.17 [validates the schemas against the database](../reference/cli.md#validation-at-start) when `run` starts. It exits on a table or column that doesn't exist, where 0.16 started and failed at the first document, retrying forever, and on one case 0.16 ran with: a `soft_delete` `field` that reads no column, which 0.16 ignored, so soft-deleted rows stayed indexed. A type disagreement (`long` over an `integer` column, `keyword` over an enum, domain or `uuid` column) is printed and the start goes on. Run 0.17's `flusso check` against the database before upgrading and fix what it lists.
+- **Fixing a dangling `soft_delete` `field` rebuilds the index.** The marker is part of the schema's content hash, so pointing it at a real column moves the index to a new physical name and backfills it, without the soft-deleted rows. To keep 0.16's behaviour instead, remove the `soft_delete` block: same documents, stated explicitly (also a new hash).
+- **`check --offline --format json`** now always emits `diagnostics` as an array (it was `null` offline), and exits non-zero on a dangling `soft_delete` `field`.
+
 - **WAL is released sooner.** 0.17 confirms the slot within about 2 seconds of the last sink flush, where 0.16 took 10 to 30 seconds; expect a lower steady [slot lag](../reference/metrics.md). Nothing to configure. See [Capture](../reference/source-postgres.md#capture).
 - **Keyword maps take more disk.** Each key of a `keyword`, `enum` or `uuid` map with subfields also carries an exact `.keyword` subfield in 0.17, so the rebuilt index is somewhat larger than 0.16's; see [Objects and maps](../reference/objects-and-maps.md#map).
 - **Ad-hoc readers on the convenience alias** (`{prefix}{logical}`, dashboards, `curl`) move to the new generation as soon as 0.17 starts, so they see an empty or partial index until it's seeded. Point them at the old hash alias for the duration if that matters.

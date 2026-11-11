@@ -29,7 +29,7 @@ use kernel::{
     Through, Transform, ValueOpFilter, ViaHop,
 };
 use source::document::{Document, DocumentBuilder, DocumentId};
-use source::{RowKey, Severity, SourceSpec, validate_indexes};
+use source::{DiagnosticKind, RowKey, SourceSpec, validate_indexes};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -1241,109 +1241,331 @@ async fn validation_reports_a_typo_in_every_relation_position() {
     );
     let spec = spec(schema);
     let documents = builder(&url, spec.schema(&index_name("users")).unwrap().clone()).await;
-    let found: Vec<(String, String)> = validate_indexes(&spec, &documents)
+    let found: Vec<(String, DiagnosticKind, String)> = validate_indexes(&spec, &documents)
         .await
         .unwrap()
         .into_iter()
         .map(|d| {
-            assert_eq!(d.severity, Severity::Error, "{d:?}");
-            (d.dotted_path(), d.message)
+            assert_eq!(d.severity, d.kind.severity(), "{d:?}");
+            (d.dotted_path(), d.kind, d.message)
         })
         .collect();
-    let expected: Vec<(String, String)> = [
+    let expected: Vec<(String, DiagnosticKind, String)> = [
         (
             "profile",
+            DiagnosticKind::UnknownColumn,
             "`foreign_key` references unknown column `public.profiles.userid`",
         ),
         (
             "profile",
+            DiagnosticKind::UnknownColumn,
             "`on.local` references unknown column `public.users.nam`",
         ),
         (
             "profile",
+            DiagnosticKind::UnknownColumn,
             "`on.related` references unknown column `public.profiles.headlne`",
         ),
         (
             "profile",
-            "`primary_key` references unknown column `public.profiles.pk`",
+            DiagnosticKind::IgnoredPrimaryKey,
+            "`primary_key` references unknown column `public.profiles.pk`; ignored: the join is keyed by the table's own primary key",
         ),
         (
             "profile",
+            DiagnosticKind::UnknownColumn,
             "`filters` references unknown column `public.profiles.headlin`",
         ),
         (
             "profile",
+            DiagnosticKind::UnknownColumn,
             "`order_by` references unknown column `public.profiles.rank`",
         ),
         (
             "owner",
+            DiagnosticKind::UnknownColumn,
             "`column` references unknown column `public.users.owner_id`",
         ),
         (
             "orders.items",
+            DiagnosticKind::UnknownTable,
             "`table` references unknown table `public.order_item`",
         ),
         (
             "tags",
+            DiagnosticKind::UnknownColumn,
             "`through.left_key` references unknown column `public.user_tags.userid`",
         ),
         (
             "tags",
+            DiagnosticKind::UnknownColumn,
             "`through.right_key` references unknown column `public.user_tags.tagid`",
         ),
         (
             "tags",
+            DiagnosticKind::UnknownColumn,
             "`through.filters` references unknown column `public.user_tags.tag`",
         ),
         (
             "labels",
+            DiagnosticKind::UnknownTable,
             "`through.table` references unknown table `public.user_tag`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`via.foreign_key` references unknown column `public.orders.userid`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`via.on.local` references unknown column `public.users.nme`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`via.on.related` references unknown column `public.orders.stat`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`via.filters` references unknown column `public.orders.state`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`foreign_key` references unknown column `public.order_items.orderid`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`on.local` references unknown column `public.orders.totl`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`on.related` references unknown column `public.order_items.prce`",
         ),
         (
             "itemCount",
+            DiagnosticKind::UnknownColumn,
             "`filters` references unknown column `public.order_items.quantity`",
         ),
         (
             "lostHop",
+            DiagnosticKind::UnknownTable,
             "`via.table` references unknown table `public.order`",
         ),
         (
             "lostTable",
+            DiagnosticKind::UnknownTable,
             "`table` references unknown table `public.ordrs`",
         ),
     ]
     .iter()
-    .map(|(path, message)| ((*path).to_owned(), (*message).to_owned()))
+    .map(|(path, kind, message)| ((*path).to_owned(), *kind, (*message).to_owned()))
     .collect();
     assert_eq!(found, expected);
+}
+
+/// Issue #211: the root's own keys, on the root table — `filters`, and the
+/// `soft_delete` marker's `column`, `field` and `when`. Also pins why the
+/// dangling `field` must be an error: the document query skips such a marker
+/// without a word, so a soft-deleted row stays a document.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn validation_reports_a_typo_in_every_root_position() {
+    let (_pg, url) = start_seeded().await;
+    let problems = |schema: IndexSchema| {
+        let url = url.clone();
+        async move {
+            let spec = spec(schema);
+            let documents = builder(&url, spec.schema(&index_name("users")).unwrap().clone()).await;
+            validate_indexes(&spec, &documents)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|d| {
+                    assert_eq!(d.severity, d.kind.severity(), "{d:?}");
+                    (d.dotted_path(), d.kind, d.message)
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let expected = |pairs: &[(&str, DiagnosticKind, &str)]| {
+        pairs
+            .iter()
+            .map(|(path, kind, message)| ((*path).to_owned(), *kind, (*message).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let fields = || vec![col("name", "name"), col("email", "email")];
+
+    let mut filtered = users_schema(
+        fields(),
+        Some(SoftDelete::Column(SoftDeleteColumn {
+            column: column("deleted"),
+            when: Some(vec![
+                eq("stats", "banned"),
+                null_check("archivd", NullOp::IsNull),
+                raw("whatever"),
+            ]),
+        })),
+    );
+    filtered.filters = Some(vec![eq("emial", "x"), null_check("bi", NullOp::IsNull)]);
+    assert_eq!(
+        problems(filtered).await,
+        expected(&[
+            (
+                "filters",
+                DiagnosticKind::UnknownColumn,
+                "`filters` references unknown column `public.users.emial`"
+            ),
+            (
+                "filters",
+                DiagnosticKind::UnknownColumn,
+                "`filters` references unknown column `public.users.bi`"
+            ),
+            (
+                "soft_delete",
+                DiagnosticKind::UnknownColumn,
+                "`column` references unknown column `public.users.deleted`"
+            ),
+            (
+                "soft_delete",
+                DiagnosticKind::UnknownColumn,
+                "`when` references unknown column `public.users.stats`"
+            ),
+            (
+                "soft_delete",
+                DiagnosticKind::UnknownColumn,
+                "`when` references unknown column `public.users.archivd`"
+            ),
+        ]),
+    );
+
+    let dangling = users_schema(
+        fields(),
+        Some(SoftDelete::Field(SoftDeleteField {
+            field: field("deleted"),
+            when: None,
+        })),
+    );
+    let silent = builder(&url, dangling.clone()).await;
+    assert!(
+        !is_tombstone(&silent, 4).await,
+        "a marker that reads no column is skipped: the deleted row stays"
+    );
+    assert_eq!(
+        problems(dangling).await,
+        expected(&[(
+            "soft_delete",
+            DiagnosticKind::UnreadSoftDeleteMarker,
+            "`field` names `deleted`, but no field has that name"
+        )]),
+    );
+
+    let mut placed_at = col("placed_at", "placed_at");
+    if let FieldSource::Column(column) = &mut placed_at.source {
+        column.ty = FlussoType::Timestamp;
+    }
+    let orders = join_field(
+        "orders",
+        Join {
+            table: table("orders"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![placed_at],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let as_join = users_schema(
+        vec![col("name", "name"), orders.clone()],
+        Some(SoftDelete::Field(SoftDeleteField {
+            field: field("orders"),
+            when: None,
+        })),
+    );
+    assert_eq!(
+        problems(as_join).await,
+        expected(&[(
+            "soft_delete",
+            DiagnosticKind::UnreadSoftDeleteMarker,
+            "`field` names `orders`, but the first field of that name is not a column"
+        )]),
+    );
+    let in_join = users_schema(
+        vec![col("name", "name"), orders],
+        Some(SoftDelete::Field(SoftDeleteField {
+            field: field("placed_at"),
+            when: None,
+        })),
+    );
+    assert_eq!(
+        problems(in_join).await,
+        expected(&[(
+            "soft_delete",
+            DiagnosticKind::UnknownColumn,
+            "`field` references unknown column `public.users.placed_at`"
+        )]),
+    );
+}
+
+/// A Postgres enum column and a domain column are reported by their own type
+/// names, which no declared type accepts: a `TypeMismatch` for `flusso check`.
+/// The document still builds with their values, which is why that kind does
+/// not stop `flusso run`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn an_enum_or_domain_column_is_a_type_mismatch_that_still_builds() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TYPE mood AS ENUM ('calm', 'busy')",
+        "CREATE DOMAIN email_address AS text CHECK (VALUE LIKE '%@%')",
+        "ALTER TABLE users ADD COLUMN mood mood DEFAULT 'calm', \
+         ADD COLUMN contact email_address DEFAULT 'ada@example.com'",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let mut mood = col("mood", "mood");
+    if let FieldSource::Column(column) = &mut mood.source {
+        column.ty = FlussoType::Enum;
+    }
+    let schema = users_schema(vec![mood, col("contact", "contact")], None);
+    let spec = spec(schema.clone());
+    let documents = builder(&url, schema).await;
+
+    let found: Vec<_> = validate_indexes(&spec, &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| (d.dotted_path(), d.kind, d.message))
+        .collect();
+    let mismatch = |path: &str, sql_type: &str| {
+        (
+            path.to_owned(),
+            DiagnosticKind::TypeMismatch,
+            format!("declared type does not accept the column's database type `{sql_type}`"),
+        )
+    };
+    assert_eq!(
+        found,
+        vec![
+            mismatch("mood", "mood"),
+            mismatch("contact", "email_address")
+        ]
+    );
+
+    let body = upsert(&documents, 1).await;
+    assert_eq!(str_of(&body, "mood"), "calm");
+    assert_eq!(str_of(&body, "contact"), "ada@example.com");
 }
 
 // ---------------------------------------------------------------------------

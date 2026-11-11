@@ -33,6 +33,13 @@ impl Pen {
         }
     }
 
+    /// Color when stderr is a terminal and `NO_COLOR` is not set.
+    pub(crate) fn detect_stderr() -> Self {
+        Self {
+            color: std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+        }
+    }
+
     fn paint(self, code: &str, text: &str) -> String {
         if self.color {
             format!("\x1b[{code}m{text}\x1b[0m")
@@ -405,6 +412,24 @@ pub(crate) fn diagnostics(
         writeln!(out, "  {}", pen.dim("(schema matches the database)"))?;
         return Ok(());
     }
+    diagnostic_lines(out, pen, diagnostics)
+}
+
+/// The disagreements found with no database (`check --offline`). Prints
+/// nothing when there are none.
+pub(crate) fn offline_diagnostics(
+    out: &mut impl Write,
+    pen: Pen,
+    diagnostics: &[Diagnostic],
+) -> Result<()> {
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    section(out, pen, "Schema validation")?;
+    diagnostic_lines(out, pen, diagnostics)
+}
+
+fn diagnostic_lines(out: &mut impl Write, pen: Pen, diagnostics: &[Diagnostic]) -> Result<()> {
     for d in diagnostics {
         let (label, code) = match d.severity {
             Severity::Error => ("error", "31"),

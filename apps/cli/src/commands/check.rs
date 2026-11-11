@@ -3,7 +3,9 @@
 //! database, so the fully-typed shape is shown either way. Unless `--offline`,
 //! the command also connects and confirms the declared types and nullability
 //! agree with the live database, reporting any disagreement; an `Error`-level
-//! disagreement fails the check.
+//! disagreement fails the check. `--offline` still reports the disagreements
+//! that need no database (a `soft_delete` `field` that names no column).
+//! `flusso run` runs the same database validation at start.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -83,18 +85,16 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     let postgres = adapters::source_config(&config)?;
 
     let diagnostics = if args.offline {
-        None
+        source::validate_spec(&source_spec(&config))
     } else {
         let (_, sql_url) = crate::backends::source_sql_url(&config)?;
         let spec = Arc::new(source_spec(&config));
         let documents = PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec))
             .await
             .context("connecting to the database")?;
-        Some(
-            source::validate_indexes(&spec, &documents)
-                .await
-                .context("validating schemas against the database")?,
-        )
+        source::validate_indexes(&spec, &documents)
+            .await
+            .context("validating schemas against the database")?
     };
 
     let (coverage, pre_image) = if args.offline {
@@ -115,8 +115,8 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     let manage = postgres.manage_publication;
 
     let has_errors = diagnostics
-        .as_ref()
-        .is_some_and(|ds| ds.iter().any(|d| d.severity == source::Severity::Error));
+        .iter()
+        .any(|d| d.severity == source::Severity::Error);
 
     let mut out = std::io::stdout().lock();
     match args.format {
@@ -124,16 +124,17 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             let doc = serde_json::json!({
                 "config": &*config,
                 "mappings": mappings,
-                "diagnostics": diagnostics.as_ref().map(|ds| ds
+                "diagnostics": diagnostics
                     .iter()
                     .map(|d| serde_json::json!({
                         "index": d.index.as_ref(),
                         "field": d.field.as_ref(),
                         "path": d.dotted_path(),
                         "severity": format!("{:?}", d.severity).to_lowercase(),
+                        "kind": d.kind.as_str(),
                         "message": d.message,
                     }))
-                    .collect::<Vec<_>>()),
+                    .collect::<Vec<_>>(),
                 "coverage": coverage.as_ref().map(|c| serde_json::json!({
                     "satisfied": c.satisfied,
                     "manageable": c.manageable,
@@ -173,39 +174,39 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             )?;
             print::config(&mut out, pen, &config)?;
             print::resolved(&mut out, pen, &mappings)?;
-            match &diagnostics {
-                None => {
-                    print::warning(
-                        &mut out,
-                        pen,
-                        "offline",
-                        "skipped database validation — types and nullability not checked",
-                    )?;
+            if args.offline {
+                print::offline_diagnostics(&mut out, pen, &diagnostics)?;
+                print::warning(
+                    &mut out,
+                    pen,
+                    "offline",
+                    "skipped database validation — types and nullability not checked",
+                )?;
+            } else {
+                print::diagnostics(&mut out, pen, &diagnostics)?;
+                if let Some(coverage) = &coverage {
+                    print::coverage(&mut out, pen, coverage, manage)?;
                 }
-                Some(diagnostics) => {
-                    print::diagnostics(&mut out, pen, diagnostics)?;
-                    if let Some(coverage) = &coverage {
-                        print::coverage(&mut out, pen, coverage, manage)?;
-                    }
-                    if let Some(pre_image) = &pre_image {
-                        print::pre_image(
-                            &mut out,
-                            pen,
-                            pre_image,
-                            postgres.manage_replica_identity,
-                        )?;
-                    }
-                    writeln!(out)?;
-                    if has_errors {
-                        print::warning(&mut out, pen, "failed", "schema disagrees with database")?;
-                    } else {
-                        print::success(&mut out, pen, "check passed")?;
-                    }
+                if let Some(pre_image) = &pre_image {
+                    print::pre_image(&mut out, pen, pre_image, postgres.manage_replica_identity)?;
+                }
+                writeln!(out)?;
+                if has_errors {
+                    print::warning(&mut out, pen, "failed", "schema disagrees with database")?;
+                } else {
+                    print::success(&mut out, pen, "check passed")?;
                 }
             }
         }
     }
 
-    ensure!(!has_errors, "schema validation failed against the database");
+    ensure!(
+        !has_errors,
+        if args.offline {
+            "schema validation failed"
+        } else {
+            "schema validation failed against the database"
+        }
+    );
     Ok(())
 }
