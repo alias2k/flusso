@@ -2,7 +2,7 @@
 //! resolution) and collecting relation tables (to pre-resolve their primary keys).
 //! No I/O.
 
-use kernel::{ColumnName, Field, Filter, Relation, RelationKey, TableName, ViaHop};
+use kernel::{ColumnName, ColumnPair, Field, Filter, Relation, RelationKey, TableName, ViaHop};
 
 /// One hop of a path from the root down to a changed table: a relation's own
 /// hop, or one table of an aggregate's `via` on the way to it.
@@ -10,8 +10,12 @@ use kernel::{ColumnName, Field, Filter, Relation, RelationKey, TableName, ViaHop
 pub(super) enum Step<'a> {
     Relation(&'a Relation),
     /// A downward foreign-key hop: `foreign_key` on `table` points at the
-    /// table before it.
-    Via(&'a ViaHop),
+    /// table before it. `next_on` are the `on` pairs of the level after the
+    /// hop, whose `local` columns the hop's rows hold.
+    Via {
+        hop: &'a ViaHop,
+        next_on: &'a [ColumnPair],
+    },
 }
 
 impl<'a> Step<'a> {
@@ -19,7 +23,7 @@ impl<'a> Step<'a> {
     pub(super) fn table(self) -> &'a TableName {
         match self {
             Step::Relation(relation) => relation.table(),
-            Step::Via(hop) => &hop.table,
+            Step::Via { hop, .. } => &hop.table,
         }
     }
 
@@ -27,7 +31,7 @@ impl<'a> Step<'a> {
     pub(super) fn key(self) -> RelationKey<'a> {
         match self {
             Step::Relation(relation) => relation.key(),
-            Step::Via(hop) => RelationKey::Direct(&hop.foreign_key),
+            Step::Via { hop, .. } => RelationKey::Direct(&hop.foreign_key),
         }
     }
 
@@ -36,7 +40,7 @@ impl<'a> Step<'a> {
     pub(super) fn row_link(self) -> Option<(&'a TableName, &'a ColumnName)> {
         match self {
             Step::Relation(relation) => source::row_link(relation),
-            Step::Via(hop) => Some((&hop.table, &hop.foreign_key)),
+            Step::Via { hop, .. } => Some((&hop.table, &hop.foreign_key)),
         }
     }
 }
@@ -92,10 +96,8 @@ pub(super) fn find_paths<'a>(
         match field.relation() {
             Some(relation) => {
                 let depth = prefix.len();
-                let steps = relation
-                    .via()
-                    .iter()
-                    .map(Step::Via)
+                let steps = source::via_hops(relation)
+                    .map(|(hop, next_on)| Step::Via { hop, next_on })
                     .chain([Step::Relation(relation)]);
                 for step in steps {
                     prefix.push(step);

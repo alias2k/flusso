@@ -106,8 +106,23 @@ fn a_via_table_links_to_the_table_before_it_through_its_foreign_key() {
         on: vec![],
     };
     assert_eq!(
-        link_on_row(Step::Via(&hop), &table("projects")),
+        link_on_row(
+            Step::Via {
+                hop: &hop,
+                next_on: &[],
+            },
+            &table("projects")
+        ),
         Some(&column("user_id"))
     );
-    assert_eq!(link_on_row(Step::Via(&hop), &table("tasks")), None);
+    assert_eq!(
+        link_on_row(
+            Step::Via {
+                hop: &hop,
+                next_on: &[],
+            },
+            &table("tasks")
+        ),
+        None
+    );
 }

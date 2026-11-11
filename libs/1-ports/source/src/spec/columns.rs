@@ -10,9 +10,16 @@
 //!   fields, the root `filters`, the `soft_delete` marker and its `when`.
 //! - [`relation_columns`]: what a relation reads from one of its tables — the
 //!   projected fields, `filters`, `order_by`, the aggregate input, and the
-//!   link (a child's `foreign_key`, a junction's `left_key`/`right_key`).
+//!   link (a child's `foreign_key`, a junction's `left_key`/`right_key`, the
+//!   `related` side of its `on` pairs).
 //! - [`via_columns`]: what an aggregate reads from one of its `via` tables —
-//!   the hop's `foreign_key` and `filters`.
+//!   the hop's `foreign_key`, `filters`, the `related` side of its `on` pairs
+//!   and the `local` side of the next level's.
+//!
+//! An `on` pair reads a column on each side of its hop: `related` on the hop's
+//! own table, `local` on the table before it, so a parent level (the root row,
+//! a join's rows, a `via` hop) counts the `local` columns of the relations it
+//! correlates.
 //! - [`soft_delete_column`]: the column a `soft_delete` marker reads on the
 //!   root row; the document query reads the same one.
 //! - [`row_link`]: the link column a related row holds, which a deleted or
@@ -49,8 +56,8 @@
 use std::collections::{HashMap, HashSet};
 
 use kernel::{
-    ColumnName, Field, FieldName, FieldSource, Filter, GenericValue, IndexSchema, Relation,
-    RelationKey, SoftDelete, TableName, ViaHop,
+    ColumnName, ColumnPair, Field, FieldName, FieldSource, Filter, GenericValue, IndexSchema,
+    Relation, RelationKey, SoftDelete, TableName, ViaHop,
 };
 
 use crate::{RowImage, RowKey};
@@ -153,9 +160,22 @@ impl Collector {
         }
     }
 
-    /// The columns one row level reads: its fields, same-row groups, and the
-    /// `belongs_to` columns pointing out of it. Other relations correlate on the
-    /// row's primary key and read their own tables.
+    fn locals(&mut self, on: &[ColumnPair]) {
+        for pair in on {
+            self.column(&pair.local);
+        }
+    }
+
+    fn related(&mut self, on: &[ColumnPair]) {
+        for pair in on {
+            self.column(&pair.related);
+        }
+    }
+
+    /// The columns one row level reads: its fields, same-row groups, the
+    /// `belongs_to` columns pointing out of it, and the `local` side of every
+    /// relation's first `on` pairs. Otherwise relations correlate on the row's
+    /// primary key and read their own tables.
     fn level(&mut self, fields: &[Field]) {
         for field in fields {
             match &field.source {
@@ -169,6 +189,7 @@ impl Collector {
                     if let RelationKey::Local(column) = relation.key() {
                         self.column(column);
                     }
+                    self.locals(relation.parent_on());
                 }
                 FieldSource::Constant(_) => {}
             }
@@ -207,7 +228,7 @@ pub fn root_columns(schema: &IndexSchema) -> ColumnUse {
 
 /// The columns of `table` that `relation` (a relation of `schema`) reads: as
 /// its target (fields, `filters`, `order_by`, aggregate input, a child's
-/// `foreign_key`) and as its junction (`left_key`, `right_key`, the
+/// `foreign_key`, the `related` side of its `on` pairs) and as its junction (`left_key`, `right_key`, the
 /// junction's `filters`).
 pub fn relation_columns(schema: &IndexSchema, relation: &Relation, table: &TableName) -> ColumnUse {
     if reads_raw(schema) {
@@ -230,6 +251,7 @@ pub fn relation_columns(schema: &IndexSchema, relation: &Relation, table: &Table
             }
         }
         used.filters(relation.filters());
+        used.related(relation.on());
         if let RelationKey::Direct(foreign_key) = relation.key() {
             used.column(foreign_key);
         }
@@ -245,16 +267,34 @@ pub fn relation_columns(schema: &IndexSchema, relation: &Relation, table: &Table
 }
 
 /// The columns an aggregate (of `schema`) reads from one of its `via` tables:
-/// the hop's `foreign_key` and its `filters`. The hop's primary key, which the
-/// next hop points at, is checked by [`RowDiff::new`].
-pub fn via_columns(schema: &IndexSchema, hop: &ViaHop) -> ColumnUse {
+/// the hop's `foreign_key`, its `filters`, the `related` side of its `on`
+/// pairs, and the `local` side of `next_on` — the pairs of the level after the
+/// hop (the next hop's, or the aggregate's own after the last). The hop's
+/// primary key, which the next level points at, is checked by
+/// [`RowDiff::new`].
+pub fn via_columns(schema: &IndexSchema, hop: &ViaHop, next_on: &[ColumnPair]) -> ColumnUse {
     if reads_raw(schema) {
         return ColumnUse::All;
     }
     let mut used = Collector::default();
     used.column(&hop.foreign_key);
     used.filters(hop.filters.as_deref());
+    used.related(&hop.on);
+    used.locals(next_on);
     used.finish()
+}
+
+/// Each `via` hop of `relation` with the `on` pairs of the level after it: the
+/// next hop's, or the relation's own after the last hop. What
+/// [`via_columns`] takes.
+pub fn via_hops(relation: &Relation) -> impl Iterator<Item = (&ViaHop, &[ColumnPair])> {
+    let via = relation.via();
+    let next = via
+        .iter()
+        .skip(1)
+        .map(|hop| hop.on.as_slice())
+        .chain([relation.on()]);
+    via.iter().zip(next)
 }
 
 /// The column a `soft_delete` marker reads on the root row: its `column`, or

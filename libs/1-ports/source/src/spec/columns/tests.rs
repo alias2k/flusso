@@ -466,7 +466,10 @@ fn a_via_hop_reads_its_foreign_key_and_filters() {
     let flag = task_flag(Some(vec![value_filter("archived")]));
     let schema = users(vec![relation_field("flag", flag.clone())]);
     let hop = flag.via().first().unwrap();
-    assert_eq!(via_columns(&schema, hop), columns(&["archived", "user_id"]));
+    assert_eq!(
+        via_columns(&schema, hop, &[]),
+        columns(&["archived", "user_id"])
+    );
     assert_eq!(reads(&flag, "tasks"), columns(&["project_id", "status"]));
 }
 
@@ -476,7 +479,78 @@ fn a_raw_filter_on_a_via_hop_reads_every_column_of_the_index() {
     let schema = users(vec![field("email"), relation_field("flag", flag.clone())]);
     assert_eq!(root_columns(&schema), ColumnUse::All);
     assert_eq!(
-        via_columns(&schema, flag.via().first().unwrap()),
+        via_columns(&schema, flag.via().first().unwrap(), &[]),
         ColumnUse::All
     );
+}
+
+fn pair(local: &str, related: &str) -> ColumnPair {
+    ColumnPair {
+        local: column(local),
+        related: column(related),
+    }
+}
+
+#[test]
+fn an_on_pair_reads_related_on_the_child_and_local_on_the_parent() {
+    let mut orders = has_many_orders();
+    orders.on = vec![pair("tenant_id", "org_id")];
+    let orders = Relation::Join(orders);
+    let schema = users(vec![
+        field("email"),
+        relation_field("orders", orders.clone()),
+    ]);
+    assert_eq!(
+        reads(&orders, "orders"),
+        columns(&["id", "org_id", "shop_id", "total", "user_id"])
+    );
+    assert_eq!(
+        root_columns(&schema),
+        columns(&["email", "id", "tenant_id"])
+    );
+}
+
+#[test]
+fn a_belongs_to_pair_reads_local_on_the_enclosing_join() {
+    let mut orders = has_many_orders();
+    if let Some(FieldSource::Relation(Relation::Join(shop))) =
+        orders.fields.get_mut(1).map(|field| &mut field.source)
+    {
+        shop.on = vec![pair("region", "region_code")];
+    }
+    let shop = match orders.fields.get(1).map(|field| &field.source) {
+        Some(FieldSource::Relation(relation)) => relation.clone(),
+        _ => unreachable!(),
+    };
+    let orders = Relation::Join(orders);
+    assert_eq!(
+        reads(&orders, "orders"),
+        columns(&["id", "region", "shop_id", "total", "user_id"])
+    );
+    assert_eq!(
+        reads(&shop, "shops"),
+        columns(&["id", "name", "region_code"])
+    );
+}
+
+#[test]
+fn via_pairs_split_across_the_hops_they_join() {
+    let mut flag = task_flag(None);
+    if let Relation::Aggregate(aggregate) = &mut flag {
+        aggregate.on = vec![pair("team_id", "team_id")];
+        if let Some(hop) = aggregate.via.first_mut() {
+            hop.on = vec![pair("tenant_id", "tenant_id")];
+        }
+    }
+    let schema = users(vec![relation_field("flag", flag.clone())]);
+    let (hop, next_on) = via_hops(&flag).next().unwrap();
+    assert_eq!(
+        via_columns(&schema, hop, next_on),
+        columns(&["team_id", "tenant_id", "user_id"])
+    );
+    assert_eq!(
+        reads(&flag, "tasks"),
+        columns(&["project_id", "status", "team_id"])
+    );
+    assert_eq!(root_columns(&schema), columns(&["id", "tenant_id"]));
 }
