@@ -684,6 +684,9 @@ serialized and hashed as the bare `ColumnName` (format freeze); an expression is
 lock as its canonical text, which must nest no deeper than the tree is tall (a double negation
 renders `- -a`) so every accepted tree re-parses from its lock. An expression's
 `sum`/`min`/`max` takes only a numeric `value_type`, rejected at load.
+`sql::arithmetic` renders every `/` as `(left / NULLIF(right, 0))` (issue #202): a zero divisor
+nulls that row, which the aggregate skips, instead of failing the document query and stalling the
+deployment; integer overflow stays a Postgres error.
 `AggregateOp::input()` is the one accessor (`sql::arithmetic`, `relation_columns`,
 `validate_indexes`, designer codegen); the designer checks input through `POST /api/expression`,
 the same parser. Guards: `a_plain_column_aggregate_keeps_its_content_hash`, the

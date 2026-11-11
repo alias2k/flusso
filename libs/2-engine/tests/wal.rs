@@ -1217,8 +1217,9 @@ async fn on_pairs_rebuild_the_parent_from_either_side() {
 /// `orders` folding `quantity * unit_price` (and friends) over its lines, and
 /// `customers` summing the same expression `via` their orders: the built values
 /// follow Postgres arithmetic (a null operand drops the row, integer division
-/// truncates), each operand's update rebuilds the parents that read it, and a
-/// column no expression reads rebuilds nothing.
+/// truncates, a zero divisor nulls the row instead of failing the build), each
+/// operand's update rebuilds the parents that read it, and a column no
+/// expression reads rebuilds nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn an_aggregate_expression_rebuilds_from_each_operand() {
@@ -1352,6 +1353,37 @@ async fn an_aggregate_expression_rebuilds_from_each_operand() {
         "only `orders` reads `divisor`"
     );
     assert_eq!(order().await, (27.0, 9.0, 2, -3));
+    // (sum, mean, min, max of quantity / divisor, line count)
+    let shares = || async {
+        let order = body("orders").await;
+        (
+            order["shareSum"].as_i64(),
+            order["meanShare"].as_f64(),
+            order["smallestShare"].as_i64(),
+            order["largestShare"].as_i64(),
+            order["lineCount"].as_i64().unwrap(),
+        )
+    };
+    assert_eq!(shares().await, (Some(9), Some(3.0), Some(2), Some(5), 3));
+
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET divisor = 0 WHERE id = 2").await,
+        sorted(&["upsert orders 1"]),
+        "a zero divisor nulls that line's share"
+    );
+    assert_eq!(shares().await, (Some(4), Some(2.0), Some(2), Some(2), 3));
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET divisor = 0").await,
+        sorted(&["upsert orders 1"]),
+        "every divisor zero"
+    );
+    assert_eq!(shares().await, (None, None, None, None, 3));
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET divisor = 2 WHERE id = 1").await,
+        sorted(&["upsert orders 1"]),
+        "the pipeline keeps going"
+    );
+    assert_eq!(shares().await, (Some(3), Some(3.0), Some(3), Some(3), 3));
 
     engine.abort();
 }
@@ -1924,6 +1956,28 @@ fn order_values_spec() -> SourceSpec {
                     Some(FlussoType::Long),
                 ),
             ),
+            aggregate_field(
+                "shareSum",
+                lines(
+                    AggregateOp::Sum(expr("quantity / divisor")),
+                    Some(FlussoType::Long),
+                ),
+            ),
+            aggregate_field(
+                "meanShare",
+                lines(
+                    AggregateOp::Avg(expr("quantity / divisor")),
+                    Some(FlussoType::Double),
+                ),
+            ),
+            aggregate_field(
+                "largestShare",
+                lines(
+                    AggregateOp::Max(expr("quantity / divisor")),
+                    Some(FlussoType::Long),
+                ),
+            ),
+            aggregate_field("lineCount", lines(AggregateOp::Count, None)),
             aggregate_field(
                 "largestRemainder",
                 lines(

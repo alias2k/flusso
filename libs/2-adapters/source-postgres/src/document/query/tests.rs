@@ -958,7 +958,18 @@ fn an_expression_renders_qualified_quoted_and_fully_grouped() {
         ("(a + b) * c", r#"(("q"."a" + "q"."b") * "q"."c")"#),
         ("a - b - c", r#"(("q"."a" - "q"."b") - "q"."c")"#),
         ("a - (b - c)", r#"("q"."a" - ("q"."b" - "q"."c"))"#),
-        ("a / 2 / 3.5", r#"(("q"."a" / 2) / 3.5)"#),
+        (
+            "a / 2 / 3.5",
+            r#"(("q"."a" / NULLIF(2, 0)) / NULLIF(3.5, 0))"#,
+        ),
+        (
+            "total / quantity",
+            r#"("q"."total" / NULLIF("q"."quantity", 0))"#,
+        ),
+        (
+            "a / (b - c)",
+            r#"("q"."a" / NULLIF(("q"."b" - "q"."c"), 0))"#,
+        ),
         ("-a * b", r#"((-"q"."a") * "q"."b")"#),
         ("a - -b", r#"("q"."a" - (-"q"."b"))"#),
         ("--a", r#"(-(-"q"."a"))"#),
