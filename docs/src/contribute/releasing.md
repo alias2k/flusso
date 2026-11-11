@@ -34,4 +34,5 @@ Conventional Commits with the crate as scope: `fix(engine): …`, `feat(query): 
 
 ## Where this shows up
 
-- The versioned editor schemas at `alias2k.github.io/flusso/schemas/` are assembled from the two parser crates' release tags, which move together because both sit in the libs train.
+- The versioned editor schemas at `alias2k.github.io/flusso/schemas/` are assembled from the `flusso-config-v*` tags (before 0.16, the two parser crates' tags).
+- The manual at the site root is rebuilt from the newest release tag of any train: each train's tag (`flusso-config-v*`, `flusso-cli-v*`, `flusso-query-v*`) redeploys the site. The manual for `main` is under `/main/`. See [Writing docs](writing-docs.md#where-the-book-is-published).

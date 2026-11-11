@@ -23,6 +23,14 @@ lychee --offline docs/book
 
 CI does the same on every PR and also asserts that every `alias2k.github.io/flusso/<path>` URL in the repository's markdown and Rust sources resolves to a page in the fresh build.
 
+## Where the book is published
+
+The Pages site serves the book twice. The root, `alias2k.github.io/flusso/`, is `docs/` as of the newest release tag of any train; `/main/` is `docs/` as of `main`, with a banner saying it is unreleased and `noindex`. A docs change shows up under `/main/` when it merges and at the root with the next release.
+
+- `.github/scripts/build-manuals.sh` builds both, each from a `git archive` of its ref.
+- `docs/channels/` holds the two `head.hbs` overlays (the banner, the link between the two), passed as the theme directory at build time. They come from `main`, so an old tag builds unchanged. The book itself must not have a `theme/` directory or a `theme` key; the script refuses one.
+- Deep links in READMEs, Rust docs and plugin skills point at the root. They reach readers through crates.io at release, when the root has caught up. The link check resolves a `/main/` URL against the same fresh build.
+
 When a page moves, add an `[output.html.redirect]` entry in `docs/book.toml` and update `CLAUDE.md`'s pointers and any plugin skill naming the old path; `agent_docs_paths.rs` fails the build on a dangling repo path.
 
 ## READMEs
