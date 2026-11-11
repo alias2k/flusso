@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp, Copy, Trash2, X } from "lucide-react";
 import pluralize from "pluralize";
 import { useEffect, useRef, useState } from "react";
 import {
+  NUMERIC_TYPES,
   SCALAR_TYPES,
   api,
   type Aggregate,
@@ -1165,7 +1166,9 @@ function AggregateBody({
             value={opCol}
             table={agg.table}
             columns={aggColShapes}
-            onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })}
+            onChange={(c) =>
+              setAgg({ ...agg, op: withAggColumn(kind, c), value_type: inputValueType(c, agg.value_type) })
+            }
           />
         )}
         <AggregateKeyEditor
@@ -1199,7 +1202,7 @@ function AggregateBody({
           <Row label="value_type">
             <Select
               value={(agg.value_type as string) ?? "integer"}
-              options={SCALAR_TYPES as string[]}
+              options={(opCol !== null && !isPlainColumn(opCol) ? NUMERIC_TYPES : SCALAR_TYPES) as string[]}
               onChange={(v) => setAgg({ ...agg, value_type: v as FlussoType })}
             />
           </Row>
@@ -1365,6 +1368,20 @@ const CHECK_DELAY_MS = 250;
 /// Whether `input` is a lone name (letters, digits, `_`): the column view shows
 /// it, anything else opens in the expression view. Only picks the initial
 /// view; the server's parser decides what is valid.
+/// A plain column, not an expression: the loader takes any scalar `value_type`
+/// for one, but only a numeric one over arithmetic.
+function isPlainColumn(input: string): boolean {
+  const name = input.trim();
+  return name !== "" && !(name.charAt(0) >= "0" && name.charAt(0) <= "9") && isColumnName(name);
+}
+
+/// The `value_type` to keep once the input changes: an expression snaps a
+/// non-numeric one to `double`.
+function inputValueType(input: string, current: FlussoType | undefined): FlussoType | undefined {
+  if (current === undefined || isPlainColumn(input) || NUMERIC_TYPES.includes(current)) return current;
+  return "double";
+}
+
 function isColumnName(input: string): boolean {
   return [...input.trim()].every(
     (c) => c === "_" || (c >= "0" && c <= "9") || (c.toLowerCase() >= "a" && c.toLowerCase() <= "z"),

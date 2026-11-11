@@ -46,6 +46,9 @@ export const SCALAR_TYPES: FlussoType[] = [
   "json",
 ];
 
+/** The `value_type`s a `sum`/`min`/`max` over an arithmetic expression accepts. */
+export const NUMERIC_TYPES: FlussoType[] = ["short", "integer", "long", "float", "double", "decimal"];
+
 export type Transform = "lowercase" | "trim";
 
 export interface Column {

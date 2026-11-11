@@ -450,6 +450,36 @@ fn an_aggregate_column_may_be_arithmetic_over_the_table_s_columns() {
     }
 }
 
+fn aggregate_with(op: &str, column: &str, value_type: &str) -> Result<IndexSchema, String> {
+    convert(&format!(
+        "version: 1\ntable: orders\nfields:\n  - {op}: linesValue\n    table: order_lines\n    foreign_key: order_id\n    column: \"{column}\"\n    value_type: {value_type}"
+    ))
+    .map_err(|e| e.to_string())
+}
+
+#[test]
+fn an_expression_needs_a_numeric_value_type() {
+    for op in ["sum", "min", "max"] {
+        for value_type in ["keyword", "date", "boolean", "text", "timestamp"] {
+            let err = aggregate_with(op, "quantity * unit_price", value_type).unwrap_err();
+            assert!(
+                err.contains(&format!(
+                    "aggregate `linesValue`: '{op}' over an expression needs a numeric `value_type`"
+                )),
+                "{op} {value_type}: {err}"
+            );
+        }
+        for value_type in ["short", "integer", "long", "float", "double", "decimal"] {
+            aggregate_with(op, "quantity * unit_price", value_type)
+                .unwrap_or_else(|e| panic!("{op} {value_type}: {e}"));
+        }
+        for value_type in ["keyword", "date", "boolean"] {
+            aggregate_with(op, "(Code)", value_type)
+                .unwrap_or_else(|e| panic!("plain column {op} {value_type}: {e}"));
+        }
+    }
+}
+
 #[test]
 fn a_malformed_aggregate_expression_names_the_field_and_the_position() {
     let err = aggregate_input("quantity *").unwrap_err();

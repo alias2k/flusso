@@ -74,6 +74,20 @@ fn scalar_type() -> impl Strategy<Value = FlussoType> {
         Timestamp, Binary, Json,
     ])
 }
+/// A `sum`/`min`/`max` input with a `value_type` the loader accepts for it:
+/// any scalar for a plain column, a numeric one for an expression.
+fn typed_input() -> impl Strategy<Value = (Expression, FlussoType)> {
+    use FlussoType::*;
+    let numeric = prop::sample::select(vec![Short, Integer, Long, Float, Double, Decimal]);
+    (input(), scalar_type(), numeric).prop_map(|(input, scalar, numeric)| {
+        let value_type = if input.as_column().is_some() {
+            scalar
+        } else {
+            numeric
+        };
+        (input, value_type)
+    })
+}
 fn leaf_type() -> impl Strategy<Value = FlussoType> {
     use FlussoType::*;
     prop::sample::select(vec![Text, Keyword, Integer, Long, Double, Date])
@@ -265,19 +279,19 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
     let ops = prop_oneof![
         (table(), agg_key()).prop_map(move |(t, k)| mk(t, AggregateOp::Count, k, None)),
         (table(), agg_key()).prop_map(move |(t, k)| mk(t, AggregateOp::Exists, k, None)),
-        (table(), input(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
+        (table(), typed_input(), agg_key()).prop_map(move |(t, (c, vt), k)| mk(
             t,
             AggregateOp::Sum(c),
             k,
             Some(vt)
         )),
-        (table(), input(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
+        (table(), typed_input(), agg_key()).prop_map(move |(t, (c, vt), k)| mk(
             t,
             AggregateOp::Min(c),
             k,
             Some(vt)
         )),
-        (table(), input(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
+        (table(), typed_input(), agg_key()).prop_map(move |(t, (c, vt), k)| mk(
             t,
             AggregateOp::Max(c),
             k,
