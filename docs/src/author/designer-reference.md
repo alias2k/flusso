@@ -44,7 +44,7 @@ Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a
 | join | verb, related table, key (`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, junction table + keys + junction filters for `many_to_many`), required (to-one), **Indexed** (off stores the rows without indexing them; see [Joins](../reference/joins.md#indexed)), filters, the FK nullability note |
 | scalar field | **From the database** (column, SQL type, `NOT NULL`/nullable) · bridge rule · **In the document** (rename chips, type with description and *suggested* chip, `lowercase`/`trim`, **Auto subfields** on `text`/`keyword`/`uuid` and **Indexed** on `json` (each with a hint naming what turning it off loses; changing the type drops the one it no longer takes), required, default) · **Advanced · index tuning** drawer (`options` as key/JSON-value pairs with quick-adds) · **Filters** drawer where the kind takes them |
 | enum field | plus **Variants (ordered)** with add, move up/down, remove |
-| aggregate | related table, column to aggregate, `value_type`/`element_type`, key, `distinct` + junction filters (over a junction), filters, **Via** hops (table, `foreign_key`, filters each; **Add a hop**) |
+| aggregate | **operation** (switching keeps the table, key, filters and Via hops; the column and `value_type`/`element_type` reset), related table, column to aggregate, `value_type`/`element_type`, key, `distinct` + junction filters (over a junction), filters, **Via** hops (table, `foreign_key`, filters each; **Add a hop**) |
 | geo | lat and lon columns, or a single json column |
 | map | column (json/jsonb), `values` |
 | custom | postgres types (comma-separated), opensearch type |

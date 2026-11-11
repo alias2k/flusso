@@ -202,6 +202,7 @@ export const it: Record<string, string> = {
   "typeDesc.json": "Oggetto JSON arbitrario",
   "inspector.fromDb": "Dal database",
   "inspector.inDoc": "Nel documento",
+  "inspector.aggOp": "operazione",
   "inspector.aggFrom": "Aggregato da",
   "inspector.relationship": "La relazione",
   "inspector.advanced": "Avanzate · ottimizzazione indice",

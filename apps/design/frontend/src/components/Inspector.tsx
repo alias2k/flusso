@@ -17,7 +17,7 @@ import {
   type Through,
   type ViaHop,
 } from "../api";
-import { KIND_HELP, LEAF_TYPES } from "../fields";
+import { AGGREGATE_OPS, KIND_HELP, LEAF_TYPES, withAggregateOp } from "../fields";
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
@@ -1129,6 +1129,9 @@ function AggregateBody({
   return (
     <>
       <Block variant="src" title={t("inspector.aggFrom")}>
+        <Row label={t("inspector.aggOp")}>
+          <Select value={kind} options={[...AGGREGATE_OPS]} onChange={(v) => setAgg(withAggregateOp(agg, v))} />
+        </Row>
         <Row label={t("inspector.relatedTable")}>
           <TablePicker
             value={agg.table}

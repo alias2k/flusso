@@ -197,6 +197,7 @@ export const en: Record<string, string> = {
   "typeDesc.json": "Arbitrary JSON object",
   "inspector.fromDb": "From the database",
   "inspector.inDoc": "In the document",
+  "inspector.aggOp": "operation",
   "inspector.aggFrom": "Aggregated from",
   "inspector.relationship": "The relationship",
   "inspector.advanced": "Advanced · index tuning",

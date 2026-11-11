@@ -146,6 +146,14 @@ function defaultJoin(kind: FieldKind, table: string): Join {
 }
 
 function defaultAggregate(kind: FieldKind, table: string): Aggregate {
+  return withAggregateOp({ table, op: "count", key: { direct: "" } }, kind);
+}
+
+/// Switch an aggregate to the op `kind`, keeping what every op shares: its
+/// table, key, filters and `via` hops. Only the old op's own parts reset: the
+/// column it read, its `value_type` or `element_type`, and `distinct` once the
+/// key no longer goes `through` a junction.
+export function withAggregateOp(agg: Aggregate, kind: FieldKind): Aggregate {
   let op: AggregateOp;
   switch (kind) {
     case "count":
@@ -169,9 +177,12 @@ function defaultAggregate(kind: FieldKind, table: string): Aggregate {
     default:
       op = { ids: { element_type: "long" } };
   }
-  const agg: Aggregate = { table, op, key: { direct: "" } };
-  if (kind === "sum" || kind === "min" || kind === "max") agg.value_type = "integer";
-  return agg;
+  const next: Aggregate = { table: agg.table, op, key: agg.key };
+  if (agg.filters) next.filters = agg.filters;
+  if (agg.via) next.via = agg.via;
+  if (kind === "sum" || kind === "min" || kind === "max") next.value_type = "integer";
+  if (agg.distinct && "through" in agg.key) next.distinct = agg.distinct;
+  return next;
 }
 
 /// The related table a relation field reads from (for column suggestions).
