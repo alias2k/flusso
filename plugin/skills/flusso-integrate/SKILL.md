@@ -80,7 +80,7 @@ flusso check --config flusso.toml --offline  # format and rules only, skip the D
 
 Against a live DB this also checks the real catalog and prints the publication coverage and
 replica identity reports (see **flusso-postgres**); what it verifies is owned by the
-[CLI reference](https://alias2k.github.io/flusso/reference/cli.html#check). Fix every error here before running.
+[CLI reference](https://alias2k.github.io/flusso/main/reference/cli.html#check). Fix every error here before running.
 
 ### 4. Run
 

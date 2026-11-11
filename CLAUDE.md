@@ -7,8 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 flusso keeps OpenSearch in sync with Postgres from declarative config. You describe a
 search document in YAML (`*.schema.yml`); flusso derives the index mapping, seeds it,
 then follows Postgres logical replication so the index stays current. Read `README.md`
-for the full picture. The user manual is an mdBook under `docs/`, published to GitHub Pages at the site root
-(`alias2k.github.io/flusso/`; the versioned editor schemas sit beside it under `/schemas/`).
+for the full picture. The user manual is an mdBook under `docs/`, published to GitHub Pages twice (issue #209):
+the site root (`alias2k.github.io/flusso/`) serves `docs/` as of the **newest release tag of any
+train**, `/main/` serves `main`'s tip with an "unreleased" banner and `noindex` (overlays in
+`docs/channels/`, built by `.github/scripts/build-manuals.sh`); the versioned editor schemas sit
+beside them under `/schemas/`. `pages.yml` deploys only from `main`: a push to `main` rebuilds both,
+and a release tag (`flusso-{config,cli,query}-v*`, pushed by the release-plz App so it fires
+workflows) dispatches a `main` run, which moves the root to that release. So a docs change reaches
+`/main/` at merge and the root at the next release.
 `docs/src/SUMMARY.md` is the page tree: seven parts (Start here, Author, Deploy, Operate,
 Query, Reference, Contribute) under one rule, **one fact, one home**. Every `*.schema.yml`
 key, `flusso.toml` key, adapter option, env var, CLI flag, Helm value, metric, and HTTP
@@ -26,7 +32,10 @@ maps the crate layering. When you change a doc's content, update the Reference p
 that owns it; when you move a page, add an `[output.html.redirect]` entry in `docs/book.toml`.
 CI's `docs` job builds the book, runs `lychee --offline --include-fragments` on it, and asserts
 every `alias2k.github.io/flusso/<path>` URL in the repo's markdown and Rust resolves to a built
-page (`.github/scripts/check-manual-links.sh`).
+page (`.github/scripts/check-manual-links.sh`; a `/main/<path>` URL is checked against the same
+book). Deep links in crate READMEs and Rust docs stay at the root (they reach readers through
+crates.io at release, when the root has the page); links in `plugin/**` point at `/main/`, since the
+plugin is installed from the repository and describes `main`.
 
 ## Commands
 

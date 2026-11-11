@@ -4,7 +4,8 @@ Thanks for your interest in improving flusso. This guide covers the practical
 bits — how to get a dev environment running, the quality gate your change has to
 clear, and how to submit it. The architecture tour and the deeper house rules
 live in [`CLAUDE.md`](CLAUDE.md); the user manual under
-[`docs/`](docs/) (schema authoring, configuration, deploying) plus
+[`docs/`](docs/) (schema authoring, configuration, deploying; built from `main` at
+[alias2k.github.io/flusso/main](https://alias2k.github.io/flusso/main/)) plus
 [`sdk/query/README.md`](sdk/query/README.md) for the query side cover everything else.
 Writing or editing docs? Follow the prose tone guide in [`docs/STYLE.md`](docs/STYLE.md).
 

@@ -63,7 +63,7 @@ The guided version, with what each step did, is the manual's [Quickstart](https:
 
 ## The manual
 
-Everything else lives at **[alias2k.github.io/flusso](https://alias2k.github.io/flusso/)**.
+Everything else lives at **[alias2k.github.io/flusso](https://alias2k.github.io/flusso/)**, the manual for the latest release. The manual for unreleased `main` is at [alias2k.github.io/flusso/main](https://alias2k.github.io/flusso/main/).
 
 | Part | For |
 | --- | --- |

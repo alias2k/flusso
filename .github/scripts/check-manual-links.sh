@@ -5,6 +5,12 @@
 # release tags) and `/bench/` (from the `benchmarks` data branch) are assembled
 # by pages.yml, not by mdbook, so they are skipped.
 #
+# The site root serves the newest release's manual and /main/ serves main's
+# (pages.yml). This checks against the book built from this checkout, so a
+# link must exist here: a root link reaches readers through crates.io at
+# release, when the root has caught up. A `/main/<path>` URL is checked
+# against the same book, since that is the book /main/ will serve.
+#
 # Usage: .github/scripts/check-manual-links.sh [book-dir]   (default docs/book)
 set -euo pipefail
 
@@ -19,6 +25,7 @@ while IFS= read -r line; do
   path="${url#https://alias2k.github.io/flusso}"
   path="${path#/}"
   case "$path" in schemas/*|bench|bench/*) continue ;; esac
+  case "$path" in main|main/*) path="${path#main}"; path="${path#/}" ;; esac
   fragment=""
   case "$path" in *'#'*) fragment="${path#*#}"; path="${path%%#*}" ;; esac
   case "$path" in ""|*/) path="${path}index.html" ;; esac
