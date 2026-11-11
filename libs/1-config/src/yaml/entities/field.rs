@@ -88,7 +88,7 @@ pub struct ScalarBody {
 }
 
 /// An `enum:` scalar — a closed set of string values with an optional declared
-/// `variants` order. Converted into a [`Field::Scalar`] with a
+/// `variants` order. Converted into a [`FieldKind::Scalar`] with a
 /// [`FlussoType::Enum`]; an empty `variants` is a plain keyword alias.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,7 +116,7 @@ pub struct EnumBody {
 }
 
 /// A `custom:` scalar — an explicit Postgres/OpenSearch type pair. Converted
-/// into a [`Field::Scalar`] with a [`FlussoType::Custom`].
+/// into a [`FieldKind::Scalar`] with a [`FlussoType::Custom`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomBody {
