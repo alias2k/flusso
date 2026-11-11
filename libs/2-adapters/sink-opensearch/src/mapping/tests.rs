@@ -404,8 +404,12 @@ fn a_map_key_is_mapped_like_a_plain_field_of_its_values_type() {
 
             let template = &map["mappings"]["dynamic_templates"][0]["flusso_map:title"];
             assert_eq!(template["path_match"], "title.*", "{ty:?}");
+            let mut key = template["mapping"].clone();
+            if ty.opensearch() == MappingType::Keyword && options.auto_subfields {
+                key["fields"].as_object_mut().unwrap().remove("keyword");
+            }
             assert_eq!(
-                template["mapping"], plain["mappings"]["properties"]["title"],
+                key, plain["mappings"]["properties"]["title"],
                 "{ty:?} auto_subfields={} {:?}",
                 options.auto_subfields, options.text_analysis,
             );
@@ -425,6 +429,51 @@ fn a_text_map_key_gets_the_text_analyzer_and_subfields() {
         key["fields"]["keyword_lowercase"]["normalizer"],
         LOWERCASE_NORMALIZER
     );
+}
+
+#[test]
+fn a_keyword_map_key_gets_an_exact_keyword_subfield() {
+    for ty in [FlussoType::Keyword, FlussoType::Enum, FlussoType::Uuid] {
+        let body = build_index_body(&[map_field("codes", &ty)], &opts());
+        let key = &body["mappings"]["dynamic_templates"][0]["flusso_map:codes"]["mapping"];
+        assert_eq!(key["type"], "keyword", "{ty:?}");
+        assert_eq!(
+            key["fields"]["keyword"],
+            json!({ "type": "keyword" }),
+            "{ty:?}"
+        );
+        assert_eq!(key["fields"]["text"]["type"], "text", "{ty:?}");
+        assert_eq!(
+            key["fields"]["keyword_lowercase"]["normalizer"],
+            LOWERCASE_NORMALIZER
+        );
+    }
+}
+
+#[test]
+fn only_a_keyword_map_with_subfields_gets_the_exact_subfield() {
+    let mut no_subfields = map_field("codes", &FlussoType::Keyword);
+    no_subfields.mapping.map_values.as_mut().unwrap().subfields = false;
+    let off = IndexOptions {
+        auto_subfields: false,
+        ..opts()
+    };
+    let bodies = [
+        build_index_body(&[no_subfields], &opts()),
+        build_index_body(&[map_field("codes", &FlussoType::Keyword)], &off),
+    ];
+    for body in bodies {
+        let key = &body["mappings"]["dynamic_templates"][0]["flusso_map:codes"]["mapping"];
+        assert_eq!(key, &json!({ "type": "keyword" }));
+    }
+}
+
+#[test]
+fn a_plain_keyword_field_gets_no_exact_subfield() {
+    let body = build_index_body(&[field("code", MappingType::Keyword, vec![])], &opts());
+    let fields = &body["mappings"]["properties"]["code"]["fields"];
+    assert!(fields.get("keyword").is_none());
+    assert!(fields.get("keyword_lowercase").is_some());
 }
 
 #[test]

@@ -39,7 +39,9 @@ Per index, an `[[index]]` entry's `[index.sinks.<name>]` table takes `index_sett
   generation.
 - **Mapping.** Field types come from the schema, created `dynamic: strict`. A
   `map` field's runtime keys are mapped like a plain field of its `values` type
-  through one `dynamic_templates` entry per map.
+  through one `dynamic_templates` entry per map. A keyword key also gets an
+  exact `keyword` subfield, so a query across keys can target the exact values
+  alone (`labels.*.keyword`).
 - **Subfields.** Each `text`/`keyword` field gets `keyword` (exact),
   `keyword_lowercase` (sortable), and `text` (searchable) subfields, unless the
   field says `subfields: false`.

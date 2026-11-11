@@ -1,4 +1,5 @@
-//! Compile-fail snapshot tests for the derive's error messages (bon-style).
+//! Compile-fail snapshot tests for the derive's error messages (bon-style),
+//! plus `tests/ui_pass/`: surfaces that must compile against the fixture.
 //!
 //! trybuild compiles each `tests/ui/*.rs` in a temp dir, so we point the derive
 //! at the fixture config via `FLUSSO_CONFIG` (absolute) rather than a relative
@@ -17,4 +18,5 @@ fn ui() {
     }
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/*.rs");
+    t.pass("tests/ui_pass/*.rs");
 }

@@ -14,7 +14,7 @@
 //! `_source`, and nothing under it is mapped — no properties, no enum-sort
 //! analysis, no map templates.
 
-use kernel::{MappingType, ResolvedField};
+use kernel::{Mapping, MappingType, ResolvedField};
 
 use crate::config::TextAnalysis;
 use crate::settings::IndexSettings;
@@ -127,10 +127,14 @@ fn collect_map_templates(
                 array: false,
                 children: Vec::new(),
             };
+            let mut mapping = build_property(&key, options, &path);
+            if options.auto_subfields && values.subfields {
+                add_exact_key_subfield(&mut mapping, values);
+            }
             out.push(json!({
                 format!("{MAP_TEMPLATE_PREFIX}{path}"): {
                     "path_match": format!("{path}.*"),
-                    "mapping": build_property(&key, options, &path),
+                    "mapping": mapping,
                 },
             }));
         }
@@ -353,6 +357,21 @@ fn build_property(field: &ResolvedField, options: &IndexOptions, path: &str) -> 
         );
     }
     Value::Object(prop)
+}
+
+/// Give each key of a keyword map with subfields an exact `.keyword` subfield.
+///
+/// A cross-key query names its fields by a pattern, and `path.*` also reaches
+/// each key's `.text` and `.keyword_lowercase`. `path.*.keyword` reaches the
+/// exact values and nothing else, so the exact operators run there. A plain
+/// keyword field needs no such subfield: its own path is exact.
+fn add_exact_key_subfield(mapping: &mut Value, values: &Mapping) {
+    if !matches!(values.mapping_type, MappingType::Keyword) {
+        return;
+    }
+    if let Some(fields) = mapping.get_mut("fields").and_then(Value::as_object_mut) {
+        fields.insert(KEYWORD_SUBFIELD.to_owned(), json!({ "type": "keyword" }));
+    }
 }
 
 /// The case/accent-insensitive `keyword_lowercase` subfield, shared by the

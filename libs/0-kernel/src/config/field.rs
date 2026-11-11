@@ -95,7 +95,10 @@ pub(crate) fn is_enabled(flag: &bool) -> bool {
 /// Bumped when the index a `map` column produces changes shape, so every
 /// schema with a map gets a new content hash (a new physical index, rebuilt
 /// once) while no other schema moves. `1`: keys mapped as their `values` type.
-const MAP_KEY_MAPPING_REVISION: u8 = 1;
+/// `2`: a keyword key also gets an exact `.keyword` subfield. Both land in
+/// 0.17.0, so a 0.16 map schema still moves once; `2` moves a main-tip index
+/// built under `1`, which lacks the subfield.
+const MAP_KEY_MAPPING_REVISION: u8 = 2;
 
 /// Hashes the fields in declaration order (exactly what the derive did), plus
 /// `MAP_KEY_MAPPING_REVISION` for a `map` column only. `subfields` and `indexed`

@@ -15,11 +15,12 @@
 //! And the cross-key surface (issue #186): every mirrored operator family on
 //! every map kind returns exactly the documents an `or` of the same operator on
 //! each key returns, `only_preferred` narrows to the preferred keys, and a
-//! cross-key query lifts into a `nested` scope. A keyword map with subfields
-//! shows why it has no cross-key `eq`: `path.*` also reaches each key's `.text`
-//! and `.keyword_lowercase`. Adversarial values (operator words, backslash
-//! escapes, quotes, a leading `-`, the empty string) agree with the per-key
-//! `or` too, and `only_preferred` with no preferred key matches nothing.
+//! cross-key query lifts into a `nested` scope. On a keyword map with subfields
+//! the exact family runs over each key's exact `.keyword` subfield (issue #191):
+//! `path.*` would also reach each key's `.text` and `.keyword_lowercase`.
+//! Adversarial values (operator words, backslash escapes, quotes, a leading
+//! `-`, the empty string) agree with the per-key `or` too, with and without
+//! subfields, and `only_preferred` with no preferred key matches nothing.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -554,8 +555,8 @@ async fn map_cross_key_queries_match_the_per_key_or() {
         .await,
         ["1", "2", "3"]
     );
-    // Why a keyword map with subfields has no cross-key `eq`: `codes.*` also
-    // reaches every key's `.text` and `.keyword_lowercase`.
+    // Why the exact family skips `codes.*`: it also reaches every key's
+    // `.text` and `.keyword_lowercase`.
     assert_eq!(
         ids_in::<Catalog>(
             &client,
@@ -566,8 +567,77 @@ async fn map_cross_key_queries_match_the_per_key_or() {
         ["1", "2", "3"]
     );
     assert_eq!(
-        ids_in::<Catalog>(&client, per_key(&c, |k| codes.key(k).eq("sale"))).await,
+        agree::<Catalog>(
+            &client,
+            codes.eq("sale"),
+            per_key(&c, |k| codes.key(k).eq("sale"))
+        )
+        .await,
         ["1"]
+    );
+    assert_eq!(
+        agree::<Catalog>(
+            &client,
+            codes.any_of(["Sale", "big sale now"]),
+            per_key(&c, |k| codes.key(k).any_of(["Sale", "big sale now"]))
+        )
+        .await,
+        ["2", "3"]
+    );
+    assert_eq!(
+        agree::<Catalog>(
+            &client,
+            codes.prefix("foo b"),
+            per_key(&c, |k| codes.key(k).prefix("foo b"))
+        )
+        .await,
+        ["2"]
+    );
+    assert_eq!(
+        agree::<Catalog>(
+            &client,
+            codes.wildcard("?ale"),
+            per_key(&c, |k| codes.key(k).wildcard("?ale"))
+        )
+        .await,
+        ["1", "3"]
+    );
+    assert_eq!(
+        agree::<Catalog>(
+            &client,
+            codes.regexp("[Ff]oo.*"),
+            per_key(&c, |k| codes.key(k).regexp("[Ff]oo.*"))
+        )
+        .await,
+        ["1", "2"]
+    );
+    assert_eq!(
+        agree::<Catalog>(
+            &client,
+            codes.fuzzy("Sald").fuzziness(Fuzziness::Edits(1)),
+            per_key(&c, |k| codes
+                .key(k)
+                .fuzzy("Sald")
+                .fuzziness(Fuzziness::Edits(1)))
+        )
+        .await,
+        ["3"]
+    );
+    assert_eq!(
+        ids_in::<Catalog>(
+            &client,
+            codes.eq("sale").prefer("sku", 2.0).only_preferred()
+        )
+        .await,
+        ["1"]
+    );
+    assert_eq!(
+        ids_in::<Catalog>(
+            &client,
+            codes.eq("sale").prefer("ean", 2.0).only_preferred()
+        )
+        .await,
+        Vec::<String>::new()
     );
 
     let tags = KeywordMap::<Root, NoSubfields>::leaf("tags");
@@ -808,6 +878,97 @@ impl FlussoRoot for Tricky {
     const SCHEMA_HASH: &'static str = "00001861";
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct TrickySubfields {}
+impl FlussoScope for TrickySubfields {
+    const PATH: &'static [Segment] = &[];
+}
+impl FlussoRoot for TrickySubfields {
+    const INDEX: &'static str = "tricky_subfields";
+    const SCHEMA_HASH: &'static str = "00001910";
+}
+
+/// Every exact operator of `$tags` agrees with its per-key `or` on the
+/// adversarial values, and the operator words, escapes and empty value land
+/// where the per-key queries put them.
+macro_rules! adversarial_exact_family {
+    ($R:ty, $client:expr, $tags:expr, $values:expr) => {{
+        let k = ["a", "b", "c"];
+        for value in $values {
+            let found = agree::<$R>(
+                $client,
+                $tags.eq(value),
+                per_key(&k, |key| $tags.key(key).eq(value)),
+            )
+            .await;
+            assert!(!found.is_empty(), "eq {value:?} finds its document");
+            agree::<$R>(
+                $client,
+                $tags.prefix(value),
+                per_key(&k, |key| $tags.key(key).prefix(value)),
+            )
+            .await;
+            agree::<$R>(
+                $client,
+                $tags.fuzzy(value),
+                per_key(&k, |key| $tags.key(key).fuzzy(value)),
+            )
+            .await;
+        }
+        for pattern in [
+            "AND", "OR", "NOT", "and", "&&", "||", "!", "a\\ b", "a\\-b", "a\\", "a\\\\", "a b",
+            "\"q\"", "-lead", "N?T", "AND*", "",
+        ] {
+            agree::<$R>(
+                $client,
+                $tags.wildcard(pattern),
+                per_key(&k, |key| $tags.key(key).wildcard(pattern)),
+            )
+            .await;
+        }
+        for pattern in ["AND", "N.T", "a.b", "a\\\\", "-lead", "", "x/.*"] {
+            agree::<$R>(
+                $client,
+                $tags.regexp(pattern),
+                per_key(&k, |key| $tags.key(key).regexp(pattern)),
+            )
+            .await;
+        }
+        assert_eq!(
+            agree::<$R>(
+                $client,
+                $tags.wildcard("a\\ b"),
+                per_key(&k, |key| $tags.key(key).wildcard("a\\ b"))
+            )
+            .await,
+            ["9"]
+        );
+        assert_eq!(
+            agree::<$R>(
+                $client,
+                $tags.wildcard("a\\"),
+                per_key(&k, |key| $tags.key(key).wildcard("a\\"))
+            )
+            .await,
+            ["11"]
+        );
+        assert_eq!(
+            agree::<$R>(
+                $client,
+                $tags.any_of(["AND", "OR", "NOT"]),
+                per_key(&k, |key| $tags.key(key).any_of(["AND", "OR", "NOT"]))
+            )
+            .await,
+            ["0", "1", "2"]
+        );
+        assert!(!ids_in::<$R>($client, $tags.eq("filler")).await.is_empty());
+        assert_eq!(
+            ids_in::<$R>($client, $tags.eq("filler").only_preferred()).await,
+            Vec::<String>::new()
+        );
+    }};
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn map_cross_key_adversarial_values_match_the_per_key_or() {
@@ -838,77 +999,25 @@ async fn map_cross_key_adversarial_values_match_the_per_key_or() {
         .map(|(id, doc)| (id.as_str(), doc.clone()))
         .collect();
     seed_many(&bare_sink(&base), &tricky, &docs).await;
+    let tricky_subfields = IndexMapping {
+        index: IndexName::try_new(TrickySubfields::INDEX).unwrap(),
+        hash: ContentHash::new(0x1910),
+        ..tricky
+    };
+    seed_many(&sink(&base), &tricky_subfields, &docs).await;
     refresh(&base, &Tricky::physical_index()).await;
+    refresh(&base, &TrickySubfields::physical_index()).await;
     let client = Client::connect(&base).unwrap();
-
-    let tags = KeywordMap::<Root, NoSubfields>::leaf("tags");
-    let k = ["a", "b", "c"];
-    for value in values {
-        let found = agree::<Tricky>(
-            &client,
-            tags.eq(value),
-            per_key(&k, |key| tags.key(key).eq(value)),
-        )
-        .await;
-        assert!(!found.is_empty(), "eq {value:?} finds its document");
-        agree::<Tricky>(
-            &client,
-            tags.prefix(value),
-            per_key(&k, |key| tags.key(key).prefix(value)),
-        )
-        .await;
-        agree::<Tricky>(
-            &client,
-            tags.fuzzy(value),
-            per_key(&k, |key| tags.key(key).fuzzy(value)),
-        )
-        .await;
-    }
-    for pattern in [
-        "AND", "OR", "NOT", "and", "&&", "||", "!", "a\\ b", "a\\-b", "a\\", "a\\\\", "a b",
-        "\"q\"", "-lead", "N?T", "AND*", "",
-    ] {
-        agree::<Tricky>(
-            &client,
-            tags.wildcard(pattern),
-            per_key(&k, |key| tags.key(key).wildcard(pattern)),
-        )
-        .await;
-    }
-    assert_eq!(
-        agree::<Tricky>(
-            &client,
-            tags.wildcard("a\\ b"),
-            per_key(&k, |key| tags.key(key).wildcard("a\\ b"))
-        )
-        .await,
-        ["9"]
+    adversarial_exact_family!(
+        Tricky,
+        &client,
+        KeywordMap::<Root, NoSubfields>::leaf("tags"),
+        values
     );
-    assert_eq!(
-        agree::<Tricky>(
-            &client,
-            tags.wildcard("a\\"),
-            per_key(&k, |key| tags.key(key).wildcard("a\\"))
-        )
-        .await,
-        ["11"]
-    );
-    assert_eq!(
-        agree::<Tricky>(
-            &client,
-            tags.any_of(["AND", "OR", "NOT"]),
-            per_key(&k, |key| tags.key(key).any_of(["AND", "OR", "NOT"]))
-        )
-        .await,
-        ["0", "1", "2"]
-    );
-    assert!(
-        !ids_in::<Tricky>(&client, tags.eq("filler"))
-            .await
-            .is_empty()
-    );
-    assert_eq!(
-        ids_in::<Tricky>(&client, tags.eq("filler").only_preferred()).await,
-        Vec::<String>::new()
+    adversarial_exact_family!(
+        TrickySubfields,
+        &client,
+        KeywordMap::<Root>::at("tags"),
+        values
     );
 }

@@ -47,12 +47,12 @@
 //! that subfield of every key (`path.*.keyword_lowercase`).
 //!
 //! The exact operators (`eq`, `any_of`, `prefix`, `wildcard`, `regexp`,
-//! `fuzzy`) exist on a [`KeywordMap`] **without** subfields only. With them,
-//! the pattern `path.*` also matches each key's analyzed `.text` and folded
-//! `.keyword_lowercase` subfields, so `eq("sale")` would match "big sale" or
-//! "Sale". A field pattern can't exclude them, so the operator is absent
-//! rather than wrong. Use `keyword_lowercase().eq(..)` (case-insensitive,
-//! every key) or `key(k).eq(..)` (exact, one key).
+//! `fuzzy`) on a [`KeywordMap`] render over `path.*` without subfields. With
+//! them, `path.*` would also reach each key's analyzed `.text` and folded
+//! `.keyword_lowercase`, so `eq("sale")` would match "big sale" or "Sale".
+//! The sink gives every key of such a map an exact `.keyword` subfield, and
+//! the operators render over `path.*.keyword` instead: the same exact match,
+//! under the same names. [`KeywordMap::keyword`] is that view.
 //!
 //! ```
 //! use flusso_query::{AsQuery, KeywordMap, NumberMap, Root, TextMap, kind};
@@ -77,6 +77,10 @@
 //! let q = NumberMap::<kind::Double, Root>::at("prices").between(10, 50).to_value();
 //! assert_eq!(q["query_string"]["query"], json!(r#"["10" TO "50"]"#));
 //!
+//! // Exact value, in any key.
+//! let q = KeywordMap::<Root>::at("tags").eq("sale").to_value();
+//! assert_eq!(q["query_string"]["fields"], json!(["tags.*.keyword"]));
+//!
 //! // Case-insensitive exact value, in any key.
 //! let q = KeywordMap::<Root>::at("tags").keyword_lowercase().eq("sale").to_value();
 //! assert_eq!(q["query_string"]["fields"], json!(["tags.*.keyword_lowercase"]));
@@ -96,7 +100,8 @@ use super::{
 };
 use crate::query::{AsQuery, Query, Root};
 
-/// The suffix of the exact `.keyword` subfield a `text` key carries.
+/// The suffix of the exact `.keyword` subfield a `text` key, and a `keyword`
+/// key with subfields, carries.
 const KEYWORD_SUFFIX: &str = ".keyword";
 /// The suffix of the analyzed `.text` subfield a `keyword` key carries.
 const TEXT_SUFFIX: &str = ".text";
@@ -805,12 +810,12 @@ string_map_handle!(
 string_map_handle!(
     /// A dynamic-key object whose values are exact strings (`map` with a
     /// `keyword`/`enum`/`uuid` value kind). [`key`](Self::key) yields a
-    /// [`Keyword`] leaf. Without subfields the exact operators (`eq`,
-    /// `any_of`, `prefix`, `wildcard`, `regexp`, `fuzzy`) run across every
-    /// key; with them, use a subfield view ([`text`](Self::text),
-    /// [`keyword_lowercase`](Self::keyword_lowercase)) or
-    /// [`contains`](Self::contains). [`sort_key`](Self::sort_key) orders by a
-    /// key, with `.or(..)` fallback.
+    /// [`Keyword`] leaf. The exact operators (`eq`, `any_of`, `prefix`,
+    /// `wildcard`, `regexp`, `fuzzy`) run across every key, over each key's
+    /// exact `.keyword` subfield when it has subfields. The subfield views
+    /// ([`text`](Self::text), [`keyword_lowercase`](Self::keyword_lowercase))
+    /// and [`contains`](Self::contains) need subfields.
+    /// [`sort_key`](Self::sort_key) orders by a key, with `.or(..)` fallback.
     KeywordMap
 );
 
@@ -903,6 +908,65 @@ impl<S> KeywordMap<S, WithSubfields> {
     /// across keys (`text().matches(..)`).
     pub fn text(&self) -> TextMap<S, NoSubfields> {
         TextMap::handle(self.keys.view(TEXT_SUFFIX))
+    }
+
+    /// The exact `.keyword` subfield of every key, as a keyword map without
+    /// subfields. The exact operators below run on it; `path.*` itself would
+    /// also reach each key's `.text` and `.keyword_lowercase`.
+    pub fn keyword(&self) -> KeywordMap<S, NoSubfields> {
+        KeywordMap::handle(self.keys.view(KEYWORD_SUFFIX))
+    }
+
+    /// Some key equals `value` exactly. Accepts a `String`/`&str` or a
+    /// `#[derive(FlussoValue)]` keyword type, matched by its serde string.
+    ///
+    /// ```
+    /// use flusso_query::{AsQuery, KeywordMap, Root};
+    /// use serde_json::json;
+    ///
+    /// let q = KeywordMap::<Root>::at("codes").eq("0049").prefer("ean", 2.0);
+    /// assert_eq!(
+    ///     q.to_value(),
+    ///     json!({ "query_string": {
+    ///         "query": r#""0049""#,
+    ///         "fields": ["codes.ean.keyword^2", "codes.*.keyword"]
+    ///     } })
+    /// );
+    /// ```
+    pub fn eq(&self, value: impl FlussoValue<kind::Keyword>) -> MapTerm<S> {
+        self.keyword().eq(value)
+    }
+
+    /// Some key equals any of `values` exactly.
+    pub fn any_of(
+        &self,
+        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword>>,
+    ) -> MapTerm<S> {
+        self.keyword().any_of(values)
+    }
+
+    /// Some key starts with `value`.
+    pub fn prefix(&self, value: impl Into<String>) -> MapPrefix<S> {
+        self.keyword().prefix(value)
+    }
+
+    /// Some key matches the wildcard `pattern`: `?` matches one character,
+    /// `*` matches any run, and `\` escapes the next character. An empty
+    /// pattern matches nothing, as on one key.
+    pub fn wildcard(&self, pattern: impl Into<String>) -> MapWildcard<S> {
+        self.keyword().wildcard(pattern)
+    }
+
+    /// Some key matches the regular expression `pattern` (Lucene syntax,
+    /// anchored to the whole value).
+    pub fn regexp(&self, pattern: impl Into<String>) -> MapRegexp<S> {
+        self.keyword().regexp(pattern)
+    }
+
+    /// Some key is within the default `AUTO` edit distance of `value`. An
+    /// empty value matches only the empty value, as `AUTO` does on one key.
+    pub fn fuzzy(&self, value: impl Into<String>) -> MapFuzzy<S> {
+        self.keyword().fuzzy(value)
     }
 
     /// Sort by this key, with optional fallback (`sort_key("a").or("b")`),
