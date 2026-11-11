@@ -7,9 +7,10 @@
 //! instances, resolving connection URLs and credentials in the running
 //! environment. The daemon and the engines never see an adapter's name.
 
+use std::io::Write;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use config::Config;
 use daemon::{Backends, DaemonOptions, SinkParts, SourceParts};
@@ -19,7 +20,7 @@ use sink_opensearch::{IndexSettings, OpensearchSink};
 use sink_stdout::{StdoutConfig, StdoutSink};
 use source::cdc::ChangeCapture;
 use source::document::DocumentBuilder;
-use source::{CaptureProvisioning, SourceSpec};
+use source::{CaptureProvisioning, Catalog, Diagnostic, Severity, SourceSpec};
 use source_postgres::{
     PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
 };
@@ -29,6 +30,7 @@ use stream_channel::ChannelStream;
 use script::{ScriptedBuilder, Scripts};
 
 use crate::adapters::{self, IndexSinkConfig, SinkConfig};
+use crate::commands::print;
 
 /// The one [`Backends`] implementation: the composition root's choice of
 /// concrete adapters, looked up by each port entry's `type`.
@@ -121,10 +123,50 @@ async fn build_documents(
 ) -> anyhow::Result<Arc<dyn DocumentBuilder>> {
     let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
-    let builder = PgDocumentBuilder::connect(connection_url, spec)
+    let builder = PgDocumentBuilder::connect(connection_url, Arc::clone(&spec))
         .await
         .context("connecting to Postgres")?;
+    validate_at_start(&spec, &builder).await?;
     Ok(ScriptedBuilder::wrap(Arc::new(builder), scripts))
+}
+
+/// Check the schemas against the database once, before anything is staged,
+/// as `flusso check` does: print the diagnostics to stderr and refuse to start
+/// on an error. Runs on the document builder's own connection, so an
+/// unreachable database fails exactly as the connect above does.
+async fn validate_at_start(spec: &SourceSpec, catalog: &dyn Catalog) -> anyhow::Result<()> {
+    let diagnostics = source::validate_indexes(spec, catalog)
+        .await
+        .context("validating the schemas against the database")?;
+    start_verdict(
+        &mut std::io::stderr().lock(),
+        print::Pen::detect_stderr(),
+        &diagnostics,
+    )
+}
+
+/// Print `diagnostics` (nothing when there are none) and fail when any is an
+/// error. Warnings never stop a start.
+fn start_verdict(
+    out: &mut impl Write,
+    pen: print::Pen,
+    diagnostics: &[Diagnostic],
+) -> anyhow::Result<()> {
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    print::diagnostics(out, pen, diagnostics)?;
+    writeln!(out)?;
+    let errors = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    ensure!(
+        errors == 0,
+        "the schemas disagree with the database ({errors} error(s) above); \
+         fix them, confirm with `flusso check`, then start again"
+    );
+    Ok(())
 }
 
 /// Compile every script field of the enabled indexes, reporting all that fail.
@@ -240,6 +282,48 @@ mod tests {
             );
         }
         config
+    }
+
+    fn diagnostic(severity: Severity) -> Diagnostic {
+        let field = kernel::FieldName::try_new("title").unwrap();
+        Diagnostic {
+            index: IndexName::try_new("products").unwrap(),
+            path: vec![field.clone()],
+            field,
+            severity,
+            message: "references unknown column `public.products.title`".to_owned(),
+        }
+    }
+
+    fn verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let result = start_verdict(&mut out, print::Pen::detect_stderr(), diagnostics);
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn a_clean_validation_starts_and_prints_nothing() {
+        let (result, printed) = verdict(&[]);
+        assert!(result.is_ok());
+        assert_eq!(printed, "");
+    }
+
+    #[test]
+    fn warnings_are_printed_and_the_start_goes_on() {
+        let (result, printed) = verdict(&[diagnostic(Severity::Warning)]);
+        assert!(result.is_ok());
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(printed.contains("products.title"), "{printed}");
+    }
+
+    #[test]
+    fn an_error_is_printed_and_refuses_the_start() {
+        let (result, printed) =
+            verdict(&[diagnostic(Severity::Warning), diagnostic(Severity::Error)]);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("1 error(s)"), "{error}");
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("[warning]"), "{printed}");
     }
 
     #[test]

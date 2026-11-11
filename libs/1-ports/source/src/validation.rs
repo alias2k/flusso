@@ -16,6 +16,14 @@
 //! `order_by` column, and a join's `primary_key`. A missing table is reported
 //! once per relation, and the columns on it are not looked up.
 //!
+//! The root's own keys are checked on the root table: the columns its
+//! `filters` name, and the `soft_delete` marker — its `column` (or the column
+//! behind its `field`) and its `when` filters. A diagnostic on one of these is
+//! anchored at the key's name (`filters`, `soft_delete`) instead of a field.
+//! One check needs no database at all: a `soft_delete` `field` that names no
+//! column field, which [`validate_spec`] reports on its own (`flusso check
+//! --offline`) and [`validate_indexes`] reports with the rest.
+//!
 //! The one store-specific piece is the [`Catalog`] trait: how a store reports a
 //! table and a column. Everything else — the field walk, which table each name
 //! lives on — is shared here.
@@ -71,9 +79,10 @@ use async_trait::async_trait;
 use kernel::common::{ColumnName, FieldName, IndexName};
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnPair, DatabaseSchema, Field, FieldSource,
-    Filter, FlussoType, Geo, Join, JoinKind, Relation, TableName, Through,
+    Filter, FlussoType, Geo, IndexSchema, Join, JoinKind, Relation, SoftDelete, TableName, Through,
 };
 
+use crate::spec::first_named;
 use crate::{Result, SourceError, SourceSpec};
 
 /// How a store reports one base-table column: its native type name (as the
@@ -123,6 +132,8 @@ pub struct Diagnostic {
     /// The field the disagreement is on: the last segment of [`path`](Self::path).
     pub field: FieldName,
     /// The field's path from the document root, e.g. `orders`, `items`, `sku`.
+    /// A disagreement on an index-level key is anchored at that key alone:
+    /// `filters` or `soft_delete`.
     pub path: Vec<FieldName>,
     pub severity: Severity,
     pub message: String,
@@ -156,8 +167,59 @@ pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Resul
         checker
             .fields(&schema.table, &schema.fields, schema.primary_key.as_ref())
             .await?;
+        checker.root(schema).await?;
     }
     Ok(diagnostics)
+}
+
+/// The checks that need no database: a `soft_delete` `field` that names no
+/// field, or whose first field of that name is not a column. Such a marker
+/// reads nothing, so soft-deleted rows would stay indexed. [`validate_indexes`]
+/// reports these too.
+pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for (name, schema) in spec.indexes() {
+        let Some(message) = marker_field_problem(schema) else {
+            continue;
+        };
+        let Some(key) = schema_key(SOFT_DELETE) else {
+            continue;
+        };
+        diagnostics.push(Diagnostic {
+            index: name.clone(),
+            field: key.clone(),
+            path: vec![key],
+            severity: Severity::Error,
+            message,
+        });
+    }
+    diagnostics
+}
+
+const FILTERS: &str = "filters";
+const SOFT_DELETE: &str = "soft_delete";
+
+/// An index-level schema key as a diagnostic's anchor. Both keys are valid
+/// field names, so this is never `None`.
+fn schema_key(key: &str) -> Option<FieldName> {
+    FieldName::try_new(key).ok()
+}
+
+/// Why a `soft_delete` `field` reads no column, when it doesn't.
+fn marker_field_problem(schema: &IndexSchema) -> Option<String> {
+    let Some(SoftDelete::Field(marker)) = &schema.soft_delete else {
+        return None;
+    };
+    let name = &marker.field;
+    match first_named(&schema.fields, name) {
+        None => Some(format!(
+            "`field` names `{name}`, but no field has that name"
+        )),
+        Some((field, _)) if field.column().is_none() => Some(format!(
+            "`field` names `{name}`, but the first field of that name is not a column"
+        )),
+        Some(_) => None,
+    }
 }
 
 /// One index's walk: where it is (`path`), what it has found (`out`), and the
@@ -197,6 +259,46 @@ impl Checker<'_> {
             severity,
             message,
         });
+    }
+
+    /// The root's own keys, on the root table: the `filters` columns, then the
+    /// `soft_delete` marker's column and `when` columns.
+    async fn root(&mut self, schema: &IndexSchema) -> Result<()> {
+        if let Some(key) = schema_key(FILTERS) {
+            self.path.push(key);
+            self.filters(&schema.table, schema.filters.as_deref(), FILTERS)
+                .await?;
+            self.path.pop();
+        }
+        let Some(marker) = &schema.soft_delete else {
+            return Ok(());
+        };
+        let Some(key) = schema_key(SOFT_DELETE) else {
+            return Ok(());
+        };
+        self.path.push(key);
+        let when = match marker {
+            SoftDelete::Column(marker) => {
+                self.exists(&schema.table, &marker.column, "column").await?;
+                marker.when.as_deref()
+            }
+            SoftDelete::Field(marker) => {
+                if let Some(message) = marker_field_problem(schema) {
+                    self.report(Severity::Error, message);
+                }
+                // A root-level field's column was checked with the field. One
+                // found inside a relation is still read on the root row.
+                if let Some((field, true)) = first_named(&schema.fields, &marker.field)
+                    && let Some(column) = field.column()
+                {
+                    self.exists(&schema.table, column, "field").await?;
+                }
+                marker.when.as_deref()
+            }
+        };
+        self.filters(&schema.table, when, "when").await?;
+        self.path.pop();
+        Ok(())
     }
 
     /// Validate a list of fields under `table`. Boxed because the recursion is
@@ -740,20 +842,30 @@ mod tests {
 
     /// `(path, message)` for every diagnostic of a `users` index with `fields`.
     fn shop_problems(fields: serde_json::Value) -> Vec<(String, String)> {
-        let schema: IndexSchema = serde_json::from_value(json!({
+        root_problems(json!({ "fields": fields }))
+    }
+
+    /// A `users` index: `id` and `name`, plus the index-level `keys`.
+    fn users_spec(keys: serde_json::Value) -> SourceSpec {
+        let mut schema = json!({
             "version": 1,
             "table": "users",
             "db_schema": "public",
             "primary_key": "id",
-            "fields": fields,
-        }))
-        .unwrap();
-        let spec = SourceSpec::new(BTreeMap::from([(
+            "fields": [int_field("id"), int_field("name")],
+        });
+        for (key, value) in keys.as_object().unwrap() {
+            schema[key] = value.clone();
+        }
+        let schema: IndexSchema = serde_json::from_value(schema).unwrap();
+        SourceSpec::new(BTreeMap::from([(
             IndexName::try_new("users").unwrap(),
             schema,
-        )]));
-        futures::executor::block_on(validate_indexes(&spec, &Shop))
-            .unwrap()
+        )]))
+    }
+
+    fn located(diagnostics: Vec<Diagnostic>) -> Vec<(String, String)> {
+        diagnostics
             .into_iter()
             .map(|d| {
                 assert_eq!(d.severity, Severity::Error);
@@ -761,6 +873,11 @@ mod tests {
                 (d.dotted_path(), d.message)
             })
             .collect()
+    }
+
+    /// `(path, message)` for every diagnostic of a `users` index with `keys`.
+    fn root_problems(keys: serde_json::Value) -> Vec<(String, String)> {
+        located(futures::executor::block_on(validate_indexes(&users_spec(keys), &Shop)).unwrap())
     }
 
     fn problems(expected: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -982,6 +1099,157 @@ mod tests {
                     "`through.right_key` references unknown column `public.user_tags.tagid`"
                 ),
             ]),
+        );
+    }
+
+    #[test]
+    fn root_filters_are_checked_on_the_root_table() {
+        assert_eq!(
+            root_problems(json!({
+                "filters": [value_filter("nme"), null_filter("team"), { "raw": { "raw": "nope" } }],
+            })),
+            problems(&[
+                (
+                    "filters",
+                    "`filters` references unknown column `public.users.nme`"
+                ),
+                (
+                    "filters",
+                    "`filters` references unknown column `public.users.team`"
+                ),
+            ]),
+        );
+        assert_eq!(
+            root_problems(json!({ "filters": [value_filter("name"), null_filter("team_id")] })),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_soft_delete_column_and_its_when_are_checked_on_the_root_table() {
+        assert_eq!(
+            root_problems(json!({ "soft_delete": { "column": {
+                "column": "deleted_at",
+                "when": [value_filter("stat"), null_filter("team")],
+            } } })),
+            problems(&[
+                (
+                    "soft_delete",
+                    "`column` references unknown column `public.users.deleted_at`"
+                ),
+                (
+                    "soft_delete",
+                    "`when` references unknown column `public.users.stat`"
+                ),
+                (
+                    "soft_delete",
+                    "`when` references unknown column `public.users.team`"
+                ),
+            ]),
+        );
+        assert_eq!(
+            root_problems(json!({ "soft_delete": { "column": {
+                "column": "team_id", "when": [null_filter("name")],
+            } } })),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_soft_delete_field_must_name_a_column_field() {
+        assert_eq!(
+            root_problems(json!({ "soft_delete": { "field": {
+                "field": "deleted", "when": [value_filter("nme")],
+            } } })),
+            problems(&[
+                (
+                    "soft_delete",
+                    "`field` names `deleted`, but no field has that name"
+                ),
+                (
+                    "soft_delete",
+                    "`when` references unknown column `public.users.nme`"
+                ),
+            ]),
+        );
+        assert_eq!(
+            root_problems(json!({ "soft_delete": { "field": { "field": "name" } } })),
+            Vec::new()
+        );
+    }
+
+    /// The search is depth-first: a join named like the marker, declared before
+    /// a column field of that name, is the match, and it is not a column.
+    #[test]
+    fn a_soft_delete_field_whose_first_match_is_a_join_is_an_error() {
+        let team = json!({ "field": "team", "source": { "relation": { "join": {
+            "table": "teams", "kind": { "belongs_to": { "column": "team_id" } },
+            "primary_key": "id", "nullable": true, "fields": [int_field("name")],
+        } } } });
+        assert_eq!(
+            root_problems(json!({
+                "fields": [team, int_field("team")],
+                "soft_delete": { "field": { "field": "team" } },
+            })),
+            problems(&[
+                ("team", "references unknown column `public.users.team`"),
+                (
+                    "soft_delete",
+                    "`field` names `team`, but the first field of that name is not a column"
+                ),
+            ]),
+        );
+    }
+
+    /// A field found inside a relation is read on the root row, so its column
+    /// must exist there.
+    #[test]
+    fn a_soft_delete_field_inside_a_relation_is_checked_on_the_root_table() {
+        let orders = |field: &str| {
+            json!({ "field": "orders", "source": { "relation": { "join": {
+                "table": "orders", "kind": { "has_many": { "foreign_key": "user_id" } },
+                "primary_key": "id", "fields": [int_field(field)],
+            } } } })
+        };
+        assert_eq!(
+            root_problems(json!({
+                "fields": [orders("status")],
+                "soft_delete": { "field": { "field": "status" } },
+            })),
+            problems(&[(
+                "soft_delete",
+                "`field` references unknown column `public.users.status`"
+            )]),
+        );
+        assert_eq!(
+            root_problems(json!({
+                "fields": [orders("name"), int_field("id")],
+                "soft_delete": { "field": { "field": "name" } },
+            })),
+            problems(&[(
+                "orders.name",
+                "references unknown column `public.orders.name`"
+            )]),
+        );
+    }
+
+    #[test]
+    fn validate_spec_reports_a_dangling_soft_delete_field_with_no_database() {
+        assert_eq!(
+            located(validate_spec(&users_spec(json!({
+                "soft_delete": { "field": { "field": "deleted" } },
+            })))),
+            problems(&[(
+                "soft_delete",
+                "`field` names `deleted`, but no field has that name"
+            )]),
+        );
+        assert!(
+            validate_spec(&users_spec(json!({
+                "filters": [value_filter("nme")],
+                "soft_delete": { "column": { "column": "deleted_at" } },
+            })))
+            .is_empty()
         );
     }
 

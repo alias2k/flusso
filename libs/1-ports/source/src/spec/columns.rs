@@ -325,12 +325,19 @@ pub fn row_link(relation: &Relation) -> Option<(&TableName, &ColumnName)> {
 }
 
 fn field_column<'a>(fields: &'a [Field], name: &FieldName) -> Option<&'a ColumnName> {
+    first_named(fields, name).and_then(|(field, _)| field.column())
+}
+
+/// The first field named `name`, depth-first in declaration order through
+/// groups and joins, and whether it was found inside a relation.
+pub(crate) fn first_named<'a>(fields: &'a [Field], name: &FieldName) -> Option<(&'a Field, bool)> {
     for field in fields {
         if field.field == *name {
-            return field.column();
+            return Some((field, false));
         }
-        if let Some(column) = field_column(field.children(), name) {
-            return Some(column);
+        let in_relation = matches!(field.source, FieldSource::Relation(_));
+        if let Some((found, nested)) = first_named(field.children(), name) {
+            return Some((found, nested || in_relation));
         }
     }
     None

@@ -95,6 +95,8 @@ Any deployment going from 0.16 to 0.17. Step 1 applies to every deployment with 
 
 ## Options and variations
 
+- **A wrong table or column name now stops the start.** 0.17 [validates the schemas against the database](../reference/cli.md#validation-at-start) when `run` starts and exits on an error, where 0.16 started and failed at the first document, retrying forever. Every error `check` reports stops it, including two that 0.16 ran with: a `soft_delete` `field` that reads no column (ignored, so soft-deleted rows stayed indexed) and a declared type the column's type doesn't fit, such as `long` over an `integer` column. Run 0.17's `flusso check` against the database before upgrading and fix every `[error]` it lists.
+
 - **WAL is released sooner.** 0.17 confirms the slot within about 2 seconds of the last sink flush, where 0.16 took 10 to 30 seconds; expect a lower steady [slot lag](../reference/metrics.md). Nothing to configure. See [Capture](../reference/source-postgres.md#capture).
 - **Ad-hoc readers on the convenience alias** (`{prefix}{logical}`, dashboards, `curl`) move to the new generation as soon as 0.17 starts, so they see an empty or partial index until it's seeded. Point them at the old hash alias for the duration if that matters.
 - **Revert `on_error`** to `stop` once the rebuild is done and the quarantined rows are fixed; changing the policy never triggers a reindex.

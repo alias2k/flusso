@@ -55,6 +55,20 @@ soft_delete:
 
 The marker column is read from the current row when the document is rebuilt, so a boolean flag and a `deleted_at` timestamp both work. If the row is deleted outright, the tombstone comes from the WAL delete and needs the table's row identity; see [Source: Postgres](source-postgres.md#server-requirements).
 
+### How the marker is verified
+
+`field` resolves to the first field of that name, depth-first in declaration order, joins included; the column behind it is read on the **root** row, even when the field sits inside a join. The marker and its `when` are checked by [`flusso check`](cli.md#what-the-database-check-verifies) and at every [`flusso run` start](cli.md#validation-at-start), each reported under `soft_delete`:
+
+| Problem | Message | Needs the database |
+| --- | --- | --- |
+| No field has that name | `` `field` names `deleted`, but no field has that name `` | no |
+| The first field of that name is a join, a group, or anything but a column | `` `field` names `team`, but the first field of that name is not a column `` | no |
+| The marker column isn't on the root table | `` `column` references unknown column `public.users.deleted_at` `` | yes |
+| A field found inside a join names a column the root table lacks | `` `field` references unknown column `public.users.status` `` | yes |
+| A value or null-check `when` filter names a column the root table lacks | `` `when` references unknown column `public.users.stat` `` | yes |
+
+All are errors. A `field` that reads no column used to be ignored without a word, marker and `when` both, so soft-deleted rows stayed indexed; now `check` fails on it, `--offline` included, and `run` refuses to start. A `raw` `when` filter is passed to the database unread and isn't checked.
+
 ## Example
 
 ```yaml

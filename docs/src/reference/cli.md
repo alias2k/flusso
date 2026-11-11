@@ -24,7 +24,7 @@ Runs the full load and validation, then writes the whole configuration, every sc
 
 ## run
 
-Like `cargo run`, it compiles first. With a `flusso.toml` present (the default path or `--config`) it recompiles, **rewrites `flusso.lock`** when the bytes changed, and runs that. With no config it loads the existing lock. Connection and credentials resolve here, in the running environment. Then: continuity check, ensure indexes, backfill unseeded ones, follow live changes, serve the two HTTP surfaces until a signal or an error.
+Like `cargo run`, it compiles first. With a `flusso.toml` present (the default path or `--config`) it recompiles, **rewrites `flusso.lock`** when the bytes changed, and runs that. With no config it loads the existing lock. Connection and credentials resolve here, in the running environment. Then: [validate against the database](#validation-at-start), continuity check, ensure indexes, backfill unseeded ones, follow live changes, serve the two HTTP surfaces until a signal or an error.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -49,11 +49,23 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 
 The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-replica-identity`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
 
+### Validation at start
+
+Once connected, and before any index is touched, `run` checks the schemas against the database exactly as [`check`](#what-the-database-check-verifies) does, on every start, `--locked` and lock-only runs included. The diagnostics go to stderr in `check`'s format.
+
+- **An error stops the start.** `run` exits non-zero with `the schemas disagree with the database (N error(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
+- **A warning is printed and the start goes on.**
+- **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
+
+There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
+
 ## check
 
 Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also checks the schemas against the live database, then prints the publication coverage report and the tables whose replica identity isn't `FULL` (see [Replica identity](source-postgres.md#replica-identity)), in two groups: the child tables that miss their parent link, and the tables that only miss the rest of the row. Each says whether `run` will fix it or gives the exact SQL. `check` never mutates the database.
 
-**What the database check verifies.** Every problem of one run is listed together, each naming the index, the field path (`users.orders.items`), and the missing table or column, with the schema key that names it (`` `foreign_key` references unknown column `public.orders.userid` ``).
+### What the database check verifies
+
+Every problem of one run is listed together, each naming the index, the field path (`users.orders.items`), and the missing table or column, with the schema key that names it (`` `foreign_key` references unknown column `public.orders.userid` ``).
 
 - **Fields.** Each column a field reads exists, and its database type is one the declared type accepts. A field declared `required` over a nullable column is a warning.
 - **Geo points.** Both coordinate columns exist and are numeric.
@@ -68,6 +80,9 @@ Loads and validates the config and every schema, validates every port table agai
   - every `order_by` column, and a join's `primary_key`.
 
   A missing table is reported once, and nothing on it is looked up.
+- **Root keys, on the root table.** The columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
+
+Everything above is an error except the `required`-over-nullable warning. `--offline` still reports the one problem that needs no database: a `soft_delete` `field` that reads no column.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -78,7 +93,7 @@ Loads and validates the config and every schema, validates every port table agai
 | `--manage-replica-identity <bool>` | config, else `true` | Affects the replica-identity report's phrasing only. |
 | `--format <human\|json>` | `human` | `json` prints one machine-readable document. |
 
-Exit status is non-zero when validation fails or the schema disagrees with the database.
+Exit status is non-zero when validation fails or any diagnostic is an error. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`.
 
 ## design
 

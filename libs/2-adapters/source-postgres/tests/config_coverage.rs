@@ -1346,6 +1346,147 @@ async fn validation_reports_a_typo_in_every_relation_position() {
     assert_eq!(found, expected);
 }
 
+/// Issue #211: the root's own keys, on the root table — `filters`, and the
+/// `soft_delete` marker's `column`, `field` and `when`. Also pins why the
+/// dangling `field` must be an error: the document query skips such a marker
+/// without a word, so a soft-deleted row stays a document.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn validation_reports_a_typo_in_every_root_position() {
+    let (_pg, url) = start_seeded().await;
+    let problems = |schema: IndexSchema| {
+        let url = url.clone();
+        async move {
+            let spec = spec(schema);
+            let documents = builder(&url, spec.schema(&index_name("users")).unwrap().clone()).await;
+            validate_indexes(&spec, &documents)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|d| {
+                    assert_eq!(d.severity, Severity::Error, "{d:?}");
+                    (d.dotted_path(), d.message)
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let expected = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(path, message)| ((*path).to_owned(), (*message).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let fields = || vec![col("name", "name"), col("email", "email")];
+
+    let mut filtered = users_schema(
+        fields(),
+        Some(SoftDelete::Column(SoftDeleteColumn {
+            column: column("deleted"),
+            when: Some(vec![
+                eq("stats", "banned"),
+                null_check("archivd", NullOp::IsNull),
+                raw("whatever"),
+            ]),
+        })),
+    );
+    filtered.filters = Some(vec![eq("emial", "x"), null_check("bi", NullOp::IsNull)]);
+    assert_eq!(
+        problems(filtered).await,
+        expected(&[
+            (
+                "filters",
+                "`filters` references unknown column `public.users.emial`"
+            ),
+            (
+                "filters",
+                "`filters` references unknown column `public.users.bi`"
+            ),
+            (
+                "soft_delete",
+                "`column` references unknown column `public.users.deleted`"
+            ),
+            (
+                "soft_delete",
+                "`when` references unknown column `public.users.stats`"
+            ),
+            (
+                "soft_delete",
+                "`when` references unknown column `public.users.archivd`"
+            ),
+        ]),
+    );
+
+    let dangling = users_schema(
+        fields(),
+        Some(SoftDelete::Field(SoftDeleteField {
+            field: field("deleted"),
+            when: None,
+        })),
+    );
+    let silent = builder(&url, dangling.clone()).await;
+    assert!(
+        !is_tombstone(&silent, 4).await,
+        "a marker that reads no column is skipped: the deleted row stays"
+    );
+    assert_eq!(
+        problems(dangling).await,
+        expected(&[(
+            "soft_delete",
+            "`field` names `deleted`, but no field has that name"
+        )]),
+    );
+
+    let mut placed_at = col("placed_at", "placed_at");
+    if let FieldSource::Column(column) = &mut placed_at.source {
+        column.ty = FlussoType::Timestamp;
+    }
+    let orders = join_field(
+        "orders",
+        Join {
+            table: table("orders"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![placed_at],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let as_join = users_schema(
+        vec![col("name", "name"), orders.clone()],
+        Some(SoftDelete::Field(SoftDeleteField {
+            field: field("orders"),
+            when: None,
+        })),
+    );
+    assert_eq!(
+        problems(as_join).await,
+        expected(&[(
+            "soft_delete",
+            "`field` names `orders`, but the first field of that name is not a column"
+        )]),
+    );
+    let in_join = users_schema(
+        vec![col("name", "name"), orders],
+        Some(SoftDelete::Field(SoftDeleteField {
+            field: field("placed_at"),
+            when: None,
+        })),
+    );
+    assert_eq!(
+        problems(in_join).await,
+        expected(&[(
+            "soft_delete",
+            "`field` references unknown column `public.users.placed_at`"
+        )]),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Builders for config, schema, fields, filters, and the value assertions.
 // ---------------------------------------------------------------------------

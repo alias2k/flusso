@@ -582,8 +582,17 @@ enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_t
 relation at any depth and looks up its table, key, junction keys, `via` hops, both sides of each
 `on:` pair, value/null-check filter columns, `order_by` and a join's `primary_key` on the table
 each lives on — issue #202; a missing table is a `SourceError::UnknownTable` diagnostic, reported
-once per relation; `Diagnostic.path` is the field path; guards: the `validation::tests` mock-catalog
-cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position`) and `CaptureProvisioning` answers "is this table set coverable",
+once per relation; `Diagnostic.path` is the field path; and on the root table the root `filters`
+and the `soft_delete` marker's column, `when` and `field` (issue #211; anchored at the key name,
+`filters`/`soft_delete`; a `field` that reads no column — `source::soft_delete_column` is `None`,
+which the document query silently skips — is an error that `validate_spec` reports with no
+database, so `check --offline` shows it; guards: the `validation::tests` mock-catalog
+cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position` /
+`validation_reports_a_typo_in_every_root_position`). **`run` validates at start** (issue #211):
+`backends.rs`'s `build_documents` runs `validate_indexes` on the document builder's own connection
+inside `Backends::source`, before anything is staged — `--locked` included, an unreachable database
+still fails as `connecting to Postgres` — prints to stderr with `check`'s printer, and refuses to
+start on any `Error` (`start_verdict` and its tests); no opt-out flag and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
 columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven tooling can pick
 from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m
