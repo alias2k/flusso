@@ -84,7 +84,6 @@ const KIND_HUE: Record<string, string> = {
   min: "t-number",
   max: "t-number",
   ids: "t-number",
-  // `exists` reduces to a boolean
   exists: "t-bool",
 };
 export function kindColorClass(kind: string): string {

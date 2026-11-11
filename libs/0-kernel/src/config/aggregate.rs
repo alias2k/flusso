@@ -38,7 +38,9 @@ pub struct Aggregate {
 /// table before it (the parent, for the first hop).
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct ViaHop {
+    /// The table this hop passes through.
     pub table: common::TableName,
+    /// The column on `table` pointing at the table before it.
     pub foreign_key: common::ColumnName,
     /// Which rows of `table` the path passes through.
     #[serde(default, skip_serializing_if = "Option::is_none")]

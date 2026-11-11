@@ -784,3 +784,26 @@ fn a_junction_after_via_hops_ties_its_left_key_to_the_last_hop() {
         )),
     );
 }
+
+#[test]
+fn exists_over_a_junction_wraps_the_junction_subquery() {
+    assert_eq!(
+        aggregate_sql(Aggregate {
+            table: t("tags"),
+            op: AggregateOp::Exists,
+            key: AggregateKey::Through(kernel::Through {
+                table: t("task_tags"),
+                left_key: c("task_id"),
+                right_key: c("tag_id"),
+                filters: None,
+            }),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: vec![hop("tasks", "user_id", None)],
+        }),
+        wrap(
+            r#"(EXISTS (SELECT 1 FROM "public"."tags" AS "rel2" JOIN "public"."task_tags" AS "rel3" ON "rel3"."tag_id" = "rel2"."id" WHERE "rel3"."task_id" IN (SELECT "rel1"."id" FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id")))"#
+        ),
+    );
+}

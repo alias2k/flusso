@@ -452,12 +452,14 @@ async fn an_aggregate_via_hops_rebuilds_its_parent_from_every_hop() {
         "ALTER TABLE projects REPLICA IDENTITY FULL",
         "ALTER TABLE tasks REPLICA IDENTITY FULL",
         "ALTER TABLE task_tags REPLICA IDENTITY FULL",
+        "ALTER TABLE tags REPLICA IDENTITY FULL",
         "CREATE PUBLICATION flusso FOR TABLE users, teams, projects, tasks, tags, task_tags",
         "INSERT INTO users VALUES (1, 'ada@x.io'), (2, 'grace@x.io')",
         "INSERT INTO teams VALUES (10, 1, false, ''), (20, 2, false, '')",
         "INSERT INTO projects VALUES (100, 10, false, ''), (200, 20, false, '')",
-        "INSERT INTO tasks VALUES (1000, 100, 'open', '')",
+        "INSERT INTO tasks VALUES (1000, 100, 'open', ''), (2000, 200, 'open', '')",
         "INSERT INTO tags VALUES (1, 'urgent'), (2, 'later')",
+        "INSERT INTO task_tags VALUES (2, 1000, 2)",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -510,7 +512,7 @@ async fn an_aggregate_via_hops_rebuilds_its_parent_from_every_hop() {
             )
         }
     };
-    assert_eq!(flags(1).await, (true, 1, false, 0));
+    assert_eq!(flags(1).await, (true, 1, false, 1));
     assert_eq!(flags(2).await, (true, 1, false, 0));
 
     let exec = |sql: &'static str| {
@@ -523,7 +525,7 @@ async fn an_aggregate_via_hops_rebuilds_its_parent_from_every_hop() {
         (900, "UPDATE teams SET name = 'core' WHERE id = 10"),
         (901, "UPDATE projects SET note = 'q3' WHERE id = 100"),
         (902, "UPDATE tasks SET memo = 'later' WHERE id = 1000"),
-        (903, "UPDATE tags SET label = 'now' WHERE id = 1"),
+        (903, "UPDATE tags SET label = 'now' WHERE id = 2"),
     ] {
         recorded.lock().unwrap().clear();
         exec(sql).await;
@@ -542,56 +544,61 @@ async fn an_aggregate_via_hops_rebuilds_its_parent_from_every_hop() {
 
     // Each change rebuilds exactly these users, which then read these values.
     type Flags = (bool, i64, bool, i64);
-    let steps: [(&str, &[(i32, Flags)]); 15] = [
+    let steps: [(&str, &[(i32, Flags)]); 16] = [
         // A filter column on the aggregated table, three hops down.
         (
             "UPDATE tasks SET status = 'completed' WHERE id = 1000",
-            &[(1, (true, 1, true, 0))],
+            &[(1, (true, 1, true, 1))],
         ),
         // A filter column on the first hop.
         (
             "UPDATE teams SET archived = true WHERE id = 10",
-            &[(1, (true, 0, false, 0))],
+            &[(1, (true, 0, false, 1))],
         ),
         (
             "UPDATE teams SET archived = false WHERE id = 10",
-            &[(1, (true, 1, true, 0))],
+            &[(1, (true, 1, true, 1))],
         ),
         // A filter column on the middle hop.
         (
             "UPDATE projects SET archived = true WHERE id = 100",
-            &[(1, (true, 0, true, 0))],
+            &[(1, (true, 0, true, 1))],
         ),
         (
             "UPDATE projects SET archived = false WHERE id = 100",
-            &[(1, (true, 1, true, 0))],
+            &[(1, (true, 1, true, 1))],
         ),
-        // A junction row past the last hop, inserted then deleted.
+        // A junction row past the last hop: inserted, moved to another
+        // user's task, deleted.
         (
             "INSERT INTO task_tags VALUES (1, 1000, 1)",
-            &[(1, (true, 1, true, 1))],
+            &[(1, (true, 1, true, 2))],
+        ),
+        (
+            "UPDATE task_tags SET task_id = 2000 WHERE id = 1",
+            &[(1, (true, 1, true, 1)), (2, (true, 1, false, 1))],
         ),
         (
             "DELETE FROM task_tags WHERE id = 1",
-            &[(1, (true, 1, true, 0))],
+            &[(2, (true, 1, false, 0))],
         ),
-        // Re-parenting on each hop moves the flag between users.
+        // Re-parenting on each hop moves the flags between users.
         (
             "UPDATE tasks SET project_id = 200 WHERE id = 1000",
-            &[(1, (true, 1, false, 0)), (2, (true, 1, true, 0))],
+            &[(1, (true, 1, false, 0)), (2, (true, 1, true, 1))],
         ),
         (
             "UPDATE projects SET team_id = 10 WHERE id = 200",
-            &[(1, (true, 2, true, 0)), (2, (true, 0, false, 0))],
+            &[(1, (true, 2, true, 1)), (2, (true, 0, false, 0))],
         ),
         (
             "UPDATE teams SET owner_id = 2 WHERE id = 10",
-            &[(1, (false, 0, false, 0)), (2, (true, 2, true, 0))],
+            &[(1, (false, 0, false, 0)), (2, (true, 2, true, 1))],
         ),
         // Inserts and deletes on each hop.
         (
             "INSERT INTO tasks VALUES (1001, 100, 'completed', '')",
-            &[(2, (true, 2, true, 0))],
+            &[(2, (true, 2, true, 1))],
         ),
         (
             "DELETE FROM tasks WHERE id = 1000",
