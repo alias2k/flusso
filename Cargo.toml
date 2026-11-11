@@ -108,7 +108,7 @@ thiserror = { version = "2.0.*" }
 anyhow = { version = "1.0.*", features = ["backtrace"] }
 toml = { version = "1.1.*", features = ["preserve_order"] }
 nutype = { version = "0.7.*", features = ["serde", "regex"] }
-regex = { version = "1.12.*" }
+regex = { version = "1.13.*" }
 bon = { version = "3.*" }
 rust_decimal = { version = "1.*", features = ["serde-with-str"] }
 pgwire-replication = { version = "0.3.*", features = ["md5"] }
