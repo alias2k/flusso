@@ -91,9 +91,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   binaries (`wal_release`, issue #204: with the engines running over recording sinks, the slot's
   `confirmed_flush_lsn` and `restart_lsn` pass the WAL written by changes that produce no document
   — an unread table under `FOR ALL TABLES`, unread-column updates, filtered/soft-deleted/orphaned
-  rows, a large and a split mixed transaction, idle WAL after a burst — within one `RELEASE_BOUND`
-  constant, and the sinks got exactly the expected ops; a stalled sink pins the slot until it
-  flushes, a `backfill = false` sink does not; the full
+  rows, a large and a split mixed transaction, idle WAL after a burst — `confirmed_flush_lsn` within
+  `CONFIRM_BOUND` (what flusso controls), `restart_lsn` within `RELEASE_BOUND` (also waits on
+  Postgres's next `running_xacts` record), and the sinks got exactly the expected ops; a stalled sink
+  pins the slot at its last flushed position (the watermark's minimum over lanes) until it catches
+  up, a `backfill = false` sink does not; the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
   the engine, or it can't be published before the engine and the layering is violated);
   `testcontainers` spins up Postgres (and, for `pipeline`, OpenSearch). `engine`'s `wal`

@@ -6,14 +6,14 @@
 //! that yields few or no documents, takes `pg_current_wal_lsn()` as the
 //! target, and asserts on `pg_replication_slots` that:
 //!
-//! - `confirmed_flush_lsn` passes the target, and
-//! - `restart_lsn` passes it too, so the slot retains none of the WAL the
-//!   writes produced (`pg_current_wal_lsn() - restart_lsn` is back to near
-//!   zero: only what Postgres wrote since, such as autovacuum),
+//! - `confirmed_flush_lsn` passes the target within [`CONFIRM_BOUND`], and
+//! - `restart_lsn` passes it within [`RELEASE_BOUND`], so the slot retains
+//!   none of the WAL the writes produced (`pg_current_wal_lsn() - restart_lsn`
+//!   is back to near zero: only what Postgres wrote since, such as autovacuum),
 //!
-//! within [`RELEASE_BOUND`], *and* that the sinks received exactly the
-//! operations the writes call for. The second half is what makes a "fix" that
-//! confirms without processing fail too.
+//! *and* that the sinks received exactly the operations the writes call for.
+//! The second half is what makes a "fix" that confirms without processing fail
+//! too. The two LSNs move on different clocks, so each has its own bound.
 //!
 //! The cases (issue #204):
 //!
@@ -28,11 +28,13 @@
 //! - **F** idle after a burst: the slot reaches the WAL position the burst
 //!   ended at, not one commit behind, then follows WAL that holds no change
 //!   (a `CHECKPOINT`) to the server's current position.
-//! - **G** several sinks: a stalled sink pins the slot (by design) and releases
-//!   it once it catches up; a `backfill = false` sink pins nothing.
+//! - **G** several sinks: a stalled sink pins the slot at the last position it
+//!   flushed (by design) and releases it once it catches up; a
+//!   `backfill = false` sink pins nothing.
 //!
-//! Each test prints how long the release took, so a latency improvement shows
-//! up in `--no-capture` output.
+//! Each case prints how long confirmation and release took, so a latency
+//! improvement shows up in `--no-capture` output. Every wait fails fast once
+//! the deployment stopped.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -52,7 +54,7 @@ use engine::{BatchPolicy, IngestEngine, SinkControl, SinkEngine};
 use futures::FutureExt;
 use futures::future::{BoxFuture, select_all};
 use kernel::{
-    DatabaseSchema, Envelope, Field, FieldSource, Filter, IndexSchema, Join, JoinKind,
+    DatabaseSchema, Envelope, Field, FieldSource, Filter, IndexName, IndexSchema, Join, JoinKind,
     NullCheckFilter, NullOp, Relation, SinkName, SoftDelete, SoftDeleteColumn,
 };
 use sink::{Result as SinkResult, Sink, SinkOptions};
@@ -68,18 +70,29 @@ use tokio::task::JoinHandle;
 mod common;
 use common::{column, column_field, field, index_name, start_postgres, table, users_spec};
 
-/// How long the slot may take to release WAL once the writes are committed,
-/// for `confirmed_flush_lsn` and `restart_lsn` alike.
+/// How long setup may take: the slot created, the backfill landed, a write
+/// delivered to a sink. Not what these tests measure, so generous.
+const SETUP_BOUND: Duration = Duration::from_secs(60);
+
+/// How long `confirmed_flush_lsn` may take to pass the target once the writes
+/// are committed.
 ///
-/// Generous on purpose: today the replication client reports its position on
-/// a ~10 s status interval, and `restart_lsn` only moves past a
-/// `running_xacts` record Postgres logs every ~15 s, so a release takes up to
-/// ~25 s. Issue #205 shortens release latency and tightens this constant to
-/// match; until then it is 45 s.
+/// It moves when flusso reports its position to Postgres: the part flusso
+/// controls. Issue #205 tightens it to 5 s.
+const CONFIRM_BOUND: Duration = Duration::from_secs(45);
+
+/// How long `restart_lsn`, and with it the WAL the slot retains, may take to
+/// pass the target once the writes are committed.
+///
+/// It decides what WAL Postgres can recycle, and it moves only once Postgres
+/// has logged, and flusso has decoded, a `running_xacts` record past the
+/// target. The background writer logs one about every 15 s when there was
+/// activity, so this bound includes a wait flusso cannot shorten.
 const RELEASE_BOUND: Duration = Duration::from_secs(45);
 
-/// How long a stalled sink is given to (wrongly) let the slot advance: several
-/// of the 1 s feedback intervals the stalled-sink test configures.
+/// How long a stalled sink is given to (wrongly) let the slot advance, and,
+/// once it is unblocked, how long the slot has to confirm what it held back:
+/// several of the 1 s feedback intervals the stalled-sink test configures.
 const STALL_WINDOW: Duration = Duration::from_secs(5);
 
 const SLOT: &str = "flusso";
@@ -98,7 +111,7 @@ async fn writes_to_a_table_no_index_reads_release_the_slot() {
     .await;
     let sink = Arc::new(RecordingSink::default());
     let run = deploy(&url, users_spec(), vec![primary(&sink)], Tuning::default()).await;
-    wait_until_live(&pool, &sink, 0).await;
+    wait_until_live(&run, &pool, &sink, 0).await;
 
     for _ in 0..500 {
         exec(
@@ -110,7 +123,7 @@ async fn writes_to_a_table_no_index_reads_release_the_slot() {
     exec(&pool, "UPDATE noise SET payload = 'y'").await;
     let target = current_lsn(&pool).await;
 
-    wait_until_released(&pool, &target, "B: unread table").await;
+    wait_until_released(&run, &pool, &target, "B: unread table").await;
     assert_eq!(sink.ops(), Vec::<String>::new());
     stop(run).await;
 }
@@ -128,7 +141,7 @@ async fn a_burst_of_unread_column_updates_releases_the_slot() {
     .await;
     let sink = Arc::new(RecordingSink::default());
     let run = deploy(&url, users_spec(), vec![primary(&sink)], Tuning::default()).await;
-    wait_until_live(&pool, &sink, 100).await;
+    wait_until_live(&run, &pool, &sink, 100).await;
     let backfilled = sink.ops();
 
     for i in 0..500 {
@@ -148,7 +161,7 @@ async fn a_burst_of_unread_column_updates_releases_the_slot() {
     }
     let target = current_lsn(&pool).await;
 
-    wait_until_released(&pool, &target, "C: unread column").await;
+    wait_until_released(&run, &pool, &target, "C: unread column").await;
     assert_eq!(
         sink.ops(),
         backfilled,
@@ -172,7 +185,7 @@ async fn filtered_soft_deleted_and_orphaned_rows_release_the_slot() {
     .await;
     let sink = Arc::new(RecordingSink::default());
     let run = deploy(&url, nodes_spec(), vec![primary(&sink)], Tuning::default()).await;
-    wait_until_live(&pool, &sink, 0).await;
+    wait_until_live(&run, &pool, &sink, 0).await;
 
     let mut expected = BTreeSet::new();
     for i in 0..ROWS {
@@ -200,7 +213,7 @@ async fn filtered_soft_deleted_and_orphaned_rows_release_the_slot() {
     exec(&pool, "UPDATE nodes SET name = 'z'; DELETE FROM notes;").await;
     let target = current_lsn(&pool).await;
 
-    wait_until_released(&pool, &target, "D: no document").await;
+    wait_until_released(&run, &pool, &target, "D: no document").await;
     let tombstoned: BTreeSet<String> = sink.ops().into_iter().collect();
     assert_eq!(tombstoned, expected, "only tombstones, one per touched id");
     stop(run).await;
@@ -227,7 +240,7 @@ async fn large_and_split_mixed_transactions_release_the_slot() {
         ..Tuning::default()
     };
     let run = deploy(&url, users_spec(), vec![primary(&sink)], tuning).await;
-    wait_until_live(&pool, &sink, 200).await;
+    wait_until_live(&run, &pool, &sink, 200).await;
     let backfilled = sink.ops();
 
     exec(
@@ -241,7 +254,7 @@ async fn large_and_split_mixed_transactions_release_the_slot() {
     )
     .await;
     let target = current_lsn(&pool).await;
-    wait_until_released(&pool, &target, "E: large unread transaction").await;
+    wait_until_released(&run, &pool, &target, "E: large unread transaction").await;
     assert_eq!(sink.ops(), backfilled, "an unread change was rebuilt");
 
     exec(
@@ -256,7 +269,7 @@ async fn large_and_split_mixed_transactions_release_the_slot() {
     )
     .await;
     let target = current_lsn(&pool).await;
-    wait_until_released(&pool, &target, "E: split mixed transaction").await;
+    wait_until_released(&run, &pool, &target, "E: split mixed transaction").await;
     assert_eq!(
         sink.ops().get(backfilled.len()..).unwrap(),
         ["upsert users 1", "upsert users 2"]
@@ -277,7 +290,7 @@ async fn idle_after_a_burst_the_slot_reaches_the_current_wal_position() {
     .await;
     let sink = Arc::new(RecordingSink::default());
     let run = deploy(&url, users_spec(), vec![primary(&sink)], Tuning::default()).await;
-    wait_until_live(&pool, &sink, 0).await;
+    wait_until_live(&run, &pool, &sink, 0).await;
 
     for id in 1..=ROWS {
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, 'a')")
@@ -288,11 +301,11 @@ async fn idle_after_a_burst_the_slot_reaches_the_current_wal_position() {
     }
     let target = current_lsn(&pool).await;
 
-    wait_until_released(&pool, &target, "F: the burst's last commit").await;
+    wait_until_released(&run, &pool, &target, "F: the burst's last commit").await;
 
     exec(&pool, "CHECKPOINT").await;
     let idle = current_lsn(&pool).await;
-    wait_until_released(&pool, &idle, "F: idle WAL past it").await;
+    wait_until_released(&run, &pool, &idle, "F: idle WAL past it").await;
     let upserted: BTreeSet<String> = sink.ops().into_iter().collect();
     let expected: BTreeSet<String> = (1..=ROWS).map(|id| format!("upsert users {id}")).collect();
     assert_eq!(upserted, expected);
@@ -311,7 +324,7 @@ async fn a_stalled_sink_pins_the_slot_until_it_catches_up() {
     )
     .await;
     let fast = Arc::new(RecordingSink::default());
-    let open = Arc::new(AtomicBool::new(false));
+    let open = Arc::new(AtomicBool::new(true));
     let stalled = Arc::new(RecordingSink::gated(Arc::clone(&open)));
     let live_only = Arc::new(RecordingSink::default());
     let tuning = Tuning {
@@ -324,9 +337,22 @@ async fn a_stalled_sink_pins_the_slot_until_it_catches_up() {
         SinkSpec::new("live_only", &live_only, false),
     ];
     let run = deploy(&url, users_spec(), sinks, tuning).await;
-    wait_until_live(&pool, &fast, 0).await;
+    wait_until_live(&run, &pool, &fast, 0).await;
+    wait_until_live(&run, &pool, &stalled, 0).await;
 
-    for id in 1..=ROWS {
+    // Every lane, the stalled one included, acks a positioned batch first, so
+    // the watermark is a real minimum over lanes rather than "no position yet".
+    exec(&pool, "INSERT INTO users (id, email) VALUES (0, 'a')").await;
+    let before_stall = current_lsn(&pool).await;
+    for sink in [&fast, &stalled, &live_only] {
+        wait_for_ops(&run, sink, 1).await;
+    }
+    wait_until_confirmed(&run, &pool, &before_stall, "G: before the stall").await;
+    open.store(false, Ordering::Release);
+
+    exec(&pool, "INSERT INTO users (id, email) VALUES (1, 'a')").await;
+    let first_unflushed = current_lsn(&pool).await;
+    for id in 2..=ROWS {
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, 'a')")
             .bind(id)
             .execute(&pool)
@@ -334,19 +360,33 @@ async fn a_stalled_sink_pins_the_slot_until_it_catches_up() {
             .unwrap();
     }
     let target = current_lsn(&pool).await;
-    let expected: BTreeSet<String> = (1..=ROWS).map(|id| format!("upsert users {id}")).collect();
+    let expected: BTreeSet<String> = (0..=ROWS).map(|id| format!("upsert users {id}")).collect();
 
-    wait_for_ops(&fast, expected.len()).await;
-    wait_for_ops(&live_only, expected.len()).await;
-    tokio::time::sleep(STALL_WINDOW).await;
-    assert!(
-        !passes(&pool, SlotLsn::Confirmed, &target).await,
-        "the slot advanced past changes the stalled sink has not flushed"
-    );
-    assert_eq!(stalled.ops(), Vec::<String>::new());
+    wait_for_ops(&run, &fast, expected.len()).await;
+    wait_for_ops(&run, &live_only, expected.len()).await;
+    // The slot may confirm idle WAL past `before_stall`, but never the end of
+    // the first commit the stalled sink holds.
+    let window = Instant::now();
+    while window.elapsed() < STALL_WINDOW {
+        run.alive();
+        assert!(
+            !passes(&pool, SlotLsn::Confirmed, &first_unflushed).await,
+            "the slot confirmed a change the stalled sink has not flushed: {}",
+            describe_slot(&pool).await
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(stalled.ops(), ["upsert users 0"]);
 
     open.store(true, Ordering::Release);
-    wait_until_released(&pool, &target, "G: stalled sink caught up").await;
+    wait_until_released_within(
+        &run,
+        &pool,
+        &target,
+        STALL_WINDOW,
+        "G: stalled sink caught up",
+    )
+    .await;
     for sink in [&fast, &stalled, &live_only] {
         let ops: BTreeSet<String> = sink.ops().into_iter().collect();
         assert_eq!(ops, expected);
@@ -373,7 +413,7 @@ async fn a_live_only_sink_beside_a_backfilled_one_does_not_pin_the_slot() {
         SinkSpec::new("live_only", &live_only, false),
     ];
     let run = deploy(&url, users_spec(), sinks, Tuning::default()).await;
-    wait_until_live(&pool, &backfilled, BACKFILLED).await;
+    wait_until_live(&run, &pool, &backfilled, BACKFILLED).await;
 
     for id in 1..=100 {
         sqlx::query("UPDATE users SET email = $1 WHERE id = $2")
@@ -385,7 +425,7 @@ async fn a_live_only_sink_beside_a_backfilled_one_does_not_pin_the_slot() {
     }
     let target = current_lsn(&pool).await;
 
-    wait_until_released(&pool, &target, "G: live-only sink").await;
+    wait_until_released(&run, &pool, &target, "G: live-only sink").await;
     let live: BTreeSet<String> = (1..=100).map(|id| format!("upsert users {id}")).collect();
     let received: BTreeSet<String> = live_only.ops().into_iter().collect();
     assert_eq!(received, live, "the live-only sink gets live changes only");
@@ -397,12 +437,14 @@ async fn a_live_only_sink_beside_a_backfilled_one_does_not_pin_the_slot() {
     stop(run).await;
 }
 
-/// A sink that records the operations it flushed. A gated one blocks in
-/// `flush` until its gate opens, holding its lane's acks back.
+/// A sink that records the operations it flushed and whether its backfill
+/// completed. A gated one blocks in `flush` until its gate opens, holding its
+/// lane's acks back.
 #[derive(Debug, Default)]
 struct RecordingSink {
     applied: Mutex<Vec<String>>,
     flushed: Mutex<Vec<String>>,
+    seeded: AtomicBool,
     open: Option<Arc<AtomicBool>>,
 }
 
@@ -441,6 +483,11 @@ impl Sink for RecordingSink {
         self.flushed.lock().unwrap().extend(applied);
         Ok(sink::FlushReport::clean())
     }
+
+    async fn mark_seeded(&self, _: &IndexName) -> SinkResult<()> {
+        self.seeded.store(true, Ordering::Release);
+        Ok(())
+    }
 }
 
 struct SinkSpec {
@@ -474,12 +521,7 @@ struct Tuning {
 /// The daemon's assembly with the CLI's capture: the publication and replica
 /// identity managed, the ingest engine and every sink engine running until one
 /// of them stops.
-async fn deploy(
-    url: &str,
-    spec: SourceSpec,
-    sinks: Vec<SinkSpec>,
-    tuning: Tuning,
-) -> JoinHandle<engine::Result<()>> {
+async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tuning) -> Deployment {
     let port = url.rsplit(':').next().unwrap().split('/').next().unwrap();
     let mut replication =
         ReplicationConfig::new("127.0.0.1", "postgres", "postgres", "postgres", SLOT, SLOT)
@@ -521,15 +563,38 @@ async fn deploy(
     }
     let ingest = IngestEngine::new(capture, documents, stream, names).with_batch(tuning.batch);
     engines.push(async move { ingest.run().await }.boxed());
-    tokio::spawn(async move { select_all(engines).await.0 })
+    let stopped = Arc::new(Mutex::new(None));
+    let outcome = Arc::clone(&stopped);
+    let task = tokio::spawn(async move {
+        let result = select_all(engines).await.0;
+        *outcome.lock().unwrap() = Some(format!("{result:?}"));
+    });
+    Deployment { task, stopped }
+}
+
+/// A running deployment: its task, and how it ended once one engine stopped.
+struct Deployment {
+    task: JoinHandle<()>,
+    stopped: Arc<Mutex<Option<String>>>,
+}
+
+impl Deployment {
+    /// Fails the test if an engine stopped, so a wait doesn't spin to its bound.
+    fn alive(&self) {
+        if let Some(result) = &*self.stopped.lock().unwrap() {
+            panic!("the deployment stopped: {result}");
+        }
+        assert!(
+            !self.task.is_finished(),
+            "the deployment stopped: it panicked"
+        );
+    }
 }
 
 /// Fails if the deployment stopped on its own, then stops it.
-async fn stop(run: JoinHandle<engine::Result<()>>) {
-    if run.is_finished() {
-        panic!("the deployment stopped: {:?}", run.await);
-    }
-    run.abort();
+async fn stop(run: Deployment) {
+    run.alive();
+    run.task.abort();
 }
 
 async fn connect(url: &str) -> PgPool {
@@ -547,31 +612,36 @@ async fn current_lsn(pool: &PgPool) -> String {
         .unwrap()
 }
 
-/// Waits for the slot to exist (the source prepared) and the backfill to land.
-async fn wait_until_live(pool: &PgPool, sink: &RecordingSink, backfilled: usize) {
-    let deadline = Instant::now() + RELEASE_BOUND;
+/// Waits for the slot to exist (the source prepared) and the backfill to
+/// complete. Waiting on the op count alone would let a write the test makes
+/// next land in the snapshot as well.
+async fn wait_until_live(run: &Deployment, pool: &PgPool, sink: &RecordingSink, backfilled: usize) {
+    let deadline = Instant::now() + SETUP_BOUND;
     loop {
+        run.alive();
         let slot: Option<i32> =
             sqlx::query_scalar("SELECT 1 FROM pg_replication_slots WHERE slot_name = $1")
                 .bind(SLOT)
                 .fetch_optional(pool)
                 .await
                 .unwrap();
-        if slot.is_some() && sink.ops().len() == backfilled {
+        let seeded = sink.seeded.load(Ordering::Acquire);
+        if slot.is_some() && seeded && sink.ops().len() == backfilled {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "not live: slot {slot:?}, {} of {backfilled} backfilled",
+            "not live: slot {slot:?}, seeded {seeded}, {} of {backfilled} backfilled",
             sink.ops().len()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn wait_for_ops(sink: &RecordingSink, count: usize) {
-    let deadline = Instant::now() + RELEASE_BOUND;
+async fn wait_for_ops(run: &Deployment, sink: &RecordingSink, count: usize) {
+    let deadline = Instant::now() + SETUP_BOUND;
     while sink.ops().len() < count {
+        run.alive();
         assert!(
             Instant::now() < deadline,
             "{} of {count} ops flushed",
@@ -611,32 +681,66 @@ async fn passes(pool: &PgPool, lsn: SlotLsn, target: &str) -> bool {
     ahead >= 0
 }
 
-/// Waits, within [`RELEASE_BOUND`], for the slot to confirm `target` and to
-/// retain no WAL before it, and prints how long each took.
-async fn wait_until_released(pool: &PgPool, target: &str, case: &str) {
+/// Waits for `lsn` to pass `target`, failing past `bound`; returns how long it
+/// took.
+async fn wait_until_passes(
+    run: &Deployment,
+    pool: &PgPool,
+    lsn: SlotLsn,
+    target: &str,
+    bound: Duration,
+    case: &str,
+) -> Duration {
     let start = Instant::now();
-    let retained_at_target = retained(pool).await;
-    let mut confirmed = None;
     loop {
-        if confirmed.is_none() && passes(pool, SlotLsn::Confirmed, target).await {
-            confirmed = Some(start.elapsed());
+        run.alive();
+        if passes(pool, lsn, target).await {
+            return start.elapsed();
         }
-        if confirmed.is_some() && passes(pool, SlotLsn::Restart, target).await {
-            break;
-        }
-        if start.elapsed() > RELEASE_BOUND {
+        if start.elapsed() > bound {
+            let name = match lsn {
+                SlotLsn::Confirmed => "confirmed_flush_lsn",
+                SlotLsn::Restart => "restart_lsn",
+            };
             panic!(
-                "[{case}] the slot did not release {target} within {RELEASE_BOUND:?} \
-                 (confirmed after {confirmed:?}): {}",
+                "[{case}] {name} did not pass {target} within {bound:?}: {}",
                 describe_slot(pool).await
             );
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// Waits, within [`CONFIRM_BOUND`], for the slot to confirm `target`.
+async fn wait_until_confirmed(run: &Deployment, pool: &PgPool, target: &str, case: &str) {
+    let confirmed =
+        wait_until_passes(run, pool, SlotLsn::Confirmed, target, CONFIRM_BOUND, case).await;
+    println!("[{case}] confirmed after {confirmed:?}");
+}
+
+/// Waits for the slot to confirm `target` within [`CONFIRM_BOUND`] and to
+/// retain no WAL before it within [`RELEASE_BOUND`], and prints both times.
+async fn wait_until_released(run: &Deployment, pool: &PgPool, target: &str, case: &str) {
+    wait_until_released_within(run, pool, target, CONFIRM_BOUND, case).await;
+}
+
+/// [`wait_until_released`], with `confirm_bound` for `confirmed_flush_lsn`.
+async fn wait_until_released_within(
+    run: &Deployment,
+    pool: &PgPool,
+    target: &str,
+    confirm_bound: Duration,
+    case: &str,
+) {
+    let start = Instant::now();
+    let retained_at_target = retained(pool).await;
+    let confirmed =
+        wait_until_passes(run, pool, SlotLsn::Confirmed, target, confirm_bound, case).await;
+    let left = RELEASE_BOUND.saturating_sub(start.elapsed());
+    wait_until_passes(run, pool, SlotLsn::Restart, target, left, case).await;
     println!(
-        "[{case}] confirmed after {:?}, released after {:?}; retained {retained_at_target} B \
-         at the target, {} B now",
-        confirmed.unwrap_or_default(),
+        "[{case}] confirmed after {confirmed:?}, released after {:?}; retained \
+         {retained_at_target} B at the target, {} B now",
         start.elapsed(),
         retained(pool).await
     );
