@@ -14,11 +14,15 @@
 //! - **An expression is stored as its canonical text** ([`Display`](std::fmt::Display)): single
 //!   spaces around binary operators, only the parentheses the tree needs. Two
 //!   spellings of one tree (whitespace, redundant parentheses) serialize and
-//!   hash the same.
+//!   hash the same. A double negation renders `- -a`, never `--a` or
+//!   `-(-a)`, so the text never nests deeper than the tree is tall.
 //! - **Malformed input fails with a position** ([`ExpressionError`]): the
 //!   1-based character the parser stopped at.
 //! - **Depth is capped at [`MAX_DEPTH`]**, for the parser's recursion and the
-//!   tree's height, so no input can overflow the stack.
+//!   tree's height, so no input can overflow the stack. Every tree the parser
+//!   accepts renders to text it accepts again: `parse(render(x)) == x`.
+//! - **A string [`ColumnName`] accepts is that column**, by the newtype's own
+//!   rules (trim, Unicode lowercase), exactly as before expressions existed.
 //!
 //! ```
 //! use kernel::config::{BinaryOp, Expression};
@@ -175,14 +179,20 @@ impl FromStr for Expression {
 
 /// The canonical text: single spaces around binary operators, and parentheses
 /// only where the tree needs them (a right operand at the same precedence keeps
-/// them, since the operators associate left).
+/// them, since the operators associate left). A negated negation is `- -a`:
+/// the space keeps `--` out of the text, and no parentheses means the text
+/// nests no deeper than the tree is tall, so every parsed tree renders to text
+/// the parser accepts.
 impl fmt::Display for Expression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Column(column) => f.write_str(column.as_ref()),
             Self::Number(number) => f.write_str(number.as_str()),
-            Self::Negate(inner) if inner.precedence() <= 3 => write!(f, "-({inner})"),
-            Self::Negate(inner) => write!(f, "-{inner}"),
+            Self::Negate(inner) => match **inner {
+                Self::Negate(_) => write!(f, "- {inner}"),
+                Self::Binary { .. } => write!(f, "-({inner})"),
+                Self::Column(_) | Self::Number(_) => write!(f, "-{inner}"),
+            },
             Self::Binary { op, left, right } => {
                 write_operand(f, left, left.precedence() < op.precedence())?;
                 write!(f, " {} ", op.symbol())?;

@@ -10,6 +10,8 @@
 //! ```
 //!
 //! Whitespace between tokens is ignored. Positions are 1-based characters.
+//! A whole input [`ColumnName`] accepts (trimmed, Unicode-lowercased) is that
+//! column before any tokenizing: it holds no operator, so it can't be one.
 //!
 //! ```
 //! use kernel::config::{Expression, ExpressionErrorKind};
@@ -25,7 +27,8 @@ use super::{BinaryOp, Expression, NumberLiteral};
 use crate::common::ColumnName;
 
 /// How deep an expression may nest: parentheses and unary minus on the way
-/// down, and the height of the resulting tree.
+/// down, and the height of the resulting tree. The canonical text of a tree
+/// nests no deeper than its height, so both caps agree on what renders.
 pub const MAX_DEPTH: usize = 64;
 
 /// A malformed expression: what went wrong and where.
@@ -180,6 +183,9 @@ struct Parser {
 }
 
 pub(super) fn parse(input: &str) -> Result<Expression, ExpressionError> {
+    if let Ok(column) = ColumnName::try_new(input) {
+        return Ok(Expression::Column(column));
+    }
     let mut parser = Parser {
         tokens: tokenize(input)?,
         next: 0,

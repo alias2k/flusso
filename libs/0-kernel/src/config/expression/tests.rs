@@ -106,7 +106,10 @@ fn display_is_canonical() {
         ("(a - b) - c", "a - b - c"),
         ("a / (b * c)", "a / (b * c)"),
         ("-(a)", "-a"),
-        ("--a", "-(-a)"),
+        ("--a", "- -a"),
+        ("-(-a)", "- -a"),
+        ("---(a + b)", "- - -(a + b)"),
+        ("a - --b", "a - - -b"),
         ("-(a * b)", "-(a * b)"),
         ("a--b", "a - -b"),
         ("-2.5*x", "-2.5 * x"),
@@ -176,6 +179,52 @@ fn nesting_deeper_than_the_cap_is_refused() {
     assert_eq!(fails(&minus).1, ExpressionErrorKind::TooDeep);
 }
 
+fn renders_back(input: &str) -> Expression {
+    let tree = parse(input);
+    let text = tree.to_string();
+    assert!(!text.contains("--"), "{input} rendered {text}");
+    assert_eq!(
+        Expression::parse(&text).as_ref(),
+        Ok(&tree),
+        "{input} rendered {text}"
+    );
+    tree
+}
+
+fn chain(opening: impl Fn(usize) -> &'static str, n: usize) -> String {
+    let open: String = (0..n).map(&opening).collect();
+    let close = ")".repeat(open.matches('(').count());
+    format!("{open}a{close}")
+}
+
+#[test]
+fn every_chain_up_to_the_cap_renders_to_text_that_parses_back() {
+    let shapes: [(&str, fn(usize) -> &'static str); 4] = [
+        ("minus", |_| "-"),
+        ("parenthesis", |_| "("),
+        (
+            "minus then parenthesis",
+            |i| if i % 2 == 0 { "-" } else { "(" },
+        ),
+        (
+            "parenthesis then minus",
+            |i| if i % 2 == 0 { "(" } else { "-" },
+        ),
+    ];
+    for (shape, opening) in shapes {
+        for n in 1..=MAX_DEPTH {
+            renders_back(&chain(opening, n));
+        }
+        assert_eq!(
+            fails(&chain(opening, MAX_DEPTH + 1)).1,
+            ExpressionErrorKind::TooDeep,
+            "{shape}"
+        );
+    }
+    let minuses = renders_back(&format!("{}a", "-".repeat(MAX_DEPTH)));
+    assert_eq!(height(&minuses), MAX_DEPTH);
+}
+
 #[test]
 fn a_tree_taller_than_the_cap_is_refused() {
     let chain = |terms: usize| vec!["a"; terms].join(" + ");
@@ -194,6 +243,40 @@ fn pathological_input_neither_panics_nor_overflows() {
     ] {
         assert!(Expression::parse(&input).is_err());
     }
+}
+
+#[test]
+fn a_whole_column_name_keeps_the_column_name_rules() {
+    let long = "a".repeat(64);
+    let at_limit = "a".repeat(63);
+    for input in [
+        "amount",
+        "Amount",
+        "AMOUNT_2",
+        "  amount  ",
+        "\u{2003}amount\u{3000}",
+        "\tamount\n",
+        "\u{212A}ey",
+        "\u{212A}",
+        "_",
+        at_limit.as_str(),
+        long.as_str(),
+        " a ",
+        "2amount",
+        "am ount",
+        "",
+        "é",
+        "\u{0130}d",
+    ] {
+        let expected = ColumnName::try_new(input).ok();
+        let parsed = Expression::parse(input);
+        match &expected {
+            Some(column) => assert_eq!(parsed, Ok(Expression::Column(column.clone())), "{input:?}"),
+            None => assert!(parsed.is_err(), "{input:?} parsed as {parsed:?}"),
+        }
+    }
+    assert_eq!(parse("\u{212A}ey"), col("key"));
+    assert_eq!(parse(&format!(" {at_limit} ")), col(&at_limit));
 }
 
 #[test]
@@ -257,7 +340,60 @@ fn arb_expression() -> impl Strategy<Value = Expression> {
     })
 }
 
+fn height(expression: &Expression) -> usize {
+    match expression {
+        Expression::Column(_) | Expression::Number(_) => 0,
+        Expression::Negate(inner) => 1 + height(inner),
+        Expression::Binary { left, right, .. } => 1 + height(left).max(height(right)),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Wrap {
+    Negate,
+    Left(BinaryOp, Expression),
+    Right(BinaryOp, Expression),
+}
+
+fn arb_op() -> impl Strategy<Value = BinaryOp> {
+    prop_oneof![
+        Just(BinaryOp::Add),
+        Just(BinaryOp::Subtract),
+        Just(BinaryOp::Multiply),
+        Just(BinaryOp::Divide),
+    ]
+}
+
+/// A small tree under a chain of negations and binary operators as tall as
+/// the cap allows: the shapes that render deepest.
+fn arb_deep_expression() -> impl Strategy<Value = Expression> {
+    let wrap = prop_oneof![
+        3 => Just(Wrap::Negate),
+        1 => (arb_op(), "[a-c]").prop_map(|(op, name)| Wrap::Left(op, col(&name))),
+        1 => (arb_op(), "[a-c]").prop_map(|(op, name)| Wrap::Right(op, col(&name))),
+    ];
+    (arb_expression(), prop::collection::vec(wrap, 0..=MAX_DEPTH)).prop_map(|(base, wraps)| {
+        let room = MAX_DEPTH.saturating_sub(height(&base));
+        wraps
+            .into_iter()
+            .take(room)
+            .fold(base, |inner, wrap| match wrap {
+                Wrap::Negate => neg(inner),
+                Wrap::Left(op, other) => bin(op, inner, other),
+                Wrap::Right(op, other) => bin(op, other, inner),
+            })
+    })
+}
+
 proptest! {
+    #[test]
+    fn a_tree_up_to_the_cap_renders_to_text_that_parses_back(expr in arb_deep_expression()) {
+        prop_assert!(height(&expr) <= MAX_DEPTH);
+        let text = expr.to_string();
+        prop_assert!(!text.contains("--"), "{}", text);
+        prop_assert_eq!(Expression::parse(&text).unwrap(), expr);
+    }
+
     #[test]
     fn rendering_then_parsing_gives_back_the_tree(expr in arb_expression()) {
         let text = expr.to_string();
