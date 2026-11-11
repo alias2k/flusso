@@ -20,11 +20,15 @@
 //! ([`apply`]).
 //!
 //! One identity is **kept** instead: `USING INDEX` on an index that carries
-//! every link (and the primary key, see [`uncarried`]). Someone chose it on
+//! the whole primary key and every link (see [`uncarried`]), for every table,
+//! link or not. Someone chose it on
 //! purpose, usually to hold down WAL volume for every consumer of the table,
 //! and flusso only loses the unread-column skip there, so it is reported under
 //! `partial` with [`PreImageGap::kept`] set and never altered. `DEFAULT`,
-//! `NOTHING`, and an identity index that misses a link are still set.
+//! `NOTHING`, an identity index that misses a link or any primary-key column
+//! (the decoder would key changes by the index's columns instead), a dropped
+//! identity index (Postgres then logs nothing), and a table with no primary
+//! key are still set.
 //! That needs ownership of the table (or superuser) — the same grant publication
 //! management needs — and takes an `ACCESS EXCLUSIVE` lock, so it runs under a
 //! short `lock_timeout` rather than queueing behind a long transaction. The
@@ -105,10 +109,21 @@ impl Member {
         uncarried(carries, &self.primary_key, required)
     }
 
-    /// An identity set on an index that already carries every `required`
-    /// link: left as the operator chose it, never altered.
+    /// An identity set on an index that carries the whole primary key and
+    /// every `required` link: left as the operator chose it, never altered.
+    ///
+    /// The primary key is checked even with no link to carry. Without it the
+    /// decoder keys every change by the identity columns, so live writes land
+    /// under other document ids than the backfill's and a delete removes
+    /// nothing; and an identity index that was dropped carries nothing at all.
     fn kept(&self, required: &[ColumnName]) -> bool {
-        self.identity == ReplicaIdentity::Index && self.uncarried(required).is_empty()
+        self.identity == ReplicaIdentity::Index
+            && !self.primary_key.is_empty()
+            && self
+                .primary_key
+                .iter()
+                .all(|pk| self.carried.iter().any(|name| name == pk))
+            && self.uncarried(required).is_empty()
     }
 
     /// Whether flusso sets this relation to `FULL` when its table is reported.
@@ -211,7 +226,11 @@ fn shortfall(
     let (listed, kept) = if altered.is_empty() {
         (
             short,
-            Some("replica identity is set on an index that carries every parent link".to_owned()),
+            Some(
+                "replica identity is set on an index that carries the primary key and every \
+                 parent link"
+                    .to_owned(),
+            ),
         )
     } else {
         (altered, None)

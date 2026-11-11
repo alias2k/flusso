@@ -529,8 +529,8 @@ impl CaptureProvisioning for WalChangeCapture {
         if !kept.is_empty() {
             tracing::info!(
                 tables = %kept.join("; "),
-                "replica identity kept as is on these tables: it already carries every parent \
-                 link, so flusso does not set it to FULL; an update there always rebuilds every \
+                "replica identity kept as is on these tables: its index already carries the \
+                 primary key and every parent link, so flusso does not set it to FULL; an update there always rebuilds every \
                  document that reads the table",
             );
         }

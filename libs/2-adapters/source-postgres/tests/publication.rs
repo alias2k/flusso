@@ -758,6 +758,65 @@ async fn an_identity_index_carrying_the_link_is_kept_and_the_rest_are_set_to_ful
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
+async fn a_root_is_kept_only_on_an_identity_index_carrying_its_primary_key() {
+    let container = postgres().await;
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
+    for statement in [
+        "CREATE TABLE on_pk (id int PRIMARY KEY, slug text NOT NULL)",
+        "ALTER TABLE on_pk REPLICA IDENTITY USING INDEX on_pk_pkey",
+        "CREATE TABLE with_pk (id int PRIMARY KEY, slug text NOT NULL)",
+        "CREATE UNIQUE INDEX with_pk_identity ON with_pk (slug, id)",
+        "ALTER TABLE with_pk REPLICA IDENTITY USING INDEX with_pk_identity",
+        "CREATE TABLE without_pk \
+         (id int PRIMARY KEY, tenant int NOT NULL, slug text NOT NULL)",
+        "CREATE UNIQUE INDEX without_pk_identity ON without_pk (tenant, slug)",
+        "ALTER TABLE without_pk REPLICA IDENTITY USING INDEX without_pk_identity",
+        "CREATE TABLE dropped (id int PRIMARY KEY, slug text NOT NULL)",
+        "CREATE UNIQUE INDEX dropped_identity ON dropped (id, slug)",
+        "ALTER TABLE dropped REPLICA IDENTITY USING INDEX dropped_identity",
+        "DROP INDEX dropped_identity",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    assert_eq!(
+        identity(&pool, "dropped").await,
+        "i",
+        "Postgres keeps the code"
+    );
+    let cap = capture(port, "postgres", "postgres", "postgres");
+    let roots: PreImageColumns = required(&["on_pk", "with_pk", "without_pk", "dropped"])
+        .into_iter()
+        .map(|table| (table, Vec::new()))
+        .collect();
+
+    let report = cap.ensure_pre_image(&roots, true).await.unwrap();
+    assert!(report.gaps.is_empty(), "a root has no link to miss");
+    let kept: Vec<String> = report
+        .partial
+        .iter()
+        .filter(|gap| gap.kept.is_some())
+        .map(|gap| gap.table.to_string())
+        .collect();
+    assert_eq!(kept, ["public.on_pk", "public.with_pk"]);
+
+    assert_eq!(identity(&pool, "on_pk").await, "i");
+    assert_eq!(identity(&pool, "with_pk").await, "i");
+    assert_eq!(
+        identity(&pool, "without_pk").await,
+        "f",
+        "changes would be keyed by (tenant, slug)"
+    );
+    assert_eq!(
+        identity(&pool, "dropped").await,
+        "f",
+        "a dropped identity index logs nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
 async fn a_table_the_role_does_not_own_is_reported_and_the_rest_are_set() {
     let container = postgres().await;
     let port = container.get_host_port_ipv4(5432).await.unwrap();

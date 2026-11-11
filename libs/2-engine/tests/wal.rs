@@ -453,7 +453,9 @@ async fn managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs
 /// A child table whose `USING INDEX` identity already carries its parent link
 /// is kept as it is by replica identity management, while its siblings are set
 /// to `FULL`. Its deletes and re-parents still reach the old parent through
-/// the identity index; only the unread-column skip is lost there.
+/// the identity index; only the unread-column skip is lost there. The root,
+/// kept on an identity index that includes its primary key, still keys its
+/// updates and deletes by that key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_kept_identity_index_still_traces_deleted_and_reparented_rows() {
@@ -476,7 +478,9 @@ async fn a_kept_identity_index_still_traces_deleted_and_reparented_rows() {
 
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
-        "CREATE TABLE users (id int PRIMARY KEY, email text, last_seen int)",
+        "CREATE TABLE users (id int PRIMARY KEY, email text, last_seen int NOT NULL DEFAULT 0)",
+        "CREATE UNIQUE INDEX users_identity ON users (last_seen, id)",
+        "ALTER TABLE users REPLICA IDENTITY USING INDEX users_identity",
         "CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL, total int, \
          status text, placed_at int, note text)",
         "CREATE UNIQUE INDEX orders_identity ON orders (id, user_id)",
@@ -529,7 +533,7 @@ async fn a_kept_identity_index_still_traces_deleted_and_reparented_rows() {
         [
             ("orders", "i"),
             ("payments", "f"),
-            ("users", "f"),
+            ("users", "i"),
             ("visits", "f")
         ]
     );
@@ -563,6 +567,16 @@ async fn a_kept_identity_index_still_traces_deleted_and_reparented_rows() {
         rebuilt("UPDATE orders SET note = 'gift' WHERE id = 10").await,
         sorted(&["upsert users 2"]),
         "no whole old row, so an unread column still rebuilds"
+    );
+    assert_eq!(
+        rebuilt("UPDATE users SET last_seen = 7 WHERE id = 1").await,
+        sorted(&["upsert users 1"]),
+        "a kept root is keyed by its primary key, not its identity index"
+    );
+    assert_eq!(
+        rebuilt("DELETE FROM users WHERE id = 1").await,
+        sorted(&["delete users 1"]),
+        "a delete on a kept root removes the document the backfill wrote"
     );
 
     engine.abort();

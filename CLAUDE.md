@@ -554,8 +554,11 @@ with `PreImageGap.kept` set is one the source leaves on purpose (`will_manage` i
 info line, `check` says "kept as is" and prints no SQL for it). Postgres answers
 from `relreplident` (`cdc/replica_identity.rs`, `shortfall`); `check` prints a Replica identity
 section with both groups (read-only); `run` **sets** `REPLICA IDENTITY FULL` on every member that
-isn't `FULL` and isn't **kept** — a `USING INDEX` identity carrying every link (issue #212; `Member::kept`,
-per member, so a carrying partition stays while a sibling missing the link is set) — in `prepare()`, **before the slot** (a change logged in between would decode with the
+isn't `FULL` and isn't **kept** — a `USING INDEX` identity whose index carries the whole, non-empty
+primary key and every link (issue #212; `Member::kept`, per member, so a carrying partition stays while
+a sibling missing the link is set). The PK half holds with no link too: on an index without it the
+decoder keys changes by the index's columns (wrong `_id`, deletes miss), and a dropped identity index
+carries nothing, so both are set — in `prepare()`, **before the slot** (a change logged in between would decode with the
 old identity), via `ensure_pre_image` when `manage_replica_identity` (default on; `false` alters
 nothing) and the role owns the table — each relation in its own transaction under a 5 s
 `lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned

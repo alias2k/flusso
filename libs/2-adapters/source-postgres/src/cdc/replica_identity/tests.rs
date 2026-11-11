@@ -198,6 +198,10 @@ fn only_an_identity_index_carrying_every_link_is_kept() {
         (Index, &["id"][..], link, Some((true, false))),
         (Index, &["user_id"][..], link, Some((true, false))),
         (Index, &["id"][..], none, Some((false, true))),
+        (Index, &["id", "slug"][..], none, Some((false, true))),
+        (Index, &["tenant", "slug"][..], none, Some((false, false))),
+        (Index, &[][..], none, Some((false, false))),
+        (Index, &[][..], link, Some((true, false))),
         (Full, &["id"][..], link, None),
         (Full, &["id"][..], none, None),
     ];
@@ -252,5 +256,63 @@ fn a_partition_keeps_its_identity_index_while_a_sibling_missing_the_link_is_set(
         shortfall(&orders(), &columns(&["user_id"]), &members[..2]),
         None,
         "a partitioned table with no gap is left alone"
+    );
+}
+
+/// Whether a lone table with `identity` on an index holding `carried`, keyed
+/// by `primary_key`, is kept when it has no link to carry.
+fn kept_without_links(identity: ReplicaIdentity, carried: &[&str], primary_key: &[&str]) -> bool {
+    let table = [Member {
+        carried: carried.iter().map(|c| (*c).to_owned()).collect(),
+        primary_key: primary_key.iter().map(|c| (*c).to_owned()).collect(),
+        ..member("orders", identity, true)
+    }];
+    shortfall(&orders(), &[], &table).unwrap().kept.is_some()
+}
+
+#[test]
+fn a_table_with_no_link_is_kept_only_on_an_index_carrying_its_whole_primary_key() {
+    use ReplicaIdentity::Index;
+    assert!(kept_without_links(Index, &["id"], &["id"]));
+    assert!(kept_without_links(
+        Index,
+        &["tenant", "id", "slug"],
+        &["tenant", "id"]
+    ));
+    assert!(
+        !kept_without_links(Index, &["tenant", "slug"], &["id"]),
+        "changes would be keyed by (tenant, slug)"
+    );
+    assert!(
+        !kept_without_links(Index, &["tenant", "slug"], &["tenant", "id"]),
+        "a composite key only partly carried"
+    );
+    assert!(
+        !kept_without_links(Index, &[], &["id"]),
+        "a dropped identity index logs nothing"
+    );
+    assert!(
+        !kept_without_links(Index, &["tenant", "slug"], &[]),
+        "a table with no primary key"
+    );
+}
+
+#[test]
+fn a_root_on_an_identity_index_without_its_primary_key_is_set_to_full() {
+    let gap = shortfall(
+        &orders(),
+        &[],
+        &lone(ReplicaIdentity::Index, &["tenant", "slug"]),
+    )
+    .unwrap();
+    assert!(
+        gap.missing.is_empty(),
+        "partial, not a gap: no link to miss"
+    );
+    assert_eq!(gap.kept, None);
+    assert!(gap.will_manage(true));
+    assert_eq!(
+        gap.remediation,
+        "ALTER TABLE \"public\".\"orders\" REPLICA IDENTITY FULL;"
     );
 }
