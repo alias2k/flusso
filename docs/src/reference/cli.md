@@ -51,10 +51,15 @@ The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-
 
 ### Validation at start
 
-Once connected, and before any index is touched, `run` checks the schemas against the database exactly as [`check`](#what-the-database-check-verifies) does, on every start, `--locked` and lock-only runs included. The diagnostics go to stderr in `check`'s format.
+Once connected, and before any index is touched, `run` runs the same check as [`check`](#what-the-database-check-verifies), on every start, `--locked` and lock-only runs included. The diagnostics go to stderr in `check`'s format. The verdict differs: `run` stops only on what can't work as written.
 
-- **An error stops the start.** `run` exits non-zero with `the schemas disagree with the database (N error(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
-- **A warning is printed and the start goes on.**
+- **These stop the start:**
+  - a table that doesn't exist, in any position;
+  - a column the document query reads that doesn't exist: a field's column, a key (`column`, `foreign_key`, `left_key`, `right_key`, a hop's `foreign_key`), either side of an `on:` pair, a value or null-check filter column (relation, junction, hop, root `filters`, `soft_delete` `when`), an `order_by` column, a geo coordinate, an aggregate's input column or expression operand, and the `soft_delete` column;
+  - a `soft_delete` `field` that reads no column.
+
+  `run` exits non-zero with `the schemas name what the database does not have (N problem(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
+- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, and a join `primary_key` that names no column. The documents build as they did in 0.16; `check` still exits non-zero on the errors.
 - **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
 
 There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
@@ -77,12 +82,12 @@ Every problem of one run is listed together, each naming the index, the field pa
   - each `via` hop's `table` and `foreign_key`;
   - both sides of every `on:` pair: `local` on the table before the hop, `related` on the hop's table;
   - the columns of the value and null-check `filters` on the relation, its junction, and each hop (a `raw` filter is passed to the database unread, so it isn't checked);
-  - every `order_by` column, and a join's `primary_key`.
+  - every `order_by` column, and a join's `primary_key` (a warning: relations are keyed by the table's own primary key, so a name that misses is ignored).
 
   A missing table is reported once, and nothing on it is looked up.
 - **Root keys, on the root table.** The columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
 
-Everything above is an error except the `required`-over-nullable warning. `--offline` still reports the one problem that needs no database: a `soft_delete` `field` that reads no column.
+Everything above is an error except the two warnings, `required` over a nullable column and a join `primary_key` that names no column. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the one problem that needs no database: a `soft_delete` `field` that reads no column.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -93,7 +98,7 @@ Everything above is an error except the `required`-over-nullable warning. `--off
 | `--manage-replica-identity <bool>` | config, else `true` | Affects the replica-identity report's phrasing only. |
 | `--format <human\|json>` | `human` | `json` prints one machine-readable document. |
 
-Exit status is non-zero when validation fails or any diagnostic is an error. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`.
+Exit status is non-zero when validation fails or any diagnostic is an error. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`: each has `index`, `field`, `path`, `severity` (`error`/`warning`), `kind`, and `message`. `kind` is one of `unknown_table`, `unknown_column`, `unread_soft_delete_marker` (the three that stop `run`), `type_mismatch`, `not_numeric`, `nullability`, `ignored_primary_key`.
 
 ## design
 

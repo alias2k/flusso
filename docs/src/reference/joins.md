@@ -12,7 +12,7 @@ A join folds rows from a related table into the document. The relationship verb 
 | Sibling | Type | Applies to | Meaning |
 | --- | --- | --- | --- |
 | `table` | [Postgres identifier](identifiers.md) | all | The related table. Required. |
-| `primary_key` | Postgres identifier | all | The related table's primary key. Required. The projected field reading it is forced non-null. |
+| `primary_key` | Postgres identifier | all | The related table's primary key. Required. The projected field reading it is forced non-null. The join itself is keyed by the table's primary key as the database defines it, so a name that misses is ignored ([a warning](cli.md#what-the-database-check-verifies)). |
 | `column` | Postgres identifier | `belongs_to` | This table's column pointing at the related row. Defaults to the document key. |
 | `foreign_key` | Postgres identifier | `has_one`, `has_many` | The related table's column pointing back at the parent. Required. |
 | `through` | table | `many_to_many` | The junction. Required. See [through](#through). |
