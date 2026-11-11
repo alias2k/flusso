@@ -41,10 +41,21 @@ impl ConnectArgs {
     }
 
     /// A request to `path` on the private surface, with Basic auth applied.
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        reqwest::Client::new()
+    fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> anyhow::Result<reqwest::RequestBuilder> {
+        let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|der| reqwest::Certificate::from_der(der).ok());
+        let client = reqwest::Client::builder()
+            .tls_certs_only(roots)
+            .build()
+            .context("building the HTTP client")?;
+        Ok(client
             .request(method, format!("{}{path}", self.base_url()))
-            .basic_auth(&self.admin_user, Some(&self.admin_password))
+            .basic_auth(&self.admin_user, Some(&self.admin_password)))
     }
 }
 
@@ -71,7 +82,7 @@ pub(crate) struct ReindexArgs {
 pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
     let resp = args
         .connect
-        .request(reqwest::Method::GET, "/indexes")
+        .request(reqwest::Method::GET, "/indexes")?
         .send()
         .await
         .context("requesting /indexes")?;
@@ -92,7 +103,7 @@ pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
 pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
     let resp = args
         .connect
-        .request(reqwest::Method::POST, "/reindex")
+        .request(reqwest::Method::POST, "/reindex")?
         .query(&[("index", args.index.as_str())])
         .query(&args.sink.as_deref().map(|sink| [("sink", sink)]))
         .send()

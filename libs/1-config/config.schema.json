@@ -511,7 +511,7 @@
         },
         "tls_verify": {
           "type": "boolean",
-          "description": "Verify TLS certificates. Set `false` for a local cluster with a\nself-signed certificate.",
+          "description": "Verify TLS certificates against the Mozilla root bundle built into\nflusso; the OS trust store is not read. Set `false` for a local cluster\nwith a self-signed certificate.",
           "default": true
         },
         "batch_size": {

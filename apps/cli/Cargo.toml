@@ -62,7 +62,8 @@ axum.workspace = true
 base64.workspace = true
 # HTTP client for the `indexes`/`reindex` subcommands talking to a running
 # flusso's private control surface.
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls", "query"] }
+webpki-root-certs.workspace = true
 
 [dev-dependencies]
 # The `/wait` router tests implement a tiny `ChangeCapture`, whose stream type

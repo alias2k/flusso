@@ -43,8 +43,9 @@ pub struct OpensearchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[adapter(example = Secret::env("OPENSEARCH_PASSWORD"))]
     pub password: Option<Secret>,
-    /// Verify TLS certificates. Set `false` for a local cluster with a
-    /// self-signed certificate.
+    /// Verify TLS certificates against the Mozilla root bundle built into
+    /// flusso; the OS trust store is not read. Set `false` for a local cluster
+    /// with a self-signed certificate.
     #[serde(default = "default_tls_verify")]
     pub tls_verify: bool,
     /// Documents per bulk request.

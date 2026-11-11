@@ -42,7 +42,8 @@ futures-core = { workspace = true }
 # `rt` only: a dropped pinned walk spawns its point-in-time close on the
 # caller's runtime (reqwest already requires tokio).
 tokio = { workspace = true, features = ["rt"] }
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+webpki-root-certs.workspace = true
 flusso-query-derive = { path = "../query-derive", version = "=0.16.0", optional = true }
 rust_decimal = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }

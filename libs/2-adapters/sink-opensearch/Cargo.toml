@@ -31,7 +31,8 @@ async-trait.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+webpki-root-certs.workspace = true
 
 [dev-dependencies]
 chrono = { workspace = true, features = ["clock"] }

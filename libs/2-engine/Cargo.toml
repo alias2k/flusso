@@ -42,7 +42,7 @@ testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"
 criterion.workspace = true
 # The full-pipeline e2e (`tests/pipeline.rs`) reads the real OpenSearch index
 # back to assert what actually landed.
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json.workspace = true
 # `RUST_LOG`-driven engine logs while an e2e runs (`--no-capture`), so a
 # misbehaving run can be diagnosed from what the engine said, not just from

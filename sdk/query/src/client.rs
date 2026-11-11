@@ -37,9 +37,19 @@ pub struct Client {
     pub(crate) after: Option<Arc<After>>,
 }
 
+/// The Mozilla root bundle, which the client has always verified against:
+/// reqwest 0.13 would otherwise read the OS trust store.
+fn mozilla_roots() -> impl Iterator<Item = reqwest::Certificate> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|der| reqwest::Certificate::from_der(der).ok())
+}
+
 impl Client {
     /// Connect to the cluster at `url` (`http` or `https`). This validates the
-    /// URL and builds the HTTP client; it does not perform any I/O.
+    /// URL and builds the HTTP client; it does not perform any I/O. An `https`
+    /// certificate is verified against the Mozilla root bundle built into the
+    /// client, not the OS trust store.
     pub fn connect(url: impl AsRef<str>) -> Result<Self> {
         let raw = url.as_ref();
         let parsed = Url::parse(raw).map_err(|error| Error::Url(format!("{raw}: {error}")))?;
@@ -47,7 +57,9 @@ impl Client {
             "http" | "https" => {}
             other => return Err(Error::Url(format!("unsupported scheme `{other}` in {raw}"))),
         }
-        let http = reqwest::Client::builder().build()?;
+        let http = reqwest::Client::builder()
+            .tls_certs_only(mozilla_roots())
+            .build()?;
         Ok(Self {
             http,
             base: raw.trim_end_matches('/').to_string(),

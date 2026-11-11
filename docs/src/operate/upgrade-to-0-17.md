@@ -104,6 +104,9 @@ Any deployment going from 0.16 to 0.17. Step 1 applies to every deployment with 
 - **Ad-hoc readers on the convenience alias** (`{prefix}{logical}`, dashboards, `curl`) move to the new generation as soon as 0.17 starts, so they see an empty or partial index until it's seeded. Point them at the old hash alias for the duration if that matters.
 - **Revert `on_error`** to `stop` once the rebuild is done and the quarantined rows are fixed; changing the policy never triggers a reindex.
 - **Rolling back to 0.16** after 0.17 ran returns to the old index, which missed every change made while 0.17 ran. Run `flusso reindex <index>` for each `map` index after the rollback, or delete its generation so the restart rebuilds it.
+- **OTLP export over `https://` works.** 0.16's HTTP exporter had no TLS and failed every export to an `https://` endpoint with a network error; 0.17 verifies it against the operating system's trust store. Exports are now retried, and a metric export that keeps failing (a collector that takes traces but not metrics, for one) logs an `ERROR` every 10 seconds where 0.16 stayed silent. To export traces alone, set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` instead of the general endpoint. See [Environment variables](../reference/environment.md#logging-and-telemetry).
+- **`/metrics` is unchanged** except `target_info`'s `telemetry_sdk_version` label, which reports the OpenTelemetry SDK (`0.33.1`).
+- **`flusso_query::Error::Http` wraps a `reqwest` 0.13 error.** Code that only formats the error or calls its methods (`is_timeout()`, `status()`) compiles as before. Code that names the inner type, such as a `From<reqwest::Error>` impl or a function taking `reqwest::Error`, needs `reqwest` 0.13 in your own `Cargo.toml`. The client's trust roots stay the Mozilla bundle built into it.
 - **Several OpenSearch sinks** each rebuild their own copy; watch every sink's block in `/status`. A `stdout` sink has no index and is unaffected.
 
 ## Related
