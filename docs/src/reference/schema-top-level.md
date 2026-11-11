@@ -37,7 +37,7 @@ fields:
 | `object` | same-row sub-object | [Objects and maps](objects-and-maps.md#object) |
 | `map` | dynamic-key object | [Objects and maps](objects-and-maps.md#map) |
 | `belongs_to` `has_one` `has_many` `many_to_many` | join | [Joins](joins.md) |
-| `count` `sum` `avg` `min` `max` `ids` | aggregate | [Aggregates](aggregates.md) |
+| `count` `sum` `avg` `min` `max` `ids` `exists` | aggregate | [Aggregates](aggregates.md) |
 | `constant` | fixed value | [Field types](field-types.md#constant) |
 
 Which siblings a field accepts depends on its type key:
@@ -55,7 +55,7 @@ Which siblings a field accepts depends on its type key:
 | `values` | `map` | The shared leaf type of every value. Required. |
 | `fields` | `object`, joins | The nested projection. |
 | `table`, `primary_key`, `column` / `foreign_key` / `through`, `order_by`, `limit`, `filters` | joins | See [Joins](joins.md). |
-| `table`, `column`, `value_type`, `element_type`, `foreign_key` / `through`, `filters` | aggregates | See [Aggregates](aggregates.md). |
+| `table`, `column`, `value_type`, `element_type`, `foreign_key` / `through`, `distinct`, `via`, `filters` | aggregates | See [Aggregates](aggregates.md). |
 | `value` | `constant` | The fixed value. |
 
 ## Example

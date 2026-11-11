@@ -655,6 +655,7 @@ fn spec() -> SourceSpec {
                 value_type: None,
                 filters: None,
                 distinct: false,
+                via: Vec::new(),
             },
         ),
     ];
@@ -741,6 +742,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         value_type: None,
         filters,
         distinct: false,
+        via: Vec::new(),
     }
 }
 

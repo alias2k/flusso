@@ -108,6 +108,7 @@ pub struct Product {
 | `has_many`, `many_to_many` | `Vec<Struct>` | `Nested<S, T>` |
 | any join or `json` with `indexed: false` | as above | none; see [Stored-only fields](#stored-only-fields) |
 | `ids` aggregate | `Vec<i64>` or `Vec<String>` | `Number` / `Keyword` |
+| `exists` aggregate | `bool` | `Bool` |
 
 Dates sit behind a feature so a caller picks `time` or `chrono` (or `String` for raw ISO-8601).
 
@@ -123,7 +124,7 @@ A field is `T` or `Option<T>`, and the derive checks which. Nullability comes fr
 | `object` | no |
 | `belongs_to`, `has_one` | yes |
 | `has_many`, `many_to_many` | no; empty `Vec`, never null |
-| `count`, `ids` | no |
+| `count`, `ids`, `exists` | no |
 | `sum`, `avg`, `min`, `max` | yes |
 
 ## Related

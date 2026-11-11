@@ -11,6 +11,8 @@
 //! - [`relation_columns`]: what a relation reads from one of its tables — the
 //!   projected fields, `filters`, `order_by`, the aggregate input, and the
 //!   link (a child's `foreign_key`, a junction's `left_key`/`right_key`).
+//! - [`via_columns`]: what an aggregate reads from one of its `via` tables —
+//!   the hop's `foreign_key` and `filters`.
 //! - [`soft_delete_column`]: the column a `soft_delete` marker reads on the
 //!   root row; the document query reads the same one.
 //! - [`row_link`]: the link column a related row holds, which a deleted or
@@ -48,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 
 use kernel::{
     ColumnName, Field, FieldName, FieldSource, Filter, GenericValue, IndexSchema, Relation,
-    RelationKey, SoftDelete, TableName,
+    RelationKey, SoftDelete, TableName, ViaHop,
 };
 
 use crate::{RowImage, RowKey};
@@ -242,6 +244,19 @@ pub fn relation_columns(schema: &IndexSchema, relation: &Relation, table: &Table
     used.finish()
 }
 
+/// The columns an aggregate (of `schema`) reads from one of its `via` tables:
+/// the hop's `foreign_key` and its `filters`. The hop's primary key, which the
+/// next hop points at, is checked by [`RowDiff::new`].
+pub fn via_columns(schema: &IndexSchema, hop: &ViaHop) -> ColumnUse {
+    if reads_raw(schema) {
+        return ColumnUse::All;
+    }
+    let mut used = Collector::default();
+    used.column(&hop.foreign_key);
+    used.filters(hop.filters.as_deref());
+    used.finish()
+}
+
 /// The column a `soft_delete` marker reads on the root row: its `column`, or
 /// the column behind the first field named `field`, searched depth-first in
 /// declaration order through groups **and** joins. A name found inside a join
@@ -273,7 +288,7 @@ fn aggregate_input(op: &kernel::AggregateOp) -> Option<&ColumnName> {
         | AggregateOp::Avg(column)
         | AggregateOp::Min(column)
         | AggregateOp::Max(column) => Some(column),
-        AggregateOp::Count | AggregateOp::Ids { .. } => None,
+        AggregateOp::Count | AggregateOp::Ids { .. } | AggregateOp::Exists => None,
     }
 }
 
@@ -297,7 +312,8 @@ fn soft_delete_when(soft_delete: &SoftDelete) -> Option<&[Filter]> {
 }
 
 /// Whether a raw SQL filter appears anywhere in the index: root `filters`,
-/// the `soft_delete` `when`, or any relation's or junction's `filters`.
+/// the `soft_delete` `when`, or any relation's, junction's or `via` hop's
+/// `filters`.
 fn reads_raw(schema: &IndexSchema) -> bool {
     fn any_raw(filters: Option<&[Filter]>) -> bool {
         filters
@@ -310,6 +326,7 @@ fn reads_raw(schema: &IndexSchema) -> bool {
             field.relation().is_some_and(|relation| {
                 any_raw(relation.filters())
                     || matches!(relation.key(), RelationKey::Through(through) if any_raw(through.filters.as_deref()))
+                    || relation.via().iter().any(|hop| any_raw(hop.filters.as_deref()))
             }) || in_fields(field.children())
         })
     }

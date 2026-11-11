@@ -15,8 +15,9 @@ import {
   type JoinKind,
   type SoftDelete,
   type Through,
+  type ViaHop,
 } from "../api";
-import { KIND_HELP, LEAF_TYPES } from "../fields";
+import { AGGREGATE_OPS, KIND_HELP, LEAF_TYPES, withAggregateOp } from "../fields";
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
@@ -45,9 +46,9 @@ import {
 } from "./widgets";
 
 /// The verb-agnostic view of an [`AggregateOp`]: which op it is, and the column
-/// it reads (null for `count`/`ids`, which read no column).
-function aggOpKind(op: AggregateOp): "count" | "sum" | "avg" | "min" | "max" | "ids" {
-  if (typeof op === "string") return "count";
+/// it reads (null for `count`/`exists`/`ids`, which read no column).
+function aggOpKind(op: AggregateOp): "count" | "exists" | "sum" | "avg" | "min" | "max" | "ids" {
+  if (typeof op === "string") return op;
   if ("sum" in op) return "sum";
   if ("avg" in op) return "avg";
   if ("min" in op) return "min";
@@ -194,6 +195,7 @@ function nameSuggestions(field: Field): string[] {
     const col = aggOpColumn(agg.op) ?? "";
     if (op === "count") return [`${camel(singular(agg.table))}Count`, `${camel(agg.table)}Count`];
     if (op === "ids") return [`${camel(singular(agg.table))}Ids`];
+    if (op === "exists") return [`has${pascal(singular(agg.table))}`];
     return col ? [camel(col), `${camel(col)}${pascal(op)}`] : [];
   }
   return [];
@@ -1124,10 +1126,12 @@ function AggregateBody({
   const opCol = aggOpColumn(op);
   const kind = aggOpKind(op);
   const aggColShapes = columnsFor(agg.table);
-  const hasMappingType = kind === "sum" || kind === "min" || kind === "max" || kind === "ids";
   return (
     <>
       <Block variant="src" title={t("inspector.aggFrom")}>
+        <Row label={t("inspector.aggOp")}>
+          <Select value={kind} options={[...AGGREGATE_OPS]} onChange={(v) => setAgg(withAggregateOp(agg, v))} />
+        </Row>
         <Row label={t("inspector.relatedTable")}>
           <TablePicker
             value={agg.table}
@@ -1183,8 +1187,16 @@ function AggregateBody({
             />
           </Row>
         )}
-        {!hasMappingType && <p className="hint">{t("inspector.countResult")}</p>}
+        {kind === "count" && <p className="hint">{t("inspector.countResult")}</p>}
+        {kind === "exists" && <p className="hint">{t("inspector.existsResult")}</p>}
+        {kind === "avg" && <p className="hint">{t("inspector.avgResult")}</p>}
       </Block>
+      <ViaEditor
+        value={agg.via ?? []}
+        tables={tables}
+        junctions={junctions}
+        onChange={(via) => setAgg({ ...agg, via: via.length ? via : undefined })}
+      />
       <Drawer title={t("inspector.filters")} count={(agg.filters ?? []).length}>
         <Filters
           value={agg.filters ?? []}
@@ -1196,6 +1208,59 @@ function AggregateBody({
         <JunctionFilters through={agg.key.through} onChange={(through) => setAgg({ ...agg, key: { through } })} />
       )}
     </>
+  );
+}
+
+/// The tables an aggregate passes through between its parent and its table,
+/// in order from the parent. Each hop names its table and the foreign key on it
+/// that points at the table before; the aggregate's own key then points at the
+/// last hop.
+function ViaEditor({
+  value,
+  tables,
+  junctions,
+  onChange,
+}: {
+  value: ViaHop[];
+  tables: string[];
+  junctions?: ReadonlySet<string>;
+  onChange: (via: ViaHop[]) => void;
+}) {
+  const { t } = useT();
+  const { columnsFor } = useDesign();
+  const set = (i: number, hop: ViaHop) => onChange(value.map((h, j) => (j === i ? hop : h)));
+  return (
+    <Drawer title={t("inspector.via")} count={value.length} defaultOpen={value.length > 0}>
+      <p className="hint">{t("inspector.viaHint")}</p>
+      {value.map((hop, i) => (
+        <div className="my-2 rounded-md border border-border p-2" key={i}>
+          <div className="flex flex-wrap items-end gap-2">
+            <Row label={t("inspector.viaHop", { n: i + 1 })}>
+              <TablePicker
+                value={hop.table}
+                tables={tables}
+                junctions={junctions}
+                onChange={(table) => set(i, { ...hop, table, filters: table === hop.table ? hop.filters : undefined })}
+              />
+            </Row>
+            <Row label="foreign_key">
+              <ColumnPicker
+                value={hop.foreign_key}
+                columns={columnsFor(hop.table)}
+                onChange={(foreign_key) => set(i, { ...hop, foreign_key })}
+              />
+            </Row>
+            <RemoveButton label={t("common.remove")} onClick={() => onChange(value.filter((_, j) => j !== i))} />
+          </div>
+          <Filters
+            value={hop.filters ?? []}
+            columns={columnsFor(hop.table)}
+            onChange={(filters) => set(i, { ...hop, filters: filters?.length ? filters : undefined })}
+          />
+        </div>
+      ))}
+      <AddButton label={t("inspector.viaAdd")} onClick={() => onChange([...value, { table: "", foreign_key: "" }])} />
+    </Drawer>
   );
 }
 

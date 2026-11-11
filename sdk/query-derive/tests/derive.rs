@@ -928,3 +928,28 @@ fn opted_out_fields_deserialize_and_lose_only_what_the_index_lacks() -> Result {
     assert_eq!(listing.snapshot.unwrap()["rooms"], 3);
     Ok(())
 }
+
+/// An `exists` aggregate, one hop or across `via`, maps to a non-null
+/// `boolean`, so it projects as a plain `bool` and gets the boolean handle.
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "flags", config = "tests/fixtures/flusso.toml")]
+struct UserFlags {
+    id: i32,
+    #[flusso(rename = "hasPaidOrder")]
+    has_paid_order: bool,
+    #[flusso(rename = "hasCompletedTask")]
+    has_completed_task: bool,
+}
+
+#[test]
+fn an_exists_aggregate_gets_the_bool_handle() -> Result {
+    let paid: flusso_query::Bool<flusso_query::Root> = UserFlags::has_paid_order();
+    let body = UserFlags::query()
+        .filter(paid.eq(true))
+        .filter(UserFlags::has_completed_task().eq(false))
+        .body();
+    let json = body.to_string();
+    assert!(json.contains(r#""hasPaidOrder":true"#), "{json}");
+    assert!(json.contains(r#""hasCompletedTask":false"#), "{json}");
+    Ok(())
+}

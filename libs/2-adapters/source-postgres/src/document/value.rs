@@ -195,10 +195,12 @@ fn coerce_relation(json: serde_json::Value, fields: &[Field]) -> GenericValue {
 
 /// An aggregate's result, typed by its op: a count is a [`BigInt`](GenericValue::BigInt),
 /// an average a [`Double`](GenericValue::Double), `sum`/`min`/`max` follow the
-/// declared `value_type`, and `ids` is an array of the element type.
+/// declared `value_type`, `ids` is an array of the element type, and `exists`
+/// is a [`Bool`](GenericValue::Bool).
 fn coerce_aggregate(json: serde_json::Value, aggregate: &Aggregate) -> GenericValue {
     match &aggregate.op {
         AggregateOp::Count => coerce_scalar(json, &FlussoType::Long),
+        AggregateOp::Exists => coerce_scalar(json, &FlussoType::Boolean),
         AggregateOp::Avg(_) => coerce_scalar(json, &FlussoType::Double),
         AggregateOp::Sum(_) | AggregateOp::Min(_) | AggregateOp::Max(_) => {
             match &aggregate.value_type {

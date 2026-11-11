@@ -782,6 +782,135 @@ fn many_to_many_join_takes_junction_filters() {
     }
 }
 
+// ── via / exists ─────────────────────────────────────────────────────────────
+
+const TASK_FLAG: &str = "version: 1\ntable: users\nprimary_key: id\nfields:\n  - exists: hasCompletedTask\n    table: tasks\n    foreign_key: project_id\n    filters:\n      - { column: status, op: eq, value: completed }\n    via:\n      - table: teams\n        foreign_key: owner_id\n      - table: projects\n        foreign_key: team_id\n        filters:\n          - { column: archived, op: eq, value: 'false' }\n";
+
+fn aggregate<'a>(schema: &'a IndexSchema, name: &str) -> &'a kernel::Aggregate {
+    match &field(schema, name).source {
+        FieldSource::Relation(Relation::Aggregate(aggregate)) => aggregate,
+        other => panic!("expected an aggregate, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_aggregate_reaches_its_table_via_hops_in_order_from_the_parent() {
+    let schema = convert(TASK_FLAG).unwrap();
+    let a = aggregate(&schema, "hasCompletedTask");
+    assert!(matches!(a.op, AggregateOp::Exists));
+    assert!(matches!(&a.key, AggregateKey::Direct(fk) if fk.as_ref() == "project_id"));
+    let hops: Vec<(&str, &str)> = a
+        .via
+        .iter()
+        .map(|hop| (hop.table.as_ref(), hop.foreign_key.as_ref()))
+        .collect();
+    assert_eq!(hops, [("teams", "owner_id"), ("projects", "team_id")]);
+    assert!(a.via[0].filters.is_none());
+    assert!(matches!(
+        a.via[1].filters.as_deref(),
+        Some([Filter::ValueOp(f)]) if f.column.as_ref() == "archived"
+    ));
+}
+
+#[test]
+fn exists_maps_to_a_non_null_boolean() {
+    let schema = convert(TASK_FLAG).unwrap();
+    let mapping = schema.resolve(kernel::IndexName::try_new("users").unwrap());
+    let flag = &mapping.fields[0];
+    assert!(matches!(
+        flag.mapping.mapping_type,
+        kernel::MappingType::Boolean
+    ));
+    assert!(!flag.nullable);
+}
+
+#[test]
+fn an_aggregate_without_via_has_no_hops() {
+    let schema = convert(ORDER_WEIGHT).unwrap();
+    assert!(aggregate(&schema, "totalWeight").via.is_empty());
+}
+
+#[test]
+fn via_ends_in_a_junction_through_the_aggregate_s_own_through() {
+    let schema = convert(&format!(
+        "{ORDER_WEIGHT}    via:\n      - table: orders_archive\n        foreign_key: customer_id\n"
+    ))
+    .unwrap();
+    let a = aggregate(&schema, "totalWeight");
+    assert!(matches!(a.key, AggregateKey::Through(_)));
+    assert_eq!(a.via.len(), 1);
+}
+
+#[test]
+fn distinct_stays_rejected_on_a_foreign_key_chain() {
+    let err = convert(&format!("{TASK_FLAG}    distinct: true\n")).unwrap_err();
+    assert!(matches!(err, ConversionError::DistinctWithoutThrough));
+}
+
+#[test]
+fn a_via_hop_needs_a_foreign_key() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - count: tasks\n    table: tasks\n    foreign_key: project_id\n    via:\n      - table: projects\n",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ConversionError::ViaMissingForeignKey { ref field, ref table } if field == "tasks" && table == "projects")
+    );
+    assert!(
+        err.to_string()
+            .starts_with("aggregate `tasks`: `via` entry `projects`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_belongs_to_direction_via_hop_is_rejected() {
+    let err = convert(
+        "version: 1\ntable: tasks\nfields:\n  - count: siblings\n    table: tasks\n    foreign_key: project_id\n    via:\n      - table: projects\n        column: project_id\n",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::ViaBelongsTo { ref field, .. } if field == "siblings"));
+    assert!(err.to_string().contains("belongs_to"), "{err}");
+    assert!(err.to_string().contains("aggregate `siblings`"), "{err}");
+}
+
+#[test]
+fn a_junction_in_the_middle_of_via_is_rejected() {
+    let err = convert(
+        "version: 1\ntable: users\nfields:\n  - count: tasks\n    table: tasks\n    foreign_key: project_id\n    via:\n      - table: projects\n        through: { table: user_projects, left_key: user_id, right_key: project_id }\n",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::ViaJunction { ref field, .. } if field == "tasks"));
+    assert!(err.to_string().contains("last hop"), "{err}");
+    assert!(err.to_string().contains("aggregate `tasks`"), "{err}");
+}
+
+#[test]
+fn exists_rejects_column_and_value_type() {
+    let base = "version: 1\ntable: users\nfields:\n  - exists: hasOrder\n    table: orders\n    foreign_key: user_id\n";
+    let err = convert(&format!("{base}    column: total\n")).unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::UnexpectedExistsSibling { sibling: "column" }
+    ));
+    let err = convert(&format!("{base}    value_type: boolean\n")).unwrap_err();
+    assert!(matches!(
+        err,
+        ConversionError::UnexpectedExistsSibling {
+            sibling: "value_type"
+        }
+    ));
+}
+
+#[test]
+fn an_unknown_key_in_a_via_hop_is_a_parse_error() {
+    let err = parse(
+        "version: 1\ntable: users\nfields:\n  - count: tasks\n    table: tasks\n    foreign_key: project_id\n    via:\n      - table: projects\n        foreign_key: user_id\n        order_by: [{ column: id }]\n",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("order_by"), "{err}");
+}
+
 // ── subfields / indexed opt-outs ─────────────────────────────────────────────
 
 fn column<'a>(schema: &'a IndexSchema, name: &str) -> &'a Column {

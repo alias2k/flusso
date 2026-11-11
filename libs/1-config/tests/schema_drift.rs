@@ -154,10 +154,10 @@ fn all_aggregate_ops() -> Vec<config::yaml::AggregateOp> {
     fn _exhaustive(a: config::yaml::AggregateOp) {
         use config::yaml::AggregateOp::*;
         match a {
-            Count | Sum | Avg | Min | Max | Ids => {}
+            Count | Sum | Avg | Min | Max | Ids | Exists => {}
         }
     }
-    vec![Count, Sum, Avg, Min, Max, Ids]
+    vec![Count, Sum, Avg, Min, Max, Ids, Exists]
 }
 
 /// The 16 scalar `FlussoType`s — those usable as a field type tag and as an
@@ -270,6 +270,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             through: _,
             distinct: _,
             filters: _,
+            via: _,
             options: _,
         } = a;
         let config::yaml::ConstantBody { field: _, value: _ } = k;
@@ -296,6 +297,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "value_type",   // aggregate (sum/min/max)
         "element_type", // aggregate (ids)
         "distinct",     // aggregate (over through)
+        "via",          // aggregate (across several hops)
         "values",       // map (value leaf type)
         "value",        // constant
         "subfields",    // text / keyword / uuid
@@ -436,5 +438,24 @@ fn index_through_keys_match_parser() {
         schema_keys(&index_schema(), "/definitions/through/properties"),
         strs(&["table", "left_key", "right_key", "filters"]),
         "`through` keys drifted",
+    );
+}
+
+#[test]
+fn index_via_keys_match_parser() {
+    fn _guard(hop: config::yaml::ViaHop) {
+        let config::yaml::ViaHop {
+            table: _,
+            foreign_key: _,
+            filters: _,
+            // Parsed only to be rejected at conversion; not offered to editors.
+            column: _,
+            through: _,
+        } = hop;
+    }
+    assert_eq!(
+        schema_keys(&index_schema(), "/definitions/via/items/properties"),
+        strs(&["table", "foreign_key", "filters"]),
+        "`via` keys drifted",
     );
 }

@@ -5,7 +5,7 @@ use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, Direction, Field, FieldSource,
     Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join, JoinKind, NullCheckFilter,
     NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
-    Transform, ValueOpFilter,
+    Transform, ValueOpFilter, ViaHop,
 };
 use rust_decimal::Decimal;
 
@@ -430,6 +430,12 @@ fn convert_aggregate_field(
     if body.distinct && matches!(key, AggregateKey::Direct(_)) {
         return Err(ConversionError::DistinctWithoutThrough);
     }
+    let via = body
+        .via
+        .unwrap_or_default()
+        .into_iter()
+        .map(|hop| convert_via_hop(&body.field, hop))
+        .collect::<Result<_, _>>()?;
     let aggregate = Aggregate {
         table: body.table,
         op,
@@ -437,6 +443,7 @@ fn convert_aggregate_field(
         value_type,
         filters: convert_filters_opt(body.filters)?,
         distinct: body.distinct,
+        via,
     };
     Ok(Field {
         field: body.field,
@@ -477,6 +484,17 @@ fn convert_aggregate_op(
             AggregateOp::Max(require_aggregate_column(column, "max")?),
             Some(require_aggregate_type(body.value_type.clone(), "max")?),
         ),
+        entities::AggregateOp::Exists => {
+            if body.column.is_some() {
+                return Err(ConversionError::UnexpectedExistsSibling { sibling: "column" });
+            }
+            if body.value_type.is_some() {
+                return Err(ConversionError::UnexpectedExistsSibling {
+                    sibling: "value_type",
+                });
+            }
+            (AggregateOp::Exists, None)
+        }
         entities::AggregateOp::Ids => {
             if body.column.is_some() {
                 return Err(ConversionError::UnexpectedIdsSibling { sibling: "column" });
@@ -502,6 +520,29 @@ fn aggregate_key(
         (None, Some(t)) => Ok(AggregateKey::Through(convert_through(t)?)),
         _ => Err(ConversionError::InvalidAggregateKey),
     }
+}
+
+/// A `via` entry: a downward foreign-key hop. A `column` (the `belongs_to`
+/// direction) or a `through` (a junction in the middle) is rejected.
+fn convert_via_hop(
+    field: &kernel::FieldName,
+    hop: entities::ViaHop,
+) -> Result<ViaHop, ConversionError> {
+    let field = field.to_string();
+    let table = hop.table.to_string();
+    if hop.through.is_some() {
+        return Err(ConversionError::ViaJunction { field, table });
+    }
+    if hop.column.is_some() {
+        return Err(ConversionError::ViaBelongsTo { field, table });
+    }
+    Ok(ViaHop {
+        foreign_key: hop
+            .foreign_key
+            .ok_or(ConversionError::ViaMissingForeignKey { field, table })?,
+        table: hop.table,
+        filters: convert_filters_opt(hop.filters)?,
+    })
 }
 
 fn convert_through(through: entities::Through) -> Result<Through, ConversionError> {

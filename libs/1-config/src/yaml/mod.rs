@@ -88,6 +88,26 @@ pub enum ConversionError {
         "aggregate op 'ids' does not take `{sibling}` (it always collects the related table's primary key)"
     )]
     UnexpectedIdsSibling { sibling: &'static str },
+    #[error(
+        "aggregate op 'exists' does not take `{sibling}` (it is a boolean: does any row exist)"
+    )]
+    UnexpectedExistsSibling { sibling: &'static str },
+    #[error(
+        "aggregate `{field}`: `via` entry `{table}` needs a `foreign_key`: the column on \
+         `{table}` pointing at the table before it"
+    )]
+    ViaMissingForeignKey { field: String, table: String },
+    #[error(
+        "aggregate `{field}`: `via` entry `{table}` does not take `column`: `via` hops are foreign keys on each \
+         hop's table pointing at the table before it; a hop in the `belongs_to` direction is \
+         not supported"
+    )]
+    ViaBelongsTo { field: String, table: String },
+    #[error(
+        "aggregate `{field}`: `via` entry `{table}` does not take `through`: a junction can only be the last hop, \
+         written as the aggregate's own `through`"
+    )]
+    ViaJunction { field: String, table: String },
     #[error("aggregate does not take `{sibling}` (only `ids` does)")]
     UnexpectedAggregateSibling { sibling: &'static str },
     #[error(

@@ -24,7 +24,7 @@ use kernel::common::ColumnName;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, DatabaseSchema, Field, FieldName, FieldSource,
     Filter, FlussoType, GenericValue, Geo, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp,
-    OrderBy, ParseFrom, Relation, TableName, Through, Transform,
+    OrderBy, ParseFrom, Relation, TableName, Through, Transform, ViaHop,
 };
 use proptest::prelude::*;
 
@@ -82,6 +82,15 @@ fn through() -> impl Strategy<Value = Through> {
             filters,
         }
     })
+}
+fn via() -> impl Strategy<Value = Vec<ViaHop>> {
+    let hop =
+        (table(), col(), junction_filters()).prop_map(|(table, foreign_key, filters)| ViaHop {
+            table,
+            foreign_key,
+            filters,
+        });
+    prop::collection::vec(hop, 0..=2)
 }
 fn agg_key() -> impl Strategy<Value = AggregateKey> {
     prop_oneof![
@@ -205,10 +214,12 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
                 value_type,
                 filters: None,
                 distinct: false,
+                via: Vec::new(),
             }))
         };
     let ops = prop_oneof![
         (table(), agg_key()).prop_map(move |(t, k)| mk(t, AggregateOp::Count, k, None)),
+        (table(), agg_key()).prop_map(move |(t, k)| mk(t, AggregateOp::Exists, k, None)),
         (table(), col(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
             t,
             AggregateOp::Sum(c),
@@ -235,10 +246,11 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
             None
         )),
     ];
-    (ops, any::<bool>())
-        .prop_map(|(mut source, distinct)| {
+    (ops, any::<bool>(), via())
+        .prop_map(|(mut source, distinct, via)| {
             if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut source {
                 aggregate.distinct = distinct && matches!(aggregate.key, AggregateKey::Through(_));
+                aggregate.via = via;
             }
             source
         })

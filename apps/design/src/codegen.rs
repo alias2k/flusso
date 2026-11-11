@@ -25,7 +25,7 @@ use anyhow::Result;
 use config::toml::ConfigToml;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, Field, FieldSource, Filter, FilterValue, Geo,
-    IndexSchema, Join, JoinKind, NullOp, OrderBy, Relation, SoftDelete, Through, Transform,
+    IndexSchema, Join, JoinKind, NullOp, OrderBy, Relation, SoftDelete, Through, Transform, ViaHop,
 };
 use kernel::{FlussoType, GenericValue};
 use serde_yaml::{Mapping, Value};
@@ -202,6 +202,7 @@ fn aggregate_field(agg: &Aggregate, body: &mut Mapping) -> Result<&'static str> 
     body.insert(Value::from("table"), Value::from(agg.table.as_ref()));
     let tag = match &agg.op {
         AggregateOp::Count => "count",
+        AggregateOp::Exists => "exists",
         AggregateOp::Avg(column) => {
             body.insert(Value::from("column"), Value::from(column.as_ref()));
             "avg"
@@ -245,7 +246,24 @@ fn aggregate_field(agg: &Aggregate, body: &mut Mapping) -> Result<&'static str> 
     if let Some(filters) = &agg.filters {
         body.insert(Value::from("filters"), filters_value(filters)?);
     }
+    if !agg.via.is_empty() {
+        let hops = agg.via.iter().map(via_value).collect::<Result<_>>()?;
+        body.insert(Value::from("via"), Value::Sequence(hops));
+    }
     Ok(tag)
+}
+
+fn via_value(hop: &ViaHop) -> Result<Value> {
+    let mut map = Mapping::new();
+    map.insert(Value::from("table"), Value::from(hop.table.as_ref()));
+    map.insert(
+        Value::from("foreign_key"),
+        Value::from(hop.foreign_key.as_ref()),
+    );
+    if let Some(filters) = &hop.filters {
+        map.insert(Value::from("filters"), filters_value(filters)?);
+    }
+    Ok(Value::Mapping(map))
 }
 
 fn through_value(through: &Through) -> Result<Value> {

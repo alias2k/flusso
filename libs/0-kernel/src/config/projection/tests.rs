@@ -25,6 +25,7 @@ fn ids_schema(element_type: FlussoType) -> IndexSchema {
                 value_type: None,
                 filters: None,
                 distinct: false,
+                via: vec![],
             })),
         }],
     }
@@ -197,6 +198,7 @@ fn through_schema() -> IndexSchema {
                     value_type: Some(FlussoType::Double),
                     filters: None,
                     distinct: false,
+                    via: vec![],
                 })),
             },
             Field {
@@ -269,6 +271,102 @@ fn opting_into_distinct_or_junction_filters_changes_the_content_hash() {
     assert_ne!(base, distinct);
     assert_ne!(base, filtered);
     assert_ne!(distinct, filtered);
+}
+
+fn aggregate_field(name: &str, op: AggregateOp, value_type: Option<FlussoType>) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: TableName::try_new("tasks").unwrap(),
+            op,
+            key: AggregateKey::Direct(ColumnName::try_new("user_id").unwrap()),
+            value_type,
+            filters: None,
+            distinct: false,
+            via: vec![],
+        })),
+    }
+}
+
+fn direct_aggregates_schema() -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: TableName::try_new("users").unwrap(),
+        db_schema: DatabaseSchema::default(),
+        primary_key: None,
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            aggregate_field("taskCount", AggregateOp::Count, None),
+            aggregate_field(
+                "effort",
+                AggregateOp::Sum(ColumnName::try_new("effort").unwrap()),
+                Some(FlussoType::Long),
+            ),
+            aggregate_field(
+                "taskIds",
+                AggregateOp::Ids {
+                    element_type: FlussoType::Long,
+                },
+                None,
+            ),
+        ],
+    }
+}
+
+fn via_hop(table: &str, foreign_key: &str) -> crate::config::ViaHop {
+    crate::config::ViaHop {
+        table: TableName::try_new(table).unwrap(),
+        foreign_key: ColumnName::try_new(foreign_key).unwrap(),
+        filters: None,
+    }
+}
+
+#[test]
+fn a_schema_without_via_keeps_its_content_hash() {
+    let mapping = direct_aggregates_schema().resolve(IndexName::try_new("users").unwrap());
+    assert_eq!(mapping.hash.to_string(), "e25bb2e9");
+}
+
+#[test]
+fn an_aggregate_via_hops_changes_the_content_hash() {
+    let base = direct_aggregates_schema()
+        .resolve(IndexName::try_new("users").unwrap())
+        .hash;
+    let with_via = |hops: Vec<crate::config::ViaHop>| {
+        let mut schema = direct_aggregates_schema();
+        if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut schema.fields[0].source
+        {
+            aggregate.via = hops;
+        }
+        schema.resolve(IndexName::try_new("users").unwrap()).hash
+    };
+    let one = with_via(vec![via_hop("projects", "user_id")]);
+    let two = with_via(vec![
+        via_hop("teams", "user_id"),
+        via_hop("projects", "team_id"),
+    ]);
+    assert_eq!(with_via(vec![]), base);
+    assert_ne!(base, one);
+    assert_ne!(one, two);
+}
+
+#[test]
+fn exists_maps_to_a_non_null_boolean() {
+    let mut schema = direct_aggregates_schema();
+    schema.fields = vec![aggregate_field("hasTask", AggregateOp::Exists, None)];
+    let mapping = schema.resolve(IndexName::try_new("users").unwrap());
+    let field = &mapping.fields[0];
+    assert!(matches!(field.mapping.mapping_type, MappingType::Boolean));
+    assert!(!field.nullable);
+    assert_ne!(
+        mapping.hash,
+        direct_aggregates_schema()
+            .resolve(IndexName::try_new("users").unwrap())
+            .hash
+    );
 }
 
 fn column_field(name: &str, ty: FlussoType) -> Field {

@@ -191,6 +191,28 @@ fields:
       right_key: tag_id
       filters:
         - { column: removed_at, op: is_null }
+  - exists: hasHelpfulReply
+    table: replies
+    foreign_key: review_id
+    filters:
+      - { column: helpful, op: eq, value: true }
+    via:
+      - table: reviews
+        foreign_key: product_id
+        filters:
+          - { column: stars, op: lte, value: 2 }
+  - count: taggedReplyCount
+    table: tags
+    distinct: true
+    through:
+      table: reply_tags
+      left_key: reply_id
+      right_key: tag_id
+    via:
+      - table: reviews
+        foreign_key: product_id
+      - table: replies
+        foreign_key: review_id
 
   - constant: docSource
     value: catalog

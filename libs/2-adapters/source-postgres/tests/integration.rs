@@ -531,6 +531,7 @@ async fn an_aggregate_over_the_root_table_rebuilds_the_parent() {
             value_type: None,
             filters: None,
             distinct: false,
+            via: Vec::new(),
         })),
     };
     let builder = items_builder(&url, child_count).await;

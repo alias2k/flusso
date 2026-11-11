@@ -16,7 +16,7 @@
 mod columns;
 
 pub use columns::{
-    ColumnUse, RowDiff, relation_columns, root_columns, row_link, soft_delete_column,
+    ColumnUse, RowDiff, relation_columns, root_columns, row_link, soft_delete_column, via_columns,
 };
 
 use std::cmp::Ordering;
@@ -105,7 +105,8 @@ impl SourceSpec {
     }
 
     /// Every table any enabled index reads — each index's root table plus every
-    /// table a join or aggregate (and any `through` junction) pulls from.
+    /// table a join or aggregate (and any `through` junction or `via` hop)
+    /// pulls from.
     ///
     /// Relations carry no schema of their own; the resolver qualifies a related
     /// table with the *index's* `db_schema` (see the Postgres `resolve` module),
@@ -126,7 +127,8 @@ impl SourceSpec {
 
     /// Every table whose rows hold the link to their parent, with that link
     /// column: a `has_one`/`has_many` (or direct aggregate) child's
-    /// `foreign_key`, and a junction's `left_key`.
+    /// `foreign_key`, a junction's `left_key`, and each aggregate `via` hop's
+    /// `foreign_key`.
     ///
     /// Once such a row is deleted or re-parented, only its pre-image still names
     /// the old parent, so these are the columns the source's change feed must
@@ -145,12 +147,19 @@ impl SourceSpec {
 /// `db_schema` to `out`.
 fn collect_link_columns(fields: &[Field], db_schema: &DatabaseSchema, out: &mut PreImageColumns) {
     for field in fields {
-        if let Some((table, column)) = field.relation().and_then(row_link) {
-            let columns = out
-                .entry(QualifiedTable::new(db_schema.clone(), table.clone()))
-                .or_default();
-            if !columns.contains(column) {
-                columns.push(column.clone());
+        if let Some(relation) = field.relation() {
+            let links = relation
+                .via()
+                .iter()
+                .map(|hop| (&hop.table, &hop.foreign_key))
+                .chain(row_link(relation));
+            for (table, column) in links {
+                let columns = out
+                    .entry(QualifiedTable::new(db_schema.clone(), table.clone()))
+                    .or_default();
+                if !columns.contains(column) {
+                    columns.push(column.clone());
+                }
             }
         }
         collect_link_columns(field.children(), db_schema, out);
@@ -158,7 +167,7 @@ fn collect_link_columns(fields: &[Field], db_schema: &DatabaseSchema, out: &mut 
 }
 
 /// Walk the field tree, adding every relation target table (and any `through`
-/// junction table) under `db_schema` to `out`.
+/// junction or `via` table) under `db_schema` to `out`.
 fn collect_relation_tables(
     fields: &[Field],
     db_schema: &DatabaseSchema,
@@ -175,6 +184,9 @@ fn collect_relation_tables(
                     db_schema.clone(),
                     through.table.clone(),
                 ));
+            }
+            for hop in relation.via() {
+                out.insert(QualifiedTable::new(db_schema.clone(), hop.table.clone()));
             }
         }
         collect_relation_tables(field.children(), db_schema, out);

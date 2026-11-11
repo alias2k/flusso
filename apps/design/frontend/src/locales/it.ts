@@ -202,6 +202,7 @@ export const it: Record<string, string> = {
   "typeDesc.json": "Oggetto JSON arbitrario",
   "inspector.fromDb": "Dal database",
   "inspector.inDoc": "Nel documento",
+  "inspector.aggOp": "operazione",
   "inspector.aggFrom": "Aggregato da",
   "inspector.relationship": "La relazione",
   "inspector.advanced": "Avanzate · ottimizzazione indice",
@@ -209,6 +210,13 @@ export const it: Record<string, string> = {
   "inspector.noSource": "Nessuna origine dal database — un valore fisso in ogni documento.",
   "inspector.nestedNote": "↳ un oggetto annidato — scegli le sue colonne e sotto-relazioni sul nodo.",
   "inspector.countResult": "Conta le righe correlate in un intero.",
+  "inspector.existsResult": "Vero se esiste almeno una riga correlata, falso se non ne esiste nessuna. Mai null.",
+  "inspector.avgResult": "Calcola la media della colonna sulle righe correlate in un double; null se non ce ne sono.",
+  "inspector.via": "Via (più passaggi)",
+  "inspector.viaHint":
+    "Le tabelle tra questa riga e la tabella correlata, in ordine a partire da questa riga. La foreign_key di ogni passaggio punta alla tabella precedente; la chiave dell'aggregato punta poi all'ultimo passaggio.",
+  "inspector.viaHop": "Tabella del passaggio {n}",
+  "inspector.viaAdd": "Aggiungi un passaggio",
   "inspector.bridgeNotNull":
     "NOT NULL → obbligatorio per impostazione predefinita. Deseleziona per renderlo facoltativo nel documento.",
   "inspector.bridgeNullable":
@@ -263,6 +271,7 @@ export const it: Record<string, string> = {
   "kindHelp.min": "Il valore minimo di una colonna tra le righe correlate.",
   "kindHelp.max": "Il valore massimo di una colonna tra le righe correlate.",
   "kindHelp.ids": "Raccoglie le chiavi primarie della tabella correlata in un array.",
+  "kindHelp.exists": "Se esiste almeno una riga correlata, come booleano.",
   "kindHelp.geo": "Un punto geografico da due colonne (lat/lon).",
   "kindHelp.map": "Un oggetto a chiavi dinamiche su una colonna json/jsonb; le chiavi restano ricercabili.",
   "kindHelp.custom": "Un tipo che flusso non modella — indichi tu i tipi Postgres + OpenSearch.",

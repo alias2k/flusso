@@ -131,7 +131,7 @@ fn is_decimal(field: &Field) -> bool {
                 aggregate.value_type.as_ref().is_some_and(ty_is_decimal)
             }
             AggregateOp::Ids { element_type } => ty_is_decimal(element_type),
-            AggregateOp::Count | AggregateOp::Avg(_) => false,
+            AggregateOp::Count | AggregateOp::Avg(_) | AggregateOp::Exists => false,
         },
         _ => false,
     }
@@ -180,6 +180,7 @@ fn type_and_nullability(
 fn aggregate_type(aggregate: &Aggregate) -> (MappingType, bool, bool) {
     match &aggregate.op {
         AggregateOp::Count => (MappingType::Long, false, false),
+        AggregateOp::Exists => (MappingType::Boolean, false, false),
         AggregateOp::Avg(_) => (MappingType::Double, true, false),
         AggregateOp::Sum(_) | AggregateOp::Min(_) | AggregateOp::Max(_) => {
             let mapping_type = aggregate

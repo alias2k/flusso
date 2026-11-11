@@ -1,7 +1,7 @@
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, DatabaseSchema, FilterOp, FilterValue,
     FlussoType, Join, JoinKind, OrderBy, RawFilter, RawFilterValue, SoftDeleteColumn,
-    SoftDeleteField, Through, ValueOpFilter,
+    SoftDeleteField, Through, ValueOpFilter, ViaHop,
 };
 
 use super::*;
@@ -165,6 +165,7 @@ fn an_aggregate_reads_its_input_filters_and_link() {
         value_type: None,
         filters: Some(vec![value_filter("status")]),
         distinct: false,
+        via: Vec::new(),
     });
     assert_eq!(
         reads(&sum, "orders"),
@@ -437,4 +438,41 @@ fn every_column_use_is_always_touched() {
         Some(&image(1, "a", 1)),
         Some(&image(1, "a", 1))
     ));
+}
+
+/// users → projects (archived?) → tasks: does the user have a completed task.
+fn task_flag(project_filters: Option<Vec<Filter>>) -> Relation {
+    Relation::Aggregate(Aggregate {
+        table: table("tasks"),
+        op: AggregateOp::Exists,
+        key: AggregateKey::Direct(column("project_id")),
+        value_type: None,
+        filters: Some(vec![value_filter("status")]),
+        distinct: false,
+        via: vec![ViaHop {
+            table: table("projects"),
+            foreign_key: column("user_id"),
+            filters: project_filters,
+        }],
+    })
+}
+
+#[test]
+fn a_via_hop_reads_its_foreign_key_and_filters() {
+    let flag = task_flag(Some(vec![value_filter("archived")]));
+    let schema = users(vec![relation_field("flag", flag.clone())]);
+    let hop = flag.via().first().unwrap();
+    assert_eq!(via_columns(&schema, hop), columns(&["archived", "user_id"]));
+    assert_eq!(reads(&flag, "tasks"), columns(&["project_id", "status"]));
+}
+
+#[test]
+fn a_raw_filter_on_a_via_hop_reads_every_column_of_the_index() {
+    let flag = task_flag(Some(vec![raw_filter("archived_at is null")]));
+    let schema = users(vec![field("email"), relation_field("flag", flag.clone())]);
+    assert_eq!(root_columns(&schema), ColumnUse::All);
+    assert_eq!(
+        via_columns(&schema, flag.via().first().unwrap()),
+        ColumnUse::All
+    );
 }

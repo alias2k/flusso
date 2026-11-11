@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-use super::{Aggregate, AggregateKey, Filter, FlussoType, Join, JoinKind, Through, Transform};
+use super::{
+    Aggregate, AggregateKey, Filter, FlussoType, Join, JoinKind, Through, Transform, ViaHop,
+};
 
 /// One field of a document: a name, optional OpenSearch mapping `options` passed
 /// through to the index, and a [`source`](Self::source) saying where its value
@@ -238,6 +240,17 @@ impl Relation {
         match self {
             Relation::Join(join) => join.filters.as_deref(),
             Relation::Aggregate(aggregate) => aggregate.filters.as_deref(),
+        }
+    }
+
+    /// The tables between the parent and [`table`](Self::table), in order from
+    /// the parent: an aggregate's `via`. Empty for a join and a one-hop
+    /// aggregate. When non-empty, the [`key`](Self::key) ties the related rows
+    /// to the last hop rather than to the parent.
+    pub fn via(&self) -> &[ViaHop] {
+        match self {
+            Relation::Join(_) => &[],
+            Relation::Aggregate(aggregate) => &aggregate.via,
         }
     }
 }

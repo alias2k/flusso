@@ -124,6 +124,7 @@ definitions:
       min: { $ref: "#/definitions/field_name" }
       max: { $ref: "#/definitions/field_name" }
       ids: { $ref: "#/definitions/field_name" }
+      exists: { $ref: "#/definitions/field_name" }
       # ── constant ──────────────────────────────────────────────────────────
       constant: { $ref: "#/definitions/field_name" }
 
@@ -225,6 +226,10 @@ definitions:
       distinct:
         type: boolean
         default: false
+      # aggregate across several hops: the tables between this row and the
+      # aggregated `table`, in order from this row:
+      via:
+        $ref: "#/definitions/via"
       # map (the shared leaf type of every dynamic-key value — must be a leaf
       # kind: text/keyword or a number/date type, enforced at conversion):
       values:
@@ -326,3 +331,23 @@ definitions:
           Conditions on the junction rows (e.g. skip cancelled order lines).
           The relation's own `filters` apply to the target table.
         $ref: "#/definitions/filters"
+
+  via:
+    description: >-
+      The tables between the parent row and an aggregate's `table`, in order
+      from the parent. Each hop's `foreign_key` points at the table before it
+      (the first at the parent); the aggregate's own `foreign_key` (or
+      `through.left_key`) then points at the last hop.
+    type: array
+    items:
+      type: object
+      required: [table, foreign_key]
+      additionalProperties: false
+      properties:
+        table:
+          $ref: "#/definitions/pg_identifier"
+        foreign_key:
+          $ref: "#/definitions/pg_identifier"
+        filters:
+          description: Which rows of this hop's table the path passes through.
+          $ref: "#/definitions/filters"

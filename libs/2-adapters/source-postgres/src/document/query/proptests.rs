@@ -20,7 +20,7 @@
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, Direction, Field, FieldName, FieldSource, Filter,
     FilterOp, FilterValue, FlussoType, Geo, Join, JoinKind, NullCheckFilter, NullOp, OrderBy,
-    Relation, SoftDelete, SoftDeleteColumn, Through, Transform, ValueOpFilter,
+    Relation, SoftDelete, SoftDeleteColumn, Through, Transform, ValueOpFilter, ViaHop,
 };
 use proptest::prelude::*;
 
@@ -186,6 +186,14 @@ fn join_kind() -> impl Strategy<Value = JoinKind> {
     ]
 }
 
+fn via_hop() -> impl Strategy<Value = ViaHop> {
+    (table(), column(), filters_opt()).prop_map(|(table, foreign_key, filters)| ViaHop {
+        table,
+        foreign_key,
+        filters,
+    })
+}
+
 fn aggregate() -> impl Strategy<Value = Aggregate> {
     (
         table(),
@@ -198,6 +206,7 @@ fn aggregate() -> impl Strategy<Value = Aggregate> {
             Just(AggregateOp::Ids {
                 element_type: FlussoType::Long
             }),
+            Just(AggregateOp::Exists),
         ],
         prop_oneof![
             column().prop_map(AggregateKey::Direct),
@@ -205,9 +214,11 @@ fn aggregate() -> impl Strategy<Value = Aggregate> {
         ],
         filters_opt(),
         any::<bool>(),
+        prop::collection::vec(via_hop(), 0..=2),
     )
-        .prop_map(|(table, op, key, filters, distinct)| Aggregate {
+        .prop_map(|(table, op, key, filters, distinct, via)| Aggregate {
             distinct: distinct && matches!(key, AggregateKey::Through(_)),
+            via,
             table,
             op,
             key,
