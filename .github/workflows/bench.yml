@@ -44,10 +44,15 @@ jobs:
       # before the base was built) look older than the base build. Criterion
       # writes both sides' baselines to one CRITERION_HOME, outside the cached
       # target dir, so no earlier run's baselines reach the comparison.
+      # BASE_TARGET_DIR and CRITERION_HOME live under $RUNNER_TEMP, which the
+      # job-level env can't name; the first step sets them.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      BASE_TARGET_DIR: ${{ runner.temp }}/base-target
-      CRITERION_HOME: ${{ runner.temp }}/criterion
     steps:
+      - name: Place the base target dir and the Criterion dir
+        run: |
+          echo "BASE_TARGET_DIR=$RUNNER_TEMP/base-target" >>"$GITHUB_ENV"
+          echo "CRITERION_HOME=$RUNNER_TEMP/criterion" >>"$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
