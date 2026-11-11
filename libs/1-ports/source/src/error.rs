@@ -39,6 +39,12 @@ pub enum SourceError {
     #[error("references unknown column `{0}`")]
     UnknownColumn(String),
 
+    /// A field, relation or filter names a table the database doesn't have.
+    /// Like [`UnknownColumn`](Self::UnknownColumn), a schema↔DB disagreement
+    /// that validation reports per field.
+    #[error("references unknown table `{0}`")]
+    UnknownTable(String),
+
     /// The configuration uses a feature the active source implementation does
     /// not support yet.
     #[error("unsupported: {0}")]
