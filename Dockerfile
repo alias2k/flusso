@@ -57,7 +57,8 @@ RUN cargo build --release --locked -p flusso-cli --no-default-features \
 # ---- runtime (the published image) ----
 FROM debian:bookworm-slim AS runtime
 
-# ca-certificates for TLS to Postgres/OpenSearch; a non-root system user to run as.
+# ca-certificates: the OS trust store, read for an `https://` OTLP endpoint (the
+# OpenSearch sink carries its own root bundle); a non-root system user to run as.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

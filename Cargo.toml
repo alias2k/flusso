@@ -138,8 +138,11 @@ serde_json = { version = "1.*" }
 # the editor schema and the Reference tables read the way the config type does.
 schemars = { version = "1.2.*", features = ["preserve_order"] }
 # One reqwest for our clients and the OTLP exporter. `rustls` is rustls with the
-# aws-lc-rs provider; reqwest and sqlx (ring) each pass their provider
-# explicitly, so neither installs a process default the other could trip over.
+# aws-lc-rs provider. reqwest and sqlx (ring) each pass their provider
+# explicitly. pgwire-replication installs ring as the process default on its
+# first TLS connection, before it builds its own config; a reqwest client built
+# after that uses ring, one built before it aws-lc-rs. Nothing builds a rustls
+# config while no provider is named or installed, which is what would panic.
 # reqwest 0.13 verifies against the OS trust store by default: our clients pin
 # the Mozilla bundle from `webpki-root-certs` instead (see `tls_roots`).
 reqwest = { version = "0.13.*", default-features = false }
