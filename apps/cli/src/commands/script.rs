@@ -46,25 +46,25 @@ struct RunArgs {
     config: PathBuf,
 
     /// The index whose scripts to run.
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_SCRIPT_INDEX")]
     index: String,
 
     /// The root row's primary key to build from the database. Without it (and
     /// without `--input`), the first row is used.
-    #[arg(long, conflicts_with = "input")]
+    #[arg(long, env = "FLUSSO_SCRIPT_ID", conflicts_with = "input")]
     id: Option<String>,
 
     /// A JSON document to run the scripts over instead of a database row.
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_SCRIPT_INPUT")]
     input: Option<PathBuf>,
 
     /// Show only this field of the finished document (`label`,
     /// `variants[0].price`).
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_SCRIPT_FIELD")]
     field: Option<String>,
 
     /// Re-run whenever the config or a schema beside it changes.
-    #[arg(long)]
+    #[arg(long, env = "FLUSSO_SCRIPT_WATCH")]
     watch: bool,
 }
 

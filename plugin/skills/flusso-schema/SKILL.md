@@ -102,6 +102,8 @@ Scalar/`geo` siblings: `required`, `column` (source column, defaults to the docu
 
 An `enum` takes an optional `variants:` list — its values in rank order (`variants: [low, medium, high]`). Given it, the field sorts by that order instead of alphabetically (the rank is prebaked into the index; the query side's `Enum` handle `.asc()`/`.desc()` uses it automatically). Omit it for a plain keyword-like enum. Variants must be unique and free of `=>`/newlines; a stored value not in the list sorts after the declared ones. Changing the list rotates the index like any schema change. (Read-side: a Rust enum may cover the list partially; `#[flusso(keyword, exhaustive)]` on it demands full coverage — see the flusso-query skill.)
 
+**A computed leaf**: `script:` beside a leaf type key computes the value in Rhai from the built document (`this` = the object at the field's level, one element inside a `has_many`; `root` = the whole document), typed by the type key; `array: true` returns an array of it. It reads no column, so `column`/`transforms`/`default`/`indexed` are rejected with it. `emit: false` on any field makes it input-only: built so scripts can read it, never in the document or the mapping. A script can only read what the schema already folds in, never the database. Owned meaning: the [Script fields reference](https://alias2k.github.io/flusso/reference/scripts.html); test one with `flusso script run --index <name> --id <pk>`.
+
 ## Joins — fold a related table in. The verb names where the key lives.
 
 | Verb | Key lives on | Key sibling | Renders as |

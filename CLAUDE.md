@@ -68,7 +68,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   is gone). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
   over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
-  nextest `docker` group, re-records it), `sink-opensearch`'s `render`. The last two sit behind each
+  nextest `docker` group, re-records it), `sink-opensearch`'s `render`, `script`'s `scripted` (public
+  API, no feature; `bench-in-process.sh` skips it on a PR base that predates the crate). `pgoutput` and `render` sit behind each
   crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
   `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
   on a PR, `in-process` runs the three benches on the base then the PR (same runner) and fails past
@@ -257,7 +258,9 @@ so the committed lock stays current; with no config it loads the existing `--loc
 `--locked` runs the lock as-is with no recompile; a lock-write failure is fatal;
 `--skip-backfill` resumes live only — see
 `resolve_config`/`plan_config` in `apps/cli/src/commands/run.rs`), `schema` (print an embedded
-editor-assist JSON Schema: `schema config` or `schema index`; no DB). See `dev/README.md` for the walk-through. **Every flag also reads a
+editor-assist JSON Schema: `schema config` or `schema index`; no DB), `script run` (build one
+document — `--id`, the first row, or `--input` JSON with no DB — run its index's scripts, print input,
+prints, and output or the failure with a caret; `--watch` re-runs on file changes). See `dev/README.md` for the walk-through. **Every flag also reads a
 `FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.
 `FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_PUBLIC_ADDRESS` — so the binary configures cleanly from
 the environment (Helm/compose). This is separate from the config's own reserved env vars
@@ -292,7 +295,7 @@ time uses `#![cfg_attr(test, allow(unused_crate_dependencies))]` (see `libs/2-en
 
 Crates live under `libs/`, `apps/`, and `sdk/`; the **numeric prefix is the dependency layer** —
 a crate only depends on lower-numbered ones (`0-kernel` → `1-{ports/*, config}` →
-`2-{adapters/*, engine}` → `3-daemon` → `apps`, `sdk`). The five seams are named in `CONTEXT.md`:
+`2-{adapters/*, engine, script}` → `3-daemon` → `apps`, `sdk`). The five seams are named in `CONTEXT.md`:
 **kernel** (the shared vocabulary), **ports** (source, stream, sink: the contracts the engine
 drives), **adapters** (one implementation of one port for one technology, at
 `libs/2-adapters/<port>-<technology>`), **engine** (the generic loop), **daemon** (the
@@ -472,6 +475,14 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   sink does *not* retry item-level rejections, and reports a missing target
   (`index_not_found_exception`) as flush-wide, not as a rejection. Guarded by `skip_policy_*`/`stop_policy_*`/
   `per_index_stop_*`.
+- **A document a script fails on is decided on the ingest side (issue #198).** A
+  `DocumentBuilder` may return `Document::Failed { id, failure: BuildFailure }`; the ingest engine
+  resolves the index's `FailurePolicies` (the same `on_error` the sink engines use, handed to it by
+  the daemon via `IngestEngine::with_failure_policies`): `Stop` returns `EngineError::DocumentFailed`
+  before anything in the batch is published (the change is retried after the restart), `Skip` reports
+  `Observer::on_document_failed` and publishes nothing for that id, so every sink keeps its indexed
+  version and the position still advances. Guards: `skip_policy_leaves_a_failed_document_out_and_keeps_going`,
+  `stop_policy_fails_the_ingest_engine_on_a_failed_document`.
 - **Observability is a trait, not baked in.** Both engines report to an `Observer`
   (`libs/2-engine/src/observer.rs`) — sync, cheap, no-op by default, set via `with_observer`;
   every sink-side event carries the `SinkName`, engine errors an `EngineId`. It depends only on
@@ -713,6 +724,29 @@ order with no script; out-of-set values sort after. Parsing lives in
 `libs/1-config/src/yaml/entities/field.rs`; the core model is `kernel::FieldSource`
 (`Join.kind: JoinKind`, with reverse resolution per kind in
 `libs/2-adapters/source-postgres/src/document/resolve.rs`).
+
+### Script fields (issue #198)
+
+`script:` beside a leaf type key is `FieldSource::Script(Script { source, ty, nullable, array,
+enum_order, subfields })`; `emit: false` on any field is `Field.emit` (input-only). Both hash only when
+used (`Field`/`Script` hashing: `emit` hashed only when off), so a schema without them keeps its index.
+The YAML entity is `Field { kind: FieldKind, emit }` (`emit` is lifted off the mapping before the body
+deserializes). The projection maps a script as its declared leaf (`array` → `ResolvedField.array`) and
+**drops `emit: false` fields from the mapping** — the Postgres builder still fetches them (it walks
+`IndexSchema.fields`), and renders a script field as a `NULL` placeholder. The `script` crate
+(`libs/2-script`, layer 2: kernel + source port only; Rhai with `sync`/`decimal`/`no_time`/`no_module`)
+compiles every script once (`Scripts::compile`, all errors with line/column/excerpt; the source is
+wrapped as `fn __flusso(root) { … }` so `this` can be bound — columns on line 1 are shifted back) and
+`ScriptedBuilder` decorates any `DocumentBuilder`: per object level, scripts run against `this` (a
+fresh copy per call) and `root` (read-only, shared), all before any output is written, so no script
+sees another's output; then outputs are written and `emit: false` fields stripped. A failure becomes
+`Document::Failed` (see the engine invariant). Sandbox: strict variables, failing on a missing
+property, no `eval`, fixed limits (`sandbox.rs`). The CLI wraps the Postgres builder in
+`backends.rs`, compiles scripts beside `adapters::validate` in `build`/`check`/`run`
+(`compile_scripts`), records `flusso.script.failures{index,field}` and a rate-limited `error!` log
+(`telemetry/script_log.rs`, array positions folded to `[]`); the daemon's `Status` carries
+`script_failures` per index. The designer compiles scripts in `/api/preview` (`script_errors`) and runs
+them on the sample (`/api/sample` takes an `id`).
 
 ### Query side — `flusso-query` + the derive
 
@@ -966,6 +1000,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | --- | --- |
 | The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, recv → apply → flush → ack, failure policies, `SinkControl::Reindex`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
+| Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`; `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
 | Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: entries + horizon) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/sink_engine.rs` (`report_positions`, the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |

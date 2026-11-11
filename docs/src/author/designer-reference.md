@@ -24,7 +24,7 @@ Every panel, control, and shortcut in `flusso design`, and how saving maps to fi
 | filter box | narrows a wide table's column list |
 | include all / clear all | the whole table |
 | **+ join** | search the foreign keys to and from this table; pick one to add a child node with the inferred verb |
-| **+ field** | add an aggregate (`count` `exists` `sum` `avg` `min` `max` `ids`), `geo`, `map`, `custom`, or `constant` leaf |
+| **+ field** | add an aggregate (`count` `exists` `sum` `avg` `min` `max` `ids`), `geo`, `map`, `custom`, `constant`, or `script` leaf |
 | `+ column name, Enter` | add a column by name when the catalog is offline |
 | double-click a node title | rename the field in place |
 | collapse / expand | one node; the toolbar does all |
@@ -49,6 +49,8 @@ Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a
 | map | column (json/jsonb), `values` |
 | custom | postgres types (comma-separated), opensearch type |
 | constant | value (JSON); no source block |
+| script | type (the leaf types a script may return), required, **Returns an array**, **Variants** on `enum`, **Auto subfields** on `text`/`keyword`/`uuid`, the **Script** editor (compile errors from the live preview listed under it and underlined in it); no source block. See [Script fields](../reference/scripts.md) |
+| every field | **Emitted** (off makes it input-only: fetched for scripts, never in the document or the mapping; see [emit](../reference/scripts.md#emit)). The canvas marks an input-only row with ⊘ and a broken script in red |
 
 Two rules are steered, not forced. A `NOT NULL` column is required by default and may be relaxed. A nullable column marked required demands a default and is flagged (red default field, highlighted column) until one is set; you can still save. A type that's a sharp change from the source column (a `text` over an `integer`) raises a banner with **Fix all** / **Ignore**.
 
@@ -66,7 +68,7 @@ A YAML editor over the selected index. Problems panel with a count, valid-YAML i
 | --- | --- |
 | YAML | the canonical file that would be written |
 | Mapping | the derived OpenSearch mapping, database-free; an opted-out field shows `subfields: false` or `indexed: false` |
-| Sample | a document built from one live row via the same path the sink uses; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
+| Sample | a document built from one live row via the same path the sink uses, scripts run and input-only fields stripped; **Row id** picks the row (blank: the first); a failing script shows its field, message and line with a caret over the row as built; what the scripts printed; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
 
 The document tree marks a stored-only field (`indexed: false`) with a *not indexed* chip.
 

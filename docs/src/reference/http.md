@@ -34,6 +34,8 @@ The live status document as JSON: the deployment, then one block per sink.
 | `searchable_position` | string or null | The source position every sink can search. The slowest sink's. |
 | `errors` | int | Engine errors, ingest and sink. |
 | `last_error` | string or null | |
+| `script_failures.<index>.count` | int | Documents of that index a script failed on and `on_error = "skip"` left at their indexed version. The key is absent until one fails. |
+| `script_failures.<index>.last` | object | The most recent: `id`, `field` (path, e.g. `variants[2].gross`), `message` (with the script line and a caret), `at` (RFC 3339). |
 | `sinks.<name>.phase` | `starting` \| `backfilling` \| `live` \| `failed` \| `stopped` | `failed` while the daemon waits to restart that sink engine; the others keep running. |
 | `sinks.<name>.indexes` | map of name to state | That sink's own view of each index. |
 | `sinks.<name>.changes_committed` | int | Changes whose batch this sink flushed and acked. |

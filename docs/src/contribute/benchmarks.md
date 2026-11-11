@@ -10,7 +10,7 @@ The vocabulary (benchmark, component bench, scenario, headline metric, baseline,
 | --- | --- | --- | --- | --- |
 | Scenarios | the shipped `flusso` binary as a child process, a seeded store, a seeded change writer | Docker | `dev/bench` (`flusso-bench`) | `main` pushes |
 | Component benches, Docker-backed | Criterion over a live Postgres / OpenSearch: document build and resolve, bulk indexing, the full pipeline's change and burst paths | Docker | `benches/` in `source-postgres`, `sink-opensearch`, `engine` | `main` pushes |
-| Component benches, in-process | Criterion with no I/O: the two engines over the channel stream with mocks, pgoutput decode over a recorded fixture, sink rendering | nothing | `benches/engine.rs`, `benches/pgoutput.rs`, `benches/render.rs` | every PR, A/B |
+| Component benches, in-process | Criterion with no I/O: the two engines over the channel stream with mocks, pgoutput decode over a recorded fixture, sink rendering, script fields over built documents | nothing | `benches/engine.rs`, `benches/pgoutput.rs`, `benches/render.rs`, `benches/scripted.rs` | every PR, A/B |
 
 The scenario numbers are what gets watched. The component benches exist so that when a headline metric moves, the stage that moved is already on record for the same commit.
 
@@ -58,7 +58,7 @@ To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on
 
 `.github/workflows/bench.yml` has two jobs.
 
-- **On a pull request**, `in-process` checks out the PR's base, runs the three in-process benches saving baseline `base`, checks out the PR, runs them again as `pr`, and fails when any bench's median is more than 10% slower. Same runner for both sides, so there is no cross-run noise to argue with.
+- **On a pull request**, `in-process` checks out the PR's base, runs the four in-process benches saving baseline `base` (a base that predates the script bench runs the other three), checks out the PR, runs them again as `pr`, and fails when any bench's median is more than 10% slower. Same runner for both sides, so there is no cross-run noise to argue with.
 - **On a push to `main`**, `scenarios` runs the in-process benches, the Docker-backed component benches, and both scenarios at `ci` scale, converts everything to one list of data points, and stores them with `github-action-benchmark` on the `benchmarks` data branch. The Pages workflow folds that branch into the site at [`/bench/`](https://alias2k.github.io/flusso/bench/).
 
 ## What counts as a regression

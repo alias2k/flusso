@@ -27,4 +27,4 @@ Script fields for [flusso](https://github.com/alias2k/flusso): typed computed fi
 - Nothing else. No database, no clock, no other script's output.
 
 The full reference is the
-[script fields page](https://alias2k.github.io/flusso/reference/schema/scripts.html) of the manual.
+[Script fields reference](https://alias2k.github.io/flusso/reference/scripts.html) of the manual.

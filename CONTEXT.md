@@ -122,6 +122,14 @@ _Avoid_: refreshed, indexed
 One denormalized, typed search record built from a root row and its joins and aggregates, keyed by a deterministic id. Built once, on the ingest side.
 _Avoid_: record, row, entity, payload
 
+**Script field**:
+A leaf computed by a script from the built document rather than read from a column: typed by its type key like any field, it reads only the object at its level and the whole document, never the source, never another script's output. Finished on the ingest side, once, before the document is published.
+_Avoid_: computed column, derived field, formula, transform (that is a column-level `lowercase`/`trim`)
+
+**Input-only field**:
+A field marked `emit: false`: built like any field so scripts can read it, then stripped, so it reaches no sink and has no mapping.
+_Avoid_: hidden field, private field, internal field
+
 **Envelope**:
 The message a lane carries: the index, the operation, the document id, the document, the position (`seq` on the wire), plus, filled in by the emitting sink as it writes, that sink's name and a `meta` summary. Emitting sinks forward it as-is; a consumer deserializes the same type over its own document type.
 _Avoid_: message, event, wrapper, frame
@@ -132,6 +140,9 @@ _Avoid_: failed doc, error item, dead letter
 
 **Quarantine**:
 What happens to a rejected document under a skip policy: it is reported and left out so the batch can be confirmed.
+
+**Failed document**:
+A document a script failed on. Decided on the ingest side by the index's failure policy: stop the ingest engine, or skip it so every sink keeps its indexed version. Unlike a rejected document it never reaches a sink.
 _Avoid_: dead-letter, dropped, skipped (as a noun)
 
 ### Index lifecycle

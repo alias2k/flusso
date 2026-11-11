@@ -38,7 +38,7 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 
 | Variable | Flag | Commands |
 | --- | --- | --- |
-| `FLUSSO_CONFIG` | `--config` | `build`, `check`, `run`, `design` (and the query derive at compile time, see below) |
+| `FLUSSO_CONFIG` | `--config` | `build`, `check`, `run`, `design`, `script run` (and the query derive at compile time, see below) |
 | `FLUSSO_OUT` | `--out` | `build` |
 | `FLUSSO_LOCK` | `--lock` | `run` |
 | `FLUSSO_LOCKED` | `--locked` | `run` |
@@ -63,6 +63,11 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_DESIGN_ADDRESS` | `--address` | `design` |
 | `FLUSSO_DESIGN_NO_OPEN` | `--no-open` | `design` |
 | `FLUSSO_SCHEMA` | the positional schema kind | `schema` |
+| `FLUSSO_SCRIPT_INDEX` | `--index` | `script run` |
+| `FLUSSO_SCRIPT_ID` | `--id` | `script run` |
+| `FLUSSO_SCRIPT_INPUT` | `--input` | `script run` |
+| `FLUSSO_SCRIPT_FIELD` | `--field` | `script run` |
+| `FLUSSO_SCRIPT_WATCH` | `--watch` | `script run` |
 
 Defaults and semantics are on the [CLI](cli.md) page.
 
