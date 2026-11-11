@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 TIMEOUT_SECS = 180
+STDOUT_TAIL_LINES = 60
 
 # Substrings that mean "the database isn't reachable / configured" rather than
 # "the schema is wrong". When an online check fails for one of these, we fall
@@ -146,10 +147,14 @@ def run_check(runner, cwd, config, offline):
     error = (proc.stderr or proc.stdout or "").strip()
     if proc.returncode == 0:
         return proc.returncode, error, False
-    # A failing check prints its diagnostics on stdout and only the one-line
-    # verdict on stderr: show both, diagnostics first. Whether the database
-    # was unreachable is read from the verdict alone, not the printed mapping.
-    parts = (proc.stdout.strip(), proc.stderr.strip())
+    # A failing check prints its diagnostics on stdout, after the config and
+    # every resolved mapping, and only the one-line verdict on stderr. Show the
+    # tail of stdout (where the diagnostics are) and the verdict. Whether the
+    # database was unreachable is read from the verdict alone.
+    lines = proc.stdout.strip().splitlines()
+    if len(lines) > STDOUT_TAIL_LINES:
+        lines = ["[…]"] + lines[-STDOUT_TAIL_LINES:]
+    parts = ("\n".join(lines), proc.stderr.strip())
     detail = "\n".join(part for part in parts if part)
     return proc.returncode, detail, looks_like_db_unavailable(error)
 
