@@ -1,14 +1,16 @@
 import { ChevronDown, ChevronUp, Copy, Trash2, X } from "lucide-react";
 import pluralize from "pluralize";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   SCALAR_TYPES,
+  api,
   type Aggregate,
   type AggregateKey,
   type AggregateOp,
   type Column,
   type ColumnPair,
   type ColumnShape,
+  type ExpressionCheck,
   type Field,
   type FieldSource,
   type FlussoType,
@@ -1159,13 +1161,12 @@ function AggregateBody({
           />
         </Row>
         {opCol !== null && (
-          <Row label={t("inspector.aggColumn")}>
-            <ColumnPicker
-              value={opCol}
-              columns={aggColShapes}
-              onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })}
-            />
-          </Row>
+          <AggregateInput
+            value={opCol}
+            table={agg.table}
+            columns={aggColShapes}
+            onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })}
+          />
         )}
         <AggregateKeyEditor
           value={agg.key}
@@ -1243,6 +1244,125 @@ function AggregateBody({
       )}
     </>
   );
+}
+
+/// What a `sum`/`avg`/`min`/`max` folds: a column picked from the aggregated
+/// table, or arithmetic over its columns. An expression is checked by the
+/// loader's own parser (`/api/expression`) and reaches the model only once it
+/// parses, so the preview never sees a half-typed one.
+function AggregateInput({
+  value,
+  table,
+  columns,
+  onChange,
+}: {
+  value: string;
+  table: string;
+  columns: ColumnShape[];
+  onChange: (input: string) => void;
+}) {
+  const { t } = useT();
+  const [mode, setMode] = useState<"column" | "expression">(
+    value === "" || columns.some((c) => c.name === value) ? "column" : "expression",
+  );
+  const [draft, setDraft] = useState(value);
+  const [seen, setSeen] = useState(value);
+  const [check, setCheck] = useState<ExpressionCheck | null>(null);
+  const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const ticket = useRef(0);
+  if (value !== seen) {
+    setSeen(value);
+    setDraft(value);
+    setCheck(null);
+  }
+  const type = (input: string) => {
+    setDraft(input);
+    clearTimeout(pending.current);
+    const mine = ++ticket.current;
+    pending.current = setTimeout(() => {
+      void api
+        .expression(input)
+        .then((result) => {
+          if (mine !== ticket.current) return;
+          setCheck(result);
+          if (!result.error) {
+            setSeen(input);
+            onChange(input);
+          }
+        })
+        .catch(() => undefined);
+    }, 250);
+  };
+  const known = new Set(columns.map((c) => c.name));
+  const unknown = columns.length ? (check?.columns ?? []).filter((c) => !known.has(c)) : [];
+  return (
+    <>
+      <Row label={t("inspector.aggInput")}>
+        <Select
+          value={mode}
+          options={[
+            { value: "column", label: t("inspector.aggInputColumn") },
+            { value: "expression", label: t("inspector.aggInputExpression") },
+          ]}
+          onChange={setMode}
+        />
+      </Row>
+      {mode === "column" ? (
+        <Row label={t("inspector.aggColumn")}>
+          <ColumnPicker value={value} columns={columns} onChange={onChange} />
+        </Row>
+      ) : (
+        <Row label={t("inspector.aggExpression")}>
+          <Text
+            value={draft}
+            onChange={type}
+            placeholder={t("inspector.aggExpressionPlaceholder")}
+            invalid={Boolean(check?.error)}
+            className="font-mono"
+          />
+        </Row>
+      )}
+      {mode === "expression" && check?.error && (
+        <p className="mt-1.5 flex items-start gap-1 text-2xs text-warn" role="alert">
+          <span aria-hidden>⚠</span>
+          <span>{expressionError(t, check.error)}</span>
+        </p>
+      )}
+      {mode === "expression" && unknown.length > 0 && (
+        <p className="mt-1.5 flex items-start gap-1 text-2xs text-warn">
+          <span aria-hidden>⚠</span>
+          <span>{t("inspector.aggExpressionUnknown", { table, columns: unknown.join(", ") })}</span>
+        </p>
+      )}
+      {mode === "expression" && <p className="hint">{t("inspector.aggExpressionHint")}</p>}
+    </>
+  );
+}
+
+/// A parse error in the user's language: literal keys, so the i18n check sees
+/// every one.
+function expressionError(t: Translate, error: NonNullable<ExpressionCheck["error"]>): string {
+  const at = { position: error.position, detail: error.detail ?? "" };
+  switch (error.code) {
+    case "empty":
+      return t("inspector.exprEmpty", at);
+    case "unexpected_character":
+      return t("inspector.exprUnexpectedCharacter", at);
+    case "incomplete_number":
+      return t("inspector.exprIncompleteNumber", at);
+    case "invalid_column":
+      return t("inspector.exprInvalidColumn", at);
+    case "expected_operand":
+      return t("inspector.exprExpectedOperand", at);
+    case "expected_operator":
+      return t("inspector.exprExpectedOperator", at);
+    case "unclosed_parenthesis":
+      return t("inspector.exprUnclosedParenthesis", at);
+    case "unmatched_parenthesis":
+      return t("inspector.exprUnmatchedParenthesis", at);
+    case "too_deep":
+      return t("inspector.exprTooDeep", at);
+  }
 }
 
 /// The tables an aggregate passes through between its parent and its table,

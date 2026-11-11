@@ -368,6 +368,34 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/// An aggregate input checked by the loader's own parser: its canonical text
+/// and columns, or what is wrong and where.
+export interface ExpressionCheck {
+  canonical?: string;
+  columns: string[];
+  /// A single column rather than arithmetic.
+  plain: boolean;
+  error?: {
+    /// A stable token naming the mistake, translated by the editor.
+    code:
+      | "empty"
+      | "unexpected_character"
+      | "incomplete_number"
+      | "invalid_column"
+      | "expected_operand"
+      | "expected_operator"
+      | "unclosed_parenthesis"
+      | "unmatched_parenthesis"
+      | "too_deep";
+    /// 1-based character position.
+    position: number;
+    /// The offending character or column name, or the depth cap.
+    detail?: string;
+    /// The parser's own English message.
+    message: string;
+  };
+}
+
 export interface ParseResponse {
   schema?: IndexSchema;
   error?: string;
@@ -414,6 +442,13 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ yaml }),
     }).then((r) => json<ParseResponse>(r)),
+  /// Check an aggregate input (a column or an arithmetic expression).
+  expression: (input: string) =>
+    fetch("/api/expression", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input }),
+    }).then((r) => json<ExpressionCheck>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
   /// Relative subdirectories under the config dir, for the schema-folder picker.
   dirs: () => fetch("/api/dirs").then((r) => json<string[]>(r)),
