@@ -1356,7 +1356,7 @@ fn users_with_relations_spec() -> SourceSpec {
     }]);
     let paid = Relation::Aggregate(Aggregate {
         table: table("payments"),
-        op: AggregateOp::Sum(column("amount")),
+        op: AggregateOp::Sum(column("amount").into()),
         key: AggregateKey::Direct(column("user_id")),
         value_type: Some(FlussoType::Long),
         filters: None,

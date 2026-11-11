@@ -272,19 +272,19 @@ async fn aggregates_cover_every_op_and_through() {
         agg_field("order_count", orders_agg(AggregateOp::Count, None)),
         agg_field(
             "total_spent",
-            orders_agg(AggregateOp::Sum(column("total")), None),
+            orders_agg(AggregateOp::Sum(column("total").into()), None),
         ),
         agg_field(
             "avg_order",
-            orders_agg(AggregateOp::Avg(column("total")), None),
+            orders_agg(AggregateOp::Avg(column("total").into()), None),
         ),
         agg_field(
             "min_order",
-            orders_agg(AggregateOp::Min(column("total")), None),
+            orders_agg(AggregateOp::Min(column("total").into()), None),
         ),
         agg_field(
             "max_order",
-            orders_agg(AggregateOp::Max(column("total")), None),
+            orders_agg(AggregateOp::Max(column("total").into()), None),
         ),
         // count restricted by a filter on the related rows.
         agg_field(
@@ -374,7 +374,7 @@ async fn aggregates_over_a_junction_entity_honour_distinct_and_both_filter_sets(
         sqlx::query(*statement).execute(&pool).await.unwrap();
     }
 
-    let weight = || AggregateOp::Sum(column("weight"));
+    let weight = || AggregateOp::Sum(column("weight").into());
     let ids = || AggregateOp::Ids {
         element_type: FlussoType::Long,
     };

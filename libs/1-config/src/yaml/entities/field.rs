@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer};
 
-use kernel::FlussoType;
 use kernel::common;
+use kernel::{Expression, FlussoType};
 
 use super::{AggregateOp, ColumnPair, Filter, JoinVerb, OrderBy, Through, Transform, ViaHop};
 
@@ -197,8 +197,10 @@ pub struct JoinBody {
 pub struct AggregateBody {
     pub field: common::FieldName,
     pub table: common::TableName,
+    /// The per-row input of `sum`/`avg`/`min`/`max`: a column of `table`, or
+    /// arithmetic over its columns.
     #[serde(default)]
-    pub column: Option<common::ColumnName>,
+    pub column: Option<Expression>,
     #[serde(default)]
     pub value_type: Option<FlussoType>,
     #[serde(default)]

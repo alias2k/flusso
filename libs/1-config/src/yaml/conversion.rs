@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, Direction, Field,
-    FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join, JoinKind,
-    NullCheckFilter, NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, Direction, Expression,
+    Field, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join,
+    JoinKind, NullCheckFilter, NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn,
     SoftDeleteField, Through, Transform, ValueOpFilter, ViaHop,
 };
 use rust_decimal::Decimal;
@@ -650,9 +650,9 @@ fn convert_order_by(ob: entities::OrderBy) -> OrderBy {
 }
 
 fn require_aggregate_column(
-    column: Option<ColumnName>,
+    column: Option<Expression>,
     op: &'static str,
-) -> Result<ColumnName, ConversionError> {
+) -> Result<Expression, ConversionError> {
     column.ok_or(ConversionError::MissingAggregateColumn { op })
 }
 

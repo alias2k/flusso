@@ -52,6 +52,18 @@ definitions:
     pattern: "^[a-z_][a-z0-9_]*$"
     maxLength: 63
 
+  # The input of a `sum`/`avg`/`min`/`max` aggregate. No `pattern`: the
+  # grammar nests, so the loader's parser is the authority and reports the
+  # position of a mistake.
+  aggregate_expression:
+    type: string
+    minLength: 1
+    description: >-
+      Arithmetic over the columns of the aggregated table, evaluated per row:
+      column names, numbers (`2`, `0.5`), `+ - * /`, unary minus and
+      parentheses, with the usual precedence. No functions. Integer division
+      truncates; a null operand makes that row's value null.
+
   field_name:
     type: string
     pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$"
@@ -139,7 +151,15 @@ definitions:
           nullable, `true` maps it non-null. Not allowed on a to-many join
           (`has_many`/`many_to_many`), which is always a non-null array.
       column:
-        $ref: "#/definitions/pg_identifier"
+        description: >-
+          A scalar leaf's source column (defaults to the field name); a
+          `belongs_to` join's column pointing at the related row. On
+          `sum`/`avg`/`min`/`max`: the per-row input, a column of the
+          aggregated `table` or arithmetic over its columns
+          (`quantity * unit_price`).
+        anyOf:
+          - $ref: "#/definitions/pg_identifier"
+          - $ref: "#/definitions/aggregate_expression"
       options:
         type: object
         additionalProperties: true

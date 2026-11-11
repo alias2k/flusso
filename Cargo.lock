@@ -1283,6 +1283,7 @@ dependencies = [
  "chrono",
  "flusso-kernel-derive",
  "nutype",
+ "proptest",
  "regex",
  "rust_decimal",
  "schemars 1.2.1",

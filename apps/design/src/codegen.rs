@@ -157,7 +157,7 @@ fn join_field(join: &Join, body: &mut Mapping) -> Result<&'static str> {
     );
     let (tag, to_many) = match &join.kind {
         JoinKind::BelongsTo { column } => {
-            body.insert(Value::from("column"), Value::from(column.as_ref()));
+            body.insert(Value::from("column"), Value::from(column.to_string()));
             ("belongs_to", false)
         }
         JoinKind::HasOne { foreign_key } => {
@@ -206,19 +206,19 @@ fn aggregate_field(agg: &Aggregate, body: &mut Mapping) -> Result<&'static str> 
         AggregateOp::Count => "count",
         AggregateOp::Exists => "exists",
         AggregateOp::Avg(column) => {
-            body.insert(Value::from("column"), Value::from(column.as_ref()));
+            body.insert(Value::from("column"), Value::from(column.to_string()));
             "avg"
         }
         AggregateOp::Sum(column) => {
-            body.insert(Value::from("column"), Value::from(column.as_ref()));
+            body.insert(Value::from("column"), Value::from(column.to_string()));
             "sum"
         }
         AggregateOp::Min(column) => {
-            body.insert(Value::from("column"), Value::from(column.as_ref()));
+            body.insert(Value::from("column"), Value::from(column.to_string()));
             "min"
         }
         AggregateOp::Max(column) => {
-            body.insert(Value::from("column"), Value::from(column.as_ref()));
+            body.insert(Value::from("column"), Value::from(column.to_string()));
             "max"
         }
         AggregateOp::Ids { element_type } => {

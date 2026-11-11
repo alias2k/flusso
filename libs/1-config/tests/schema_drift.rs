@@ -478,3 +478,30 @@ fn index_on_keys_match_parser() {
         "`on` keys drifted",
     );
 }
+
+/// An aggregate's `column` may be an arithmetic expression, so the sibling
+/// admits one beside the identifier pattern, and the expression branch carries
+/// no `pattern` (the parser, not a regex, decides what is well formed).
+#[test]
+fn index_column_admits_an_aggregate_expression() {
+    let schema = index_schema();
+    let branches: BTreeSet<String> = schema
+        .pointer("/definitions/field/properties/column/anyOf")
+        .and_then(Value::as_array)
+        .expect("`column` is an anyOf")
+        .iter()
+        .filter_map(|branch| branch.get("$ref")?.as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        branches,
+        strs(&[
+            "#/definitions/aggregate_expression",
+            "#/definitions/pg_identifier"
+        ])
+    );
+    let expression = schema
+        .pointer("/definitions/aggregate_expression")
+        .expect("an aggregate_expression definition");
+    assert!(expression.get("pattern").is_none());
+    assert!(kernel::Expression::parse("quantity * (unit_price - 1.5)").is_ok());
+}

@@ -399,11 +399,72 @@ fn aggregates_come_from_the_op_tag() {
     }
     match &field(&schema, "lifetimeValue").source {
         FieldSource::Relation(Relation::Aggregate(a)) => {
-            assert!(matches!(&a.op, AggregateOp::Sum(c) if c.as_ref() == "total"));
+            assert!(matches!(&a.op, AggregateOp::Sum(c) if c.to_string() == "total"));
             assert_eq!(a.value_type, Some(FlussoType::Decimal));
         }
         other => panic!("expected an aggregate, got {other:?}"),
     }
+}
+
+fn aggregate_input(column: &str) -> Result<String, String> {
+    let yaml = format!(
+        "version: 1\ntable: orders\nfields:\n  - sum: linesValue\n    table: order_lines\n    foreign_key: order_id\n    column: \"{column}\"\n    value_type: double"
+    );
+    let parsed = parse(&yaml).map_err(|e| e.to_string())?;
+    let schema = IndexSchema::try_from(parsed).map_err(|e| e.to_string())?;
+    match &field(&schema, "linesValue").source {
+        FieldSource::Relation(Relation::Aggregate(a)) => match &a.op {
+            AggregateOp::Sum(input) => Ok(input.to_string()),
+            other => panic!("expected a sum, got {other:?}"),
+        },
+        other => panic!("expected an aggregate, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_aggregate_column_may_be_arithmetic_over_the_table_s_columns() {
+    assert_eq!(
+        aggregate_input("quantity * unit_price").unwrap(),
+        "quantity * unit_price"
+    );
+    assert_eq!(
+        aggregate_input(" Quantity*( unit_price-discount )/100 ").unwrap(),
+        "quantity * (unit_price - discount) / 100"
+    );
+    assert_eq!(aggregate_input("amount").unwrap(), "amount");
+    for (op, value_type) in [
+        ("avg", ""),
+        ("min", "\n    value_type: double"),
+        ("max", "\n    value_type: double"),
+    ] {
+        let schema = convert(&format!(
+            "version: 1\ntable: orders\nfields:\n  - {op}: x\n    table: order_lines\n    foreign_key: order_id\n    column: -quantity * 2.5{value_type}"
+        ))
+        .unwrap();
+        match &field(&schema, "x").source {
+            FieldSource::Relation(Relation::Aggregate(a)) => {
+                assert_eq!(a.op.input().unwrap().to_string(), "-quantity * 2.5", "{op}");
+            }
+            other => panic!("expected an aggregate, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_malformed_aggregate_expression_names_the_field_and_the_position() {
+    let err = aggregate_input("quantity *").unwrap_err();
+    assert!(err.contains("`sum` field `linesValue`"), "{err}");
+    assert!(
+        err.contains("invalid expression `quantity *`: at position 11: expected a column"),
+        "{err}"
+    );
+    let err = aggregate_input("sum(quantity)").unwrap_err();
+    assert!(err.contains("at position 4"), "{err}");
+    let err = aggregate_input("quantity * price %").unwrap_err();
+    assert!(
+        err.contains("at position 18: unexpected character `%`"),
+        "{err}"
+    );
 }
 
 #[test]
