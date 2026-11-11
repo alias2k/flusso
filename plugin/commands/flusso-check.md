@@ -7,7 +7,7 @@ Validate the flusso deployment at `$1` (find the project's `flusso.toml` if no p
 there are several).
 
 1. Run validation. Prefer a live DB, which also checks declared types and nullability against real
-   columns and prints publication coverage:
+   columns, every table and column a relation names, and prints publication coverage:
    ```sh
    flusso check --config $1            # or: cargo run -- check --config $1
    flusso check --config $1 --offline  # format and rules only, no DB

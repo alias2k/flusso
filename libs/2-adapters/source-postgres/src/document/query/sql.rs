@@ -5,8 +5,8 @@
 //! and the entry queries assemble them.
 
 use kernel::{
-    AggregateOp, ColumnName, DatabaseSchema, Direction, Expression, GenericValue, Geo, OrderBy,
-    TableName, Transform,
+    AggregateOp, BinaryOp, ColumnName, DatabaseSchema, Direction, Expression, GenericValue, Geo,
+    OrderBy, TableName, Transform,
 };
 
 /// Wrap a per-row `object` over a filtered/ordered/limited `inner` subquery in a
@@ -151,12 +151,23 @@ pub(super) fn agg_function(op: &AggregateOp, alias: &str) -> String {
 /// An aggregate input over rows aliased `alias`: each column qualified and
 /// quoted, each literal as its validated digits, and every operation in its
 /// own parentheses so Postgres evaluates the tree as parsed. A plain column is
-/// the bare qualified column.
+/// the bare qualified column. A divisor is wrapped in `NULLIF(…, 0)`: a zero
+/// divisor makes that row's value null, which the aggregate skips, instead of
+/// failing the whole document query.
 pub(super) fn arithmetic(expression: &Expression, alias: &str) -> String {
     match expression {
         Expression::Column(column) => qcol(alias, column),
         Expression::Number(number) => number.as_str().to_owned(),
         Expression::Negate(inner) => format!("(-{})", arithmetic(inner, alias)),
+        Expression::Binary {
+            op: BinaryOp::Divide,
+            left,
+            right,
+        } => format!(
+            "({} / NULLIF({}, 0))",
+            arithmetic(left, alias),
+            arithmetic(right, alias)
+        ),
         Expression::Binary { op, left, right } => format!(
             "({} {} {})",
             arithmetic(left, alias),

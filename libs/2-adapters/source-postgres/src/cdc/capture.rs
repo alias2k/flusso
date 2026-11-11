@@ -65,12 +65,13 @@ pub struct WalChangeCapture {
     /// Whether to auto-create/extend the publication in [`prepare`](ChangeCapture::prepare), before the slot.
     /// When false, a coverage gap is only reported, never provisioned.
     manage_publication: bool,
-    /// Per table, the columns resolution needs from a pre-image. Ensured by
+    /// Every table whose whole old row the pre-image should carry, with the
+    /// link columns resolution can't do without. Ensured by
     /// [`prepare`](ChangeCapture::prepare); set via
     /// [`with_pre_image_management`](Self::with_pre_image_management).
     pre_image_columns: PreImageColumns,
-    /// Whether [`prepare`](ChangeCapture::prepare) sets the replica identity of
-    /// tables that need it. When false, a gap is only reported.
+    /// Whether [`prepare`](ChangeCapture::prepare) sets `REPLICA IDENTITY FULL`
+    /// on the tables that aren't. When false, a gap is only reported.
     manage_replica_identity: bool,
     /// The position bookkeeping of the open live stream, so `confirm` can reach
     /// it. Replaced each time `live` opens a stream; `None` before the first.
@@ -120,12 +121,14 @@ impl WalChangeCapture {
         self
     }
 
-    /// Declare the columns resolution needs from each table's pre-image —
-    /// typically [`SourceSpec::pre_image_columns`](source::SourceSpec::pre_image_columns) —
-    /// and whether to set `REPLICA IDENTITY FULL` where they're missing.
-    /// [`prepare`](ChangeCapture::prepare) ensures them before the slot (or
-    /// warns, when not allowed), and the stream warns once per table when a
-    /// change arrives without them.
+    /// Declare the tables whose whole old row the pre-image should carry, with
+    /// the link columns resolution needs from each — typically
+    /// [`SourceSpec::pre_images`](source::SourceSpec::pre_images) — and whether
+    /// to set `REPLICA IDENTITY FULL` on the ones that aren't.
+    /// [`prepare`](ChangeCapture::prepare) sets it before the slot where the
+    /// role may (warning where a link is still missing, one info line for the
+    /// rest), and the stream warns once per table when a change arrives
+    /// without its link.
     pub fn with_pre_image_management(mut self, columns: PreImageColumns, manage: bool) -> Self {
         self.pre_image_columns = columns;
         self.manage_replica_identity = manage;
@@ -472,26 +475,50 @@ impl CaptureProvisioning for WalChangeCapture {
     ) -> Result<PreImageReport> {
         let pool = self.admin_pool().await?;
         let report = replica_identity::inspect(pool, required).await?;
-        for gap in &report.gaps {
-            let reason = if !manage {
-                "automatic replica identity management is disabled".to_owned()
-            } else if !gap.manageable {
-                gap.blockers.join("; ")
-            } else {
-                match replica_identity::apply(pool, gap).await {
-                    Ok(()) => {
-                        tracing::info!(
-                            table = %gap.table,
-                            missing = %replica_identity::join_columns(&gap.missing),
-                            "set REPLICA IDENTITY FULL so deleted and re-parented rows reach \
-                             their old parent's document",
-                        );
-                        continue;
-                    }
-                    Err(error) => error.to_string(),
+        let mut unset = Vec::new();
+        for gap in report.gaps.iter().chain(&report.partial) {
+            let reason = if manage {
+                let mut reasons = gap.blockers.clone();
+                if let Err(error) = replica_identity::apply(pool, gap).await {
+                    reasons.push(error.to_string());
                 }
+                if reasons.is_empty() {
+                    tracing::info!(
+                        table = %gap.table,
+                        missing = %replica_identity::join_columns(&gap.missing),
+                        "set REPLICA IDENTITY FULL: deleted and re-parented rows reach their old \
+                         parent's document, and an update that changes no column a document reads \
+                         rebuilds nothing",
+                    );
+                    continue;
+                }
+                reasons.join("; ")
+            } else {
+                "automatic replica identity management is disabled".to_owned()
             };
-            replica_identity::warn_untraceable(&gap.table, &gap.missing, &reason, &gap.remediation);
+            if gap.missing.is_empty() {
+                unset.push((gap, reason));
+            } else {
+                replica_identity::warn_untraceable(
+                    &gap.table,
+                    &gap.missing,
+                    &reason,
+                    &gap.remediation,
+                );
+            }
+        }
+        if !unset.is_empty() {
+            let tables = unset
+                .iter()
+                .map(|(gap, reason)| format!("{} ({reason}): {}", gap.table, gap.remediation))
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::info!(
+                %tables,
+                "replica identity is not FULL on these tables, so an update there rebuilds every \
+                 document that reads the table even when it changes no column a document reads; \
+                 run the printed SQL to skip those",
+            );
         }
         Ok(report)
     }

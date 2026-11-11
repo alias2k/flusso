@@ -5,7 +5,8 @@
 //! plus the replica-identity half: the report (`inspect_pre_image`) across
 //! `DEFAULT`, `FULL`, `USING INDEX`, a composite-key junction, and a
 //! partitioned table across its partitions, and
-//! `ensure_pre_image` setting `FULL` when privileged and refusing when not.
+//! `ensure_pre_image` setting `FULL` when privileged and refusing when not —
+//! on every table an index reads, the root and a `belongs_to` target included.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -15,10 +16,13 @@
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use kernel::{ColumnName, DatabaseSchema, TableName};
-use source::{CaptureProvisioning, PreImageColumns, QualifiedTable};
+use kernel::{
+    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, IndexName,
+    IndexSchema, Join, JoinKind, Relation, TableName,
+};
+use source::{CaptureProvisioning, PreImageColumns, QualifiedTable, SourceSpec};
 use source_postgres::{ReplicationConfig, WalChangeCapture};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -414,6 +418,13 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
 
     let gaps: Vec<String> = report.gaps.iter().map(|g| g.table.to_string()).collect();
     assert_eq!(gaps, ["public.by_default", "public.by_link_index"]);
+    let partial: Vec<String> = report.partial.iter().map(|g| g.table.to_string()).collect();
+    assert_eq!(
+        partial,
+        ["public.by_index", "public.junction"],
+        "they carry the link, but not the whole row"
+    );
+    assert!(report.partial.iter().all(|g| g.missing.is_empty()));
     let remediation = report.gaps.first().unwrap().remediation.clone();
     assert_eq!(
         remediation,
@@ -506,4 +517,189 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         report.gaps.first().unwrap().remediation,
         "ALTER TABLE \"public\".\"parted_late\" REPLICA IDENTITY FULL;"
     );
+}
+
+fn column_field(name: &str) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        source: FieldSource::Column(Column {
+            column: ColumnName::try_new(name).unwrap(),
+            ty: FlussoType::Keyword,
+            nullable: true,
+            transforms: Vec::new(),
+            default: None,
+            enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
+        }),
+    }
+}
+
+fn join_field(name: &str, table: &str, kind: JoinKind) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: TableName::try_new(table).unwrap(),
+            kind,
+            primary_key: ColumnName::try_new("id").unwrap(),
+            nullable: true,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![column_field("id")],
+            on: vec![],
+            indexed: true,
+        })),
+    }
+}
+
+/// `users` (the root) with its `belongs_to` team and its `has_many` orders.
+fn users_spec() -> SourceSpec {
+    let schema = IndexSchema {
+        version: 1,
+        table: TableName::try_new("users").unwrap(),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(ColumnName::try_new("id").unwrap()),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_field("name"),
+            join_field(
+                "team",
+                "teams",
+                JoinKind::BelongsTo {
+                    column: ColumnName::try_new("team_id").unwrap(),
+                },
+            ),
+            join_field(
+                "orders",
+                "orders",
+                JoinKind::HasMany {
+                    foreign_key: ColumnName::try_new("user_id").unwrap(),
+                },
+            ),
+        ],
+    };
+    SourceSpec::new(BTreeMap::from([(
+        IndexName::try_new("users").unwrap(),
+        schema,
+    )]))
+}
+
+const USERS_TABLES: &[&str] = &[
+    "CREATE TABLE users (id int PRIMARY KEY, name text, team_id int)",
+    "CREATE TABLE teams (id int PRIMARY KEY, name text)",
+    "CREATE TABLE orders (id int PRIMARY KEY, user_id int)",
+];
+
+/// `relreplident` of each of `users`, `teams`, `orders`, by name.
+async fn identities(pool: &PgPool) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT relname::text, relreplident::text FROM pg_class \
+         WHERE relname IN ('users', 'teams', 'orders') ORDER BY relname",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(name, identity)| ((*name).to_owned(), (*identity).to_owned()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn every_table_an_index_reads_is_set_to_full() {
+    let container = postgres().await;
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
+    for statement in USERS_TABLES {
+        sqlx::query(*statement).execute(&pool).await.unwrap();
+    }
+    let cap = capture(port, "postgres", "postgres", "postgres");
+    let required = users_spec().pre_images();
+
+    let report = cap.inspect_pre_image(&required).await.unwrap();
+    let tables = |gaps: &[source::PreImageGap]| -> Vec<String> {
+        gaps.iter().map(|gap| gap.table.to_string()).collect()
+    };
+    assert_eq!(tables(&report.gaps), ["public.orders"], "the has_many link");
+    assert_eq!(
+        tables(&report.partial),
+        ["public.teams", "public.users"],
+        "the belongs_to target and the root"
+    );
+    assert!(report.partial.iter().all(|gap| gap.manageable));
+
+    // Opted out: reported, left alone.
+    cap.ensure_pre_image(&required, false).await.unwrap();
+    assert_eq!(
+        identities(&pool).await,
+        pairs(&[("orders", "d"), ("teams", "d"), ("users", "d")])
+    );
+
+    // A table held by a long transaction times out; the others are still set.
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT count(*) FROM users")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    cap.ensure_pre_image(&required, true).await.unwrap();
+    assert_eq!(
+        identities(&pool).await,
+        pairs(&[("orders", "f"), ("teams", "f"), ("users", "d")])
+    );
+    blocker.rollback().await.unwrap();
+
+    // The next start sets the one it missed.
+    cap.ensure_pre_image(&required, true).await.unwrap();
+    assert_eq!(
+        identities(&pool).await,
+        pairs(&[("orders", "f"), ("teams", "f"), ("users", "f")])
+    );
+    assert!(cap.inspect_pre_image(&required).await.unwrap().complete());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_table_the_role_does_not_own_is_reported_and_the_rest_are_set() {
+    let container = postgres().await;
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
+    for statement in USERS_TABLES.iter().copied().chain([
+        "CREATE ROLE app LOGIN PASSWORD 'app'",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO app",
+        "ALTER TABLE teams OWNER TO app",
+        "ALTER TABLE orders OWNER TO app",
+    ]) {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let cap = capture(port, "app", "app", "postgres");
+    let required = users_spec().pre_images();
+
+    let before = cap.ensure_pre_image(&required, true).await.unwrap();
+    let users = before
+        .partial
+        .iter()
+        .find(|gap| gap.table.to_string() == "public.users");
+    let users = users.unwrap();
+    assert!(!users.manageable);
+    assert_eq!(users.blockers, ["role does not own table public.users"]);
+    assert_eq!(
+        identities(&pool).await,
+        pairs(&[("orders", "f"), ("teams", "f"), ("users", "d")])
+    );
+
+    let after = cap.inspect_pre_image(&required).await.unwrap();
+    assert!(after.satisfied(), "every link is carried");
+    assert!(!after.complete());
+    assert_eq!(after.partial.len(), 1);
 }

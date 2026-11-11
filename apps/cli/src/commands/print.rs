@@ -16,7 +16,7 @@ use config::{Config, IndexMapping, ResolvedField, SoftDelete};
 use kernel::{OptionValue, Port, PortEntry};
 
 use crate::adapters;
-use source::{CoverageReport, Diagnostic, PreImageReport, Severity};
+use source::{CoverageReport, Diagnostic, PreImageGap, PreImageReport, Severity};
 
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
 /// threaded by value through the render functions.
@@ -159,10 +159,12 @@ pub(crate) fn coverage(
     Ok(())
 }
 
-/// Report whether every child table's replica identity carries its parent
-/// link, so a delete or re-parent rebuilds the old parent's document. Each gap
-/// says whether `flusso run` will set it (`manage` is the effective
-/// `manage_replica_identity`); the SQL is printed for the ones it won't.
+/// Report the tables an index reads whose replica identity isn't the whole old
+/// row, in two groups: the ones that miss a parent link (a delete or re-parent
+/// leaves the old parent's document stale) and the ones that only lose the
+/// unread-column skip. Each says whether `flusso run` will set it (`manage` is
+/// the effective `manage_replica_identity`); the SQL is printed for the ones it
+/// won't.
 pub(crate) fn pre_image(
     out: &mut impl Write,
     pen: Pen,
@@ -171,65 +173,98 @@ pub(crate) fn pre_image(
 ) -> Result<()> {
     section(out, pen, "Replica identity")?;
 
+    if report.complete() {
+        writeln!(
+            out,
+            "  {} every table an index reads logs its whole old row",
+            pen.green("✓"),
+        )?;
+        return Ok(());
+    }
+
+    let verdict = |gap: &PreImageGap| {
+        if gap.will_manage(manage) {
+            pen.green("→ will be set automatically on the next `flusso run`")
+        } else if gap.manageable {
+            pen.yellow("→ the role CAN set it, but manage_replica_identity = false")
+        } else {
+            pen.yellow(&format!(
+                "→ flusso will NOT set it where: {}",
+                gap.blockers.join("; ")
+            ))
+        }
+    };
+
     if report.satisfied() {
         writeln!(
             out,
             "  {} every child table's changes carry the link to their parent",
             pen.green("✓"),
         )?;
-        return Ok(());
-    }
-
-    writeln!(
-        out,
-        "  {} {} table(s) don't log their parent link on delete or update:",
-        pen.yellow("!"),
-        report.gaps.len(),
-    )?;
-    for gap in &report.gaps {
-        let missing = gap
-            .missing
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let verdict = if gap.will_manage(manage) {
-            pen.green("→ will be set automatically on the next `flusso run`")
-        } else if gap.manageable {
-            pen.yellow("→ the role CAN set it, but manage_replica_identity = false")
-        } else {
-            pen.yellow(&format!(
-                "→ flusso will NOT set it: {}",
-                gap.blockers.join("; ")
-            ))
-        };
+    } else {
         writeln!(
             out,
-            "    {} {} ({})  {}",
-            pen.dim("•"),
-            gap.table,
-            missing,
-            verdict
+            "  {} {} table(s) don't log their parent link on delete or update:",
+            pen.yellow("!"),
+            report.gaps.len(),
         )?;
+        for gap in &report.gaps {
+            let missing = gap
+                .missing
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                out,
+                "    {} {} ({})  {}",
+                pen.dim("•"),
+                gap.table,
+                missing,
+                verdict(gap)
+            )?;
+        }
     }
 
-    let manual: Vec<_> = report
-        .gaps
-        .iter()
-        .filter(|gap| !gap.will_manage(manage))
-        .collect();
-    if !manual.is_empty() {
+    if !report.partial.is_empty() {
+        writeln!(
+            out,
+            "  {} {} table(s) don't log their whole old row, so an update there rebuilds what \
+             reads it even when it changes no column a document reads:",
+            pen.dim("·"),
+            report.partial.len(),
+        )?;
+        for gap in &report.partial {
+            writeln!(out, "    {} {}  {}", pen.dim("•"), gap.table, verdict(gap))?;
+        }
+    }
+
+    let manual = |gaps: &[PreImageGap]| -> Vec<String> {
+        gaps.iter()
+            .filter(|gap| !gap.will_manage(manage))
+            .map(|gap| gap.remediation.clone())
+            .collect()
+    };
+    let links = manual(&report.gaps);
+    if !links.is_empty() {
         writeln!(
             out,
             "  {}",
             pen.yellow(
-                "→ until set, deleting or re-parenting their rows leaves the old parent's \
-                 document stale",
+                "→ until a parent link is logged, deleting or re-parenting that table's rows \
+                 leaves the old parent's document stale",
             ),
         )?;
         section(out, pen, "Run to trace deleted and re-parented rows")?;
-        for gap in manual {
-            writeln!(out, "  {}", gap.remediation)?;
+        for sql in links {
+            writeln!(out, "  {sql}")?;
+        }
+    }
+    let rows = manual(&report.partial);
+    if !rows.is_empty() {
+        section(out, pen, "Run to skip updates of columns no document reads")?;
+        for sql in rows {
+            writeln!(out, "  {sql}")?;
         }
     }
     Ok(())
@@ -363,7 +398,7 @@ pub(crate) fn diagnostics(
             out,
             "  {} {}  {}",
             pen.paint(code, &format!("[{label}]")),
-            pen.bold(&format!("{}.{}", d.index, d.field)),
+            pen.bold(&format!("{}.{}", d.index, d.dotted_path())),
             pen.dim(&d.message),
         )?;
     }

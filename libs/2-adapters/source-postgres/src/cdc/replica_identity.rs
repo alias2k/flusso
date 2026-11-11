@@ -13,12 +13,14 @@
 //! | `f` (`FULL`) | every column |
 //! | `n` (`NOTHING`) | nothing |
 //!
-//! A required column outside that set is a gap, closed by
-//! `ALTER TABLE … REPLICA IDENTITY FULL` ([`apply`]). That needs ownership of the
-//! table (or superuser) — the same grant publication management needs — and
-//! takes an `ACCESS EXCLUSIVE` lock, so it runs under a short `lock_timeout`
-//! rather than queueing behind a long transaction. The table then logs whole old
-//! rows on update and delete.
+//! Every table an index reads should be `FULL`: a required link column outside
+//! the old tuple is a correctness gap (a delete or re-parent leaves the old
+//! parent stale), and anything short of the whole row loses the unread-column
+//! skip. Both are closed by `ALTER TABLE … REPLICA IDENTITY FULL` ([`apply`]).
+//! That needs ownership of the table (or superuser) — the same grant publication
+//! management needs — and takes an `ACCESS EXCLUSIVE` lock, so it runs under a
+//! short `lock_timeout` rather than queueing behind a long transaction. The
+//! table then logs whole old rows on update and delete.
 //!
 //! A **partitioned** table is checked and set across its whole tree. Its
 //! changes are published under its own name (`publish_via_partition_root`, see
@@ -26,7 +28,7 @@
 //! announced relation flags; but each partition's own identity decides what its
 //! WAL logs, and Postgres doesn't pass a parent's setting down — not to
 //! existing partitions, nor to ones created or attached later. So every member
-//! that falls short is altered, and a partition added later is caught at the
+//! that isn't `FULL` is altered, and a partition added later is caught at the
 //! next start.
 
 use kernel::ColumnName;
@@ -50,7 +52,7 @@ const MEMBERS_SQL: &str = "WITH target AS ( \
          WHERE t.level > 0 \
        ) \
      SELECT n.nspname::text AS schema, c.relname::text AS name, \
-       c.relreplident::text AS identity, \
+       c.relreplident::text AS identity, c.relkind = 'p' AS partitioned, \
        ARRAY(SELECT a.attname::text FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
              WHERE i.indrelid = c.oid \
@@ -72,6 +74,7 @@ struct Member {
     schema: String,
     name: String,
     identity: ReplicaIdentity,
+    partitioned: bool,
     carried: Vec<String>,
     primary_key: Vec<String>,
     owned: bool,
@@ -111,6 +114,7 @@ async fn members<'e>(
                 schema: row.try_get("schema")?,
                 name: row.try_get("name")?,
                 identity: ReplicaIdentity::from_code(&row.try_get::<String, _>("identity")?),
+                partitioned: row.try_get("partitioned")?,
                 carried: row.try_get("columns")?,
                 primary_key: row.try_get("primary_key")?,
                 owned: row.try_get("owned")?,
@@ -119,57 +123,89 @@ async fn members<'e>(
         .collect()
 }
 
-/// Inspect every `required` table's replica identity, read-only. A partitioned
-/// table is checked across its whole tree: the parent's identity flags the
-/// columns of the relation pgoutput announces, while each partition's decides
-/// what its WAL actually logs, so every one of them must carry the link.
+/// Inspect every `required` table's replica identity, read-only. A table that
+/// is not `FULL` throughout is listed: under [`PreImageReport::gaps`] when a
+/// member misses a link column, else under [`PreImageReport::partial`]. A
+/// partitioned table is checked across its whole tree: the parent's identity
+/// flags the columns of the relation pgoutput announces, while each
+/// partition's decides what its WAL actually logs.
 pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result<PreImageReport> {
     let mut report = PreImageReport::default();
     for (table, columns) in required {
         let members = members(pool, table)
             .await
             .map_err(|e| SourceError::Query(e.to_string()))?;
-        let short: Vec<(&Member, Vec<ColumnName>)> = members
-            .iter()
-            .map(|member| (member, member.uncarried(columns)))
-            .filter(|(_, missing)| !missing.is_empty())
-            .collect();
-        if short.is_empty() {
+        let Some(gap) = shortfall(table, columns, &members) else {
             continue;
+        };
+        if gap.missing.is_empty() {
+            report.partial.push(gap);
+        } else {
+            report.gaps.push(gap);
         }
-        let missing: Vec<ColumnName> = columns
-            .iter()
-            .filter(|column| short.iter().any(|(_, missing)| missing.contains(column)))
-            .cloned()
-            .collect();
-        let blockers = short
-            .iter()
-            .filter(|(member, _)| !member.owned)
-            .map(|(member, _)| format!("role does not own table {}.{}", member.schema, member.name))
-            .collect::<Vec<_>>();
-        report.gaps.push(PreImageGap {
-            table: table.clone(),
-            missing,
-            manageable: blockers.is_empty(),
-            blockers,
-            remediation: short
-                .iter()
-                .map(|(member, _)| member.alter_sql())
-                .collect::<Vec<_>>()
-                .join(" "),
-        });
     }
     Ok(report)
+}
+
+/// What `table` (its `members`) falls short of a `FULL` identity throughout:
+/// the `required` link columns some member's old tuple misses, the members the
+/// role can't alter, and the statements for every member that isn't `FULL`.
+/// `None` when every member is `FULL`, and for a partitioned table that misses
+/// no link: its updates always rebuild (they carry no post-image), so the
+/// rest of the row would buy nothing.
+fn shortfall(
+    table: &QualifiedTable,
+    required: &[ColumnName],
+    members: &[Member],
+) -> Option<PreImageGap> {
+    let short: Vec<&Member> = members
+        .iter()
+        .filter(|member| member.identity != ReplicaIdentity::Full)
+        .collect();
+    if short.is_empty() {
+        return None;
+    }
+    let missing = required
+        .iter()
+        .filter(|column| {
+            short
+                .iter()
+                .any(|member| member.uncarried(required).contains(column))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let partitioned = members.first().is_some_and(|root| root.partitioned);
+    if missing.is_empty() && partitioned {
+        return None;
+    }
+    let blockers: Vec<String> = short
+        .iter()
+        .filter(|member| !member.owned)
+        .map(|member| format!("role does not own table {}.{}", member.schema, member.name))
+        .collect();
+    Some(PreImageGap {
+        table: table.clone(),
+        missing,
+        manageable: blockers.is_empty(),
+        blockers,
+        remediation: short
+            .iter()
+            .map(|member| member.alter_sql())
+            .collect::<Vec<_>>()
+            .join(" "),
+    })
 }
 
 /// How long [`apply`] waits for each table lock before giving up.
 const LOCK_TIMEOUT: &str = "5s";
 
-/// Close one gap: `REPLICA IDENTITY FULL` on its table — and on every partition
-/// that falls short, for a partitioned one. Each relation gets its own
-/// transaction under [`LOCK_TIMEOUT`], so a busy partition neither holds the
-/// parent's lock while it waits nor undoes its siblings. A timeout or a denied
-/// grant is a [`SourceError::Setup`] naming the table; the rest still run.
+/// `REPLICA IDENTITY FULL` on every member of `gap`'s table (the table alone,
+/// or its partition tree) that isn't `FULL` and that the role owns; the
+/// members it doesn't own are already the gap's blockers. Each relation gets
+/// its own transaction under [`LOCK_TIMEOUT`], so a busy partition neither
+/// holds the parent's lock while it waits nor undoes its siblings. A timeout
+/// or a denied grant is a [`SourceError::Setup`] naming the table; the rest
+/// still run.
 pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap) -> Result<()> {
     let setup = |e: sqlx::Error| {
         SourceError::Setup(format!(
@@ -179,7 +215,7 @@ pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap) -> Result<()> {
     };
     let mut first_error = None;
     for member in members(pool, &gap.table).await.map_err(setup)? {
-        if member.uncarried(&gap.missing).is_empty() {
+        if member.identity == ReplicaIdentity::Full || !member.owned {
             continue;
         }
         if let Err(e) = alter(pool, &member).await {

@@ -51,10 +51,13 @@ pub struct PostgresConfig {
     /// makes flusso only report coverage gaps and never issue publication DDL.
     #[serde(default = "default_true")]
     pub manage_publication: bool,
-    /// Whether flusso may set `REPLICA IDENTITY FULL` on a child table whose
-    /// replica identity doesn't carry its parent link, so a deleted or
-    /// re-parented row rebuilds its old parent. Needs ownership of the table.
-    /// `false` makes flusso only report the gap and never issue the `ALTER`.
+    /// Whether flusso may set `REPLICA IDENTITY FULL` on every table an index
+    /// reads, before the slot is created: a child table then carries its parent
+    /// link (a deleted or re-parented row rebuilds its old parent), and an
+    /// update that changes no column a document reads rebuilds nothing. Needs
+    /// ownership of the table; every update and delete then logs the whole old
+    /// row (more WAL). `false` makes flusso only report and never issue the
+    /// `ALTER`.
     #[serde(default = "default_true")]
     pub manage_replica_identity: bool,
     /// The logical replication slot flusso consumes. Created on first run.
