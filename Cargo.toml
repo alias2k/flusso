@@ -137,11 +137,16 @@ serde_json = { version = "1.*" }
 # `preserve_order` keeps struct declaration order in the generated schemas, so
 # the editor schema and the Reference tables read the way the config type does.
 schemars = { version = "1.2.*", features = ["preserve_order"] }
-# Our HTTP client stays on 0.12. The OTLP exporter pulls its own reqwest 0.13
-# transitively; deduping would force a 0.13 TLS-feature migration (rustls-tls →
-# rustls + a crypto provider) that risks colliding with sqlx's rustls provider,
-# so it's a deliberate separate change, not a version bump.
-reqwest = { version = "0.12.*", default-features = false }
+# One reqwest for our clients and the OTLP exporter. `rustls` is rustls with the
+# aws-lc-rs provider. reqwest and sqlx (ring) each pass their provider
+# explicitly. pgwire-replication installs ring as the process default on its
+# first TLS connection, before it builds its own config; a reqwest client built
+# after that uses ring, one built before it aws-lc-rs. Nothing builds a rustls
+# config while no provider is named or installed, which is what would panic.
+# reqwest 0.13 verifies against the OS trust store by default: our clients pin
+# the Mozilla bundle from `webpki-root-certs` instead (see `tls_roots`).
+reqwest = { version = "0.13.*", default-features = false }
+webpki-root-certs = { version = "1.*" }
 testcontainers-modules = { version = "0.15.*" }
 criterion = { version = "0.8.*", features = ["async_tokio"] }
 proptest = { version = "1.*" }
@@ -157,11 +162,11 @@ open = "5.*"
 # OpenTelemetry stack, shared by the CLI (traces) and the daemon (metrics).
 # Per-crate feature sets differ and are added at the use site; Cargo unifies
 # them. Keep these versions in lockstep — the otel crates release together.
-opentelemetry = { version = "0.32.*" }
-opentelemetry_sdk = { version = "0.32.*" }
-opentelemetry-otlp = { version = "0.32.*" }
-opentelemetry-prometheus = { version = "0.32.*" }
-tracing-opentelemetry = { version = "0.33.*" }
+opentelemetry = { version = "0.33.*" }
+opentelemetry_sdk = { version = "0.33.*" }
+opentelemetry-otlp = { version = "0.33.*" }
+opentelemetry-prometheus = { version = "0.33.*" }
+tracing-opentelemetry = { version = "0.34.*" }
 prometheus = { version = "0.14.*" }
 # Script fields. `sync`: one engine shared across tasks; `decimal`: a `decimal`
 # field round-trips exactly; `no_time`/`no_module`: no clock, no imports, so a

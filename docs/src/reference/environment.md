@@ -87,7 +87,7 @@ Defaults and semantics are on the [CLI](cli.md) page.
 | `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | the general one | Per-signal override. |
 | `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | the general one | Per-signal override. |
 
-With no OTLP endpoint set, no exporter is installed and telemetry costs nothing. When one is set, the rest of the standard `OTEL_*` variables (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, …) are honored by the SDK. The protocol is **not** inferred from the port: pointing the default HTTP exporter at a gRPC `:4317` fails with a network error. Prometheus is a separate pull path at `/metrics` and needs no variable. The runbook is [Ship traces over OTLP](../operate/traces-otlp.md).
+With no OTLP endpoint set, no exporter is installed and telemetry costs nothing. When one is set, the rest of the standard `OTEL_*` variables (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, …) are honored by the SDK. The protocol is **not** inferred from the port: pointing the default HTTP exporter at a gRPC `:4317` fails with a network error. Over `http/protobuf` an `https://` endpoint is verified against the operating system's trust store (unlike the OpenSearch sink, which carries its own root bundle); `grpc` is plaintext only. A failed export is retried up to three times with backoff (on HTTP 429, 502, 503, 504 or a retryable gRPC code), and a metric export that still fails logs an `ERROR` on every push (`RUST_LOG=info,opentelemetry_sdk=off` silences it). Prometheus is a separate pull path at `/metrics` and needs no variable. The runbook is [Ship traces over OTLP](../operate/traces-otlp.md).
 
 ## Example
 

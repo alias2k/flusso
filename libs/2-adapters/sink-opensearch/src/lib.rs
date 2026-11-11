@@ -140,14 +140,23 @@ impl IndexTarget {
     }
 }
 
+/// The Mozilla root bundle, which the sink has always verified against: reqwest
+/// 0.13 would otherwise read the OS trust store.
+fn mozilla_roots() -> impl Iterator<Item = reqwest::Certificate> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|der| reqwest::Certificate::from_der(der).ok())
+}
+
 impl OpensearchSink {
     /// Build a sink from the schema's OpenSearch sink configuration. The
     /// connection URL and credentials are resolved here, in the running
     /// environment, applying the `<NAME>_OPENSEARCH_*` deployment overrides for
     /// the sink named `name`.
     pub fn from_config(name: &SinkName, config: &OpensearchConfig) -> Result<Self> {
-        let mut builder =
-            reqwest::Client::builder().timeout(Duration::from_secs(config.timeout_secs));
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .tls_certs_only(mozilla_roots());
 
         if !config.tls_verify {
             builder = builder.danger_accept_invalid_certs(true);

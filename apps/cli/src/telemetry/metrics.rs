@@ -89,7 +89,7 @@ pub(crate) fn init(prometheus: bool) -> anyhow::Result<Metrics> {
             .with_registry(registry.clone())
             // Drop the per-series `otel_scope_name`/`otel_scope_version` labels —
             // there's a single scope ("flusso"), so they only add noise.
-            .without_scope_info()
+            .scope_info_enabled(false)
             .build()
             .context("building the Prometheus metrics exporter")?;
         builder = builder.with_reader(exporter);

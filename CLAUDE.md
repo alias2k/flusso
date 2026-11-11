@@ -1170,6 +1170,11 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   own representation at its boundary (`sink::to_json` is the OpenSearch JSON translation,
   where e.g. `bytea`→base64 lives) — core picks no wire format.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
+- **Every `reqwest` client flusso builds pins its trust roots.** reqwest 0.13 verifies against the
+  OS trust store by default; the OpenSearch sink, `flusso-query` and the CLI's admin client each
+  call `tls_certs_only` with the Mozilla bundle from `webpki-root-certs` (`mozilla_roots`), as 0.12's
+  `rustls-tls` did. A new client that skips it silently changes which certificates it trusts. The
+  OTLP exporter builds its own client and reads the OS store.
 - **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`
   (`flusso-dev-search-api`), `dev/query-e2e` (`flusso-query-e2e`), and `dev/bench` (`flusso-bench`) —

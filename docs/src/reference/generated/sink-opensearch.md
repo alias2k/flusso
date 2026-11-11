@@ -5,7 +5,7 @@
 | `url` | string or `{ env }` | — | Required. Base URL of the cluster, literal or `{ env = "VAR" }`. `<NAME>_OPENSEARCH_URL` overrides or supplies it. |
 | `username` | string or `{ env }` | none | HTTP Basic auth user. `<NAME>_OPENSEARCH_USERNAME` overrides or supplies it. |
 | `password` | string or `{ env }` | none | HTTP Basic auth password. `<NAME>_OPENSEARCH_PASSWORD` overrides or supplies it. |
-| `tls_verify` | bool | `true` | Verify TLS certificates. Set `false` for a local cluster with a self-signed certificate. |
+| `tls_verify` | bool | `true` | Verify TLS certificates against the Mozilla root bundle built into flusso; the OS trust store is not read. Set `false` for a local cluster with a self-signed certificate. |
 | `batch_size` | int | `1000` | Documents per bulk request. |
 | `max_bytes` | int | `10485760` | Maximum serialized size of one bulk request, in bytes. A flush is split so no request exceeds this, independent of `batch_size`, keeping requests under OpenSearch's `http.max_content_length` (100 MB by default). A single document larger than this is sent on its own. |
 | `timeout_secs` | int | `30` | Request timeout, in seconds. |
