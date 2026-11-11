@@ -234,6 +234,40 @@ fn parse_round_trips_generated_yaml_and_reports_errors() {
 /// `list_dirs` enumerates subfolders (forward-slash, recursive) and skips hidden
 /// dirs and the usual build/vendor noise — it backs the schema-folder picker.
 #[test]
+fn an_aggregate_input_is_checked_by_the_loader_s_parser() {
+    let check = |input: &str| {
+        api::check_expression(&api::ExpressionRequest {
+            input: input.into(),
+        })
+    };
+
+    let plain = check(" Amount ");
+    assert!(plain.plain && plain.error.is_none());
+    assert_eq!(plain.canonical.as_deref(), Some("amount"));
+
+    let product = check("quantity*(unit_price - 1.5)");
+    assert!(!product.plain);
+    assert_eq!(
+        product.canonical.as_deref(),
+        Some("quantity * (unit_price - 1.5)")
+    );
+    assert_eq!(product.columns, ["quantity", "unit_price"]);
+
+    let bad = check("quantity *");
+    assert!(bad.canonical.is_none());
+    let error = bad.error.expect("a malformed input reports an error");
+    assert_eq!((error.code, error.position), ("expected_operand", 11));
+
+    let error = check("a % b")
+        .error
+        .expect("an unknown character is refused");
+    assert_eq!(
+        (error.code, error.detail.as_deref()),
+        ("unexpected_character", Some("%"))
+    );
+}
+
+#[test]
 fn list_dirs_walks_subfolders_and_skips_noise() {
     let dir = fixture();
     std::fs::create_dir_all(dir.join("schemas/nested")).unwrap();

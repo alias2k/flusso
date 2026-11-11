@@ -22,9 +22,10 @@ use std::collections::BTreeMap;
 use config::yaml::SchemaYaml;
 use kernel::common::ColumnName;
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnPair, DatabaseSchema, Field, FieldName,
-    FieldSource, Filter, FlussoType, GenericValue, Geo, IndexSchema, Join, JoinKind,
-    NullCheckFilter, NullOp, OrderBy, ParseFrom, Relation, TableName, Through, Transform, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, BinaryOp, Column, ColumnPair, DatabaseSchema, Expression,
+    Field, FieldName, FieldSource, Filter, FlussoType, GenericValue, Geo, IndexSchema, Join,
+    JoinKind, NullCheckFilter, NullOp, OrderBy, ParseFrom, Relation, TableName, Through, Transform,
+    ViaHop,
 };
 use proptest::prelude::*;
 
@@ -33,6 +34,34 @@ const DEPTH: u32 = 2;
 fn col() -> impl Strategy<Value = ColumnName> {
     prop::sample::select(vec!["a", "b", "c", "col1", "amount", "val"])
         .prop_map(|s| ColumnName::try_new(s).unwrap())
+}
+/// An aggregate input: a plain column, or arithmetic over columns and
+/// literals, built as a tree so every operator and nesting shape is reached.
+fn input() -> impl Strategy<Value = Expression> {
+    let leaf = prop_oneof![
+        col().prop_map(Expression::from),
+        prop::sample::select(vec!["2", "0.5", "100"]).prop_map(|n| n.parse().unwrap()),
+    ];
+    leaf.prop_recursive(3, 12, 2, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|e| Expression::Negate(Box::new(e))),
+            (
+                prop::sample::select(vec![
+                    BinaryOp::Add,
+                    BinaryOp::Subtract,
+                    BinaryOp::Multiply,
+                    BinaryOp::Divide,
+                ]),
+                inner.clone(),
+                inner,
+            )
+                .prop_map(|(op, left, right)| Expression::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }),
+        ]
+    })
 }
 fn table() -> impl Strategy<Value = TableName> {
     prop::sample::select(vec!["t_a", "t_b", "t_c", "orders"])
@@ -236,25 +265,30 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
     let ops = prop_oneof![
         (table(), agg_key()).prop_map(move |(t, k)| mk(t, AggregateOp::Count, k, None)),
         (table(), agg_key()).prop_map(move |(t, k)| mk(t, AggregateOp::Exists, k, None)),
-        (table(), col(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
+        (table(), input(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
             t,
             AggregateOp::Sum(c),
             k,
             Some(vt)
         )),
-        (table(), col(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
+        (table(), input(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
             t,
             AggregateOp::Min(c),
             k,
             Some(vt)
         )),
-        (table(), col(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
+        (table(), input(), scalar_type(), agg_key()).prop_map(move |(t, c, vt, k)| mk(
             t,
             AggregateOp::Max(c),
             k,
             Some(vt)
         )),
-        (table(), col(), agg_key()).prop_map(move |(t, c, k)| mk(t, AggregateOp::Avg(c), k, None)),
+        (table(), input(), agg_key()).prop_map(move |(t, c, k)| mk(
+            t,
+            AggregateOp::Avg(c),
+            k,
+            None
+        )),
         (table(), elem_type(), agg_key()).prop_map(move |(t, et, k)| mk(
             t,
             AggregateOp::Ids { element_type: et },

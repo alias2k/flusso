@@ -116,6 +116,81 @@ pub struct ParseRequest {
     pub yaml: String,
 }
 
+/// An aggregate input to check as the user types it: a column name or an
+/// arithmetic expression.
+#[derive(Debug, Deserialize)]
+pub struct ExpressionRequest {
+    pub input: String,
+}
+
+/// A checked aggregate input: its canonical text and the columns it reads, or
+/// what is wrong with it and where.
+#[derive(Debug, Serialize)]
+pub struct ExpressionResponse {
+    /// The canonical text, when the input parses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
+    /// The columns the input reads, once each, in order of appearance.
+    pub columns: Vec<String>,
+    /// Whether the input is a single column rather than arithmetic.
+    pub plain: bool,
+    /// What makes the input malformed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ExpressionProblem>,
+}
+
+/// A malformed aggregate input, structured so the editor can translate it.
+#[derive(Debug, Serialize)]
+pub struct ExpressionProblem {
+    /// A stable token naming the mistake (`expected_operand`, `too_deep`, …).
+    pub code: &'static str,
+    /// The 1-based character the parser stopped at.
+    pub position: usize,
+    /// The offending character or column name, when the mistake has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The parser's own English message.
+    pub message: String,
+}
+
+/// Parse an aggregate input with the loader's own parser.
+pub fn check_expression(request: &ExpressionRequest) -> ExpressionResponse {
+    use kernel::{Expression, ExpressionErrorKind as Kind};
+
+    match Expression::parse(&request.input) {
+        Ok(expression) => ExpressionResponse {
+            canonical: Some(expression.to_string()),
+            columns: expression.columns().iter().map(|c| c.to_string()).collect(),
+            plain: expression.as_column().is_some(),
+            error: None,
+        },
+        Err(err) => {
+            let (code, detail) = match &err.kind {
+                Kind::Empty => ("empty", None),
+                Kind::UnexpectedCharacter(c) => ("unexpected_character", Some(c.to_string())),
+                Kind::IncompleteNumber => ("incomplete_number", None),
+                Kind::InvalidColumn(name) => ("invalid_column", Some(name.clone())),
+                Kind::ExpectedOperand(_) => ("expected_operand", None),
+                Kind::ExpectedOperator(_) => ("expected_operator", None),
+                Kind::UnclosedParenthesis => ("unclosed_parenthesis", None),
+                Kind::UnmatchedParenthesis => ("unmatched_parenthesis", None),
+                Kind::TooDeep => ("too_deep", Some(kernel::MAX_DEPTH.to_string())),
+            };
+            ExpressionResponse {
+                canonical: None,
+                columns: Vec::new(),
+                plain: false,
+                error: Some(ExpressionProblem {
+                    code,
+                    position: err.position,
+                    detail,
+                    message: err.kind.to_string(),
+                }),
+            }
+        }
+    }
+}
+
 /// The 1-based position a parse error points at, when the parser's location is
 /// trustworthy (field-scoped errors deliberately carry none — see the parser).
 #[derive(Debug, Serialize)]
