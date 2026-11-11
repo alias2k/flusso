@@ -110,7 +110,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   re-parenting, promotion, and demotion), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
   only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
   `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
-  kind, and the no-pre-image fallback). `sink-opensearch`'s `map_keys` binary (issue #177)
+  kind, and the no-pre-image fallback; `on_pairs_rebuild_the_parent_from_either_side` covers `on:`
+  pairs on `has_many`/`belongs_to`/a direct aggregate/a `via` hop, both sides of a pair, and the skip). `sink-opensearch`'s `map_keys` binary (issue #177)
   proves on a live OpenSearch that map keys take their `values` type under the strict root and
   inside a `nested` array, and that a value a plain field would refuse is an item-level rejection;
   its `an_unindexed_subtree_is_stored_but_not_searchable` (issue #170) proves an `indexed: false`
@@ -663,9 +664,21 @@ nested `IN` levels (`Builder::parent_match`), reverse resolution walks one `Step
 `a_self_reaching_via_rebuilds_every_ancestor_it_reaches` (a hop back into the root's own table),
 `a_via_under_a_nested_relation_rebuilds_the_root_from_every_hop` (a table that is both a relation
 and a hop) (all `wal`), `an_aggregate_via_hops_adds_one_step_per_hop`, the `*via*` SQL tests.
+Any hop but a junction takes `on:` (issue #173): `ColumnPair { local, related }` lists on
+`Join.on`, `Aggregate.on` (direct key only) and `ViaHop.on`, each one more equality ANDed with
+the key (`local` on the table before the hop, `related` on the hop's table; rejected at load on
+`many_to_many`, over `through`, half-written or duplicated). `Relation::on()` / `parent_on()`
+(the pairs whose `local` is on the parent row). The SQL appends `AND related = parent.local`; across
+`via` a hop with pairs is a row-value `IN` selecting the next level's `local` columns
+(`ParentMatch::link`). Reverse resolution is unchanged (the key walk is a superset); the #169
+sets carry both sides (`related` on the hop's table, `local` on the level before: `Collector::level`,
+`via_columns(schema, hop, next_on)` via `source::via_hops`, `Step::Via { hop, next_on }`), and
+`pre_image_columns` needs no `related` column (a row changing only those keeps its key). Guards:
+`on_pairs_rebuild_the_parent_from_either_side` (`wal`), the `on_pairs_*` SQL tests,
+`a_schema_without_on_keeps_its_content_hash`.
 **The content hash is the physical index name**, so `Aggregate`
-and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via` when
-unset — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
+and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via`/`on` when
+unset (`ViaHop` and `Join` likewise for `on`, a hop's pairs under their own tag) — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
 and `a_schema_without_via_keeps_its_content_hash` pin it. `Column` and `Join` do the same for the two mapping opt-outs (issue #170):
 `subfields: false` (`text`/`keyword`/`uuid` → `Column.subfields`, projected to
 `Mapping.subfields`; the sink drops the auto subfields, keeping a `text` field's analyzer) and

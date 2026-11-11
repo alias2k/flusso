@@ -191,6 +191,7 @@ fn via_hop() -> impl Strategy<Value = ViaHop> {
         table,
         foreign_key,
         filters,
+        on: vec![],
     })
 }
 
@@ -224,6 +225,7 @@ fn aggregate() -> impl Strategy<Value = Aggregate> {
             key,
             value_type: None,
             filters,
+            on: vec![],
         })
 }
 
@@ -291,6 +293,7 @@ fn field_source() -> impl Strategy<Value = FieldSource> {
                             limit,
                             fields,
                             indexed: true,
+                            on: vec![],
                         }))
                     }
                 ),

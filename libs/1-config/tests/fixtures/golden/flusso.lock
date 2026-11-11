@@ -634,6 +634,78 @@ table = "replies"
 foreign_key = "review_id"
 
 [[config.indexes.catalog.schema.fields]]
+field = "regionalBrand"
+
+[config.indexes.catalog.schema.fields.source.relation.join]
+table = "brands"
+primary_key = "id"
+nullable = true
+
+[config.indexes.catalog.schema.fields.source.relation.join.kind.belongs_to]
+column = "brand_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.join.fields]]
+field = "name"
+
+[config.indexes.catalog.schema.fields.source.relation.join.fields.source.column]
+column = "name"
+ty = "keyword"
+nullable = false
+
+[[config.indexes.catalog.schema.fields.source.relation.join.on]]
+local = "region"
+related = "region"
+
+[[config.indexes.catalog.schema.fields]]
+field = "regionalReviews"
+
+[config.indexes.catalog.schema.fields.source.relation.join]
+table = "reviews"
+primary_key = "id"
+nullable = false
+
+[config.indexes.catalog.schema.fields.source.relation.join.kind.has_many]
+foreign_key = "product_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.join.fields]]
+field = "stars"
+
+[config.indexes.catalog.schema.fields.source.relation.join.fields.source.column]
+column = "stars"
+ty = "short"
+nullable = false
+
+[[config.indexes.catalog.schema.fields.source.relation.join.on]]
+local = "region"
+related = "region"
+
+[[config.indexes.catalog.schema.fields.source.relation.join.on]]
+local = "locale"
+related = "language"
+
+[[config.indexes.catalog.schema.fields]]
+field = "regionalReplyCount"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate]
+table = "replies"
+op = "count"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.key]
+direct = "review_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.via]]
+table = "reviews"
+foreign_key = "product_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.via.on]]
+local = "region"
+related = "region"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.on]]
+local = "region"
+related = "region"
+
+[[config.indexes.catalog.schema.fields]]
 field = "docSource"
 
 [config.indexes.catalog.schema.fields.source.constant]

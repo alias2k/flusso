@@ -17,6 +17,7 @@ mod columns;
 
 pub use columns::{
     ColumnUse, RowDiff, relation_columns, root_columns, row_link, soft_delete_column, via_columns,
+    via_hops,
 };
 
 use std::cmp::Ordering;

@@ -1028,3 +1028,122 @@ fn options_on_an_unindexed_field_are_rejected() {
         );
     }
 }
+
+// ── on ───────────────────────────────────────────────────────────────────────
+
+const TENANT_HEAD: &str = "version: 1\ntable: orders\nprimary_key: id\nfields:\n";
+
+fn on_pairs(pairs: &[kernel::ColumnPair]) -> Vec<(&str, &str)> {
+    pairs
+        .iter()
+        .map(|pair| (pair.local.as_ref(), pair.related.as_ref()))
+        .collect()
+}
+
+#[test]
+fn every_to_one_and_has_many_join_takes_on_pairs() {
+    let schema = convert(&format!(
+        "{TENANT_HEAD}  - has_many: lines\n    table: order_lines\n    primary_key: id\n    foreign_key: order_id\n    on:\n      - {{ local: tenant_id, related: tenant_id }}\n      - {{ local: region, related: region_code }}\n    fields:\n      - long: id\n        required: true\n  - has_one: invoice\n    table: invoices\n    primary_key: id\n    foreign_key: order_id\n    on: [{{ local: tenant_id, related: tenant_id }}]\n    fields:\n      - long: id\n        required: true\n  - belongs_to: customer\n    table: customers\n    primary_key: id\n    column: customer_id\n    on: [{{ local: tenant_id, related: tenant_id }}]\n    fields:\n      - long: id\n        required: true\n"
+    ))
+    .unwrap();
+    assert_eq!(
+        on_pairs(&join(&schema, "lines").on),
+        [("tenant_id", "tenant_id"), ("region", "region_code")]
+    );
+    assert_eq!(
+        on_pairs(&join(&schema, "invoice").on),
+        [("tenant_id", "tenant_id")]
+    );
+    assert_eq!(
+        on_pairs(&join(&schema, "customer").on),
+        [("tenant_id", "tenant_id")]
+    );
+}
+
+#[test]
+fn an_empty_on_list_is_no_pairs() {
+    let schema = convert(&format!(
+        "{TENANT_HEAD}  - has_many: lines\n    table: order_lines\n    primary_key: id\n    foreign_key: order_id\n    on: []\n    fields:\n      - long: id\n        required: true\n"
+    ))
+    .unwrap();
+    assert!(join(&schema, "lines").on.is_empty());
+}
+
+#[test]
+fn an_aggregate_and_its_via_hops_take_on_pairs() {
+    let schema = convert(&format!(
+        "{TENANT_HEAD}  - count: shipped\n    table: parcels\n    foreign_key: shipment_id\n    on: [{{ local: tenant_id, related: tenant_id }}]\n    via:\n      - table: shipments\n        foreign_key: order_id\n        on: [{{ local: tenant_id, related: tenant_id }}]\n"
+    ))
+    .unwrap();
+    let a = aggregate(&schema, "shipped");
+    assert_eq!(on_pairs(&a.on), [("tenant_id", "tenant_id")]);
+    assert_eq!(on_pairs(&a.via[0].on), [("tenant_id", "tenant_id")]);
+}
+
+#[test]
+fn on_is_rejected_on_many_to_many() {
+    let err = convert(&format!(
+        "{TENANT_HEAD}  - many_to_many: tags\n    table: tags\n    primary_key: id\n    through: {{ table: order_tags, left_key: order_id, right_key: tag_id }}\n    on: [{{ local: tenant_id, related: tenant_id }}]\n    fields:\n      - long: id\n        required: true\n"
+    ))
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::OnNotAllowed { .. }));
+    assert!(
+        err.to_string()
+            .starts_with("many_to_many `tags`: `on` is not allowed"),
+        "{err}"
+    );
+}
+
+#[test]
+fn on_is_rejected_on_an_aggregate_over_through() {
+    let err = convert(&format!(
+        "{TENANT_HEAD}  - count: tags\n    table: tags\n    through: {{ table: order_tags, left_key: order_id, right_key: tag_id }}\n    on: [{{ local: tenant_id, related: tenant_id }}]\n"
+    ))
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::OnNotAllowed { .. }));
+    assert!(err.to_string().contains("aggregate `tags`"), "{err}");
+    assert!(err.to_string().contains("over `through`"), "{err}");
+}
+
+#[test]
+fn a_half_written_on_pair_is_rejected() {
+    let err = convert(&format!(
+        "{TENANT_HEAD}  - has_many: lines\n    table: order_lines\n    primary_key: id\n    foreign_key: order_id\n    on: [{{ local: tenant_id }}]\n    fields:\n      - long: id\n        required: true\n"
+    ))
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::OnIncompletePair { .. }));
+    assert!(err.to_string().starts_with("has_many `lines`"), "{err}");
+
+    let err = convert(&format!(
+        "{TENANT_HEAD}  - count: shipped\n    table: parcels\n    foreign_key: shipment_id\n    via:\n      - table: shipments\n        foreign_key: order_id\n        on: [{{}}]\n"
+    ))
+    .unwrap_err();
+    assert!(matches!(err, ConversionError::OnIncompletePair { .. }));
+    assert!(
+        err.to_string()
+            .starts_with("aggregate `shipped`, `via` entry `shipments`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_duplicate_on_pair_is_rejected() {
+    let err = convert(&format!(
+        "{TENANT_HEAD}  - count: lines\n    table: order_lines\n    foreign_key: order_id\n    on:\n      - {{ local: tenant_id, related: tenant_id }}\n      - {{ local: tenant_id, related: tenant_id }}\n"
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, ConversionError::OnDuplicatePair { ref pair, .. } if pair == "`tenant_id` = `tenant_id`")
+    );
+    assert!(err.to_string().starts_with("aggregate `lines`"), "{err}");
+}
+
+#[test]
+fn an_unknown_key_in_an_on_pair_is_a_parse_error() {
+    assert!(
+        parse(&format!(
+            "{TENANT_HEAD}  - count: lines\n    table: order_lines\n    foreign_key: order_id\n    on: [{{ local: a, related: b, other: c }}]\n"
+        ))
+        .is_err()
+    );
+}

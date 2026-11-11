@@ -214,5 +214,35 @@ fields:
       - table: replies
         foreign_key: review_id
 
+  - belongs_to: regionalBrand
+    table: brands
+    column: brand_id
+    primary_key: id
+    on:
+      - { local: region, related: region }
+    fields:
+      - keyword: name
+        required: true
+  - has_many: regionalReviews
+    table: reviews
+    foreign_key: product_id
+    primary_key: id
+    on:
+      - { local: region, related: region }
+      - { local: locale, related: language }
+    fields:
+      - short: stars
+        required: true
+  - count: regionalReplyCount
+    table: replies
+    foreign_key: review_id
+    on:
+      - { local: region, related: region }
+    via:
+      - table: reviews
+        foreign_key: product_id
+        on:
+          - { local: region, related: region }
+
   - constant: docSource
     value: catalog

@@ -256,6 +256,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             filters: _,
             order_by: _,
             limit: _,
+            on: _,
             fields: _,
             options: _,
             indexed: _,
@@ -271,6 +272,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             distinct: _,
             filters: _,
             via: _,
+            on: _,
             options: _,
         } = a;
         let config::yaml::ConstantBody { field: _, value: _ } = k;
@@ -298,6 +300,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "element_type", // aggregate (ids)
         "distinct",     // aggregate (over through)
         "via",          // aggregate (across several hops)
+        "on",           // joins / aggregates (extra column equalities)
         "values",       // map (value leaf type)
         "value",        // constant
         "subfields",    // text / keyword / uuid
@@ -448,6 +451,7 @@ fn index_via_keys_match_parser() {
             table: _,
             foreign_key: _,
             filters: _,
+            on: _,
             // Parsed only to be rejected at conversion; not offered to editors.
             column: _,
             through: _,
@@ -455,7 +459,22 @@ fn index_via_keys_match_parser() {
     }
     assert_eq!(
         schema_keys(&index_schema(), "/definitions/via/items/properties"),
-        strs(&["table", "foreign_key", "filters"]),
+        strs(&["table", "foreign_key", "filters", "on"]),
         "`via` keys drifted",
+    );
+}
+
+#[test]
+fn index_on_keys_match_parser() {
+    fn _guard(pair: config::yaml::ColumnPair) {
+        let config::yaml::ColumnPair {
+            local: _,
+            related: _,
+        } = pair;
+    }
+    assert_eq!(
+        schema_keys(&index_schema(), "/definitions/on/items/properties"),
+        strs(&["local", "related"]),
+        "`on` keys drifted",
     );
 }

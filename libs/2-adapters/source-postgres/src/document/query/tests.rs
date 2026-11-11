@@ -194,6 +194,7 @@ fn has_many_with_order_and_limit() {
             limit: Some(5),
             fields: vec![col_field("id", "id"), col_field("total", "total")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![orders]);
@@ -229,6 +230,7 @@ fn belongs_to_correlates_on_the_parent_column() {
             limit: None,
             fields: vec![col_field("name", "name")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![org]);
@@ -262,6 +264,7 @@ fn aggregate_count() {
             filters: None,
             distinct: false,
             via: Vec::new(),
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![count]);
@@ -293,6 +296,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
             filters: None,
             distinct: false,
             via: Vec::new(),
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![ids]);
@@ -341,6 +345,7 @@ fn through_aggregate_sql(
             filters,
             distinct,
             via: Vec::new(),
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![aggregate]);
@@ -449,6 +454,7 @@ fn many_to_many_join_applies_junction_filters() {
             limit: None,
             fields: vec![col_field("name", "name")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![tags]);
@@ -555,6 +561,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
             limit: None,
             fields: vec![col_field("id", "id"), col_field("deleted_at", "deleted_at")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(
@@ -661,6 +668,7 @@ fn hop(table: &str, foreign_key: &str, filters: Option<Vec<Filter>>) -> kernel::
         table: t(table),
         foreign_key: c(foreign_key),
         filters,
+        on: vec![],
     }
 }
 
@@ -702,6 +710,7 @@ fn exists_on_one_hop_is_an_exists_subquery() {
             filters: None,
             distinct: false,
             via: Vec::new(),
+            on: vec![],
         }),
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id"))"#
@@ -720,6 +729,7 @@ fn an_aggregate_via_one_hop_matches_the_hop_s_rows_of_the_parent() {
             filters: Some(vec![eq("status", "completed")]),
             distinct: false,
             via: vec![hop("projects", "user_id", Some(vec![eq("archived", "false")]))],
+            on: vec![],
         }),
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id" AND ("rel1"."archived" = $1::boolean)) AND ("rel2"."status" = $2::text)))"#
@@ -742,6 +752,7 @@ fn an_aggregate_via_two_hops_nests_one_level_per_hop() {
                 hop("teams", "owner_id", None),
                 hop("projects", "team_id", None)
             ],
+            on: vec![],
         }),
         wrap(
             r#"(SELECT count(*) FROM "public"."tasks" AS "rel3" WHERE "rel3"."project_id" IN (SELECT "rel2"."id" FROM "public"."projects" AS "rel2" WHERE "rel2"."team_id" IN (SELECT "rel1"."id" FROM "public"."teams" AS "rel1" WHERE "rel1"."owner_id" = "root"."id")))"#
@@ -769,6 +780,7 @@ fn a_junction_after_via_hops_ties_its_left_key_to_the_last_hop() {
         filters: None,
         distinct,
         via: via.clone(),
+        on: vec![],
     };
     let chain = r#"IN (SELECT "rel2"."id" FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id"))"#;
     assert_eq!(
@@ -801,9 +813,130 @@ fn exists_over_a_junction_wraps_the_junction_subquery() {
             filters: None,
             distinct: false,
             via: vec![hop("tasks", "user_id", None)],
+            on: vec![],
         }),
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tags" AS "rel2" JOIN "public"."task_tags" AS "rel3" ON "rel3"."tag_id" = "rel2"."id" WHERE "rel3"."task_id" IN (SELECT "rel1"."id" FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id")))"#
+        ),
+    );
+}
+
+fn pair(local: &str, related: &str) -> kernel::ColumnPair {
+    kernel::ColumnPair {
+        local: c(local),
+        related: c(related),
+    }
+}
+
+fn join_field(
+    name: &str,
+    table: &str,
+    kind: JoinKind,
+    on: Vec<kernel::ColumnPair>,
+    fields: Vec<Field>,
+) -> Field {
+    Field {
+        field: f(name),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: t(table),
+            kind,
+            primary_key: c("id"),
+            nullable: true,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields,
+            indexed: true,
+            on,
+        })),
+    }
+}
+
+#[test]
+fn on_pairs_join_every_join_kind_to_its_parent_row_at_any_depth() {
+    let shop = join_field(
+        "shop",
+        "shops",
+        JoinKind::BelongsTo {
+            column: c("shop_id"),
+        },
+        vec![pair("region", "region_code")],
+        vec![col_field("name", "name")],
+    );
+    let invoice = join_field(
+        "invoice",
+        "invoices",
+        JoinKind::HasOne {
+            foreign_key: c("order_id"),
+        },
+        vec![pair("tenant_id", "tenant_id")],
+        vec![col_field("number", "number")],
+    );
+    let orders = join_field(
+        "orders",
+        "orders",
+        JoinKind::HasMany {
+            foreign_key: c("user_id"),
+        },
+        vec![pair("tenant_id", "tenant_id"), pair("region", "region")],
+        vec![shop, invoice],
+    );
+    let schema = index(Some("id"), None, vec![orders]);
+    let pks = ["orders", "shops", "invoices"]
+        .into_iter()
+        .map(|table| (table.to_owned(), c("id")))
+        .collect();
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(1))],
+        &pks,
+        &id_types(),
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('shop', (SELECT json_build_object('name', "rel2"."name") FROM "public"."shops" AS "rel2" WHERE "rel2"."id" = "rel1"."shop_id" AND "rel2"."region_code" = "rel1"."region" LIMIT 1), 'invoice', (SELECT json_build_object('number', "rel3"."number") FROM "public"."invoices" AS "rel3" WHERE "rel3"."order_id" = "rel1"."id" AND "rel3"."tenant_id" = "rel1"."tenant_id" LIMIT 1))), '[]'::json) FROM (SELECT "rel4".* FROM "public"."orders" AS "rel4" WHERE "rel4"."user_id" = "root"."id" AND "rel4"."tenant_id" = "root"."tenant_id" AND "rel4"."region" = "root"."region") AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+    );
+}
+
+#[test]
+fn on_pairs_join_a_direct_aggregate_to_its_parent_row() {
+    assert_eq!(
+        aggregate_sql(Aggregate {
+            table: t("tasks"),
+            op: AggregateOp::Count,
+            key: AggregateKey::Direct(c("user_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: Vec::new(),
+            on: vec![pair("tenant_id", "tenant_id")],
+        }),
+        wrap(
+            r#"(SELECT count(*) FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id" AND "rel1"."tenant_id" = "root"."tenant_id")"#
+        ),
+    );
+}
+
+#[test]
+fn on_pairs_across_via_select_each_level_s_local_columns() {
+    let mut teams = hop("teams", "owner_id", None);
+    teams.on = vec![pair("tenant_id", "tenant_id")];
+    let projects = hop("projects", "team_id", None);
+    assert_eq!(
+        aggregate_sql(Aggregate {
+            table: t("tasks"),
+            op: AggregateOp::Count,
+            key: AggregateKey::Direct(c("project_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: vec![teams, projects],
+            on: vec![pair("tenant_id", "tenant_id"), pair("team_id", "team_id")],
+        }),
+        wrap(
+            r#"(SELECT count(*) FROM "public"."tasks" AS "rel3" WHERE ("rel3"."project_id", "rel3"."tenant_id", "rel3"."team_id") IN (SELECT "rel2"."id", "rel2"."tenant_id", "rel2"."team_id" FROM "public"."projects" AS "rel2" WHERE "rel2"."team_id" IN (SELECT "rel1"."id" FROM "public"."teams" AS "rel1" WHERE "rel1"."owner_id" = "root"."id" AND "rel1"."tenant_id" = "root"."tenant_id")))"#
         ),
     );
 }

@@ -4,7 +4,8 @@
 //! update that changes no column a document reads must surface as nothing.
 //! Aggregates across several hops (`via`) rebuild their parent from a change
 //! on any hop, including hops back into the root's own table and hops under a
-//! nested relation.
+//! nested relation. Relations joined `on` extra column pairs rebuild from a
+//! change on either side of a pair.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -1010,6 +1011,207 @@ async fn a_via_under_a_nested_relation_rebuilds_the_root_from_every_hop() {
     engine.abort();
 }
 
+/// orders scoped by `tenant_id`: a `belongs_to` customer, `has_many` lines, a
+/// direct `count` of the lines, and a `count` of parcels `via` shipments, each
+/// joined on `tenant_id` beside its key. A change to either side of a pair
+/// rebuilds the order it joined before and the one it joins after; an unread
+/// column rebuilds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn on_pairs_rebuild_the_parent_from_either_side() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE orders (id int PRIMARY KEY, tenant_id text, customer_id int, note text)",
+        "CREATE TABLE customers (id int PRIMARY KEY, tenant_id text, name text, bio text)",
+        "CREATE TABLE lines (id int PRIMARY KEY, order_id int, tenant_id text, qty int, memo text)",
+        "CREATE TABLE shipments (id int PRIMARY KEY, order_id int, tenant_id text, note text)",
+        "CREATE TABLE parcels (id int PRIMARY KEY, shipment_id int, tenant_id text, memo text)",
+        "ALTER TABLE orders REPLICA IDENTITY FULL",
+        "ALTER TABLE customers REPLICA IDENTITY FULL",
+        "ALTER TABLE lines REPLICA IDENTITY FULL",
+        "ALTER TABLE shipments REPLICA IDENTITY FULL",
+        "ALTER TABLE parcels REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE orders, customers, lines, shipments, parcels",
+        "INSERT INTO orders VALUES (1, 't1', 10, ''), (2, 't2', 10, '')",
+        "INSERT INTO customers VALUES (10, 't1', 'acme', '')",
+        "INSERT INTO lines VALUES (100, 1, 't1', 5, ''), (101, 1, 't2', 7, '')",
+        "INSERT INTO shipments VALUES (1000, 1, 't1', '')",
+        "INSERT INTO parcels VALUES (5000, 1000, 't1', ''), (5001, 1000, 't2', '')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(tenant_orders_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        sink,
+    ));
+    expect_op(&mut engine, &recorded, "upsert orders 1").await;
+    expect_op(&mut engine, &recorded, "upsert orders 2").await;
+
+    type Built = (Option<String>, Vec<i64>, i64, i64);
+    // (customer name, line quantities, line count, parcel count)
+    let built = |order: i32| {
+        let documents = Arc::clone(&documents);
+        async move {
+            let id = DocumentId {
+                index: index_name("orders"),
+                key: RowKey(vec![(column("id"), kernel::GenericValue::Int(order))]),
+            };
+            let Document::Upsert { body, .. } = documents.build(&id).await.unwrap() else {
+                panic!("order {order} is not a document");
+            };
+            let body = sink::to_json(&body);
+            let built: Built = (
+                body["customer"]["name"].as_str().map(str::to_owned),
+                body["lines"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|line| line["qty"].as_i64().unwrap())
+                    .collect(),
+                body["lineCount"].as_i64().unwrap(),
+                body["parcelCount"].as_i64().unwrap(),
+            );
+            built
+        }
+    };
+    let acme = || Some("acme".to_owned());
+    assert_eq!(built(1).await, (acme(), vec![5], 1, 1));
+    assert_eq!(built(2).await, (None, vec![], 0, 0));
+
+    // An unread column on every table rebuilds nothing.
+    for (marker, sql) in [
+        (900, "UPDATE orders SET note = 'rush' WHERE id = 1"),
+        (901, "UPDATE customers SET bio = 'b2b' WHERE id = 10"),
+        (902, "UPDATE lines SET memo = 'fragile' WHERE id = 100"),
+        (903, "UPDATE shipments SET note = 'late' WHERE id = 1000"),
+        (904, "UPDATE parcels SET memo = 'dented' WHERE id = 5000"),
+    ] {
+        recorded.lock().unwrap().clear();
+        sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO orders VALUES ($1, 't9', NULL, 'marker')")
+            .bind(marker)
+            .execute(&pool)
+            .await
+            .unwrap();
+        expect_op(&mut engine, &recorded, &format!("upsert orders {marker}")).await;
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![format!("upsert orders {marker}")],
+            "`{sql}` changed no column the document reads"
+        );
+    }
+
+    // Each change rebuilds these orders, which then read these values.
+    let steps: [(&str, &[(i32, Built)]); 12] = [
+        (
+            "INSERT INTO lines VALUES (102, 1, 't1', 3, '')",
+            &[(1, (acme(), vec![3, 5], 2, 1))],
+        ),
+        // A `related` column moving a child out of, then into, the match.
+        (
+            "UPDATE lines SET tenant_id = 't2' WHERE id = 100",
+            &[(1, (acme(), vec![3], 1, 1))],
+        ),
+        (
+            "UPDATE lines SET tenant_id = 't1' WHERE id = 101",
+            &[(1, (acme(), vec![3, 7], 2, 1))],
+        ),
+        // Re-parented to an order it doesn't match: the old one still rebuilds.
+        (
+            "UPDATE lines SET order_id = 2 WHERE id = 102",
+            &[(1, (acme(), vec![7], 1, 1)), (2, (None, vec![], 0, 0))],
+        ),
+        // A `belongs_to` target's `related` column: every order pointing at it.
+        (
+            "UPDATE customers SET tenant_id = 't2' WHERE id = 10",
+            &[(1, (None, vec![7], 1, 1)), (2, (acme(), vec![], 0, 0))],
+        ),
+        // A `local` column on the root: every relation re-matches.
+        (
+            "UPDATE orders SET tenant_id = 't2' WHERE id = 1",
+            &[(1, (acme(), vec![5], 1, 0))],
+        ),
+        // A `via` hop's column, `related` to the order and `local` to parcels.
+        (
+            "UPDATE shipments SET tenant_id = 't2' WHERE id = 1000",
+            &[(1, (acme(), vec![5], 1, 1))],
+        ),
+        (
+            "UPDATE parcels SET tenant_id = 't2' WHERE id = 5000",
+            &[(1, (acme(), vec![5], 1, 2))],
+        ),
+        (
+            "DELETE FROM parcels WHERE id = 5001",
+            &[(1, (acme(), vec![5], 1, 1))],
+        ),
+        (
+            "DELETE FROM lines WHERE id = 100",
+            &[(1, (acme(), vec![], 0, 1))],
+        ),
+        (
+            "INSERT INTO parcels VALUES (5002, 1000, 't1', '')",
+            &[(1, (acme(), vec![], 0, 1))],
+        ),
+        (
+            "DELETE FROM customers WHERE id = 10",
+            &[(1, (None, vec![], 0, 1)), (2, (None, vec![], 0, 0))],
+        ),
+    ];
+    for (sql, rebuilt) in steps {
+        recorded.lock().unwrap().clear();
+        sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        for (order, expected) in rebuilt {
+            expect_op(&mut engine, &recorded, &format!("upsert orders {order}")).await;
+            assert_eq!(
+                built(*order).await,
+                *expected,
+                "order {order} after `{sql}`"
+            );
+        }
+    }
+
+    engine.abort();
+}
+
 /// One deployment the way the daemon runs it: stage the sink engine, then run
 /// it and the ingest engine together until either stops. `Ok` when the live
 /// stream ends; the first engine error otherwise.
@@ -1135,6 +1337,7 @@ fn users_with_relations_spec() -> SourceSpec {
         limit: None,
         indexed: true,
         fields,
+        on: vec![],
     };
     let relation = |name: &str, relation: Relation| Field {
         field: field(name),
@@ -1159,6 +1362,7 @@ fn users_with_relations_spec() -> SourceSpec {
         filters: None,
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     });
     let visits = has_many("visits", vec![column_field("path", "path")]);
     let schema = IndexSchema {
@@ -1197,6 +1401,7 @@ fn users_with_recent_orders_spec() -> SourceSpec {
         limit: None,
         indexed: true,
         fields: vec![column_field("total", "total")],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,
@@ -1236,6 +1441,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
         table: table(target),
         foreign_key: column(foreign_key),
         filters,
+        on: vec![],
     };
     let aggregate = |name: &str, aggregate: Aggregate| Field {
         field: field(name),
@@ -1250,6 +1456,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
         filters: None,
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     };
     let active_projects = Aggregate {
         table: table("projects"),
@@ -1259,6 +1466,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
         filters: not_archived(),
         distinct: false,
         via: vec![hop("teams", "owner_id", not_archived())],
+        on: vec![],
     };
     let has_completed_task = Aggregate {
         table: table("tasks"),
@@ -1275,6 +1483,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
             hop("teams", "owner_id", not_archived()),
             hop("projects", "team_id", None),
         ],
+        on: vec![],
     };
     let tag_count = Aggregate {
         table: table("tags"),
@@ -1293,6 +1502,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
             hop("projects", "team_id", None),
             hop("tasks", "project_id", None),
         ],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,
@@ -1332,7 +1542,9 @@ fn categories_with_grandchildren_spec() -> SourceSpec {
             table: table("categories"),
             foreign_key: column("parent_id"),
             filters: None,
+            on: vec![],
         }],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,
@@ -1358,6 +1570,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
         table: table(target),
         foreign_key: column(foreign_key),
         filters: None,
+        on: vec![],
     };
     let tasks = |op, via| Aggregate {
         table: table("tasks"),
@@ -1367,6 +1580,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
         filters: None,
         distinct: false,
         via,
+        on: vec![],
     };
     let orgs = Join {
         table: table("orgs"),
@@ -1403,6 +1617,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
                 tasks(AggregateOp::Exists, vec![hop("projects", "org_id")]),
             ),
         ],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,
@@ -1430,6 +1645,93 @@ fn users_with_org_tasks_spec() -> SourceSpec {
         ],
     };
     SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
+}
+
+/// `orders` with every relation joined on `tenant_id` beside its key.
+fn tenant_orders_spec() -> SourceSpec {
+    let tenant = || {
+        vec![kernel::ColumnPair {
+            local: column("tenant_id"),
+            related: column("tenant_id"),
+        }]
+    };
+    let join = |target: &str, kind: JoinKind, fields: Vec<Field>| Join {
+        table: table(target),
+        kind,
+        primary_key: column("id"),
+        nullable: true,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields,
+        indexed: true,
+        on: tenant(),
+    };
+    let mut lines = join(
+        "lines",
+        JoinKind::HasMany {
+            foreign_key: column("order_id"),
+        },
+        vec![column_field("qty", "qty")],
+    );
+    lines.order_by = Some(vec![OrderBy {
+        column: column("qty"),
+        direction: None,
+    }]);
+    let customer = join(
+        "customers",
+        JoinKind::BelongsTo {
+            column: column("customer_id"),
+        },
+        vec![column_field("name", "name")],
+    );
+    let line_count = Aggregate {
+        table: table("lines"),
+        op: AggregateOp::Count,
+        key: AggregateKey::Direct(column("order_id")),
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via: Vec::new(),
+        on: tenant(),
+    };
+    let parcel_count = Aggregate {
+        table: table("parcels"),
+        op: AggregateOp::Count,
+        key: AggregateKey::Direct(column("shipment_id")),
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via: vec![ViaHop {
+            table: table("shipments"),
+            foreign_key: column("order_id"),
+            filters: None,
+            on: tenant(),
+        }],
+        on: tenant(),
+    };
+    let relation = |name: &str, relation: Relation| Field {
+        field: field(name),
+        options: Default::default(),
+        source: FieldSource::Relation(relation),
+    };
+    let schema = IndexSchema {
+        version: 1,
+        table: table("orders"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_field("id", "id"),
+            relation("customer", Relation::Join(customer)),
+            relation("lines", Relation::Join(lines)),
+            aggregate_field("lineCount", line_count),
+            aggregate_field("parcelCount", parcel_count),
+        ],
+    };
+    SourceSpec::new(BTreeMap::from([(index_name("orders"), schema)]))
 }
 
 fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {

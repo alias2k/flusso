@@ -7,6 +7,7 @@ import {
   type AggregateKey,
   type AggregateOp,
   type Column,
+  type ColumnPair,
   type ColumnShape,
   type Field,
   type FieldSource,
@@ -383,7 +384,7 @@ function NodeInspector({ path }: { path: number[] }) {
           <Select
             value={verb}
             options={["belongs_to", "has_one", "has_many", "many_to_many"]}
-            onChange={(v) => setJoin({ ...join, kind: blankKind(v) })}
+            onChange={(v) => setJoin({ ...join, kind: blankKind(v), on: v === "many_to_many" ? undefined : join.on })}
           />
         </Row>
         <Row label={t("inspector.table")}>
@@ -437,6 +438,14 @@ function NodeInspector({ path }: { path: number[] }) {
           />
         )}
       </Block>
+      {verb !== "many_to_many" && (
+        <OnEditor
+          value={join.on ?? []}
+          localColumns={columnsFor(parentTable)}
+          relatedColumns={relColShapes}
+          onChange={(on) => setJoin({ ...join, on })}
+        />
+      )}
       {!toMany && fkNullable === true && <Bridge>{t("inspector.fkNullable", { col: btColumn ?? "" })}</Bridge>}
       {!toMany && fkNullable === false && <Bridge>{t("inspector.fkNotNull", { col: btColumn ?? "" })}</Bridge>}
       <Block variant="doc" title={t("inspector.inDoc")}>
@@ -529,7 +538,14 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
       {"geo" in s && <GeoBody field={field} set={set} columns={colShapes} />}
       {"constant" in s && <ConstantBody field={field} set={set} value={s.constant} />}
       {"relation" in s && "aggregate" in s.relation && (
-        <AggregateBody field={field} agg={s.relation.aggregate} tables={tables} junctions={junctions} set={set} />
+        <AggregateBody
+          field={field}
+          agg={s.relation.aggregate}
+          parentTable={table}
+          tables={tables}
+          junctions={junctions}
+          set={set}
+        />
       )}
 
       <OptionsEditor field={field} set={set} />
@@ -1109,12 +1125,14 @@ function GeoBody({ field, set, columns }: { field: Field; set: (f: Field) => voi
 function AggregateBody({
   field,
   agg,
+  parentTable,
   tables,
   junctions,
   set,
 }: {
   field: Field;
   agg: Aggregate;
+  parentTable: string;
   tables: string[];
   junctions?: ReadonlySet<string>;
   set: (f: Field) => void;
@@ -1154,7 +1172,14 @@ function AggregateBody({
           tables={tables}
           junctions={junctions}
           columns={aggColShapes}
-          onChange={(key) => setAgg({ ...agg, key, distinct: "through" in key ? agg.distinct : undefined })}
+          onChange={(key) =>
+            setAgg({
+              ...agg,
+              key,
+              distinct: "through" in key ? agg.distinct : undefined,
+              on: "through" in key ? undefined : agg.on,
+            })
+          }
         />
         {"through" in agg.key && (
           <>
@@ -1193,10 +1218,19 @@ function AggregateBody({
       </Block>
       <ViaEditor
         value={agg.via ?? []}
+        parentTable={parentTable}
         tables={tables}
         junctions={junctions}
         onChange={(via) => setAgg({ ...agg, via: via.length ? via : undefined })}
       />
+      {"direct" in agg.key && (
+        <OnEditor
+          value={agg.on ?? []}
+          localColumns={columnsFor(agg.via?.[agg.via.length - 1]?.table ?? parentTable)}
+          relatedColumns={aggColShapes}
+          onChange={(on) => setAgg({ ...agg, on })}
+        />
+      )}
       <Drawer title={t("inspector.filters")} count={(agg.filters ?? []).length}>
         <Filters
           value={agg.filters ?? []}
@@ -1217,11 +1251,13 @@ function AggregateBody({
 /// last hop.
 function ViaEditor({
   value,
+  parentTable,
   tables,
   junctions,
   onChange,
 }: {
   value: ViaHop[];
+  parentTable: string;
   tables: string[];
   junctions?: ReadonlySet<string>;
   onChange: (via: ViaHop[]) => void;
@@ -1240,7 +1276,9 @@ function ViaEditor({
                 value={hop.table}
                 tables={tables}
                 junctions={junctions}
-                onChange={(table) => set(i, { ...hop, table, filters: table === hop.table ? hop.filters : undefined })}
+                onChange={(table) =>
+                  set(i, table === hop.table ? hop : { ...hop, table, filters: undefined, on: undefined })
+                }
               />
             </Row>
             <Row label="foreign_key">
@@ -1257,10 +1295,83 @@ function ViaEditor({
             columns={columnsFor(hop.table)}
             onChange={(filters) => set(i, { ...hop, filters: filters?.length ? filters : undefined })}
           />
+          <OnPairs
+            value={hop.on ?? []}
+            localColumns={columnsFor(value[i - 1]?.table ?? parentTable)}
+            relatedColumns={columnsFor(hop.table)}
+            onChange={(on) => set(i, { ...hop, on })}
+          />
         </div>
       ))}
       <AddButton label={t("inspector.viaAdd")} onClick={() => onChange([...value, { table: "", foreign_key: "" }])} />
     </Drawer>
+  );
+}
+
+/// Extra column equalities on a hop, in their own drawer: each pair matches a
+/// column of the table before the hop (`local`) to one of the hop's table
+/// (`related`), on top of the key.
+function OnEditor(props: {
+  value: ColumnPair[];
+  localColumns: ColumnShape[];
+  relatedColumns: ColumnShape[];
+  onChange: (on: ColumnPair[] | undefined) => void;
+}) {
+  const { t } = useT();
+  return (
+    <Drawer title={t("inspector.on")} count={props.value.length} defaultOpen={props.value.length > 0}>
+      <p className="hint">{t("inspector.onHint")}</p>
+      <OnPairs {...props} />
+    </Drawer>
+  );
+}
+
+/// The `on` pair rows and their add button, shared by a relation's drawer and
+/// each `via` hop.
+function OnPairs({
+  value,
+  localColumns,
+  relatedColumns,
+  onChange,
+}: {
+  value: ColumnPair[];
+  localColumns: ColumnShape[];
+  relatedColumns: ColumnShape[];
+  onChange: (on: ColumnPair[] | undefined) => void;
+}) {
+  const { t } = useT();
+  const set = (i: number, pair: ColumnPair) => onChange(value.map((p, j) => (j === i ? pair : p)));
+  return (
+    <div className="my-1.5">
+      <div className={cn("mb-1", LABEL)}>on</div>
+      {value.map((pair, i) => (
+        <div className="my-1 flex items-center gap-1.5" key={i}>
+          <ColumnPicker
+            value={pair.local}
+            columns={localColumns}
+            onChange={(local) => set(i, { ...pair, local })}
+            placeholder={t("inspector.onLocal")}
+            className="min-w-0 flex-1"
+          />
+          <span aria-hidden="true">=</span>
+          <ColumnPicker
+            value={pair.related}
+            columns={relatedColumns}
+            onChange={(related) => set(i, { ...pair, related })}
+            placeholder={t("inspector.onRelated")}
+            className="min-w-0 flex-1"
+          />
+          <RemoveButton
+            label={t("common.remove")}
+            onClick={() => {
+              const next = value.filter((_, j) => j !== i);
+              onChange(next.length ? next : undefined);
+            }}
+          />
+        </div>
+      ))}
+      <AddButton label={t("inspector.onAdd")} onClick={() => onChange([...value, { local: "", related: "" }])} />
+    </div>
   );
 }
 

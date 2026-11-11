@@ -19,6 +19,7 @@ fn count(on: &str, key: AggregateKey) -> Relation {
         filters: None,
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     })
 }
 
@@ -102,10 +103,26 @@ fn a_via_table_links_to_the_table_before_it_through_its_foreign_key() {
         table: table("projects"),
         foreign_key: column("user_id"),
         filters: None,
+        on: vec![],
     };
     assert_eq!(
-        link_on_row(Step::Via(&hop), &table("projects")),
+        link_on_row(
+            Step::Via {
+                hop: &hop,
+                next_on: &[],
+            },
+            &table("projects")
+        ),
         Some(&column("user_id"))
     );
-    assert_eq!(link_on_row(Step::Via(&hop), &table("tasks")), None);
+    assert_eq!(
+        link_on_row(
+            Step::Via {
+                hop: &hop,
+                next_on: &[],
+            },
+            &table("tasks")
+        ),
+        None
+    );
 }

@@ -18,6 +18,7 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 | `foreign_key` | Postgres identifier | all | The related table's column pointing back at the parent. Exactly one of `foreign_key` or `through`. |
 | `through` | table | all | A junction, as in [Joins](joins.md#through), including its own `filters`. Exactly one of `foreign_key` or `through`. See [Over a junction](#over-a-junction). |
 | `via` | list of hops | all | The tables between the parent and `table`, in order from the parent. With `via`, `foreign_key` (or `through.left_key`) points at the last hop instead of the parent. See [Across several hops](#across-several-hops). |
+| `on` | list of `{ local, related }` | `foreign_key` aggregates | Extra column equalities ANDed with the key. Rejected over `through`. See [on](#on). |
 | `distinct` | bool, default `false` | aggregates over `through` | `true` counts each target row once instead of once per junction row. Rejected on a `foreign_key` aggregate, with or without `via`. |
 | `column` | Postgres identifier | `sum`, `avg`, `min`, `max` | The column to reduce. Required there; `count` doesn't read it; `ids` and `exists` reject it. |
 | `value_type` | a scalar type key | `sum`, `min`, `max` | The result type; it mirrors the column. Required there; `count` and `avg` don't read it; `ids` and `exists` reject it. |
@@ -43,6 +44,7 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 | `table` | Postgres identifier | The table this hop passes through. Required. |
 | `foreign_key` | Postgres identifier | The column on this hop's table pointing at the table before it (the parent, for the first hop). Required. |
 | `filters` | list | Which rows of this hop's table the path passes through. See [Filters](filters-and-soft-delete.md). |
+| `on` | list of `{ local, related }` | Extra column equalities between the table before this hop (`local`) and this hop's table (`related`). See [on](#on). |
 
 - **Hops go down foreign keys only.** Each hop's table holds the key. A `column` on a hop (the `belongs_to` direction) and a `through` on a hop (a junction in the middle) are rejected at load.
 - **The last hop can still be a junction.** Write it as the aggregate's own `through`, whose `left_key` then points at the last `via` table.
@@ -72,6 +74,28 @@ An aggregate reduces rows of a related table to one value. The operation is the 
     - { table: teams, foreign_key: owner_id }
     - { table: projects, foreign_key: team_id }
     - { table: tasks, foreign_key: project_id }
+```
+
+## on
+
+`on` narrows an aggregate's hop with column equalities beside its key, the same as on a join; [Joins](joins.md#on) owns the syntax, the null rule, and what rebuilds. On an aggregate, each hop has its own pairs:
+
+- **The aggregate's own `on`** relates the table right before `table` (`local`) to `table` (`related`): the parent for a one-hop aggregate, the last `via` hop otherwise.
+- **A `via` hop's `on`** relates the table before that hop (the parent, for the first) to the hop's table.
+- **Not over `through`.** A junction matches on `left_key`/`right_key` only; `on` on an aggregate over `through` is rejected at load. With `via` and a final `through`, the `via` hops still take `on`.
+
+```yaml
+# orders → shipments → parcels, every hop scoped to the order's tenant.
+- count: parcelCount
+  table: parcels
+  foreign_key: shipment_id
+  on:
+    - { local: tenant_id, related: tenant_id }   # shipments.tenant_id = parcels.tenant_id
+  via:
+    - table: shipments
+      foreign_key: order_id
+      on:
+        - { local: tenant_id, related: tenant_id } # orders.tenant_id = shipments.tenant_id
 ```
 
 ## Over a junction

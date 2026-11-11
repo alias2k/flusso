@@ -42,6 +42,19 @@ pub struct Through {
     pub filters: Option<Vec<Filter>>,
 }
 
+/// One `on` entry: an extra equality between a column of the table the field
+/// is declared on (`local`) and a column of the field's `table` (`related`).
+/// Both sides are optional here only so conversion can reject a half-written
+/// pair with a message naming the field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnPair {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<common::ColumnName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related: Option<common::ColumnName>,
+}
+
 /// One `order_by` entry for a to-many join.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -93,7 +93,7 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 | aggregate [`via`](aggregates.md#across-several-hops) table | its `foreign_key` |
 | `many_to_many` junction | its `left_key` (already carried when it's part of the junction's primary key) |
 
-`belongs_to` targets and the far side of a `many_to_many` need nothing: the rows that point at them are still there.
+`belongs_to` targets and the far side of a `many_to_many` need nothing: the rows that point at them are still there. The `related` columns of an [`on`](joins.md#on) pair need nothing either: a row that only changes them keeps its key, so its parent is still found from the current row.
 
 | `REPLICA IDENTITY` | Carries the link? |
 | --- | --- |
@@ -125,11 +125,11 @@ A column counts as read by a part of the document when it is:
 | Read through | Columns |
 | --- | --- |
 | The root row's own document | its fields, the index `filters`, the `soft_delete` column and its `when` |
-| A join | its fields, `filters`, `order_by`, and the link (`foreign_key`) |
-| An aggregate | its input column (`sum`/`avg`/`min`/`max`), `filters`, and the link |
-| An aggregate's `via` hop | the hop's `foreign_key` and `filters` |
+| A join | its fields, `filters`, `order_by`, the link (`foreign_key`), and the `related` side of its [`on`](joins.md#on) pairs |
+| An aggregate | its input column (`sum`/`avg`/`min`/`max`), `filters`, the link, and the `related` side of its `on` pairs |
+| An aggregate's `via` hop | the hop's `foreign_key`, `filters`, the `related` side of its `on` pairs, and the `local` side of the next hop's (or the aggregate's own, after the last hop) |
 | A `many_to_many` junction | `left_key`, `right_key`, and `through.filters` |
-| Any of them | the table's primary key, and a nested `belongs_to`'s `column` |
+| Any of them | the table's primary key, a nested `belongs_to`'s `column`, and the `local` side of the `on` pairs of the relations nested in it (the root row too) |
 
 - A column reached only through `filters` or `order_by` counts: changing it can move the row in or out of the document.
 - A `raw` filter can read any column of any table its SQL can name (the root row as `root`, a junction, an enclosing level), so an index with a `raw` filter anywhere (root `filters`, `soft_delete.when`, any join's or aggregate's `filters`, `through.filters`, a `via` hop's `filters`) rebuilds on every update, as it always has.

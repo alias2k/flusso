@@ -217,6 +217,12 @@ export const it: Record<string, string> = {
     "Le tabelle tra questa riga e la tabella correlata, in ordine a partire da questa riga. La foreign_key di ogni passaggio punta alla tabella precedente; la chiave dell'aggregato punta poi all'ultimo passaggio.",
   "inspector.viaHop": "Tabella del passaggio {n}",
   "inspector.viaAdd": "Aggiungi un passaggio",
+  "inspector.on": "On (coppie di colonne aggiuntive)",
+  "inspector.onHint":
+    "Ogni coppia aggiunge un'uguaglianza alla chiave: una colonna della tabella precedente (local) deve essere uguale a una colonna di questa tabella (related). Un null su uno dei due lati non corrisponde a nulla.",
+  "inspector.onLocal": "colonna locale",
+  "inspector.onRelated": "colonna correlata",
+  "inspector.onAdd": "Aggiungi una coppia",
   "inspector.bridgeNotNull":
     "NOT NULL → obbligatorio per impostazione predefinita. Deseleziona per renderlo facoltativo nel documento.",
   "inspector.bridgeNullable":

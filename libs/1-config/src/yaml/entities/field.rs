@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer};
 use kernel::FlussoType;
 use kernel::common;
 
-use super::{AggregateOp, Filter, JoinVerb, OrderBy, Through, Transform, ViaHop};
+use super::{AggregateOp, ColumnPair, Filter, JoinVerb, OrderBy, Through, Transform, ViaHop};
 
 /// One field of a document, parsed from the type-as-key form. Each variant
 /// carries the type/op the tag denoted plus a body holding the rest.
@@ -176,6 +176,9 @@ pub struct JoinBody {
     pub order_by: Option<Vec<OrderBy>>,
     #[serde(default)]
     pub limit: Option<u64>,
+    /// Extra column equalities on the hop; not on `many_to_many`.
+    #[serde(default)]
+    pub on: Option<Vec<ColumnPair>>,
     pub fields: Vec<Field>,
     #[serde(default)]
     pub options: BTreeMap<String, serde_yaml::Value>,
@@ -210,6 +213,10 @@ pub struct AggregateBody {
     pub filters: Option<Vec<Filter>>,
     #[serde(default)]
     pub via: Option<Vec<ViaHop>>,
+    /// Extra column equalities between the aggregated rows and the table
+    /// before them; only with `foreign_key`.
+    #[serde(default)]
+    pub on: Option<Vec<ColumnPair>>,
     #[serde(default)]
     pub options: BTreeMap<String, serde_yaml::Value>,
 }

@@ -11,6 +11,11 @@
 //! a re-parented one — whose row names the new parent — still rebuild the
 //! document they used to sit in. Without a pre-image (a table whose replica
 //! identity doesn't carry the link column) only the current parent is found.
+//!
+//! A hop's `on` pairs are not applied: the key alone finds every parent a row
+//! is linked to, a superset of the ones it joins, and each rebuild evaluates
+//! the pairs. A row that only changes a `related` column keeps its key, so the
+//! parent it left is still found.
 
 use std::collections::{HashMap, HashSet};
 

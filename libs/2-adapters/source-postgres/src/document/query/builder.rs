@@ -11,9 +11,9 @@
 use std::collections::HashMap;
 
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, ColumnName, DatabaseSchema, Field, FieldSource, Filter,
-    FilterOp, FilterValue, GenericValue, IndexSchema, Join, JoinKind, NullOp, Relation, SoftDelete,
-    TableName, ValueOpFilter, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, ColumnName, ColumnPair, DatabaseSchema, Field,
+    FieldSource, Filter, FilterOp, FilterValue, GenericValue, IndexSchema, Join, JoinKind, NullOp,
+    Relation, SoftDelete, TableName, ValueOpFilter, ViaHop,
 };
 use source::{Result, SourceError};
 
@@ -129,11 +129,12 @@ impl Builder<'_> {
                 let object = self.object(&join.fields, &alias, Some(&target_pk))?;
                 let filters = self.filters(join.filters.as_deref(), &alias, target)?;
                 Ok(format!(
-                    "(SELECT {object} FROM {} AS {} WHERE {} = {}{filters} LIMIT 1)",
+                    "(SELECT {object} FROM {} AS {} WHERE {} = {}{}{filters} LIMIT 1)",
                     qtable(self.db, target),
                     qident(&alias),
                     qcol(&alias, &target_pk),
                     qcol(parent_alias, column),
+                    on_clause(&join.on, &alias, parent_alias),
                 ))
             }
             JoinKind::HasOne { foreign_key } => {
@@ -145,11 +146,12 @@ impl Builder<'_> {
                 let filters = self.filters(join.filters.as_deref(), &alias, child)?;
                 let order = order_clause(join.order_by.as_deref(), &alias);
                 Ok(format!(
-                    "(SELECT {object} FROM {} AS {} WHERE {} = {}{filters}{order} LIMIT 1)",
+                    "(SELECT {object} FROM {} AS {} WHERE {} = {}{}{filters}{order} LIMIT 1)",
                     qtable(self.db, child),
                     qident(&alias),
                     qcol(&alias, foreign_key),
                     qcol(parent_alias, parent_pk),
+                    on_clause(&join.on, &alias, parent_alias),
                 ))
             }
             JoinKind::HasMany { foreign_key } => {
@@ -161,10 +163,11 @@ impl Builder<'_> {
                 let inner = self.alias();
                 let filters = self.filters(join.filters.as_deref(), &inner, child)?;
                 let inner_sql = format!(
-                    "SELECT {ia}.* FROM {} AS {ia} WHERE {} = {}{filters}{}{}",
+                    "SELECT {ia}.* FROM {} AS {ia} WHERE {} = {}{}{filters}{}{}",
                     qtable(self.db, child),
                     qcol(&inner, foreign_key),
                     qcol(parent_alias, parent_pk),
+                    on_clause(&join.on, &inner, parent_alias),
                     order_clause(join.order_by.as_deref(), &inner),
                     limit_clause(join.limit),
                     ia = qident(&inner),
@@ -211,9 +214,10 @@ impl Builder<'_> {
     }
 
     /// A scalar subquery reducing the related rows. The rows are tied to the
-    /// parent by `<key> = parent.pk`, or, across `via`, by `<key> IN (<the last
-    /// hop's keys>)` (see [`parent_match`](Self::parent_match)). `exists` wraps
-    /// the same rows in `EXISTS`.
+    /// parent by `<key> = parent.pk` (plus the `on` pairs), or, across `via`,
+    /// by `<key> IN (<the last hop's keys>)` (see
+    /// [`parent_match`](Self::parent_match)). `exists` wraps the same rows in
+    /// `EXISTS`.
     fn aggregate_value(
         &mut self,
         aggregate: &Aggregate,
@@ -234,10 +238,10 @@ impl Builder<'_> {
                 let filters =
                     self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
                 format!(
-                    "(SELECT {function} FROM {} AS {} WHERE {} {parent}{filters})",
+                    "(SELECT {function} FROM {} AS {} WHERE {}{filters})",
                     qtable(self.db, &aggregate.table),
                     qident(&alias),
-                    qcol(&alias, foreign_key),
+                    parent.link(&alias, foreign_key, &aggregate.on),
                 )
             }
             AggregateKey::Through(through) => {
@@ -256,17 +260,17 @@ impl Builder<'_> {
                 let far = qtable(self.db, &aggregate.table);
                 let junction = qtable(self.db, &through.table);
                 let right_key = qcol(&junction_alias, &through.right_key);
-                let left_key = qcol(&junction_alias, &through.left_key);
+                let linked = parent.link(&junction_alias, &through.left_key, &[]);
                 let far_key = qcol(&alias, &far_pk);
                 let fa = qident(&alias);
                 let ja = qident(&junction_alias);
                 if aggregate.distinct {
                     format!(
-                        "(SELECT {function} FROM {far} AS {fa} WHERE {far_key} IN (SELECT {right_key} FROM {junction} AS {ja} WHERE {left_key} {parent}{junction_filters}){filters})"
+                        "(SELECT {function} FROM {far} AS {fa} WHERE {far_key} IN (SELECT {right_key} FROM {junction} AS {ja} WHERE {linked}{junction_filters}){filters})"
                     )
                 } else {
                     format!(
-                        "(SELECT {function} FROM {far} AS {fa} JOIN {junction} AS {ja} ON {right_key} = {far_key} WHERE {left_key} {parent}{filters}{junction_filters})"
+                        "(SELECT {function} FROM {far} AS {fa} JOIN {junction} AS {ja} ON {right_key} = {far_key} WHERE {linked}{filters}{junction_filters})"
                     )
                 }
             }
@@ -278,29 +282,35 @@ impl Builder<'_> {
         })
     }
 
-    /// The right-hand side tying an aggregate's key to its parent row:
-    /// `= parent.pk` for a one-hop aggregate. Each `via` hop wraps it in one
-    /// more level, `IN (SELECT hop.pk FROM hop WHERE hop.foreign_key <previous>
-    /// AND <hop filters>)`, so the key ends up matching the last hop's rows.
-    /// A row of a foreign-key chain has one parent, so no level repeats a row.
+    /// What ties an aggregate's rows to its parent row: the parent itself for
+    /// a one-hop aggregate. Each `via` hop wraps it in one more level, a
+    /// subquery over the hop's rows tied to the level before it, so the key
+    /// ends up matching the last hop's rows. A row of a foreign-key chain has
+    /// one parent, so no level repeats a row.
     fn parent_match(
         &mut self,
         via: &[ViaHop],
         parent_alias: &str,
         parent_pk: &ColumnName,
-    ) -> Result<String> {
-        let mut parent = format!("= {}", qcol(parent_alias, parent_pk));
+    ) -> Result<ParentMatch> {
+        let mut parent = ParentMatch::Row {
+            alias: parent_alias.to_owned(),
+            pk: parent_pk.clone(),
+        };
         for hop in via {
             let pk = self.pk_of(&hop.table)?;
             let alias = self.alias();
             let filters = self.filters(hop.filters.as_deref(), &alias, &hop.table)?;
-            parent = format!(
-                "IN (SELECT {} FROM {} AS {} WHERE {} {parent}{filters})",
-                qcol(&alias, &pk),
-                qtable(self.db, &hop.table),
-                qident(&alias),
-                qcol(&alias, &hop.foreign_key),
-            );
+            let link = parent.link(&alias, &hop.foreign_key, &hop.on);
+            parent = ParentMatch::Hop {
+                rows: format!(
+                    "FROM {} AS {} WHERE {link}{filters}",
+                    qtable(self.db, &hop.table),
+                    qident(&alias),
+                ),
+                alias,
+                pk,
+            };
         }
         Ok(parent)
     }
@@ -474,6 +484,77 @@ impl Builder<'_> {
         let when_sql = self.filters(when, ROOT, &schema.table)?;
         Ok(Some(format!("({truthy}){when_sql}")))
     }
+}
+
+/// The rows an aggregate level is tied to: the parent row in scope, or the
+/// rows of the last `via` hop, selected in a subquery.
+enum ParentMatch {
+    Row {
+        alias: String,
+        pk: ColumnName,
+    },
+    Hop {
+        alias: String,
+        pk: ColumnName,
+        /// `FROM … WHERE …` over the hop's rows, already tied to the level
+        /// before it.
+        rows: String,
+    },
+}
+
+impl ParentMatch {
+    /// The condition tying `alias` (a row keyed by `key` and `on`) to these
+    /// rows. Against a hop, the `on` pairs turn the `IN` into a row-value
+    /// `IN`, so their `local` columns are selected where the hop's alias is in
+    /// scope; a row value holding a null matches nothing, like `=`.
+    fn link(&self, alias: &str, key: &ColumnName, on: &[ColumnPair]) -> String {
+        match self {
+            ParentMatch::Row { alias: parent, pk } => format!(
+                "{} = {}{}",
+                qcol(alias, key),
+                qcol(parent, pk),
+                on_clause(on, alias, parent),
+            ),
+            ParentMatch::Hop {
+                alias: hop,
+                pk,
+                rows,
+            } if on.is_empty() => {
+                format!("{} IN (SELECT {} {rows})", qcol(alias, key), qcol(hop, pk))
+            }
+            ParentMatch::Hop {
+                alias: hop,
+                pk,
+                rows,
+            } => {
+                let (related, local): (Vec<String>, Vec<String>) = on
+                    .iter()
+                    .map(|pair| (qcol(alias, &pair.related), qcol(hop, &pair.local)))
+                    .unzip();
+                format!(
+                    "({}, {}) IN (SELECT {}, {} {rows})",
+                    qcol(alias, key),
+                    related.join(", "),
+                    qcol(hop, pk),
+                    local.join(", "),
+                )
+            }
+        }
+    }
+}
+
+/// ` AND related = parent.local` for each `on` pair: `alias` is the hop's row,
+/// `parent_alias` the row before it.
+fn on_clause(on: &[ColumnPair], alias: &str, parent_alias: &str) -> String {
+    on.iter()
+        .map(|pair| {
+            format!(
+                " AND {} = {}",
+                qcol(alias, &pair.related),
+                qcol(parent_alias, &pair.local)
+            )
+        })
+        .collect()
 }
 
 fn require_pk(parent_pk: Option<&ColumnName>) -> Result<&ColumnName> {

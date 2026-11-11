@@ -27,6 +27,10 @@ pub struct Join {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
     pub fields: Vec<Field>,
+    /// Extra column equalities on the hop, ANDed with the key. Never set on a
+    /// [`ManyToMany`](JoinKind::ManyToMany) join.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<ColumnPair>,
     /// Whether a sink indexes the folded-in rows. `false` still builds them
     /// into the stored document, but maps the whole subtree as one disabled
     /// object: nothing under it is searchable, filterable or sortable, and it
@@ -38,8 +42,9 @@ pub struct Join {
     pub indexed: bool,
 }
 
-/// Hashes `indexed` only when turned off, so a schema that never opts out keeps
-/// the content hash (and so the physical index) it had before the field existed.
+/// Hashes `indexed` only when turned off and `on` only when non-empty, so a
+/// schema that never opts in keeps the content hash (and so the physical
+/// index) it had before the fields existed.
 impl Hash for Join {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let Self {
@@ -51,6 +56,7 @@ impl Hash for Join {
             order_by,
             limit,
             fields,
+            on,
             indexed,
         } = self;
         table.hash(state);
@@ -64,6 +70,28 @@ impl Hash for Join {
         if !indexed {
             "indexed".hash(state);
         }
+        hash_on("on", on, state);
+    }
+}
+
+/// One extra equality on a relation hop: `local` is a column of the table
+/// before the hop (the parent row), `related` a column of the hop's table.
+/// SQL equality, so a null on either side matches nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ColumnPair {
+    /// The column on the table before the hop.
+    pub local: common::ColumnName,
+    /// The column on the hop's own table.
+    pub related: common::ColumnName,
+}
+
+/// Hashes a hop's `on` pairs only when there are any, so a relation without
+/// them keeps its content hash. `tag` keeps a `via` hop's pairs apart from the
+/// aggregate's own, which would otherwise hash to the same bytes.
+pub(super) fn hash_on<H: Hasher>(tag: &str, on: &[ColumnPair], state: &mut H) {
+    if !on.is_empty() {
+        tag.hash(state);
+        on.hash(state);
     }
 }
 

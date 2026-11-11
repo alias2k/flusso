@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, Direction, Field, FieldSource,
-    Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join, JoinKind, NullCheckFilter,
-    NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, Through,
-    Transform, ValueOpFilter, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, Direction, Field,
+    FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join, JoinKind,
+    NullCheckFilter, NullOp, OrderBy, RawFilter, Relation, SoftDelete, SoftDeleteColumn,
+    SoftDeleteField, Through, Transform, ValueOpFilter, ViaHop,
 };
 use rust_decimal::Decimal;
 
@@ -277,6 +277,14 @@ fn convert_join_field(
     body: entities::JoinBody,
 ) -> Result<Field, ConversionError> {
     let kind = join_kind(verb, &body)?;
+    let context = format!("{} `{}`", verb.as_str(), body.field);
+    if matches!(kind, JoinKind::ManyToMany { .. }) && has_pairs(body.on.as_deref()) {
+        return Err(ConversionError::OnNotAllowed {
+            context,
+            place: "a `many_to_many` join",
+        });
+    }
+    let on = convert_on(&context, body.on)?;
     // Ordering/limiting is only meaningful when there are rows to choose among.
     // `has_one` keeps `order_by` (it picks *which* row becomes the object);
     // `belongs_to` targets a unique row by primary key, so neither applies, and
@@ -325,6 +333,7 @@ fn convert_join_field(
         limit: body.limit,
         fields,
         indexed,
+        on,
     };
     Ok(Field {
         field: body.field,
@@ -430,6 +439,14 @@ fn convert_aggregate_field(
     if body.distinct && matches!(key, AggregateKey::Direct(_)) {
         return Err(ConversionError::DistinctWithoutThrough);
     }
+    let context = format!("aggregate `{}`", body.field);
+    if matches!(key, AggregateKey::Through(_)) && has_pairs(body.on.as_deref()) {
+        return Err(ConversionError::OnNotAllowed {
+            context,
+            place: "an aggregate over `through`",
+        });
+    }
+    let on = convert_on(&context, body.on)?;
     let via = body
         .via
         .unwrap_or_default()
@@ -444,6 +461,7 @@ fn convert_aggregate_field(
         filters: convert_filters_opt(body.filters)?,
         distinct: body.distinct,
         via,
+        on,
     };
     Ok(Field {
         field: body.field,
@@ -536,13 +554,47 @@ fn convert_via_hop(
     if hop.column.is_some() {
         return Err(ConversionError::ViaBelongsTo { field, table });
     }
+    let on = convert_on(
+        &format!("aggregate `{field}`, `via` entry `{table}`"),
+        hop.on,
+    )?;
     Ok(ViaHop {
         foreign_key: hop
             .foreign_key
             .ok_or(ConversionError::ViaMissingForeignKey { field, table })?,
         table: hop.table,
         filters: convert_filters_opt(hop.filters)?,
+        on,
     })
+}
+
+fn has_pairs(on: Option<&[entities::ColumnPair]>) -> bool {
+    on.is_some_and(|pairs| !pairs.is_empty())
+}
+
+/// An `on` list: every pair complete and listed once. Absent and `[]` are the
+/// same: no extra equality.
+fn convert_on(
+    context: &str,
+    on: Option<Vec<entities::ColumnPair>>,
+) -> Result<Vec<ColumnPair>, ConversionError> {
+    let mut pairs: Vec<ColumnPair> = Vec::new();
+    for pair in on.unwrap_or_default() {
+        let (Some(local), Some(related)) = (pair.local, pair.related) else {
+            return Err(ConversionError::OnIncompletePair {
+                context: context.to_owned(),
+            });
+        };
+        let pair = ColumnPair { local, related };
+        if pairs.contains(&pair) {
+            return Err(ConversionError::OnDuplicatePair {
+                context: context.to_owned(),
+                pair: format!("`{}` = `{}`", pair.local, pair.related),
+            });
+        }
+        pairs.push(pair);
+    }
+    Ok(pairs)
 }
 
 fn convert_through(through: entities::Through) -> Result<Through, ConversionError> {

@@ -65,7 +65,7 @@ impl IndexReads {
                     .iter()
                     .map(|path| match path.last() {
                         Some(Step::Relation(relation)) => relation_columns(schema, relation, table),
-                        Some(Step::Via(hop)) => via_columns(schema, hop),
+                        Some(Step::Via { hop, next_on }) => via_columns(schema, hop, next_on),
                         None => ColumnUse::All,
                     })
                     .collect();

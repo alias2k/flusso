@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-use super::{AggregateKey, Filter, FlussoType};
+use super::{AggregateKey, ColumnPair, Filter, FlussoType, join::hash_on};
 
 /// Reduces rows from a related `table` to a single value — a count, sum,
 /// extreme, or existence flag. The `key` connects the tables; `filters`
@@ -31,12 +31,17 @@ pub struct Aggregate {
     /// at the last hop's table instead of the parent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub via: Vec<ViaHop>,
+    /// Extra column equalities between the aggregated rows and the table
+    /// before them (the parent, or the last `via` hop), ANDed with the key.
+    /// Only with an [`AggregateKey::Direct`] key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<ColumnPair>,
 }
 
 /// One table an aggregate passes through on its way to the aggregated table: a
 /// downward foreign-key hop. `foreign_key` is on `table` and points at the
 /// table before it (the parent, for the first hop).
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViaHop {
     /// The table this hop passes through.
     pub table: common::TableName,
@@ -45,9 +50,29 @@ pub struct ViaHop {
     /// Which rows of `table` the path passes through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<Vec<Filter>>,
+    /// Extra column equalities between `table` and the table before it,
+    /// ANDed with `foreign_key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<ColumnPair>,
 }
 
-/// Hashes `distinct` only when set and `via` only when non-empty, so a schema
+/// Hashes `on` only when non-empty, so a hop without it keeps its content hash.
+impl Hash for ViaHop {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self {
+            table,
+            foreign_key,
+            filters,
+            on,
+        } = self;
+        table.hash(state);
+        foreign_key.hash(state);
+        filters.hash(state);
+        hash_on("via_on", on, state);
+    }
+}
+
+/// Hashes `distinct` only when set and `via`/`on` only when non-empty, so a schema
 /// that never opts in keeps the content hash (and so the physical index) it had
 /// before the fields existed.
 impl Hash for Aggregate {
@@ -60,6 +85,7 @@ impl Hash for Aggregate {
             filters,
             distinct,
             via,
+            on,
         } = self;
         table.hash(state);
         op.hash(state);
@@ -73,6 +99,7 @@ impl Hash for Aggregate {
             "via".hash(state);
             via.hash(state);
         }
+        hash_on("on", on, state);
     }
 }
 

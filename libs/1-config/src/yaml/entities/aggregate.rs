@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use kernel::common;
 
-use super::Filter;
+use super::{ColumnPair, Filter};
 
 /// The aggregate operation — written as the field's type key
 /// (`count:` / `sum:` / `avg:` / `min:` / `max:` / `ids:` / `exists:`).
@@ -32,6 +32,8 @@ pub struct ViaHop {
     pub foreign_key: Option<common::ColumnName>,
     #[serde(default)]
     pub filters: Option<Vec<Filter>>,
+    #[serde(default)]
+    pub on: Option<Vec<ColumnPair>>,
     #[serde(default)]
     pub column: Option<serde_yaml::Value>,
     #[serde(default)]

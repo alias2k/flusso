@@ -212,6 +212,12 @@ export const en: Record<string, string> = {
     "The tables between this row and the related table, in order from this row. Each hop's foreign_key points at the table before it; the aggregate's own key then points at the last hop.",
   "inspector.viaHop": "Hop {n} table",
   "inspector.viaAdd": "Add a hop",
+  "inspector.on": "On (extra column pairs)",
+  "inspector.onHint":
+    "Each pair adds one more equality to the key: a column of the table before (local) must equal a column of this table (related). A null on either side matches nothing.",
+  "inspector.onLocal": "local column",
+  "inspector.onRelated": "related column",
+  "inspector.onAdd": "Add a pair",
   "inspector.bridgeNotNull": "NOT NULL → required by default. Uncheck to make it optional in the document.",
   "inspector.bridgeNullable": "Nullable → optional by default. Mark it required and a default becomes mandatory.",
   "inspector.defaultError":
