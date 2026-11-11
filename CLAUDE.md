@@ -33,8 +33,9 @@ that owns it; when you move a page, add an `[output.html.redirect]` entry in `do
 CI's `docs` job builds the book, runs `lychee --offline --include-fragments` on it, and asserts
 every `alias2k.github.io/flusso/<path>` URL in the repo's markdown and Rust resolves to a built
 page (`.github/scripts/check-manual-links.sh`; a `/main/<path>` URL is checked against the same
-book). Keep deep links at the root, not `/main/`: they reach readers through crates.io at release,
-when the root has the page.
+book). Deep links in crate READMEs and Rust docs stay at the root (they reach readers through
+crates.io at release, when the root has the page); links in `plugin/**` point at `/main/`, since the
+plugin is installed from the repository and describes `main`.
 
 ## Commands
 

@@ -98,7 +98,9 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: mdbook
+          # Pinned: the root manual is built from an immutable release tag, so an
+          # mdBook that rejects that tag's book would block every deploy.
+          tool: mdbook@0.5.4
 
       - name: Build the released manual at the root and main's under /main/
         run: .github/scripts/build-manuals.sh site origin/main

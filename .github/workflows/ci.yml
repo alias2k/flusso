@@ -115,10 +115,18 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: mdbook,lychee
+          tool: mdbook@0.5.4,lychee
 
+      # mdBook logs a failed `{{#include}}` as ERROR yet exits 0; the Pages
+      # build refuses such a book (build-manuals.sh), so refuse it here first.
       - name: Build the book
-        run: mdbook build docs
+        run: |
+          set -euo pipefail
+          NO_COLOR=1 mdbook build docs 2>&1 | tee mdbook.log
+          if grep -qE '(^|[^[:alpha:]])ERROR ' mdbook.log; then
+            echo "::error::mdBook reported errors (see above)" >&2
+            exit 1
+          fi
 
       # Every relative link and `#anchor` inside the book must resolve. Offline:
       # external URLs are not the book's responsibility and would make the job
