@@ -49,6 +49,7 @@ A join folds rows from a related table into the document. The relationship verb 
 
 - **Each pair is one more `=`**, ANDed with the key and the `filters`. The example folds in the lines whose `order_id` is the order's primary key **and** whose `tenant_id` equals the order's.
 - **SQL equality.** A null on either side matches nothing, so a row with a null `tenant_id` never folds in.
+- **`required` still means "always matches".** A `required: true` `belongs_to`/`has_one` whose pairs match no row builds a null object in a field mapped non-null, the same as one whose `filters` exclude the row. Mark it required only when the pairs always hold.
 - **The key keeps its meaning.** `column` or `foreign_key` still points at a primary key; `on` only narrows the match. A relation keyed purely on a composite key, with no primary-key column in it, isn't supported.
 - **Where it's allowed:** `belongs_to`, `has_one`, `has_many`, and on aggregates (a `foreign_key` aggregate and each `via` hop; see [Aggregates](aggregates.md#on)). Rejected at load, naming the field: on `many_to_many`, on an aggregate over `through`, a pair missing `local` or `related`, the same pair listed twice. `on: []` is the same as no `on`.
 - **Not checked by [`flusso check`](cli.md#check)**, like the key columns: a typo surfaces when a document is built.

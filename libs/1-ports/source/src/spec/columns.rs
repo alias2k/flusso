@@ -15,16 +15,17 @@
 //! - [`via_columns`]: what an aggregate reads from one of its `via` tables —
 //!   the hop's `foreign_key`, `filters`, the `related` side of its `on` pairs
 //!   and the `local` side of the next level's.
-//!
-//! An `on` pair reads a column on each side of its hop: `related` on the hop's
-//! own table, `local` on the table before it, so a parent level (the root row,
-//! a join's rows, a `via` hop) counts the `local` columns of the relations it
-//! correlates.
+
 //! - [`soft_delete_column`]: the column a `soft_delete` marker reads on the
 //!   root row; the document query reads the same one.
 //! - [`row_link`]: the link column a related row holds, which a deleted or
 //!   re-parented row's pre-image must carry (see
 //!   [`SourceSpec::pre_image_columns`](crate::SourceSpec::pre_image_columns)).
+//!
+//! An `on` pair reads a column on each side of its hop: `related` on the hop's
+//! own table, `local` on the table before it, so a parent level (the root row,
+//! a join's rows, a `via` hop) counts the `local` columns of the relations it
+//! correlates.
 //!
 //! A raw SQL filter is pasted into a correlated subquery, so it can read any
 //! column it can name: its own table's, the root row's (`root.…`), a

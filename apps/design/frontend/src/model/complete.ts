@@ -6,8 +6,14 @@
 import type { Aggregate, AggregateKey, ColumnPair, Field } from "../api";
 import { joinOf } from "./tree";
 
-const pairsIncomplete = (on: ColumnPair[] | undefined): boolean =>
-  (on ?? []).some((pair) => !pair.local || !pair.related);
+/// A pair missing a side, or listed twice: both are rejected at load.
+export const pairsIncomplete = (on: ColumnPair[] | undefined): boolean =>
+  (on ?? []).some(
+    (pair, i, all) =>
+      !pair.local ||
+      !pair.related ||
+      all.findIndex((other) => other.local === pair.local && other.related === pair.related) !== i,
+  );
 
 function keyIncomplete(key: AggregateKey): boolean {
   if ("direct" in key) return !key.direct;
@@ -16,7 +22,7 @@ function keyIncomplete(key: AggregateKey): boolean {
 }
 
 /// Is the join that *is* this node still missing a required key/table, or a
-/// side of an `on` pair?
+/// side of an `on` pair (or listing one twice)?
 export function joinIncomplete(field: Field | null): boolean {
   const join = joinOf(field);
   if (!join) return false;

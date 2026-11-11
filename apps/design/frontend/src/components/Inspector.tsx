@@ -1276,7 +1276,9 @@ function ViaEditor({
                 value={hop.table}
                 tables={tables}
                 junctions={junctions}
-                onChange={(table) => set(i, { ...hop, table, filters: table === hop.table ? hop.filters : undefined })}
+                onChange={(table) =>
+                  set(i, table === hop.table ? hop : { ...hop, table, filters: undefined, on: undefined })
+                }
               />
             </Row>
             <Row label="foreign_key">

@@ -5,7 +5,7 @@
 // incomplete pieces so the preview shows everything that *is* valid; it runs
 // only for preview, the edited doc keeps the in-progress work untouched.
 
-import type { Aggregate, Field, Filter, IndexSchema, SoftDelete, Through } from "../api";
+import type { Aggregate, ColumnPair, Field, Filter, IndexSchema, SoftDelete, Through } from "../api";
 import { aggregateIncomplete, joinIncomplete } from "./complete";
 
 const filterOk = (f: Filter): boolean =>
@@ -16,6 +16,30 @@ const prunedFilters = (filters: Filter[] | undefined): Filter[] | undefined => {
   return kept.length ? kept : undefined;
 };
 
+/// Complete pairs, each once; `undefined` when none is left.
+const prunedOn = (on: ColumnPair[] | undefined): ColumnPair[] | undefined => {
+  const kept: ColumnPair[] = [];
+  for (const pair of on ?? []) {
+    const seen = kept.some((p) => p.local === pair.local && p.related === pair.related);
+    if (pair.local && pair.related && !seen) kept.push(pair);
+  }
+  return kept.length ? kept : undefined;
+};
+
+/// The field with its unfinished `on` pairs dropped, so one being built hides
+/// only itself from the preview, not the whole relation.
+function withPrunedPairs(field: Field): Field {
+  const s = field.source;
+  if (!("relation" in s)) return field;
+  if ("join" in s.relation) {
+    const join = s.relation.join;
+    return { ...field, source: { relation: { join: { ...join, on: prunedOn(join.on) } } } };
+  }
+  const agg = s.relation.aggregate;
+  const via = agg.via?.map((hop) => ({ ...hop, on: prunedOn(hop.on) }));
+  return { ...field, source: { relation: { aggregate: { ...agg, on: prunedOn(agg.on), via } } } };
+}
+
 const prunedThrough = (through: Through): Through => ({ ...through, filters: prunedFilters(through.filters) });
 
 function prunedAggregate(agg: Aggregate): Aggregate {
@@ -24,7 +48,8 @@ function prunedAggregate(agg: Aggregate): Aggregate {
   return { ...agg, key, filters: prunedFilters(agg.filters), via: via?.length ? via : undefined };
 }
 
-function prunedField(field: Field): Field | null {
+function prunedField(input: Field): Field | null {
+  const field = withPrunedPairs(input);
   const s = field.source;
   if ("relation" in s) {
     if ("aggregate" in s.relation) {
