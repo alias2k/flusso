@@ -29,4 +29,17 @@ pub enum EngineError {
          set on-error=skip to quarantine rejected documents and continue"
     )]
     DocumentsRejected(usize, String),
+
+    /// A document could not be built (a script failed on it) and the failure
+    /// policy for its index is [`Stop`](crate::FailurePolicy::Stop).
+    #[error(
+        "document `{id}` in index `{index}` could not be built: {failure}\n\
+         stopping; the change is retried after a restart. \
+         set on_error = \"skip\" for this index to leave such documents at their indexed version"
+    )]
+    DocumentFailed {
+        index: String,
+        id: String,
+        failure: Box<source::document::BuildFailure>,
+    },
 }

@@ -423,6 +423,7 @@ async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
             Document::Delete { id } => {
                 Envelope::delete(id.index.clone(), document_id(&id), None, ts)
             }
+            Document::Failed { failure, .. } => panic!("the bench schema has no script: {failure}"),
         };
         services.sink.apply(&envelope).await.unwrap();
     }

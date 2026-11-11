@@ -1206,6 +1206,7 @@ async fn upsert(builder: &PgDocumentBuilder, id: i64) -> BTreeMap<String, Generi
         } => map,
         Document::Upsert { .. } => panic!("expected the document body to be an object"),
         Document::Delete { .. } => panic!("expected an upsert, got a tombstone"),
+        Document::Failed { failure, .. } => panic!("expected an upsert, got {failure}"),
     }
 }
 

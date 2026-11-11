@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kernel::{IndexName, Position, SinkName};
+use source::document::BuildFailure;
 
 /// What one ingest commit produced: how many changes it covered, how many
 /// documents it built (deduplicated), per index, and how long the build took.
@@ -111,6 +112,12 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     /// A sink rejected one document and the `skip` policy left it out.
     fn on_document_quarantined(&self, sink: &SinkName, index: &str, id: &str, reason: &str) {
         let _ = (sink, index, id, reason);
+    }
+
+    /// A document could not be built (a script failed on it) and the `skip`
+    /// policy left it out: every sink keeps its indexed version.
+    fn on_document_failed(&self, index: &IndexName, id: &str, failure: &BuildFailure) {
+        let _ = (index, id, failure);
     }
 
     /// `sink` flushed every live change up to and including `position`: a
@@ -232,6 +239,12 @@ impl Observer for FanOut {
     fn on_document_quarantined(&self, sink: &SinkName, index: &str, id: &str, reason: &str) {
         for observer in &self.observers {
             observer.on_document_quarantined(sink, index, id, reason);
+        }
+    }
+
+    fn on_document_failed(&self, index: &IndexName, id: &str, failure: &BuildFailure) {
+        for observer in &self.observers {
+            observer.on_document_failed(index, id, failure);
         }
     }
 

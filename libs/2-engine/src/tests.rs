@@ -162,6 +162,7 @@ impl ChangeCapture for MockSource {
 struct MockDocuments {
     builds: Arc<Mutex<Vec<usize>>>,
     deleted: Mutex<Vec<i64>>,
+    failing: Mutex<Vec<i64>>,
 }
 
 #[async_trait]
@@ -186,6 +187,16 @@ impl DocumentBuilder for MockDocuments {
         };
         if self.deleted.lock().unwrap().contains(&row) {
             return Ok(Document::Delete { id: id.clone() });
+        }
+        if self.failing.lock().unwrap().contains(&row) {
+            return Ok(Document::Failed {
+                id: id.clone(),
+                failure: source::document::BuildFailure {
+                    field: "label".to_owned(),
+                    message: "boom".to_owned(),
+                    position: None,
+                },
+            });
         }
         Ok(Document::Upsert {
             id: id.clone(),
@@ -330,6 +341,11 @@ impl Harness {
 
     fn with_batch(mut self, batch: BatchPolicy) -> Self {
         self.ingest = self.ingest.with_batch(batch);
+        self
+    }
+
+    fn map_ingest(mut self, f: impl FnOnce(IngestEngine) -> IngestEngine) -> Self {
+        self.ingest = f(self.ingest);
         self
     }
 
@@ -1351,4 +1367,88 @@ async fn an_immediate_snapshot_flush_releases_deferred_positions() {
         vec!["applied primary 4", "searchable primary 4"],
         "a snapshot batch has no position of its own"
     );
+}
+
+#[derive(Debug, Default)]
+struct FailedObserver {
+    failed: Mutex<Vec<(String, String, String)>>,
+}
+
+impl Observer for FailedObserver {
+    fn on_document_failed(
+        &self,
+        index: &IndexName,
+        id: &str,
+        failure: &source::document::BuildFailure,
+    ) {
+        self.failed
+            .lock()
+            .unwrap()
+            .push((index.to_string(), id.to_owned(), failure.field.clone()));
+    }
+}
+
+#[tokio::test]
+async fn skip_policy_leaves_a_failed_document_out_and_keeps_going() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let ops = Arc::clone(&sink.ops);
+    let observer = Arc::new(FailedObserver::default());
+    let observer_dyn = Arc::clone(&observer) as Arc<dyn Observer>;
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(2), upsert(3)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .map_ingest(|engine| {
+        engine
+            .with_observer(observer_dyn)
+            .with_failure_policies(FailurePolicies::new(FailurePolicy::Skip))
+    });
+    harness.documents.failing.lock().unwrap().push(2);
+    let source = Arc::clone(&harness.source);
+    harness.run(Continuity::Resumed).await;
+
+    let recorded = ops.lock().unwrap();
+    assert_eq!(
+        recorded.as_slice(),
+        ["upsert users 1", "upsert users 3"],
+        "the failed document is published to no sink"
+    );
+    assert_eq!(
+        observer.failed.lock().unwrap().as_slice(),
+        [("users".to_owned(), "2".to_owned(), "label".to_owned())]
+    );
+    assert_eq!(
+        source.confirmed.lock().unwrap().last(),
+        Some(&Position(2)),
+        "a skipped document does not hold the slot back"
+    );
+}
+
+#[tokio::test]
+async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let ops = Arc::clone(&sink.ops);
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1), upsert(2)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(5),
+    });
+    harness.documents.failing.lock().unwrap().push(2);
+    for sink in &harness.sinks {
+        sink.stage(Continuity::Resumed).await.unwrap();
+    }
+    let outcome = harness.ingest.run().await;
+    let Err(EngineError::DocumentFailed { index, id, failure }) = outcome else {
+        panic!("expected DocumentFailed, got {outcome:?}");
+    };
+    assert_eq!((index.as_str(), id.as_str()), ("users", "2"));
+    assert_eq!(failure.field, "label");
+    assert!(
+        ops.lock().unwrap().is_empty(),
+        "nothing in the failing batch is published"
+    );
+    assert!(harness.source.confirmed.lock().unwrap().is_empty());
 }

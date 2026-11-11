@@ -195,7 +195,7 @@ impl PgDocumentBuilder {
         };
         match self.build(&id).await? {
             Document::Upsert { body, .. } => Ok(Some(body)),
-            Document::Delete { .. } => Ok(None),
+            Document::Delete { .. } | Document::Failed { .. } => Ok(None),
         }
     }
 
