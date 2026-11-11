@@ -21,7 +21,7 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 | `on` | list of `{ local, related }` | `foreign_key` aggregates | Extra column equalities ANDed with the key. Rejected over `through`. See [on](#on). |
 | `distinct` | bool, default `false` | aggregates over `through` | `true` counts each target row once instead of once per junction row. Rejected on a `foreign_key` aggregate, with or without `via`. |
 | `column` | Postgres identifier, or an [arithmetic expression](#arithmetic-input) | `sum`, `avg`, `min`, `max` | What to reduce: a column of `table`, or arithmetic over its columns. Required there; `count` doesn't read it; `ids` and `exists` reject it. |
-| `value_type` | a scalar type key | `sum`, `min`, `max` | The result type; it mirrors the column. Required there; `count` and `avg` don't read it; `ids` and `exists` reject it. |
+| `value_type` | a scalar type key | `sum`, `min`, `max` | The result type; it mirrors the column, and must be numeric over an [expression](#arithmetic-input). Required there; `count` and `avg` don't read it; `ids` and `exists` reject it. |
 | `element_type` | a scalar type key | `ids` | The type of each collected key, usually `long` or `keyword`; `geo` and `custom` are rejected. Required on `ids`, rejected on every other op. |
 | `filters` | list | all | Which rows of `table` count. Junction rows are filtered by `through.filters`. See [Filters](filters-and-soft-delete.md). |
 
@@ -52,10 +52,16 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 - **Usual precedence.** Unary minus binds tightest, then `*` and `/`, then `+` and `-`. Operators of equal precedence group from the left: `a - b - c` is `(a - b) - c`.
 - **Columns of the aggregated table only.** No parent-row, `via`-hop, or junction column; for those, filter or join instead.
 - **No functions, casts, or other operators.** `round(…)`, `::numeric`, `%` and `||` are rejected.
-- **Postgres arithmetic, as is.** Integer operands divide as integers, so `quantity / 2` truncates; write `quantity / 2.0` for a fraction. A null operand makes that row's value null, and `sum`/`avg`/`min`/`max` skip null rows. Division by zero fails the document build, so guard the divisor with a [filter](filters-and-soft-delete.md).
-- **Same result types.** `value_type` stays required on `sum`/`min`/`max` and states the result; `avg` is a `double`. Pick a `value_type` that holds what the arithmetic produces: `double` or `decimal` for a product with a `numeric` column.
+- **Postgres arithmetic, as is.** Integer operands divide as integers, so `quantity / 2` truncates; write `quantity / 2.0` for a fraction. A null operand makes that row's value null, and `sum`/`avg`/`min`/`max` skip null rows. Division by zero and integer overflow are errors; see the warning below.
+- **Quote a literal-only expression.** YAML reads `column: 1` as a number, not a string, and the load rejects it. Write `column: "1"`.
+- **Same result types, numeric only.** `value_type` stays required on `sum`/`min`/`max` and states the result; `avg` is a `double`. Over an expression it must be numeric (`short`, `integer`, `long`, `float`, `double`, `decimal`): `keyword`, `date`, `boolean` and the rest are rejected at load. Pick one that holds what the arithmetic produces. `/` on a `numeric` column or a decimal literal (`* 1.5`) yields fractions, which an integer `value_type` misdescribes and a typed reader can't decode; use `double` or `decimal` there.
 - **Load-time errors carry a position.** A malformed expression fails the load naming the field and the 1-based character where parsing stopped, e.g. `` `sum` field `linesValue`: invalid expression `quantity *`: at position 11: expected a column, a number, `-` or `(`, found the end ``. Nesting is capped at 64 levels, counting parentheses, unary minus, and chained operators.
 - **Spelling doesn't matter.** Whitespace and redundant parentheses are dropped: `quantity*unit_price` and `quantity * (unit_price)` are the same input, keep the same physical index, and write the same `flusso.lock`. A plain column name is unchanged from before expressions existed.
+> ⚠️ **Warning** — a runtime arithmetic error stalls the whole deployment. Division by zero, or an integer result past its type (`integer * integer` beyond 2³¹), makes Postgres fail the document query. That fails the whole batch: the ingest engine restarts and retries it, every index stalls, and WAL stays pinned until the offending row changes. A backfill over such a row fails the same way. Rule it out in the schema:
+>
+> - **A zero divisor** — exclude it with a `filters` entry on the aggregate, e.g. `{ column: quantity, op: neq, value: 0 }` for `total / quantity`.
+> - **Overflow** — widen the column type (`bigint`, `numeric`) in Postgres, or multiply by a decimal literal (`* 1.0`) so the arithmetic runs in `numeric`.
+
 - **Every column in the expression rebuilds the parent.** Changing any of them on an aggregated row rebuilds its parent document; an update that changes none of them, nor the aggregate's key or filter columns, rebuilds nothing.
 - **[`flusso check`](cli.md#check) verifies the columns.** Each column the expression names must exist on `table` and be numeric. A plain column keeps its own check: the declared `value_type` must accept its database type.
 

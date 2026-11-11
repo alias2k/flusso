@@ -678,12 +678,20 @@ sets carry both sides (`related` on the hop's table, `local` on the level before
 `a_schema_without_on_keeps_its_content_hash`.
 `sum`/`avg`/`min`/`max` fold a `kernel::Expression` (issue #194; grammar and storage in the
 `expression.rs` module doc, semantics in the Aggregates reference): parsed by hand, **no regex**,
-depth-capped. A plain column is the `Column` leaf, serialized and hashed as the bare
-`ColumnName` (format freeze); an expression is stored in the lock as its canonical text.
+depth-capped. A whole input `ColumnName::try_new` accepts is that column (so every old
+spelling still loads, Unicode lowercasing included); a plain column is the `Column` leaf,
+serialized and hashed as the bare `ColumnName` (format freeze); an expression is stored in the
+lock as its canonical text, which must nest no deeper than the tree is tall (a double negation
+renders `- -a`) so every accepted tree re-parses from its lock. An expression's
+`sum`/`min`/`max` takes only a numeric `value_type`, rejected at load.
 `AggregateOp::input()` is the one accessor (`sql::arithmetic`, `relation_columns`,
 `validate_indexes`, designer codegen); the designer checks input through `POST /api/expression`,
 the same parser. Guards: `a_plain_column_aggregate_keeps_its_content_hash`, the
-`expression::tests` proptests, `an_aggregate_expression_rebuilds_from_each_operand` (`wal`).
+`expression::tests` proptests (`a_tree_up_to_the_cap_renders_to_text_that_parses_back`),
+`every_chain_up_to_the_cap_renders_to_text_that_parses_back`,
+`a_whole_column_name_keeps_the_column_name_rules`, `the_deepest_expression_survives_a_lock_round_trip`
+(`golden_lock`), `an_expression_needs_a_numeric_value_type`,
+`an_aggregate_expression_rebuilds_from_each_operand` (`wal`).
 **The content hash is the physical index name**, so `Aggregate`
 and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via`/`on` when
 unset (`ViaHop` and `Join` likewise for `on`, a hop's pairs under their own tag) — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
