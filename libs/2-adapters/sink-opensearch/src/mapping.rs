@@ -128,7 +128,9 @@ fn collect_map_templates(
                 children: Vec::new(),
             };
             let mut mapping = build_property(&key, options, &path);
-            add_exact_key_subfield(&mut mapping, values);
+            if options.auto_subfields && values.subfields {
+                add_exact_key_subfield(&mut mapping, values);
+            }
             out.push(json!({
                 format!("{MAP_TEMPLATE_PREFIX}{path}"): {
                     "path_match": format!("{path}.*"),
@@ -367,9 +369,7 @@ fn add_exact_key_subfield(mapping: &mut Value, values: &Mapping) {
     if !matches!(values.mapping_type, MappingType::Keyword) {
         return;
     }
-    if let Some(fields) = mapping.get_mut("fields").and_then(Value::as_object_mut)
-        && fields.contains_key(KEYWORD_LOWERCASE_SUBFIELD)
-    {
+    if let Some(fields) = mapping.get_mut("fields").and_then(Value::as_object_mut) {
         fields.insert(KEYWORD_SUBFIELD.to_owned(), json!({ "type": "keyword" }));
     }
 }
