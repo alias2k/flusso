@@ -35,3 +35,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 toml.workspace = true
+proptest.workspace = true

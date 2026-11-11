@@ -19,7 +19,8 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use kernel::common::{ColumnName, IndexName};
 use kernel::{
-    AggregateOp, Column, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation, TableName,
+    Aggregate, AggregateOp, Column, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation,
+    TableName,
 };
 
 use crate::{Result, SourceError, SourceSpec};
@@ -162,26 +163,8 @@ async fn validate_field(
             .await?;
         }
         FieldSource::Relation(Relation::Aggregate(aggregate)) => {
-            let column = match &aggregate.op {
-                AggregateOp::Sum(c) | AggregateOp::Min(c) | AggregateOp::Max(c) => Some(c),
-                AggregateOp::Count
-                | AggregateOp::Avg(_)
-                | AggregateOp::Ids { .. }
-                | AggregateOp::Exists => None,
-            };
-            if let (Some(column), Some(value_type)) = (column, &aggregate.value_type) {
-                check_type(
-                    index,
-                    db_schema,
-                    &aggregate.table,
-                    &field.field,
-                    column,
-                    value_type,
-                    catalog,
-                    out,
-                )
+            validate_aggregate_input(index, db_schema, &field.field, aggregate, catalog, out)
                 .await?;
-            }
         }
         FieldSource::Group(fields) => {
             validate_fields(index, db_schema, table, fields, primary_key, catalog, out).await?;
@@ -206,6 +189,82 @@ async fn validate_field(
     Ok(())
 }
 
+const NUMERIC: &[FlussoType] = &[
+    FlussoType::Double,
+    FlussoType::Float,
+    FlussoType::Decimal,
+    FlussoType::Integer,
+    FlussoType::Long,
+    FlussoType::Short,
+];
+
+fn is_numeric(sql_type: &str) -> bool {
+    NUMERIC.iter().any(|ty| ty.accepts_pg(sql_type))
+}
+
+/// Check the input a `sum`/`avg`/`min`/`max` folds. A plain column keeps the
+/// one check it always had: `sum`/`min`/`max` declare a `value_type` that must
+/// accept the column's type. An expression's columns must each exist on the
+/// aggregated table and be numeric.
+async fn validate_aggregate_input(
+    index: &IndexName,
+    db_schema: &DatabaseSchema,
+    field: &FieldName,
+    aggregate: &Aggregate,
+    catalog: &dyn Catalog,
+    out: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let Some(input) = aggregate.op.input() else {
+        return Ok(());
+    };
+    if let Some(column) = input.as_column() {
+        if let (false, Some(value_type)) = (
+            matches!(aggregate.op, AggregateOp::Avg(_)),
+            &aggregate.value_type,
+        ) {
+            check_type(
+                index,
+                db_schema,
+                &aggregate.table,
+                field,
+                column,
+                value_type,
+                catalog,
+                out,
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    for column in input.columns() {
+        let Some(info) = lookup_column(
+            catalog,
+            index,
+            db_schema,
+            &aggregate.table,
+            field,
+            column,
+            out,
+        )
+        .await?
+        else {
+            continue;
+        };
+        if !is_numeric(&info.sql_type) {
+            out.push(Diagnostic {
+                index: index.clone(),
+                field: field.clone(),
+                severity: Severity::Error,
+                message: format!(
+                    "aggregate expression column `{column}` must be numeric, found `{}`",
+                    info.sql_type
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Confirm both coordinate columns of a geo point exist and hold a numeric type.
 async fn validate_geo(
     index: &IndexName,
@@ -216,21 +275,13 @@ async fn validate_geo(
     catalog: &dyn Catalog,
     out: &mut Vec<Diagnostic>,
 ) -> Result<()> {
-    const NUMERIC: &[FlussoType] = &[
-        FlussoType::Double,
-        FlussoType::Float,
-        FlussoType::Decimal,
-        FlussoType::Integer,
-        FlussoType::Long,
-        FlussoType::Short,
-    ];
     for column in [&geo.lat, &geo.lon] {
         let Some(info) =
             lookup_column(catalog, index, db_schema, table, field, column, out).await?
         else {
             continue;
         };
-        if !NUMERIC.iter().any(|ty| ty.accepts_pg(&info.sql_type)) {
+        if !is_numeric(&info.sql_type) {
             out.push(Diagnostic {
                 index: index.clone(),
                 field: field.clone(),
@@ -379,5 +430,91 @@ mod tests {
             "got: {}",
             diagnostics[0].message,
         );
+    }
+
+    /// `order_lines(quantity integer, unit_price numeric, note text)`.
+    struct OrderLines;
+
+    #[async_trait]
+    impl Catalog for OrderLines {
+        async fn column(
+            &self,
+            schema: &DatabaseSchema,
+            table: &TableName,
+            column: &ColumnName,
+        ) -> Result<ColumnInfo> {
+            let sql_type = match column.as_ref() {
+                "quantity" => "integer",
+                "unit_price" => "numeric",
+                "note" => "text",
+                _ => {
+                    return Err(SourceError::UnknownColumn(format!(
+                        "{schema}.{table}.{column}"
+                    )));
+                }
+            };
+            Ok(ColumnInfo {
+                sql_type: sql_type.to_owned(),
+                nullable: true,
+            })
+        }
+    }
+
+    fn aggregate_messages(op: serde_json::Value, value_type: Option<&str>) -> Vec<String> {
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1,
+            "table": "orders",
+            "db_schema": "public",
+            "fields": [{
+                "field": "value",
+                "source": { "relation": { "aggregate": {
+                    "table": "order_lines",
+                    "op": op,
+                    "key": { "direct": "order_id" },
+                    "value_type": value_type,
+                } } },
+            }],
+        }))
+        .unwrap();
+        let mut indexes = BTreeMap::new();
+        indexes.insert(IndexName::try_new("orders").unwrap(), schema);
+        let spec = SourceSpec::new(indexes);
+        futures::executor::block_on(validate_indexes(&spec, &OrderLines))
+            .unwrap()
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn every_expression_column_must_exist_and_be_numeric() {
+        let messages = aggregate_messages(
+            json!({ "sum": "quantity * unit_price + note - missing" }),
+            Some("double"),
+        );
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages[0].contains("`note` must be numeric, found `text`"),
+            "{messages:?}"
+        );
+        assert!(
+            messages[1].contains("unknown column `public.order_lines.missing`"),
+            "{messages:?}"
+        );
+        for op in ["avg", "min", "max"] {
+            let messages = aggregate_messages(json!({ op: "quantity * unit_price" }), None);
+            assert!(messages.is_empty(), "{op}: {messages:?}");
+        }
+    }
+
+    #[test]
+    fn a_plain_column_keeps_its_value_type_check() {
+        let messages = aggregate_messages(json!({ "sum": "note" }), Some("double"));
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("does not accept the column's database type `text`"),
+            "{messages:?}"
+        );
+        assert!(aggregate_messages(json!({ "sum": "quantity" }), Some("integer")).is_empty());
     }
 }

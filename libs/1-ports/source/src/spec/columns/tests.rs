@@ -161,7 +161,7 @@ fn a_join_reads_its_filter_and_order_by_columns() {
 fn an_aggregate_reads_its_input_filters_and_link() {
     let sum = Relation::Aggregate(Aggregate {
         table: table("orders"),
-        op: AggregateOp::Sum(column("amount")),
+        op: AggregateOp::Sum(column("amount").into()),
         key: AggregateKey::Direct(column("user_id")),
         value_type: None,
         filters: Some(vec![value_filter("status")]),
@@ -173,6 +173,31 @@ fn an_aggregate_reads_its_input_filters_and_link() {
         reads(&sum, "orders"),
         columns(&["amount", "status", "user_id"])
     );
+}
+
+#[test]
+fn an_aggregate_reads_every_column_of_its_expression() {
+    for op in [
+        AggregateOp::Sum,
+        AggregateOp::Avg,
+        AggregateOp::Min,
+        AggregateOp::Max,
+    ] {
+        let value = Relation::Aggregate(Aggregate {
+            table: table("order_lines"),
+            op: op("quantity * (unit_price - discount) / 100".parse().unwrap()),
+            key: AggregateKey::Direct(column("order_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: Vec::new(),
+            on: vec![],
+        });
+        assert_eq!(
+            reads(&value, "order_lines"),
+            columns(&["discount", "order_id", "quantity", "unit_price"])
+        );
+    }
 }
 
 #[test]

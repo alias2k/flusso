@@ -195,7 +195,7 @@ fn through_schema() -> IndexSchema {
                 options: Default::default(),
                 source: FieldSource::Relation(Relation::Aggregate(Aggregate {
                     table: TableName::try_new("products").unwrap(),
-                    op: AggregateOp::Sum(ColumnName::try_new("weight").unwrap()),
+                    op: AggregateOp::Sum(ColumnName::try_new("weight").unwrap().into()),
                     key: AggregateKey::Through(through()),
                     value_type: Some(FlussoType::Double),
                     filters: None,
@@ -307,7 +307,7 @@ fn direct_aggregates_schema() -> IndexSchema {
             aggregate_field("taskCount", AggregateOp::Count, None),
             aggregate_field(
                 "effort",
-                AggregateOp::Sum(ColumnName::try_new("effort").unwrap()),
+                AggregateOp::Sum(ColumnName::try_new("effort").unwrap().into()),
                 Some(FlussoType::Long),
             ),
             aggregate_field(
@@ -672,4 +672,64 @@ fn on_pairs_change_the_content_hash() {
             assert_ne!(a, b);
         }
     }
+}
+
+fn plain_column_aggregates_schema() -> IndexSchema {
+    let column = || crate::config::Expression::Column(ColumnName::try_new("amount").unwrap());
+    let mut schema = direct_aggregates_schema();
+    schema.fields = vec![
+        aggregate_field(
+            "total",
+            AggregateOp::Sum(column()),
+            Some(FlussoType::Double),
+        ),
+        aggregate_field("mean", AggregateOp::Avg(column()), None),
+        aggregate_field(
+            "least",
+            AggregateOp::Min(column()),
+            Some(FlussoType::Double),
+        ),
+        aggregate_field("most", AggregateOp::Max(column()), Some(FlussoType::Double)),
+    ];
+    schema
+}
+
+#[test]
+fn a_plain_column_aggregate_keeps_its_content_hash() {
+    let mapping = plain_column_aggregates_schema().resolve(IndexName::try_new("orders").unwrap());
+    assert_eq!(mapping.hash.to_string(), "6fafe945");
+}
+
+#[test]
+fn an_expression_input_changes_the_content_hash() {
+    let base = plain_column_aggregates_schema()
+        .resolve(IndexName::try_new("orders").unwrap())
+        .hash;
+    let mut schema = plain_column_aggregates_schema();
+    schema.fields[0] = aggregate_field(
+        "total",
+        AggregateOp::Sum("amount * 2".parse().unwrap()),
+        Some(FlussoType::Double),
+    );
+    assert_ne!(
+        base,
+        schema.resolve(IndexName::try_new("orders").unwrap()).hash
+    );
+}
+
+#[test]
+fn two_spellings_of_one_expression_hash_the_same() {
+    let hash = |input: &str| {
+        let mut schema = plain_column_aggregates_schema();
+        schema.fields[0] = aggregate_field(
+            "total",
+            AggregateOp::Sum(input.parse().unwrap()),
+            Some(FlussoType::Double),
+        );
+        schema.resolve(IndexName::try_new("orders").unwrap()).hash
+    };
+    assert_eq!(
+        hash("quantity*unit_price"),
+        hash(" (quantity) *  unit_price ")
+    );
 }

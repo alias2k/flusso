@@ -706,6 +706,19 @@ local = "region"
 related = "region"
 
 [[config.indexes.catalog.schema.fields]]
+field = "weightedStars"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate]
+table = "reviews"
+value_type = "double"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.op]
+sum = "stars * (helpful_votes + 1) - -0.5 / 2"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.key]
+direct = "product_id"
+
+[[config.indexes.catalog.schema.fields]]
 field = "docSource"
 
 [config.indexes.catalog.schema.fields.source.constant]

@@ -371,7 +371,7 @@ fn wrap(aggregate: &str) -> String {
 fn aggregate_through_counts_once_per_junction_row() {
     assert_eq!(
         through_aggregate_sql(
-            AggregateOp::Sum(c("weight")),
+            AggregateOp::Sum(c("weight").into()),
             false,
             Some(vec![null_check("cancelled_at")]),
             Some(vec![null_check("archived_at")]),
@@ -386,7 +386,7 @@ fn aggregate_through_counts_once_per_junction_row() {
 fn distinct_aggregate_through_counts_each_target_row_once() {
     assert_eq!(
         through_aggregate_sql(
-            AggregateOp::Sum(c("weight")),
+            AggregateOp::Sum(c("weight").into()),
             true,
             Some(vec![null_check("cancelled_at")]),
             Some(vec![null_check("archived_at")]),
@@ -937,6 +937,88 @@ fn on_pairs_across_via_select_each_level_s_local_columns() {
         }),
         wrap(
             r#"(SELECT count(*) FROM "public"."tasks" AS "rel3" WHERE ("rel3"."project_id", "rel3"."tenant_id", "rel3"."team_id") IN (SELECT "rel2"."id", "rel2"."tenant_id", "rel2"."team_id" FROM "public"."projects" AS "rel2" WHERE "rel2"."team_id" IN (SELECT "rel1"."id" FROM "public"."teams" AS "rel1" WHERE "rel1"."owner_id" = "root"."id" AND "rel1"."tenant_id" = "root"."tenant_id")))"#
+        ),
+    );
+}
+
+fn expr(input: &str) -> kernel::Expression {
+    input.parse().unwrap()
+}
+
+#[test]
+fn an_expression_renders_qualified_quoted_and_fully_grouped() {
+    use super::sql::arithmetic;
+    for (input, sql) in [
+        ("amount", r#""q"."amount""#),
+        (
+            "quantity * unit_price",
+            r#"("q"."quantity" * "q"."unit_price")"#,
+        ),
+        ("a + b * c", r#"("q"."a" + ("q"."b" * "q"."c"))"#),
+        ("(a + b) * c", r#"(("q"."a" + "q"."b") * "q"."c")"#),
+        ("a - b - c", r#"(("q"."a" - "q"."b") - "q"."c")"#),
+        ("a - (b - c)", r#"("q"."a" - ("q"."b" - "q"."c"))"#),
+        ("a / 2 / 3.5", r#"(("q"."a" / 2) / 3.5)"#),
+        ("-a * b", r#"((-"q"."a") * "q"."b")"#),
+        ("a - -b", r#"("q"."a" - (-"q"."b"))"#),
+        ("--a", r#"(-(-"q"."a"))"#),
+        ("-(a + 1)", r#"(-("q"."a" + 1))"#),
+        (
+            "Quantity*Unit_Price",
+            r#"("q"."quantity" * "q"."unit_price")"#,
+        ),
+    ] {
+        assert_eq!(arithmetic(&expr(input), "q"), sql, "{input}");
+    }
+}
+
+#[test]
+fn every_folding_op_wraps_the_expression() {
+    for (op, name) in [
+        (AggregateOp::Sum as fn(_) -> _, "sum"),
+        (AggregateOp::Avg, "avg"),
+        (AggregateOp::Min, "min"),
+        (AggregateOp::Max, "max"),
+    ] {
+        assert_eq!(
+            aggregate_sql(Aggregate {
+                table: t("tasks"),
+                op: op(expr("hours * rate")),
+                key: AggregateKey::Direct(c("user_id")),
+                value_type: None,
+                filters: None,
+                distinct: false,
+                via: Vec::new(),
+                on: vec![],
+            }),
+            wrap(&format!(
+                r#"(SELECT {name}(("rel1"."hours" * "rel1"."rate")) FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id")"#
+            )),
+        );
+    }
+}
+
+#[test]
+fn an_expression_reads_the_aggregated_table_through_via_and_through() {
+    assert_eq!(
+        aggregate_sql(Aggregate {
+            table: t("tasks"),
+            op: AggregateOp::Sum(expr("hours * rate")),
+            key: AggregateKey::Direct(c("project_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: vec![hop("projects", "user_id", None)],
+            on: vec![],
+        }),
+        wrap(
+            r#"(SELECT sum(("rel2"."hours" * "rel2"."rate")) FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id"))"#
+        ),
+    );
+    assert_eq!(
+        through_aggregate_sql(AggregateOp::Sum(expr("weight * 2")), false, None, None),
+        wrap(
+            r#"(SELECT sum(("rel1"."weight" * 2)) FROM "public"."products" AS "rel1" JOIN "public"."order_items" AS "rel2" ON "rel2"."product_id" = "rel1"."id" WHERE "rel2"."order_id" = "root"."id")"#
         ),
     );
 }

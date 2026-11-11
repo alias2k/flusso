@@ -620,19 +620,19 @@ fn spec() -> SourceSpec {
         agg_field("order_count", orders_agg(AggregateOp::Count, None)),
         agg_field(
             "total_spent",
-            orders_agg(AggregateOp::Sum(column("total")), None),
+            orders_agg(AggregateOp::Sum(column("total").into()), None),
         ),
         agg_field(
             "avg_order",
-            orders_agg(AggregateOp::Avg(column("total")), None),
+            orders_agg(AggregateOp::Avg(column("total").into()), None),
         ),
         agg_field(
             "min_order",
-            orders_agg(AggregateOp::Min(column("total")), None),
+            orders_agg(AggregateOp::Min(column("total").into()), None),
         ),
         agg_field(
             "max_order",
-            orders_agg(AggregateOp::Max(column("total")), None),
+            orders_agg(AggregateOp::Max(column("total").into()), None),
         ),
         agg_field(
             "fulfilled_orders",

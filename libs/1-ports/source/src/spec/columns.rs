@@ -9,13 +9,13 @@
 //! - [`root_columns`]: what an index reads from its root row — root-level
 //!   fields, the root `filters`, the `soft_delete` marker and its `when`.
 //! - [`relation_columns`]: what a relation reads from one of its tables — the
-//!   projected fields, `filters`, `order_by`, the aggregate input, and the
+//!   projected fields, `filters`, `order_by`, every column of the aggregate
+//!   input (one column or an arithmetic expression), and the
 //!   link (a child's `foreign_key`, a junction's `left_key`/`right_key`, the
 //!   `related` side of its `on` pairs).
 //! - [`via_columns`]: what an aggregate reads from one of its `via` tables —
 //!   the hop's `foreign_key`, `filters`, the `related` side of its `on` pairs
 //!   and the `local` side of the next level's.
-
 //! - [`soft_delete_column`]: the column a `soft_delete` marker reads on the
 //!   root row; the document query reads the same one.
 //! - [`row_link`]: the link column a related row holds, which a deleted or
@@ -246,8 +246,10 @@ pub fn relation_columns(schema: &IndexSchema, relation: &Relation, table: &Table
                 }
             }
             Relation::Aggregate(aggregate) => {
-                if let Some(input) = aggregate_input(&aggregate.op) {
-                    used.column(input);
+                if let Some(input) = aggregate.op.input() {
+                    for column in input.columns() {
+                        used.column(column);
+                    }
                 }
             }
         }
@@ -319,17 +321,6 @@ pub fn row_link(relation: &Relation) -> Option<(&TableName, &ColumnName)> {
         RelationKey::Direct(foreign_key) => Some((relation.table(), foreign_key)),
         RelationKey::Through(through) => Some((&through.table, &through.left_key)),
         RelationKey::Local(_) => None,
-    }
-}
-
-fn aggregate_input(op: &kernel::AggregateOp) -> Option<&ColumnName> {
-    use kernel::AggregateOp;
-    match op {
-        AggregateOp::Sum(column)
-        | AggregateOp::Avg(column)
-        | AggregateOp::Min(column)
-        | AggregateOp::Max(column) => Some(column),
-        AggregateOp::Count | AggregateOp::Ids { .. } | AggregateOp::Exists => None,
     }
 }
 

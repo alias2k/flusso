@@ -5,8 +5,8 @@
 //! and the entry queries assemble them.
 
 use kernel::{
-    AggregateOp, ColumnName, DatabaseSchema, Direction, GenericValue, Geo, OrderBy, TableName,
-    Transform,
+    AggregateOp, ColumnName, DatabaseSchema, Direction, Expression, GenericValue, Geo, OrderBy,
+    TableName, Transform,
 };
 
 /// Wrap a per-row `object` over a filtered/ordered/limited `inner` subquery in a
@@ -139,12 +139,30 @@ pub(super) fn agg_function(op: &AggregateOp, alias: &str) -> String {
         AggregateOp::Count => "count(*)".to_owned(),
         // The builder wraps the subquery in `EXISTS`; the selected value is unread.
         AggregateOp::Exists => "1".to_owned(),
-        AggregateOp::Sum(c) => format!("sum({})", qcol(alias, c)),
-        AggregateOp::Avg(c) => format!("avg({})", qcol(alias, c)),
-        AggregateOp::Min(c) => format!("min({})", qcol(alias, c)),
-        AggregateOp::Max(c) => format!("max({})", qcol(alias, c)),
+        AggregateOp::Sum(input) => format!("sum({})", arithmetic(input, alias)),
+        AggregateOp::Avg(input) => format!("avg({})", arithmetic(input, alias)),
+        AggregateOp::Min(input) => format!("min({})", arithmetic(input, alias)),
+        AggregateOp::Max(input) => format!("max({})", arithmetic(input, alias)),
         // The `ids` arms emit through `ids_agg`; reaching here is a builder bug.
         AggregateOp::Ids { .. } => "null".to_owned(),
+    }
+}
+
+/// An aggregate input over rows aliased `alias`: each column qualified and
+/// quoted, each literal as its validated digits, and every operation in its
+/// own parentheses so Postgres evaluates the tree as parsed. A plain column is
+/// the bare qualified column.
+pub(super) fn arithmetic(expression: &Expression, alias: &str) -> String {
+    match expression {
+        Expression::Column(column) => qcol(alias, column),
+        Expression::Number(number) => number.as_str().to_owned(),
+        Expression::Negate(inner) => format!("(-{})", arithmetic(inner, alias)),
+        Expression::Binary { op, left, right } => format!(
+            "({} {} {})",
+            arithmetic(left, alias),
+            op.symbol(),
+            arithmetic(right, alias)
+        ),
     }
 }
 

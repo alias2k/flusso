@@ -676,6 +676,22 @@ sets carry both sides (`related` on the hop's table, `local` on the level before
 `pre_image_columns` needs no `related` column (a row changing only those keeps its key). Guards:
 `on_pairs_rebuild_the_parent_from_either_side` (`wal`), the `on_pairs_*` SQL tests,
 `a_schema_without_on_keeps_its_content_hash`.
+`sum`/`avg`/`min`/`max` fold a `kernel::Expression` (issue #194; grammar and storage in the
+`expression.rs` module doc, semantics in the Aggregates reference): parsed by hand, **no regex**,
+depth-capped. A whole input `ColumnName::try_new` accepts is that column (so every old
+spelling still loads, Unicode lowercasing included); a plain column is the `Column` leaf,
+serialized and hashed as the bare `ColumnName` (format freeze); an expression is stored in the
+lock as its canonical text, which must nest no deeper than the tree is tall (a double negation
+renders `- -a`) so every accepted tree re-parses from its lock. An expression's
+`sum`/`min`/`max` takes only a numeric `value_type`, rejected at load.
+`AggregateOp::input()` is the one accessor (`sql::arithmetic`, `relation_columns`,
+`validate_indexes`, designer codegen); the designer checks input through `POST /api/expression`,
+the same parser. Guards: `a_plain_column_aggregate_keeps_its_content_hash`, the
+`expression::tests` proptests (`a_tree_up_to_the_cap_renders_to_text_that_parses_back`),
+`every_chain_up_to_the_cap_renders_to_text_that_parses_back`,
+`a_whole_column_name_keeps_the_column_name_rules`, `the_deepest_expression_survives_a_lock_round_trip`
+(`golden_lock`), `an_expression_needs_a_numeric_value_type`,
+`an_aggregate_expression_rebuilds_from_each_operand` (`wal`).
 **The content hash is the physical index name**, so `Aggregate`
 and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via`/`on` when
 unset (`ViaHop` and `Join` likewise for `on`, a hop's pairs under their own tag) — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
@@ -978,7 +994,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`, `replica_identity.rs`), `document/` (`resolve.rs`: reverse resolution + the first-hop pre-image union) |
 | Source trait abstractions (`ChangeCapture` + `Continuity`, `ChangeEvent` + `RowImage` pre-image, `DocumentBuilder`, `SourceSpec` + `all_tables`/`pre_image_columns`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`/`PreImageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
-| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits (node ids are the client-only container `uid`s of `ids.ts`, which collapse state + drag positions key on, stripped from every request), plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
+| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/**expression**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits (node ids are the client-only container `uid`s of `ids.ts`, which collapse state + drag positions key on, stripped from every request), plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
 | `Sink` trait (`apply`/`flush`/seeding/`reindex`), `SinkOptions`, JSON render | `libs/1-ports/sink/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger, watermark) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |

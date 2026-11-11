@@ -153,6 +153,7 @@ A search document needs more than its root row: a user with their orders, a prod
 
 - **A non-null object.** `required: true` on a `belongs_to`/`has_one` maps the object non-null. Only do this when the FK column is `NOT NULL`.
 - **`has_one` with several candidates.** `order_by` picks which row becomes the object.
+- **Arithmetic per related row.** `column` on `sum`/`avg`/`min`/`max` can be an expression over the related table's columns, e.g. an order's value over its lines: `column: quantity * unit_price` with `value_type: double`. The grammar and how integer division and nulls behave are in [Aggregates](../reference/aggregates.md#arithmetic-input).
 - **A relation scoped by a second column.** `on` adds column equalities beside the key, e.g. lines of the same tenant as their order: `on: [{ local: tenant_id, related: tenant_id }]` on the `has_many`. It works on `belongs_to`, `has_one`, `has_many`, and aggregates, not across a junction. See [Joins](../reference/joins.md#on).
 - **Key arity is enforced.** A `has_many` with a `column`, or a `belongs_to` with a `foreign_key`, is a load-time error naming the right sibling.
 - **Deep nesting is fine.** The dev stack's `users` schema goes three levels: user, orders, items.

@@ -1,5 +1,6 @@
 mod aggregate;
 mod content_hash;
+mod expression;
 mod field;
 mod filter;
 mod flusso_type;
@@ -13,6 +14,7 @@ mod transform;
 
 pub use aggregate::*;
 pub use content_hash::*;
+pub use expression::*;
 pub use field::*;
 pub use filter::*;
 pub use flusso_type::*;

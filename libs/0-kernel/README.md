@@ -7,7 +7,7 @@ The cross-cutting vocabulary for `flusso` — the validated types every other la
 | Item | Role |
 | --- | --- |
 | [`common`] | Validated primitives — [`TableName`], [`ColumnName`], and the other identifier newtypes |
-| [`config`] | The structures built from them — [`IndexSchema`], [`Field`], [`Join`], [`Aggregate`], [`Filter`], [`IndexMapping`] |
+| [`config`] | The structures built from them — [`IndexSchema`], [`Field`], [`Join`], [`Aggregate`] (and the [`Expression`] its `sum`/`avg`/`min`/`max` fold), [`Filter`], [`IndexMapping`] |
 | [`options`] | The neutral, ordered value tree a port entry carries to its adapter — [`Options`], [`OptionValue`] |
 | [`adapter`] | What an adapter declares about its configuration — [`AdapterConfig`], [`AdapterDescription`], [`Port`], [`override_var`] |
 | [`traits`] | The conversion the config crate implements — [`ParseFrom`] (text into entities) |

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-use super::{AggregateKey, ColumnPair, Filter, FlussoType, join::hash_on};
+use super::{AggregateKey, ColumnPair, Expression, Filter, FlussoType, join::hash_on};
 
 /// Reduces rows from a related `table` to a single value — a count, sum,
 /// extreme, or existence flag. The `key` connects the tables; `filters`
@@ -103,14 +103,16 @@ impl Hash for Aggregate {
     }
 }
 
+/// What an aggregate computes. `sum`/`avg`/`min`/`max` fold an [`Expression`]
+/// over the aggregated rows: one column, or arithmetic over the table's columns.
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AggregateOp {
     Count,
-    Sum(common::ColumnName),
-    Avg(common::ColumnName),
-    Min(common::ColumnName),
-    Max(common::ColumnName),
+    Sum(Expression),
+    Avg(Expression),
+    Min(Expression),
+    Max(Expression),
     /// Collect the related table's primary keys into a flat scalar array. The
     /// element type is stated explicitly (the schema names it) so the array's
     /// mapping is known without touching the database.
@@ -121,4 +123,17 @@ pub enum AggregateOp {
     /// rows. Last, so the derived `Hash` keeps every earlier variant's
     /// discriminant.
     Exists,
+}
+
+impl AggregateOp {
+    /// The per-row input `sum`/`avg`/`min`/`max` fold; `None` for the ops that
+    /// read no column.
+    pub fn input(&self) -> Option<&Expression> {
+        match self {
+            Self::Sum(input) | Self::Avg(input) | Self::Min(input) | Self::Max(input) => {
+                Some(input)
+            }
+            Self::Count | Self::Ids { .. } | Self::Exists => None,
+        }
+    }
 }

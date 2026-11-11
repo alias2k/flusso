@@ -8,6 +8,7 @@ primary_key: id
 
 fields:
   - integer: id
+    required: true
   - keyword: email
     required: true
 
@@ -37,6 +38,16 @@ fields:
     column: created_at
     value_type: timestamp
     foreign_key: user_id
+
+  # `column` can be arithmetic over the related table's columns, per row:
+  # column names, numbers, + - * /, unary minus, parentheses. No functions.
+  - sum: lifetimeItemValue
+    table: order_items
+    column: quantity * unit_price
+    value_type: double
+    foreign_key: order_id
+    via:
+      - { table: orders, foreign_key: user_id }
 
   # Aggregating across a many-to-many uses `through` INSTEAD of `foreign_key`
   # (exactly one of the two).
@@ -85,6 +96,7 @@ fields:
 
   # Exact money: decimal -> double loses precision, so declare a custom field.
   - custom: balance
+    required: false
     postgres: [numeric]
     opensearch: scaled_float
     options: { scaling_factor: 100 }
