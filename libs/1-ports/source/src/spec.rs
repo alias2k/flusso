@@ -65,7 +65,9 @@ impl Ord for QualifiedTable {
 
 /// Per table, the columns a change's pre-image must carry so a deleted or
 /// re-parented row can be traced to its old parent (see
-/// [`SourceSpec::pre_image_columns`]).
+/// [`SourceSpec::pre_image_columns`]). As [`SourceSpec::pre_images`] builds
+/// it, every table an index reads is listed, most with no link column: each
+/// one wants its whole old row.
 pub type PreImageColumns = BTreeMap<QualifiedTable, Vec<ColumnName>>;
 
 /// The enabled indexes a source must build, each paired with its schema.
@@ -141,6 +143,24 @@ impl SourceSpec {
             collect_link_columns(&schema.fields, &schema.db_schema, &mut columns);
         }
         columns
+    }
+}
+
+impl SourceSpec {
+    /// Every table any enabled index reads ([`all_tables`](Self::all_tables)),
+    /// each with its link columns from [`pre_image_columns`](Self::pre_image_columns)
+    /// (empty for a root, a `belongs_to` target, …).
+    ///
+    /// What [`CaptureProvisioning`](crate::CaptureProvisioning) asks the whole
+    /// old row for: a missing link column is a correctness gap, a table that
+    /// only misses the rest of the row loses the unread-column skip (an update
+    /// there rebuilds whatever reads the table, changed column or not).
+    pub fn pre_images(&self) -> PreImageColumns {
+        let mut pre_images = self.pre_image_columns();
+        for table in self.all_tables() {
+            pre_images.entry(table).or_default();
+        }
+        pre_images
     }
 }
 

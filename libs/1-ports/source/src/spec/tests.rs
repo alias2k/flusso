@@ -164,6 +164,35 @@ fn pre_image_columns_are_child_foreign_keys_and_junction_left_keys() {
 }
 
 #[test]
+fn pre_images_list_every_table_read_with_its_links() {
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("books"), books())]));
+    let public = DatabaseSchema::try_new("public").unwrap();
+    let entry = |table: &str, columns: &[&str]| {
+        (
+            QualifiedTable::new(public.clone(), TableName::try_new(table).unwrap()),
+            columns
+                .iter()
+                .map(|column| ColumnName::try_new(*column).unwrap())
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    assert_eq!(
+        spec.pre_images(),
+        BTreeMap::from([
+            entry("book_tags", &["book_id"]),
+            entry("books", &[]),
+            entry("reviews", &["book_id"]),
+            entry("tags", &[]),
+        ])
+    );
+    assert_eq!(
+        spec.pre_images().into_keys().collect::<Vec<_>>(),
+        spec.all_tables().into_iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn pre_image_columns_carry_a_self_join_link_on_the_root_table() {
     let mut items = schema("items");
     items.fields.push(Field {

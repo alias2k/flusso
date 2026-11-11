@@ -9,9 +9,10 @@
 //! **ensure** they are.
 //!
 //! The same surface covers a second prerequisite: whether the change feed
-//! carries the **pre-image** columns reverse resolution needs to trace a deleted
-//! or re-parented row to its old parent
-//! ([`SourceSpec::pre_image_columns`](crate::SourceSpec::pre_image_columns)).
+//! carries each table's whole **pre-image** (old row). Reverse resolution needs
+//! its link columns to trace a deleted or re-parented row to its old parent,
+//! and the rest lets an update that changes no column a document reads rebuild
+//! nothing ([`SourceSpec::pre_images`](crate::SourceSpec::pre_images)).
 //! It follows the same inspect / ensure split, per table:
 //! [`inspect_pre_image`](CaptureProvisioning::inspect_pre_image) reports,
 //! [`ensure_pre_image`](CaptureProvisioning::ensure_pre_image) closes each gap
@@ -66,15 +67,24 @@ pub struct CoverageReport {
     pub remediation: Vec<String>,
 }
 
-/// What a source found when asked whether its change feed carries the
-/// pre-image columns of every table that needs them.
+/// What a source found when asked whether its change feed carries the whole
+/// pre-image (old row) of every table an index reads.
 ///
-/// A gap means a delete or re-parent of that table's rows leaves the old
-/// parent's document stale.
+/// Two severities, kept apart:
+///
+/// - [`gaps`](Self::gaps) — the pre-image misses a **link** column: a delete
+///   or re-parent of that table's rows leaves the old parent's document stale.
+///   A correctness gap.
+/// - [`partial`](Self::partial) — every link is there, but not the rest of
+///   the old row: an update can't be told apart from one that changes a column
+///   a document reads, so it always rebuilds. Correct, only slower.
 #[derive(Debug, Clone, Default)]
 pub struct PreImageReport {
-    /// Tables whose pre-image misses a required column.
+    /// Tables whose pre-image misses a required link column.
     pub gaps: Vec<PreImageGap>,
+    /// Tables whose pre-image carries every link column but not the whole
+    /// row. Each entry's `missing` is empty.
+    pub partial: Vec<PreImageGap>,
 }
 
 impl PreImageGap {
@@ -85,25 +95,32 @@ impl PreImageGap {
 }
 
 impl PreImageReport {
-    /// Every table's pre-image carries what resolution needs.
+    /// Every table's pre-image carries what resolution needs (its links).
     pub fn satisfied(&self) -> bool {
         self.gaps.is_empty()
     }
+
+    /// Every table's pre-image is the whole old row: links and the
+    /// unread-column skip both work.
+    pub fn complete(&self) -> bool {
+        self.gaps.is_empty() && self.partial.is_empty()
+    }
 }
 
-/// One table whose pre-image misses columns resolution needs.
+/// One table whose pre-image is not the whole old row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreImageGap {
     /// The table whose pre-image falls short.
     pub table: QualifiedTable,
-    /// The required columns the pre-image does not carry.
+    /// The required link columns the pre-image does not carry. Empty for a
+    /// [`partial`](PreImageReport::partial) entry.
     pub missing: Vec<ColumnName>,
     /// Whether this source, with its current credentials, can close the gap.
     pub manageable: bool,
     /// Why `manageable` is false (e.g. "role does not own table public.orders").
     pub blockers: Vec<String>,
-    /// The backend-specific step that closes this gap — opaque, shown verbatim
-    /// (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`).
+    /// The backend-specific step that makes the pre-image the whole row —
+    /// opaque, shown verbatim (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`).
     pub remediation: String,
 }
 
@@ -128,14 +145,17 @@ pub trait CaptureProvisioning: Send + Sync {
         manage: bool,
     ) -> Result<CoverageReport>;
 
-    /// Read-only: report which `required` tables' pre-images miss a column.
-    /// A table the source can't find is skipped — coverage reports it.
+    /// Read-only: report which `required` tables' pre-images are not the whole
+    /// row, and which of those miss a link column. A table the source can't
+    /// find is skipped — coverage reports it.
     async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport>;
 
-    /// Close every manageable gap when `manage` is set, and report (log) the
-    /// rest. Returns the report as observed *before* acting, so a gap it just
-    /// closed is still listed — re-inspect for the current state. A gap that
-    /// can't be closed degrades resolution; it doesn't stop capture.
+    /// When `manage` is set, make the pre-image the whole row on every listed
+    /// table the source is allowed to, and report (log) the rest: a link gap
+    /// loudly, a partial one quietly. Returns the report as observed *before*
+    /// acting, so a gap it just closed is still listed — re-inspect for the
+    /// current state. One table that can't be set doesn't stop the others, nor
+    /// capture.
     async fn ensure_pre_image(
         &self,
         required: &PreImageColumns,
