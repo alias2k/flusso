@@ -7,7 +7,7 @@ Dependabot proposes updates once a week in a handful of grouped PRs, and a RustS
 Two pieces, both under `.github/`:
 
 - **`dependabot.yml`** opens the update PRs. It reads the file from `main` only, so a change to it takes effect after merge.
-- **`workflows/audit.yml`** runs `cargo deny check advisories --all-features` over the graph flusso actually builds. It isn't a required check: a new advisory never blocks an unrelated merge.
+- **`workflows/audit.yml`** runs `cargo deny check advisories --all-features` over every crate a workspace target can build, dev-dependencies included. It isn't a required check: a new advisory never blocks an unrelated merge.
 
 ## What the bot opens
 
@@ -51,7 +51,9 @@ The scheduled run failing is the signal; nothing opens an issue for it. Read the
 
 1. **A fixed version exists** — run `cargo update -p <crate>` (or bump the requirement for a breaking fix) in a `fix(deps): …` PR. That PR re-runs the check.
 2. **No fix yet, and it affects flusso** — open an issue and track the upstream.
-3. **It doesn't apply** (the vulnerable code path is never reached) — add an `ignore` for its ID under `[advisories]` in a `deny.toml` at the repo root, with a comment saying why. The comment is the audit trail.
+3. **It doesn't apply** (the vulnerable code path is never reached) — add an `ignore` for its ID under `[advisories]` in `deny.toml` at the repo root, with a comment saying why. The comment is the audit trail.
+
+An **unmaintained** crate fails the check only when a workspace crate depends on it directly (`unmaintained = "workspace"` in `deny.toml`): replace it. One that arrives through another crate is that crate's to replace, and isn't reported.
 
 cargo-deny resolves features, so a crate that sits in `Cargo.lock` only through an optional dependency nothing enables isn't reported at all.
 

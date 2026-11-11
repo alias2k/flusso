@@ -1,7 +1,7 @@
 name: audit
 
-# RustSec advisory check over the dependency graph flusso actually builds
-# (`cargo deny check advisories`, all features). Advisory only: it runs on a
+# RustSec advisory check over every crate a workspace target can build,
+# dev-dependencies included (`cargo deny check advisories`, all features; deny.toml). Advisory only: it runs on a
 # schedule and on changes to the manifests or the lock, and is not a required
 # check, so a new advisory never blocks an unrelated merge. A red scheduled run
 # is the signal; the response is in docs/src/contribute/dependencies.md.
@@ -19,11 +19,13 @@ on:
     paths:
       - "**/Cargo.toml"
       - "Cargo.lock"
+      - "deny.toml"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "Cargo.lock"
+      - "deny.toml"
       - ".github/workflows/audit.yml"
 
 concurrency:
