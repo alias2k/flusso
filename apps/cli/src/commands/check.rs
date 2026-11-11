@@ -131,6 +131,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                         "field": d.field.as_ref(),
                         "path": d.dotted_path(),
                         "severity": format!("{:?}", d.severity).to_lowercase(),
+                        "kind": d.kind.as_str(),
                         "message": d.message,
                     }))
                     .collect::<Vec<_>>(),

@@ -20,7 +20,7 @@ use sink_opensearch::{IndexSettings, OpensearchSink};
 use sink_stdout::{StdoutConfig, StdoutSink};
 use source::cdc::ChangeCapture;
 use source::document::DocumentBuilder;
-use source::{CaptureProvisioning, Catalog, Diagnostic, Severity, SourceSpec};
+use source::{CaptureProvisioning, Catalog, Diagnostic, DiagnosticKind, Severity, SourceSpec};
 use source_postgres::{
     PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
 };
@@ -131,9 +131,10 @@ async fn build_documents(
 }
 
 /// Check the schemas against the database once, before anything is staged,
-/// as `flusso check` does: print the diagnostics to stderr and refuse to start
-/// on an error. Runs on the document builder's own connection, so an
-/// unreachable database fails exactly as the connect above does.
+/// with `flusso check`'s check: print the diagnostics to stderr and refuse to
+/// start on one that cannot work as written (see [`stops_the_start`]). Runs on
+/// the document builder's own connection, so an unreachable database fails
+/// exactly as the connect above does.
 async fn validate_at_start(spec: &SourceSpec, catalog: &dyn Catalog) -> anyhow::Result<()> {
     let diagnostics = source::validate_indexes(spec, catalog)
         .await
@@ -145,8 +146,9 @@ async fn validate_at_start(spec: &SourceSpec, catalog: &dyn Catalog) -> anyhow::
     )
 }
 
-/// Print `diagnostics` (nothing when there are none) and fail when any is an
-/// error. Warnings never stop a start.
+/// Print `diagnostics` (nothing when there are none) and fail when any
+/// [stops the start](stops_the_start). Every other diagnostic, error or
+/// warning, is printed and the start goes on.
 fn start_verdict(
     out: &mut impl Write,
     pen: print::Pen,
@@ -157,16 +159,39 @@ fn start_verdict(
     }
     print::diagnostics(out, pen, diagnostics)?;
     writeln!(out)?;
-    let errors = diagnostics
+    let blocking = diagnostics
         .iter()
-        .filter(|d| d.severity == Severity::Error)
+        .filter(|d| stops_the_start(d.kind))
         .count();
     ensure!(
-        errors == 0,
-        "the schemas disagree with the database ({errors} error(s) above); \
+        blocking == 0,
+        "the schemas name what the database does not have ({blocking} problem(s) above); \
          fix them, confirm with `flusso check`, then start again"
     );
+    if diagnostics.iter().any(|d| d.severity == Severity::Error) {
+        writeln!(
+            out,
+            "starting anyway: the errors above do not stop `flusso run` (`flusso check` still fails on them)\n"
+        )?;
+    }
     Ok(())
+}
+
+/// Whether a diagnostic of `kind` means the documents cannot be built as
+/// written: a table or column that does not exist, or a `soft_delete` marker
+/// that reads no column (it would be dropped, and deleted rows stay indexed).
+/// A type, numeric or nullability disagreement still builds, as it did before
+/// `run` validated, so it only prints.
+fn stops_the_start(kind: DiagnosticKind) -> bool {
+    match kind {
+        DiagnosticKind::UnknownTable
+        | DiagnosticKind::UnknownColumn
+        | DiagnosticKind::UnreadSoftDeleteMarker => true,
+        DiagnosticKind::TypeMismatch
+        | DiagnosticKind::NotNumeric
+        | DiagnosticKind::Nullability
+        | DiagnosticKind::IgnoredPrimaryKey => false,
+    }
 }
 
 /// Compile every script field of the enabled indexes, reporting all that fail.
@@ -284,14 +309,15 @@ mod tests {
         config
     }
 
-    fn diagnostic(severity: Severity) -> Diagnostic {
+    fn diagnostic(kind: DiagnosticKind) -> Diagnostic {
         let field = kernel::FieldName::try_new("title").unwrap();
         Diagnostic {
             index: IndexName::try_new("products").unwrap(),
             path: vec![field.clone()],
             field,
-            severity,
-            message: "references unknown column `public.products.title`".to_owned(),
+            kind,
+            severity: kind.severity(),
+            message: format!("a {kind:?} finding"),
         }
     }
 
@@ -308,22 +334,150 @@ mod tests {
         assert_eq!(printed, "");
     }
 
-    #[test]
-    fn warnings_are_printed_and_the_start_goes_on() {
-        let (result, printed) = verdict(&[diagnostic(Severity::Warning)]);
-        assert!(result.is_ok());
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(printed.contains("products.title"), "{printed}");
+    fn refuses(kind: DiagnosticKind) {
+        let (result, printed) = verdict(&[diagnostic(kind)]);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("1 problem(s)"), "{kind:?}: {error}");
+        assert!(
+            printed.contains(&format!("a {kind:?} finding")),
+            "{printed}"
+        );
+    }
+
+    fn starts(kind: DiagnosticKind) -> String {
+        let (result, printed) = verdict(&[diagnostic(kind)]);
+        assert!(result.is_ok(), "{kind:?} should not stop the start");
+        assert!(
+            printed.contains(&format!("a {kind:?} finding")),
+            "{printed}"
+        );
+        printed
     }
 
     #[test]
-    fn an_error_is_printed_and_refuses_the_start() {
-        let (result, printed) =
-            verdict(&[diagnostic(Severity::Warning), diagnostic(Severity::Error)]);
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("1 error(s)"), "{error}");
+    fn an_unknown_table_refuses_the_start() {
+        refuses(DiagnosticKind::UnknownTable);
+    }
+
+    #[test]
+    fn an_unknown_column_refuses_the_start() {
+        refuses(DiagnosticKind::UnknownColumn);
+    }
+
+    #[test]
+    fn an_unread_soft_delete_marker_refuses_the_start() {
+        refuses(DiagnosticKind::UnreadSoftDeleteMarker);
+    }
+
+    #[test]
+    fn a_type_mismatch_error_prints_and_starts() {
+        let printed = starts(DiagnosticKind::TypeMismatch);
         assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_not_numeric_error_prints_and_starts() {
+        let printed = starts(DiagnosticKind::NotNumeric);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_nullability_warning_prints_and_starts() {
+        let printed = starts(DiagnosticKind::Nullability);
         assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn an_ignored_join_primary_key_prints_and_starts() {
+        let printed = starts(DiagnosticKind::IgnoredPrimaryKey);
+        assert!(printed.contains("[warning]"), "{printed}");
+    }
+
+    #[test]
+    fn one_refusing_kind_among_others_refuses_and_prints_them_all() {
+        let (result, printed) = verdict(&[
+            diagnostic(DiagnosticKind::Nullability),
+            diagnostic(DiagnosticKind::TypeMismatch),
+            diagnostic(DiagnosticKind::UnknownColumn),
+        ]);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("1 problem(s)"), "{error}");
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(printed.contains("a TypeMismatch finding"), "{printed}");
+        assert!(printed.contains("a UnknownColumn finding"), "{printed}");
+    }
+
+    /// `places(label mood, email email_address)`: an enum type and a domain,
+    /// which the catalog reports by their own names.
+    struct EnumAndDomain;
+
+    #[async_trait]
+    impl Catalog for EnumAndDomain {
+        async fn column(
+            &self,
+            _: &kernel::DatabaseSchema,
+            _: &kernel::TableName,
+            column: &kernel::ColumnName,
+        ) -> source::Result<source::ColumnInfo> {
+            let sql_type = if column.as_ref() == "label" {
+                "mood"
+            } else {
+                "email_address"
+            };
+            Ok(source::ColumnInfo {
+                sql_type: sql_type.to_owned(),
+                nullable: true,
+            })
+        }
+
+        async fn has_table(
+            &self,
+            _: &kernel::DatabaseSchema,
+            _: &kernel::TableName,
+        ) -> source::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    /// The motivating false positive: a `keyword`/`enum` field over a Postgres
+    /// enum or domain column is a type error for `flusso check` (no declared
+    /// type accepts the type's own name), but the document builds, so `run`
+    /// prints it and starts.
+    #[test]
+    fn a_keyword_or_enum_over_an_enum_or_domain_column_does_not_stop_the_start() {
+        let column = |name: &str, ty: &str| {
+            serde_json::json!({ "field": name, "source": { "column": {
+                "column": name, "ty": ty, "nullable": true,
+            } } })
+        };
+        let schema: kernel::IndexSchema = serde_json::from_value(serde_json::json!({
+            "version": 1, "table": "places", "db_schema": "public",
+            "fields": [column("label", "enum"), column("email", "keyword")],
+        }))
+        .unwrap();
+        let spec = SourceSpec::new(std::collections::BTreeMap::from([(
+            IndexName::try_new("places").unwrap(),
+            schema,
+        )]));
+        let diagnostics =
+            futures::executor::block_on(source::validate_indexes(&spec, &EnumAndDomain)).unwrap();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|d| (d.kind, d.severity))
+                .collect::<Vec<_>>(),
+            vec![
+                (DiagnosticKind::TypeMismatch, Severity::Error),
+                (DiagnosticKind::TypeMismatch, Severity::Error),
+            ]
+        );
+        let (result, printed) = verdict(&diagnostics);
+        assert!(result.is_ok(), "{printed}");
+        assert!(printed.contains("`mood`"), "{printed}");
+        assert!(printed.contains("`email_address`"), "{printed}");
     }
 
     #[test]

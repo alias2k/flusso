@@ -16,6 +16,14 @@
 //! `order_by` column, and a join's `primary_key`. A missing table is reported
 //! once per relation, and the columns on it are not looked up.
 //!
+//! Every [`Diagnostic`] carries a [`DiagnosticKind`], which fixes its
+//! [`Severity`]. The kind says whether the document can be built as written:
+//! an unknown table or column, or a `soft_delete` marker that reads nothing,
+//! cannot; a type, numeric or nullability disagreement still builds. A join's
+//! `primary_key` that names no column is only a warning
+//! ([`DiagnosticKind::IgnoredPrimaryKey`]): relations are keyed by the table's
+//! own primary key.
+//!
 //! The root's own keys are checked on the root table: the columns its
 //! `filters` name, and the `soft_delete` marker — its `column` (or the column
 //! behind its `field`) and its `when` filters. A diagnostic on one of these is
@@ -124,6 +132,56 @@ pub enum Severity {
     Warning,
 }
 
+/// What a [`Diagnostic`] found. Each kind has one [`Severity`]; a caller that
+/// acts on diagnostics (e.g. refusing to start) decides on the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticKind {
+    /// A table the schema names does not exist.
+    UnknownTable,
+    /// A column the document query reads does not exist.
+    UnknownColumn,
+    /// A `soft_delete` `field` that reads no column: the marker would be
+    /// dropped and soft-deleted rows would stay indexed.
+    UnreadSoftDeleteMarker,
+    /// A declared type (field or aggregate `value_type`) does not accept the
+    /// column's database type.
+    TypeMismatch,
+    /// A column an aggregate expression or a geo point reads is not numeric.
+    NotNumeric,
+    /// A field declared non-null (`required`) over a column that allows null.
+    Nullability,
+    /// A join's `primary_key` names no column. Nothing builds on it: the join
+    /// is keyed by the table's own primary key.
+    IgnoredPrimaryKey,
+}
+
+impl DiagnosticKind {
+    /// How serious this kind is.
+    pub fn severity(self) -> Severity {
+        match self {
+            Self::UnknownTable
+            | Self::UnknownColumn
+            | Self::UnreadSoftDeleteMarker
+            | Self::TypeMismatch
+            | Self::NotNumeric => Severity::Error,
+            Self::Nullability | Self::IgnoredPrimaryKey => Severity::Warning,
+        }
+    }
+
+    /// The kind as a stable `snake_case` token, e.g. `unknown_column`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownTable => "unknown_table",
+            Self::UnknownColumn => "unknown_column",
+            Self::UnreadSoftDeleteMarker => "unread_soft_delete_marker",
+            Self::TypeMismatch => "type_mismatch",
+            Self::NotNumeric => "not_numeric",
+            Self::Nullability => "nullability",
+            Self::IgnoredPrimaryKey => "ignored_primary_key",
+        }
+    }
+}
+
 /// One disagreement between a declared schema and the live database.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -135,6 +193,9 @@ pub struct Diagnostic {
     /// A disagreement on an index-level key is anchored at that key alone:
     /// `filters` or `soft_delete`.
     pub path: Vec<FieldName>,
+    /// What was found.
+    pub kind: DiagnosticKind,
+    /// The kind's [`severity`](DiagnosticKind::severity).
     pub severity: Severity,
     pub message: String,
 }
@@ -189,7 +250,8 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
             index: name.clone(),
             field: key.clone(),
             path: vec![key],
-            severity: Severity::Error,
+            kind: DiagnosticKind::UnreadSoftDeleteMarker,
+            severity: DiagnosticKind::UnreadSoftDeleteMarker.severity(),
             message,
         });
     }
@@ -248,7 +310,7 @@ fn is_numeric(sql_type: &str) -> bool {
 
 impl Checker<'_> {
     /// Report a disagreement on the field at the current path.
-    fn report(&mut self, severity: Severity, message: String) {
+    fn report(&mut self, kind: DiagnosticKind, message: String) {
         let Some(field) = self.path.last() else {
             return;
         };
@@ -256,7 +318,8 @@ impl Checker<'_> {
             index: self.index.clone(),
             field: field.clone(),
             path: self.path.clone(),
-            severity,
+            kind,
+            severity: kind.severity(),
             message,
         });
     }
@@ -284,7 +347,7 @@ impl Checker<'_> {
             }
             SoftDelete::Field(marker) => {
                 if let Some(message) = marker_field_problem(schema) {
-                    self.report(Severity::Error, message);
+                    self.report(DiagnosticKind::UnreadSoftDeleteMarker, message);
                 }
                 // A root-level field's column was checked with the field. One
                 // found inside a relation is still read on the root row.
@@ -349,7 +412,7 @@ impl Checker<'_> {
         };
         if !exists {
             self.report(
-                Severity::Error,
+                DiagnosticKind::UnknownTable,
                 format!(
                     "`{role}` references unknown table `{}.{table}`",
                     self.db_schema
@@ -374,14 +437,14 @@ impl Checker<'_> {
             Ok(info) => Ok(Some(info)),
             Err(SourceError::UnknownColumn(what)) => {
                 self.report(
-                    Severity::Error,
+                    DiagnosticKind::UnknownColumn,
                     format!("{prefix}references unknown column `{what}`"),
                 );
                 Ok(None)
             }
             Err(SourceError::UnknownTable(what)) => {
                 self.report(
-                    Severity::Error,
+                    DiagnosticKind::UnknownTable,
                     format!("{prefix}references unknown table `{what}`"),
                 );
                 Ok(None)
@@ -392,6 +455,33 @@ impl Checker<'_> {
 
     async fn exists(&mut self, table: &TableName, column: &ColumnName, role: &str) -> Result<()> {
         self.column(table, column, Some(role)).await.map(drop)
+    }
+
+    /// A join's declared `primary_key`. Relations are keyed by the table's own
+    /// primary key from the catalog, so a name that misses is ignored: a
+    /// warning, not an unknown column.
+    async fn join_primary_key(&mut self, table: &TableName, column: &ColumnName) -> Result<()> {
+        match self.catalog.column(self.db_schema, table, column).await {
+            Ok(_) => Ok(()),
+            Err(SourceError::UnknownColumn(what)) => {
+                self.report(
+                    DiagnosticKind::IgnoredPrimaryKey,
+                    format!(
+                        "`primary_key` references unknown column `{what}`; ignored: \
+                         the join is keyed by the table's own primary key"
+                    ),
+                );
+                Ok(())
+            }
+            Err(SourceError::UnknownTable(what)) => {
+                self.report(
+                    DiagnosticKind::UnknownTable,
+                    format!("`primary_key` references unknown table `{what}`"),
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The columns value and null-check filters name, on `table`.
@@ -477,7 +567,7 @@ impl Checker<'_> {
         if !related {
             return Ok(());
         }
-        self.exists(&join.table, &join.primary_key, "primary_key")
+        self.join_primary_key(&join.table, &join.primary_key)
             .await?;
         self.filters(&join.table, join.filters.as_deref(), "filters")
             .await?;
@@ -549,7 +639,7 @@ impl Checker<'_> {
                 };
                 if !value_type.accepts_pg(&info.sql_type) {
                     self.report(
-                        Severity::Error,
+                        DiagnosticKind::TypeMismatch,
                         format!(
                             "declared aggregate type does not accept the column's database type `{}`",
                             info.sql_type
@@ -565,7 +655,7 @@ impl Checker<'_> {
             };
             if !is_numeric(&info.sql_type) {
                 self.report(
-                    Severity::Error,
+                    DiagnosticKind::NotNumeric,
                     format!(
                         "aggregate expression column `{column}` must be numeric, found `{}`",
                         info.sql_type
@@ -584,7 +674,7 @@ impl Checker<'_> {
             };
             if !is_numeric(&info.sql_type) {
                 self.report(
-                    Severity::Error,
+                    DiagnosticKind::NotNumeric,
                     format!(
                         "geo_point coordinate column `{column}` must be numeric, found `{}`",
                         info.sql_type
@@ -607,7 +697,7 @@ impl Checker<'_> {
 
         if !column.ty.accepts_pg(&info.sql_type) {
             self.report(
-                Severity::Error,
+                DiagnosticKind::TypeMismatch,
                 format!(
                     "declared type does not accept the column's database type `{}`",
                     info.sql_type
@@ -620,7 +710,7 @@ impl Checker<'_> {
         let forced_non_null = primary_key == Some(&column.column) || column.default.is_some();
         if !column.nullable && info.nullable && !forced_non_null {
             self.report(
-                Severity::Warning,
+                DiagnosticKind::Nullability,
                 "declared non-null (`required`) but the database column allows null".to_owned(),
             );
         }
@@ -686,6 +776,7 @@ mod tests {
             1,
             "the unknown column should produce one diagnostic"
         );
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::UnknownColumn);
         assert_eq!(diagnostics[0].severity, Severity::Error);
         assert!(
             diagnostics[0].message.contains("unknown column"),
@@ -726,7 +817,10 @@ mod tests {
         }
     }
 
-    fn aggregate_messages(op: serde_json::Value, value_type: Option<&str>) -> Vec<String> {
+    fn aggregate_messages(
+        op: serde_json::Value,
+        value_type: Option<&str>,
+    ) -> Vec<(DiagnosticKind, String)> {
         let schema: IndexSchema = serde_json::from_value(json!({
             "version": 1,
             "table": "orders",
@@ -748,7 +842,7 @@ mod tests {
         futures::executor::block_on(validate_indexes(&spec, &OrderLines))
             .unwrap()
             .into_iter()
-            .map(|d| d.message)
+            .map(|d| (d.kind, d.message))
             .collect()
     }
 
@@ -758,14 +852,18 @@ mod tests {
             json!({ "sum": "quantity * unit_price + note - missing" }),
             Some("double"),
         );
-        assert_eq!(messages.len(), 2, "{messages:?}");
-        assert!(
-            messages[0].contains("`note` must be numeric, found `text`"),
-            "{messages:?}"
-        );
-        assert!(
-            messages[1].contains("unknown column `public.order_lines.missing`"),
-            "{messages:?}"
+        assert_eq!(
+            messages,
+            vec![
+                (
+                    DiagnosticKind::NotNumeric,
+                    "aggregate expression column `note` must be numeric, found `text`".to_owned()
+                ),
+                (
+                    DiagnosticKind::UnknownColumn,
+                    "references unknown column `public.order_lines.missing`".to_owned()
+                ),
+            ]
         );
         for op in ["avg", "min", "max"] {
             let messages = aggregate_messages(json!({ op: "quantity * unit_price" }), None);
@@ -775,13 +873,90 @@ mod tests {
 
     #[test]
     fn a_plain_column_keeps_its_value_type_check() {
-        let messages = aggregate_messages(json!({ "sum": "note" }), Some("double"));
-        assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].contains("does not accept the column's database type `text`"),
-            "{messages:?}"
+        assert_eq!(
+            aggregate_messages(json!({ "sum": "note" }), Some("double")),
+            vec![(
+                DiagnosticKind::TypeMismatch,
+                "declared aggregate type does not accept the column's database type `text`"
+                    .to_owned()
+            )]
         );
         assert!(aggregate_messages(json!({ "sum": "quantity" }), Some("integer")).is_empty());
+    }
+
+    /// `places(id integer not null, label mood, email email_address, lat text,
+    /// lon double precision)`, where `mood` is an enum type and `email_address`
+    /// a domain: a catalog reports both by their own names.
+    struct Places;
+
+    #[async_trait]
+    impl Catalog for Places {
+        async fn column(
+            &self,
+            schema: &DatabaseSchema,
+            table: &TableName,
+            column: &ColumnName,
+        ) -> Result<ColumnInfo> {
+            let sql_type = match column.as_ref() {
+                "id" => "integer",
+                "label" => "mood",
+                "email" => "email_address",
+                "lat" => "text",
+                "lon" => "double precision",
+                _ => {
+                    return Err(SourceError::UnknownColumn(format!(
+                        "{schema}.{table}.{column}"
+                    )));
+                }
+            };
+            Ok(ColumnInfo {
+                sql_type: sql_type.to_owned(),
+                nullable: column.as_ref() != "id",
+            })
+        }
+
+        async fn has_table(&self, _: &DatabaseSchema, _: &TableName) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    /// The type, numeric and nullability checks each carry their own kind, so a
+    /// caller can tell them from a name that does not exist.
+    #[test]
+    fn type_numeric_and_nullability_findings_carry_their_kind() {
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1, "table": "places", "db_schema": "public", "primary_key": "id",
+            "fields": [
+                { "field": "id", "source": { "column": { "column": "id", "ty": "integer", "nullable": false } } },
+                { "field": "label", "source": { "column": { "column": "label", "ty": "enum", "nullable": false } } },
+                { "field": "email", "source": { "column": { "column": "email", "ty": "keyword", "nullable": true } } },
+                { "field": "at", "source": { "geo": { "lat": "lat", "lon": "lon", "nullable": true } } },
+            ],
+        }))
+        .unwrap();
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new("places").unwrap(),
+            schema,
+        )]));
+        let found: Vec<_> = futures::executor::block_on(validate_indexes(&spec, &Places))
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.dotted_path(), d.kind, d.severity))
+            .collect();
+        let path = |p: &str| p.to_owned();
+        assert_eq!(
+            found,
+            vec![
+                (path("label"), DiagnosticKind::TypeMismatch, Severity::Error),
+                (
+                    path("label"),
+                    DiagnosticKind::Nullability,
+                    Severity::Warning
+                ),
+                (path("email"), DiagnosticKind::TypeMismatch, Severity::Error),
+                (path("at"), DiagnosticKind::NotNumeric, Severity::Error),
+            ]
+        );
     }
 
     /// `users(id, name, team_id)`, `teams(id, name)`, `orders(id, user_id,
@@ -840,8 +1015,8 @@ mod tests {
         })
     }
 
-    /// `(path, message)` for every diagnostic of a `users` index with `fields`.
-    fn shop_problems(fields: serde_json::Value) -> Vec<(String, String)> {
+    /// `(path, kind, message)` for every diagnostic of a `users` index with `fields`.
+    fn shop_problems(fields: serde_json::Value) -> Vec<Found> {
         root_problems(json!({ "fields": fields }))
     }
 
@@ -864,26 +1039,29 @@ mod tests {
         )]))
     }
 
-    fn located(diagnostics: Vec<Diagnostic>) -> Vec<(String, String)> {
+    /// `(path, kind, message)` of one diagnostic.
+    type Found = (String, DiagnosticKind, String);
+
+    fn located(diagnostics: Vec<Diagnostic>) -> Vec<Found> {
         diagnostics
             .into_iter()
             .map(|d| {
-                assert_eq!(d.severity, Severity::Error);
+                assert_eq!(d.severity, d.kind.severity());
                 assert_eq!(d.path.last(), Some(&d.field));
-                (d.dotted_path(), d.message)
+                (d.dotted_path(), d.kind, d.message)
             })
             .collect()
     }
 
-    /// `(path, message)` for every diagnostic of a `users` index with `keys`.
-    fn root_problems(keys: serde_json::Value) -> Vec<(String, String)> {
+    /// `(path, kind, message)` for every diagnostic of a `users` index with `keys`.
+    fn root_problems(keys: serde_json::Value) -> Vec<Found> {
         located(futures::executor::block_on(validate_indexes(&users_spec(keys), &Shop)).unwrap())
     }
 
-    fn problems(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    fn problems(expected: &[(&str, DiagnosticKind, &str)]) -> Vec<Found> {
         expected
             .iter()
-            .map(|(path, message)| ((*path).to_owned(), (*message).to_owned()))
+            .map(|(path, kind, message)| ((*path).to_owned(), *kind, (*message).to_owned()))
             .collect()
     }
 
@@ -951,38 +1129,47 @@ mod tests {
             problems(&[
                 (
                     "team",
+                    DiagnosticKind::UnknownColumn,
                     "`column` references unknown column `public.users.teamid`"
                 ),
                 (
                     "team",
+                    DiagnosticKind::UnknownColumn,
                     "`on.local` references unknown column `public.users.nmae`"
                 ),
                 (
                     "team",
+                    DiagnosticKind::UnknownColumn,
                     "`on.related` references unknown column `public.teams.nmae`"
                 ),
                 (
                     "team",
-                    "`primary_key` references unknown column `public.teams.uid`"
+                    DiagnosticKind::IgnoredPrimaryKey,
+                    "`primary_key` references unknown column `public.teams.uid`; ignored: the join is keyed by the table's own primary key"
                 ),
                 (
                     "team",
+                    DiagnosticKind::UnknownColumn,
                     "`filters` references unknown column `public.teams.stat`"
                 ),
                 (
                     "team",
+                    DiagnosticKind::UnknownColumn,
                     "`filters` references unknown column `public.teams.nam`"
                 ),
                 (
                     "team",
+                    DiagnosticKind::UnknownColumn,
                     "`order_by` references unknown column `public.teams.rank`"
                 ),
                 (
                     "orders",
+                    DiagnosticKind::UnknownColumn,
                     "`foreign_key` references unknown column `public.orders.userid`"
                 ),
                 (
                     "orders.items",
+                    DiagnosticKind::UnknownTable,
                     "`table` references unknown table `public.item`"
                 ),
             ]),
@@ -1004,6 +1191,7 @@ mod tests {
             }))),
             problems(&[(
                 "tags",
+                DiagnosticKind::UnknownTable,
                 "`through.table` references unknown table `public.user_tag`"
             )]),
         );
@@ -1015,14 +1203,17 @@ mod tests {
             problems(&[
                 (
                     "tags",
+                    DiagnosticKind::UnknownColumn,
                     "`through.left_key` references unknown column `public.user_tags.user`"
                 ),
                 (
                     "tags",
+                    DiagnosticKind::UnknownColumn,
                     "`through.right_key` references unknown column `public.user_tags.tag`"
                 ),
                 (
                     "tags",
+                    DiagnosticKind::UnknownColumn,
                     "`through.filters` references unknown column `public.user_tags.knd`"
                 ),
             ]),
@@ -1056,46 +1247,57 @@ mod tests {
             problems(&[
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`via.foreign_key` references unknown column `public.orders.userid`"
                 ),
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`via.on.local` references unknown column `public.users.nme`"
                 ),
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`via.on.related` references unknown column `public.orders.regio`"
                 ),
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`via.filters` references unknown column `public.orders.state`"
                 ),
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`foreign_key` references unknown column `public.items.orderid`"
                 ),
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`on.local` references unknown column `public.orders.regn`"
                 ),
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`on.related` references unknown column `public.items.rgn`"
                 ),
                 (
                     "itemCount",
+                    DiagnosticKind::UnknownColumn,
                     "`filters` references unknown column `public.items.qt`"
                 ),
                 (
                     "lostHop",
+                    DiagnosticKind::UnknownTable,
                     "`via.table` references unknown table `public.order`"
                 ),
                 (
                     "lostTable",
+                    DiagnosticKind::UnknownTable,
                     "`table` references unknown table `public.item`"
                 ),
                 (
                     "lostTable",
+                    DiagnosticKind::UnknownColumn,
                     "`through.right_key` references unknown column `public.user_tags.tagid`"
                 ),
             ]),
@@ -1111,10 +1313,12 @@ mod tests {
             problems(&[
                 (
                     "filters",
+                    DiagnosticKind::UnknownColumn,
                     "`filters` references unknown column `public.users.nme`"
                 ),
                 (
                     "filters",
+                    DiagnosticKind::UnknownColumn,
                     "`filters` references unknown column `public.users.team`"
                 ),
             ]),
@@ -1135,14 +1339,17 @@ mod tests {
             problems(&[
                 (
                     "soft_delete",
+                    DiagnosticKind::UnknownColumn,
                     "`column` references unknown column `public.users.deleted_at`"
                 ),
                 (
                     "soft_delete",
+                    DiagnosticKind::UnknownColumn,
                     "`when` references unknown column `public.users.stat`"
                 ),
                 (
                     "soft_delete",
+                    DiagnosticKind::UnknownColumn,
                     "`when` references unknown column `public.users.team`"
                 ),
             ]),
@@ -1164,10 +1371,12 @@ mod tests {
             problems(&[
                 (
                     "soft_delete",
+                    DiagnosticKind::UnreadSoftDeleteMarker,
                     "`field` names `deleted`, but no field has that name"
                 ),
                 (
                     "soft_delete",
+                    DiagnosticKind::UnknownColumn,
                     "`when` references unknown column `public.users.nme`"
                 ),
             ]),
@@ -1192,9 +1401,14 @@ mod tests {
                 "soft_delete": { "field": { "field": "team" } },
             })),
             problems(&[
-                ("team", "references unknown column `public.users.team`"),
+                (
+                    "team",
+                    DiagnosticKind::UnknownColumn,
+                    "references unknown column `public.users.team`"
+                ),
                 (
                     "soft_delete",
+                    DiagnosticKind::UnreadSoftDeleteMarker,
                     "`field` names `team`, but the first field of that name is not a column"
                 ),
             ]),
@@ -1218,6 +1432,7 @@ mod tests {
             })),
             problems(&[(
                 "soft_delete",
+                DiagnosticKind::UnknownColumn,
                 "`field` references unknown column `public.users.status`"
             )]),
         );
@@ -1228,6 +1443,7 @@ mod tests {
             })),
             problems(&[(
                 "orders.name",
+                DiagnosticKind::UnknownColumn,
                 "references unknown column `public.orders.name`"
             )]),
         );
@@ -1241,6 +1457,7 @@ mod tests {
             })))),
             problems(&[(
                 "soft_delete",
+                DiagnosticKind::UnreadSoftDeleteMarker,
                 "`field` names `deleted`, but no field has that name"
             )]),
         );
@@ -1268,6 +1485,7 @@ mod tests {
         )]));
         let diagnostics = futures::executor::block_on(validate_indexes(&spec, &Shop)).unwrap();
         assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::UnknownTable);
         assert_eq!(
             diagnostics[0].message,
             "references unknown table `public.user`"
