@@ -2,6 +2,8 @@
 //! engine → a lane → a sink engine over a recording sink. Inserts and deletes
 //! on the source must surface as document upserts and tombstones, and an
 //! update that changes no column a document reads must surface as nothing.
+//! Aggregates across several hops (`via`) rebuild their parent from a change
+//! on any hop.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -20,13 +22,13 @@ use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Envelope, Field,
     FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, IndexName, IndexSchema,
-    Join, JoinKind, OrderBy, RawFilter, RawFilterValue, Relation, SinkName, TableName,
-    ValueOpFilter,
+    Join, JoinKind, OrderBy, RawFilter, RawFilterValue, Relation, SinkName, TableName, Through,
+    ValueOpFilter, ViaHop,
 };
 use sink::{Result as SinkResult, Sink};
-use source::SourceSpec;
 use source::cdc::ChangeCapture;
-use source::document::DocumentBuilder;
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowKey, SourceSpec};
 use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
 use stream::Stream;
@@ -415,6 +417,211 @@ async fn a_raw_filter_reading_the_root_row_rebuilds_on_that_column() {
     engine.abort();
 }
 
+/// users → teams → projects → tasks → (task_tags) → tags. Every hop is a
+/// foreign key on the lower table; a change on any of them rebuilds the user
+/// it sits under, and its old user too when it moved or went away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn an_aggregate_via_hops_rebuilds_its_parent_from_every_hop() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text)",
+        "CREATE TABLE teams (id int PRIMARY KEY, owner_id int, archived boolean, name text)",
+        "CREATE TABLE projects (id int PRIMARY KEY, team_id int, archived boolean, note text)",
+        "CREATE TABLE tasks (id int PRIMARY KEY, project_id int, status text, memo text)",
+        "CREATE TABLE tags (id int PRIMARY KEY, label text)",
+        "CREATE TABLE task_tags (id int PRIMARY KEY, task_id int, tag_id int)",
+        "ALTER TABLE teams REPLICA IDENTITY FULL",
+        "ALTER TABLE projects REPLICA IDENTITY FULL",
+        "ALTER TABLE tasks REPLICA IDENTITY FULL",
+        "ALTER TABLE task_tags REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE users, teams, projects, tasks, tags, task_tags",
+        "INSERT INTO users VALUES (1, 'ada@x.io'), (2, 'grace@x.io')",
+        "INSERT INTO teams VALUES (10, 1, false, ''), (20, 2, false, '')",
+        "INSERT INTO projects VALUES (100, 10, false, ''), (200, 20, false, '')",
+        "INSERT INTO tasks VALUES (1000, 100, 'open', '')",
+        "INSERT INTO tags VALUES (1, 'urgent'), (2, 'later')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(users_with_task_flags_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        sink,
+    ));
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+    expect_op(&mut engine, &recorded, "upsert users 2").await;
+
+    // (team count, active project count, has a completed task, tag count)
+    let flags = |user: i32| {
+        let documents = Arc::clone(&documents);
+        async move {
+            let id = DocumentId {
+                index: index_name("users"),
+                key: RowKey(vec![(column("id"), kernel::GenericValue::Int(user))]),
+            };
+            let Document::Upsert { body, .. } = documents.build(&id).await.unwrap() else {
+                panic!("user {user} is not a document");
+            };
+            let body = sink::to_json(&body);
+            (
+                body["hasTeam"].as_bool().unwrap(),
+                body["activeProjects"].as_i64().unwrap(),
+                body["hasCompletedTask"].as_bool().unwrap(),
+                body["tagCount"].as_i64().unwrap(),
+            )
+        }
+    };
+    assert_eq!(flags(1).await, (true, 1, false, 0));
+    assert_eq!(flags(2).await, (true, 1, false, 0));
+
+    let exec = |sql: &'static str| {
+        let pool = pool.clone();
+        async move { sqlx::raw_sql(sql).execute(&pool).await.unwrap() }
+    };
+
+    // An unread column on every hop rebuilds nothing.
+    for (marker, sql) in [
+        (900, "UPDATE teams SET name = 'core' WHERE id = 10"),
+        (901, "UPDATE projects SET note = 'q3' WHERE id = 100"),
+        (902, "UPDATE tasks SET memo = 'later' WHERE id = 1000"),
+        (903, "UPDATE tags SET label = 'now' WHERE id = 1"),
+    ] {
+        recorded.lock().unwrap().clear();
+        exec(sql).await;
+        sqlx::query("INSERT INTO users VALUES ($1, 'marker')")
+            .bind(marker)
+            .execute(&pool)
+            .await
+            .unwrap();
+        expect_op(&mut engine, &recorded, &format!("upsert users {marker}")).await;
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![format!("upsert users {marker}")],
+            "`{sql}` changed no column the document reads"
+        );
+    }
+
+    // Each change rebuilds exactly these users, which then read these values.
+    type Flags = (bool, i64, bool, i64);
+    let steps: [(&str, &[(i32, Flags)]); 15] = [
+        // A filter column on the aggregated table, three hops down.
+        (
+            "UPDATE tasks SET status = 'completed' WHERE id = 1000",
+            &[(1, (true, 1, true, 0))],
+        ),
+        // A filter column on the first hop.
+        (
+            "UPDATE teams SET archived = true WHERE id = 10",
+            &[(1, (true, 0, false, 0))],
+        ),
+        (
+            "UPDATE teams SET archived = false WHERE id = 10",
+            &[(1, (true, 1, true, 0))],
+        ),
+        // A filter column on the middle hop.
+        (
+            "UPDATE projects SET archived = true WHERE id = 100",
+            &[(1, (true, 0, true, 0))],
+        ),
+        (
+            "UPDATE projects SET archived = false WHERE id = 100",
+            &[(1, (true, 1, true, 0))],
+        ),
+        // A junction row past the last hop, inserted then deleted.
+        (
+            "INSERT INTO task_tags VALUES (1, 1000, 1)",
+            &[(1, (true, 1, true, 1))],
+        ),
+        (
+            "DELETE FROM task_tags WHERE id = 1",
+            &[(1, (true, 1, true, 0))],
+        ),
+        // Re-parenting on each hop moves the flag between users.
+        (
+            "UPDATE tasks SET project_id = 200 WHERE id = 1000",
+            &[(1, (true, 1, false, 0)), (2, (true, 1, true, 0))],
+        ),
+        (
+            "UPDATE projects SET team_id = 10 WHERE id = 200",
+            &[(1, (true, 2, true, 0)), (2, (true, 0, false, 0))],
+        ),
+        (
+            "UPDATE teams SET owner_id = 2 WHERE id = 10",
+            &[(1, (false, 0, false, 0)), (2, (true, 2, true, 0))],
+        ),
+        // Inserts and deletes on each hop.
+        (
+            "INSERT INTO tasks VALUES (1001, 100, 'completed', '')",
+            &[(2, (true, 2, true, 0))],
+        ),
+        (
+            "DELETE FROM tasks WHERE id = 1000",
+            &[(2, (true, 2, true, 0))],
+        ),
+        (
+            "DELETE FROM projects WHERE id = 100",
+            &[(2, (true, 1, false, 0))],
+        ),
+        (
+            "DELETE FROM teams WHERE id = 10",
+            &[(2, (true, 0, false, 0))],
+        ),
+        (
+            "INSERT INTO teams VALUES (30, 1, false, '')",
+            &[(1, (true, 0, false, 0))],
+        ),
+    ];
+    for (sql, rebuilt) in steps {
+        recorded.lock().unwrap().clear();
+        exec(sql).await;
+        for (user, expected) in rebuilt {
+            expect_op(&mut engine, &recorded, &format!("upsert users {user}")).await;
+            assert_eq!(flags(*user).await, *expected, "user {user} after `{sql}`");
+        }
+    }
+
+    engine.abort();
+}
+
 /// One deployment the way the daemon runs it: stage the sink engine, then run
 /// it and the ingest engine together until either stops. `Ok` when the live
 /// stream ends; the first engine error otherwise.
@@ -580,6 +787,101 @@ fn users_with_recent_orders_spec() -> SourceSpec {
                 options: Default::default(),
                 source: FieldSource::Relation(Relation::Join(orders)),
             },
+        ],
+    };
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
+}
+
+/// `users` with aggregates across hops of users → teams → projects → tasks →
+/// task_tags → tags: whether the user owns a team (one hop), the user's
+/// unarchived projects in unarchived teams (two hops), whether one of those
+/// holds a completed task (three hops), and the distinct tags on any of the
+/// user's tasks (three hops and a junction).
+fn users_with_task_flags_spec() -> SourceSpec {
+    let not_archived = || {
+        Some(vec![Filter::ValueOp(ValueOpFilter {
+            column: column("archived"),
+            op: FilterOp::Eq,
+            value: FilterValue::Single("false".into()),
+        })])
+    };
+    let hop = |target: &str, foreign_key: &str, filters| ViaHop {
+        table: table(target),
+        foreign_key: column(foreign_key),
+        filters,
+    };
+    let aggregate = |name: &str, aggregate: Aggregate| Field {
+        field: field(name),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Aggregate(aggregate)),
+    };
+    let has_team = Aggregate {
+        table: table("teams"),
+        op: AggregateOp::Exists,
+        key: AggregateKey::Direct(column("owner_id")),
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via: Vec::new(),
+    };
+    let active_projects = Aggregate {
+        table: table("projects"),
+        op: AggregateOp::Count,
+        key: AggregateKey::Direct(column("team_id")),
+        value_type: None,
+        filters: not_archived(),
+        distinct: false,
+        via: vec![hop("teams", "owner_id", not_archived())],
+    };
+    let has_completed_task = Aggregate {
+        table: table("tasks"),
+        op: AggregateOp::Exists,
+        key: AggregateKey::Direct(column("project_id")),
+        value_type: None,
+        filters: Some(vec![Filter::ValueOp(ValueOpFilter {
+            column: column("status"),
+            op: FilterOp::Eq,
+            value: FilterValue::Single("completed".into()),
+        })]),
+        distinct: false,
+        via: vec![
+            hop("teams", "owner_id", not_archived()),
+            hop("projects", "team_id", None),
+        ],
+    };
+    let tag_count = Aggregate {
+        table: table("tags"),
+        op: AggregateOp::Count,
+        key: AggregateKey::Through(Through {
+            table: table("task_tags"),
+            left_key: column("task_id"),
+            right_key: column("tag_id"),
+            filters: None,
+        }),
+        value_type: None,
+        filters: None,
+        distinct: true,
+        via: vec![
+            hop("teams", "owner_id", None),
+            hop("projects", "team_id", None),
+            hop("tasks", "project_id", None),
+        ],
+    };
+    let schema = IndexSchema {
+        version: 1,
+        table: table("users"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_field("id", "id"),
+            column_field("email", "email"),
+            aggregate("hasTeam", has_team),
+            aggregate("activeProjects", active_projects),
+            aggregate("hasCompletedTask", has_completed_task),
+            aggregate("tagCount", tag_count),
         ],
     };
     SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
