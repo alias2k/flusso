@@ -53,6 +53,8 @@ pub struct BuildFailure {
     pub position: Option<ScriptPosition>,
 }
 
+impl std::error::Error for BuildFailure {}
+
 /// A 1-based line and column in a script, with that line's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptPosition {
