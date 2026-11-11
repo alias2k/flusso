@@ -11,7 +11,7 @@
 //!   hashes and displays exactly as the bare [`ColumnName`] the aggregate held
 //!   before expressions existed, so an existing schema keeps its content hash
 //!   and an existing `flusso.lock` keeps its bytes.
-//! - **An expression is stored as its canonical text** ([`Display`]): single
+//! - **An expression is stored as its canonical text** ([`Display`](std::fmt::Display)): single
 //!   spaces around binary operators, only the parentheses the tree needs. Two
 //!   spellings of one tree (whitespace, redundant parentheses) serialize and
 //!   hash the same.
