@@ -4,9 +4,10 @@ name: bench
 #
 #   in-process   PR gate. The four no-Docker Criterion benches (engine loop,
 #                pgoutput decode, sink render, script fields) run twice on the same runner —
-#                the PR's base, then the PR. A bench more than 10% slower is
-#                re-measured on its own (base, then PR) and the job fails only
-#                when it is past 10% again: one noisy sample doesn't fail a PR.
+#                the PR's base, then the PR, each from its own build. A bench
+#                more than 10% slower is re-measured on its own (base, then
+#                PR) and the job fails when the re-run, or the mean of both
+#                passes, is past 10%: one noisy sample doesn't fail a PR.
 #
 #   scenarios    History. On every push to main: the in-process benches, the
 #                three Docker-backed component benches, and the two flusso-bench
@@ -37,10 +38,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # One target dir for both trees: the base worktree and the PR checkout
-      # build side by side (path-keyed artifacts), and Criterion keeps every
-      # saved baseline under target/criterion for the comparison.
+      # One target dir per tree. A shared one makes the PR run the base's
+      # binary: cargo keys a workspace member by its path inside the workspace,
+      # so both trees share one fingerprint, and the PR's sources (checked out
+      # before the base was built) look older than the base build. Criterion
+      # writes both sides' baselines to one CRITERION_HOME, outside the cached
+      # target dir, so no earlier run's baselines reach the comparison.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      BASE_TARGET_DIR: ${{ runner.temp }}/base-target
+      CRITERION_HOME: ${{ runner.temp }}/criterion
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,26 +55,38 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Caches ./target (the PR's) only; the base's target dir is seeded from
+      # it below, so both sides start from the cached dependencies.
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # The base gets its own worktree, kept for the whole job so the gate can
-      # re-measure a breach on it without rebuilding either side. The runner
-      # script is taken from the PR, since the base may predate it; a base
-      # without these bench targets yields no baseline, and the gate then
-      # reports that instead of failing (nothing to gate against yet).
+      # The base gets its own worktree and target dir, both kept for the whole
+      # job so the gate can re-measure a breach on it from its own build. The
+      # runner script is taken from the PR, since the base may predate it. A
+      # base with none of the in-process benches (exit 78) has nothing to gate
+      # against and only warns; any other failure of the base fails the job.
       - name: Bench the base (baseline `base`)
         run: |
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/base" ${{ github.event.pull_request.base.sha }}
+          if [ -d target ]; then
+            cp -a --reflink=auto target "$BASE_TARGET_DIR"
+          fi
           cd "$RUNNER_TEMP/base"
-          "$GITHUB_WORKSPACE/.github/scripts/bench-in-process.sh" base || echo "::warning::the base has no in-process benches; no baseline to compare against"
+          status=0
+          CARGO_TARGET_DIR="$BASE_TARGET_DIR" "$GITHUB_WORKSPACE/.github/scripts/bench-in-process.sh" base || status=$?
+          if [ "$status" -eq 78 ]; then
+            echo "::warning::the base has no in-process benches; no baseline to compare against"
+            echo "BENCH_BASE_EMPTY=1" >>"$GITHUB_ENV"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
 
       - name: Bench the PR (baseline `pr`)
         run: .github/scripts/bench-in-process.sh pr
 
       - name: Compare (fail past 10% slower, confirmed by a re-run)
-        run: .github/scripts/bench-gate.sh "$RUNNER_TEMP/base" 10
+        run: .github/scripts/bench-gate.sh "$RUNNER_TEMP/base" "$BASE_TARGET_DIR" 10
 
   scenarios:
     name: scenarios + components (history)

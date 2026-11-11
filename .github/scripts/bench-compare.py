@@ -3,6 +3,7 @@
 
     bench-compare.py <criterion-dir> <baseline> <candidate> <max-slowdown-percent>
                      [--breaches <file>] [--confirm <re-baseline> <re-candidate>]
+                     [--allow-empty]
 
 For every bench with both `<baseline>/estimates.json` and
 `<candidate>/estimates.json`, compares medians; a bench on one side only is
@@ -11,10 +12,16 @@ listed but not gated. Exits 1 when any bench's candidate median is more than
 
 --breaches <file>   write the Criterion id of each bench past the limit, one
                     per line (what bench-gate.sh re-measures).
---confirm A B       a breach counts only if the bench is past the limit again
-                    in the re-measured baselines A vs B; a breach with no
-                    re-measurement counts as confirmed. Exits 1 only on a
+--confirm A B       decide each breach on its re-measurement, baselines A vs
+                    B. It is confirmed when the re-run change is past the
+                    limit, or the mean of the first-pass and re-run changes
+                    is; it clears only when both are within it. A breach with
+                    no re-measurement counts as confirmed. Exits 1 only on a
                     confirmed breach.
+--allow-empty       no bench measured on both sides is a warning and exit 0
+                    (a PR base that has no in-process benches yet). Without
+                    it, that is an error, exit 2: a side that measured nothing
+                    must not pass the gate.
 
 With `GITHUB_STEP_SUMMARY` set, the final report (no breach, or the --confirm
 run) is appended there as Markdown too.
@@ -66,6 +73,7 @@ def main() -> int:
     parser.add_argument("limit", type=float)
     parser.add_argument("--breaches", type=pathlib.Path)
     parser.add_argument("--confirm", nargs=2, metavar=("RE_BASE", "RE_CAND"))
+    parser.add_argument("--allow-empty", action="store_true")
     args = parser.parse_args()
     root, base, cand, limit = args.root, args.base, args.cand, args.limit
 
@@ -82,10 +90,11 @@ def main() -> int:
         b, c = measured
         rows.append((bench_id(root, bench_dir, cand), bench_dir, b, c, change(b, c)))
     if not rows:
-        # A base that predates the benches leaves nothing to gate against; the
-        # candidate's own bench step already proved it runs.
-        print(f"::warning::nothing to compare: no bench has both `{base}` and `{cand}` under {root}")
-        return 0
+        if args.allow_empty:
+            print(f"::warning::nothing to compare: no bench has both `{base}` and `{cand}` under {root}")
+            return 0
+        print(f"::error::nothing to compare: no bench has both `{base}` and `{cand}` under {root}")
+        return 2
 
     breached = [r for r in rows if r[4] > limit]
     lines = [f"| bench | {base} | {cand} | change |", "| --- | ---: | ---: | ---: |"]
@@ -111,23 +120,29 @@ def main() -> int:
         re_base, re_cand = args.confirm
         failed = []
         re_lines = [
-            f"| bench | first pass | {re_base} | {re_cand} | re-run change | verdict |",
-            "| --- | ---: | ---: | ---: | ---: | --- |",
+            f"| bench | first pass | {re_base} | {re_cand} | re-run | mean | verdict |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
         for rid, bench_dir, _, _, ch in breached:
             again = pair(bench_dir, re_base, re_cand)
             if again is None:
                 failed.append(rid)
-                re_lines.append(f"| `{rid}` | {ch:+.1f}% | — | — | — | not re-measured: counts as confirmed |")
+                re_lines.append(f"| `{rid}` | {ch:+.1f}% | — | — | — | — | not re-measured: counts as confirmed |")
                 continue
             rb, rc = again
             re_ch = change(rb, rc)
+            mean = (ch + re_ch) / 2
             if re_ch > limit:
                 failed.append(rid)
-                outcome = "**confirmed** ⚠️"
+                outcome = "**confirmed** by the re-run ⚠️"
+            elif mean > limit:
+                failed.append(rid)
+                outcome = "**confirmed** by the mean ⚠️"
             else:
-                outcome = "cleared on re-run (noise)"
-            re_lines.append(f"| `{rid}` | {ch:+.1f}% | {fmt(rb)} | {fmt(rc)} | {re_ch:+.1f}% | {outcome} |")
+                outcome = "cleared (noise)"
+            re_lines.append(
+                f"| `{rid}` | {ch:+.1f}% | {fmt(rb)} | {fmt(rc)} | {re_ch:+.1f}% | {mean:+.1f}% | {outcome} |"
+            )
         report += ["### Re-run of the breaches", "", *re_lines, ""]
         if failed:
             verdict = f"**{len(failed)} bench(es) confirmed slower than {limit:.0f}%** (see the re-run table) — regression."
