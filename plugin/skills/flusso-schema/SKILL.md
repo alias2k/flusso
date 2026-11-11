@@ -115,6 +115,19 @@ An `enum` takes an optional `variants:` list — its values in rank order (`vari
 
 `indexed: false` on any join (or a `json` field) keeps the subtree in the stored document but maps it as one disabled object: nothing under it is searchable, and it costs one mapping field. Use it for display-only content that would blow `index.mapping.total_fields.limit`. Owned meaning: the [Joins reference](https://alias2k.github.io/flusso/reference/joins.html#indexed); the trade-off: [Keep content without indexing it](https://alias2k.github.io/flusso/author/keep-content-unindexed.html).
 
+**A relation keyed on more than the key** (a tenant id on both tables, a column discriminator): add `on: [{ local, related }]` beside the key. `local` is a column of the table the field sits on (the parent row), `related` a column of the field's `table`; each pair is one more `=` ANDed with the key, and a null on either side matches nothing. Allowed on `belongs_to`/`has_one`/`has_many`, a `foreign_key` aggregate and each `via` hop; rejected on `many_to_many` and on an aggregate over `through`, as are a half-written or duplicate pair. The key itself still points at a primary key. Owned meaning: the [Joins reference](https://alias2k.github.io/flusso/reference/joins.html#on).
+
+```yaml
+- has_many: lines
+  table: order_lines
+  foreign_key: order_id
+  primary_key: id
+  on:
+    - { local: tenant_id, related: tenant_id }
+  fields:
+    - integer: qty
+```
+
 ## Aggregates — reduce a related table to a scalar. The op is the type key.
 
 `count` `exists` `sum` `avg` `min` `max` `ids`. Each needs `table` and **exactly one** of `foreign_key` xor `through`.
@@ -126,7 +139,7 @@ An `enum` takes an optional `variants:` list — its values in rank order (`vari
 
 - Over `through`, an aggregate counts **once per junction row** (a product on two order lines counts twice). `distinct: true` counts each target row once; it's rejected on `foreign_key` aggregates. A junction row whose target is missing never counts.
 - Two filter lists, scoped by position: the aggregate's `filters` narrow the **target** table; `through.filters` narrow the **junction** rows (e.g. skip cancelled lines). Owned meaning: the [Aggregates reference](https://alias2k.github.io/flusso/reference/aggregates.html#over-a-junction).
-- **Several hops away** (user → projects → tasks): `via:` lists the tables in between, **in order from the parent**, each `{ table, foreign_key, filters? }` where `foreign_key` is on that hop's table and points at the table before it. The aggregate's own `foreign_key` (or `through.left_key`) then points at the **last** hop. Hops are downward foreign keys only: `column` (belongs_to direction) or `through` on a hop is rejected; a junction may only be the last hop, as the aggregate's own `through`. `distinct` stays rejected without `through`. Owned meaning: the [Aggregates reference](https://alias2k.github.io/flusso/reference/aggregates.html#across-several-hops).
+- **Several hops away** (user → projects → tasks): `via:` lists the tables in between, **in order from the parent**, each `{ table, foreign_key, filters? }` where `foreign_key` is on that hop's table and points at the table before it. The aggregate's own `foreign_key` (or `through.left_key`) then points at the **last** hop. Hops are downward foreign keys only: `column` (belongs_to direction) or `through` on a hop is rejected; a junction may only be the last hop, as the aggregate's own `through`. `distinct` stays rejected without `through`. Each hop takes its own `on` (`local` = the table before the hop); the aggregate's own `on` then relates the last hop (`local`) to `table` (`related`). Owned meaning: the [Aggregates reference](https://alias2k.github.io/flusso/reference/aggregates.html#across-several-hops), [`on`](https://alias2k.github.io/flusso/reference/aggregates.html#on).
 
 See `examples/aggregate.schema.yml`.
 

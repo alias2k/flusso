@@ -31,7 +31,7 @@ Every panel, control, and shortcut in `flusso design`, and how saving maps to fi
 | click an edge | select its join |
 | toolbar | zoom in/out, fit to view, lock/unlock layout, reset layout, minimap, collapse/expand all |
 
-Node positions and collapsed nodes live in the browser, per index, not in the files. They follow the node, so removing, adding, or duplicating a field elsewhere leaves them alone, both while you edit and across a reload, including when the schema file changed on disk in between. Nodes are matched by field name within their parent; a node added since the last save, or renamed outside the designer, starts fresh after a reload. A node whose join is missing a required key is flagged until it's set in the inspector.
+Node positions and collapsed nodes live in the browser, per index, not in the files. They follow the node, so removing, adding, or duplicating a field elsewhere leaves them alone, both while you edit and across a reload, including when the schema file changed on disk in between. Nodes are matched by field name within their parent; a node added since the last save, or renamed outside the designer, starts fresh after a reload. A node whose join is missing a required key, or has an `on` pair missing a side, is flagged until it's set in the inspector.
 
 Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a nullable column; `=` = has a default; nothing = optional. A node header counts fields that disagree with the database after a validate.
 
@@ -41,10 +41,10 @@ Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a
 | --- | --- |
 | index root | root table, schema, root filters, soft-delete |
 | object group | name; its fields are edited on the node |
-| join | verb, related table, key (`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, junction table + keys + junction filters for `many_to_many`), required (to-one), **Indexed** (off stores the rows without indexing them; see [Joins](../reference/joins.md#indexed)), filters, the FK nullability note |
+| join | verb, related table, key (`column` for `belongs_to`, `foreign_key` for `has_one`/`has_many`, junction table + keys + junction filters for `many_to_many`), required (to-one), **Indexed** (off stores the rows without indexing them; see [Joins](../reference/joins.md#indexed)), **On** pairs (a column of the parent table = a column of the related table; **Add a pair**; not on `many_to_many`, and switching to it drops them; see [Joins](../reference/joins.md#on)), filters, the FK nullability note |
 | scalar field | **From the database** (column, SQL type, `NOT NULL`/nullable) · bridge rule · **In the document** (rename chips, type with description and *suggested* chip, `lowercase`/`trim`, **Auto subfields** on `text`/`keyword`/`uuid` and **Indexed** on `json` (each with a hint naming what turning it off loses; changing the type drops the one it no longer takes), required, default) · **Advanced · index tuning** drawer (`options` as key/JSON-value pairs with quick-adds) · **Filters** drawer where the kind takes them |
 | enum field | plus **Variants (ordered)** with add, move up/down, remove |
-| aggregate | **operation** (switching keeps the table, key, filters and Via hops; the column and `value_type`/`element_type` reset), related table, column to aggregate, `value_type`/`element_type`, key, `distinct` + junction filters (over a junction), filters, **Via** hops (table, `foreign_key`, filters each; **Add a hop**) |
+| aggregate | **operation** (switching keeps the table, key, filters and Via hops; the column and `value_type`/`element_type` reset), related table, column to aggregate, `value_type`/`element_type`, key, `distinct` + junction filters (over a junction), filters, **Via** hops (table, `foreign_key`, filters, `on` pairs each; **Add a hop**), **On** pairs against the parent or the last hop (only with a `foreign_key` key; switching to a junction drops them) |
 | geo | lat and lon columns, or a single json column |
 | map | column (json/jsonb), `values` |
 | custom | postgres types (comma-separated), opensearch type |

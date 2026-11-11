@@ -16,6 +16,7 @@ A join folds rows from a related table into the document. The relationship verb 
 | `column` | Postgres identifier | `belongs_to` | This table's column pointing at the related row. Defaults to the document key. |
 | `foreign_key` | Postgres identifier | `has_one`, `has_many` | The related table's column pointing back at the parent. Required. |
 | `through` | table | `many_to_many` | The junction. Required. See [through](#through). |
+| `on` | list of `{ local, related }` | `belongs_to`, `has_one`, `has_many` | Extra column equalities ANDed with the key. Rejected on `many_to_many`. See [on](#on). |
 | `fields` | list | all | The fields projected from each related row. Required. |
 | `required` | bool | `belongs_to`, `has_one` | `true` maps the object non-null. Rejected on to-many verbs. |
 | `filters` | list | all | Narrow which related rows fold in. See [Filters](filters-and-soft-delete.md). |
@@ -24,6 +25,36 @@ A join folds rows from a related table into the document. The relationship verb 
 | `indexed` | bool | all | `false` keeps the rows in the stored document without indexing them. Default `true`. See [indexed](#indexed). |
 
 **Key arity rule.** A join takes exactly the key sibling its verb implies. Anything else is a load-time error naming the right one.
+
+## on
+
+`on` adds column equalities to a join beside its key: a tenant id carried on both tables, a region code, a discriminator that is a column rather than a literal.
+
+```yaml
+- has_many: lines
+  table: order_lines
+  foreign_key: order_id
+  primary_key: id
+  on:
+    - { local: tenant_id, related: tenant_id }
+  fields:
+    - integer: qty
+      required: true
+```
+
+| Key | Meaning |
+| --- | --- |
+| `local` | A column of the table the field is declared on: the parent row of the hop. Inside a nested join, that join's table. |
+| `related` | A column of the field's `table`. |
+
+- **Each pair is one more `=`**, ANDed with the key and the `filters`. The example folds in the lines whose `order_id` is the order's primary key **and** whose `tenant_id` equals the order's.
+- **SQL equality.** A null on either side matches nothing, so a row with a null `tenant_id` never folds in.
+- **The key keeps its meaning.** `column` or `foreign_key` still points at a primary key; `on` only narrows the match. A relation keyed purely on a composite key, with no primary-key column in it, isn't supported.
+- **Where it's allowed:** `belongs_to`, `has_one`, `has_many`, and on aggregates (a `foreign_key` aggregate and each `via` hop; see [Aggregates](aggregates.md#on)). Rejected at load, naming the field: on `many_to_many`, on an aggregate over `through`, a pair missing `local` or `related`, the same pair listed twice. `on: []` is the same as no `on`.
+- **Not checked by [`flusso check`](cli.md#check)**, like the key columns: a typo surfaces when a document is built.
+- **Changing it** moves the schema to a new content hash, so the index is rebuilt once. A schema without `on` keeps its index.
+
+**What rebuilds.** Both sides of a pair are columns the document reads. A change to a `related` column rebuilds every parent the row's key links, whether the row matched before, matches after, or both, so a row leaving the match drops out of the document it left. A change to a `local` column rebuilds that parent's document, like any column it reads. An update that touches neither side, nor anything else the join reads, still rebuilds nothing; see [What a related change rebuilds](#what-a-related-change-rebuilds).
 
 ## through
 
@@ -65,7 +96,7 @@ The same `through` shape keys an aggregate; see [Aggregates](aggregates.md#over-
 
 ## What a related change rebuilds
 
-Every join is resolved in reverse. A changed related row is mapped back to the parent documents through the key the verb names, and each is rebuilt from the current rows. An update that changes no column the join reads (its fields, `filters`, `order_by`, link) rebuilds nothing on a `REPLICA IDENTITY FULL` table; see [Updates that change nothing a document reads](source-postgres.md#updates-that-change-nothing-a-document-reads). A `belongs_to` target that changes or is deleted re-emits every document pointing at it: the referrers are found on the parent table (`WHERE column = <key>`), so a deleted target rebuilds them with a null object rather than leaving them stale. Every joined table must be in the publication; see [Source: Postgres](source-postgres.md#capture).
+Every join is resolved in reverse. A changed related row is mapped back to the parent documents through the key the verb names, and each is rebuilt from the current rows. An update that changes no column the join reads (its fields, `filters`, `order_by`, link, either side of an [`on`](#on) pair) rebuilds nothing on a `REPLICA IDENTITY FULL` table; see [Updates that change nothing a document reads](source-postgres.md#updates-that-change-nothing-a-document-reads). A `belongs_to` target that changes or is deleted re-emits every document pointing at it: the referrers are found on the parent table (`WHERE column = <key>`), so a deleted target rebuilds them with a null object rather than leaving them stale. Every joined table must be in the publication; see [Source: Postgres](source-postgres.md#capture).
 
 A join can point back at the index's own table: a tree of `items` whose `has_many: children` reads `items` over `parent_id`. A change on that table rebuilds its own document **and** every document that embeds the row, to the depth the schema declares, each only when the change touches a column it reads. `children` nested once under `children` rebuilds the parent and the grandparent, never further. `belongs_to`, `has_one`, `many_to_many`, and aggregates over the root table behave the same way. A [`soft_delete`](filters-and-soft-delete.md#soft_delete) applies to the root row only: a soft-deleted child tombstones its own document but still appears under its parent unless the join carries its own `filters` on the soft-delete column. A deleted or re-parented row leaves its old parent like any other child, so the root table's replica identity has to carry the link column too; see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows). A schema with no join back at its own table pays nothing for this.
 
