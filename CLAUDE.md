@@ -508,14 +508,23 @@ reports a second prerequisite (issue #140, ADR 0007): reverse resolution traces 
 re-parented child to its old parent through the change's **pre-image** (`ChangeEvent.before:
 Option<RowImage>`, passed to `DocumentBuilder::resolve` and read only on the first hop, unioned
 with the current-DB lookup), so each child table's replica identity must carry its link column
-(`SourceSpec::pre_image_columns`: `has_one`/`has_many` `foreign_key`, junction `left_key`).
-Postgres answers from `relreplident` (`cdc/replica_identity.rs`); `check` prints a Replica
-identity section (read-only); `run` **sets** `REPLICA IDENTITY FULL` in `prepare()`, **before
-the slot** (a change logged in between would decode with the old identity), via `ensure_pre_image`
-when `manage_replica_identity` (default on) and the role owns the table — under a 5 s
-`lock_timeout`; a partitioned table is set on the parent and every partition that misses the link
-(a partition added later is caught at the next start); an unclosable gap is warned with
-the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
+(`SourceSpec::pre_image_columns`: `has_one`/`has_many` `foreign_key`, junction `left_key`), and
+every table an index reads should log its **whole** old row, for the #169 skip below (issue #202).
+`SourceSpec::pre_images` lists every `all_tables` entry with its links (mostly none); the CLI hands
+it to `run` and `check`. `PreImageReport` keeps two severities apart: `gaps` (a link column is
+missing: correctness — a loud warning with the SQL, and the stream warns once per table) and
+`partial` (only the rest of the row: the skip is lost — one info line per start). Postgres answers
+from `relreplident` (`cdc/replica_identity.rs`, `shortfall`); `check` prints a Replica identity
+section with both groups (read-only); `run` **sets** `REPLICA IDENTITY FULL` on every member that
+isn't `FULL` in `prepare()`, **before the slot** (a change logged in between would decode with the
+old identity), via `ensure_pre_image` when `manage_replica_identity` (default on; `false` alters
+nothing) and the role owns the table — each relation in its own transaction under a 5 s
+`lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned
+table is set on the parent and every partition (a partition added later is caught at the next
+start). Guards: `replica_identity::tests` (`shortfall`), `publication`'s
+`every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on
+one table) and `a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s
+`managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target`. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
 which mark every column under `FULL`. **An update that changes no column a document reads rebuilds nothing**
 (issue #169): an update with a pre-image also carries a post-image (`ChangeEvent::Upsert.after`,
@@ -1001,7 +1010,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | `flusso.toml` parsing (entities only; conversion is beside `Config`) | `libs/1-config/src/toml/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`, `replica_identity.rs`), `document/` (`resolve.rs`: reverse resolution + the first-hop pre-image union) |
-| Source trait abstractions (`ChangeCapture` + `Continuity`, `ChangeEvent` + `RowImage` pre-image, `DocumentBuilder`, `SourceSpec` + `all_tables`/`pre_image_columns`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`/`PreImageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
+| Source trait abstractions (`ChangeCapture` + `Continuity`, `ChangeEvent` + `RowImage` pre-image, `DocumentBuilder`, `SourceSpec` + `all_tables`/`pre_image_columns`/`pre_images`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`/`PreImageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
 | Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/**expression**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits (node ids are the client-only container `uid`s of `ids.ts`, which collapse state + drag positions key on, stripped from every request), plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
 | `Sink` trait (`apply`/`flush`/seeding/`reindex`), `SinkOptions`, JSON render | `libs/1-ports/sink/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |

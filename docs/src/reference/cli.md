@@ -33,7 +33,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--slot <name>` | `[source] slot`, else `flusso` | Replication slot to consume. Created when missing. |
 | `--publication <name>` | `[source] publication`, else `flusso` | Publication to subscribe to. Created or extended when allowed. |
 | `--manage-publication <bool>` | `[source] manage_publication`, else `true` | Whether flusso may issue publication DDL. |
-| `--manage-replica-identity <bool>` | `[source] manage_replica_identity`, else `true` | Whether flusso may set `REPLICA IDENTITY FULL` on child tables that need it. |
+| `--manage-replica-identity <bool>` | `[source] manage_replica_identity`, else `true` | Whether flusso may set `REPLICA IDENTITY FULL` on every table an index reads. |
 | `--skip-backfill` | off | Resume live capture only. A fresh slot then only warns instead of rebuilding. |
 | `--pretty` | off | Pretty-print every stdout sink's output (the default sink included). |
 | `--queue-capacity <n>` | `[stream] capacity`, else `1024` | Changes buffered between capture and processing. |
@@ -50,7 +50,7 @@ The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-
 
 ## check
 
-Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also checks the schemas against the live database, then prints the publication coverage report and the child tables whose replica identity misses their parent link (see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)), each saying whether `run` will fix it or giving the exact SQL. `check` never mutates the database.
+Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also checks the schemas against the live database, then prints the publication coverage report and the tables whose replica identity isn't `FULL` (see [Replica identity](source-postgres.md#replica-identity)), in two groups: the child tables that miss their parent link, and the tables that only miss the rest of the row. Each says whether `run` will fix it or gives the exact SQL. `check` never mutates the database.
 
 **What the database check verifies.** Every problem of one run is listed together, each naming the index, the field path (`users.orders.items`), and the missing table or column, with the schema key that names it (`` `foreign_key` references unknown column `public.orders.userid` ``).
 

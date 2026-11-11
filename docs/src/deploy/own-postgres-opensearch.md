@@ -22,7 +22,7 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
    GRANT SELECT ON ALL TABLES IN SCHEMA public TO flusso;
    ```
 
-   To let flusso manage the publication and the child tables' replica identity too, the role must own those tables (and hold `CREATE` on the database, for the publication). Otherwise flusso prints the SQL and you run it as a privileged role.
+   To let flusso manage the publication and set [`REPLICA IDENTITY FULL`](../reference/source-postgres.md#replica-identity) on the tables an index reads too, the role must own those tables (and hold `CREATE` on the database, for the publication). Otherwise flusso prints the SQL and you run it as a privileged role.
 
 3. **Confirm row identity.** Every replicated table needs a single-column primary key or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change.
 

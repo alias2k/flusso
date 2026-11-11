@@ -1,16 +1,23 @@
 # Upgrade to 0.17
 
-0.17 maps every `map` key like a plain field of the map's `values` type, so each index with a `map` field is rebuilt once into a new physical index; plan the data check, the consumer rollout, and the cleanup.
+0.17 sets `REPLICA IDENTITY FULL` on every table an index reads, and maps every `map` key like a plain field of the map's `values` type, so each index with a `map` field is rebuilt once into a new physical index; decide on the first, then plan the data check, the consumer rollout, and the cleanup of the second.
 
 ## When to use this
 
-Any deployment going from 0.16 to 0.17 whose schemas declare a [`map`](../reference/objects-and-maps.md#map) field anywhere in the document, joined tables included. Without one, nothing moves: no index is rebuilt and this page doesn't apply.
+Any deployment going from 0.16 to 0.17. Step 1 applies to every deployment with a Postgres source. Steps 2 to 8 apply when the schemas declare a [`map`](../reference/objects-and-maps.md#map) field anywhere in the document, joined tables included; without one, no index is rebuilt and you can stop after step 1.
 
 **Why the rebuild.** The content hash is the physical index name. 0.17 changes the hash of every schema with a `map` (and of no other schema), so the first 0.17 run finds a new hash alias, `{prefix}{logical}_{newhash}`, with no seed marker, creates generation `_1` behind it, and backfills it from Postgres on every OpenSearch sink. This happens with a committed `flusso.lock` and `--locked` too: the hash is recomputed when the lock loads.
 
 ## Steps
 
-1. **Check the data for values the typed keys refuse.** 0.16 left each key to OpenSearch's dynamic defaults, which accepted anything. 0.17 maps a key like a plain field, so the rebuild rejects:
+1. **Decide whether flusso may alter your tables.** On its first start, before it creates or resumes the slot, 0.17 runs `ALTER TABLE … REPLICA IDENTITY FULL` on every table an index reads that isn't `FULL` yet and that its role owns, where 0.16 only touched child tables missing their parent link. That buys [updates that change nothing a document reads](../reference/source-postgres.md#updates-that-change-nothing-a-document-reads) skipping the rebuild on root tables and `belongs_to` targets too. What it costs:
+
+   - **A brief lock per table.** Each `ALTER` takes an `ACCESS EXCLUSIVE` lock, waits at most 5 seconds for it, and blocks that table's readers while it waits. A table that times out is left as is and retried at the next start.
+   - **More WAL.** From then on every update and delete on those tables logs the whole old row instead of the primary key, so WAL volume, retention, and replication traffic grow, for every consumer of the server's WAL. Update-heavy and wide tables feel it most.
+
+   Preview what it will alter with `flusso check` against the database (0.17's): its **Replica identity** section lists each table that isn't `FULL`, whether the next `run` will set it, and the statement. To keep a table as it is, opt out **before the first 0.17 start**, with `manage_replica_identity = false` in `[source]` (or `--manage-replica-identity false`, `FLUSSO_MANAGE_REPLICA_IDENTITY=false`); flusso then alters nothing and only reports. What you take on by opting out is in [Replica identity](../reference/source-postgres.md#replica-identity). An `ALTER` already made stays; `ALTER TABLE … REPLICA IDENTITY DEFAULT` undoes it.
+
+2. **Check the data for values the typed keys refuse.** 0.16 left each key to OpenSearch's dynamic defaults, which accepted anything. 0.17 maps a key like a plain field, so the rebuild rejects:
 
    - a non-numeric string in a numeric map (a numeric string such as `"3.5"` is coerced and passes);
    - an object as a value, in any map;
@@ -35,9 +42,9 @@ Any deployment going from 0.16 to 0.17 whose schemas declare a [`map`](../refere
 
    Fix the rows, or plan to skip them (next step).
 
-2. **Decide what a rejected row does during the rebuild.** The default [`on_error = "stop"`](../reference/index-and-on-error.md#on_error) halts that sink on the first rejection, and the redelivered batch hits it again on every restart: the rebuild never finishes. If step 1 left rows you can't fix yet, set `on_error = "skip"` on those indexes for the upgrade, then find and re-index the quarantined documents as in [Handle rejected documents](rejected-documents.md).
+3. **Decide what a rejected row does during the rebuild.** The default [`on_error = "stop"`](../reference/index-and-on-error.md#on_error) halts that sink on the first rejection, and the redelivered batch hits it again on every restart: the rebuild never finishes. If step 2 left rows you can't fix yet, set `on_error = "skip"` on those indexes for the upgrade, then find and re-index the quarantined documents as in [Handle rejected documents](rejected-documents.md).
 
-3. **Check the field budget of wide maps.** Every distinct key now costs as many mapped fields as a plain field of its type: three for a `text` key with the default `auto_subfields`, four for a keyword key (it also gets an exact `.keyword` for queries across keys), one for a number or date. A map with a few hundred distinct keys reaches `index.mapping.total_fields.limit` (1000), and each document that adds a key past it is rejected. Count the keys:
+4. **Check the field budget of wide maps.** Every distinct key now costs as many mapped fields as a plain field of its type: three for a `text` key with the default `auto_subfields`, four for a keyword key (it also gets an exact `.keyword` for queries across keys), one for a number or date. A map with a few hundred distinct keys reaches `index.mapping.total_fields.limit` (1000), and each document that adds a key past it is rejected. Count the keys:
 
    ```sql
    SELECT count(DISTINCT k) FROM products, jsonb_object_keys(title::jsonb) AS k;
@@ -45,7 +52,7 @@ Any deployment going from 0.16 to 0.17 whose schemas declare a [`map`](../refere
 
    If the total gets close, raise the limit for that index with [`index_settings`](../reference/sink-opensearch.md#index-settings) before upgrading; settings are read when a generation is created, which the rebuild is.
 
-4. **Upgrade flusso, keep the consumers as they are.** Stop the 0.16 process and start 0.17 on the same slot. Every `map` index goes `backfilling`, the others stay `seeded`.
+5. **Upgrade flusso, keep the consumers as they are.** Stop the 0.16 process and start 0.17 on the same slot. Every `map` index goes `backfilling`, the others stay `seeded`.
 
    A `flusso-query` consumer bakes the schema hash at compile time, so the two generations of consumers address different indexes:
 
@@ -56,7 +63,7 @@ Any deployment going from 0.16 to 0.17 whose schemas declare a [`map`](../refere
 
    So the old consumers keep serving (slightly stale) results until the new index is seeded.
 
-5. **Wait for the new index to be seeded.** Watch each `map` index under every sink in [`/status`](../reference/http.md#get-status) on the public surface, or with [`flusso indexes`](../reference/cli.md#indexes) on the private one:
+6. **Wait for the new index to be seeded.** Watch each `map` index under every sink in [`/status`](../reference/http.md#get-status) on the public surface, or with [`flusso indexes`](../reference/cli.md#indexes) on the private one:
 
    ```sh
    watch -n 5 'curl -s localhost:9464/status | jq .sinks.primary.indexes'
@@ -64,9 +71,9 @@ Any deployment going from 0.16 to 0.17 whose schemas declare a [`map`](../refere
 
    `seeded` means the backfill finished and the hash alias serves a complete generation.
 
-6. **Deploy the consumers rebuilt against 0.17.** Rebuild them with `flusso-query` 0.17 (the source changes, including `TextMap::search` becoming `matches`, are in [Maps](../query/maps.md#upgrading-from-016)) and roll them out now, not earlier: string map sorts and the exact operators across a keyword map's keys read subfields only the new index has.
+7. **Deploy the consumers rebuilt against 0.17.** Rebuild them with `flusso-query` 0.17 (the source changes, including `TextMap::search` becoming `matches`, are in [Maps](../query/maps.md#upgrading-from-016)) and roll them out now, not earlier: string map sorts and the exact operators across a keyword map's keys read subfields only the new index has.
 
-7. **Delete the old index.** flusso never removes it: a rebuild only sweeps generations under its *own* hash alias, so `{prefix}{logical}_{oldhash}_{n}` keeps its disk until deleted by hand. List the aliases; the convenience alias `{logical}` points at the new generation, and the hash alias that points elsewhere is the old one:
+8. **Delete the old index.** flusso never removes it: a rebuild only sweeps generations under its *own* hash alias, so `{prefix}{logical}_{oldhash}_{n}` keeps its disk until deleted by hand. List the aliases; the convenience alias `{logical}` points at the new generation, and the hash alias that points elsewhere is the old one:
 
    ```sh
    curl -s 'localhost:9200/_cat/aliases/products*?v&h=alias,index'
@@ -95,6 +102,7 @@ Any deployment going from 0.16 to 0.17 whose schemas declare a [`map`](../refere
 
 ## Related
 
+- [Source: Postgres](../reference/source-postgres.md#replica-identity) for what flusso sets on your tables and how to opt out.
 - [Objects and maps](../reference/objects-and-maps.md#map) for how a key is mapped.
 - [Sink: OpenSearch](../reference/sink-opensearch.md#index-naming) for hash aliases and generations.
 - [Reindex without downtime](reindex.md) for rebuilding an index on demand.
