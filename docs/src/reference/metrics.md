@@ -47,7 +47,7 @@ The dev stack ships two Prometheus recording rules worth copying (`dev/prometheu
 | `flusso:slot_lag_bytes_rate5m` | `deriv(flusso_replication_slot_lag_bytes[2m])` | Net drain rate in bytes/s. Negative means catching up. |
 | `flusso:backlog_drain_eta_seconds` | `(lag > 4 MiB) / (-rate > 0)` | Seconds until the backlog clears at the current rate. Absent while flat or growing, and below an idle floor of 4 MiB. |
 
-The floor exists because slot lag never reaches zero: Postgres advances the WAL on checkpoints and autovacuum while flusso's confirmed position moves only on real changes. Raise it above your deployment's steady idle lag.
+The floor exists because slot lag rarely reaches zero: Postgres writes WAL of its own (checkpoints, autovacuum), and flusso's confirmed position catches up with it only when the server reports that progress in a keepalive, so even an idle deployment trails the head a little. Raise it above your deployment's steady idle lag.
 
 ## Export
 

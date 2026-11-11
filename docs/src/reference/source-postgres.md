@@ -68,7 +68,11 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
   - The option applies to the whole publication. Once set, a partition's changes arrive under its topmost published ancestor's name, so an index that reads a partition directly while its partitioned table is also in the publication sees none of them (flusso warns when both are read), and so does any other subscriber of the same publication that expects partition names.
 - **Every read table's replica identity is set to `FULL` automatically** when `manage_replica_identity` is on and the role owns it. See [Replica identity](#replica-identity).
 - **Idle tables don't pin WAL.** A running flusso advances the slot from server keepalives even while the watched tables are quiet, so writes to unrelated tables aren't retained on its behalf.
-- **WAL is released within about 2 seconds of the last sink flush.** flusso reports its confirmed position to Postgres every second, so once every sink has flushed a change, the slot's `confirmed_flush_lsn` passes it about 1 to 2 seconds later and the server can recycle that WAL. The interval is fixed. A slow or stalled sink still holds the slot back: the confirmed position is the slowest sink's.
+- **Retained WAL trails by seconds, not by change volume.** Two clocks decide it:
+  - flusso reports its position about a second after every sink has flushed a change, so the slot's `confirmed_flush_lsn` passes the change then. The interval is fixed.
+  - Postgres can recycle that WAL (the slot's `restart_lsn` moves) once it has logged its next periodic snapshot record, typically within about 15 seconds.
+
+  A slow or stalled sink still holds the slot back: the confirmed position is the slowest sink's.
 - **Backfill** snapshots the root tables of unseeded indexes before live capture. `--skip-backfill` skips it. A partitioned root is read through the parent, every partition included.
 
 ## Server requirements
