@@ -90,7 +90,7 @@ pub struct PreImageReport {
 impl PreImageGap {
     /// Whether a source told to `manage` will close this gap itself.
     pub fn will_manage(&self, manage: bool) -> bool {
-        manage && self.manageable
+        manage && self.manageable && self.kept.is_none()
     }
 }
 
@@ -122,6 +122,12 @@ pub struct PreImageGap {
     /// The backend-specific step that makes the pre-image the whole row —
     /// opaque, shown verbatim (for Postgres, `ALTER TABLE … REPLICA IDENTITY FULL`).
     pub remediation: String,
+    /// Why the source leaves this table as it is on purpose, even when told to
+    /// manage it: the operator chose a setting that already carries the row's key and every link
+    /// (for Postgres, a replica identity on an index). Only ever on a
+    /// [`partial`](PreImageReport::partial) entry; `remediation` still names
+    /// the step for an operator who wants the whole row anyway.
+    pub kept: Option<String>,
 }
 
 /// A source's ability to report and provision the prerequisites for streaming a
@@ -151,8 +157,9 @@ pub trait CaptureProvisioning: Send + Sync {
     async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport>;
 
     /// When `manage` is set, make the pre-image the whole row on every listed
-    /// table the source is allowed to, and report (log) the rest: a link gap
-    /// loudly, a partial one quietly. Returns the report as observed *before*
+    /// table the source is allowed to and doesn't [keep](PreImageGap::kept),
+    /// and report (log) the rest: a link gap loudly, a partial or kept one
+    /// quietly. Returns the report as observed *before*
     /// acting, so a gap it just closed is still listed — re-inspect for the
     /// current state. One table that can't be set doesn't stop the others, nor
     /// capture.

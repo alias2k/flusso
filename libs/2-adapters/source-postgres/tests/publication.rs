@@ -6,7 +6,8 @@
 //! `DEFAULT`, `FULL`, `USING INDEX`, a composite-key junction, and a
 //! partitioned table across its partitions, and
 //! `ensure_pre_image` setting `FULL` when privileged and refusing when not —
-//! on every table an index reads, the root and a `belongs_to` target included.
+//! on every table an index reads, the root and a `belongs_to` target included —
+//! and keeping a `USING INDEX` identity that already carries the link.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -425,6 +426,17 @@ async fn pre_image_gaps_follow_each_tables_replica_identity() {
         "they carry the link, but not the whole row"
     );
     assert!(report.partial.iter().all(|g| g.missing.is_empty()));
+    let kept: Vec<String> = report
+        .partial
+        .iter()
+        .filter(|g| g.kept.is_some())
+        .map(|g| g.table.to_string())
+        .collect();
+    assert_eq!(
+        kept,
+        ["public.by_index"],
+        "an identity index carrying the link"
+    );
     let remediation = report.gaps.first().unwrap().remediation.clone();
     assert_eq!(
         remediation,
@@ -667,6 +679,140 @@ async fn every_table_an_index_reads_is_set_to_full() {
         pairs(&[("orders", "f"), ("teams", "f"), ("users", "f")])
     );
     assert!(cap.inspect_pre_image(&required).await.unwrap().complete());
+}
+
+/// `relreplident` of the relation named `name`.
+async fn identity(pool: &PgPool, name: &str) -> String {
+    sqlx::query_scalar("SELECT relreplident::text FROM pg_class WHERE relname = $1")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn an_identity_index_carrying_the_link_is_kept_and_the_rest_are_set_to_full() {
+    let container = postgres().await;
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
+    for statement in [
+        "CREATE TABLE by_index (id int PRIMARY KEY, parent_id int NOT NULL)",
+        "CREATE UNIQUE INDEX by_index_identity ON by_index (id, parent_id)",
+        "ALTER TABLE by_index REPLICA IDENTITY USING INDEX by_index_identity",
+        "CREATE TABLE by_default (id int PRIMARY KEY, parent_id int NOT NULL)",
+        "CREATE TABLE by_other_index (id int PRIMARY KEY, parent_id int NOT NULL, code int NOT NULL)",
+        "CREATE UNIQUE INDEX by_other_index_identity ON by_other_index (id, code)",
+        "ALTER TABLE by_other_index REPLICA IDENTITY USING INDEX by_other_index_identity",
+        "CREATE TABLE parted (id int, parent_id int NOT NULL, PRIMARY KEY (id)) \
+         PARTITION BY RANGE (id)",
+        "CREATE TABLE parted_low PARTITION OF parted FOR VALUES FROM (0) TO (1000)",
+        "CREATE TABLE parted_high PARTITION OF parted FOR VALUES FROM (1000) TO (2000)",
+        "CREATE UNIQUE INDEX parted_high_identity ON parted_high (id, parent_id)",
+        "ALTER TABLE parted_high REPLICA IDENTITY USING INDEX parted_high_identity",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let cap = capture(port, "postgres", "postgres", "postgres");
+    let required = links(&[
+        ("by_index", "parent_id"),
+        ("by_default", "parent_id"),
+        ("by_other_index", "parent_id"),
+        ("parted", "parent_id"),
+    ]);
+
+    let report = cap.ensure_pre_image(&required, true).await.unwrap();
+    let kept = report
+        .partial
+        .iter()
+        .find(|gap| gap.table.to_string() == "public.by_index")
+        .unwrap();
+    assert!(kept.kept.is_some());
+    assert!(!kept.will_manage(true));
+
+    assert_eq!(identity(&pool, "by_index").await, "i", "kept as chosen");
+    assert_eq!(identity(&pool, "by_default").await, "f");
+    assert_eq!(
+        identity(&pool, "by_other_index").await,
+        "f",
+        "missed the link"
+    );
+    assert_eq!(identity(&pool, "parted").await, "f");
+    assert_eq!(identity(&pool, "parted_low").await, "f");
+    assert_eq!(
+        identity(&pool, "parted_high").await,
+        "i",
+        "a partition whose identity index carries the link is kept"
+    );
+
+    let after = cap.inspect_pre_image(&required).await.unwrap();
+    assert!(after.satisfied(), "every link is carried");
+    let partial: Vec<String> = after.partial.iter().map(|g| g.table.to_string()).collect();
+    assert_eq!(
+        partial,
+        ["public.by_index"],
+        "the partitioned table is not reported"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_root_is_kept_only_on_an_identity_index_carrying_its_primary_key() {
+    let container = postgres().await;
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&admin_url).await.unwrap();
+    for statement in [
+        "CREATE TABLE on_pk (id int PRIMARY KEY, slug text NOT NULL)",
+        "ALTER TABLE on_pk REPLICA IDENTITY USING INDEX on_pk_pkey",
+        "CREATE TABLE with_pk (id int PRIMARY KEY, slug text NOT NULL)",
+        "CREATE UNIQUE INDEX with_pk_identity ON with_pk (slug, id)",
+        "ALTER TABLE with_pk REPLICA IDENTITY USING INDEX with_pk_identity",
+        "CREATE TABLE without_pk \
+         (id int PRIMARY KEY, tenant int NOT NULL, slug text NOT NULL)",
+        "CREATE UNIQUE INDEX without_pk_identity ON without_pk (tenant, slug)",
+        "ALTER TABLE without_pk REPLICA IDENTITY USING INDEX without_pk_identity",
+        "CREATE TABLE dropped (id int PRIMARY KEY, slug text NOT NULL)",
+        "CREATE UNIQUE INDEX dropped_identity ON dropped (id, slug)",
+        "ALTER TABLE dropped REPLICA IDENTITY USING INDEX dropped_identity",
+        "DROP INDEX dropped_identity",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    assert_eq!(
+        identity(&pool, "dropped").await,
+        "i",
+        "Postgres keeps the code"
+    );
+    let cap = capture(port, "postgres", "postgres", "postgres");
+    let roots: PreImageColumns = required(&["on_pk", "with_pk", "without_pk", "dropped"])
+        .into_iter()
+        .map(|table| (table, Vec::new()))
+        .collect();
+
+    let report = cap.ensure_pre_image(&roots, true).await.unwrap();
+    assert!(report.gaps.is_empty(), "a root has no link to miss");
+    let kept: Vec<String> = report
+        .partial
+        .iter()
+        .filter(|gap| gap.kept.is_some())
+        .map(|gap| gap.table.to_string())
+        .collect();
+    assert_eq!(kept, ["public.on_pk", "public.with_pk"]);
+
+    assert_eq!(identity(&pool, "on_pk").await, "i");
+    assert_eq!(identity(&pool, "with_pk").await, "i");
+    assert_eq!(
+        identity(&pool, "without_pk").await,
+        "f",
+        "changes would be keyed by (tenant, slug)"
+    );
+    assert_eq!(
+        identity(&pool, "dropped").await,
+        "f",
+        "a dropped identity index logs nothing"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

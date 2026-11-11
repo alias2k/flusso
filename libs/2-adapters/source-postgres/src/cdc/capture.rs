@@ -486,10 +486,19 @@ impl CaptureProvisioning for WalChangeCapture {
         let pool = self.admin_pool().await?;
         let report = replica_identity::inspect(pool, required).await?;
         let mut unset = Vec::new();
+        let mut kept = Vec::new();
         for gap in report.gaps.iter().chain(&report.partial) {
+            if let Some(reason) = &gap.kept {
+                kept.push(format!("{} ({reason})", gap.table));
+                continue;
+            }
             let reason = if manage {
                 let mut reasons = gap.blockers.clone();
-                if let Err(error) = replica_identity::apply(pool, gap).await {
+                let links = required
+                    .get(&gap.table)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if let Err(error) = replica_identity::apply(pool, gap, links).await {
                     reasons.push(error.to_string());
                 }
                 if reasons.is_empty() {
@@ -516,6 +525,14 @@ impl CaptureProvisioning for WalChangeCapture {
                     &gap.remediation,
                 );
             }
+        }
+        if !kept.is_empty() {
+            tracing::info!(
+                tables = %kept.join("; "),
+                "replica identity kept as is on these tables: its index already carries the \
+                 primary key and every parent link, so flusso does not set it to FULL; an update there always rebuilds every \
+                 document that reads the table",
+            );
         }
         if !unset.is_empty() {
             let tables = unset

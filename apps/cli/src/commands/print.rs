@@ -175,8 +175,8 @@ pub(crate) fn coverage(
 /// row, in two groups: the ones that miss a parent link (a delete or re-parent
 /// leaves the old parent's document stale) and the ones that only lose the
 /// unread-column skip. Each says whether `flusso run` will set it (`manage` is
-/// the effective `manage_replica_identity`); the SQL is printed for the ones it
-/// won't.
+/// the effective `manage_replica_identity`) or keeps it on purpose; the SQL is
+/// printed for the ones it won't set and doesn't keep.
 pub(crate) fn pre_image(
     out: &mut impl Write,
     pen: Pen,
@@ -195,7 +195,11 @@ pub(crate) fn pre_image(
     }
 
     let verdict = |gap: &PreImageGap| {
-        if gap.will_manage(manage) {
+        if let Some(reason) = &gap.kept {
+            pen.dim(&format!(
+                "→ kept as is ({reason}); updates to this table always rebuild"
+            ))
+        } else if gap.will_manage(manage) {
             pen.green("→ will be set automatically on the next `flusso run`")
         } else if gap.manageable {
             pen.yellow("→ the role CAN set it, but manage_replica_identity = false")
@@ -253,7 +257,7 @@ pub(crate) fn pre_image(
 
     let manual = |gaps: &[PreImageGap]| -> Vec<String> {
         gaps.iter()
-            .filter(|gap| !gap.will_manage(manage))
+            .filter(|gap| gap.kept.is_none() && !gap.will_manage(manage))
             .map(|gap| gap.remediation.clone())
             .collect()
     };
@@ -579,7 +583,39 @@ fn pen_pad(pen: Pen, text: &str) -> usize {
 mod tests {
     use config::{FlussoType, Mapping};
 
-    use super::type_label;
+    use super::{Pen, pre_image, type_label};
+
+    fn gap(table: &str, kept: Option<&str>) -> source::PreImageGap {
+        source::PreImageGap {
+            table: source::QualifiedTable::new(
+                config::DatabaseSchema::try_new("public").unwrap(),
+                config::TableName::try_new(table).unwrap(),
+            ),
+            missing: Vec::new(),
+            manageable: true,
+            blockers: Vec::new(),
+            remediation: format!("ALTER TABLE {table} REPLICA IDENTITY FULL;"),
+            kept: kept.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_kept_table_says_why_and_prints_no_sql() {
+        let report = source::PreImageReport {
+            gaps: Vec::new(),
+            partial: vec![gap("teams", None), gap("orders", Some("on an index"))],
+        };
+        let mut out = Vec::new();
+        pre_image(&mut out, Pen { color: false }, &report, false).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(
+                "orders  → kept as is (on an index); updates to this table always rebuild"
+            )
+        );
+        assert!(out.contains("ALTER TABLE teams"));
+        assert!(!out.contains("ALTER TABLE orders"), "{out}");
+    }
 
     #[test]
     fn a_map_reads_as_its_key_type() {

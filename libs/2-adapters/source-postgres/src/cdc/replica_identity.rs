@@ -13,10 +13,22 @@
 //! | `f` (`FULL`) | every column |
 //! | `n` (`NOTHING`) | nothing |
 //!
-//! Every table an index reads should be `FULL`: a required link column outside
-//! the old tuple is a correctness gap (a delete or re-parent leaves the old
-//! parent stale), and anything short of the whole row loses the unread-column
-//! skip. Both are closed by `ALTER TABLE … REPLICA IDENTITY FULL` ([`apply`]).
+//! Every table an index reads should log its whole old row: a required link
+//! column outside the old tuple is a correctness gap (a delete or re-parent
+//! leaves the old parent stale), and anything short of the whole row loses the
+//! unread-column skip. Both are closed by `ALTER TABLE … REPLICA IDENTITY FULL`
+//! ([`apply`]).
+//!
+//! One identity is **kept** instead: `USING INDEX` on an index that carries
+//! the whole primary key and every link (see [`uncarried`]), for every table,
+//! link or not. Someone chose it on
+//! purpose, usually to hold down WAL volume for every consumer of the table,
+//! and flusso only loses the unread-column skip there, so it is reported under
+//! `partial` with [`PreImageGap::kept`] set and never altered. `DEFAULT`,
+//! `NOTHING`, an identity index that misses a link or any primary-key column
+//! (the decoder would key changes by the index's columns instead), a dropped
+//! identity index (Postgres then logs nothing), and a table with no primary
+//! key are still set.
 //! That needs ownership of the table (or superuser) — the same grant publication
 //! management needs — and takes an `ACCESS EXCLUSIVE` lock, so it runs under a
 //! short `lock_timeout` rather than queueing behind a long transaction. The
@@ -29,7 +41,11 @@
 //! WAL logs, and Postgres doesn't pass a parent's setting down — not to
 //! existing partitions, nor to ones created or attached later. So every member
 //! that isn't `FULL` is altered, and a partition added later is caught at the
-//! next start.
+//! next start. The kept rule is per member: a parent or partition whose
+//! identity index carries its primary key and every link stays as it is while its siblings that
+//! miss one are set. A partitioned table with no gap is left alone whatever
+//! its members' identities: its updates carry no post-image, so the whole
+//! row would buy nothing.
 
 use kernel::ColumnName;
 use source::{PreImageColumns, PreImageGap, PreImageReport, QualifiedTable, Result, SourceError};
@@ -93,6 +109,28 @@ impl Member {
         uncarried(carries, &self.primary_key, required)
     }
 
+    /// An identity set on an index that carries the whole primary key and
+    /// every `required` link: left as the operator chose it, never altered.
+    ///
+    /// The primary key is checked even with no link to carry. Without it the
+    /// decoder keys every change by the identity columns, so live writes land
+    /// under other document ids than the backfill's and a delete removes
+    /// nothing; and an identity index that was dropped carries nothing at all.
+    fn kept(&self, required: &[ColumnName]) -> bool {
+        self.identity == ReplicaIdentity::Index
+            && !self.primary_key.is_empty()
+            && self
+                .primary_key
+                .iter()
+                .all(|pk| self.carried.iter().any(|name| name == pk))
+            && self.uncarried(required).is_empty()
+    }
+
+    /// Whether flusso sets this relation to `FULL` when its table is reported.
+    fn to_alter(&self, required: &[ColumnName]) -> bool {
+        self.identity != ReplicaIdentity::Full && !self.kept(required)
+    }
+
     fn alter_sql(&self) -> String {
         alter_sql(&self.schema, &self.name)
     }
@@ -149,10 +187,12 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
 
 /// What `table` (its `members`) falls short of a `FULL` identity throughout:
 /// the `required` link columns some member's old tuple misses, the members the
-/// role can't alter, and the statements for every member that isn't `FULL`.
-/// `None` when every member is `FULL`, and for a partitioned table that misses
-/// no link: its updates always rebuild (they carry no post-image), so the
-/// rest of the row would buy nothing.
+/// role can't alter, and the statements for every member flusso sets. `None`
+/// when every member is `FULL`, and for a partitioned table that misses no
+/// link: its updates always rebuild (they carry no post-image), so the rest of
+/// the row would buy nothing. A table whose only shortfall is a kept identity
+/// (see the module doc) is reported with [`PreImageGap::kept`] set, its
+/// remediation still the statement an operator could run by hand.
 fn shortfall(
     table: &QualifiedTable,
     required: &[ColumnName],
@@ -178,7 +218,24 @@ fn shortfall(
     if missing.is_empty() && partitioned {
         return None;
     }
-    let blockers: Vec<String> = short
+    let altered: Vec<&Member> = short
+        .iter()
+        .copied()
+        .filter(|member| member.to_alter(required))
+        .collect();
+    let (listed, kept) = if altered.is_empty() {
+        (
+            short,
+            Some(
+                "replica identity is set on an index that carries the primary key and every \
+                 parent link"
+                    .to_owned(),
+            ),
+        )
+    } else {
+        (altered, None)
+    };
+    let blockers: Vec<String> = listed
         .iter()
         .filter(|member| !member.owned)
         .map(|member| format!("role does not own table {}.{}", member.schema, member.name))
@@ -188,11 +245,12 @@ fn shortfall(
         missing,
         manageable: blockers.is_empty(),
         blockers,
-        remediation: short
+        remediation: listed
             .iter()
             .map(|member| member.alter_sql())
             .collect::<Vec<_>>()
             .join(" "),
+        kept,
     })
 }
 
@@ -200,13 +258,17 @@ fn shortfall(
 const LOCK_TIMEOUT: &str = "5s";
 
 /// `REPLICA IDENTITY FULL` on every member of `gap`'s table (the table alone,
-/// or its partition tree) that isn't `FULL` and that the role owns; the
-/// members it doesn't own are already the gap's blockers. Each relation gets
-/// its own transaction under [`LOCK_TIMEOUT`], so a busy partition neither
-/// holds the parent's lock while it waits nor undoes its siblings. A timeout
-/// or a denied grant is a [`SourceError::Setup`] naming the table; the rest
-/// still run.
-pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap) -> Result<()> {
+/// or its partition tree) that isn't `FULL`, isn't a kept identity for the
+/// `required` links, and that the role owns; the members it doesn't own are
+/// already the gap's blockers. A gap that is [`kept`](PreImageGap::kept) alters
+/// nothing. Each relation gets its own transaction under [`LOCK_TIMEOUT`], so a
+/// busy partition neither holds the parent's lock while it waits nor undoes its
+/// siblings. A timeout or a denied grant is a [`SourceError::Setup`] naming the
+/// table; the rest still run.
+pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap, required: &[ColumnName]) -> Result<()> {
+    if gap.kept.is_some() {
+        return Ok(());
+    }
     let setup = |e: sqlx::Error| {
         SourceError::Setup(format!(
             "failed to set REPLICA IDENTITY FULL on {}: {e}",
@@ -215,7 +277,7 @@ pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap) -> Result<()> {
     };
     let mut first_error = None;
     for member in members(pool, &gap.table).await.map_err(setup)? {
-        if member.identity == ReplicaIdentity::Full || !member.owned {
+        if !member.to_alter(required) || !member.owned {
             continue;
         }
         if let Err(e) = alter(pool, &member).await {
