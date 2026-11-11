@@ -56,8 +56,9 @@ pub struct PostgresConfig {
     /// link (a deleted or re-parented row rebuilds its old parent), and an
     /// update that changes no column a document reads rebuilds nothing. Needs
     /// ownership of the table; every update and delete then logs the whole old
-    /// row (more WAL). `false` makes flusso only report and never issue the
-    /// `ALTER`.
+    /// row (more WAL). A `USING INDEX` identity whose index already carries
+    /// the whole primary key and every parent link is kept as it is. `false`
+    /// makes flusso only report and never issue the `ALTER`.
     #[serde(default = "default_true")]
     pub manage_replica_identity: bool,
     /// The logical replication slot flusso consumes. Created on first run.

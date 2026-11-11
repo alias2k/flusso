@@ -91,4 +91,5 @@
 - [Testing](contribute/testing.md)
 - [Benchmarks](contribute/benchmarks.md)
 - [Releasing](contribute/releasing.md)
+- [Dependency updates](contribute/dependencies.md)
 - [Writing docs](contribute/writing-docs.md)

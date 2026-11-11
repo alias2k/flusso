@@ -205,9 +205,10 @@ bench baseline="":
       cargo bench -p flusso-script --bench scripted
     fi
 
-# Compare two saved in-process baselines; fails past 10% slower (what CI does
-# with `base` vs `pr`). E.g. `just bench main` on main, `just bench pr` on the
-# branch, then `just bench-compare main pr`.
+# Compare two saved in-process baselines; fails past 10% slower (CI's first pass
+# with `base` vs `pr`; CI then re-measures a breach, see bench-gate.sh).
+# E.g. `just bench main` on main, `just bench pr` on the branch, then
+# `just bench-compare main pr`.
 bench-compare base cand:
     python3 .github/scripts/bench-compare.py target/criterion {{base}} {{cand}} 10
 

@@ -44,7 +44,7 @@ Caps: a wall-clock cap for the whole run and an RSS cap on the child. Either one
 ```sh
 just bench                         # in-process benches, no Docker, ~2 minutes
 just bench main                    # same, saved as Criterion baseline `main`
-just bench-compare main pr         # fail past 10% slower (what CI does for a PR)
+just bench-compare main pr         # fail past 10% slower (CI's first pass; CI then re-measures a breach)
 just bench-components              # the Docker-backed component benches
 just bench-scenario reference ci   # a scenario; also `complex`, and `default` scale
 just load                          # the soak tool: watch it, it produces no comparable number
@@ -58,7 +58,13 @@ To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on
 
 `.github/workflows/bench.yml` has two jobs.
 
-- **On a pull request**, `in-process` checks out the PR's base, runs the four in-process benches saving baseline `base` (a base that predates the script bench runs the other three), checks out the PR, runs them again as `pr`, and fails when any bench's median is more than 10% slower. Same runner for both sides, so there is no cross-run noise to argue with.
+- **On a pull request**, `in-process` checks the PR's base out into a second worktree, runs the four in-process benches there saving baseline `base` (a base that predates the script bench runs the other three), then runs them on the PR as `pr`. Both sides run on the same runner, each from its own target directory, and write their baselines to one Criterion directory (`CRITERION_HOME`).
+  - Each tree needs its own target directory. With one shared directory, cargo treats the base's build as fresh for the PR tree (a workspace member's artifacts are keyed by its path inside the workspace, and freshness is by modification time) and the PR side runs the base's binary. Before comparing, `bench-provenance.py` checks that each side ran executables from its own target directory and prints both sides' sha256 per bench. Identical hashes alone are not an error: a PR that changes only tests or comments compiles to the same bench binary.
+  - A base with none of the in-process benches only warns: there is nothing to gate against yet. Any other failure on the base fails the job, and so does a comparison that finds no bench measured on both sides.
+  - A bench whose median is more than 10% slower is a **breach**, not yet a failure. A shared runner still has noisy moments, and one sample past 10% is often just that.
+  - `.github/scripts/bench-gate.sh` re-measures each breach on its own (Criterion's `--exact` filter on its full id, so `live_drain/sinks1/6` never runs `…/64`), base then PR, one bench at a time, saved as `base-confirm` and `pr-confirm`. Both trees and both target directories are kept, so cargo finds both builds fresh, and the provenance check proves each re-run executed the same binary as its first pass.
+  - A breach is confirmed, and fails the job, when the re-run is past 10% or the mean of the first-pass and re-run changes is; it clears only when both are within 10%. A breach left unmeasured, because a re-run failed or the 600 s budget (`BENCH_CONFIRM_BUDGET_SECS`, checked before each benchmark) ran out, counts as confirmed: if most of the suite breaches, the gate re-measures it all and a broken runner still goes red.
+  - The log and the step summary show the first-pass table, then one row per re-measured bench with the first-pass change, both re-run medians, the re-run change, the mean and the verdict.
 - **On a push to `main`**, `scenarios` runs the in-process benches, the Docker-backed component benches, and both scenarios at `ci` scale, converts everything to one list of data points, and stores them with `github-action-benchmark` on the `benchmarks` data branch. The Pages workflow folds that branch into the site at [`/bench/`](https://alias2k.github.io/flusso/bench/).
 
 ## What counts as a regression

@@ -81,8 +81,14 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   API, no feature; `bench-in-process.sh` skips it on a PR base that predates the crate). `pgoutput` and `render` sit behind each
   crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
   `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
-  on a PR, `in-process` runs the three benches on the base then the PR (same runner) and fails past
-  10% slower (`bench-compare.py`); on a `main` push, `scenarios` runs everything and stores the
+  on a PR, `in-process` runs the in-process benches on the base (its own worktree **and its own
+  target dir**: a shared one makes cargo run the base's binary for the PR, since a workspace member's
+  fingerprint is keyed by its path inside the workspace) then the PR, same runner, both into one
+  `CRITERION_HOME`; `bench-provenance.py` checks each side ran executables from its own target dir; a
+  base with no in-process bench (exit 78) only warns, any other base failure fails. `bench-gate.sh`
+  re-measures each bench past 10% slower (`bench-compare.py`) on its own, base then PR (`--exact`), and
+  a breach is confirmed when the re-run or the mean of both passes is past 10%, cleared only when both
+  are within it; on a `main` push, `scenarios` runs everything and stores the
   points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
   `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
   calls a regression only on two consecutive points past 25% (20% RSS), image-tag change restarts
@@ -189,7 +195,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
-  handling — they're ordinary tests caught by the nextest step.
+  handling — they're ordinary tests caught by the nextest step. Outside `ci.yml`, `audit.yml`'s
+  `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on
+  changes to a `Cargo.toml`/`Cargo.lock` — advisory only, never a required check — and
+  `.github/dependabot.yml` opens grouped weekly `chore(deps)` PRs (cargo, npm, actions; skips
+  flusso's own crates, `rust-toolchain.toml`, ESLint 10). A bot npm bump fails the dist-drift guard
+  until the SPA is rebuilt and committed on its branch (`docs/src/contribute/dependencies.md`).
 - **The designer (`apps/design`) has two test layers.** (1) A property/"fuzz" round-trip
   (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
   `codegen → parse → convert` identity — an ordinary test, caught by the nextest step (plus the
@@ -553,18 +564,26 @@ every table an index reads should log its **whole** old row, for the #169 skip b
 `SourceSpec::pre_images` lists every `all_tables` entry with its links (mostly none); the CLI hands
 it to `run` and `check`. `PreImageReport` keeps two severities apart: `gaps` (a link column is
 missing: correctness — a loud warning with the SQL, and the stream warns once per table) and
-`partial` (only the rest of the row: the skip is lost — one info line per start). Postgres answers
+`partial` (only the rest of the row: the skip is lost — one info line per start); a `partial` entry
+with `PreImageGap.kept` set is one the source leaves on purpose (`will_manage` is then false, its own
+info line, `check` says "kept as is" and prints no SQL for it). Postgres answers
 from `relreplident` (`cdc/replica_identity.rs`, `shortfall`); `check` prints a Replica identity
 section with both groups (read-only); `run` **sets** `REPLICA IDENTITY FULL` on every member that
-isn't `FULL` in `prepare()`, **before the slot** (a change logged in between would decode with the
+isn't `FULL` and isn't **kept** — a `USING INDEX` identity whose index carries the whole, non-empty
+primary key and every link (issue #212; `Member::kept`, per member, so a carrying partition stays while
+a sibling missing the link is set). The PK half holds with no link too: on an index without it the
+decoder keys changes by the index's columns (wrong `_id`, deletes miss), and a dropped identity index
+carries nothing, so both are set — in `prepare()`, **before the slot** (a change logged in between would decode with the
 old identity), via `ensure_pre_image` when `manage_replica_identity` (default on; `false` alters
 nothing) and the role owns the table — each relation in its own transaction under a 5 s
 `lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned
 table is set on the parent and every partition (a partition added later is caught at the next
 start), but only when it misses a link: its updates carry no post-image, so `partial` never lists it. Guards: `replica_identity::tests` (`shortfall`), `publication`'s
 `every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on
-one table) and `a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s
-`managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target`. The WAL decoder keys a change by the table's **catalog
+one table), `an_identity_index_carrying_the_link_is_kept_and_the_rest_are_set_to_full`, and
+`a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s
+`managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target` and
+`a_kept_identity_index_still_traces_deleted_and_reparented_rows`. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
 which mark every column under `FULL`. **An update that changes no column a document reads rebuilds nothing**
 (issue #169): an update with a pre-image also carries a post-image (`ChangeEvent::Upsert.after`,
@@ -586,13 +605,29 @@ enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_t
 relation at any depth and looks up its table, key, junction keys, `via` hops, both sides of each
 `on:` pair, value/null-check filter columns, `order_by` and a join's `primary_key` on the table
 each lives on — issue #202; a missing table is a `SourceError::UnknownTable` diagnostic, reported
-once per relation; `Diagnostic.path` is the field path; guards: the `validation::tests` mock-catalog
-cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position`) and `CaptureProvisioning` answers "is this table set coverable",
+once per relation; `Diagnostic.path` is the field path; and on the root table the root `filters`
+and the `soft_delete` marker's column, `when` and `field` (issue #211; anchored at the key name,
+`filters`/`soft_delete`; a `field` that reads no column — `source::soft_delete_column` is `None`,
+which the document query silently skips — is an error that `validate_spec` reports with no
+database, so `check --offline` shows it; guards: the `validation::tests` mock-catalog
+cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position` /
+`validation_reports_a_typo_in_every_root_position`). Every `Diagnostic` carries a
+`DiagnosticKind`, which fixes its `Severity`; a join `primary_key` naming no column is the
+`IgnoredPrimaryKey` warning, since relations key on the catalog primary key) and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
 columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven tooling can pick
 from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m
 junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual designer
-(`apps/design`) is its first consumer. The daemon
+(`apps/design`) is its first consumer. **`run` validates at start** (issue #211):
+`backends.rs`'s `build_documents` runs `validate_indexes` on the document builder's own connection
+inside `Backends::source`, before anything is staged (`--locked` included; an unreachable database
+still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer,
+and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
+`DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker` stop;
+type, numeric, nullability and ignored-primary-key findings print and start, as they built in
+0.16), so a new kind forces a decision there. `check` still fails on every `Error`. No opt-out
+flag. Guards: `backends::tests` (one per kind) and `config_coverage`'s
+`an_enum_or_domain_column_is_a_type_mismatch_that_still_builds`. The daemon
 wires a `StatusObserver` (`observer.rs`) that updates a shared per-sink `Status` (`status.rs`),
 runs the engines under `supervise.rs` (stage every sink engine → spawn them + the ingest engine
 as independent tasks → restart a failed one with backoff while the others keep going; the
@@ -952,8 +987,9 @@ forwards it; enum-only — on a newtype/`FlussoMap` it's a macro error, and at a
 declared variants it's a const error, so a schema edit can't silently disarm it).
 An `indexed: false` field gets **no handle** (`emit_level` skips it) but still deserializes and is
 shape-checked; a `subfields: false` field is stamped `NoSubfields` like a sink with
-`auto_subfields` off (`ui/unindexed_has_no_handle.rs`, the `stored` fixture index in
-`derive.rs`).
+`auto_subfields` off, and a `#[flusso(scope = "…")]` on an unindexed field is a compile error
+(`ui/unindexed_has_no_handle.rs`, `ui/subfields_false_has_no_keyword.rs`,
+`ui/scope_on_unindexed_field.rs`, the `stored` fixture index in `derive.rs`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/

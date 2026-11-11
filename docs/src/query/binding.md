@@ -79,7 +79,7 @@ pub mod flusso_user_query {
 }
 ```
 
-Rename a generated scope from the field, and everything under it follows: `#[flusso(scope = "Purchases")]` on `orders` gives `Purchases::total()` and `PurchasesItems::quantity()`. Only a root field can carry it. Rename the module with `#[flusso(index = "users", scope_mod = "user_queries")]`.
+Rename a generated scope from the field, and everything under it follows: `#[flusso(scope = "Purchases")]` on `orders` gives `Purchases::total()` and `PurchasesItems::quantity()`. Only a root nested or object field can carry it, and only one the index searches: on an `indexed: false` field, which gets no handle, it's a compile error. Rename the module with `#[flusso(index = "users", scope_mod = "user_queries")]`.
 
 Finally the root bakes the resolved subtree into const data and drives the check into every fragment it embeds:
 
