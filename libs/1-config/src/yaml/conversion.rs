@@ -434,7 +434,7 @@ fn convert_aggregate_field(
         .via
         .unwrap_or_default()
         .into_iter()
-        .map(convert_via_hop)
+        .map(|hop| convert_via_hop(&body.field, hop))
         .collect::<Result<_, _>>()?;
     let aggregate = Aggregate {
         table: body.table,
@@ -524,18 +524,22 @@ fn aggregate_key(
 
 /// A `via` entry: a downward foreign-key hop. A `column` (the `belongs_to`
 /// direction) or a `through` (a junction in the middle) is rejected.
-fn convert_via_hop(hop: entities::ViaHop) -> Result<ViaHop, ConversionError> {
+fn convert_via_hop(
+    field: &kernel::FieldName,
+    hop: entities::ViaHop,
+) -> Result<ViaHop, ConversionError> {
+    let field = field.to_string();
     let table = hop.table.to_string();
     if hop.through.is_some() {
-        return Err(ConversionError::ViaJunction { table });
+        return Err(ConversionError::ViaJunction { field, table });
     }
     if hop.column.is_some() {
-        return Err(ConversionError::ViaBelongsTo { table });
+        return Err(ConversionError::ViaBelongsTo { field, table });
     }
     Ok(ViaHop {
         foreign_key: hop
             .foreign_key
-            .ok_or(ConversionError::ViaMissingForeignKey { table })?,
+            .ok_or(ConversionError::ViaMissingForeignKey { field, table })?,
         table: hop.table,
         filters: convert_filters_opt(hop.filters)?,
     })

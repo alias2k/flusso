@@ -854,7 +854,12 @@ fn a_via_hop_needs_a_foreign_key() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, ConversionError::ViaMissingForeignKey { ref table } if table == "projects")
+        matches!(err, ConversionError::ViaMissingForeignKey { ref field, ref table } if field == "tasks" && table == "projects")
+    );
+    assert!(
+        err.to_string()
+            .starts_with("aggregate `tasks`: `via` entry `projects`"),
+        "{err}"
     );
 }
 
@@ -864,8 +869,9 @@ fn a_belongs_to_direction_via_hop_is_rejected() {
         "version: 1\ntable: tasks\nfields:\n  - count: siblings\n    table: tasks\n    foreign_key: project_id\n    via:\n      - table: projects\n        column: project_id\n",
     )
     .unwrap_err();
-    assert!(matches!(err, ConversionError::ViaBelongsTo { .. }));
+    assert!(matches!(err, ConversionError::ViaBelongsTo { ref field, .. } if field == "siblings"));
     assert!(err.to_string().contains("belongs_to"), "{err}");
+    assert!(err.to_string().contains("aggregate `siblings`"), "{err}");
 }
 
 #[test]
@@ -874,8 +880,9 @@ fn a_junction_in_the_middle_of_via_is_rejected() {
         "version: 1\ntable: users\nfields:\n  - count: tasks\n    table: tasks\n    foreign_key: project_id\n    via:\n      - table: projects\n        through: { table: user_projects, left_key: user_id, right_key: project_id }\n",
     )
     .unwrap_err();
-    assert!(matches!(err, ConversionError::ViaJunction { .. }));
+    assert!(matches!(err, ConversionError::ViaJunction { ref field, .. } if field == "tasks"));
     assert!(err.to_string().contains("last hop"), "{err}");
+    assert!(err.to_string().contains("aggregate `tasks`"), "{err}");
 }
 
 #[test]
