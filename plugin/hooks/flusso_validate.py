@@ -132,8 +132,8 @@ def resolve_runner(config_path):
 
 
 def run_check(runner, cwd, config, offline):
-    """Run `flusso check`. Returns (returncode, detail) or None to skip
-    (timeout / spawn failure — never a reason to block editing)."""
+    """Run `flusso check`. Returns (returncode, detail, db_unavailable) or
+    None to skip (timeout / spawn failure — never a reason to block editing)."""
     cmd = runner + ["check", "--config", config]
     if offline:
         cmd.append("--offline")
@@ -143,7 +143,15 @@ def run_check(runner, cwd, config, offline):
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
-    return proc.returncode, (proc.stderr or proc.stdout or "").strip()
+    error = (proc.stderr or proc.stdout or "").strip()
+    if proc.returncode == 0:
+        return proc.returncode, error, False
+    # A failing check prints its diagnostics on stdout and only the one-line
+    # verdict on stderr: show both, diagnostics first. Whether the database
+    # was unreachable is read from the verdict alone, not the printed mapping.
+    parts = (proc.stdout.strip(), proc.stderr.strip())
+    detail = "\n".join(part for part in parts if part)
+    return proc.returncode, detail, looks_like_db_unavailable(error)
 
 
 def main():
@@ -174,14 +182,14 @@ def main():
     online = run_check(runner, cwd, config, offline=False)
     if online is None:
         sys.exit(0)  # timeout / couldn't spawn — never block editing
-    rc, detail = online
+    rc, detail, db_unavailable = online
     if rc == 0:
         sys.exit(0)  # valid against the live DB — stay silent
 
     # The DB just isn't up (or isn't configured)? Fall back to offline
     # structural validation so we still catch schema errors without nagging
     # about connections on every edit.
-    if looks_like_db_unavailable(detail):
+    if db_unavailable:
         offline = run_check(runner, cwd, config, offline=True)
         if offline is None or offline[0] == 0:
             sys.exit(0)  # structure is fine; DB simply isn't reachable
