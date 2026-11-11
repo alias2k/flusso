@@ -363,7 +363,7 @@ pub(crate) fn diagnostics(
             out,
             "  {} {}  {}",
             pen.paint(code, &format!("[{label}]")),
-            pen.bold(&format!("{}.{}", d.index, d.field)),
+            pen.bold(&format!("{}.{}", d.index, d.dotted_path())),
             pen.dim(&d.message),
         )?;
     }

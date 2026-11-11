@@ -127,6 +127,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     .map(|d| serde_json::json!({
                         "index": d.index.as_ref(),
                         "field": d.field.as_ref(),
+                        "path": d.dotted_path(),
                         "severity": format!("{:?}", d.severity).to_lowercase(),
                         "message": d.message,
                     }))
