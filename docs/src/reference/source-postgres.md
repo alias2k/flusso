@@ -63,7 +63,7 @@ TLS settings come from two surfaces, merged: the URL's libpq parameters (`sslmod
 flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are the `slot` and `publication` keys above; the `--slot` and `--publication` flags of [`run`](cli.md#run) override them.
 
 - **The slot is created automatically** when missing; that needs only the `REPLICATION` attribute. A slot that had to be created has no memory of earlier changes, which is why a missing slot triggers a rebuild of every seeded index. See [Recover from a dropped slot](../operate/dropped-slot.md).
-- **The publication is managed automatically** when `manage_publication` is on and the role can: flusso derives the full table set from the schemas (root tables plus every joined or aggregated table) and creates or extends it. Creating or extending a publication needs ownership of those tables plus `CREATE` on the database, or superuser. When the role can't, flusso logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION … ADD TABLE` statements and keeps running; `flusso check` prints the same coverage report.
+- **The publication is managed automatically** when `manage_publication` is on and the role can: flusso derives the full table set from the schemas (root tables plus every joined or aggregated table, junctions and `via` tables included) and creates or extends it. Creating or extending a publication needs ownership of those tables plus `CREATE` on the database, or superuser. When the role can't, flusso logs the exact `CREATE PUBLICATION` / `ALTER PUBLICATION … ADD TABLE` statements and keeps running; `flusso check` prints the same coverage report.
 - **Partitioned tables are published via their root.** By default Postgres streams a partitioned table's changes under each partition's name, which no index reads. A publication flusso creates sets `publish_via_partition_root = true`. When an index reads a partitioned table and an existing publication lacks the option, flusso sets it under the same rule as coverage (needs ownership of the publication), or logs `ALTER PUBLICATION … SET (publish_via_partition_root = true);`; `flusso check` lists such tables. A change that arrives for a table no index reads is dropped with a warning, once per table. Changes a partitioned table took before the option was set were dropped this way; [`flusso reindex`](cli.md#reindex) its indexes to repair them.
   - The option applies to the whole publication. Once set, a partition's changes arrive under its topmost published ancestor's name, so an index that reads a partition directly while its partitioned table is also in the publication sees none of them (flusso warns when both are read), and so does any other subscriber of the same publication that expects partition names.
 - **Child tables' replica identity is managed automatically** when `manage_replica_identity` is on and the role owns them. See [Deleted and re-parented rows](#deleted-and-re-parented-rows).
@@ -90,6 +90,7 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 | Table | Link column |
 | --- | --- |
 | `has_one` / `has_many` target, direct aggregate | its `foreign_key` |
+| aggregate [`via`](aggregates.md#across-several-hops) table | its `foreign_key` |
 | `many_to_many` junction | its `left_key` (already carried when it's part of the junction's primary key) |
 
 `belongs_to` targets and the far side of a `many_to_many` need nothing: the rows that point at them are still there.
@@ -126,11 +127,12 @@ A column counts as read by a part of the document when it is:
 | The root row's own document | its fields, the index `filters`, the `soft_delete` column and its `when` |
 | A join | its fields, `filters`, `order_by`, and the link (`foreign_key`) |
 | An aggregate | its input column (`sum`/`avg`/`min`/`max`), `filters`, and the link |
+| An aggregate's `via` hop | the hop's `foreign_key` and `filters` |
 | A `many_to_many` junction | `left_key`, `right_key`, and `through.filters` |
 | Any of them | the table's primary key, and a nested `belongs_to`'s `column` |
 
 - A column reached only through `filters` or `order_by` counts: changing it can move the row in or out of the document.
-- A `raw` filter can read any column of any table its SQL can name (the root row as `root`, a junction, an enclosing level), so an index with a `raw` filter anywhere (root `filters`, `soft_delete.when`, any join's or aggregate's `filters`, `through.filters`) rebuilds on every update, as it always has.
+- A `raw` filter can read any column of any table its SQL can name (the root row as `root`, a junction, an enclosing level), so an index with a `raw` filter anywhere (root `filters`, `soft_delete.when`, any join's or aggregate's `filters`, `through.filters`, a `via` hop's `filters`) rebuilds on every update, as it always has.
 - Each part is checked on its own. Changing a field the root projects rebuilds the row's own document but not the parents that embed it, unless they read it too.
 - Inserts and deletes always rebuild.
 

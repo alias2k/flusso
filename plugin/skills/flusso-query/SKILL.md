@@ -467,6 +467,7 @@ them can't silently disarm the guarantee.
 | `has_many` / `many_to_many` | `Vec<struct>` | `Nested<S,T>` |
 | `map` | `HashMap<String, V>` or a `#[derive(FlussoMap)]` type | see [`maps.md`](maps.md) |
 | `ids` aggregate | `Vec<i64>` / `Vec<String>` per `element_type` | `Number` / `Keyword` (term queries match arrays) |
+| `exists` aggregate | `bool` (never null) | `Bool` |
 | any join or `json` with `indexed: false` | as above (still deserialized and shape-checked) | **none** — not in the index, so no handle; querying it is a compile error |
 
 Matching is by **leaf identifier and `Option` shape**: the macro compares the final type segment,

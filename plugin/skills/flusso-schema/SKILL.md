@@ -117,14 +117,16 @@ An `enum` takes an optional `variants:` list — its values in rank order (`vari
 
 ## Aggregates — reduce a related table to a scalar. The op is the type key.
 
-`count` `sum` `avg` `min` `max` `ids`. Each needs `table` and **exactly one** of `foreign_key` xor `through`.
+`count` `exists` `sum` `avg` `min` `max` `ids`. Each needs `table` and **exactly one** of `foreign_key` xor `through`.
 
 - `count` → non-null `long`; `avg` → nullable `double` → neither takes `column`/`value_type`.
+- `exists` → non-null `boolean` (`false` over zero rows); **rejects** `column`/`value_type`. Prefer it to `count` for a presence flag.
 - `sum`/`min`/`max` → **must** declare both `column` and `value_type` (it mirrors the column).
 - `ids` → a **flat array of the related table's primary keys** (never null; `[]` when empty), not a nested body. **Must** declare `element_type` (the scalar type of each key, e.g. `long` for integer PKs, `keyword` for uuid/string PKs); takes **no** `column`/`value_type` — the key column is the related table's PK. Works over `foreign_key` (one-to-many) or `through` (many-to-many).
 
 - Over `through`, an aggregate counts **once per junction row** (a product on two order lines counts twice). `distinct: true` counts each target row once; it's rejected on `foreign_key` aggregates. A junction row whose target is missing never counts.
 - Two filter lists, scoped by position: the aggregate's `filters` narrow the **target** table; `through.filters` narrow the **junction** rows (e.g. skip cancelled lines). Owned meaning: the [Aggregates reference](https://alias2k.github.io/flusso/reference/aggregates.html#over-a-junction).
+- **Several hops away** (user → projects → tasks): `via:` lists the tables in between, **in order from the parent**, each `{ table, foreign_key, filters? }` where `foreign_key` is on that hop's table and points at the table before it. The aggregate's own `foreign_key` (or `through.left_key`) then points at the **last** hop. Hops are downward foreign keys only: `column` (belongs_to direction) or `through` on a hop is rejected; a junction may only be the last hop, as the aggregate's own `through`. `distinct` stays rejected without `through`. Owned meaning: the [Aggregates reference](https://alias2k.github.io/flusso/reference/aggregates.html#across-several-hops).
 
 See `examples/aggregate.schema.yml`.
 

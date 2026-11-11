@@ -64,6 +64,25 @@ fields:
       right_key: tag_id
     element_type: long
 
+  # exists — a non-null boolean (false over zero rows). No column / value_type.
+  - exists: hasOpenOrder
+    table: orders
+    foreign_key: user_id
+    filters:
+      - { column: status, op: eq, value: open }
+
+  # Several hops away (users -> orders -> order_items): `via` lists the tables
+  # in between, in order from the parent. Each hop's foreign_key points at the
+  # table before it; the aggregate's own foreign_key points at the last hop.
+  - count: paidItemCount
+    table: order_items
+    foreign_key: order_id
+    via:
+      - table: orders
+        foreign_key: user_id
+        filters:
+          - { column: status, op: eq, value: paid }
+
   # Exact money: decimal -> double loses precision, so declare a custom field.
   - custom: balance
     postgres: [numeric]

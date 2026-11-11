@@ -650,11 +650,21 @@ split by relationship verb, which names where the key lives: `belongs_to` (this 
 (the related table's `foreign_key`), `many_to_many` (`through` a junction). Aggregates
 split by op (`count`/`sum`/`avg`/`min`/`max`, plus `ids` — a flat scalar array of the
 related table's primary keys, typed by an explicit `element_type`; `ResolvedField.array`
-flags it). What an aggregate over `through` counts (`distinct`, `through.filters`) is owned
-by the Aggregates reference. **The content hash is the physical index name**, so `Aggregate`
-and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters` when
+flags it — and `exists`, a non-null `boolean`, appended last to `AggregateOp` so the derived
+`Hash` keeps every earlier discriminant). What an aggregate over `through` counts (`distinct`,
+`through.filters`) is owned by the Aggregates reference. An aggregate reaches a table several
+hops away with `via` (issue #172): `Aggregate.via: Vec<ViaHop>` (`table`, `foreign_key` pointing
+at the table before, `filters`), downward foreign keys only (a hop's `column`/`through` is parsed
+only to be rejected), its own key then pointing at the last hop. `Relation::via()` exposes it;
+everything that walks relations must cover it: the SQL ties the key to the last hop through
+nested `IN` levels (`Builder::parent_match`), reverse resolution walks one `Step::Via` per hop
+(`document/fields.rs`), `via_columns` is the hop's #169 read set, and `all_tables` /
+`pre_image_columns` include each hop. Guards: `an_aggregate_via_hops_rebuilds_its_parent_from_every_hop`
+(`wal`), `an_aggregate_via_hops_adds_one_step_per_hop`, the `*via*` SQL tests.
+**The content hash is the physical index name**, so `Aggregate`
+and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via` when
 unset — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
-pins it. `Column` and `Join` do the same for the two mapping opt-outs (issue #170):
+and `a_schema_without_via_keeps_its_content_hash` pin it. `Column` and `Join` do the same for the two mapping opt-outs (issue #170):
 `subfields: false` (`text`/`keyword`/`uuid` → `Column.subfields`, projected to
 `Mapping.subfields`; the sink drops the auto subfields, keeping a `text` field's analyzer) and
 `indexed: false` (`json` → `Column.indexed`, any join → `Join.indexed`, projected to

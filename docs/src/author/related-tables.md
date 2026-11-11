@@ -65,7 +65,7 @@ A search document needs more than its root row: a user with their orders, a prod
          required: true
    ```
 
-5. **Roll up instead of embedding.** The op is the type key. A `count` is a non-null `long`; `sum`/`min`/`max` mirror their column and need a `value_type`; `ids` collects primary keys into a flat array.
+5. **Roll up instead of embedding.** The op is the type key. A `count` is a non-null `long`; `exists` is a non-null `boolean`; `sum`/`min`/`max` mirror their column and need a `value_type`; `ids` collects primary keys into a flat array.
 
    ```yaml
    - count: orderCount
@@ -94,6 +94,21 @@ A search document needs more than its root row: a user with their orders, a prod
        filters:
          - { column: status, op: neq, value: cancelled }
    ```
+
+   A table further away is reached with `via`, the tables in between in order from the parent, each with its own `foreign_key` and `filters`. A user flagged by a completed task in one of their projects:
+
+   ```yaml
+   - exists: hasCompletedTask
+     table: tasks
+     foreign_key: project_id
+     filters:
+       - { column: status, op: eq, value: completed }
+     via:
+       - table: projects
+         foreign_key: user_id
+   ```
+
+   Which hops are allowed, and what `distinct` means across them, are in [Aggregates](../reference/aggregates.md#across-several-hops).
 
 6. **Nest a tree with a join back at the same table.** A `has_many` can read the index's own table, so a row carries its children. Each level is declared explicitly: a two-level tree is a `has_many` nested in a `has_many`.
 
