@@ -87,8 +87,15 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120;
   `partitions`: a range-partitioned root and child stream under the parent's name via
   `publish_via_partition_root`, resolve, and backfill through the parent — issue #143) plus
-  `engine`'s `wal` and `pipeline`
-  binaries (the full
+  `engine`'s `wal`, `wal_release`, and `pipeline`
+  binaries (`wal_release`, issue #204: with the engines running over recording sinks, the slot's
+  `confirmed_flush_lsn` and `restart_lsn` pass the WAL written by changes that produce no document
+  — an unread table under `FOR ALL TABLES`, unread-column updates, filtered/soft-deleted/orphaned
+  rows, a large and a split mixed transaction, idle WAL after a burst — `confirmed_flush_lsn` within
+  `CONFIRM_BOUND` (what flusso controls), `restart_lsn` within `RELEASE_BOUND` (also waits on
+  Postgres's next `running_xacts` record), and the sinks got exactly the expected ops; a stalled sink
+  pins the slot at its last flushed position (the watermark's minimum over lanes) until it catches
+  up, a `backfill = false` sink does not; the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
   the engine, or it can't be published before the engine and the layering is violated);
   `testcontainers` spins up Postgres (and, for `pipeline`, OpenSearch). `engine`'s `wal`
@@ -349,7 +356,8 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `watermark_is_the_minimum_over_lanes`/`several_deliveries_can_be_outstanding_and_ack_independently`,
   the daemon's `failed_sink_engine_restarts_and_redelivers` /
   `failed_ingest_engine_restarts_and_resumes_the_stream`, the Postgres adapter's
-  `a_reopened_stream_continues_the_numbering`.
+  `a_reopened_stream_continues_the_numbering`, and the `wal_release` e2e (an empty batch is still
+  published and acked, keepalives move the horizon, a `backfill = false` lane acks).
 - **A fence only observes, per sink, at two levels (issue #136, ADR 0009).** A client reads the
   **source position** after its commit (`pg_current_wal_lsn()`) and waits on the daemon's `Fence`
   (`libs/3-daemon/src/fence.rs`; the CLI serves it as `GET /wait`) until a sink, or every sink, has

@@ -24,10 +24,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Envelope, Field,
-    FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, IndexName, IndexSchema,
-    Join, JoinKind, OrderBy, RawFilter, RawFilterValue, Relation, SinkName, TableName, Through,
-    ValueOpFilter, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, Column, DatabaseSchema, Envelope, Field, FieldSource,
+    Filter, FilterOp, FilterValue, FlussoType, IndexSchema, Join, JoinKind, OrderBy, RawFilter,
+    RawFilterValue, Relation, SinkName, Through, ValueOpFilter, ViaHop,
 };
 use sink::{Result as SinkResult, Sink};
 use source::cdc::ChangeCapture;
@@ -40,6 +39,9 @@ use stream_channel::ChannelStream;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+mod common;
+use common::{column, column_field, field, index_name, table, users_spec};
 
 /// A sink that records the operations it receives, for assertions. A batch's
 /// operations become visible together at its flush, so seeing a later change
@@ -1592,20 +1594,6 @@ fn sorted(ops: &[&str]) -> Vec<String> {
     ops
 }
 
-fn users_spec() -> SourceSpec {
-    let schema = IndexSchema {
-        version: 1,
-        table: table("users"),
-        db_schema: DatabaseSchema::try_new("public").unwrap(),
-        primary_key: Some(column("id")),
-        doc_id: None,
-        soft_delete: None,
-        filters: None,
-        fields: vec![column_field("id", "id"), column_field("email", "email")],
-    };
-    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
-}
-
 /// `users` reading `email` from the root, `orders` (projecting `total`,
 /// filtered on `status`, ordered by `placed_at`), the sum of `payments.amount`,
 /// and `visits.path`.
@@ -2169,35 +2157,4 @@ fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {
         emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     }
-}
-
-fn column_field(name: &str, col: &str) -> Field {
-    Field {
-        field: field(name),
-        options: Default::default(),
-        emit: true,
-        source: FieldSource::Column(Column {
-            column: column(col),
-            ty: FlussoType::Keyword,
-            nullable: true,
-            transforms: Vec::new(),
-            default: None,
-            enum_order: Vec::new(),
-            subfields: true,
-            indexed: true,
-        }),
-    }
-}
-
-fn field(name: &str) -> FieldName {
-    FieldName::try_new(name).unwrap()
-}
-fn column(name: &str) -> ColumnName {
-    ColumnName::try_new(name).unwrap()
-}
-fn table(name: &str) -> TableName {
-    TableName::try_new(name).unwrap()
-}
-fn index_name(name: &str) -> IndexName {
-    IndexName::try_new(name).unwrap()
 }
