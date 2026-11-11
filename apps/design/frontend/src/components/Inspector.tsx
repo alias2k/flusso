@@ -1222,7 +1222,13 @@ function AggregateBody({
         parentTable={parentTable}
         tables={tables}
         junctions={junctions}
-        onChange={(via) => setAgg({ ...agg, via: via.length ? via : undefined })}
+        onChange={(via) => {
+          // The aggregate's own `on` pairs take `local` from the last hop (or the
+          // parent): when that table changes, their `local` columns name another table.
+          const before = agg.via?.[agg.via.length - 1]?.table ?? parentTable;
+          const after = via[via.length - 1]?.table ?? parentTable;
+          setAgg({ ...agg, via: via.length ? via : undefined, on: before === after ? agg.on : undefined });
+        }}
       />
       {"direct" in agg.key && (
         <OnEditor
