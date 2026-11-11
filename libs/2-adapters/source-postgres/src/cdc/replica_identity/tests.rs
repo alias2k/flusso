@@ -81,3 +81,64 @@ fn the_remediation_quotes_the_table() {
         "ALTER TABLE \"public\".\"order_items\" REPLICA IDENTITY FULL;"
     );
 }
+
+fn member(name: &str, identity: ReplicaIdentity, owned: bool) -> Member {
+    Member {
+        schema: "public".to_owned(),
+        name: name.to_owned(),
+        identity,
+        carried: vec!["id".to_owned()],
+        primary_key: vec!["id".to_owned()],
+        owned,
+    }
+}
+
+fn orders() -> QualifiedTable {
+    QualifiedTable::new(
+        kernel::DatabaseSchema::try_new("public").unwrap(),
+        kernel::TableName::try_new("orders").unwrap(),
+    )
+}
+
+#[test]
+fn a_table_full_throughout_falls_short_of_nothing() {
+    let members = [
+        member("orders", ReplicaIdentity::Full, true),
+        member("orders_2026", ReplicaIdentity::Full, false),
+    ];
+    assert_eq!(shortfall(&orders(), &columns(&["user_id"]), &members), None);
+}
+
+#[test]
+fn a_missing_link_is_a_gap_and_the_rest_of_the_row_is_partial() {
+    let members = [member("orders", ReplicaIdentity::Default, true)];
+    let gap = shortfall(&orders(), &columns(&["user_id"]), &members).unwrap();
+    assert_eq!(gap.missing, columns(&["user_id"]));
+    assert!(gap.manageable);
+    assert_eq!(
+        gap.remediation,
+        "ALTER TABLE \"public\".\"orders\" REPLICA IDENTITY FULL;"
+    );
+
+    let partial = shortfall(&orders(), &[], &members).unwrap();
+    assert!(partial.missing.is_empty(), "no link to miss");
+    assert!(partial.manageable);
+    assert_eq!(partial.remediation, gap.remediation);
+}
+
+#[test]
+fn every_member_short_of_full_is_listed_and_unowned_ones_block() {
+    let members = [
+        member("orders", ReplicaIdentity::Full, true),
+        member("orders_2025", ReplicaIdentity::Default, false),
+        member("orders_2026", ReplicaIdentity::Index, true),
+    ];
+    let gap = shortfall(&orders(), &[], &members).unwrap();
+    assert!(!gap.manageable);
+    assert_eq!(gap.blockers, ["role does not own table public.orders_2025"]);
+    assert_eq!(
+        gap.remediation,
+        "ALTER TABLE \"public\".\"orders_2025\" REPLICA IDENTITY FULL; \
+         ALTER TABLE \"public\".\"orders_2026\" REPLICA IDENTITY FULL;"
+    );
+}
