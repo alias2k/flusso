@@ -7,7 +7,7 @@
 //! nested relation. Relations joined `on` extra column pairs rebuild from a
 //! change on either side of a pair. An aggregate over an arithmetic
 //! expression rebuilds from a change to any of its operands, and from nothing
-//! else.
+//! else. The slot releases WAL within seconds of the last sink flush.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -50,6 +50,7 @@ use common::{column, column_field, field, index_name, table, users_spec};
 struct RecordingSink {
     ops: Arc<Mutex<Vec<String>>>,
     applied: Mutex<Vec<String>>,
+    last_flush: Mutex<Option<Instant>>,
 }
 
 impl RecordingSink {
@@ -57,7 +58,13 @@ impl RecordingSink {
         Self {
             ops: Arc::clone(ops),
             applied: Mutex::default(),
+            last_flush: Mutex::default(),
         }
+    }
+
+    /// When the last flush that landed an operation returned.
+    fn last_flush(&self) -> Option<Instant> {
+        *self.last_flush.lock().unwrap()
     }
 }
 
@@ -75,7 +82,10 @@ impl Sink for RecordingSink {
 
     async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
         let applied = std::mem::take(&mut *self.applied.lock().unwrap());
-        self.ops.lock().unwrap().extend(applied);
+        if !applied.is_empty() {
+            self.ops.lock().unwrap().extend(applied);
+            *self.last_flush.lock().unwrap() = Some(Instant::now());
+        }
         Ok(sink::FlushReport::clean())
     }
 }
@@ -1502,6 +1512,163 @@ async fn an_aggregate_expression_rebuilds_from_each_operand() {
 /// One deployment the way the daemon runs it: stage the sink engine, then run
 /// it and the ingest engine together until either stops. `Ok` when the live
 /// stream ends; the first engine error otherwise.
+/// The longest the slot may hold WAL after the sinks landed it (issue #205):
+/// a confirmation reaches the client at once, which reports it every second,
+/// and the ingest engine confirms a late ack on a one-second tick.
+const RELEASE_BOUND: Duration = Duration::from_secs(5);
+
+/// After a burst, after a lone change, and after a burst of updates no
+/// document reads, the slot's `confirmed_flush_lsn` passes the last commit
+/// within [`RELEASE_BOUND`] of the last sink flush (of the commit, when
+/// nothing is flushed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+#[allow(clippy::print_stderr)]
+async fn wal_is_released_within_seconds_of_the_last_flush() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text, last_seen int)",
+        "ALTER TABLE users REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE users",
+        "INSERT INTO users SELECT g, 'u' || g || '@x.io', 0 FROM generate_series(1, 200) g",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(users_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
+        documents,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+    ));
+    expect_op(&mut engine, &recorded, "upsert users 200").await;
+
+    for round in 0..3 {
+        for id in 1..=200 {
+            sqlx::query("UPDATE users SET email = $1 WHERE id = $2")
+                .bind(format!("burst{round}-{id}@x.io"))
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let target = current_wal_lsn(&pool).await;
+        expect_op(&mut engine, &recorded, "upsert users 200").await;
+        let released = released_after(&mut engine, &pool, &target).await;
+        let flushed = sink.last_flush().unwrap();
+        let delay = released.saturating_duration_since(flushed);
+        eprintln!("burst {round}: released {delay:?} after the last flush");
+        assert!(delay <= RELEASE_BOUND, "burst {round}: {delay:?}");
+    }
+
+    for round in 0..3 {
+        let op = format!("upsert users {}", round + 1);
+        recorded.lock().unwrap().clear();
+        sqlx::query("UPDATE users SET email = $1 WHERE id = $2")
+            .bind(format!("lone{round}@x.io"))
+            .bind(round + 1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let target = current_wal_lsn(&pool).await;
+        expect_op(&mut engine, &recorded, &op).await;
+        let released = released_after(&mut engine, &pool, &target).await;
+        let flushed = sink.last_flush().unwrap();
+        let delay = released.saturating_duration_since(flushed);
+        eprintln!("lone change {round}: released {delay:?} after the flush");
+        assert!(delay <= RELEASE_BOUND, "lone change {round}: {delay:?}");
+    }
+
+    for round in 0..3 {
+        for id in 1..=200 {
+            sqlx::query("UPDATE users SET last_seen = last_seen + 1 WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let committed = Instant::now();
+        let target = current_wal_lsn(&pool).await;
+        let released = released_after(&mut engine, &pool, &target).await;
+        let delay = released.saturating_duration_since(committed);
+        eprintln!("unread burst {round}: released {delay:?} after the last commit");
+        assert!(delay <= RELEASE_BOUND, "unread burst {round}: {delay:?}");
+    }
+
+    engine.abort();
+}
+
+async fn current_wal_lsn(pool: &sqlx::PgPool) -> String {
+    sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Poll the slot until its `confirmed_flush_lsn` reaches `target`; the instant
+/// it was first seen there.
+async fn released_after(
+    engine: &mut tokio::task::JoinHandle<engine::Result<()>>,
+    pool: &sqlx::PgPool,
+    target: &str,
+) -> Instant {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if engine.is_finished() {
+            panic!("engine stopped: {:?}", engine.await);
+        }
+        let released: bool = sqlx::query_scalar(
+            "SELECT confirmed_flush_lsn >= $1::pg_lsn FROM pg_replication_slots \
+             WHERE slot_name = 'flusso'",
+        )
+        .bind(target)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if released {
+            return Instant::now();
+        }
+        assert!(Instant::now() < deadline, "the slot never reached {target}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn run_deployment(
     capture: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
