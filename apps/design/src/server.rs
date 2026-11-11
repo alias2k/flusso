@@ -136,6 +136,7 @@ fn router(state: AppState) -> Router {
         .route("/api/catalog", get(catalog))
         .route("/api/test-connection", post(test_connection))
         .route("/api/parse", post(parse))
+        .route("/api/expression", post(expression))
         .route("/api/preview", post(preview))
         .route("/api/validate", post(validate))
         .route("/api/sample", post(sample))
@@ -172,6 +173,10 @@ async fn test_connection(
 
 async fn parse(Json(request): Json<api::ParseRequest>) -> Response {
     Json(api::parse_index(&request)).into_response()
+}
+
+async fn expression(Json(request): Json<api::ExpressionRequest>) -> Response {
+    Json(api::check_expression(&request)).into_response()
 }
 
 async fn preview(Json(request): Json<api::PreviewRequest>) -> Result<Response, ApiError> {

@@ -195,15 +195,27 @@ fn via_hop() -> impl Strategy<Value = ViaHop> {
     })
 }
 
+/// A plain column, or arithmetic over two columns and a literal.
+fn input() -> impl Strategy<Value = kernel::Expression> {
+    prop_oneof![
+        column().prop_map(kernel::Expression::from),
+        (column(), column(), "[-+*/]", "[0-9]{1,3}(\\.[0-9]{1,2})?").prop_map(
+            |(left, right, op, number)| format!("-({left} {op} {right}) * {number}")
+                .parse()
+                .unwrap()
+        ),
+    ]
+}
+
 fn aggregate() -> impl Strategy<Value = Aggregate> {
     (
         table(),
         prop_oneof![
             Just(AggregateOp::Count),
-            column().prop_map(AggregateOp::Sum),
-            column().prop_map(AggregateOp::Avg),
-            column().prop_map(AggregateOp::Min),
-            column().prop_map(AggregateOp::Max),
+            input().prop_map(AggregateOp::Sum),
+            input().prop_map(AggregateOp::Avg),
+            input().prop_map(AggregateOp::Min),
+            input().prop_map(AggregateOp::Max),
             Just(AggregateOp::Ids {
                 element_type: FlussoType::Long
             }),

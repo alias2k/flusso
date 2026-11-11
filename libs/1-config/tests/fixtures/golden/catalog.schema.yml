@@ -257,6 +257,11 @@ fields:
         foreign_key: product_id
         on:
           - { local: region, related: region }
+  - sum: weightedStars
+    table: reviews
+    foreign_key: product_id
+    column: "stars*(helpful_votes + 1) - -0.5 / 2"
+    value_type: double
 
   - constant: docSource
     value: catalog

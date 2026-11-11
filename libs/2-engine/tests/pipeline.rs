@@ -1235,7 +1235,7 @@ async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
-    let pre_image_columns = spec.pre_image_columns();
+    let pre_image_columns = spec.pre_images();
     let documents = Arc::new(
         PgDocumentBuilder::connect(&pg.url, Arc::new(spec))
             .await

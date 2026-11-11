@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, Direction, Field,
-    FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join, JoinKind,
-    NullCheckFilter, NullOp, OrderBy, RawFilter, Relation, Script, SoftDelete, SoftDeleteColumn,
-    SoftDeleteField, Through, Transform, ValueOpFilter, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, Direction, Expression,
+    Field, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, Geo, Join,
+    JoinKind, NullCheckFilter, NullOp, OrderBy, RawFilter, Relation, Script, SoftDelete,
+    SoftDeleteColumn, SoftDeleteField, Through, Transform, ValueOpFilter, ViaHop,
 };
 use rust_decimal::Decimal;
 
@@ -640,15 +640,15 @@ fn convert_aggregate_op(
         ),
         entities::AggregateOp::Sum => (
             AggregateOp::Sum(require_aggregate_column(column, "sum")?),
-            Some(require_aggregate_type(body.value_type.clone(), "sum")?),
+            Some(require_input_type(body, "sum")?),
         ),
         entities::AggregateOp::Min => (
             AggregateOp::Min(require_aggregate_column(column, "min")?),
-            Some(require_aggregate_type(body.value_type.clone(), "min")?),
+            Some(require_input_type(body, "min")?),
         ),
         entities::AggregateOp::Max => (
             AggregateOp::Max(require_aggregate_column(column, "max")?),
-            Some(require_aggregate_type(body.value_type.clone(), "max")?),
+            Some(require_input_type(body, "max")?),
         ),
         entities::AggregateOp::Exists => {
             if body.column.is_some() {
@@ -798,9 +798,9 @@ fn convert_order_by(ob: entities::OrderBy) -> OrderBy {
 }
 
 fn require_aggregate_column(
-    column: Option<ColumnName>,
+    column: Option<Expression>,
     op: &'static str,
-) -> Result<ColumnName, ConversionError> {
+) -> Result<Expression, ConversionError> {
     column.ok_or(ConversionError::MissingAggregateColumn { op })
 }
 
@@ -817,6 +817,36 @@ fn require_aggregate_type(
         }
         scalar => Ok(scalar),
     }
+}
+
+/// The `value_type` of a `sum`/`min`/`max`: a scalar, and a number when the
+/// `column` is an expression (a plain column's type is checked against the
+/// database instead).
+fn require_input_type(
+    body: &entities::AggregateBody,
+    op: &'static str,
+) -> Result<FlussoType, ConversionError> {
+    let ty = require_aggregate_type(body.value_type.clone(), op)?;
+    let is_expression = body
+        .column
+        .as_ref()
+        .is_some_and(|column| column.as_column().is_none());
+    let is_numeric = matches!(
+        ty,
+        FlussoType::Short
+            | FlussoType::Integer
+            | FlussoType::Long
+            | FlussoType::Float
+            | FlussoType::Double
+            | FlussoType::Decimal
+    );
+    if is_expression && !is_numeric {
+        return Err(ConversionError::NonNumericExpressionType {
+            field: body.field.clone(),
+            op,
+        });
+    }
+    Ok(ty)
 }
 
 /// The `element_type` of an `ids` aggregate — the scalar type of each collected

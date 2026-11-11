@@ -244,6 +244,25 @@ export const it: Record<string, string> = {
     "Un punto è assente quando una delle colonne è null (mai inviato come '{'lat:null'}'). Segna obbligatorio per vietare tale assenza.",
   "inspector.relatedTable": "tabella correlata",
   "inspector.aggColumn": "colonna (da aggregare)",
+  "inspector.aggInput": "input",
+  "inspector.aggInputColumn": "una colonna",
+  "inspector.aggInputExpression": "un'espressione",
+  "inspector.aggExpression": "espressione (per riga)",
+  "inspector.aggExpressionPlaceholder": "quantity * unit_price",
+  "inspector.aggExpressionHint":
+    "Aritmetica sulle colonne della tabella correlata, calcolata riga per riga prima di aggregare: nomi di colonna, numeri, + - * /, meno unario e parentesi. Niente funzioni. La divisione tra interi tronca; una riga con un operando nullo viene ignorata.",
+  "inspector.aggExpressionUnknown": "Non è una colonna di {table}: {columns}",
+  "inspector.exprEmpty": "L'espressione è vuota.",
+  "inspector.exprUnexpectedCharacter":
+    "Posizione {position}: “{detail}” non è ammesso. Usa nomi di colonna, numeri, + - * / e parentesi.",
+  "inspector.exprIncompleteNumber": "Posizione {position}: un numero richiede una cifra dopo il “.”.",
+  "inspector.exprInvalidColumn":
+    "Posizione {position}: “{detail}” è troppo lungo per un nome di colonna (al massimo 63 caratteri).",
+  "inspector.exprExpectedOperand": "Posizione {position}: atteso una colonna, un numero, “-” o “(”.",
+  "inspector.exprExpectedOperator": "Posizione {position}: atteso un operatore (+ - * /) o la fine.",
+  "inspector.exprUnclosedParenthesis": "Posizione {position}: questa “(” non viene mai chiusa.",
+  "inspector.exprUnmatchedParenthesis": "Posizione {position}: questa “)” non ha una “(” corrispondente.",
+  "inspector.exprTooDeep": "Posizione {position}: l'espressione è annidata oltre {detail} livelli.",
   "inspector.junctionTable": "tabella di giunzione",
   "inspector.junctionFilters": "Filtri di giunzione",
   "inspector.junctionFiltersHint":

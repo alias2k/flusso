@@ -81,3 +81,36 @@ fn future_format_version_is_rejected() {
         other => panic!("expected VersionMismatch, got {other:?}"),
     }
 }
+
+#[test]
+fn the_deepest_expression_survives_a_lock_round_trip() {
+    let dir = std::env::temp_dir().join(format!("flusso-deep-expression-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("flusso.toml"),
+        "[source]\ntype = \"postgres\"\n\n[[index]]\nname = \"orders\"\nschema = \"orders.schema.yml\"\nenabled = true\n",
+    )
+    .unwrap();
+    let column = format!("{}amount", "-".repeat(kernel::MAX_DEPTH));
+    std::fs::write(
+        dir.join("orders.schema.yml"),
+        format!(
+            "version: 1\ntable: orders\nfields:\n  - long: id\n    required: true\n  - sum: total\n    table: order_lines\n    foreign_key: order_id\n    column: \"{column}\"\n    value_type: double\n"
+        ),
+    )
+    .unwrap();
+
+    let compiled = config::compile(dir.join("flusso.toml")).unwrap();
+    let bytes = config::to_bytes(&compiled).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(text.contains("- - -amount"), "{text}");
+    assert!(!text.contains("--"), "{text}");
+    let config = config::from_bytes(&bytes).unwrap();
+    let rewrapped = config::Compiled {
+        format_version: config::FORMAT_VERSION,
+        config,
+    };
+    assert_eq!(config::to_bytes(&rewrapped).unwrap(), bytes);
+}

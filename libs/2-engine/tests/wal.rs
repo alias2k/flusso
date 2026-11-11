@@ -5,7 +5,9 @@
 //! Aggregates across several hops (`via`) rebuild their parent from a change
 //! on any hop, including hops back into the root's own table and hops under a
 //! nested relation. Relations joined `on` extra column pairs rebuild from a
-//! change on either side of a pair.
+//! change on either side of a pair. An aggregate over an arithmetic
+//! expression rebuilds from a change to any of its operands, and from nothing
+//! else.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -331,6 +333,115 @@ async fn an_update_of_unread_columns_rebuilds_nothing() {
             expect_op(&mut engine, &recorded, &format!("upsert users {id}")).await;
         }
     }
+
+    engine.abort();
+}
+
+/// With replica identity management on (the default), flusso sets every table
+/// an index reads to `REPLICA IDENTITY FULL` before the slot, so an update of
+/// an unread column on the root or on a `belongs_to` target rebuilds nothing,
+/// with no `ALTER TABLE` in the setup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE teams (id int PRIMARY KEY, name text, motto text)",
+        "CREATE TABLE users (id int PRIMARY KEY, email text, last_seen int, team_id int)",
+        "CREATE PUBLICATION flusso FOR TABLE teams, users",
+        "INSERT INTO teams VALUES (1, 'core', '')",
+        "INSERT INTO users VALUES (1, 'ada@x.io', 0, 1)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let spec = users_with_team_spec();
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let capture = WalChangeCapture::new(replication, url.clone())
+        .with_pre_image_management(spec.pre_images(), true);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(spec))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(Arc::new(capture), documents, sink));
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+
+    let identities: Vec<(String, String)> = sqlx::query_as(
+        "SELECT relname::text, relreplident::text FROM pg_class \
+         WHERE relname IN ('teams', 'users') ORDER BY relname",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        identities,
+        [
+            ("teams".to_owned(), "f".to_owned()),
+            ("users".to_owned(), "f".to_owned())
+        ]
+    );
+
+    let marker_sql = "INSERT INTO users (id) VALUES ($1)";
+    let mut marker = 100;
+    let mut rebuilt = async |sql: &'static str| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            sql,
+            marker_sql,
+            marker,
+            &format!("upsert users {marker}"),
+        )
+        .await
+    };
+    assert_eq!(
+        rebuilt("UPDATE users SET last_seen = 1 WHERE id = 1").await,
+        Vec::<String>::new(),
+        "no field reads the root's `last_seen`"
+    );
+    assert_eq!(
+        rebuilt("UPDATE teams SET motto = 'ship it' WHERE id = 1").await,
+        Vec::<String>::new(),
+        "no field reads the team's `motto`"
+    );
+    assert_eq!(
+        rebuilt("UPDATE teams SET name = 'platform' WHERE id = 1").await,
+        sorted(&["upsert users 1"])
+    );
+    assert_eq!(
+        rebuilt("UPDATE users SET email = 'ada@y.io' WHERE id = 1").await,
+        sorted(&["upsert users 1"])
+    );
 
     engine.abort();
 }
@@ -1212,6 +1323,180 @@ async fn on_pairs_rebuild_the_parent_from_either_side() {
     engine.abort();
 }
 
+/// `orders` folding `quantity * unit_price` (and friends) over its lines, and
+/// `customers` summing the same expression `via` their orders: the built values
+/// follow Postgres arithmetic (a null operand drops the row, integer division
+/// truncates, a zero divisor nulls the row instead of failing the build), each
+/// operand's update rebuilds the parents that read it, and a column no
+/// expression reads rebuilds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn an_aggregate_expression_rebuilds_from_each_operand() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE customers (id int PRIMARY KEY, name text)",
+        "CREATE TABLE orders (id int PRIMARY KEY, customer_id int, note text)",
+        "CREATE TABLE order_lines (id int PRIMARY KEY, order_id int, quantity int, \
+         unit_price numeric, divisor int, memo text)",
+        "ALTER TABLE orders REPLICA IDENTITY FULL",
+        "ALTER TABLE order_lines REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE customers, orders, order_lines",
+        "INSERT INTO customers VALUES (1, 'ada')",
+        "INSERT INTO orders VALUES (1, 1, '')",
+        "INSERT INTO order_lines VALUES (1, 1, 2, 1.5, 3, ''), (2, 1, 5, 2, 2, ''), \
+         (3, 1, 4, NULL, 2, '')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let replication = ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port);
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(order_values_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::new(&recorded));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication, url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        sink,
+    ));
+    expect_op(&mut engine, &recorded, "upsert orders 1").await;
+    expect_op(&mut engine, &recorded, "upsert customers 1").await;
+
+    let body = |index: &'static str| {
+        let documents = Arc::clone(&documents);
+        async move {
+            let id = DocumentId {
+                index: index_name(index),
+                key: RowKey(vec![(column("id"), kernel::GenericValue::Int(1))]),
+            };
+            let Document::Upsert { body, .. } = documents.build(&id).await.unwrap() else {
+                panic!("{index} 1 is not a document");
+            };
+            sink::to_json(&body)
+        }
+    };
+    // (value, mean value, smallest quantity / divisor, largest 1 - quantity)
+    let order = || async {
+        let order = body("orders").await;
+        (
+            order["value"].as_f64().unwrap(),
+            order["meanValue"].as_f64().unwrap(),
+            order["smallestShare"].as_i64().unwrap(),
+            order["largestRemainder"].as_i64().unwrap(),
+        )
+    };
+    let customer = || async { body("customers").await["value"].as_f64().unwrap() };
+
+    // Line 3's null price drops it from the sum and the mean; 2 / 3 truncates to 0.
+    assert_eq!(order().await, (13.0, 6.5, 0, -1));
+    assert_eq!(customer().await, 13.0);
+
+    let marker_sql = "INSERT INTO orders (id) VALUES ($1)";
+    let mut marker = 900;
+    let mut rebuilt = async |sql: &'static str| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            sql,
+            marker_sql,
+            marker,
+            &format!("upsert orders {marker}"),
+        )
+        .await
+    };
+
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET memo = 'gift' WHERE id = 1").await,
+        Vec::<String>::new(),
+        "no expression reads `memo`"
+    );
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET quantity = 6 WHERE id = 1").await,
+        sorted(&["upsert customers 1", "upsert orders 1"])
+    );
+    assert_eq!(order().await, (19.0, 9.5, 2, -3));
+    assert_eq!(customer().await, 19.0);
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET unit_price = 2 WHERE id = 3").await,
+        sorted(&["upsert customers 1", "upsert orders 1"])
+    );
+    assert_eq!(order().await, (27.0, 9.0, 2, -3));
+    assert_eq!(customer().await, 27.0);
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET divisor = 1 WHERE id = 2").await,
+        sorted(&["upsert orders 1"]),
+        "only `orders` reads `divisor`"
+    );
+    assert_eq!(order().await, (27.0, 9.0, 2, -3));
+    // (sum, mean, min, max of quantity / divisor, line count)
+    let shares = || async {
+        let order = body("orders").await;
+        (
+            order["shareSum"].as_i64(),
+            order["meanShare"].as_f64(),
+            order["smallestShare"].as_i64(),
+            order["largestShare"].as_i64(),
+            order["lineCount"].as_i64().unwrap(),
+        )
+    };
+    assert_eq!(shares().await, (Some(9), Some(3.0), Some(2), Some(5), 3));
+
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET divisor = 0 WHERE id = 2").await,
+        sorted(&["upsert orders 1"]),
+        "a zero divisor nulls that line's share"
+    );
+    assert_eq!(shares().await, (Some(4), Some(2.0), Some(2), Some(2), 3));
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET divisor = 0").await,
+        sorted(&["upsert orders 1"]),
+        "every divisor zero"
+    );
+    assert_eq!(shares().await, (None, None, None, None, 3));
+    assert_eq!(
+        rebuilt("UPDATE order_lines SET divisor = 2 WHERE id = 1").await,
+        sorted(&["upsert orders 1"]),
+        "the pipeline keeps going"
+    );
+    assert_eq!(shares().await, (Some(3), Some(3.0), Some(3), Some(3), 3));
+
+    engine.abort();
+}
+
 /// One deployment the way the daemon runs it: stage the sink engine, then run
 /// it and the ingest engine together until either stops. `Ok` when the live
 /// stream ends; the first engine error otherwise.
@@ -1357,7 +1642,7 @@ fn users_with_relations_spec() -> SourceSpec {
     }]);
     let paid = Relation::Aggregate(Aggregate {
         table: table("payments"),
-        op: AggregateOp::Sum(column("amount")),
+        op: AggregateOp::Sum(column("amount").into()),
         key: AggregateKey::Direct(column("user_id")),
         value_type: Some(FlussoType::Long),
         filters: None,
@@ -1738,6 +2023,143 @@ fn tenant_orders_spec() -> SourceSpec {
         ],
     };
     SourceSpec::new(BTreeMap::from([(index_name("orders"), schema)]))
+}
+
+/// `users` reading `email` and its `belongs_to` team's `name`.
+fn users_with_team_spec() -> SourceSpec {
+    let team = Join {
+        table: table("teams"),
+        kind: JoinKind::BelongsTo {
+            column: column("team_id"),
+        },
+        primary_key: column("id"),
+        nullable: true,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields: vec![column_field("name", "name")],
+        indexed: true,
+        on: vec![],
+    };
+    let schema = IndexSchema {
+        version: 1,
+        table: table("users"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_field("email", "email"),
+            Field {
+                field: field("team"),
+                options: Default::default(),
+                emit: true,
+                source: FieldSource::Relation(Relation::Join(team)),
+            },
+        ],
+    };
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
+}
+
+/// `orders` with four aggregates over arithmetic on `order_lines`, and
+/// `customers` summing `quantity * unit_price` across their orders (`via`).
+fn order_values_spec() -> SourceSpec {
+    let lines = |op: AggregateOp, value_type: Option<FlussoType>| Aggregate {
+        table: table("order_lines"),
+        op,
+        key: AggregateKey::Direct(column("order_id")),
+        value_type,
+        filters: None,
+        distinct: false,
+        via: Vec::new(),
+        on: vec![],
+    };
+    let expr = |input: &str| input.parse::<kernel::Expression>().unwrap();
+    let schema = |root: &str, fields: Vec<Field>| IndexSchema {
+        version: 1,
+        table: table(root),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields,
+    };
+    let orders = schema(
+        "orders",
+        vec![
+            column_field("note", "note"),
+            aggregate_field(
+                "value",
+                lines(
+                    AggregateOp::Sum(expr("quantity * unit_price")),
+                    Some(FlussoType::Double),
+                ),
+            ),
+            aggregate_field(
+                "meanValue",
+                lines(AggregateOp::Avg(expr("quantity * unit_price")), None),
+            ),
+            aggregate_field(
+                "smallestShare",
+                lines(
+                    AggregateOp::Min(expr("quantity / divisor")),
+                    Some(FlussoType::Long),
+                ),
+            ),
+            aggregate_field(
+                "shareSum",
+                lines(
+                    AggregateOp::Sum(expr("quantity / divisor")),
+                    Some(FlussoType::Long),
+                ),
+            ),
+            aggregate_field(
+                "meanShare",
+                lines(
+                    AggregateOp::Avg(expr("quantity / divisor")),
+                    Some(FlussoType::Double),
+                ),
+            ),
+            aggregate_field(
+                "largestShare",
+                lines(
+                    AggregateOp::Max(expr("quantity / divisor")),
+                    Some(FlussoType::Long),
+                ),
+            ),
+            aggregate_field("lineCount", lines(AggregateOp::Count, None)),
+            aggregate_field(
+                "largestRemainder",
+                lines(
+                    AggregateOp::Max(expr("-quantity + 1")),
+                    Some(FlussoType::Long),
+                ),
+            ),
+        ],
+    );
+    let mut customer_value = lines(
+        AggregateOp::Sum(expr("quantity * unit_price")),
+        Some(FlussoType::Double),
+    );
+    customer_value.via = vec![ViaHop {
+        table: table("orders"),
+        foreign_key: column("customer_id"),
+        filters: None,
+        on: vec![],
+    }];
+    let customers = schema(
+        "customers",
+        vec![
+            column_field("name", "name"),
+            aggregate_field("value", customer_value),
+        ],
+    );
+    SourceSpec::new(BTreeMap::from([
+        (index_name("orders"), orders),
+        (index_name("customers"), customers),
+    ]))
 }
 
 fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {

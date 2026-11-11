@@ -519,14 +519,23 @@ reports a second prerequisite (issue #140, ADR 0007): reverse resolution traces 
 re-parented child to its old parent through the change's **pre-image** (`ChangeEvent.before:
 Option<RowImage>`, passed to `DocumentBuilder::resolve` and read only on the first hop, unioned
 with the current-DB lookup), so each child table's replica identity must carry its link column
-(`SourceSpec::pre_image_columns`: `has_one`/`has_many` `foreign_key`, junction `left_key`).
-Postgres answers from `relreplident` (`cdc/replica_identity.rs`); `check` prints a Replica
-identity section (read-only); `run` **sets** `REPLICA IDENTITY FULL` in `prepare()`, **before
-the slot** (a change logged in between would decode with the old identity), via `ensure_pre_image`
-when `manage_replica_identity` (default on) and the role owns the table — under a 5 s
-`lock_timeout`; a partitioned table is set on the parent and every partition that misses the link
-(a partition added later is caught at the next start); an unclosable gap is warned with
-the SQL, and the stream warns once per table. The WAL decoder keys a change by the table's **catalog
+(`SourceSpec::pre_image_columns`: `has_one`/`has_many` `foreign_key`, junction `left_key`), and
+every table an index reads should log its **whole** old row, for the #169 skip below (issue #202).
+`SourceSpec::pre_images` lists every `all_tables` entry with its links (mostly none); the CLI hands
+it to `run` and `check`. `PreImageReport` keeps two severities apart: `gaps` (a link column is
+missing: correctness — a loud warning with the SQL, and the stream warns once per table) and
+`partial` (only the rest of the row: the skip is lost — one info line per start). Postgres answers
+from `relreplident` (`cdc/replica_identity.rs`, `shortfall`); `check` prints a Replica identity
+section with both groups (read-only); `run` **sets** `REPLICA IDENTITY FULL` on every member that
+isn't `FULL` in `prepare()`, **before the slot** (a change logged in between would decode with the
+old identity), via `ensure_pre_image` when `manage_replica_identity` (default on; `false` alters
+nothing) and the role owns the table — each relation in its own transaction under a 5 s
+`lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned
+table is set on the parent and every partition (a partition added later is caught at the next
+start), but only when it misses a link: its updates carry no post-image, so `partial` never lists it. Guards: `replica_identity::tests` (`shortfall`), `publication`'s
+`every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on
+one table) and `a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s
+`managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target`. The WAL decoder keys a change by the table's **catalog
 primary key** (looked up per `Relation` message in `cdc/stream.rs`), never by the identity flags,
 which mark every column under `FULL`. **An update that changes no column a document reads rebuilds nothing**
 (issue #169): an update with a pre-image also carries a post-image (`ChangeEvent::Upsert.after`,
@@ -544,7 +553,12 @@ predicate uses too) are the one derivation of "which columns a path reads" — f
 index "all" (raw SQL is pasted into a correlated subquery and can read `root.…`, a junction, an
 enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_that_column`). A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers
-"the type of *this* column" and `CaptureProvisioning` answers "is this table set coverable",
+"the type of *this* column" (and "does *this* table exist": `validate_indexes` walks every
+relation at any depth and looks up its table, key, junction keys, `via` hops, both sides of each
+`on:` pair, value/null-check filter columns, `order_by` and a join's `primary_key` on the table
+each lives on — issue #202; a missing table is a `SourceError::UnknownTable` diagnostic, reported
+once per relation; `Diagnostic.path` is the field path; guards: the `validation::tests` mock-catalog
+cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position`) and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
 columns/types/PK/FKs, each with a suggested `FlussoType`) so discovery-driven tooling can pick
 from what's really there; `junction_candidates` (a free function, not a trait method) flags m2m
@@ -687,6 +701,25 @@ sets carry both sides (`related` on the hop's table, `local` on the level before
 `pre_image_columns` needs no `related` column (a row changing only those keeps its key). Guards:
 `on_pairs_rebuild_the_parent_from_either_side` (`wal`), the `on_pairs_*` SQL tests,
 `a_schema_without_on_keeps_its_content_hash`.
+`sum`/`avg`/`min`/`max` fold a `kernel::Expression` (issue #194; grammar and storage in the
+`expression.rs` module doc, semantics in the Aggregates reference): parsed by hand, **no regex**,
+depth-capped. A whole input `ColumnName::try_new` accepts is that column (so every old
+spelling still loads, Unicode lowercasing included); a plain column is the `Column` leaf,
+serialized and hashed as the bare `ColumnName` (format freeze); an expression is stored in the
+lock as its canonical text, which must nest no deeper than the tree is tall (a double negation
+renders `- -a`) so every accepted tree re-parses from its lock. An expression's
+`sum`/`min`/`max` takes only a numeric `value_type`, rejected at load.
+`sql::arithmetic` renders every `/` as `(left / NULLIF(right, 0))` (issue #202): a zero divisor
+nulls that row, which the aggregate skips, instead of failing the document query and stalling the
+deployment; integer overflow stays a Postgres error.
+`AggregateOp::input()` is the one accessor (`sql::arithmetic`, `relation_columns`,
+`validate_indexes`, designer codegen); the designer checks input through `POST /api/expression`,
+the same parser. Guards: `a_plain_column_aggregate_keeps_its_content_hash`, the
+`expression::tests` proptests (`a_tree_up_to_the_cap_renders_to_text_that_parses_back`),
+`every_chain_up_to_the_cap_renders_to_text_that_parses_back`,
+`a_whole_column_name_keeps_the_column_name_rules`, `the_deepest_expression_survives_a_lock_round_trip`
+(`golden_lock`), `an_expression_needs_a_numeric_value_type`,
+`an_aggregate_expression_rebuilds_from_each_operand` (`wal`).
 **The content hash is the physical index name**, so `Aggregate`
 and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via`/`on` when
 unset (`ViaHop` and `Join` likewise for `on`, a hop's pairs under their own tag) — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
@@ -1015,8 +1048,8 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | `flusso.toml` parsing (entities only; conversion is beside `Config`) | `libs/1-config/src/toml/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
 | Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`, `replica_identity.rs`), `document/` (`resolve.rs`: reverse resolution + the first-hop pre-image union) |
-| Source trait abstractions (`ChangeCapture` + `Continuity`, `ChangeEvent` + `RowImage` pre-image, `DocumentBuilder`, `SourceSpec` + `all_tables`/`pre_image_columns`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`/`PreImageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
-| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits (node ids are the client-only container `uid`s of `ids.ts`, which collapse state + drag positions key on, stripped from every request), plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
+| Source trait abstractions (`ChangeCapture` + `Continuity`, `ChangeEvent` + `RowImage` pre-image, `DocumentBuilder`, `SourceSpec` + `all_tables`/`pre_image_columns`/`pre_images`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`/`PreImageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
+| Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/**expression**/preview/validate/**sample**/diff/save), `codegen.rs` (model → `*.schema.yml`/`flusso.toml`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits (node ids are the client-only container `uid`s of `ids.ts`, which collapse state + drag positions key on, stripped from every request), plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs`. The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
 | `Sink` trait (`apply`/`flush`/seeding/`reindex`), `SinkOptions`, JSON render | `libs/1-ports/sink/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger, watermark) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |

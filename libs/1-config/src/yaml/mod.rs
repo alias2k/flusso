@@ -75,6 +75,14 @@ pub enum ConversionError {
     )]
     InvalidAggregateType { op: &'static str },
     #[error(
+        "aggregate `{field}`: '{op}' over an expression needs a numeric `value_type` \
+         (`short`, `integer`, `long`, `float`, `double` or `decimal`): arithmetic yields a number"
+    )]
+    NonNumericExpressionType {
+        field: kernel::common::FieldName,
+        op: &'static str,
+    },
+    #[error(
         "aggregate op 'ids' requires an `element_type` (`long` or `keyword`) — it states the \
          element type of the collected primary keys"
     )]

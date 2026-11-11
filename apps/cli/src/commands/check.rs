@@ -107,7 +107,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             .await
             .context("inspecting publication coverage")?;
         let pre_image = provisioning
-            .inspect_pre_image(&spec.pre_image_columns())
+            .inspect_pre_image(&spec.pre_images())
             .await
             .context("inspecting replica identities")?;
         (Some(coverage), Some(pre_image))
@@ -129,6 +129,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     .map(|d| serde_json::json!({
                         "index": d.index.as_ref(),
                         "field": d.field.as_ref(),
+                        "path": d.dotted_path(),
                         "severity": format!("{:?}", d.severity).to_lowercase(),
                         "message": d.message,
                     }))
@@ -143,17 +144,22 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     "blockers": c.blockers,
                     "remediation": c.remediation,
                 })),
-                "pre_image": pre_image.as_ref().map(|p| serde_json::json!({
-                    "satisfied": p.satisfied(),
-                    "gaps": p.gaps.iter().map(|gap| serde_json::json!({
+                "pre_image": pre_image.as_ref().map(|p| {
+                    let gaps = |gaps: &[source::PreImageGap]| gaps.iter().map(|gap| serde_json::json!({
                         "table": gap.table.to_string(),
                         "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
                         "manageable": gap.manageable,
                         "will_manage": gap.will_manage(postgres.manage_replica_identity),
                         "blockers": gap.blockers,
                         "remediation": gap.remediation,
-                    })).collect::<Vec<_>>(),
-                })),
+                    })).collect::<Vec<_>>();
+                    serde_json::json!({
+                        "satisfied": p.satisfied(),
+                        "complete": p.complete(),
+                        "gaps": gaps(&p.gaps),
+                        "partial": gaps(&p.partial),
+                    })
+                }),
             });
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         }

@@ -1,15 +1,18 @@
 import { ChevronDown, ChevronUp, Copy, Trash2, X } from "lucide-react";
 import pluralize from "pluralize";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
+  NUMERIC_TYPES,
   SCALAR_TYPES,
   SCRIPT_TYPES,
+  api,
   type Aggregate,
   type AggregateKey,
   type AggregateOp,
   type Column,
   type ColumnPair,
   type ColumnShape,
+  type ExpressionCheck,
   type Field,
   type FieldSource,
   type FlussoType,
@@ -1278,13 +1281,14 @@ function AggregateBody({
           />
         </Row>
         {opCol !== null && (
-          <Row label={t("inspector.aggColumn")}>
-            <ColumnPicker
-              value={opCol}
-              columns={aggColShapes}
-              onChange={(c) => setAgg({ ...agg, op: withAggColumn(kind, c) })}
-            />
-          </Row>
+          <AggregateInput
+            value={opCol}
+            table={agg.table}
+            columns={aggColShapes}
+            onChange={(c) =>
+              setAgg({ ...agg, op: withAggColumn(kind, c), value_type: inputValueType(c, agg.value_type) })
+            }
+          />
         )}
         <AggregateKeyEditor
           value={agg.key}
@@ -1317,7 +1321,7 @@ function AggregateBody({
           <Row label="value_type">
             <Select
               value={(agg.value_type as string) ?? "integer"}
-              options={SCALAR_TYPES as string[]}
+              options={(opCol !== null && !isPlainColumn(opCol) ? NUMERIC_TYPES : SCALAR_TYPES) as string[]}
               onChange={(v) => setAgg({ ...agg, value_type: v as FlussoType })}
             />
           </Row>
@@ -1340,7 +1344,13 @@ function AggregateBody({
         parentTable={parentTable}
         tables={tables}
         junctions={junctions}
-        onChange={(via) => setAgg({ ...agg, via: via.length ? via : undefined })}
+        onChange={(via) => {
+          // The aggregate's own `on` pairs take `local` from the last hop (or the
+          // parent): when that table changes, their `local` columns name another table.
+          const before = agg.via?.[agg.via.length - 1]?.table ?? parentTable;
+          const after = via[via.length - 1]?.table ?? parentTable;
+          setAgg({ ...agg, via: via.length ? via : undefined, on: before === after ? agg.on : undefined });
+        }}
       />
       {"direct" in agg.key && (
         <OnEditor
@@ -1362,6 +1372,165 @@ function AggregateBody({
       )}
     </>
   );
+}
+
+/// What a `sum`/`avg`/`min`/`max` folds: a column picked from the aggregated
+/// table, or arithmetic over its columns. An expression is checked by the
+/// loader's own parser (`/api/expression`) and reaches the model only once it
+/// parses, so the preview never sees a half-typed one.
+function AggregateInput({
+  value,
+  table,
+  columns,
+  onChange,
+}: {
+  value: string;
+  table: string;
+  columns: ColumnShape[];
+  onChange: (input: string) => void;
+}) {
+  const { t } = useT();
+  const [mode, setMode] = useState<"column" | "expression">(isColumnName(value) ? "column" : "expression");
+  const [draft, setDraft] = useState(value);
+  const [seen, setSeen] = useState(value);
+  const [check, setCheck] = useState<ExpressionCheck | null>(null);
+  const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const ticket = useRef(0);
+  const committed = useRef(value);
+  // A check still in flight belongs to the aggregate as it was typed against: an
+  // outside change or unmount voids it, or its `onChange` would write that old
+  // aggregate back.
+  const cancel = () => {
+    clearTimeout(pending.current);
+    ticket.current += 1;
+  };
+  useEffect(() => {
+    if (value !== committed.current) {
+      committed.current = value;
+      cancel();
+    }
+  }, [value]);
+  useEffect(() => cancel, []);
+  if (value !== seen) {
+    setSeen(value);
+    setDraft(value);
+    setCheck(null);
+  }
+  const type = (input: string) => {
+    setDraft(input);
+    cancel();
+    const mine = ticket.current;
+    pending.current = setTimeout(() => {
+      void api
+        .expression(input)
+        .then((result) => {
+          if (mine !== ticket.current) return;
+          setCheck(result);
+          if (!result.error) {
+            committed.current = input;
+            setSeen(input);
+            onChange(input);
+          }
+        })
+        .catch(() => undefined);
+    }, CHECK_DELAY_MS);
+  };
+  const known = new Set(columns.map((c) => c.name));
+  const unknown = columns.length ? (check?.columns ?? []).filter((c) => !known.has(c)) : [];
+  return (
+    <>
+      <Row label={t("inspector.aggInput")}>
+        <Select
+          value={mode}
+          options={[
+            { value: "column", label: t("inspector.aggInputColumn") },
+            { value: "expression", label: t("inspector.aggInputExpression") },
+          ]}
+          onChange={setMode}
+        />
+      </Row>
+      {mode === "column" ? (
+        <Row label={t("inspector.aggColumn")}>
+          <ColumnPicker value={value} columns={columns} onChange={onChange} />
+        </Row>
+      ) : (
+        <Row label={t("inspector.aggExpression")}>
+          <Text
+            value={draft}
+            onChange={type}
+            placeholder={t("inspector.aggExpressionPlaceholder")}
+            invalid={Boolean(check?.error)}
+            className="font-mono"
+          />
+        </Row>
+      )}
+      {mode === "expression" && check?.error && (
+        <p className="mt-1.5 flex items-start gap-1 text-2xs text-warn" role="alert">
+          <span aria-hidden>⚠</span>
+          <span>{expressionError(t, check.error)}</span>
+        </p>
+      )}
+      {mode === "expression" && unknown.length > 0 && (
+        <p className="mt-1.5 flex items-start gap-1 text-2xs text-warn">
+          <span aria-hidden>⚠</span>
+          <span>{t("inspector.aggExpressionUnknown", { table, columns: unknown.join(", ") })}</span>
+        </p>
+      )}
+      {mode === "expression" && <p className="hint">{t("inspector.aggExpressionHint")}</p>}
+    </>
+  );
+}
+
+/// How long typing pauses before an expression is checked.
+const CHECK_DELAY_MS = 250;
+
+/// A plain column, not an expression: the loader takes any scalar `value_type`
+/// for one, but only a numeric one over arithmetic.
+function isPlainColumn(input: string): boolean {
+  const name = input.trim();
+  return name !== "" && !(name.charAt(0) >= "0" && name.charAt(0) <= "9") && isColumnName(name);
+}
+
+/// The `value_type` to keep once the input changes: an expression snaps a
+/// non-numeric one to `double`.
+function inputValueType(input: string, current: FlussoType | undefined): FlussoType | undefined {
+  if (current === undefined || isPlainColumn(input) || NUMERIC_TYPES.includes(current)) return current;
+  return "double";
+}
+
+/// Whether `input` is a lone name (letters, digits, `_`): the column view shows
+/// it, anything else opens in the expression view. Only picks the initial
+/// view; the server's parser decides what is valid.
+function isColumnName(input: string): boolean {
+  return [...input.trim()].every(
+    (c) => c === "_" || (c >= "0" && c <= "9") || (c.toLowerCase() >= "a" && c.toLowerCase() <= "z"),
+  );
+}
+
+/// A parse error in the user's language: literal keys, so the i18n check sees
+/// every one.
+function expressionError(t: Translate, error: NonNullable<ExpressionCheck["error"]>): string {
+  const at = { position: error.position, detail: error.detail ?? "" };
+  switch (error.code) {
+    case "empty":
+      return t("inspector.exprEmpty", at);
+    case "unexpected_character":
+      return t("inspector.exprUnexpectedCharacter", at);
+    case "incomplete_number":
+      return t("inspector.exprIncompleteNumber", at);
+    case "invalid_column":
+      return t("inspector.exprInvalidColumn", at);
+    case "expected_operand":
+      return t("inspector.exprExpectedOperand", at);
+    case "expected_operator":
+      return t("inspector.exprExpectedOperator", at);
+    case "unclosed_parenthesis":
+      return t("inspector.exprUnclosedParenthesis", at);
+    case "unmatched_parenthesis":
+      return t("inspector.exprUnmatchedParenthesis", at);
+    case "too_deep":
+      return t("inspector.exprTooDeep", at);
+  }
 }
 
 /// The tables an aggregate passes through between its parent and its table,

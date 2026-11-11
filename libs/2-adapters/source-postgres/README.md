@@ -8,7 +8,7 @@ The Postgres logical-replication **source** for flusso: capture row changes over
 | --- | --- |
 | `ChangeCapture` | streams thin per-row changes (table + primary key, plus the pre-image an update or delete logs) from a replication slot; confirms progress via an LSN watermark; answers how far a sink has reached as an LSN, for fences |
 | `DocumentBuilder` | resolves which documents a changed row affects, then assembles each one. Also implements `Catalog` (a column's SQL type + nullability, for index validation) |
-| `CaptureProvisioning` | reports stream coverage + a privilege verdict for an index's tables, and provisions the gap (create/extend a publication, published via the partition root so a partitioned table's changes keep its own name) when allowed; does the same for child tables whose replica identity misses their parent link (`REPLICA IDENTITY FULL`) |
+| `CaptureProvisioning` | reports stream coverage + a privilege verdict for an index's tables, and provisions the gap (create/extend a publication, published via the partition root so a partitioned table's changes keep its own name) when allowed; does the same for replica identity: sets `REPLICA IDENTITY FULL` on every table an index reads, reporting a missing parent link apart from a table that only misses the rest of the old row |
 
 **Configuration**: [`PostgresConfig`] is the `[source]` table with `type = "postgres"`,
 declared once with `#[derive(AdapterConfig)]`: the connection (a URL, `{ env = "VAR" }`,

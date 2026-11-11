@@ -237,6 +237,25 @@ export const en: Record<string, string> = {
     "A point is absent when either column is null (never sent as '{'lat:null'}'). Mark required to forbid that absence.",
   "inspector.relatedTable": "related table",
   "inspector.aggColumn": "column (to aggregate)",
+  "inspector.aggInput": "input",
+  "inspector.aggInputColumn": "a column",
+  "inspector.aggInputExpression": "an expression",
+  "inspector.aggExpression": "expression (per row)",
+  "inspector.aggExpressionPlaceholder": "quantity * unit_price",
+  "inspector.aggExpressionHint":
+    "Arithmetic over the related table's columns, computed per row before aggregating: column names, numbers, + - * /, unary minus and parentheses. No functions. Integer division truncates; a row with a null operand is skipped.",
+  "inspector.aggExpressionUnknown": "Not a column of {table}: {columns}",
+  "inspector.exprEmpty": "The expression is empty.",
+  "inspector.exprUnexpectedCharacter":
+    "Position {position}: “{detail}” is not allowed. Use column names, numbers, + - * / and parentheses.",
+  "inspector.exprIncompleteNumber": "Position {position}: a number needs a digit after its “.”.",
+  "inspector.exprInvalidColumn":
+    "Position {position}: “{detail}” is too long for a column name (63 characters at most).",
+  "inspector.exprExpectedOperand": "Position {position}: expected a column, a number, “-” or “(”.",
+  "inspector.exprExpectedOperator": "Position {position}: expected an operator (+ - * /) or the end.",
+  "inspector.exprUnclosedParenthesis": "Position {position}: this “(” is never closed.",
+  "inspector.exprUnmatchedParenthesis": "Position {position}: this “)” has no matching “(”.",
+  "inspector.exprTooDeep": "Position {position}: the expression nests deeper than {detail} levels.",
   "inspector.junctionTable": "junction table",
   "inspector.junctionFilters": "Junction filters",
   "inspector.junctionFiltersHint":

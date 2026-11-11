@@ -134,9 +134,10 @@ An `enum` takes an optional `variants:` list — its values in rank order (`vari
 
 `count` `exists` `sum` `avg` `min` `max` `ids`. Each needs `table` and **exactly one** of `foreign_key` xor `through`.
 
-- `count` → non-null `long`; `avg` → nullable `double` → neither takes `column`/`value_type`.
+- `count` → non-null `long`, takes no `column`/`value_type`; `avg` → nullable `double`, takes a `column` but no `value_type`.
 - `exists` → non-null `boolean` (`false` over zero rows); **rejects** `column`/`value_type`. Prefer it to `count` for a presence flag.
 - `sum`/`min`/`max` → **must** declare both `column` and `value_type` (it mirrors the column).
+- `column` on `sum`/`avg`/`min`/`max` may be **arithmetic over the aggregated table's columns**, evaluated per row: `column: quantity * unit_price`. Only column names, numbers, `+ - * /`, unary minus and parentheses; no functions, no parent or `via` columns. Postgres semantics: integer division truncates (write `/ 2.0` for a fraction), a null operand or a zero divisor drops that row. `value_type` rules are unchanged; give a product with a `numeric` column `double`/`decimal`. Owned meaning: the [Aggregates reference](https://alias2k.github.io/flusso/reference/aggregates.html#arithmetic-input).
 - `ids` → a **flat array of the related table's primary keys** (never null; `[]` when empty), not a nested body. **Must** declare `element_type` (the scalar type of each key, e.g. `long` for integer PKs, `keyword` for uuid/string PKs); takes **no** `column`/`value_type` — the key column is the related table's PK. Works over `foreign_key` (one-to-many) or `through` (many-to-many).
 
 - Over `through`, an aggregate counts **once per junction row** (a product on two order lines counts twice). `distinct: true` counts each target row once; it's rejected on `foreign_key` aggregates. A junction row whose target is missing never counts.

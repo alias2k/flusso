@@ -308,8 +308,9 @@ impl PgDocumentBuilder {
     }
 
     /// The Postgres catalog's view of a column — its cast-ready SQL type and
-    /// whether it admits null — cached. An unknown column is an error: a field or
-    /// filter naming a column that does not exist is a misconfiguration.
+    /// whether it admits null — cached. An unknown column (or table) is an
+    /// error: a field or filter naming one that does not exist is a
+    /// misconfiguration.
     async fn column_meta(
         &self,
         schema: &DatabaseSchema,
@@ -332,7 +333,7 @@ impl PgDocumentBuilder {
         // from the same catalog row as the type.
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, a.attnotnull AS not_null \
                    FROM pg_attribute a \
-                   WHERE a.attrelid = $1::regclass AND a.attname = $2 \
+                   WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
                      AND a.attnum > 0 AND NOT a.attisdropped";
         let row = sqlx::query(sql)
             .bind(format!("{schema}.{table}"))
@@ -349,6 +350,9 @@ impl PgDocumentBuilder {
                     nullable: !not_null,
                 }
             }
+            None if !self.table_exists(schema, table).await? => {
+                return Err(SourceError::UnknownTable(format!("{schema}.{table}")));
+            }
             None => {
                 return Err(SourceError::UnknownColumn(format!(
                     "{schema}.{table}.{column}"
@@ -360,6 +364,16 @@ impl PgDocumentBuilder {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(cache_key, meta.clone());
         Ok(meta)
+    }
+
+    /// Whether `schema.table` names a relation, resolved the way a column
+    /// lookup resolves it.
+    async fn table_exists(&self, schema: &DatabaseSchema, table: &TableName) -> Result<bool> {
+        sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("{schema}.{table}"))
+            .fetch_one(&self.pool)
+            .await
+            .map_err(query_err)
     }
 
     /// Resolve the SQL type of every column a value filter compares against,
@@ -440,6 +454,10 @@ impl Catalog for PgDocumentBuilder {
             sql_type: meta.sql_type,
             nullable: meta.nullable,
         })
+    }
+
+    async fn has_table(&self, schema: &DatabaseSchema, table: &TableName) -> Result<bool> {
+        self.table_exists(schema, table).await
     }
 }
 

@@ -26,7 +26,7 @@ You'd rather pick tables and columns than type the grammar, or you want a sample
 
 6. **Preview.** The **Preview** panel has three tabs. **YAML** is the file that would be written. **Mapping** is the derived OpenSearch mapping, the same `flusso check --offline` prints. **Sample** builds a document from one live row, exactly what the sink would write, or synthesizes example data when the table is empty.
 
-7. **Validate.** **Validate** checks every field's column, type, and nullability against the database and highlights offending fields on the canvas with the message on hover.
+7. **Validate.** **Validate** checks every field's column, type, and nullability, and every table and column a relation names, against the database and highlights offending fields on the canvas with the message on hover.
 
 8. **Save.** **Save** (or `⌘/Ctrl+S`) opens a review of every file that would change, grouped by folder and tagged as a write, a move, a delete, or a new file. Uncheck anything to leave it alone. Saving is atomic: everything is staged first, so a failure leaves the files untouched.
 
