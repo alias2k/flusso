@@ -1,9 +1,12 @@
 //! Reverse resolution: given a changed row, find the keys of the root documents
 //! it affects by walking relation paths back up to the root.
 //!
+//! A path is a list of [`Step`]s: one per relation, plus one per table of an
+//! aggregate's `via`, each a plain foreign-key hop to the table before it.
+//!
 //! Every hop reads the **current** database, except one input to the first: when
 //! the changed row itself holds the link to its parent (a `has_one`/`has_many`
-//! child's `foreign_key`, a junction's `left_key`), the parent is also read from
+//! child's or a `via` table's `foreign_key`, a junction's `left_key`), the parent is also read from
 //! the change's pre-image. That is how a deleted child — whose row is gone — and
 //! a re-parented one — whose row names the new parent — still rebuild the
 //! document they used to sit in. Without a pre-image (a table whose replica
@@ -16,7 +19,7 @@ use kernel::{
 };
 use source::{Result, RowImage, RowKey, SourceError};
 
-use super::fields::relation_target;
+use super::fields::Step;
 use super::{PgDocumentBuilder, query, query_err, value};
 
 impl PgDocumentBuilder {
@@ -30,13 +33,13 @@ impl PgDocumentBuilder {
         changed_table: &TableName,
         change_key: &RowKey,
         before: Option<&RowImage>,
-        path: &[&Relation],
+        path: &[Step<'_>],
     ) -> Result<Vec<GenericValue>> {
         let mut current_keys = vec![change_key.clone()];
         let mut current_table = changed_table.clone();
 
         for depth in (0..path.len()).rev() {
-            let relation = *path
+            let step = *path
                 .get(depth)
                 .ok_or_else(|| SourceError::Query("internal: path index".into()))?;
 
@@ -46,7 +49,7 @@ impl PgDocumentBuilder {
                 let prev = *path
                     .get(depth - 1)
                     .ok_or_else(|| SourceError::Query("internal: path index".into()))?;
-                relation_target(prev).0.clone()
+                prev.table().clone()
             };
             let parent_pk = if depth == 0 {
                 schema.primary_key.clone().ok_or_else(|| {
@@ -61,14 +64,14 @@ impl PgDocumentBuilder {
 
             let old_link = before
                 .filter(|_| depth + 1 == path.len())
-                .zip(link_on_row(relation, &current_table));
+                .zip(link_on_row(step, &current_table));
             let mut next = Vec::new();
             let mut seen = HashSet::new();
             for key in &current_keys {
                 for value in self
                     .reverse_hop(
                         &schema.db_schema,
-                        relation,
+                        step,
                         &current_table,
                         &parent_table,
                         &parent_pk,
@@ -96,24 +99,29 @@ impl PgDocumentBuilder {
     }
 
     /// One reverse hop: from a key in `current_table`, find the parent key
-    /// values via `relation`. `parent_table`/`parent_pk` name the hop's parent
+    /// values via `step`. `parent_table`/`parent_pk` name the hop's parent
     /// side — a `belongs_to` stores its key *there*, so its reverse query runs
     /// against the parent table rather than the changed one.
     async fn reverse_hop(
         &self,
         schema: &DatabaseSchema,
-        relation: &Relation,
+        step: Step<'_>,
         current_table: &TableName,
         parent_table: &TableName,
         parent_pk: &ColumnName,
         key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
-        let (target, relation_key) = relation_target(relation);
-        match relation_key {
+        match step.key() {
             RelationKey::Direct(foreign_key) => {
-                self.reverse_direct(schema, target, foreign_key, key).await
+                self.reverse_direct(schema, step.table(), foreign_key, key)
+                    .await
             }
             RelationKey::Local(column) => {
+                let Step::Relation(relation) = step else {
+                    return Err(SourceError::Query(
+                        "internal: a `via` hop is never local".into(),
+                    ));
+                };
                 self.reverse_local(schema, relation, parent_table, parent_pk, column, key)
                     .await
             }
@@ -254,11 +262,11 @@ impl PgDocumentBuilder {
     }
 }
 
-/// The column on `row_table` that names its parent across `relation`, when the
-/// link lives on that row: a direct child's `foreign_key`, or a junction's
-/// `left_key` when the junction itself changed.
-fn link_on_row<'a>(relation: &'a Relation, row_table: &TableName) -> Option<&'a ColumnName> {
-    source::row_link(relation)
+/// The column on `row_table` that names its parent across `step`, when the
+/// link lives on that row: a direct child's or `via` table's `foreign_key`, or
+/// a junction's `left_key` when the junction itself changed.
+fn link_on_row<'a>(step: Step<'a>, row_table: &TableName) -> Option<&'a ColumnName> {
+    step.row_link()
         .filter(|(table, _)| *table == row_table)
         .map(|(_, column)| column)
 }

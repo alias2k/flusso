@@ -581,6 +581,59 @@ column = "removed_at"
 op = "is_null"
 
 [[config.indexes.catalog.schema.fields]]
+field = "hasHelpfulReply"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate]
+table = "replies"
+op = "exists"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.key]
+direct = "review_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.filters]]
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.filters.value_op]
+column = "helpful"
+op = "eq"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.filters.value_op.value]
+single = "true"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.via]]
+table = "reviews"
+foreign_key = "product_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.via.filters]]
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.via.filters.value_op]
+column = "stars"
+op = "lte"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.via.filters.value_op.value]
+single = "2"
+
+[[config.indexes.catalog.schema.fields]]
+field = "taggedReplyCount"
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate]
+table = "tags"
+op = "count"
+distinct = true
+
+[config.indexes.catalog.schema.fields.source.relation.aggregate.key.through]
+table = "reply_tags"
+left_key = "reply_id"
+right_key = "tag_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.via]]
+table = "reviews"
+foreign_key = "product_id"
+
+[[config.indexes.catalog.schema.fields.source.relation.aggregate.via]]
+table = "replies"
+foreign_key = "review_id"
+
+[[config.indexes.catalog.schema.fields]]
 field = "docSource"
 
 [config.indexes.catalog.schema.fields.source.constant]

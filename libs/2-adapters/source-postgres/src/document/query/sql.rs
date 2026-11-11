@@ -137,6 +137,8 @@ pub(super) fn limit_clause(limit: Option<u64>) -> String {
 pub(super) fn agg_function(op: &AggregateOp, alias: &str) -> String {
     match op {
         AggregateOp::Count => "count(*)".to_owned(),
+        // The builder wraps the subquery in `EXISTS`; the selected value is unread.
+        AggregateOp::Exists => "1".to_owned(),
         AggregateOp::Sum(c) => format!("sum({})", qcol(alias, c)),
         AggregateOp::Avg(c) => format!("avg({})", qcol(alias, c)),
         AggregateOp::Min(c) => format!("min({})", qcol(alias, c)),

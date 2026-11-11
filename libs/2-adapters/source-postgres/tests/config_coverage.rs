@@ -302,6 +302,7 @@ async fn aggregates_cover_every_op_and_through() {
                 value_type: None,
                 filters: None,
                 distinct: false,
+                via: Vec::new(),
             },
         ),
     ];
@@ -348,6 +349,7 @@ fn purchases_agg(
         value_type: Some(FlussoType::Long),
         filters,
         distinct,
+        via: Vec::new(),
     }
 }
 
@@ -1141,6 +1143,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         value_type: None,
         filters,
         distinct: false,
+        via: Vec::new(),
     }
 }
 

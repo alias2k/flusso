@@ -96,3 +96,33 @@ fn a_schema_without_a_self_join_has_no_path_to_its_root_table() {
 
     assert!(path_names(&[id_field(), orders], "users").is_empty());
 }
+
+#[test]
+fn an_aggregate_via_hops_adds_one_step_per_hop() {
+    let hop = |table_name: &str, foreign_key: &str| kernel::ViaHop {
+        table: table(table_name),
+        foreign_key: column(foreign_key),
+        filters: None,
+    };
+    let task_count = Field {
+        field: FieldName::try_new("taskCount").unwrap(),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Aggregate(kernel::Aggregate {
+            table: table("tasks"),
+            op: kernel::AggregateOp::Count,
+            key: kernel::AggregateKey::Direct(column("project_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: vec![hop("teams", "owner_id"), hop("projects", "team_id")],
+        })),
+    };
+    let fields = [id_field(), task_count];
+
+    assert_eq!(path_names(&fields, "teams"), [["teams"]]);
+    assert_eq!(path_names(&fields, "projects"), [["teams", "projects"]]);
+    assert_eq!(
+        path_names(&fields, "tasks"),
+        [["teams", "projects", "tasks"]]
+    );
+}

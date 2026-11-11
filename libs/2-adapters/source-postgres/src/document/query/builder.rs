@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, ColumnName, DatabaseSchema, Field, FieldSource, Filter,
     FilterOp, FilterValue, GenericValue, IndexSchema, Join, JoinKind, NullOp, Relation, SoftDelete,
-    TableName, ValueOpFilter,
+    TableName, ValueOpFilter, ViaHop,
 };
 use source::{Result, SourceError};
 
@@ -210,6 +210,10 @@ impl Builder<'_> {
         }
     }
 
+    /// A scalar subquery reducing the related rows. The rows are tied to the
+    /// parent by `<key> = parent.pk`, or, across `via`, by `<key> IN (<the last
+    /// hop's keys>)` (see [`parent_match`](Self::parent_match)). `exists` wraps
+    /// the same rows in `EXISTS`.
     fn aggregate_value(
         &mut self,
         aggregate: &Aggregate,
@@ -217,8 +221,9 @@ impl Builder<'_> {
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
         let parent_pk = require_pk(parent_pk)?;
+        let parent = self.parent_match(&aggregate.via, parent_alias, parent_pk)?;
         let is_ids = matches!(&aggregate.op, AggregateOp::Ids { .. });
-        match &aggregate.key {
+        let rows = match &aggregate.key {
             AggregateKey::Direct(foreign_key) => {
                 let alias = self.alias();
                 let function = if is_ids {
@@ -228,13 +233,12 @@ impl Builder<'_> {
                 };
                 let filters =
                     self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
-                Ok(format!(
-                    "(SELECT {function} FROM {} AS {} WHERE {} = {}{filters})",
+                format!(
+                    "(SELECT {function} FROM {} AS {} WHERE {} {parent}{filters})",
                     qtable(self.db, &aggregate.table),
                     qident(&alias),
                     qcol(&alias, foreign_key),
-                    qcol(parent_alias, parent_pk),
-                ))
+                )
             }
             AggregateKey::Through(through) => {
                 let far_pk = self.pk_of(&aggregate.table)?;
@@ -254,20 +258,51 @@ impl Builder<'_> {
                 let right_key = qcol(&junction_alias, &through.right_key);
                 let left_key = qcol(&junction_alias, &through.left_key);
                 let far_key = qcol(&alias, &far_pk);
-                let parent_key = qcol(parent_alias, parent_pk);
                 let fa = qident(&alias);
                 let ja = qident(&junction_alias);
-                Ok(if aggregate.distinct {
+                if aggregate.distinct {
                     format!(
-                        "(SELECT {function} FROM {far} AS {fa} WHERE {far_key} IN (SELECT {right_key} FROM {junction} AS {ja} WHERE {left_key} = {parent_key}{junction_filters}){filters})"
+                        "(SELECT {function} FROM {far} AS {fa} WHERE {far_key} IN (SELECT {right_key} FROM {junction} AS {ja} WHERE {left_key} {parent}{junction_filters}){filters})"
                     )
                 } else {
                     format!(
-                        "(SELECT {function} FROM {far} AS {fa} JOIN {junction} AS {ja} ON {right_key} = {far_key} WHERE {left_key} = {parent_key}{filters}{junction_filters})"
+                        "(SELECT {function} FROM {far} AS {fa} JOIN {junction} AS {ja} ON {right_key} = {far_key} WHERE {left_key} {parent}{filters}{junction_filters})"
                     )
-                })
+                }
             }
+        };
+        Ok(if matches!(aggregate.op, AggregateOp::Exists) {
+            format!("(EXISTS {rows})")
+        } else {
+            rows
+        })
+    }
+
+    /// The right-hand side tying an aggregate's key to its parent row:
+    /// `= parent.pk` for a one-hop aggregate. Each `via` hop wraps it in one
+    /// more level, `IN (SELECT hop.pk FROM hop WHERE hop.foreign_key <previous>
+    /// AND <hop filters>)`, so the key ends up matching the last hop's rows.
+    /// A row of a foreign-key chain has one parent, so no level repeats a row.
+    fn parent_match(
+        &mut self,
+        via: &[ViaHop],
+        parent_alias: &str,
+        parent_pk: &ColumnName,
+    ) -> Result<String> {
+        let mut parent = format!("= {}", qcol(parent_alias, parent_pk));
+        for hop in via {
+            let pk = self.pk_of(&hop.table)?;
+            let alias = self.alias();
+            let filters = self.filters(hop.filters.as_deref(), &alias, &hop.table)?;
+            parent = format!(
+                "IN (SELECT {} FROM {} AS {} WHERE {} {parent}{filters})",
+                qcol(&alias, &pk),
+                qtable(self.db, &hop.table),
+                qident(&alias),
+                qcol(&alias, &hop.foreign_key),
+            );
         }
+        Ok(parent)
     }
 
     /// `… AND (cond)` for each filter, qualified to `alias`; `table` names the

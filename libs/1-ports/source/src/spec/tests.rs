@@ -192,3 +192,66 @@ fn pre_image_columns_carry_a_self_join_link_on_the_root_table() {
         BTreeMap::from([(items_table, vec![ColumnName::try_new("parent_id").unwrap()])])
     );
 }
+
+/// `users` with a `via` aggregate: users → teams → projects → tasks.
+fn users_with_task_count() -> IndexSchema {
+    let hop = |table: &str, foreign_key: &str| kernel::ViaHop {
+        table: TableName::try_new(table).unwrap(),
+        foreign_key: ColumnName::try_new(foreign_key).unwrap(),
+        filters: None,
+    };
+    let mut users = schema("users");
+    users.fields.push(Field {
+        field: kernel::FieldName::try_new("taskCount").unwrap(),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Aggregate(kernel::Aggregate {
+            table: TableName::try_new("tasks").unwrap(),
+            op: kernel::AggregateOp::Count,
+            key: kernel::AggregateKey::Direct(ColumnName::try_new("project_id").unwrap()),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: vec![hop("teams", "owner_id"), hop("projects", "team_id")],
+        })),
+    });
+    users
+}
+
+#[test]
+fn all_tables_include_every_via_hop() {
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("users"),
+        users_with_task_count(),
+    )]));
+    let public = DatabaseSchema::try_new("public").unwrap();
+    let qt = |t: &str| QualifiedTable::new(public.clone(), TableName::try_new(t).unwrap());
+    assert_eq!(
+        spec.all_tables(),
+        [qt("projects"), qt("tasks"), qt("teams"), qt("users")]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn pre_image_columns_carry_each_via_hop_s_foreign_key() {
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("users"),
+        users_with_task_count(),
+    )]));
+    let public = DatabaseSchema::try_new("public").unwrap();
+    let entry = |table: &str, column: &str| {
+        (
+            QualifiedTable::new(public.clone(), TableName::try_new(table).unwrap()),
+            vec![ColumnName::try_new(column).unwrap()],
+        )
+    };
+    assert_eq!(
+        spec.pre_image_columns(),
+        BTreeMap::from([
+            entry("projects", "team_id"),
+            entry("tasks", "project_id"),
+            entry("teams", "owner_id"),
+        ])
+    );
+}

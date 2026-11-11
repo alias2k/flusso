@@ -261,6 +261,7 @@ fn aggregate_count() {
             value_type: None,
             filters: None,
             distinct: false,
+            via: Vec::new(),
         })),
     };
     let schema = index(Some("id"), None, vec![count]);
@@ -291,6 +292,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
             value_type: None,
             filters: None,
             distinct: false,
+            via: Vec::new(),
         })),
     };
     let schema = index(Some("id"), None, vec![ids]);
@@ -338,6 +340,7 @@ fn through_aggregate_sql(
             value_type: None,
             filters,
             distinct,
+            via: Vec::new(),
         })),
     };
     let schema = index(Some("id"), None, vec![aggregate]);
@@ -643,4 +646,141 @@ fn reverse_query_selects_foreign_key() {
         r#"SELECT "user_id" FROM "public"."orders" WHERE "id" = $1::bigint"#
     );
     assert_eq!(params, vec![GenericValue::Int(9)]);
+}
+
+fn eq(column: &str, value: &str) -> Filter {
+    Filter::ValueOp(ValueOpFilter {
+        column: c(column),
+        op: FilterOp::Eq,
+        value: FilterValue::Single(value.to_owned()),
+    })
+}
+
+fn hop(table: &str, foreign_key: &str, filters: Option<Vec<Filter>>) -> kernel::ViaHop {
+    kernel::ViaHop {
+        table: t(table),
+        foreign_key: c(foreign_key),
+        filters,
+    }
+}
+
+/// A `users` document with one aggregate field `agg`, rendered with every
+/// table keyed by `id`.
+fn aggregate_sql(aggregate: Aggregate) -> String {
+    let field = Field {
+        field: f("agg"),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Aggregate(aggregate)),
+    };
+    let schema = index(Some("id"), None, vec![field]);
+    let pks = ["teams", "projects", "tasks", "tags"]
+        .into_iter()
+        .map(|table| (table.to_owned(), c("id")))
+        .collect();
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(1))],
+        &pks,
+        &types(&[
+            ("users", "id", "bigint"),
+            ("projects", "archived", "boolean"),
+            ("tasks", "status", "text"),
+        ]),
+    )
+    .unwrap();
+    sql.as_str().to_owned()
+}
+
+#[test]
+fn exists_on_one_hop_is_an_exists_subquery() {
+    assert_eq!(
+        aggregate_sql(Aggregate {
+            table: t("tasks"),
+            op: AggregateOp::Exists,
+            key: AggregateKey::Direct(c("user_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: Vec::new(),
+        }),
+        wrap(
+            r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id"))"#
+        ),
+    );
+}
+
+#[test]
+fn an_aggregate_via_one_hop_matches_the_hop_s_rows_of_the_parent() {
+    assert_eq!(
+        aggregate_sql(Aggregate {
+            table: t("tasks"),
+            op: AggregateOp::Exists,
+            key: AggregateKey::Direct(c("project_id")),
+            value_type: None,
+            filters: Some(vec![eq("status", "completed")]),
+            distinct: false,
+            via: vec![hop("projects", "user_id", Some(vec![eq("archived", "false")]))],
+        }),
+        wrap(
+            r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id" AND ("rel1"."archived" = $1::boolean)) AND ("rel2"."status" = $2::text)))"#
+        )
+        .replace("\"root\".\"id\" = $1::bigint", "\"root\".\"id\" = $3::bigint"),
+    );
+}
+
+#[test]
+fn an_aggregate_via_two_hops_nests_one_level_per_hop() {
+    assert_eq!(
+        aggregate_sql(Aggregate {
+            table: t("tasks"),
+            op: AggregateOp::Count,
+            key: AggregateKey::Direct(c("project_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: vec![
+                hop("teams", "owner_id", None),
+                hop("projects", "team_id", None)
+            ],
+        }),
+        wrap(
+            r#"(SELECT count(*) FROM "public"."tasks" AS "rel3" WHERE "rel3"."project_id" IN (SELECT "rel2"."id" FROM "public"."projects" AS "rel2" WHERE "rel2"."team_id" IN (SELECT "rel1"."id" FROM "public"."teams" AS "rel1" WHERE "rel1"."owner_id" = "root"."id")))"#
+        ),
+    );
+}
+
+#[test]
+fn a_junction_after_via_hops_ties_its_left_key_to_the_last_hop() {
+    let through = AggregateKey::Through(kernel::Through {
+        table: t("task_tags"),
+        left_key: c("task_id"),
+        right_key: c("tag_id"),
+        filters: None,
+    });
+    let via = vec![
+        hop("projects", "user_id", None),
+        hop("tasks", "project_id", None),
+    ];
+    let aggregate = |distinct| Aggregate {
+        table: t("tags"),
+        op: AggregateOp::Count,
+        key: through.clone(),
+        value_type: None,
+        filters: None,
+        distinct,
+        via: via.clone(),
+    };
+    let chain = r#"IN (SELECT "rel2"."id" FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id"))"#;
+    assert_eq!(
+        aggregate_sql(aggregate(false)),
+        wrap(&format!(
+            r#"(SELECT count(*) FROM "public"."tags" AS "rel3" JOIN "public"."task_tags" AS "rel4" ON "rel4"."tag_id" = "rel3"."id" WHERE "rel4"."task_id" {chain})"#
+        )),
+    );
+    assert_eq!(
+        aggregate_sql(aggregate(true)),
+        wrap(&format!(
+            r#"(SELECT count(*) FROM "public"."tags" AS "rel3" WHERE "rel3"."id" IN (SELECT "rel4"."tag_id" FROM "public"."task_tags" AS "rel4" WHERE "rel4"."task_id" {chain}))"#
+        )),
+    );
 }

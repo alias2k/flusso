@@ -18,6 +18,7 @@ fn count(on: &str, key: AggregateKey) -> Relation {
         value_type: None,
         filters: None,
         distinct: false,
+        via: Vec::new(),
     })
 }
 
@@ -41,7 +42,7 @@ fn image(parent_id: GenericValue) -> RowImage {
 fn a_child_links_to_its_parent_through_its_foreign_key() {
     let relation = count("child", AggregateKey::Direct(column("parent_id")));
     assert_eq!(
-        link_on_row(&relation, &table("child")),
+        link_on_row(Step::Relation(&relation), &table("child")),
         Some(&column("parent_id"))
     );
 }
@@ -50,10 +51,10 @@ fn a_child_links_to_its_parent_through_its_foreign_key() {
 fn a_changed_junction_links_through_left_key_but_the_far_table_does_not() {
     let relation = count("tags", through());
     assert_eq!(
-        link_on_row(&relation, &table("user_tags")),
+        link_on_row(Step::Relation(&relation), &table("user_tags")),
         Some(&column("user_id"))
     );
-    assert_eq!(link_on_row(&relation, &table("tags")), None);
+    assert_eq!(link_on_row(Step::Relation(&relation), &table("tags")), None);
 }
 
 #[test]
@@ -93,4 +94,18 @@ fn a_null_or_missing_old_link_adds_nothing() {
         &column("parent_id"),
     );
     assert!(missing.is_empty());
+}
+
+#[test]
+fn a_via_table_links_to_the_table_before_it_through_its_foreign_key() {
+    let hop = kernel::ViaHop {
+        table: table("projects"),
+        foreign_key: column("user_id"),
+        filters: None,
+    };
+    assert_eq!(
+        link_on_row(Step::Via(&hop), &table("projects")),
+        Some(&column("user_id"))
+    );
+    assert_eq!(link_on_row(Step::Via(&hop), &table("tasks")), None);
 }

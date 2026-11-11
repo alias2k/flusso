@@ -524,6 +524,7 @@ fn users_with_relations_spec() -> SourceSpec {
         value_type: Some(FlussoType::Long),
         filters: None,
         distinct: false,
+        via: Vec::new(),
     });
     let visits = has_many("visits", vec![column_field("path", "path")]);
     let schema = IndexSchema {

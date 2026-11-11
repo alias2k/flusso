@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer};
 use kernel::FlussoType;
 use kernel::common;
 
-use super::{AggregateOp, Filter, JoinVerb, OrderBy, Through, Transform};
+use super::{AggregateOp, Filter, JoinVerb, OrderBy, Through, Transform, ViaHop};
 
 /// One field of a document, parsed from the type-as-key form. Each variant
 /// carries the type/op the tag denoted plus a body holding the rest.
@@ -187,7 +187,8 @@ pub struct JoinBody {
 
 /// An aggregate field (its op is the type key). `value_type` is required for
 /// `sum`/`min`/`max`; `element_type` is required for `ids` (and forbidden on the
-/// other ops); `distinct` is only valid with `through`.
+/// other ops); `distinct` is only valid with `through`; `via` lists the tables
+/// between the parent and `table`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateBody {
@@ -207,6 +208,8 @@ pub struct AggregateBody {
     pub distinct: bool,
     #[serde(default)]
     pub filters: Option<Vec<Filter>>,
+    #[serde(default)]
+    pub via: Option<Vec<ViaHop>>,
     #[serde(default)]
     pub options: BTreeMap<String, serde_yaml::Value>,
 }
@@ -253,6 +256,7 @@ fn classify(key: &str) -> Option<TagKind> {
         "min" => TagKind::Aggregate(AggregateOp::Min),
         "max" => TagKind::Aggregate(AggregateOp::Max),
         "ids" => TagKind::Aggregate(AggregateOp::Ids),
+        "exists" => TagKind::Aggregate(AggregateOp::Exists),
         "constant" => TagKind::Constant,
         _ => return None,
     })

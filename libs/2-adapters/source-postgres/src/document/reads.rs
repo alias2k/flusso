@@ -3,15 +3,16 @@
 //!
 //! For each index: the [`ColumnUse`] of its root row, and, per table a relation
 //! reads, one [`ColumnUse`] per path back to the root, in the order
-//! [`find_paths`] yields those paths (the last relation of each path decides,
-//! see [`source::relation_columns`]). A path with no entry counts as touched.
+//! [`find_paths`] yields those paths (the last step of each path decides, see
+//! [`source::relation_columns`] and [`source::via_columns`]). A path with no
+//! entry counts as touched.
 
 use std::collections::HashMap;
 
 use kernel::{Field, IndexName, IndexSchema, RelationKey, TableName};
-use source::{ColumnUse, SourceSpec, relation_columns, root_columns};
+use source::{ColumnUse, SourceSpec, relation_columns, root_columns, via_columns};
 
-use super::fields::find_paths;
+use super::fields::{Step, find_paths};
 
 #[derive(Debug, Default)]
 pub(super) struct ReadColumns {
@@ -63,7 +64,8 @@ impl IndexReads {
                 let uses = found
                     .iter()
                     .map(|path| match path.last() {
-                        Some(relation) => relation_columns(schema, relation, table),
+                        Some(Step::Relation(relation)) => relation_columns(schema, relation, table),
+                        Some(Step::Via(hop)) => via_columns(schema, hop),
                         None => ColumnUse::All,
                     })
                     .collect();
@@ -77,7 +79,8 @@ impl IndexReads {
     }
 }
 
-/// Every table a relation reads at any depth: targets and junctions.
+/// Every table a relation reads at any depth: targets, junctions and `via`
+/// tables.
 fn related_tables<'a>(fields: &'a [Field], out: &mut Vec<&'a TableName>) {
     for field in fields {
         if let Some(relation) = field.relation() {
@@ -85,6 +88,7 @@ fn related_tables<'a>(fields: &'a [Field], out: &mut Vec<&'a TableName>) {
             if let RelationKey::Through(through) = relation.key() {
                 out.push(&through.table);
             }
+            out.extend(relation.via().iter().map(|hop| &hop.table));
         }
         related_tables(field.children(), out);
     }

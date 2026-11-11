@@ -2,10 +2,43 @@
 //! resolution) and collecting relation tables (to pre-resolve their primary keys).
 //! No I/O.
 
-use kernel::{ColumnName, Field, Filter, Relation, RelationKey, TableName};
+use kernel::{ColumnName, Field, Filter, Relation, RelationKey, TableName, ViaHop};
 
-pub(super) fn relation_target(relation: &Relation) -> (&TableName, RelationKey<'_>) {
-    (relation.table(), relation.key())
+/// One hop of a path from the root down to a changed table: a relation's own
+/// hop, or one table of an aggregate's `via` on the way to it.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Step<'a> {
+    Relation(&'a Relation),
+    /// A downward foreign-key hop: `foreign_key` on `table` points at the
+    /// table before it.
+    Via(&'a ViaHop),
+}
+
+impl<'a> Step<'a> {
+    /// The table this hop reaches.
+    pub(super) fn table(self) -> &'a TableName {
+        match self {
+            Step::Relation(relation) => relation.table(),
+            Step::Via(hop) => &hop.table,
+        }
+    }
+
+    /// The key tying this hop's rows to the table before it.
+    pub(super) fn key(self) -> RelationKey<'a> {
+        match self {
+            Step::Relation(relation) => relation.key(),
+            Step::Via(hop) => RelationKey::Direct(&hop.foreign_key),
+        }
+    }
+
+    /// The table whose rows hold the link to the table before, and that
+    /// column; `None` for a `belongs_to`, whose link is on the parent.
+    pub(super) fn row_link(self) -> Option<(&'a TableName, &'a ColumnName)> {
+        match self {
+            Step::Relation(relation) => source::row_link(relation),
+            Step::Via(hop) => Some((&hop.table, &hop.foreign_key)),
+        }
+    }
 }
 
 /// Collect every `(table, column)` a value filter compares against, at any
@@ -25,6 +58,9 @@ pub(super) fn collect_filter_columns<'a>(
             if let RelationKey::Through(through) = relation.key() {
                 push_value_ops(&through.table, through.filters.as_deref(), out);
             }
+            for hop in relation.via() {
+                push_value_ops(&hop.table, hop.filters.as_deref(), out);
+            }
         }
         collect_filter_columns(field.children(), out);
     }
@@ -42,39 +78,49 @@ fn push_value_ops<'a>(
     }
 }
 
-/// Collect every relation path from the root down to `table`, at any depth.
-/// `prefix` is the chain of relations to the current point; a same-row group
-/// adds no hop, a relation does.
+/// Collect every path from the root down to `table`, at any depth. `prefix`
+/// is the chain of steps to the current point; a same-row group adds no step,
+/// a relation adds one, plus one per table of an aggregate's `via` before it.
+/// A path ends at the step that reaches `table` (as its table or junction).
 pub(super) fn find_paths<'a>(
     fields: &'a [Field],
     table: &TableName,
-    prefix: &mut Vec<&'a Relation>,
-    out: &mut Vec<Vec<&'a Relation>>,
+    prefix: &mut Vec<Step<'a>>,
+    out: &mut Vec<Vec<Step<'a>>>,
 ) {
     for field in fields {
         match field.relation() {
             Some(relation) => {
-                prefix.push(relation);
-                let (target, key) = relation_target(relation);
-                let hit = target == table
-                    || matches!(key, RelationKey::Through(through) if through.table == *table);
-                if hit {
-                    out.push(prefix.clone());
+                let depth = prefix.len();
+                let steps = relation
+                    .via()
+                    .iter()
+                    .map(Step::Via)
+                    .chain([Step::Relation(relation)]);
+                for step in steps {
+                    prefix.push(step);
+                    let hit = step.table() == table
+                        || matches!(step.key(), RelationKey::Through(through) if through.table == *table);
+                    if hit {
+                        out.push(prefix.clone());
+                    }
                 }
                 find_paths(field.children(), table, prefix, out);
-                prefix.pop();
+                prefix.truncate(depth);
             }
             None => find_paths(field.children(), table, prefix, out),
         }
     }
 }
 
-/// Collect the target table of every relation at any depth — the tables whose
-/// primary keys the document query needs (to correlate and join through).
+/// Collect the target table of every relation, and every `via` table, at any
+/// depth — the tables whose primary keys the document query needs (to
+/// correlate and join through).
 pub(super) fn collect_relation_tables(fields: &[Field], out: &mut Vec<TableName>) {
     for field in fields {
         if let Some(relation) = field.relation() {
             out.push(relation.table().clone());
+            out.extend(relation.via().iter().map(|hop| hop.table.clone()));
         }
         collect_relation_tables(field.children(), out);
     }
