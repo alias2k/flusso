@@ -247,6 +247,7 @@ fn spec() -> SourceSpec {
             limit: None,
             fields: vec![column_field("id")],
             indexed: true,
+            on: vec![],
         })),
     };
     let users = IndexSchema {

@@ -68,6 +68,7 @@ fn join(target: &str, kind: JoinKind, fields: Vec<Field>) -> Join {
         limit: None,
         indexed: true,
         fields,
+        on: vec![],
     }
 }
 
@@ -166,6 +167,7 @@ fn an_aggregate_reads_its_input_filters_and_link() {
         filters: Some(vec![value_filter("status")]),
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     });
     assert_eq!(
         reads(&sum, "orders"),
@@ -453,7 +455,9 @@ fn task_flag(project_filters: Option<Vec<Filter>>) -> Relation {
             table: table("projects"),
             foreign_key: column("user_id"),
             filters: project_filters,
+            on: vec![],
         }],
+        on: vec![],
     })
 }
 

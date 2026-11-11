@@ -532,6 +532,7 @@ async fn an_aggregate_over_the_root_table_rebuilds_the_parent() {
             filters: None,
             distinct: false,
             via: Vec::new(),
+            on: vec![],
         })),
     };
     let builder = items_builder(&url, child_count).await;
@@ -605,6 +606,7 @@ fn join_field(name: &str, on: &str, kind: JoinKind) -> Field {
             limit: None,
             fields: vec![column_field("id", "id"), column_field("name", "name")],
             indexed: true,
+            on: vec![],
         })),
     }
 }
@@ -625,6 +627,7 @@ fn users_spec() -> SourceSpec {
             limit: None,
             fields: vec![column_field("id", "id"), column_field("total", "total")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = IndexSchema {

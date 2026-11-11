@@ -525,6 +525,7 @@ fn spec() -> SourceSpec {
             limit: None,
             fields: vec![col("headline", "headline")],
             indexed: true,
+            on: vec![],
         },
     );
 
@@ -558,10 +559,12 @@ fn spec() -> SourceSpec {
                         limit: None,
                         fields: vec![col("sku", "sku"), col("qty", "qty"), col("price", "price")],
                         indexed: true,
+                        on: vec![],
                     },
                 ),
             ],
             indexed: true,
+            on: vec![],
         },
     );
 
@@ -584,6 +587,7 @@ fn spec() -> SourceSpec {
             limit: None,
             fields: vec![col("label", "label")],
             indexed: true,
+            on: vec![],
         },
     );
 
@@ -656,6 +660,7 @@ fn spec() -> SourceSpec {
                 filters: None,
                 distinct: false,
                 via: Vec::new(),
+                on: vec![],
             },
         ),
     ];
@@ -743,6 +748,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         filters,
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     }
 }
 

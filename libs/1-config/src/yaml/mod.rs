@@ -108,6 +108,25 @@ pub enum ConversionError {
          written as the aggregate's own `through`"
     )]
     ViaJunction { field: String, table: String },
+    #[error(
+        "{context}: `on` is not allowed on {place}: a junction hop matches on \
+         `left_key`/`right_key` only"
+    )]
+    OnNotAllowed {
+        context: String,
+        place: &'static str,
+    },
+    #[error(
+        "{context}: an `on` pair needs both `local` (a column of the table before the hop) and \
+         `related` (a column of the hop's table)"
+    )]
+    OnIncompletePair { context: String },
+    #[error("{context}: the `on` pair `{local}` = `{related}` is listed more than once")]
+    OnDuplicatePair {
+        context: String,
+        local: String,
+        related: String,
+    },
     #[error("aggregate does not take `{sibling}` (only `ids` does)")]
     UnexpectedAggregateSibling { sibling: &'static str },
     #[error(

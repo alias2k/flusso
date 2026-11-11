@@ -1135,6 +1135,7 @@ fn users_with_relations_spec() -> SourceSpec {
         limit: None,
         indexed: true,
         fields,
+        on: vec![],
     };
     let relation = |name: &str, relation: Relation| Field {
         field: field(name),
@@ -1159,6 +1160,7 @@ fn users_with_relations_spec() -> SourceSpec {
         filters: None,
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     });
     let visits = has_many("visits", vec![column_field("path", "path")]);
     let schema = IndexSchema {
@@ -1197,6 +1199,7 @@ fn users_with_recent_orders_spec() -> SourceSpec {
         limit: None,
         indexed: true,
         fields: vec![column_field("total", "total")],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,
@@ -1236,6 +1239,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
         table: table(target),
         foreign_key: column(foreign_key),
         filters,
+        on: vec![],
     };
     let aggregate = |name: &str, aggregate: Aggregate| Field {
         field: field(name),
@@ -1250,6 +1254,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
         filters: None,
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     };
     let active_projects = Aggregate {
         table: table("projects"),
@@ -1259,6 +1264,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
         filters: not_archived(),
         distinct: false,
         via: vec![hop("teams", "owner_id", not_archived())],
+        on: vec![],
     };
     let has_completed_task = Aggregate {
         table: table("tasks"),
@@ -1275,6 +1281,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
             hop("teams", "owner_id", not_archived()),
             hop("projects", "team_id", None),
         ],
+        on: vec![],
     };
     let tag_count = Aggregate {
         table: table("tags"),
@@ -1293,6 +1300,7 @@ fn users_with_task_flags_spec() -> SourceSpec {
             hop("projects", "team_id", None),
             hop("tasks", "project_id", None),
         ],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,
@@ -1332,7 +1340,9 @@ fn categories_with_grandchildren_spec() -> SourceSpec {
             table: table("categories"),
             foreign_key: column("parent_id"),
             filters: None,
+            on: vec![],
         }],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,
@@ -1358,6 +1368,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
         table: table(target),
         foreign_key: column(foreign_key),
         filters: None,
+        on: vec![],
     };
     let tasks = |op, via| Aggregate {
         table: table("tasks"),
@@ -1367,6 +1378,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
         filters: None,
         distinct: false,
         via,
+        on: vec![],
     };
     let orgs = Join {
         table: table("orgs"),
@@ -1403,6 +1415,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
                 tasks(AggregateOp::Exists, vec![hop("projects", "org_id")]),
             ),
         ],
+        on: vec![],
     };
     let schema = IndexSchema {
         version: 1,

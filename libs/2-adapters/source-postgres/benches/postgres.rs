@@ -207,6 +207,7 @@ fn spec() -> SourceSpec {
                 column_field("status", "status"),
             ],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = IndexSchema {

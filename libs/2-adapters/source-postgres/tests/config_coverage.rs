@@ -137,6 +137,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
             limit: None,
             fields: vec![col("headline", "headline")],
             indexed: true,
+            on: vec![],
         },
     );
     // One-to-many, newest first, capped at 2; each order folds in its items.
@@ -175,10 +176,12 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
                         limit: None,
                         fields: vec![col("sku", "sku"), col("qty", "qty")],
                         indexed: true,
+                        on: vec![],
                     },
                 ),
             ],
             indexed: true,
+            on: vec![],
         },
     );
     // Many-to-many through the user_tags junction, labels A→Z.
@@ -204,6 +207,7 @@ async fn joins_assemble_every_arity_including_nested_and_through() {
             limit: None,
             fields: vec![col("label", "label")],
             indexed: true,
+            on: vec![],
         },
     );
 
@@ -303,6 +307,7 @@ async fn aggregates_cover_every_op_and_through() {
                 filters: None,
                 distinct: false,
                 via: Vec::new(),
+                on: vec![],
             },
         ),
     ];
@@ -350,6 +355,7 @@ fn purchases_agg(
         filters,
         distinct,
         via: Vec::new(),
+        on: vec![],
     }
 }
 
@@ -815,6 +821,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                 limit: None,
                 fields: vec![col("headline", "headline")],
                 indexed: true,
+                on: vec![],
             },
         ),
         join_field(
@@ -845,10 +852,12 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                             limit: None,
                             fields: vec![col("sku", "sku")],
                             indexed: true,
+                            on: vec![],
                         },
                     ),
                 ],
                 indexed: true,
+                on: vec![],
             },
         ),
         join_field(
@@ -870,6 +879,7 @@ async fn reverse_resolution_walks_direct_through_and_nested() {
                 limit: None,
                 fields: vec![col("label", "label")],
                 indexed: true,
+                on: vec![],
             },
         ),
     ];
@@ -987,6 +997,7 @@ async fn belongs_to_assembles_and_reverse_resolves() {
                     limit: None,
                     fields: vec![col("name", "name"), col("email", "email")],
                     indexed: true,
+                    on: vec![],
                 },
             ),
         ],
@@ -1144,6 +1155,7 @@ fn orders_agg(op: AggregateOp, filters: Option<Vec<Filter>>) -> Aggregate {
         filters,
         distinct: false,
         via: Vec::new(),
+        on: vec![],
     }
 }
 

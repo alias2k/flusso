@@ -26,6 +26,7 @@ fn ids_schema(element_type: FlussoType) -> IndexSchema {
                 filters: None,
                 distinct: false,
                 via: vec![],
+                on: vec![],
             })),
         }],
     }
@@ -55,6 +56,7 @@ fn belongs_to_schema(nullable: bool) -> IndexSchema {
                 limit: None,
                 fields: vec![],
                 indexed: true,
+                on: vec![],
             })),
         }],
     }
@@ -199,6 +201,7 @@ fn through_schema() -> IndexSchema {
                     filters: None,
                     distinct: false,
                     via: vec![],
+                    on: vec![],
                 })),
             },
             Field {
@@ -214,6 +217,7 @@ fn through_schema() -> IndexSchema {
                     limit: None,
                     fields: vec![],
                     indexed: true,
+                    on: vec![],
                 })),
             },
         ],
@@ -285,6 +289,7 @@ fn aggregate_field(name: &str, op: AggregateOp, value_type: Option<FlussoType>) 
             filters: None,
             distinct: false,
             via: vec![],
+            on: vec![],
         })),
     }
 }
@@ -321,6 +326,7 @@ fn via_hop(table: &str, foreign_key: &str) -> crate::config::ViaHop {
         table: TableName::try_new(table).unwrap(),
         foreign_key: ColumnName::try_new(foreign_key).unwrap(),
         filters: None,
+        on: vec![],
     }
 }
 
@@ -582,4 +588,88 @@ fn an_unindexed_join_keeps_its_shape_and_children() {
     assert_eq!(products.mapping.mapping_type, MappingType::Nested);
     assert!(!products.mapping.indexed);
     assert_eq!(products.children.len(), 1);
+}
+
+/// Every place `on` can sit: a `belongs_to`, a `has_many`, an aggregate and its
+/// `via` hop — none of them with pairs.
+fn relations_without_on_schema() -> IndexSchema {
+    let mut schema = direct_aggregates_schema();
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut schema.fields[0].source {
+        aggregate.via = vec![via_hop("projects", "user_id")];
+    }
+    let join = |name: &str, kind: JoinKind| Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: TableName::try_new("orders").unwrap(),
+            kind,
+            primary_key: ColumnName::try_new("id").unwrap(),
+            nullable: false,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![],
+            indexed: true,
+            on: vec![],
+        })),
+    };
+    schema.fields.push(join(
+        "lastOrder",
+        JoinKind::BelongsTo {
+            column: ColumnName::try_new("last_order_id").unwrap(),
+        },
+    ));
+    schema.fields.push(join(
+        "orders",
+        JoinKind::HasMany {
+            foreign_key: ColumnName::try_new("user_id").unwrap(),
+        },
+    ));
+    schema
+}
+
+#[test]
+fn a_schema_without_on_keeps_its_content_hash() {
+    let mapping = relations_without_on_schema().resolve(IndexName::try_new("users").unwrap());
+    assert_eq!(mapping.hash.to_string(), "1feea849");
+}
+
+#[test]
+fn on_pairs_change_the_content_hash() {
+    let pair = || crate::config::ColumnPair {
+        local: ColumnName::try_new("tenant_id").unwrap(),
+        related: ColumnName::try_new("tenant_id").unwrap(),
+    };
+    let hash = |schema: IndexSchema| schema.resolve(IndexName::try_new("users").unwrap()).hash;
+    let base = hash(relations_without_on_schema());
+
+    let mut on_aggregate = relations_without_on_schema();
+    let mut on_hop = relations_without_on_schema();
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) =
+        &mut on_aggregate.fields[0].source
+    {
+        aggregate.on = vec![pair()];
+    }
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut on_hop.fields[0].source {
+        aggregate.via[0].on = vec![pair()];
+    }
+    let mut on_belongs_to = relations_without_on_schema();
+    let mut on_has_many = relations_without_on_schema();
+    for (schema, at) in [(&mut on_belongs_to, 3), (&mut on_has_many, 4)] {
+        if let FieldSource::Relation(Relation::Join(join)) = &mut schema.fields[at].source {
+            join.on = vec![pair()];
+        }
+    }
+    let hashes = [
+        base,
+        hash(on_aggregate),
+        hash(on_hop),
+        hash(on_belongs_to),
+        hash(on_has_many),
+    ];
+    for (i, a) in hashes.iter().enumerate() {
+        for b in hashes.iter().skip(i + 1) {
+            assert_ne!(a, b);
+        }
+    }
 }

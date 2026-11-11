@@ -230,6 +230,10 @@ definitions:
       # aggregated `table`, in order from this row:
       via:
         $ref: "#/definitions/via"
+      # belongs_to / has_one / has_many / foreign_key aggregates (not
+      # many_to_many, not over `through`): extra column equalities on the hop:
+      on:
+        $ref: "#/definitions/on"
       # map (the shared leaf type of every dynamic-key value — must be a leaf
       # kind: text/keyword or a number/date type, enforced at conversion):
       values:
@@ -351,3 +355,25 @@ definitions:
         filters:
           description: Which rows of this hop's table the path passes through.
           $ref: "#/definitions/filters"
+        on:
+          description: >-
+            Extra column equalities between the table before this hop (`local`)
+            and this hop's table (`related`), ANDed with `foreign_key`.
+          $ref: "#/definitions/on"
+
+  on:
+    description: >-
+      Extra column equalities on a relation hop, ANDed with its key: `local` is
+      a column of the table the field is declared on, `related` a column of the
+      field's `table`. A null on either side matches nothing. Not on
+      `many_to_many` or an aggregate over `through`.
+    type: array
+    items:
+      type: object
+      required: [local, related]
+      additionalProperties: false
+      properties:
+        local:
+          $ref: "#/definitions/pg_identifier"
+        related:
+          $ref: "#/definitions/pg_identifier"

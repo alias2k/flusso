@@ -41,6 +41,7 @@ fn join(name: &str, on: &str, kind: JoinKind, fields: Vec<Field>) -> Field {
             limit: None,
             fields,
             indexed: true,
+            on: vec![],
         })),
     }
 }
@@ -103,6 +104,7 @@ fn an_aggregate_via_hops_adds_one_step_per_hop() {
         table: table(table_name),
         foreign_key: column(foreign_key),
         filters: None,
+        on: vec![],
     };
     let task_count = Field {
         field: FieldName::try_new("taskCount").unwrap(),
@@ -115,6 +117,7 @@ fn an_aggregate_via_hops_adds_one_step_per_hop() {
             filters: None,
             distinct: false,
             via: vec![hop("teams", "owner_id"), hop("projects", "team_id")],
+            on: vec![],
         })),
     };
     let fields = [id_field(), task_count];

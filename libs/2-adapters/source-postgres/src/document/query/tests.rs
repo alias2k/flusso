@@ -194,6 +194,7 @@ fn has_many_with_order_and_limit() {
             limit: Some(5),
             fields: vec![col_field("id", "id"), col_field("total", "total")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![orders]);
@@ -229,6 +230,7 @@ fn belongs_to_correlates_on_the_parent_column() {
             limit: None,
             fields: vec![col_field("name", "name")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![org]);
@@ -262,6 +264,7 @@ fn aggregate_count() {
             filters: None,
             distinct: false,
             via: Vec::new(),
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![count]);
@@ -293,6 +296,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
             filters: None,
             distinct: false,
             via: Vec::new(),
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![ids]);
@@ -341,6 +345,7 @@ fn through_aggregate_sql(
             filters,
             distinct,
             via: Vec::new(),
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![aggregate]);
@@ -449,6 +454,7 @@ fn many_to_many_join_applies_junction_filters() {
             limit: None,
             fields: vec![col_field("name", "name")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(Some("id"), None, vec![tags]);
@@ -555,6 +561,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
             limit: None,
             fields: vec![col_field("id", "id"), col_field("deleted_at", "deleted_at")],
             indexed: true,
+            on: vec![],
         })),
     };
     let schema = index(
@@ -661,6 +668,7 @@ fn hop(table: &str, foreign_key: &str, filters: Option<Vec<Filter>>) -> kernel::
         table: t(table),
         foreign_key: c(foreign_key),
         filters,
+        on: vec![],
     }
 }
 
@@ -702,6 +710,7 @@ fn exists_on_one_hop_is_an_exists_subquery() {
             filters: None,
             distinct: false,
             via: Vec::new(),
+            on: vec![],
         }),
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id"))"#
@@ -720,6 +729,7 @@ fn an_aggregate_via_one_hop_matches_the_hop_s_rows_of_the_parent() {
             filters: Some(vec![eq("status", "completed")]),
             distinct: false,
             via: vec![hop("projects", "user_id", Some(vec![eq("archived", "false")]))],
+            on: vec![],
         }),
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id" AND ("rel1"."archived" = $1::boolean)) AND ("rel2"."status" = $2::text)))"#
@@ -742,6 +752,7 @@ fn an_aggregate_via_two_hops_nests_one_level_per_hop() {
                 hop("teams", "owner_id", None),
                 hop("projects", "team_id", None)
             ],
+            on: vec![],
         }),
         wrap(
             r#"(SELECT count(*) FROM "public"."tasks" AS "rel3" WHERE "rel3"."project_id" IN (SELECT "rel2"."id" FROM "public"."projects" AS "rel2" WHERE "rel2"."team_id" IN (SELECT "rel1"."id" FROM "public"."teams" AS "rel1" WHERE "rel1"."owner_id" = "root"."id")))"#
@@ -769,6 +780,7 @@ fn a_junction_after_via_hops_ties_its_left_key_to_the_last_hop() {
         filters: None,
         distinct,
         via: via.clone(),
+        on: vec![],
     };
     let chain = r#"IN (SELECT "rel2"."id" FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id"))"#;
     assert_eq!(
@@ -801,6 +813,7 @@ fn exists_over_a_junction_wraps_the_junction_subquery() {
             filters: None,
             distinct: false,
             via: vec![hop("tasks", "user_id", None)],
+            on: vec![],
         }),
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tags" AS "rel2" JOIN "public"."task_tags" AS "rel3" ON "rel3"."tag_id" = "rel2"."id" WHERE "rel3"."task_id" IN (SELECT "rel1"."id" FROM "public"."tasks" AS "rel1" WHERE "rel1"."user_id" = "root"."id")))"#

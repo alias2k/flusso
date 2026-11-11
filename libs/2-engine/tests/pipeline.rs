@@ -1402,6 +1402,7 @@ fn join_field(name: &str, table_name: &str, kind: JoinKind, fields: Vec<Field>) 
             limit: None,
             fields,
             indexed: true,
+            on: vec![],
         })),
     }
 }

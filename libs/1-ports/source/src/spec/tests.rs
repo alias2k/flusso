@@ -91,6 +91,7 @@ fn books() -> IndexSchema {
             limit: None,
             fields: vec![column_field("body")],
             indexed: true,
+            on: vec![],
         })),
     });
     books.fields.push(Field {
@@ -113,6 +114,7 @@ fn books() -> IndexSchema {
             limit: None,
             fields: vec![column_field("name")],
             indexed: true,
+            on: vec![],
         })),
     });
     books
@@ -179,6 +181,7 @@ fn pre_image_columns_carry_a_self_join_link_on_the_root_table() {
             limit: None,
             fields: vec![column_field("name")],
             indexed: true,
+            on: vec![],
         })),
     });
     let spec = SourceSpec::new(BTreeMap::from([(index_name("items"), items)]));
@@ -199,6 +202,7 @@ fn users_with_task_count() -> IndexSchema {
         table: TableName::try_new(table).unwrap(),
         foreign_key: ColumnName::try_new(foreign_key).unwrap(),
         filters: None,
+        on: vec![],
     };
     let mut users = schema("users");
     users.fields.push(Field {
@@ -212,6 +216,7 @@ fn users_with_task_count() -> IndexSchema {
             filters: None,
             distinct: false,
             via: vec![hop("teams", "owner_id"), hop("projects", "team_id")],
+            on: vec![],
         })),
     });
     users

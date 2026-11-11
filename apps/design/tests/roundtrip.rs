@@ -89,6 +89,7 @@ fn via() -> impl Strategy<Value = Vec<ViaHop>> {
             table,
             foreign_key,
             filters,
+            on: vec![],
         });
     prop::collection::vec(hop, 0..=2)
 }
@@ -215,6 +216,7 @@ fn aggregate_source() -> BoxedStrategy<FieldSource> {
                 filters: None,
                 distinct: false,
                 via: Vec::new(),
+                on: vec![],
             }))
         };
     let ops = prop_oneof![
@@ -286,6 +288,7 @@ fn join_shape(depth: u32) -> BoxedStrategy<FieldSource> {
             limit,
             fields,
             indexed: true,
+            on: vec![],
         }))
     };
     let limit_opt = prop_oneof![Just(None), (1u64..1000).prop_map(Some)];

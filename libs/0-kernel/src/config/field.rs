@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::common;
 
 use super::{
-    Aggregate, AggregateKey, Filter, FlussoType, Join, JoinKind, Through, Transform, ViaHop,
+    Aggregate, AggregateKey, ColumnPair, Filter, FlussoType, Join, JoinKind, Through, Transform,
+    ViaHop,
 };
 
 /// One field of a document: a name, optional OpenSearch mapping `options` passed
@@ -251,6 +252,25 @@ impl Relation {
         match self {
             Relation::Join(_) => &[],
             Relation::Aggregate(aggregate) => &aggregate.via,
+        }
+    }
+
+    /// The relation's own extra column equalities: `local` on the table before
+    /// [`table`](Self::table) (the parent, or the last `via` hop), `related` on
+    /// [`table`](Self::table).
+    pub fn on(&self) -> &[ColumnPair] {
+        match self {
+            Relation::Join(join) => &join.on,
+            Relation::Aggregate(aggregate) => &aggregate.on,
+        }
+    }
+
+    /// The pairs whose `local` column sits on the **parent** row: the first
+    /// `via` hop's, or the relation's own when it has no `via`.
+    pub fn parent_on(&self) -> &[ColumnPair] {
+        match self.via().first() {
+            Some(hop) => &hop.on,
+            None => self.on(),
         }
     }
 }
