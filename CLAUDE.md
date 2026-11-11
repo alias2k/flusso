@@ -189,7 +189,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
-  handling — they're ordinary tests caught by the nextest step.
+  handling — they're ordinary tests caught by the nextest step. Outside `ci.yml`, `audit.yml`'s
+  `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on
+  changes to a `Cargo.toml`/`Cargo.lock` — advisory only, never a required check — and
+  `.github/dependabot.yml` opens grouped weekly `chore(deps)` PRs (cargo, npm, actions; skips
+  flusso's own crates, `rust-toolchain.toml`, ESLint 10). A bot npm bump fails the dist-drift guard
+  until the SPA is rebuilt and committed on its branch (`docs/src/contribute/dependencies.md`).
 - **The designer (`apps/design`) has two test layers.** (1) A property/"fuzz" round-trip
   (`apps/design/tests/roundtrip.rs`, proptest): random valid `IndexSchema`s →
   `codegen → parse → convert` identity — an ordinary test, caught by the nextest step (plus the

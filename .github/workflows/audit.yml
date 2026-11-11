@@ -1,0 +1,49 @@
+name: audit
+
+# RustSec advisory check over every crate a workspace target can build,
+# dev-dependencies included (`cargo deny check advisories`, all features; deny.toml). Advisory only: it runs on a
+# schedule and on changes to the manifests or the lock, and is not a required
+# check, so a new advisory never blocks an unrelated merge. A red scheduled run
+# is the signal; the response is in docs/src/contribute/dependencies.md.
+#
+# cargo-deny, not cargo-audit: it resolves the feature graph, so a crate that is
+# only in Cargo.lock through an optional dependency nothing enables (sqlx's
+# sqlite driver, quinn) isn't reported as if it were compiled.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/audit.yml"
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: advisories (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check RustSec advisories
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+          arguments: --all-features

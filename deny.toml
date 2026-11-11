@@ -1,0 +1,9 @@
+# cargo-deny configuration. Only the advisory check runs (.github/workflows/audit.yml);
+# what to do when it goes red: docs/src/contribute/dependencies.md.
+
+[advisories]
+# An unmaintained crate fails the check only when a workspace crate depends on it
+# directly. A transitive one (smartstring via rhai, unsafe-libyaml via serde_yaml,
+# astral-tokio-tar via testcontainers) has no upgrade flusso can take, and failing on
+# it would keep the check red for good. Vulnerabilities fail at any depth.
+unmaintained = "workspace"
