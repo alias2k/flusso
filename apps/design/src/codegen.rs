@@ -202,25 +202,16 @@ fn join_field(join: &Join, body: &mut Mapping) -> Result<&'static str> {
 
 fn aggregate_field(agg: &Aggregate, body: &mut Mapping) -> Result<&'static str> {
     body.insert(Value::from("table"), Value::from(agg.table.as_ref()));
+    if let Some(input) = agg.op.input() {
+        body.insert(Value::from("column"), Value::from(input.to_string()));
+    }
     let tag = match &agg.op {
         AggregateOp::Count => "count",
         AggregateOp::Exists => "exists",
-        AggregateOp::Avg(column) => {
-            body.insert(Value::from("column"), Value::from(column.to_string()));
-            "avg"
-        }
-        AggregateOp::Sum(column) => {
-            body.insert(Value::from("column"), Value::from(column.to_string()));
-            "sum"
-        }
-        AggregateOp::Min(column) => {
-            body.insert(Value::from("column"), Value::from(column.to_string()));
-            "min"
-        }
-        AggregateOp::Max(column) => {
-            body.insert(Value::from("column"), Value::from(column.to_string()));
-            "max"
-        }
+        AggregateOp::Avg(_) => "avg",
+        AggregateOp::Sum(_) => "sum",
+        AggregateOp::Min(_) => "min",
+        AggregateOp::Max(_) => "max",
         AggregateOp::Ids { element_type } => {
             body.insert(
                 Value::from("element_type"),

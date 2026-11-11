@@ -19,7 +19,8 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use kernel::common::{ColumnName, IndexName};
 use kernel::{
-    Aggregate, Column, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation, TableName,
+    Aggregate, AggregateOp, Column, DatabaseSchema, Field, FieldSource, FlussoType, Geo, Relation,
+    TableName,
 };
 
 use crate::{Result, SourceError, SourceSpec};
@@ -217,7 +218,10 @@ async fn validate_aggregate_input(
         return Ok(());
     };
     if let Some(column) = input.as_column() {
-        if let Some(value_type) = &aggregate.value_type {
+        if let (false, Some(value_type)) = (
+            matches!(aggregate.op, AggregateOp::Avg(_)),
+            &aggregate.value_type,
+        ) {
             check_type(
                 index,
                 db_schema,

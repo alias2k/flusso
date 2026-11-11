@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronUp, Copy, Trash2, X } from "lucide-react";
 import pluralize from "pluralize";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   SCALAR_TYPES,
   api,
@@ -1268,14 +1268,27 @@ function AggregateInput({
   onChange: (input: string) => void;
 }) {
   const { t } = useT();
-  const [mode, setMode] = useState<"column" | "expression">(
-    value === "" || columns.some((c) => c.name === value) ? "column" : "expression",
-  );
+  const [mode, setMode] = useState<"column" | "expression">(isColumnName(value) ? "column" : "expression");
   const [draft, setDraft] = useState(value);
   const [seen, setSeen] = useState(value);
   const [check, setCheck] = useState<ExpressionCheck | null>(null);
   const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const ticket = useRef(0);
+  const committed = useRef(value);
+  // A check still in flight belongs to the aggregate as it was typed against: an
+  // outside change or unmount voids it, or its `onChange` would write that old
+  // aggregate back.
+  const cancel = () => {
+    clearTimeout(pending.current);
+    ticket.current += 1;
+  };
+  useEffect(() => {
+    if (value !== committed.current) {
+      committed.current = value;
+      cancel();
+    }
+  }, [value]);
+  useEffect(() => cancel, []);
   if (value !== seen) {
     setSeen(value);
     setDraft(value);
@@ -1283,8 +1296,8 @@ function AggregateInput({
   }
   const type = (input: string) => {
     setDraft(input);
-    clearTimeout(pending.current);
-    const mine = ++ticket.current;
+    cancel();
+    const mine = ticket.current;
     pending.current = setTimeout(() => {
       void api
         .expression(input)
@@ -1292,12 +1305,13 @@ function AggregateInput({
           if (mine !== ticket.current) return;
           setCheck(result);
           if (!result.error) {
+            committed.current = input;
             setSeen(input);
             onChange(input);
           }
         })
         .catch(() => undefined);
-    }, 250);
+    }, CHECK_DELAY_MS);
   };
   const known = new Set(columns.map((c) => c.name));
   const unknown = columns.length ? (check?.columns ?? []).filter((c) => !known.has(c)) : [];
@@ -1342,6 +1356,18 @@ function AggregateInput({
       )}
       {mode === "expression" && <p className="hint">{t("inspector.aggExpressionHint")}</p>}
     </>
+  );
+}
+
+/// How long typing pauses before an expression is checked.
+const CHECK_DELAY_MS = 250;
+
+/// Whether `input` is a lone name (letters, digits, `_`): the column view shows
+/// it, anything else opens in the expression view. Only picks the initial
+/// view; the server's parser decides what is valid.
+function isColumnName(input: string): boolean {
+  return [...input.trim()].every(
+    (c) => c === "_" || (c >= "0" && c <= "9") || (c.toLowerCase() >= "a" && c.toLowerCase() <= "z"),
   );
 }
 

@@ -10,6 +10,14 @@
 //! ```
 //!
 //! Whitespace between tokens is ignored. Positions are 1-based characters.
+//!
+//! ```
+//! use kernel::config::{Expression, ExpressionErrorKind};
+//!
+//! let err = Expression::parse("(quantity * 2").unwrap_err();
+//! assert_eq!(err.kind, ExpressionErrorKind::UnclosedParenthesis);
+//! assert_eq!(err.position, 1);
+//! ```
 
 use std::fmt;
 

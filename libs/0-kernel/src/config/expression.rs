@@ -61,8 +61,11 @@ pub enum Expression {
     Negate(Box<Expression>),
     /// `left op right`.
     Binary {
+        /// The operator.
         op: BinaryOp,
+        /// The left operand.
         left: Box<Expression>,
+        /// The right operand.
         right: Box<Expression>,
     },
 }
@@ -70,9 +73,13 @@ pub enum Expression {
 /// A binary arithmetic operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
+    /// `+`
     Add,
+    /// `-`
     Subtract,
+    /// `*`
     Multiply,
+    /// `/`
     Divide,
 }
 
@@ -195,7 +202,8 @@ fn write_operand(f: &mut fmt::Formatter<'_>, operand: &Expression, group: bool) 
 
 /// A plain column hashes as the [`ColumnName`] it is, so an aggregate written
 /// before expressions keeps its content hash. Anything else hashes its
-/// canonical text, which always holds a character no column name can.
+/// canonical text, which is never a column name: it holds an operator, or is
+/// a number, and a column name never starts with a digit.
 impl Hash for Expression {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {

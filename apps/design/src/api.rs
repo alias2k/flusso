@@ -120,20 +120,16 @@ pub struct ParseRequest {
 /// arithmetic expression.
 #[derive(Debug, Deserialize)]
 pub struct ExpressionRequest {
+    /// The input as typed.
     pub input: String,
 }
 
-/// A checked aggregate input: its canonical text and the columns it reads, or
-/// what is wrong with it and where.
+/// A checked aggregate input: the columns it reads, or what is wrong with it
+/// and where.
 #[derive(Debug, Serialize)]
 pub struct ExpressionResponse {
-    /// The canonical text, when the input parses.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub canonical: Option<String>,
     /// The columns the input reads, once each, in order of appearance.
     pub columns: Vec<String>,
-    /// Whether the input is a single column rather than arithmetic.
-    pub plain: bool,
     /// What makes the input malformed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ExpressionProblem>,
@@ -159,9 +155,7 @@ pub fn check_expression(request: &ExpressionRequest) -> ExpressionResponse {
 
     match Expression::parse(&request.input) {
         Ok(expression) => ExpressionResponse {
-            canonical: Some(expression.to_string()),
             columns: expression.columns().iter().map(|c| c.to_string()).collect(),
-            plain: expression.as_column().is_some(),
             error: None,
         },
         Err(err) => {
@@ -177,9 +171,7 @@ pub fn check_expression(request: &ExpressionRequest) -> ExpressionResponse {
                 Kind::TooDeep => ("too_deep", Some(kernel::MAX_DEPTH.to_string())),
             };
             ExpressionResponse {
-                canonical: None,
                 columns: Vec::new(),
-                plain: false,
                 error: Some(ExpressionProblem {
                     code,
                     position: err.position,

@@ -368,13 +368,10 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/// An aggregate input checked by the loader's own parser: its canonical text
-/// and columns, or what is wrong and where.
+/// An aggregate input checked by the loader's own parser: the columns it
+/// reads, or what is wrong and where.
 export interface ExpressionCheck {
-  canonical?: string;
   columns: string[];
-  /// A single column rather than arithmetic.
-  plain: boolean;
   error?: {
     /// A stable token naming the mistake, translated by the editor.
     code:

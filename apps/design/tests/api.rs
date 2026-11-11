@@ -242,19 +242,15 @@ fn an_aggregate_input_is_checked_by_the_loader_s_parser() {
     };
 
     let plain = check(" Amount ");
-    assert!(plain.plain && plain.error.is_none());
-    assert_eq!(plain.canonical.as_deref(), Some("amount"));
+    assert!(plain.error.is_none());
+    assert_eq!(plain.columns, ["amount"]);
 
-    let product = check("quantity*(unit_price - 1.5)");
-    assert!(!product.plain);
-    assert_eq!(
-        product.canonical.as_deref(),
-        Some("quantity * (unit_price - 1.5)")
-    );
+    let product = check("quantity*(unit_price - 1.5 * quantity)");
+    assert!(product.error.is_none());
     assert_eq!(product.columns, ["quantity", "unit_price"]);
 
     let bad = check("quantity *");
-    assert!(bad.canonical.is_none());
+    assert!(bad.columns.is_empty());
     let error = bad.error.expect("a malformed input reports an error");
     assert_eq!((error.code, error.position), ("expected_operand", 11));
 
