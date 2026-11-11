@@ -31,8 +31,7 @@ The map handle mirrors the plain handle of its value kind: same operator names, 
 | Handle | Across every key |
 | --- | --- |
 | `TextMap` | `matches`, `match_phrase`, `match_phrase_prefix`, `match_bool_prefix`, `matches_fuzzy`; with subfields `any_of` (exact, via `.keyword`) |
-| `KeywordMap` without subfields | `eq`, `any_of`, `prefix`, `wildcard`, `regexp`, `fuzzy` |
-| `KeywordMap` with subfields | none of the exact operators: reach the keys through a subfield view (below) |
+| `KeywordMap` | `eq`, `any_of`, `prefix`, `wildcard`, `regexp`, `fuzzy` (with subfields, on each key's exact `.keyword`) |
 | `NumberMap<K>`, `DateMap` | `eq`, `any_of`, `lt`, `lte`, `gt`, `gte`, `between` |
 
 Each takes two map-only options:
@@ -52,7 +51,7 @@ The builders keep their plain counterpart's options where the underlying query h
 Keys aren't known when the query is built, so each operator renders as a query that takes a field pattern:
 
 - **The analyzed family** is a `multi_match` over `name.*` (`best_fields`, `phrase`, `phrase_prefix`, `bool_prefix`), so the best-scoring key wins. The pattern also reaches each key's subfields, so a query equal to a whole value (`matches("Zebra red")`) gets an extra exact-match hit from `.keyword`/`.keyword_lowercase` and scores higher. That boost is intended. A phrase prefix renders `lenient: true`, because OpenSearch refuses a phrase prefix on a keyword subfield; those subfields are skipped.
-- **Every other operator** is a `query_string` over one explicit pattern, the value escaped so it's matched literally: `"a" OR "b"` for `eq`/`any_of`, `["10" TO "50"]` (or `{"3" TO *]`) for ranges, `v*` for `prefix`, `/re/` for `regexp`, `v~` for `fuzzy`. Date bounds take date math (`"now-1d"`). A value that starts with `AND`, `OR` or `NOT` gets its first letter escaped (`\AND~`), so it stays a value, not an operator. In a `wildcard` pattern, `\` escapes the next character as on one key, and a trailing lone `\` is a literal backslash. An empty `eq`/`fuzzy` value matches the empty value, as on one key.
+- **Every other operator** is a `query_string` over one explicit pattern (for a `KeywordMap` with subfields, `labels.*.keyword`; see [below](#subfield-views)), the value escaped so it's matched literally: `"a" OR "b"` for `eq`/`any_of`, `["10" TO "50"]` (or `{"3" TO *]`) for ranges, `v*` for `prefix`, `/re/` for `regexp`, `v~` for `fuzzy`. Date bounds take date math (`"now-1d"`). A value that starts with `AND`, `OR` or `NOT` gets its first letter escaped (`\AND~`), so it stays a value, not an operator. In a `wildcard` pattern, `\` escapes the next character as on one key, and a trailing lone `\` is a literal backslash. An empty `eq`/`fuzzy` value matches the empty value, as on one key.
 
 Edge cases worth knowing:
 
@@ -72,7 +71,7 @@ Product::labels().keyword_lowercase().eq("sale")   // KeywordMap → case-insens
 Product::labels().text().matches("sale")           // KeywordMap → analyzed, any key
 ```
 
-**Why a `KeywordMap` with subfields has no cross-key `eq`.** `labels.*` matches every key *and* every key's `.text` and `.keyword_lowercase`, and a field pattern can't leave them out. `eq("sale")` over it would also match "big sale now" and "Sale". Rather than return wrong hits, the exact operators (`eq`, `any_of`, `prefix`, `wildcard`, `regexp`, `fuzzy`) don't exist there: calling one is a compile error. Use `keyword_lowercase().eq(..)` for case-insensitive equality across keys, or `.key(k).eq(..)` for an exact match on one key. Without subfields, `labels.*` is exactly the keys, so the operators are there.
+**Why a `KeywordMap` with subfields runs its exact operators on `.keyword`.** `labels.*` matches every key *and* every key's `.text` and `.keyword_lowercase`, and a field pattern can't leave them out: `eq("sale")` over it would also match "big sale now" and "Sale". So the sink gives every key of a keyword map an exact `.keyword` subfield (see [Objects and maps](../reference/objects-and-maps.md#map)), and `eq`, `any_of`, `prefix`, `wildcard`, `regexp` and `fuzzy` render over `labels.*.keyword`. `Product::labels().keyword()` is that view. Without subfields, `labels.*` is exactly the keys, so the operators render there.
 
 ## Part of a word, across keys
 
@@ -113,7 +112,8 @@ Use the derive rather than a hand-written `impl FlussoMap<K>`: a fragment valida
 - `MapKey` is gone: a key is a plain `Text`/`Keyword`. Code that named `Text<S, MapKey>` names `Text<S>` (or `Text<S, NoSubfields>`).
 - `TextMap`/`KeywordMap` take a second type parameter, the subfield marker, defaulting to `WithSubfields`.
 - A `decimal` map's keys take the decimal kind, like a plain `decimal` field: the handle is `NumberMap<kind::Decimal>` (was `kind::Double`) and the document type `HashMap<String, Decimal>`. A float no longer compiles: `Product::costs().key("eur").eq(9.99)` becomes `.eq(Decimal::new(999, 2))` (or an integer).
-- String map sorts read `.keyword_lowercase`, which exists only in the index 0.17 rebuilds. Deploy a rebuilt consumer once that index is seeded; the order is in [Upgrade to 0.17](../operate/upgrade-to-0-17.md).
+- A `KeywordMap` with subfields has the exact operators across keys. Code that worked around their absence with `.keyword_lowercase().eq(..)` (case-insensitive) or an `or` of `.key(k).eq(..)` can call `eq(..)` directly.
+- String map sorts read `.keyword_lowercase`, and the exact operators on a `KeywordMap` with subfields read each key's `.keyword`; both exist only in the index 0.17 rebuilds. Deploy a rebuilt consumer once that index is seeded; the order is in [Upgrade to 0.17](../operate/upgrade-to-0-17.md).
 
 ## Related
 

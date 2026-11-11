@@ -60,14 +60,14 @@ keys' subfields (below), so it can find a little more:
 Product::title().matches("ciao").prefer("it", 3.0).prefer("en", 2.0)  // TextMap, multi_match
 Product::title().match_phrase("ciao mondo").prefer("it", 1.0).only_preferred()
 Product::prices().between(10, 50)                                     // NumberMap, any currency
+Product::codes().eq("Sale")                                           // exact, any key
 Product::codes().keyword_lowercase().eq("sale")                       // case-insensitive, any key
 ```
 
 | Handle | Cross-key operators |
 | --- | --- |
 | `TextMap` | `matches` `match_phrase` `match_phrase_prefix` `match_bool_prefix` `matches_fuzzy`; with subfields `any_of`, views `keyword()` / `keyword_lowercase()` |
-| `KeywordMap` without subfields | `eq` `any_of` `prefix` `wildcard` `regexp` `fuzzy` |
-| `KeywordMap` with subfields | views `text()` / `keyword_lowercase()` only |
+| `KeywordMap` | `eq` `any_of` `prefix` `wildcard` `regexp` `fuzzy`; with subfields also views `keyword()` / `text()` / `keyword_lowercase()` |
 | `NumberMap<K>` / `DateMap` | `eq` `any_of` `lt` `lte` `gt` `gte` `between` |
 
 - `prefer(key, weight)` weights a key; `only_preferred()` drops the `path.*` fallback. Both exist on
@@ -80,11 +80,10 @@ Product::codes().keyword_lowercase().eq("sale")                       // case-in
   boost). `fuzziness` on a phrase operator compiles but OpenSearch rejects it. A cluster with
   `indices.query.query_string.allowLeadingWildcard=false` refuses a cross-key pattern starting with
   `*` / `?` (every `contains`).
-- **A `KeywordMap` with subfields has no cross-key `eq`** (or `any_of` / `prefix` / `wildcard` /
-  `regexp` / `fuzzy`): `codes.*` also hits each key's `.text` and `.keyword_lowercase`, so it would
-  match `"big sale"` for `eq("sale")`. Calling one is a compile error, not a bug to work around.
-  Reach for `codes().keyword_lowercase().eq(..)` (case-insensitive, any key) or
-  `codes().key(k).eq(..)` (exact, one key).
+- **On a `KeywordMap` with subfields the exact family runs over `codes.*.keyword`**, an exact
+  subfield the sink gives every key of a keyword map: `codes.*` would also hit each key's `.text`
+  and `.keyword_lowercase` (`eq("sale")` matching `"big sale"`). `codes().keyword()` is that view.
+  Without subfields it runs over `codes.*`, which is exactly the keys.
 - Options a cross-key query type can't carry (`case_insensitive`, regex `flags`, range `format` /
   `relation`) are absent; use `.key(k)`.
 

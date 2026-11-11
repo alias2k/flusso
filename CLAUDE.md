@@ -626,8 +626,11 @@ the **full `Mapping` every key gets** (what a plain field of `values` resolves t
 `FlussoType::default_options`, the identifier analyzer) and the only thing distinguishing a
 `map` from a plain `object`/`json`. The OpenSearch sink maps each key with it through one root
 `dynamic_templates` entry per map (`flusso_map:<path>`, `path_match: "<path>.*"`, the property
-`build_property` renders, never a second copy of the rules; issue #177). `Column`'s
-hand-written `Hash` adds `MAP_KEY_MAPPING_REVISION` for a map column only, so map schemas
+`build_property` renders, never a second copy of the rules; issue #177), plus one addition:
+a keyword key with subfields also gets an exact `.keyword` (`add_exact_key_subfield`, issue #191),
+so `path.*.keyword` names the exact values alone. `Column`'s
+hand-written `Hash` adds `MAP_KEY_MAPPING_REVISION` (`2`: typed keys, then the `.keyword`; both
+in 0.17.0) for a map column only, so map schemas
 moved to a new physical index when keys became typed and nothing else did
 (`a_schema_without_a_map_keeps_its_content_hash` / `a_map_schema_moves_off_its_dynamically_mapped_hash`).
 `values` must be a leaf kind (text/keyword/number/date); the conversion rejects others. An `enum:` field takes an optional `variants:` list (its own
@@ -697,16 +700,18 @@ bare term starting `AND`/`OR`/`NOT` gets `\` on its first letter, a `wildcard` c
 pair through; `only_preferred()` with no `prefer` renders `match_none`, since empty `fields` falls
 back to every field). A
 field pattern can't exclude a key's subfields, so the exact family (`eq`/`any_of`/`prefix`/
-`wildcard`/`regexp`/`fuzzy`) exists on `KeywordMap<_, NoSubfields>` only; with subfields the map
-mirrors the plain accessors as **views** (`TextMap::keyword()`/`keyword_lowercase()`,
-`KeywordMap::text()`/`keyword_lowercase()` → a map handle over `path.*.<subfield>`). `search` was
+`wildcard`/`regexp`/`fuzzy`) on `KeywordMap<_, WithSubfields>` delegates to its `keyword()` view
+over the exact `path.*.keyword` the sink adds to keyword keys (issue #191); on `NoSubfields` it
+renders over `path.*`. With subfields the map mirrors the plain accessors as **views**
+(`TextMap::keyword()`/`keyword_lowercase()`, `KeywordMap::keyword()`/`text()`/`keyword_lowercase()`
+→ a map handle over `path.*.<subfield>`). `search` was
 removed (`matches` replaces it). `contains(part)` (string maps, subfields only) is a `MapContains`: a
 `query_string` of the escaped `*part*` over `path.*.keyword_lowercase`, a case/accent-folded
 substring match across keys; `has_key`/`exists` are presence checks. Guarded by the `*map*` unit
-tests in `sdk/query/src/tests.rs`, the `map_exact_needs_no_subfields`/`map_cross_key_gated` UI
-tests, and `map_cross_key_queries_match_the_per_key_or` (every family vs the per-key `or`) +
+tests in `sdk/query/src/tests.rs`, the `map_cross_key_gated` UI test, the `map_exact_family`
+pass tests (both type-states: `tests/ui_pass/`, `tests/ui_no_subfields/`), and `map_cross_key_queries_match_the_per_key_or` (every family vs the per-key `or`) +
 `map_cross_key_adversarial_values_match_the_per_key_or` (operator words, backslashes, quotes,
-empty values) in the `map_keys` live e2e. The
+empty values; with and without subfields) in the `map_keys` live e2e. The
 doc-side type is `HashMap<String, V>` or `BTreeMap<String, V>` (blanket `FlussoMap<K>` impls
 for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape** — newtype or
 named fields (e.g. a translations type with a `fallback` beside the language keys) with a

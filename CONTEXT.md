@@ -148,6 +148,10 @@ _Avoid_: unique, dedup, SUM DISTINCT (which dedups by value)
 The typed destination layout derived from a schema.
 _Avoid_: index template, layout, projection
 
+**Map key**:
+A runtime key of a `map` field. It is mapped, searched, and sorted like a plain field of the map's `values` kind.
+_Avoid_: dynamic field, sub-key, map entry
+
 **Generation**:
 One physical copy of an index in a destination. A reindex builds a fresh generation and swaps it in.
 _Avoid_: version, revision, copy
