@@ -1,0 +1,178 @@
+# The script recipes of the manual (docs/src/author/scripts/recipes.md includes
+# them by anchor) — `tests/recipes.rs` runs every one over `product.json` and
+# asserts its result, so a recipe that stops working fails the build.
+version: 1
+table: products
+primary_key: id
+fields:
+  - integer: id
+    required: true
+  - text: name
+    required: true
+  - keyword: nickname
+    required: false
+  - keyword: brand
+    required: false
+  - integer: stock
+    required: true
+  - timestamp: createdAt
+    column: created_at
+    required: true
+  - long: reviewCount
+    column: review_count
+    required: true
+  - double: avgRating
+    column: avg_rating
+    required: false
+  # Input-only: read by the scripts below, never indexed.
+  - keyword: sku
+    required: true
+    emit: false
+  - decimal: price
+    required: true
+    emit: false
+  - map: title
+    values: text
+    required: true
+    emit: false
+
+  # ANCHOR: label
+  - keyword: label
+    required: true
+    script: |
+      let sku = this.sku;
+      sku.trim();                     // in place: `trim` returns ()
+      `${sku.to_upper()} · ${this.name}`
+  # ANCHOR_END: label
+
+  # ANCHOR: slug
+  - keyword: slug
+    required: true
+    script: |
+      let slug = this.name.to_lower();
+      slug.replace(" ", "-");         // in place, like trim
+      slug
+  # ANCHOR_END: slug
+
+  # ANCHOR: display_name
+  - keyword: displayName
+    required: true
+    script: this.nickname ?? this.name
+  # ANCHOR_END: display_name
+
+  # ANCHOR: on_sale
+  - boolean: onSale
+    required: true
+    script: |
+      this.stock > 0 && this.price < parse_decimal("15")
+  # ANCHOR_END: on_sale
+
+  # ANCHOR: gross_price
+  - decimal: grossPrice
+    required: true
+    script: (this.price * parse_decimal("1.22")).round(2)
+  # ANCHOR_END: gross_price
+
+  # ANCHOR: stock_band
+  - enum: stockBand
+    variants: [out, low, plenty]
+    required: true
+    script: |
+      switch this.stock {
+        0 => "out",
+        1..5 => "low",
+        _ => "plenty",
+      }
+  # ANCHOR_END: stock_band
+
+  # ANCHOR: popularity
+  - double: popularity
+    required: true
+    script: |
+      let rating = this.avgRating ?? 0.0;
+      rating * this.reviewCount.to_float().sqrt()
+  # ANCHOR_END: popularity
+
+  # ANCHOR: created_year
+  - integer: createdYear
+    required: true
+    script: parse_int(this.createdAt.sub_string(0, 4))
+  # ANCHOR_END: created_year
+
+  # ANCHOR: title_fallback
+  - text: displayTitle
+    required: true
+    script: |
+      for lang in ["it", "en"] {
+        if lang in this.title { return this.title[lang]; }
+      }
+      this.name
+  # ANCHOR_END: title_fallback
+
+  # ANCHOR: tag_list
+  - keyword: tagList
+    required: true
+    array: true
+    script: |
+      let labels = this.tags.map(|t| t.label);
+      labels.sort();
+      labels.dedup();
+      labels
+  # ANCHOR_END: tag_list
+
+  # ANCHOR: tag_line
+  - text: tagLine
+    required: true
+    script: |
+      let line = "";
+      for (tag, i) in this.tags {
+        if i > 0 { line += ", "; }
+        line += tag.label;
+      }
+      line
+  # ANCHOR_END: tag_line
+
+  # ANCHOR: cheapest
+  - keyword: cheapestColor
+    required: false
+    script: |
+      let available = this.variants.filter(|v| v.stock > 0);
+      if available.is_empty() { return (); }
+      available.sort(|a, b| if a.price < b.price { -1 } else if a.price > b.price { 1 } else { 0 });
+      available[0].color
+  # ANCHOR_END: cheapest
+
+  # ANCHOR: in_stock_count
+  - integer: variantsInStock
+    required: true
+    script: this.variants.filter(|v| v.stock > 0).len()
+  # ANCHOR_END: in_stock_count
+
+  - many_to_many: tags
+    table: tags
+    through: { table: product_tags, left_key: product_id, right_key: tag_id }
+    primary_key: id
+    emit: false
+    fields:
+      - keyword: label
+        required: true
+
+  - has_many: variants
+    table: variants
+    foreign_key: product_id
+    primary_key: id
+    fields:
+      - keyword: color
+        required: true
+      - decimal: price
+        required: true
+      - integer: stock
+        required: true
+      # ANCHOR: per_element
+      - keyword: sku
+        required: true
+        script: |
+          let base = root.sku;
+          base.trim();
+          `${base}-${this.color}`
+      # ANCHOR_END: per_element

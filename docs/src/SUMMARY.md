@@ -15,6 +15,10 @@
 - [Geo, maps, enums and transforms](author/geo-maps-enums-transforms.md)
 - [Keep content without indexing it](author/keep-content-unindexed.md)
 - [Compute a field with a script](author/compute-with-scripts.md)
+  - [The Rhai you need](author/scripts/language.md)
+  - [Script recipes](author/scripts/recipes.md)
+  - [Test and debug a script](author/scripts/debugging.md)
+  - [Run scripts in production](author/scripts/production.md)
 - [Design a schema visually](author/design-visually.md)
 - [Designer reference](author/designer-reference.md)
 

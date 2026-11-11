@@ -746,7 +746,10 @@ property, no `eval`, fixed limits (`sandbox.rs`). The CLI wraps the Postgres bui
 (`compile_scripts`), records `flusso.script.failures{index,field}` and a rate-limited `error!` log
 (`telemetry/script_log.rs`, array positions folded to `[]`); the daemon's `Status` carries
 `script_failures` per index. The designer compiles scripts in `/api/preview` (`script_errors`) and runs
-them on the sample (`/api/sample` takes an `id`).
+them on the sample (`/api/sample` takes an `id`). The manual's script guide
+(`docs/src/author/scripts/`) includes its recipes by mdBook anchor from
+`libs/2-script/tests/recipes/recipes.schema.yml`, which `tests/recipes.rs` runs and asserts: change a
+recipe there, not in the page.
 
 ### Query side — `flusso-query` + the derive
 
