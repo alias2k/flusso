@@ -1909,6 +1909,91 @@ fn keyword_map_without_subfields_mirrors_the_exact_family_over_its_keys() {
 }
 
 #[test]
+fn keyword_map_with_subfields_runs_the_exact_family_on_each_keys_keyword_subfield() {
+    let codes = KeywordMap::<Root>::at("codes");
+    let exact = KeywordMap::<Root, NoSubfields>::leaf("codes");
+    let fields = |value: serde_json::Value| value["query_string"]["fields"].clone();
+    let without_fields = |mut value: serde_json::Value| {
+        value["query_string"]
+            .as_object_mut()
+            .unwrap()
+            .remove("fields");
+        value
+    };
+    let pairs = [
+        (
+            codes.eq("Foo Bar").to_value(),
+            exact.eq("Foo Bar").to_value(),
+        ),
+        (
+            codes.any_of(["a", "b"]).to_value(),
+            exact.any_of(["a", "b"]).to_value(),
+        ),
+        (
+            codes.prefix("Foo B").to_value(),
+            exact.prefix("Foo B").to_value(),
+        ),
+        (
+            codes.wildcard("F?o (*)").to_value(),
+            exact.wildcard("F?o (*)").to_value(),
+        ),
+        (
+            codes.regexp("a/[0-9]+").to_value(),
+            exact.regexp("a/[0-9]+").to_value(),
+        ),
+        (
+            codes.fuzzy("sael").to_value(),
+            exact.fuzzy("sael").to_value(),
+        ),
+        (codes.fuzzy("").to_value(), exact.fuzzy("").to_value()),
+        (codes.eq("").to_value(), exact.eq("").to_value()),
+        (codes.eq("AND").to_value(), exact.eq("AND").to_value()),
+    ];
+    for (with, without) in pairs {
+        assert_eq!(fields(with.clone()), json!(["codes.*.keyword"]), "{with}");
+        assert_eq!(fields(without.clone()), json!(["codes.*"]), "{without}");
+        assert_eq!(without_fields(with), without_fields(without));
+    }
+    assert_eq!(
+        codes
+            .eq("x")
+            .prefer("ean", 2.0)
+            .boost(1.5)
+            .name("code")
+            .to_value(),
+        json!({ "query_string": {
+            "query": "\"x\"", "fields": ["codes.ean.keyword^2", "codes.*.keyword"],
+            "boost": 1.5, "_name": "code",
+        } })
+    );
+    assert_eq!(
+        codes
+            .fuzzy("sael")
+            .fuzziness(Fuzziness::Edits(1))
+            .prefer("sku", 2.0)
+            .only_preferred()
+            .to_value(),
+        json!({ "query_string": {
+            "query": "sael~", "fuzziness": 1, "fields": ["codes.sku.keyword^2"],
+        } })
+    );
+    assert_eq!(
+        codes.prefix("a").only_preferred().to_value(),
+        json!({ "match_none": {} })
+    );
+    let none: [&str; 0] = [];
+    assert_eq!(codes.any_of(none).to_value(), json!({ "match_none": {} }));
+    assert_eq!(
+        codes.keyword().key("ean").eq("x").to_value(),
+        json!({ "term": { "codes.ean.keyword": "x" } })
+    );
+    assert_eq!(
+        codes.key("ean").eq("x").to_value(),
+        json!({ "term": { "codes.ean": "x" } })
+    );
+}
+
+#[test]
 fn keyword_map_with_subfields_reaches_its_keys_through_subfield_views() {
     let codes = KeywordMap::<Root>::at("codes");
     assert_eq!(

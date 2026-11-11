@@ -1,7 +1,7 @@
 //! Compile-fail tests for subfield gating (Tier 4): with `auto_subfields` off,
 //! a `text`/`keyword` handle is `NoSubfields`, so its `.keyword()` accessor
 //! doesn't exist, and a `text` map key (mapped like a plain `text` field) is not
-//! sortable.
+//! sortable. The exact family on a keyword map compiles there too.
 //!
 //! Lives in its own harness (not the main `ui` one) because it needs a
 //! different `FLUSSO_CONFIG` — the `no_subfields.toml` fixture. Separate test
@@ -26,4 +26,5 @@ fn ui_no_subfields() {
     t.compile_fail("tests/ui_no_subfields/subfields_gated.rs");
     t.compile_fail("tests/ui_no_subfields/map_key_not_sortable.rs");
     t.compile_fail("tests/ui_no_subfields/map_cross_key_gated.rs");
+    t.pass("tests/ui_no_subfields/map_exact_family.rs");
 }
