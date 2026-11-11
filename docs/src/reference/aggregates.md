@@ -20,12 +20,44 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 | `via` | list of hops | all | The tables between the parent and `table`, in order from the parent. With `via`, `foreign_key` (or `through.left_key`) points at the last hop instead of the parent. See [Across several hops](#across-several-hops). |
 | `on` | list of `{ local, related }` | `foreign_key` aggregates | Extra column equalities ANDed with the key. Rejected over `through`. See [on](#on). |
 | `distinct` | bool, default `false` | aggregates over `through` | `true` counts each target row once instead of once per junction row. Rejected on a `foreign_key` aggregate, with or without `via`. |
-| `column` | Postgres identifier | `sum`, `avg`, `min`, `max` | The column to reduce. Required there; `count` doesn't read it; `ids` and `exists` reject it. |
+| `column` | Postgres identifier, or an [arithmetic expression](#arithmetic-input) | `sum`, `avg`, `min`, `max` | What to reduce: a column of `table`, or arithmetic over its columns. Required there; `count` doesn't read it; `ids` and `exists` reject it. |
 | `value_type` | a scalar type key | `sum`, `min`, `max` | The result type; it mirrors the column. Required there; `count` and `avg` don't read it; `ids` and `exists` reject it. |
 | `element_type` | a scalar type key | `ids` | The type of each collected key, usually `long` or `keyword`; `geo` and `custom` are rejected. Required on `ids`, rejected on every other op. |
 | `filters` | list | all | Which rows of `table` count. Junction rows are filtered by `through.filters`. See [Filters](filters-and-soft-delete.md). |
 
 `required` is rejected on aggregates; their nullability is structural, as in the first table.
+
+## Arithmetic input
+
+`column` on `sum`, `avg`, `min` and `max` takes a column name or an arithmetic expression over the columns of `table`. Postgres evaluates it once per aggregated row, inside the aggregate: `sum(quantity * unit_price)`.
+
+```yaml
+# An order's value: quantity × price over its live lines.
+- sum: linesValue
+  table: order_lines
+  foreign_key: order_id
+  column: quantity * unit_price
+  value_type: double
+  filters:
+    - { column: archived_at, op: is_null }
+```
+
+| Element | Written as |
+| --- | --- |
+| Column | A column of `table`, following the [identifier](identifiers.md) rules (lowercased on load). |
+| Number | Digits, optionally a `.` and more digits: `2`, `0.5`, `100.25`. No exponent, no leading `.`. |
+| Operators | `+ - * /`, and unary minus (`-quantity`). |
+| Grouping | Parentheses. |
+
+- **Usual precedence.** Unary minus binds tightest, then `*` and `/`, then `+` and `-`. Operators of equal precedence group from the left: `a - b - c` is `(a - b) - c`.
+- **Columns of the aggregated table only.** No parent-row, `via`-hop, or junction column; for those, filter or join instead.
+- **No functions, casts, or other operators.** `round(…)`, `::numeric`, `%` and `||` are rejected.
+- **Postgres arithmetic, as is.** Integer operands divide as integers, so `quantity / 2` truncates; write `quantity / 2.0` for a fraction. A null operand makes that row's value null, and `sum`/`avg`/`min`/`max` skip null rows. Division by zero fails the document build, so guard the divisor with a [filter](filters-and-soft-delete.md).
+- **Same result types.** `value_type` stays required on `sum`/`min`/`max` and states the result; `avg` is a `double`. Pick a `value_type` that holds what the arithmetic produces: `double` or `decimal` for a product with a `numeric` column.
+- **Load-time errors carry a position.** A malformed expression fails the load naming the field and the 1-based character where parsing stopped, e.g. `` `sum` field `linesValue`: invalid expression `quantity *`: at position 11: expected a column, a number, `-` or `(`, found the end ``. Nesting is capped at 64 levels, counting parentheses, unary minus, and chained operators.
+- **Spelling doesn't matter.** Whitespace and redundant parentheses are dropped: `quantity*unit_price` and `quantity * (unit_price)` are the same input, keep the same physical index, and write the same `flusso.lock`. A plain column name is unchanged from before expressions existed.
+- **Every column in the expression rebuilds the parent.** Changing any of them on an aggregated row rebuilds its parent document; an update that changes none of them, nor the aggregate's key or filter columns, rebuilds nothing.
+- **[`flusso check`](cli.md#check) verifies the columns.** Each column the expression names must exist on `table` and be numeric. A plain column keeps its own check: the declared `value_type` must accept its database type.
 
 ## ids
 

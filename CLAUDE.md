@@ -676,6 +676,20 @@ sets carry both sides (`related` on the hop's table, `local` on the level before
 `pre_image_columns` needs no `related` column (a row changing only those keeps its key). Guards:
 `on_pairs_rebuild_the_parent_from_either_side` (`wal`), the `on_pairs_*` SQL tests,
 `a_schema_without_on_keeps_its_content_hash`.
+`sum`/`avg`/`min`/`max` fold a `kernel::Expression` (issue #194; `libs/0-kernel/src/config/expression.rs`):
+a column, or arithmetic over the aggregated table's columns (`+ - * /`, unary minus, numeric
+literals, parentheses; no functions). A hand-written tokenizer + recursive-descent parser builds
+the tree (**no regex**), errors carry a 1-based character position, and `MAX_DEPTH` (64) caps
+both recursion and tree height. A plain column is the `Column` leaf, which serializes, hashes
+and displays as the bare `ColumnName` (format freeze); an expression is stored in the lock as
+its canonical `Display` text and hashes that text, so whitespace never moves the hash.
+`AggregateOp::input()` is the one accessor: `sql::arithmetic` renders it qualified, quoted and
+fully parenthesized; `relation_columns` reads every column of it (#169); `validate_indexes`
+keeps a plain column's `value_type` check and requires an expression's columns to exist and be
+numeric. Guards: `a_plain_column_aggregate_keeps_its_content_hash`, the `expression::tests`
+proptests (render/parse round-trip, arbitrary input never panics),
+`an_aggregate_expression_rebuilds_from_each_operand` (`wal`), the designer's
+`POST /api/expression` (the same parser, no second grammar in TypeScript).
 **The content hash is the physical index name**, so `Aggregate`
 and `Through` hand-write `Hash` (destructuring `Self`) to skip `distinct`/`filters`/`via`/`on` when
 unset (`ViaHop` and `Join` likewise for `on`, a hop's pairs under their own tag) — a schema that doesn't opt in keeps its index; `a_through_schema_keeps_its_content_hash`
