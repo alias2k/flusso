@@ -299,9 +299,7 @@ impl SinkEngine {
                     None => control_open = false,
                     Some(SinkControl::Reindex { indexes }) => self.reindex(indexes).await?,
                 },
-                () = sleep_until(next_searchable.unwrap_or_else(Instant::now)), if next_searchable.is_some() => {
-                    self.report_searchable();
-                }
+                () = until(next_searchable) => self.report_searchable(),
             }
         }
     }
@@ -311,6 +309,15 @@ impl SinkEngine {
     /// position, but an immediate flush of one still releases what earlier
     /// flushes deferred.
     fn report_positions(&self, position: Option<Position>, visibility: Visibility) {
+        // The caught-up path, and the hot one: nothing is waiting and this
+        // flush is searchable already, so there is nothing to queue.
+        if visibility == Visibility::Immediate && self.lock_unsearchable().is_empty() {
+            if let Some(position) = position {
+                self.observer.on_position_applied(&self.name, position);
+                self.observer.on_position_searchable(&self.name, position);
+            }
+            return;
+        }
         let now = Instant::now();
         {
             let mut queue = self.lock_unsearchable();
@@ -457,5 +464,14 @@ impl SinkEngine {
             self.request_backfill(staged).await?;
         }
         Ok(())
+    }
+}
+
+/// Sleep until `at`; never, when nothing is waiting on time. Keeps the loop
+/// from building a timer on every pass just to leave it unpolled.
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
