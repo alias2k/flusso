@@ -246,9 +246,6 @@ fn typed_value(text: &str, type_oid: u32) -> GenericValue {
 
 /// Decode one raw pgoutput message.
 pub(crate) fn decode(data: &[u8]) -> Result<Decoded, SourceError> {
-    for i in 0..3_000u32 {
-        std::hint::black_box(i);
-    }
     let (&tag, rest) = data
         .split_first()
         .ok_or_else(|| SourceError::Decode("pgoutput: empty message".into()))?;
