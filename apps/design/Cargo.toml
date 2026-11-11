@@ -25,6 +25,7 @@ config.workspace = true
 kernel.workspace = true
 source.workspace = true
 source-postgres.workspace = true
+script.workspace = true
 sink.workspace = true
 anyhow.workspace = true
 serde.workspace = true

@@ -172,6 +172,43 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
         )
         .boxed()
 }
+/// A script field: a script-returnable leaf, optionally an array, with a source
+/// that exercises YAML quoting (backticks, quotes, a trailing newline, several lines).
+fn script_source() -> BoxedStrategy<FieldSource> {
+    use FlussoType::*;
+    (
+        prop::sample::select(vec![
+            Text, Keyword, Enum, Uuid, Boolean, Long, Double, Decimal, Date, Timestamp,
+        ]),
+        prop::sample::select(vec![
+            "this.a",
+            "`${this.a} ${root.b}`",
+            "\"quoted: yes\"\n",
+            "let x = 1;\nx + 1\n",
+        ]),
+        any::<bool>(),
+        any::<bool>(),
+        enum_variants(),
+        any::<bool>(),
+    )
+        .prop_map(|(ty, source, nullable, array, variants, bare)| {
+            let enum_order = if matches!(ty, Enum) {
+                variants
+            } else {
+                Vec::new()
+            };
+            FieldSource::Script(kernel::Script {
+                source: source.to_owned(),
+                nullable,
+                array,
+                enum_order,
+                subfields: !(bare && matches!(ty, Text | Keyword | Uuid)),
+                ty,
+            })
+        })
+        .boxed()
+}
+
 fn geo_source() -> BoxedStrategy<FieldSource> {
     (col(), col(), any::<bool>())
         .prop_map(|(lat, lon, nullable)| FieldSource::Geo(Geo { lat, lon, nullable }))
@@ -405,6 +442,7 @@ fn source(depth: u32) -> BoxedStrategy<FieldSource> {
         map_source(),
         custom_source(),
         aggregate_source(),
+        script_source(),
     ];
     if depth == 0 {
         return leaves.boxed();
@@ -418,15 +456,15 @@ fn source(depth: u32) -> BoxedStrategy<FieldSource> {
 }
 
 fn fields(depth: u32) -> BoxedStrategy<Vec<Field>> {
-    prop::collection::vec(source(depth), 1..=4)
+    prop::collection::vec((source(depth), prop::bool::weighted(0.85)), 1..=4)
         .prop_map(|sources| {
             sources
                 .into_iter()
                 .enumerate()
-                .map(|(i, source)| Field {
+                .map(|(i, (source, emit))| Field {
                     field: FieldName::try_new(format!("f{i}")).unwrap(),
                     options: options_for(&source),
-                    emit: true,
+                    emit,
                     source,
                 })
                 .collect()

@@ -19,7 +19,10 @@ use config::yaml::SchemaYaml;
 use kernel::AdapterConfig;
 use kernel::common::IndexName;
 use kernel::{IndexSchema, ParseFrom};
+use script::{Printer, ScriptContext, Scripts};
 use serde::{Deserialize, Serialize};
+use source::RowKey;
+use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
 use source::{
     Diagnostic, JunctionCandidate, RelationalCatalog, SchemaIntrospection, Severity, SourceSpec,
     junction_candidates, validate_indexes,
@@ -234,6 +237,60 @@ pub struct PreviewResponse {
     /// schema — surfaced rather than hidden if it does).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
+    /// Every script field that does not compile, with where.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub script_errors: Vec<ScriptErrorDto>,
+}
+
+/// A script failure — a compile error, or one raised while running over a
+/// sample — flattened for JSON.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptErrorDto {
+    /// The failing field's path, e.g. `variants[2].grossPrice`.
+    pub field: String,
+    /// What went wrong, in one line.
+    pub message: String,
+    /// 1-based line in the script, when the failure has a position.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// 1-based column in that line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    /// The script line the position points into.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+}
+
+impl From<BuildFailure> for ScriptErrorDto {
+    fn from(failure: BuildFailure) -> Self {
+        let (line, column, excerpt) = match failure.position {
+            Some(at) => (Some(at.line), Some(at.column), Some(at.excerpt)),
+            None => (None, None, None),
+        };
+        Self {
+            field: failure.field,
+            message: failure.message,
+            line,
+            column,
+            excerpt,
+        }
+    }
+}
+
+/// One index's scripts compiled on their own, for the designer.
+fn compile_index(
+    index: &IndexName,
+    schema: &IndexSchema,
+    printer: Option<Printer>,
+) -> std::result::Result<Scripts, Vec<ScriptErrorDto>> {
+    let spec = SourceSpec::new(BTreeMap::from([(index.clone(), schema.clone())]));
+    Scripts::compile_with_printer(&spec, printer).map_err(|errors| {
+        errors
+            .0
+            .into_iter()
+            .map(|error| ScriptErrorDto::from(error.failure))
+            .collect()
+    })
 }
 
 /// Build a preview for `request`.
@@ -247,11 +304,15 @@ pub fn build_preview(request: PreviewRequest) -> Result<PreviewResponse> {
         Ok(_) => (true, None),
         Err(e) => (false, Some(e)),
     };
+    let script_errors = compile_index(&request.index, &request.schema, None)
+        .err()
+        .unwrap_or_default();
     Ok(PreviewResponse {
         yaml,
         preview,
         parse_ok,
         parse_error,
+        script_errors,
     })
 }
 
@@ -776,6 +837,9 @@ pub struct SampleRequest {
     pub name: IndexName,
     /// The schema to build a sample document for.
     pub schema: IndexSchema,
+    /// The root row's primary key to build; the first row when omitted.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// A real document built from one arbitrary root row — exactly what the sink
@@ -799,12 +863,26 @@ pub struct SampleResponse {
     /// Why the database could not be reached/queried.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A script that failed on the sample. `document` is then the row as built,
+    /// before any script ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_failure: Option<ScriptErrorDto>,
+    /// What the scripts printed, as `field: text`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub printed: Vec<String>,
 }
 
 /// The outcome of a sample request against a reachable database.
 enum SampleOutcome {
-    /// A real document built from a live row.
-    Document(serde_json::Value),
+    /// A real document built from a live row, finished by the scripts unless
+    /// one failed on it.
+    Document {
+        document: serde_json::Value,
+        failure: Option<ScriptErrorDto>,
+        printed: Vec<String>,
+    },
+    /// No row has the requested id.
+    NotFound(String),
     /// The root table had no rows, so this is example data from the schema types.
     Synthetic(serde_json::Value),
     /// The index has no single-column primary key, so a row can't be keyed.
@@ -815,9 +893,22 @@ enum SampleOutcome {
 /// connection failure is reported in [`SampleResponse::error`], not as an error.
 pub async fn sample(request: SampleRequest) -> SampleResponse {
     match sample_inner(request).await {
-        Ok(SampleOutcome::Document(document)) => SampleResponse {
+        Ok(SampleOutcome::Document {
+            document,
+            failure,
+            printed,
+        }) => SampleResponse {
             document: Some(document),
             db_reachable: true,
+            script_failure: failure,
+            printed,
+            ..Default::default()
+        },
+        Ok(SampleOutcome::NotFound(id)) => SampleResponse {
+            db_reachable: true,
+            note: Some(format!(
+                "no row with id `{id}` (it is missing or soft-deleted)"
+            )),
             ..Default::default()
         },
         Ok(SampleOutcome::Synthetic(document)) => SampleResponse {
@@ -868,12 +959,37 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
     let documents = PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec))
         .await
         .context("connecting to the database")?;
-    if let Some(body) = documents
-        .sample_document(&name)
-        .await
-        .context("building a sample document")?
-    {
-        return Ok(SampleOutcome::Document(sink::to_json(&body)));
+    let built = match &request.id {
+        Some(id) => {
+            let primary_key = spec
+                .schema(&name)
+                .and_then(|schema| schema.primary_key.clone())
+                .context("index missing its primary key")?;
+            let document = DocumentId {
+                index: name.clone(),
+                key: RowKey::from_text(primary_key, id),
+            };
+            match documents
+                .build(&document)
+                .await
+                .context("building the document")?
+            {
+                Document::Upsert { body, .. } => Some(body),
+                Document::Delete { .. } | Document::Failed { .. } => {
+                    return Ok(SampleOutcome::NotFound(id.clone()));
+                }
+            }
+        }
+        None => documents
+            .sample_document(&name)
+            .await
+            .context("building a sample document")?,
+    };
+    if let Some(body) = built {
+        let schema = spec
+            .schema(&name)
+            .context("index missing from its own spec")?;
+        return Ok(run_sample_scripts(&name, schema, body));
     }
 
     // No live row — synthesize example data from the schema's declared types.
@@ -883,6 +999,37 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
     Ok(SampleOutcome::Synthetic(preview::example_document(
         schema, &name,
     )))
+}
+
+/// Finish a sampled row with its index's scripts, keeping what they printed.
+fn run_sample_scripts(
+    index: &IndexName,
+    schema: &IndexSchema,
+    built: kernel::GenericValue,
+) -> SampleOutcome {
+    let printed: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let sink = Arc::clone(&printed);
+    let printer: Printer = Arc::new(move |context: &ScriptContext<'_>, text: &str| {
+        if let Ok(mut lines) = sink.lock() {
+            lines.push(format!("{}: {text}", context.field));
+        }
+    });
+    let outcome =
+        compile_index(index, schema, Some(printer)).map_err(|mut errors| errors.remove(0));
+    let mut finished = built.clone();
+    let failure = match outcome {
+        Ok(scripts) => scripts
+            .apply(index, &mut finished)
+            .err()
+            .map(ScriptErrorDto::from),
+        Err(compile_error) => Some(compile_error),
+    };
+    let document = if failure.is_some() { &built } else { &finished };
+    SampleOutcome::Document {
+        document: sink::to_json(document),
+        failure,
+        printed: printed.lock().map(|l| l.clone()).unwrap_or_default(),
+    }
 }
 
 fn diagnostic_dto(diagnostic: Diagnostic) -> DiagnosticDto {

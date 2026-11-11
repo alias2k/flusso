@@ -165,24 +165,13 @@ async fn from_database(
         .ok_or_else(|| anyhow!("index `{index}` has no single-column primary key"))?;
     let document = DocumentId {
         index: index.clone(),
-        key: RowKey(vec![(primary_key, key_value(id))]),
+        key: RowKey::from_text(primary_key, id),
     };
     match documents.build(&document).await? {
         Document::Upsert { body, .. } => Ok((format!("{index}, id {id}"), body)),
         Document::Delete { .. } | Document::Failed { .. } => {
             bail!("no document `{id}` in `{index}` (the row is missing or soft-deleted)")
         }
-    }
-}
-
-/// A primary key typed as the database most likely holds it.
-fn key_value(id: &str) -> GenericValue {
-    if let Ok(int) = id.parse::<i64>() {
-        GenericValue::BigInt(int)
-    } else if let Ok(uuid) = uuid::Uuid::parse_str(id) {
-        GenericValue::Uuid(uuid)
-    } else {
-        GenericValue::String(id.to_owned())
     }
 }
 
@@ -308,16 +297,6 @@ mod tests {
         );
         assert_eq!(lookup(&doc, "variants[1].price"), None);
         assert_eq!(lookup(&doc, "missing"), None);
-    }
-
-    #[test]
-    fn a_key_is_typed_as_an_integer_a_uuid_or_text() {
-        assert_eq!(key_value("42"), GenericValue::BigInt(42));
-        assert!(matches!(
-            key_value("00000000-0000-0000-0000-000000000000"),
-            GenericValue::Uuid(_)
-        ));
-        assert_eq!(key_value("sku-1"), GenericValue::String("sku-1".to_owned()));
     }
 
     #[test]
