@@ -15,7 +15,6 @@
 //! - [`via_columns`]: what an aggregate reads from one of its `via` tables —
 //!   the hop's `foreign_key`, `filters`, the `related` side of its `on` pairs
 //!   and the `local` side of the next level's.
-
 //! - [`soft_delete_column`]: the column a `soft_delete` marker reads on the
 //!   root row; the document query reads the same one.
 //! - [`row_link`]: the link column a related row holds, which a deleted or
