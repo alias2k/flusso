@@ -206,6 +206,8 @@ fn body_sibling_keys() -> BTreeSet<String> {
             default: _,
             subfields: _,
             indexed: _,
+            script: _,
+            array: _,
         } = s;
         let config::yaml::EnumBody {
             field: _,
@@ -215,6 +217,8 @@ fn body_sibling_keys() -> BTreeSet<String> {
             options: _,
             transforms: _,
             default: _,
+            script: _,
+            array: _,
         } = e;
         let config::yaml::CustomBody {
             field: _,
@@ -305,6 +309,9 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "value",        // constant
         "subfields",    // text / keyword / uuid
         "indexed",      // json / joins
+        "script",       // scalar / enum (computed)
+        "array",        // scalar / enum (computed array)
+        "emit",         // every field (lifted onto `Field`, not a body)
     ])
 }
 

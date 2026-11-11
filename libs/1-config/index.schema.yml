@@ -181,6 +181,28 @@ definitions:
           under it is searchable, filterable or sortable. Only on `json` and the
           joins (`belongs_to`/`has_one`/`has_many`/`many_to_many`); not with
           `options`. Changing it moves the index to a new physical index.
+      # scalar / enum, computed (`column`, `transforms`, `default` are rejected with it):
+      script:
+        type: string
+        description: >-
+          A Rhai script computing the value from the built document, in place of
+          a column. `this` is the object at the field's level (one element inside
+          a `has_many`), `root` the whole document. Returns the field's type, or
+          `()` for null. Editing it moves the index to a new physical index.
+      array:
+        type: boolean
+        default: false
+        description: >-
+          `true` makes the `script` return an array of the field's type. Only
+          with `script`.
+      # every field:
+      emit:
+        type: boolean
+        default: true
+        description: >-
+          `false` makes the field input-only: it is fetched so scripts can read
+          it, then stripped from the document and left out of the mapping.
+          Changing it moves the index to a new physical index.
       # custom:
       postgres:
         type: array
