@@ -405,3 +405,54 @@ fn an_identity_index_without_the_primary_key_is_untraceable() {
     record_untraceable(&mut decode, 16385);
     assert_eq!(decode.untraceable[&16385], vec![column("parent_id")]);
 }
+
+/// A replication connection that never sends an event and records what it
+/// was told was applied.
+struct SilentClient {
+    applied: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Replication for SilentClient {
+    async fn recv(&mut self) -> std::result::Result<Option<ReplicationEvent>, PgWireError> {
+        std::future::pending().await
+    }
+
+    fn update_applied_lsn(&self, lsn: Lsn) {
+        self.applied
+            .fetch_max(lsn.as_u64(), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn a_confirmation_reaches_the_client_without_a_replication_event() {
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    let ack = Arc::new(Positions::new(0, 0, Default::default()));
+    let seq = ack.register(10);
+    ack.read_through(10);
+    let applied = Arc::new(AtomicU64::new(0));
+    let client = SilentClient {
+        applied: Arc::clone(&applied),
+    };
+    let catalog = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@127.0.0.1/unused")
+        .unwrap();
+    let mut stream = build(client, catalog, Default::default(), Arc::clone(&ack));
+    let reader = tokio::spawn(async move { stream.next().await.is_some() });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(applied.load(Ordering::SeqCst), 0, "nothing confirmed yet");
+
+    ack.confirm(seq);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while applied.load(Ordering::SeqCst) < 10 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the confirmed position reached the client");
+    assert!(!reader.is_finished(), "no replication event was emitted");
+    reader.abort();
+}

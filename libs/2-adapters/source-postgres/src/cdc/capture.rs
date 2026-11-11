@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -18,6 +19,12 @@ use tokio::sync::OnceCell;
 
 use super::ack::{Listeners, Positions};
 use super::{backfill, publication, replica_identity, stream};
+
+/// How often the replication client reports the confirmed position to the
+/// server, and how long an idle connection waits before reporting anyway.
+/// Together with `confirm` handing the position over at once, the slot
+/// releases WAL within about this long after the last sink flush.
+const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Postgres change capture over logical replication (pgoutput).
 ///
@@ -91,9 +98,12 @@ impl WalChangeCapture {
     ///
     /// Leave `config.start_lsn` at [`Lsn::ZERO`](pgwire_replication::Lsn::ZERO)
     /// to resume from the slot's `confirmed_flush_lsn` — the usual choice.
+    /// The client reports its position to the server every second, idle or not.
     pub fn new(config: ReplicationConfig, connection_url: impl Into<String>) -> Self {
         Self {
-            config,
+            config: config
+                .with_status_interval(STATUS_INTERVAL)
+                .with_wakeup_interval(STATUS_INTERVAL),
             connection_url: connection_url.into(),
             admin_pool: Arc::new(OnceCell::new()),
             required_tables: BTreeSet::new(),
