@@ -1,0 +1,28 @@
+version: 1
+table: people
+primary_key: id
+
+# Script fields and an input-only field (issue #198).
+fields:
+  - keyword: id
+    required: true
+  - keyword: first
+    required: true
+    emit: false
+  - keyword: label
+    required: true
+    script: this.first.to_upper()
+  - keyword: tags
+    required: true
+    array: true
+    script: '["a", "b"]'
+  - has_many: orders
+    table: orders
+    foreign_key: person_id
+    primary_key: id
+    fields:
+      - double: net
+        required: true
+      - double: gross
+        required: true
+        script: this.net * 1.23

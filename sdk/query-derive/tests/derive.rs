@@ -953,3 +953,43 @@ fn an_exists_aggregate_gets_the_bool_handle() -> Result {
     assert!(json.contains(r#""hasCompletedTask":false"#), "{json}");
     Ok(())
 }
+
+// Issue #198: a script field is an ordinary typed leaf (an `array: true` one a
+// list), and an input-only (`emit: false`) field is not in the index at all.
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "computed", config = "tests/fixtures/flusso.toml")]
+struct Person {
+    id: String,
+    label: String,
+    tags: Vec<String>,
+    orders: Vec<PersonOrder>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct PersonOrder {
+    net: f64,
+    gross: f64,
+}
+
+#[test]
+fn script_fields_get_their_declared_handles() -> Result {
+    let _: flusso_query::Keyword<flusso_query::Root, flusso_query::WithSubfields> = Person::label();
+    let body = Person::query()
+        .filter(Person::label().eq("ADA"))
+        .filter(Person::tags().eq("a"))
+        .filter(Person::orders().any(flusso_person_query::Orders::gross().gte(10.0)))
+        .body()
+        .to_string();
+    assert!(body.contains(r#""label":"ADA""#), "{body}");
+    assert!(body.contains(r#""orders.gross""#), "{body}");
+
+    let person: Person = serde_json::from_value(serde_json::json!({
+        "id": "p1",
+        "label": "ADA",
+        "tags": ["a", "b"],
+        "orders": [{ "net": 10.0, "gross": 12.3 }],
+    }))?;
+    assert_eq!(person.tags, ["a", "b"]);
+    assert!((person.orders[0].gross - 12.3).abs() < f64::EPSILON);
+    Ok(())
+}

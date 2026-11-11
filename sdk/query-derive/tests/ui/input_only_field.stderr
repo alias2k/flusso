@@ -1,0 +1,5 @@
+error: no field `first` in index `computed` — known fields: id, label, orders, tags
+ --> tests/ui/input_only_field.rs:9:5
+  |
+9 |     first: String,
+  |     ^^^^^
