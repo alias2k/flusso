@@ -948,8 +948,9 @@ forwards it; enum-only — on a newtype/`FlussoMap` it's a macro error, and at a
 declared variants it's a const error, so a schema edit can't silently disarm it).
 An `indexed: false` field gets **no handle** (`emit_level` skips it) but still deserializes and is
 shape-checked; a `subfields: false` field is stamped `NoSubfields` like a sink with
-`auto_subfields` off (`ui/unindexed_has_no_handle.rs`, the `stored` fixture index in
-`derive.rs`).
+`auto_subfields` off, and a `#[flusso(scope = "…")]` on an unindexed field is a compile error
+(`ui/unindexed_has_no_handle.rs`, `ui/subfields_false_has_no_keyword.rs`,
+`ui/scope_on_unindexed_field.rs`, the `stored` fixture index in `derive.rs`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/

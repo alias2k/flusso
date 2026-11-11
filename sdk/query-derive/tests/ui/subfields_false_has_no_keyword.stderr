@@ -1,0 +1,17 @@
+error[E0599]: no method named `keyword` found for struct `flusso_query::Text<Root, NoSubfields>` in the current scope
+  --> tests/ui/subfields_false_has_no_keyword.rs:14:30
+   |
+14 |     let _ = Listing::blurb().keyword();
+   |                              ^^^^^^^ method not found in `flusso_query::Text<Root, NoSubfields>`
+   |
+   = note: the method was found for
+           - `flusso_query::Text<S>`
+
+error[E0599]: no method named `keyword_lowercase` found for struct `flusso_query::Text<Root, NoSubfields>` in the current scope
+  --> tests/ui/subfields_false_has_no_keyword.rs:15:30
+   |
+15 |     let _ = Listing::blurb().keyword_lowercase();
+   |                              ^^^^^^^^^^^^^^^^^ method not found in `flusso_query::Text<Root, NoSubfields>`
+   |
+   = note: the method was found for
+           - `flusso_query::Text<S>`

@@ -234,6 +234,9 @@ pub(crate) fn validate(
             errors.push(unknown_field(field, level, scope));
             continue;
         };
+        if let Some(error) = scope_without_handle(field, resolved) {
+            errors.push(error);
+        }
         if let Err(error) = check_nullability(field, resolved) {
             errors.push(error);
         }
@@ -244,6 +247,22 @@ pub(crate) fn validate(
         }
     }
     (errors, asserts)
+}
+
+/// An `indexed: false` field gets no handle, so a `scope` on it would rename
+/// nothing; rejected rather than silently ignored.
+fn scope_without_handle(field: &DocField, resolved: &ResolvedField) -> Option<syn::Error> {
+    let scope = field.scope.as_ref()?;
+    (!resolved.mapping.indexed).then(|| {
+        syn::Error::new(
+            scope.span(),
+            format!(
+                "`{}` is `indexed: false` in the schema, so it has no query scope to rename — \
+                 remove `scope`",
+                field.doc_key
+            ),
+        )
+    })
 }
 
 fn unknown_field(field: &DocField, level: &[ResolvedField], scope: &str) -> syn::Error {
