@@ -251,8 +251,8 @@ pub(crate) fn pre_image(
             out,
             "  {}",
             pen.yellow(
-                "→ until set, deleting or re-parenting their rows leaves the old parent's \
-                 document stale",
+                "→ until a parent link is logged, deleting or re-parenting that table's rows \
+                 leaves the old parent's document stale",
             ),
         )?;
         section(out, pen, "Run to trace deleted and re-parented rows")?;

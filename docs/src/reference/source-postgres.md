@@ -90,13 +90,14 @@ flusso wants every table an index reads to log its **whole old row** on update a
 - **The parent link**, on a child table: without it, a [deleted or re-parented row](#deleted-and-re-parented-rows) leaves its old parent's document stale. A correctness gap.
 - **Every other column**, on any table: without them, an update can't be [compared column by column](#updates-that-change-nothing-a-document-reads), so it rebuilds every document that reads the table even when it changed nothing they read. Correct, only slower.
 
-**flusso sets it itself** when `manage_replica_identity` is on (the default) and the role owns the table, the same grant publication management needs. When the ingest engine starts, before the replication slot is created, `flusso run` issues, per table an index reads that isn't `FULL` yet (root tables, joined and aggregated tables, `belongs_to` targets, junctions, `via` tables; a `DEFAULT` or `USING INDEX` identity included):
+**flusso sets it itself** when `manage_replica_identity` is on (the default) and the role owns the table, the same grant publication management needs. When the ingest engine starts, before the replication slot is created, `flusso run` issues, per table an index reads that isn't `FULL` yet (root tables, joined and aggregated tables, `belongs_to` targets, junctions, `via` tables; a `DEFAULT`, `NOTHING`, or `USING INDEX` identity included, also one set on purpose):
 
 ```sql
 ALTER TABLE "public"."order_items" REPLICA IDENTITY FULL;
 ```
 
-- **The cost: more WAL.** Every update and delete on those tables logs the whole old row instead of the primary key, so the server writes, retains, and ships more WAL, to flusso and to every other consumer of the server's WAL (replicas, backups, other slots). Wide rows and update-heavy tables feel it most.
+- **The cost: more WAL.** Every update and delete on those tables logs the whole old row instead of the primary key, so the server writes, retains, and ships more WAL, to flusso and to every other consumer of the server's WAL (replicas, backups, other slots). Wide rows and update-heavy tables feel it most, and a large `text`/`jsonb` value stored out of line is logged in full with each old row.
+- **Other consumers of the table see it too.** Replica identity is per table, not per publication: another logical-replication consumer (Debezium, a native subscriber) starts receiving whole old rows. A native subscriber whose copy of the table has no primary key or usable index then matches rows by comparing every column, which fails on types with no equality operator (`json`, `point`).
 - **A brief lock.** The statement needs an `ACCESS EXCLUSIVE` lock. It waits at most 5 seconds for it (`lock_timeout`), blocking that table's readers while it waits, then gives up rather than sit behind a long transaction. Each table is altered in its own transaction, so a timeout on one doesn't stop the others or the start; it is retried whenever the ingest engine (re)starts.
 - **Partitioned tables** are set only when they hold a parent link (an update to one [always rebuilds](#updates-that-change-nothing-a-document-reads), so the rest of the row buys nothing), on the parent and on every partition that isn't `FULL`: each partition's own identity decides what its WAL logs, and Postgres doesn't pass the parent's down. That includes partitions created or attached later: flusso sets them at its next start, and until then deleting or re-parenting a row in one leaves its old parent stale. That staleness is **silent**: the stream announces the partitioned table, whose identity already carries the link, so the per-change warning can't see the new partition's. Restart flusso after adding partitions (or set `REPLICA IDENTITY FULL` on them as part of creating them).
 - **When a table can't be set** (the role doesn't own it, the lock timed out, or management is off), flusso keeps running and says so once per start, at a severity that matches what's lost: a table missing a parent link is a **warning** with the statement to run, and the stream also warns once per table when such a delete or update arrives; a table that only misses the rest of the row is one **info** line listing those tables and their statements.
@@ -120,7 +121,7 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 | --- | --- |
 | `DEFAULT` | Only when the link is in the primary key. |
 | `FULL` | Yes. What flusso sets; see [Replica identity](#replica-identity). |
-| `USING INDEX` on a unique index that includes the primary key and the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`. The index's columns must be `NOT NULL`. |
+| `USING INDEX` on a unique index that includes the primary key and the link (e.g. `(id, parent_id)`) | Yes, with less WAL than `FULL`, but only with `manage_replica_identity = false`: otherwise flusso replaces it with `FULL` at the next start. The index's columns must be `NOT NULL`. |
 | `USING INDEX` on an index without the primary key (e.g. `UNIQUE (parent_id)`) | No: changes are then keyed by the index columns, so the old row adds nothing beyond its key. |
 | `NOTHING` | No. |
 

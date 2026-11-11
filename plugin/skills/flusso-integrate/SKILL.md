@@ -78,9 +78,9 @@ flusso check --config flusso.toml            # validates + prints the typed mapp
 flusso check --config flusso.toml --offline  # format and rules only, skip the DB
 ```
 
-Against a live DB this also confirms each declared type and nullability against the real columns,
-and prints the publication coverage report plus any child table whose replica identity misses its
-parent link (see **flusso-postgres**). Fix every error here before running.
+Against a live DB this also checks the real catalog and prints the publication coverage and
+replica identity reports (see **flusso-postgres**); what it verifies is owned by the
+[CLI reference](https://alias2k.github.io/flusso/reference/cli.html#check). Fix every error here before running.
 
 ### 4. Run
 
