@@ -1214,9 +1214,6 @@ async fn on_pairs_rebuild_the_parent_from_either_side() {
     engine.abort();
 }
 
-/// One deployment the way the daemon runs it: stage the sink engine, then run
-/// it and the ingest engine together until either stops. `Ok` when the live
-/// stream ends; the first engine error otherwise.
 /// `orders` folding `quantity * unit_price` (and friends) over its lines, and
 /// `customers` summing the same expression `via` their orders: the built values
 /// follow Postgres arithmetic (a null operand drops the row, integer division
@@ -1359,6 +1356,9 @@ async fn an_aggregate_expression_rebuilds_from_each_operand() {
     engine.abort();
 }
 
+/// One deployment the way the daemon runs it: stage the sink engine, then run
+/// it and the ingest engine together until either stops. `Ok` when the live
+/// stream ends; the first engine error otherwise.
 async fn run_deployment(
     capture: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
