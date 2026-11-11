@@ -163,7 +163,12 @@ pub(crate) fn build<C: Replication>(
             // A confirmation moving the resume point turns the loop at once,
             // so the client hears it now rather than at the next event (a
             // keepalive can be 30 s away on a quiet stream). Dropping `recv`
-            // is safe: it is a channel receive while the worker runs.
+            // loses nothing while the worker runs: it is a channel receive.
+            // The one unsafe moment is after the channel closed, when `recv`
+            // awaits the worker's `JoinHandle`: if a wake-up wins then, the
+            // handle is dropped, and the next turn reports a generic
+            // "replication worker already joined" error instead of the
+            // worker's own outcome. The engine restarts the stream either way.
             let received = tokio::select! {
                 biased;
                 received = state.client.recv() => received,
