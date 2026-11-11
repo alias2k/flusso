@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use engine::{BuildStats, CommitStats, EngineId, Observer};
 use kernel::{IndexName, SinkName};
+use source::document::BuildFailure;
 
 use crate::status::{Phase, Status};
 
@@ -56,6 +57,10 @@ impl Observer for StatusObserver {
 
     fn on_document_quarantined(&self, sink: &SinkName, _index: &str, _id: &str, _reason: &str) {
         self.status.record_quarantine(sink);
+    }
+
+    fn on_document_failed(&self, index: &IndexName, id: &str, failure: &BuildFailure) {
+        self.status.record_script_failure(index, id, failure);
     }
 
     fn on_slot_lag(&self, bytes: u64) {

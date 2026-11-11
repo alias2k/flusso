@@ -14,7 +14,10 @@ pub use fence::{
     SinkPositions,
 };
 pub use observer::StatusObserver;
-pub use status::{IndexState, Phase, SinkPhase, SinkSnapshot, Status, StatusSnapshot};
+pub use status::{
+    IndexState, LastScriptFailure, Phase, ScriptFailures, SinkPhase, SinkSnapshot, Status,
+    StatusSnapshot,
+};
 pub use supervise::{ControlError, DaemonControl};
 
 use supervise::ControlReceivers;
@@ -181,7 +184,8 @@ impl Daemon {
             sink_names.clone(),
         )
         .with_batch(batch_policy(&config))
-        .with_observer(Arc::clone(&observer));
+        .with_observer(Arc::clone(&observer))
+        .with_failure_policies(failure_policies.clone());
 
         let sink_engines: Vec<SinkEngine> = sinks
             .into_iter()

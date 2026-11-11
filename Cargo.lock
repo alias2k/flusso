@@ -1248,6 +1248,7 @@ version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "flusso-config",
  "flusso-engine",
  "flusso-kernel",
