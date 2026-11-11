@@ -38,7 +38,7 @@ async-trait.workspace = true
 futures.workspace = true
 tracing.workspace = true
 sqlx.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "macros"] }
 url.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true

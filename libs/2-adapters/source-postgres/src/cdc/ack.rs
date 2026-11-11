@@ -31,12 +31,15 @@
 //!   the middle of an unprocessed commit's record.
 //!
 //! Confirmation is **cumulative**: confirming `p` advances the resume point
-//! and drops the entries at or before `p`.
+//! and drops the entries at or before `p`. A confirmation that moves the
+//! resume point wakes the stream ([`Positions::confirmed_moved`]), which hands
+//! it to the replication client at once instead of at its next event.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use source::cdc::AdvanceListener;
+use tokio::sync::Notify;
 
 /// The listeners a capture was handed through `on_advance`, shared with every
 /// stream it opens.
@@ -75,6 +78,7 @@ impl Listeners {
 pub(crate) struct Positions {
     inner: Mutex<Inner>,
     listeners: Arc<Listeners>,
+    confirmed_moved: Notify,
 }
 
 #[derive(Debug)]
@@ -142,6 +146,7 @@ impl Positions {
                 confirmed_lsn: start_lsn,
             }),
             listeners,
+            confirmed_moved: Notify::new(),
         }
     }
 
@@ -193,15 +198,30 @@ impl Positions {
         self.lock().confirmed_lsn
     }
 
-    /// Every position at or before `seq` is durable downstream.
+    /// Every position at or before `seq` is durable downstream. Wakes
+    /// [`confirmed_moved`](Self::confirmed_moved) when the resume point moved.
     pub(crate) fn confirm(&self, seq: u64) {
-        let mut inner = self.lock();
-        inner.confirmed_lsn = inner.confirmable(seq);
-        let Some(after) = seq.checked_add(1) else {
-            inner.entries.clear();
-            return;
+        let moved = {
+            let mut inner = self.lock();
+            let confirmable = inner.confirmable(seq);
+            let moved = confirmable > inner.confirmed_lsn;
+            inner.confirmed_lsn = confirmable;
+            match seq.checked_add(1) {
+                Some(after) => inner.entries = inner.entries.split_off(&after),
+                None => inner.entries.clear(),
+            }
+            moved
         };
-        inner.entries = inner.entries.split_off(&after);
+        if moved {
+            self.confirmed_moved.notify_one();
+        }
+    }
+
+    /// Resolves once a [`confirm`](Self::confirm) moved the resume point since
+    /// the last call returned. A move with nobody waiting is remembered, so
+    /// the stream never misses one between two polls.
+    pub(crate) async fn confirmed_moved(&self) {
+        self.confirmed_moved.notified().await;
     }
 }
 
