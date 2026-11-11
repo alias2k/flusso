@@ -22,14 +22,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Direction, Field,
-    FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType, GenericValue, IndexName,
-    IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, OrderBy, RawFilter, RawFilterValue,
-    Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, TableName, Through, Transform,
-    ValueOpFilter,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, DatabaseSchema,
+    Direction, Field, FieldName, FieldSource, Filter, FilterOp, FilterValue, FlussoType,
+    GenericValue, IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, OrderBy,
+    RawFilter, RawFilterValue, Relation, SoftDelete, SoftDeleteColumn, SoftDeleteField, TableName,
+    Through, Transform, ValueOpFilter, ViaHop,
 };
 use source::document::{Document, DocumentBuilder, DocumentId};
-use source::{RowKey, SourceSpec};
+use source::{RowKey, Severity, SourceSpec, validate_indexes};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -1082,6 +1082,268 @@ async fn root_filters_scope_which_rows_become_documents() {
         .await
         .unwrap();
     assert!(is_tombstone(&builder, 1).await);
+}
+
+// ---------------------------------------------------------------------------
+// `flusso check`: every table and column a relation names is looked up.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn validation_reports_a_typo_in_every_relation_position() {
+    let (_pg, url) = start_seeded().await;
+    let pair = |local: &str, related: &str| ColumnPair {
+        local: column(local),
+        related: column(related),
+    };
+    let join = |table_name: &str, kind: JoinKind, fields: Vec<Field>| Join {
+        table: table(table_name),
+        primary_key: column("id"),
+        nullable: true,
+        kind,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields,
+        indexed: true,
+        on: vec![],
+    };
+
+    let profile = join_field(
+        "profile",
+        Join {
+            primary_key: column("pk"),
+            filters: Some(vec![eq("headlin", "x"), raw("whatever IS NULL")]),
+            order_by: Some(vec![OrderBy {
+                column: column("rank"),
+                direction: None,
+            }]),
+            on: vec![pair("nam", "headlne")],
+            ..join(
+                "profiles",
+                JoinKind::HasOne {
+                    foreign_key: column("userid"),
+                },
+                vec![col("headline", "headline")],
+            )
+        },
+    );
+    let owner = join_field(
+        "owner",
+        join(
+            "users",
+            JoinKind::BelongsTo {
+                column: column("owner_id"),
+            },
+            vec![],
+        ),
+    );
+    let orders = join_field(
+        "orders",
+        join(
+            "orders",
+            JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
+            vec![join_field(
+                "items",
+                join(
+                    "order_item",
+                    JoinKind::HasMany {
+                        foreign_key: column("order_id"),
+                    },
+                    vec![col("sku", "sku")],
+                ),
+            )],
+        ),
+    );
+    let tags = join_field(
+        "tags",
+        join(
+            "tags",
+            JoinKind::ManyToMany {
+                through: Through {
+                    table: table("user_tags"),
+                    left_key: column("userid"),
+                    right_key: column("tagid"),
+                    filters: Some(vec![null_check("tag", NullOp::IsNull)]),
+                },
+            },
+            vec![col("label", "label")],
+        ),
+    );
+    let missing_junction = join_field(
+        "labels",
+        join(
+            "tags",
+            JoinKind::ManyToMany {
+                through: Through {
+                    table: table("user_tag"),
+                    left_key: column("user_id"),
+                    right_key: column("tag_id"),
+                    filters: None,
+                },
+            },
+            vec![col("label", "label")],
+        ),
+    );
+    let item_count = agg_field(
+        "itemCount",
+        Aggregate {
+            table: table("order_items"),
+            key: AggregateKey::Direct(column("orderid")),
+            via: vec![ViaHop {
+                table: table("orders"),
+                foreign_key: column("userid"),
+                filters: Some(vec![eq("state", "x")]),
+                on: vec![pair("nme", "stat")],
+            }],
+            on: vec![pair("totl", "prce")],
+            filters: Some(vec![eq("quantity", "1")]),
+            ..orders_agg(AggregateOp::Count, None)
+        },
+    );
+    let lost_hop = agg_field(
+        "lostHop",
+        Aggregate {
+            table: table("order_items"),
+            key: AggregateKey::Direct(column("order_id")),
+            via: vec![ViaHop {
+                table: table("order"),
+                foreign_key: column("user_id"),
+                filters: None,
+                on: vec![],
+            }],
+            ..orders_agg(AggregateOp::Count, None)
+        },
+    );
+    let lost_table = agg_field(
+        "lostTable",
+        Aggregate {
+            table: table("ordrs"),
+            ..orders_agg(AggregateOp::Count, None)
+        },
+    );
+
+    let schema = users_schema(
+        vec![
+            col("name", "name"),
+            profile,
+            owner,
+            orders,
+            tags,
+            missing_junction,
+            item_count,
+            lost_hop,
+            lost_table,
+        ],
+        None,
+    );
+    let spec = spec(schema);
+    let documents = builder(&url, spec.schema(&index_name("users")).unwrap().clone()).await;
+    let found: Vec<(String, String)> = validate_indexes(&spec, &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| {
+            assert_eq!(d.severity, Severity::Error, "{d:?}");
+            (d.dotted_path(), d.message)
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        (
+            "profile",
+            "`foreign_key` references unknown column `public.profiles.userid`",
+        ),
+        (
+            "profile",
+            "`on.local` references unknown column `public.users.nam`",
+        ),
+        (
+            "profile",
+            "`on.related` references unknown column `public.profiles.headlne`",
+        ),
+        (
+            "profile",
+            "`primary_key` references unknown column `public.profiles.pk`",
+        ),
+        (
+            "profile",
+            "`filters` references unknown column `public.profiles.headlin`",
+        ),
+        (
+            "profile",
+            "`order_by` references unknown column `public.profiles.rank`",
+        ),
+        (
+            "owner",
+            "`column` references unknown column `public.users.owner_id`",
+        ),
+        (
+            "orders.items",
+            "`table` references unknown table `public.order_item`",
+        ),
+        (
+            "tags",
+            "`through.left_key` references unknown column `public.user_tags.userid`",
+        ),
+        (
+            "tags",
+            "`through.right_key` references unknown column `public.user_tags.tagid`",
+        ),
+        (
+            "tags",
+            "`through.filters` references unknown column `public.user_tags.tag`",
+        ),
+        (
+            "labels",
+            "`through.table` references unknown table `public.user_tag`",
+        ),
+        (
+            "itemCount",
+            "`via.foreign_key` references unknown column `public.orders.userid`",
+        ),
+        (
+            "itemCount",
+            "`via.on.local` references unknown column `public.users.nme`",
+        ),
+        (
+            "itemCount",
+            "`via.on.related` references unknown column `public.orders.stat`",
+        ),
+        (
+            "itemCount",
+            "`via.filters` references unknown column `public.orders.state`",
+        ),
+        (
+            "itemCount",
+            "`foreign_key` references unknown column `public.order_items.orderid`",
+        ),
+        (
+            "itemCount",
+            "`on.local` references unknown column `public.orders.totl`",
+        ),
+        (
+            "itemCount",
+            "`on.related` references unknown column `public.order_items.prce`",
+        ),
+        (
+            "itemCount",
+            "`filters` references unknown column `public.order_items.quantity`",
+        ),
+        (
+            "lostHop",
+            "`via.table` references unknown table `public.order`",
+        ),
+        (
+            "lostTable",
+            "`table` references unknown table `public.ordrs`",
+        ),
+    ]
+    .iter()
+    .map(|(path, message)| ((*path).to_owned(), (*message).to_owned()))
+    .collect();
+    assert_eq!(found, expected);
 }
 
 // ---------------------------------------------------------------------------
