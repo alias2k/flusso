@@ -96,6 +96,7 @@ Any deployment going from 0.16 to 0.17. Step 1 applies to every deployment with 
 ## Options and variations
 
 - **WAL is released sooner.** 0.17 confirms the slot within about 2 seconds of the last sink flush, where 0.16 took 10 to 30 seconds; expect a lower steady [slot lag](../reference/metrics.md). Nothing to configure. See [Capture](../reference/source-postgres.md#capture).
+- **Keyword maps take more disk.** Each key of a keyword map with subfields also carries an exact `.keyword` subfield in 0.17, so the rebuilt index is somewhat larger than 0.16's; see [Objects and maps](../reference/objects-and-maps.md#map).
 - **Ad-hoc readers on the convenience alias** (`{prefix}{logical}`, dashboards, `curl`) move to the new generation as soon as 0.17 starts, so they see an empty or partial index until it's seeded. Point them at the old hash alias for the duration if that matters.
 - **Revert `on_error`** to `stop` once the rebuild is done and the quarantined rows are fixed; changing the policy never triggers a reindex.
 - **Rolling back to 0.16** after 0.17 ran returns to the old index, which missed every change made while 0.17 ran. Run `flusso reindex <index>` for each `map` index after the rollback, or delete its generation so the restart rebuilds it.
