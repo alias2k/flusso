@@ -16,8 +16,8 @@
 //! | `Array` / `Map` | array / object map |
 //!
 //! **Out** ([`from_dynamic`]): a script's result is checked against the field's declared type,
-//! strictly. The only widening allowed is the lossless one: an integer is accepted for a
-//! `float`/`double`/`decimal` field.
+//! strictly. The only widening allowed: an integer is accepted for a `float`/`double`/`decimal`
+//! field.
 //!
 //! ```
 //! use kernel::{FlussoType, GenericValue};

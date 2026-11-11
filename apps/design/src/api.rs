@@ -21,8 +21,7 @@ use kernel::common::IndexName;
 use kernel::{IndexSchema, ParseFrom};
 use script::{Printer, ScriptContext, Scripts};
 use serde::{Deserialize, Serialize};
-use source::RowKey;
-use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
+use source::document::BuildFailure;
 use source::{
     Diagnostic, JunctionCandidate, RelationalCatalog, SchemaIntrospection, Severity, SourceSpec,
     junction_candidates, validate_indexes,
@@ -960,26 +959,14 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
         .await
         .context("connecting to the database")?;
     let built = match &request.id {
-        Some(id) => {
-            let primary_key = spec
-                .schema(&name)
-                .and_then(|schema| schema.primary_key.clone())
-                .context("index missing its primary key")?;
-            let document = DocumentId {
-                index: name.clone(),
-                key: RowKey::from_text(primary_key, id),
-            };
-            match documents
-                .build(&document)
-                .await
-                .context("building the document")?
-            {
-                Document::Upsert { body, .. } => Some(body),
-                Document::Delete { .. } | Document::Failed { .. } => {
-                    return Ok(SampleOutcome::NotFound(id.clone()));
-                }
-            }
-        }
+        Some(id) => match documents
+            .document_by_id(&name, id)
+            .await
+            .context("building the document")?
+        {
+            Some(body) => Some(body),
+            None => return Ok(SampleOutcome::NotFound(id.clone())),
+        },
         None => documents
             .sample_document(&name)
             .await

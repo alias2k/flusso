@@ -21,7 +21,7 @@ A script reads only the document flusso already built, so it can't reach a table
 
    `this` is the object at the field's level; `root` is the whole document. The full rules are in [Script fields](../reference/scripts.md).
 
-2. **Fetch what the script needs without indexing it.** Mark a field `emit: false` and it's built, readable by scripts, then stripped:
+2. **Fetch what the script needs without indexing it.** Mark the field [`emit: false`](../reference/scripts.md#emit):
 
    ```yaml
    - decimal: rawPrice
@@ -57,7 +57,7 @@ A script reads only the document flusso already built, so it can't reach a table
 
 6. **Decide what a failing document does.** A script that fails on a document fails that document. With the default `on_error = "stop"` the run stops until the script or the data changes; with `skip` the document keeps its indexed version. See [Script fields](../reference/scripts.md#failures).
 
-7. **Alert on failures under `skip`.** Each one is logged at `error` with the script line, counted, and shown in `/status` under `script_failures`:
+7. **Alert on failures.** Each one is logged, counted, and shown in `/status` ([Script fields](../reference/scripts.md#failures)):
 
    ```promql
    increase(flusso_script_failures_total[10m]) > 0
@@ -69,6 +69,15 @@ A script reads only the document flusso already built, so it can't reach a table
 - **A fallback.** A missing value is `()`; write `this.nickname ?? this.name`. Reading a property the object doesn't have is an error, so test optional keys with `"key" in this`.
 - **Decimals stay exact.** A `decimal` arrives as a Rhai `Decimal`; an integer result is accepted for a `decimal`, `double`, or `float` field.
 - **Editing a script rebuilds the index** into a new generation, as any schema change does.
+
+## The rest of the guide
+
+| Page | For |
+| --- | --- |
+| [The Rhai you need](scripts/language.md) | the language: values, strings (and the in-place methods), decimals, null, arrays and closures, what isn't there |
+| [Script recipes](scripts/recipes.md) | tested scripts for labels, slugs, flags, bands, prices, scores, dates, translations, reshaping a list |
+| [Test and debug a script](scripts/debugging.md) | `flusso script run`, `print`, the designer, every error message and its fix |
+| [Run scripts in production](scripts/production.md) | choosing `on_error`, alerts, catching up after a fix, what scripts cost |
 
 ## Related
 

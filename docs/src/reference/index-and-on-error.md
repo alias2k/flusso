@@ -21,8 +21,6 @@ All three of `name`, `schema`, and `enabled` are required.
 | `"stop"` | Stop the run. The batch stays unconfirmed and is redelivered on restart, so a persistently bad document halts sync until the data or the policy changes. Dropping data is opt-in. This is the default. |
 | `"skip"` | Quarantine the document and continue. The rest of the batch is applied and acked, so the slot advances past the poison. The event is logged, counted in `flusso.documents.quarantined`, and shown in `/status` as `documents_quarantined`. The document never lands until its source row changes again. |
 
-A script failure happens before the document reaches any sink: `stop` halts the ingest engine, `skip` publishes nothing for that document, so every sink keeps its indexed version. See [Script fields](scripts.md#failures).
-
 The global key is the default for every index; an `[[index]]` entry's `on_error` overrides it. A single `stop` rejection halts the whole batch, decided before any quarantine event is emitted. The policy is operational, not part of the document shape, so changing it never triggers a reindex. The runbook is [Handle rejected documents](../operate/rejected-documents.md).
 
 ## sinks

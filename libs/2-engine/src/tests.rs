@@ -1380,7 +1380,9 @@ impl Observer for FailedObserver {
         index: &IndexName,
         id: &str,
         failure: &source::document::BuildFailure,
+        policy: FailurePolicy,
     ) {
+        assert_eq!(policy, FailurePolicy::Skip);
         self.failed
             .lock()
             .unwrap()

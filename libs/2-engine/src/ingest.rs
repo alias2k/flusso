@@ -35,7 +35,7 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use kernel::{Envelope, GenericValue, IndexName, Position, SinkName};
+use kernel::{Envelope, IndexName, Position, SinkName};
 use source::cdc::{ChangeCapture, ChangeEvent, LiveChange};
 use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
 use source::{SnapshotTable, SourceError};
@@ -319,22 +319,21 @@ impl IngestEngine {
         Ok((envelopes, by_index))
     }
 
-    /// Apply the failure policy to a document that could not be built: `stop`
+    /// Report a document that could not be built, then apply its policy: `stop`
     /// fails the batch (nothing in it is published, so the change is retried),
-    /// `skip` reports it and leaves every sink's indexed version alone.
+    /// `skip` leaves every sink's indexed version alone.
     fn document_failed(&self, id: &DocumentId, failure: BuildFailure) -> Result<()> {
         let rendered = document_id(id);
-        match self.failure_policies.resolve(id.index.as_ref()) {
+        let policy = self.failure_policies.resolve(id.index.as_ref());
+        self.observer
+            .on_document_failed(&id.index, &rendered, &failure, policy);
+        match policy {
             FailurePolicy::Stop => Err(EngineError::DocumentFailed {
                 index: id.index.to_string(),
                 id: rendered,
                 failure: Box::new(failure),
             }),
-            FailurePolicy::Skip => {
-                self.observer
-                    .on_document_failed(&id.index, &rendered, &failure);
-                Ok(())
-            }
+            FailurePolicy::Skip => Ok(()),
         }
     }
 
@@ -619,42 +618,7 @@ impl Consumer<Request> for ClosedConsumer {
 /// The sink's document `_id`, derived from the document key (the root primary
 /// key); composite keys join their parts with `:`.
 pub fn document_id(id: &DocumentId) -> String {
-    id.key
-        .0
-        .iter()
-        .map(|(_, value)| value_to_string(value))
-        .collect::<Vec<_>>()
-        .join(":")
-}
-
-fn value_to_string(value: &GenericValue) -> String {
-    match value {
-        GenericValue::Bool(b) => b.to_string(),
-        GenericValue::SmallInt(i) => i.to_string(),
-        GenericValue::Int(i) => i.to_string(),
-        GenericValue::BigInt(i) => i.to_string(),
-        GenericValue::Float(f) => f.to_string(),
-        GenericValue::Double(f) => f.to_string(),
-        GenericValue::Decimal(d) => d.to_string(),
-        GenericValue::String(s) => s.clone(),
-        GenericValue::Uuid(u) => u.to_string(),
-        GenericValue::Date(d) => d.to_string(),
-        GenericValue::Time(t) => t.to_string(),
-        GenericValue::Timestamp(ts) => ts.to_string(),
-        GenericValue::TimestampTz(ts) => ts.to_rfc3339(),
-        // `\x`-prefixed lowercase hex, matching Postgres's `bytea` text output,
-        // so a snapshot key and a WAL key for the same row agree.
-        GenericValue::Bytes(bytes) => {
-            let mut out = String::with_capacity(2 + bytes.len() * 2);
-            out.push_str("\\x");
-            for byte in bytes {
-                out.push_str(&format!("{byte:02x}"));
-            }
-            out
-        }
-        GenericValue::Null => "null".to_owned(),
-        GenericValue::Array(_) | GenericValue::Map(_) => String::new(),
-    }
+    id.rendered()
 }
 
 impl From<SourceError> for EngineError {

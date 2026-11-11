@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use daemon::{IndexName, Observer};
+use kernel::FailurePolicy;
 use source::document::BuildFailure;
 
 /// How often one field's failure is logged in full.
@@ -87,7 +88,19 @@ impl ScriptFailureLog {
 }
 
 impl Observer for ScriptFailureLog {
-    fn on_document_failed(&self, index: &IndexName, id: &str, failure: &BuildFailure) {
+    fn on_document_failed(
+        &self,
+        index: &IndexName,
+        id: &str,
+        failure: &BuildFailure,
+        policy: FailurePolicy,
+    ) {
+        let consequence = match policy {
+            FailurePolicy::Skip => "the document keeps its indexed version (on_error = skip)",
+            FailurePolicy::Stop => {
+                "stopping until the script or the row is fixed (on_error = stop)"
+            }
+        };
         let field = field_label(&failure.field);
         match self.admit(index.as_ref(), &field, Instant::now()) {
             Some(suppressed) => tracing::error!(
@@ -96,7 +109,7 @@ impl Observer for ScriptFailureLog {
                 id,
                 field = %failure.field,
                 suppressed,
-                "script failed; the document keeps its indexed version (on_error = skip)\n{failure}"
+                "script failed; {consequence}\n{failure}"
             ),
             None => tracing::debug!(
                 target: "script",

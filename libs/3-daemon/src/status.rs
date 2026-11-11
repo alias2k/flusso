@@ -313,7 +313,9 @@ impl Status {
         entry.last = Some(LastScriptFailure {
             id: id.to_owned(),
             field: failure.field.clone(),
-            message: failure.to_string(),
+            message: failure.message.clone(),
+            line: failure.position.as_ref().map(|at| at.line),
+            column: failure.position.as_ref().map(|at| at.column),
             at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         });
     }
@@ -456,8 +458,8 @@ pub struct StatusSnapshot {
     pub errors: u64,
     /// The most recent engine error.
     pub last_error: Option<String>,
-    /// Per index, the documents a script failed on that the `skip` policy left
-    /// at their indexed version. Only indexes with a failure appear.
+    /// Per index, the documents a script failed on, under either policy. Only
+    /// indexes with a failure appear.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub script_failures: BTreeMap<String, ScriptFailures>,
     pub sinks: BTreeMap<String, SinkSnapshot>,
@@ -466,7 +468,7 @@ pub struct StatusSnapshot {
 /// Script failures on one index since the daemon started.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScriptFailures {
-    /// Documents skipped because a script failed on them.
+    /// Documents a script failed on (a `stop` index counts each retry).
     pub count: u64,
     /// The most recent one.
     pub last: Option<LastScriptFailure>,
@@ -479,8 +481,12 @@ pub struct LastScriptFailure {
     pub id: String,
     /// The failing field's path, e.g. `variants[2].grossPrice`.
     pub field: String,
-    /// The error, with the script line and a caret when it has a position.
+    /// What went wrong, in one line.
     pub message: String,
+    /// The line in the field's script, when the failure has a position.
+    pub line: Option<usize>,
+    /// The column in that line.
+    pub column: Option<usize>,
     /// When it happened (RFC 3339, UTC).
     pub at: String,
 }

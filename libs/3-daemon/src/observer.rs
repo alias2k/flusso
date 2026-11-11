@@ -59,7 +59,13 @@ impl Observer for StatusObserver {
         self.status.record_quarantine(sink);
     }
 
-    fn on_document_failed(&self, index: &IndexName, id: &str, failure: &BuildFailure) {
+    fn on_document_failed(
+        &self,
+        index: &IndexName,
+        id: &str,
+        failure: &BuildFailure,
+        _policy: engine::FailurePolicy,
+    ) {
         self.status.record_script_failure(index, id, failure);
     }
 

@@ -6,6 +6,7 @@
 //! sink is visible on its own.
 
 use daemon::{BuildStats, CommitStats, EngineId, IndexName, Observer, SinkName};
+use kernel::FailurePolicy;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
@@ -64,9 +65,10 @@ impl OtelObserver {
             script_failures: meter
                 .u64_counter("flusso.script.failures")
                 .with_description(
-                    "Documents a script failed on, left at their indexed version (on_error = \
-                     skip). Labelled by index and field path (array positions folded to `[]`). \
-                     A non-zero value means documents are going stale — alert on it.",
+                    "Documents a script failed on, by index, field path (array positions folded \
+                     to `[]`) and policy: `skip` left the document at its indexed version, \
+                     `stop` stopped the ingest engine. A non-zero value means documents are \
+                     going stale — alert on it.",
                 )
                 .build(),
             errors: meter
@@ -138,12 +140,19 @@ impl Observer for OtelObserver {
         );
     }
 
-    fn on_document_failed(&self, index: &IndexName, _id: &str, failure: &BuildFailure) {
+    fn on_document_failed(
+        &self,
+        index: &IndexName,
+        _id: &str,
+        failure: &BuildFailure,
+        policy: FailurePolicy,
+    ) {
         self.script_failures.add(
             1,
             &[
                 KeyValue::new("index", index.as_ref().to_owned()),
                 KeyValue::new("field", field_label(&failure.field)),
+                KeyValue::new("policy", policy_label(policy)),
             ],
         );
     }
@@ -158,5 +167,12 @@ impl Observer for OtelObserver {
             EngineId::Sink(sink) => KeyValue::new("engine", format!("sink:{sink}")),
         };
         self.errors.add(1, &[label]);
+    }
+}
+
+fn policy_label(policy: FailurePolicy) -> &'static str {
+    match policy {
+        FailurePolicy::Stop => "stop",
+        FailurePolicy::Skip => "skip",
     }
 }

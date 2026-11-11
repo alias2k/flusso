@@ -1431,6 +1431,7 @@ dependencies = [
  "flusso-source",
  "rhai",
  "rust_decimal",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",

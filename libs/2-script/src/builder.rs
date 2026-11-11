@@ -46,12 +46,31 @@ impl ScriptedBuilder {
     }
 
     fn finish(&self, document: Document) -> Document {
-        match document {
-            Document::Upsert { id, mut body } => match self.scripts.apply(&id.index, &mut body) {
-                Ok(()) => Document::Upsert { id, body },
-                Err(failure) => Document::Failed { id, failure },
-            },
-            other => other,
+        let Document::Upsert { id, mut body } = document else {
+            return document;
+        };
+        // The document may hold personal data, so it is only kept for the
+        // `debug` log, and only copied when that log is on.
+        let built =
+            tracing::enabled!(target: "script", tracing::Level::DEBUG).then(|| body.clone());
+        match self
+            .scripts
+            .apply_document(&id.index, &id.rendered(), &mut body)
+        {
+            Ok(()) => Document::Upsert { id, body },
+            Err(failure) => {
+                if let Some(built) = built {
+                    tracing::debug!(
+                        target: "script",
+                        index = %id.index,
+                        id = %id.rendered(),
+                        field = %failure.field,
+                        document = ?built,
+                        "the document a script failed on, as built"
+                    );
+                }
+                Document::Failed { id, failure }
+            }
         }
     }
 }

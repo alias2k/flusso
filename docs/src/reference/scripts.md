@@ -72,7 +72,7 @@ A document value enters Rhai as:
 | object, array | object map, array |
 | null | `()` |
 
-The result is checked against the declared type, strictly. The one widening allowed is lossless: an integer for a `float`, `double` or `decimal` field. A `date` result must be `YYYY-MM-DD`; a `timestamp` result an RFC 3339 timestamp, with or without the offset. A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
+The result is checked against the declared type, strictly. The one widening allowed: an integer for a `float`, `double` or `decimal` field (a `float` result is stored as 32-bit). A `date` result must be `YYYY-MM-DD`; a `timestamp` result an RFC 3339 timestamp, with or without the offset. A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
 
 ## The sandbox
 
@@ -84,7 +84,7 @@ The result is checked against the declared type, strictly. The one widening allo
 | 1,000,000 operations, 32 call levels, 64 expression levels | A runaway script fails its document instead of stalling the pipeline. |
 | Strings up to 1 MiB, arrays and maps up to 100,000 entries | |
 
-`print` and `debug` go to the log at `debug` under the `script` target (`RUST_LOG=script=debug`), and to the output of [`flusso script run`](cli.md#script).
+`print` and `debug` go to the log at `debug` under the `script` target (`RUST_LOG=script=debug`), tagged with the index, the document id and the field, and to the output of [`flusso script run`](cli.md#script).
 
 ## Failures
 
@@ -95,7 +95,9 @@ A script that fails on one document (a runtime error, or a result of the wrong t
 | `on_error` | A failed document |
 | --- | --- |
 | `"stop"` | Stops the ingest engine before anything in the batch is published. The change is retried after the restart and fails again until the script or the data changes. |
-| `"skip"` | Is published to no sink, so every sink keeps its indexed version. Logged at `error` (the first per field each minute, then a suppressed count), counted in `flusso.script.failures`, and shown in `/status` under `script_failures`. |
+| `"skip"` | Is published to no sink, so every sink keeps its indexed version. |
+
+Either way the failure is logged at `error` with the script line and a caret (the first per index and field each minute, carrying a count of the ones suppressed since), counted in [`flusso.script.failures`](metrics.md), and shown in [`/status`](http.md#get-status) under `script_failures`. The document as built is logged at `debug` under the `script` target, since it may hold personal data.
 
 ## Content hash
 

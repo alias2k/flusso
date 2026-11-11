@@ -125,15 +125,15 @@ fn status_reports_script_failures_per_index() {
         message: "boom".to_owned(),
         position: None,
     };
-    observer.on_document_failed(&users(), "7", &failure);
-    observer.on_document_failed(&users(), "9", &failure);
+    observer.on_document_failed(&users(), "7", &failure, engine::FailurePolicy::Skip);
+    observer.on_document_failed(&users(), "9", &failure, engine::FailurePolicy::Stop);
 
     let json = serde_json::to_value(status.snapshot()).unwrap();
     let users = &json["script_failures"]["users"];
     assert_eq!(users["count"], 2);
     assert_eq!(users["last"]["id"], "9");
     assert_eq!(users["last"]["field"], "label");
-    assert_eq!(users["last"]["message"], "`label`: boom");
+    assert_eq!(users["last"]["message"], "boom");
 }
 
 /// With two sinks, the deployment is `backfilling` while either sink still

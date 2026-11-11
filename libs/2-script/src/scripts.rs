@@ -52,23 +52,42 @@ const ENTRY: &str = "__flusso";
 /// Where a script's printed output goes.
 pub type Printer = Arc<dyn Fn(&ScriptContext<'_>, &str) + Send + Sync>;
 
-/// Which script printed: its index and field path.
+/// Which script printed.
 #[derive(Debug, Clone, Copy)]
 pub struct ScriptContext<'a> {
+    /// The index whose script printed.
     pub index: &'a str,
+    /// The document's id, as the sink writes it; empty when the caller gave none.
+    pub document: &'a str,
+    /// The printing field's path, e.g. `variants[2].gross`.
     pub field: &'a str,
 }
 
+#[derive(Default)]
+struct Running {
+    index: String,
+    document: String,
+    field: String,
+}
+
 thread_local! {
-    /// The script running on this thread, as `(index, field path)`, so a print
-    /// callback (which Rhai calls with the text only) can say who printed.
-    static RUNNING: std::cell::RefCell<(String, String)> = const {
-        std::cell::RefCell::new((String::new(), String::new()))
-    };
+    /// The script running on this thread, so a print callback (which Rhai calls
+    /// with the text only) can say who printed.
+    static RUNNING: std::cell::RefCell<Running> = std::cell::RefCell::default();
 }
 
 fn with_running(f: impl FnOnce(&ScriptContext<'_>)) {
-    RUNNING.with_borrow(|(index, field)| f(&ScriptContext { index, field }));
+    RUNNING.with_borrow(|running| {
+        f(&ScriptContext {
+            index: &running.index,
+            document: &running.document,
+            field: &running.field,
+        });
+    });
+}
+
+fn set_running(update: impl FnOnce(&mut Running)) {
+    RUNNING.with_borrow_mut(update);
 }
 
 fn emit_print(printer: Option<&Printer>, text: &str) {
@@ -77,6 +96,7 @@ fn emit_print(printer: Option<&Printer>, text: &str) {
         None => tracing::debug!(
             target: "script",
             index = context.index,
+            id = context.document,
             field = context.field,
             "{text}"
         ),
@@ -127,7 +147,9 @@ struct CompiledScript {
 /// One script that does not compile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
+    /// The index the script belongs to.
     pub index: IndexName,
+    /// The field, the parser's message, and where in the script.
     pub failure: BuildFailure,
 }
 
@@ -210,9 +232,26 @@ impl Scripts {
     /// Run `index`'s scripts over one built document, then strip its
     /// input-only fields. Leaves the body untouched for an index with neither.
     pub fn apply(&self, index: &IndexName, body: &mut GenericValue) -> Result<(), BuildFailure> {
+        self.apply_document(index, "", body)
+    }
+
+    /// [`apply`](Self::apply), naming the document so what a script prints says
+    /// which document it ran on.
+    pub fn apply_document(
+        &self,
+        index: &IndexName,
+        document: &str,
+        body: &mut GenericValue,
+    ) -> Result<(), BuildFailure> {
         let Some(plan) = self.plans.get(index) else {
             return Ok(());
         };
+        set_running(|running| {
+            running.index.clear();
+            running.index.push_str(index.as_ref());
+            running.document.clear();
+            running.document.push_str(document);
+        });
         // Shared, so each call passes a pointer rather than a deep copy; read-only,
         // so no script can change what the next one reads.
         let root = if plan.reads_root {
@@ -222,7 +261,6 @@ impl Scripts {
         };
         let run = Run {
             engine: &self.engine,
-            index,
             root: &root,
         };
         run.value(&plan.root, body, "")
@@ -334,7 +372,6 @@ fn position<'a>(lines: impl Iterator<Item = &'a str>, at: Position) -> Option<Sc
 
 struct Run<'a> {
     engine: &'a Engine,
-    index: &'a IndexName,
     root: &'a Dynamic,
 }
 
@@ -401,11 +438,9 @@ impl Run<'_> {
         mut this: Dynamic,
         path: &str,
     ) -> Result<GenericValue, BuildFailure> {
-        RUNNING.with_borrow_mut(|running| {
-            running.0.clear();
-            running.0.push_str(self.index.as_ref());
-            running.1.clear();
-            running.1.push_str(path);
+        set_running(|running| {
+            running.field.clear();
+            running.field.push_str(path);
         });
         let options = CallFnOptions::new()
             .eval_ast(false)

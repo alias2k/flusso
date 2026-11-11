@@ -19,8 +19,6 @@ use clap::{Args, Subcommand};
 use config::Config;
 use kernel::{GenericValue, IndexName};
 use script::{Printer, ScriptContext, Scripts};
-use source::RowKey;
-use source::document::{Document, DocumentBuilder, DocumentId};
 use source_postgres::PgDocumentBuilder;
 
 use crate::DEFAULT_CONFIG;
@@ -159,19 +157,9 @@ async fn from_database(
             .ok_or_else(|| anyhow!("index `{index}` has no rows to build"))?;
         return Ok((format!("{index}, first row"), body));
     };
-    let primary_key = spec
-        .schema(index)
-        .and_then(|schema| schema.primary_key.clone())
-        .ok_or_else(|| anyhow!("index `{index}` has no single-column primary key"))?;
-    let document = DocumentId {
-        index: index.clone(),
-        key: RowKey::from_text(primary_key, id),
-    };
-    match documents.build(&document).await? {
-        Document::Upsert { body, .. } => Ok((format!("{index}, id {id}"), body)),
-        Document::Delete { .. } | Document::Failed { .. } => {
-            bail!("no document `{id}` in `{index}` (the row is missing or soft-deleted)")
-        }
+    match documents.document_by_id(index, id).await? {
+        Some(body) => Ok((format!("{index}, id {id}"), body)),
+        None => bail!("no document `{id}` in `{index}` (the row is missing or soft-deleted)"),
     }
 }
 

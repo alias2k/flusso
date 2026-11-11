@@ -12,6 +12,8 @@ use std::time::Duration;
 use kernel::{IndexName, Position, SinkName};
 use source::document::BuildFailure;
 
+use crate::policy::FailurePolicy;
+
 /// What one ingest commit produced: how many changes it covered, how many
 /// documents it built (deduplicated), per index, and how long the build took.
 #[derive(Debug, Clone)]
@@ -114,10 +116,17 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, index, id, reason);
     }
 
-    /// A document could not be built (a script failed on it) and the `skip`
-    /// policy left it out: every sink keeps its indexed version.
-    fn on_document_failed(&self, index: &IndexName, id: &str, failure: &BuildFailure) {
-        let _ = (index, id, failure);
+    /// A document could not be built (a script failed on it). Reported under
+    /// either `policy`: `Skip` left it out, so every sink keeps its indexed
+    /// version; `Stop` is about to stop the ingest engine.
+    fn on_document_failed(
+        &self,
+        index: &IndexName,
+        id: &str,
+        failure: &BuildFailure,
+        policy: FailurePolicy,
+    ) {
+        let _ = (index, id, failure, policy);
     }
 
     /// `sink` flushed every live change up to and including `position`: a
@@ -242,9 +251,15 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_document_failed(&self, index: &IndexName, id: &str, failure: &BuildFailure) {
+    fn on_document_failed(
+        &self,
+        index: &IndexName,
+        id: &str,
+        failure: &BuildFailure,
+        policy: FailurePolicy,
+    ) {
         for observer in &self.observers {
-            observer.on_document_failed(index, id, failure);
+            observer.on_document_failed(index, id, failure, policy);
         }
     }
 

@@ -13,6 +13,49 @@ pub struct DocumentId {
     pub key: RowKey,
 }
 
+impl DocumentId {
+    /// The key as the sink's document `_id`: each part as text, composite keys
+    /// joined with `:`.
+    pub fn rendered(&self) -> String {
+        self.key
+            .0
+            .iter()
+            .map(|(_, value)| key_part(value))
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+}
+
+fn key_part(value: &GenericValue) -> String {
+    match value {
+        GenericValue::Bool(b) => b.to_string(),
+        GenericValue::SmallInt(i) => i.to_string(),
+        GenericValue::Int(i) => i.to_string(),
+        GenericValue::BigInt(i) => i.to_string(),
+        GenericValue::Float(f) => f.to_string(),
+        GenericValue::Double(f) => f.to_string(),
+        GenericValue::Decimal(d) => d.to_string(),
+        GenericValue::String(s) => s.clone(),
+        GenericValue::Uuid(u) => u.to_string(),
+        GenericValue::Date(d) => d.to_string(),
+        GenericValue::Time(t) => t.to_string(),
+        GenericValue::Timestamp(ts) => ts.to_string(),
+        GenericValue::TimestampTz(ts) => ts.to_rfc3339(),
+        // `\x`-prefixed lowercase hex, matching Postgres's `bytea` text output,
+        // so a snapshot key and a WAL key for the same row agree.
+        GenericValue::Bytes(bytes) => {
+            let mut out = String::with_capacity(2 + bytes.len() * 2);
+            out.push_str("\\x");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out
+        }
+        GenericValue::Null => "null".to_owned(),
+        GenericValue::Array(_) | GenericValue::Map(_) => String::new(),
+    }
+}
+
 /// The result of assembling a document: a body to upsert into the index, a
 /// tombstone when the root row is gone (or soft-deleted), or a document that
 /// could not be finished (a script failed on it).
@@ -58,7 +101,9 @@ impl std::error::Error for BuildFailure {}
 /// A 1-based line and column in a script, with that line's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptPosition {
+    /// 1-based line in the script.
     pub line: usize,
+    /// 1-based column in that line, in characters.
     pub column: usize,
     /// The script line the position points into.
     pub excerpt: String,
