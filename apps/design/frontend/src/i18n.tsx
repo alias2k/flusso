@@ -71,16 +71,21 @@ function formatArg(inner: string, vars: Vars, lang: Lang): string {
 }
 
 /// A small ICU MessageFormat evaluator: named arguments, `plural` and `select`,
-/// `#` for the plural number, and `'…'` to quote literal braces. Enough for the
+/// `#` for the plural number, and `'…'` to quote literal braces (an apostrophe
+/// before anything but `{`, `}` or `#` is literal, as in ICU). Enough for the
 /// catalog's needs; the syntax is standard ICU, so messages stay portable.
 function format(message: string, vars: Vars, lang: Lang): string {
   let out = "";
   for (let i = 0; i < message.length;) {
     const ch = message[i];
     if (ch === "'") {
-      if (message[i + 1] === "'") {
+      const next = message[i + 1];
+      if (next === "'") {
         out += "'";
         i += 2;
+      } else if (next !== "{" && next !== "}" && next !== "#") {
+        out += "'";
+        i++;
       } else {
         const end = message.indexOf("'", i + 1);
         if (end === -1) {
