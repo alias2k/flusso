@@ -1,0 +1,19 @@
+# An `exists` aggregate, one hop and across `via` hops (issue #172).
+version: 1
+table: users
+primary_key: id
+
+fields:
+  - integer: id
+    required: true
+  - exists: hasPaidOrder
+    table: orders
+    foreign_key: user_id
+    filters:
+      - { column: status, op: eq, value: paid }
+  - exists: hasCompletedTask
+    table: tasks
+    foreign_key: project_id
+    via:
+      - table: projects
+        foreign_key: user_id
