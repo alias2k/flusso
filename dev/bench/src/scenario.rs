@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use rand::Rng;
+use rand::RngExt;
 use rand::rngs::StdRng;
 
 use crate::scale::Scale;
