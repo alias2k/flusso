@@ -62,17 +62,33 @@ Source, stream, and sinks are edited from each adapter's own declaration: a kind
 
 A YAML editor over the selected index. Problems panel with a count, valid-YAML indicator, search, block folding, cursor position, **Format**, **Auto-format** on focus loss when valid, VIM keybindings. Edits sync into the project as you type; Save reviews and writes as usual.
 
+Code mode shows the whole schema, so it opens only when no field is [incomplete](#incomplete-fields): otherwise the canvas stays and a message names each piece to finish or remove (a field with a blank name by its position, `#3`). A schema the server refuses for another reason, such as a malformed column name, keeps the canvas too, with the server's message. Leaving Code mode applies the YAML at once. YAML that doesn't parse holds the switch once, since its latest edits aren't in the project yet; switching again discards them.
+
 ## Preview
 
 | Tab | Shows |
 | --- | --- |
-| YAML | the canonical file that would be written |
+| YAML | the canonical file that would be written, minus anything [left out](#incomplete-fields) |
 | Mapping | the derived OpenSearch mapping, database-free; an opted-out field shows `subfields: false` or `indexed: false` |
 | Sample | a document built from one live row via the same path the sink uses, scripts run and input-only fields stripped; **Row id** picks the row (blank: the first); a failing script shows its field, message and line with a caret over the row as built; what the scripts printed; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
 
 The document tree marks a stored-only field (`indexed: false`) with a *not indexed* chip.
 
-Incomplete fields are flagged on the canvas and left out of the live preview payload only, so a half-typed field doesn't error the panel; the field and everything under it come back once it is complete. A field is incomplete when its name is blank or not a valid field name, or its column, a `geo` coordinate, a script's source, or a join or aggregate key is still blank. If a preview fails anyway, its error banner clears at the next preview that succeeds.
+### Incomplete fields
+
+The canvas flags an incomplete field and the live preview leaves it out, so a half-built field doesn't error the panel. A warning above the preview tabs lists what's left out, and the YAML and Mapping tabs show the schema without it. The document keeps it: it comes back in the preview once it's complete.
+
+A field is incomplete when:
+
+- its name is blank or not a valid field name;
+- its column, a `geo` coordinate, or a script's source is blank;
+- a join's `table`, `primary_key`, or key (`column`, `foreign_key`, or the `through` table and keys) is blank;
+- an aggregate's table, key, or column is blank, or a `sum`, `min`, or `max` has no `value_type`;
+- a `via` hop's table or key is blank.
+
+A half-written or duplicated `on` pair flags its field, but only the pair is left out of the preview. A filter, `order_by` entry, or soft-delete marker with a blank column, and a soft-delete `field` that isn't a valid field name, are left out too.
+
+A preview that fails anyway shows an error banner, cleared by the next preview that succeeds or by switching index.
 
 ## Save review
 

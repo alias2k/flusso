@@ -104,12 +104,15 @@ function Node({ node }: { node: DocumentNode }) {
 export function Preview({
   index,
   preview,
+  left,
   diagnostics,
   onSample,
 }: {
   /// The active index name — keys the sample so it resets when the index changes.
   index: string;
   preview: PreviewResponse | null;
+  /// Paths of the incomplete pieces the preview leaves out (see `pruneIncomplete`).
+  left: string[];
   diagnostics: DiagnosticDto[] | null;
   onSample?: (id?: string) => Promise<SampleResponse>;
 }) {
@@ -135,6 +138,11 @@ export function Preview({
       {!preview.parse_ok && (
         <div className="banner error mx-3 mt-3">
           <strong>{t("preview.parseError")}</strong> {preview.parse_error}
+        </div>
+      )}
+      {left.length > 0 && (
+        <div className="mx-3 mt-3 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+          {t("preview.leftOut", { list: left.join(", ") })}
         </div>
       )}
 

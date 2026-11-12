@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDesignStore, useCanUndo, useCanRedo, undo, redo, type Doc } from "./store/design";
 import { useUiStore } from "./store/ui";
 import {
@@ -72,7 +72,7 @@ import { removeAt, removeFields, removeNode } from "./model/edit";
 import { adoptIds, stripUids } from "./model/ids";
 import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
-import { prunedForPreview } from "./model/prune";
+import { pruneIncomplete } from "./model/prune";
 import type { SearchRecord } from "./model/search";
 import { DesignProvider } from "./state";
 import { BTN_ICON, NAV, NAV_ACTIVE, NAV_HEADING, NO_PW_MANAGER } from "./styles";
@@ -366,8 +366,10 @@ export default function App() {
   // without wiping a project or catalog load error. A reply for a schema that
   // has since changed is dropped, so a slow failure can't land after a success.
   const [previewError, setPreviewError] = useState("");
+  useEffect(() => setPreviewError(""), [active]);
+  const pruned = useMemo(() => (schema ? pruneIncomplete(schema) : undefined), [schema]);
   useEffect(() => {
-    if (!schema || active === "config") {
+    if (!pruned || active === "config") {
       setPreview(null);
       setPreviewError("");
       return;
@@ -375,7 +377,7 @@ export default function App() {
     let current = true;
     const handle = setTimeout(() => {
       api
-        .preview(active, prunedForPreview(schema))
+        .preview(active, pruned.schema)
         .then((p) => {
           if (!current) return;
           setPreview(p);
@@ -387,7 +389,7 @@ export default function App() {
       current = false;
       clearTimeout(handle);
     };
-  }, [active, schema, setPreview]);
+  }, [active, pruned, setPreview]);
 
   // Code-mode live sync: the buffer parses server-side (the same strict parser
   // that reads the file) and, when it converts, replaces the in-memory schema —
@@ -424,28 +426,54 @@ export default function App() {
     return () => clearTimeout(handle);
   }, [rawMode, rawText, active, rawFor, apply]);
 
-  // Switching index while Code mode is open: the buffer still shows the
-  // previous index, so regenerate it from the new index's schema (the same
-  // codegen the preview uses) before the sync above may run again.
+  // Seeding the buffer, on entering Code mode or switching index in it, before
+  // the sync above may run. The sync writes the buffer back into the document,
+  // so the buffer must render the *whole* schema: never the preview's YAML,
+  // which leaves out incomplete fields and would delete them on the way back.
+  // A schema the backend can't render yet (incomplete, or refused) keeps the
+  // canvas instead, naming what to finish. Only an index whose file failed to
+  // load has no schema; its raw file is then the one thing to edit.
+  const codeBlocked = useCallback(
+    (left: string[] | undefined): boolean => {
+      if (!left?.length) return false;
+      setToast({ kind: "error", text: t("code.incomplete", { list: left.join(", ") }) });
+      return true;
+    },
+    [t, setToast],
+  );
+  // Leaving Code mode, by any route, forgets the buffer: the canvas may change
+  // the schema before Code opens again, so it must re-seed then.
   useEffect(() => {
-    if (!rawMode || active === "config" || rawFor === active || !schema) return;
+    if (!rawMode) setRawFor("");
+  }, [rawMode]);
+  useEffect(() => {
+    if (!rawMode || !doc || active === "config" || rawFor === active) return;
+    if (!schema) {
+      setRawText(project?.indexes.find((i) => i.name === active)?.raw ?? "");
+      setRawFor(active);
+      return;
+    }
+    if (codeBlocked(pruneIncomplete(schema).left)) {
+      setRawMode(false);
+      return;
+    }
     let alive = true;
     api
-      .preview(active, prunedForPreview(schema))
+      .preview(active, schema)
       .then((p) => {
         if (!alive || !useUiStore.getState().rawMode) return;
         setRawText(p.yaml);
         setRawFor(active);
       })
-      .catch(() => {
+      .catch((e) => {
         if (!alive) return;
-        setRawText(project?.indexes.find((i) => i.name === active)?.raw ?? "");
-        setRawFor(active);
+        setRawMode(false);
+        setToast({ kind: "error", text: t("code.renderFailed", { err: errText(e) }) });
       });
     return () => {
       alive = false;
     };
-  }, [rawMode, active, rawFor, schema, project, setRawText]);
+  }, [rawMode, doc, active, rawFor, schema, project, setRawText, setRawMode, setToast, t, codeBlocked]);
 
   // …and the applied schema gets the *real* validation (columns exist, types
   // line up) against the database — it's fast, so problems surface in the rail
@@ -612,13 +640,34 @@ export default function App() {
   };
 
   // Code mode: the buffer is just another editor of the in-memory document —
-  // it seeds from the current schema's YAML and syncs back through /api/parse
-  // as you type. The one global Save then writes files, same as visual edits.
+  // it seeds from the current schema's YAML (the seed effect) and syncs back
+  // through /api/parse as you type. The one global Save then writes files, same
+  // as visual edits.
   const openRaw = () => {
-    const onDisk = project?.indexes.find((i) => i.name === active)?.raw;
-    setRawText(preview?.yaml ?? onDisk ?? "");
-    setRawFor(active);
-    setRawMode(true);
+    if (!codeBlocked(pruned?.left)) setRawMode(true);
+  };
+
+  // Leaving Code mode applies the buffer at once, so an edit still inside the
+  // sync's debounce isn't dropped. A buffer that doesn't parse holds the switch
+  // once, since its edits since the last good parse never reached the document;
+  // asking again on the same text discards them.
+  const [refusedText, setRefusedText] = useState<string | null>(null);
+  const closeRaw = async () => {
+    if (rawFor === active && schema) {
+      const res = await api.parse(rawText).catch(() => null);
+      if (res?.schema) {
+        const parsed = res.schema;
+        const current = useDesignStore.getState().doc?.schemas[active];
+        if (!current || JSON.stringify(parsed) !== JSON.stringify(stripUids(current)))
+          apply((prev) => adoptIds(prev, parsed));
+      } else if (refusedText !== rawText) {
+        setRefusedText(rawText);
+        setToast({ kind: "error", text: t("code.unparsed") });
+        return;
+      }
+    }
+    setRefusedText(null);
+    setRawMode(false);
   };
 
   const validate = async () => {
@@ -763,7 +812,7 @@ export default function App() {
       keywords: "visual code yaml editor canvas switch mode toggle raw",
       detail: { body: t("search.descMode"), enter: runAction },
       run: () => {
-        if (rawMode) setRawMode(false);
+        if (rawMode) void closeRaw();
         else openRaw();
       },
     });
@@ -951,7 +1000,7 @@ export default function App() {
                 id="mode-toggle"
                 checked={rawMode}
                 disabled={active === "config"}
-                onCheckedChange={(on) => (on ? openRaw() : setRawMode(false))}
+                onCheckedChange={(on) => (on ? openRaw() : void closeRaw())}
               />
               <Label
                 htmlFor="mode-toggle"
@@ -1150,17 +1199,23 @@ export default function App() {
                 </div>
               }
             >
-              <CodeView
-                value={rawText}
-                onChange={setRawText}
-                fileName={config.index?.find((e) => e.name === active)?.schema ?? `${active}.schema.yml`}
-                dirty={indexDirty(active)}
-                vim={vimMode}
-                autoFormat={autoFormat}
-                onSave={() => void save()}
-                parseError={codeProblem}
-                diagnostics={liveDiags}
-              />
+              {rawFor === active ? (
+                <CodeView
+                  value={rawText}
+                  onChange={setRawText}
+                  fileName={config.index?.find((e) => e.name === active)?.schema ?? `${active}.schema.yml`}
+                  dirty={indexDirty(active)}
+                  vim={vimMode}
+                  autoFormat={autoFormat}
+                  onSave={() => void save()}
+                  parseError={codeProblem}
+                  diagnostics={liveDiags}
+                />
+              ) : (
+                <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-muted-foreground">
+                  <span className="spinner" />
+                </div>
+              )}
             </Suspense>
           </main>
         ) : schema ? (
@@ -1226,6 +1281,7 @@ export default function App() {
               <Preview
                 index={active}
                 preview={preview}
+                left={pruned?.left ?? []}
                 diagnostics={allDiagnostics.filter((d) => d.index === active)}
                 onSample={
                   doc && schema && active !== "config"

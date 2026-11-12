@@ -91,6 +91,10 @@ export const en: Record<string, string> = {
   "code.fold": "Fold block",
   "code.cursor": "Ln {l}, Col {c}",
   "code.autoFormat": "Auto-format",
+  "code.incomplete": "Finish or remove these first, Code mode would drop them: {list}",
+  "code.renderFailed": "Code mode can't show this index yet: {err}",
+  "code.unparsed":
+    "The YAML doesn't parse, so its last edits aren't in the document. Fix it, or switch again to discard them.",
   "code.autoFormatHint": "Format the buffer on focus loss whenever the YAML is valid",
 
   // diff modal
@@ -309,6 +313,7 @@ export const en: Record<string, string> = {
   "preview.title": "Preview",
   "preview.empty": "Select or edit an index to preview it.",
   "preview.parseError": "This schema does not parse:",
+  "preview.leftOut": "Left out of this preview until complete: {list}",
   "preview.notIndexed": "not indexed",
   "preview.document": "Document",
   "preview.tabYaml": "YAML",

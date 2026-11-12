@@ -13,12 +13,14 @@ import { joinOf } from "./tree";
 const FIELD_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const FIELD_NAME_MAX_CHARS = 63;
 
-/// Is this field's name one the backend's `FieldName` refuses (blank included)?
-export function nameIncomplete(field: Field | undefined): boolean {
-  if (!field) return false;
-  const name = field.field.trim();
+/// Is this a name the backend's `FieldName` refuses (blank included)?
+export function nameInvalid(raw: string): boolean {
+  const name = raw.trim();
   return !FIELD_NAME.test(name) || [...name].length > FIELD_NAME_MAX_CHARS;
 }
+
+/// Is this field's name one the backend's `FieldName` refuses (blank included)?
+export const nameIncomplete = (field: Field | undefined): boolean => !!field && nameInvalid(field.field);
 
 /// Is this field, of any kind, incomplete on its own level: a bad name, a blank
 /// column or geo coordinate, a blank script, or an incomplete join/aggregate?

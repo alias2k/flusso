@@ -94,6 +94,10 @@ export const it: Record<string, string> = {
   "code.fold": "Comprimi blocco",
   "code.cursor": "Riga {l}, Col {c}",
   "code.autoFormat": "Formattazione automatica",
+  "code.incomplete": "Completa o rimuovi prima questi elementi, la modalità Codice li perderebbe: {list}",
+  "code.renderFailed": "La modalità Codice non può ancora mostrare questo indice: {err}",
+  "code.unparsed":
+    "Lo YAML non è analizzabile, quindi le ultime modifiche non sono nel documento. Correggilo, oppure cambia di nuovo modalità per scartarle.",
   "code.autoFormatHint": "Formatta il buffer quando perde il focus, se lo YAML è valido",
 
   // diff modal
@@ -318,6 +322,7 @@ export const it: Record<string, string> = {
   "preview.title": "Anteprima",
   "preview.empty": "Seleziona o modifica un indice per visualizzarne l'anteprima.",
   "preview.parseError": "Questo schema non è analizzabile:",
+  "preview.leftOut": "Esclusi da questa anteprima finché non sono completi: {list}",
   "preview.notIndexed": "non indicizzato",
   "preview.document": "Documento",
   "preview.tabYaml": "YAML",
