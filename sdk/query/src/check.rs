@@ -200,6 +200,35 @@ pub const fn is_container(level: &[FieldSpec], name: &str) -> bool {
     }
 }
 
+/// Whether `name` is a level with fields of its own: a `nested` array, or an
+/// `object` with declared children that is not a `map`. Absent → `false`.
+#[must_use]
+pub const fn has_fields(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => match field.kind {
+            KindTag::Nested => true,
+            KindTag::Object => field.map_values.is_none() && !field.children.is_empty(),
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+/// Whether `name` is an opaque `json` object (an `object` with no declared
+/// children that is not a `map`) or a kind this vocabulary does not model:
+/// a field that takes any JSON. Absent → `false`.
+#[must_use]
+pub const fn is_json(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => match field.kind {
+            KindTag::Other => true,
+            KindTag::Object => field.map_values.is_none() && field.children.is_empty(),
+            _ => false,
+        },
+        None => false,
+    }
+}
+
 /// Whether `name`'s mapping kind is one `accepted` Rust type can hold.
 ///
 /// `accepted` comes from the fragment's Rust field type — either inferred from a
@@ -517,8 +546,8 @@ value_meta! {
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldSpec, KindTag, array, children, exists, has_variants, kind_is, map_kind_ok,
-        map_value_is, nullable, variants_covered, variants_exhausted,
+        FieldSpec, KindTag, array, children, exists, has_fields, has_variants, is_json, kind_is,
+        map_kind_ok, map_value_is, nullable, variants_covered, variants_exhausted,
     };
 
     const STATUS_VARIANTS: &[&str] = &["pending", "shipped", "delivered"];
@@ -737,6 +766,19 @@ mod tests {
         assert!(map_kind_ok(LEVEL, "meta", &[KindTag::Keyword]));
         // …and an unmodeled kind never rejects, in maps as everywhere else.
         assert!(map_value_is(LEVEL, "custom", &[KindTag::Text]));
+    }
+
+    #[test]
+    fn a_level_with_fields_is_neither_json_nor_a_map() {
+        assert!(has_fields(LEVEL, "geo"));
+        assert!(!is_json(LEVEL, "geo"));
+        assert!(is_json(LEVEL, "meta"));
+        assert!(is_json(LEVEL, "custom"));
+        assert!(!has_fields(LEVEL, "meta"));
+        assert!(!has_fields(LEVEL, "labels"));
+        assert!(!is_json(LEVEL, "labels"));
+        assert!(!is_json(LEVEL, "city"));
+        assert!(!is_json(LEVEL, "town"));
     }
 
     #[test]

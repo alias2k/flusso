@@ -1,0 +1,5 @@
+error: `orders` is `Vec<serde_json::Value>`, which the derive never checks — `opaque` goes on a field whose type is a custom struct or enum (bare, or in `Option<…>` or `Vec<…>`) that the derive would otherwise check against the schema; remove `opaque` (`skip` turns off every check on a field)
+ --> tests/ui/opaque_on_json_value_array.rs:8:14
+  |
+8 |     #[flusso(opaque)]
+  |              ^^^^^^

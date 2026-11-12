@@ -1,0 +1,37 @@
+# Keys that snake-case or PascalCase to one generated name (issue #262), at the
+# root, inside a `nested` level, and across levels.
+version: 1
+table: colliding
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - keyword: fullName
+    required: true
+  - keyword: full_name
+    required: true
+  - has_many: orders
+    table: orders
+    foreign_key: colliding_id
+    primary_key: id
+    fields:
+      - keyword: placedAt
+        required: true
+      - keyword: placed_at
+        required: true
+      - has_many: items
+        table: items
+        foreign_key: order_id
+        primary_key: id
+        fields:
+          - keyword: sku
+            required: true
+  - object: ordersItems
+    fields:
+      - keyword: sku
+        required: true
+  - object: home
+    fields:
+      - keyword: exists
+        required: true

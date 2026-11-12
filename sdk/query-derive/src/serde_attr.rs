@@ -1,7 +1,8 @@
 //! Reading serde's own attributes, the one place the derives do it.
 //!
-//! The derives need five things serde decides: a container's `rename_all` and
-//! `transparent`, a field's or variant's `rename`, an `alias`, and `flatten`.
+//! The derives need what serde decides about keys and shape: a container's
+//! `rename_all` and `transparent`, a field's or variant's `rename`, its
+//! `alias`es, `flatten`, and which field a transparent struct reads.
 //! Everything else in `#[serde(…)]` is stepped over, so an attribute the derive doesn't care
 //! about (`bound = ""`, `default = "…"`, `with = "…"`, `from = "…"`) never
 //! stops it from reading the ones it does.
@@ -125,6 +126,27 @@ pub(crate) fn transparent(attrs: &[Attribute]) -> bool {
         .any(|meta| meta.name == "transparent" && matches!(meta.value, SerdeValue::Flag))
 }
 
+/// Whether a `#[serde(transparent)]` struct's deserialization passes over this
+/// field: it is `skip`/`skip_deserializing`, has a `default`, or is a
+/// `PhantomData`. Serde reads the struct as its one field that is none of these.
+pub(crate) fn passed_over_by_transparent(field: &syn::Field) -> bool {
+    if let syn::Type::Path(path) = &field.ty
+        && path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "PhantomData")
+    {
+        return true;
+    }
+    serde_metas(&field.attrs).iter().any(|meta| {
+        matches!(
+            meta.name.as_str(),
+            "skip" | "skip_deserializing" | "default"
+        )
+    })
+}
+
 /// The key deserialization reads for a variant: its `rename`, plain or the
 /// `deserialize` entry.
 pub(crate) fn variant_rename(attrs: &[Attribute]) -> Option<String> {
@@ -139,7 +161,7 @@ pub(crate) fn variant_rename(attrs: &[Attribute]) -> Option<String> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{flatten, rename_all, transparent, variant_rename};
+    use super::{flatten, passed_over_by_transparent, rename_all, transparent, variant_rename};
 
     fn attrs(source: &str) -> Vec<syn::Attribute> {
         let item: syn::DeriveInput = syn::parse_str(&format!("{source} struct S;")).unwrap();
@@ -184,5 +206,25 @@ mod tests {
             variant_rename(&attrs(r#"#[serde(rename(deserialize = "pro"))]"#)).as_deref(),
             Some("pro")
         );
+    }
+
+    #[test]
+    fn a_transparent_struct_passes_over_what_serde_does_not_read() {
+        let item: syn::DeriveInput = syn::parse_str(
+            r#"struct S {
+                read: String,
+                #[serde(skip)] skipped: u8,
+                #[serde(bound = "", skip_deserializing)] only_written: u8,
+                #[serde(default)] defaulted: u8,
+                marker: std::marker::PhantomData<u8>,
+                #[serde(skip_serializing)] still_read: u8,
+            }"#,
+        )
+        .unwrap();
+        let syn::Data::Struct(data) = item.data else {
+            unreachable!()
+        };
+        let passed_over: Vec<bool> = data.fields.iter().map(passed_over_by_transparent).collect();
+        assert_eq!(passed_over, [false, true, true, true, true, false]);
     }
 }

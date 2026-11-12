@@ -1,0 +1,17 @@
+error: field `profile` is an `object` with fields of its own in the schema, and a `HashMap<String, String>` is not that shape — declare a struct for it (a `#[derive(FlussoFragment)]`, or a plain struct marked `#[flusso(opaque)]`); a map type goes on a `map` or `json` field
+  --> tests/ui/map_at_structured_object.rs:11:14
+   |
+11 |     profile: Option<HashMap<String, String>>,
+   |              ^^^^^^
+
+error[E0080]: evaluation panicked: fragment `Profiled`: field `profile` is a `HashMap`, but the schema field here is an `object` with fields of its own — declare a struct for it (a `#[derive(FlussoFragment)]`, or a plain struct marked `#[flusso(opaque)]`); a map type goes on a `map` or `json` field
+  --> tests/ui/map_at_structured_object.rs:24:15
+   |
+24 |     profiled: Profiled,
+   |               ^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Profiled::__flusso_check`
+  --> tests/ui/map_at_structured_object.rs:16:14
+   |
+16 |     profile: Option<HashMap<String, String>>,
+   |              ^^^^^^ the failure occurred here

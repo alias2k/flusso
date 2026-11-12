@@ -1,10 +1,21 @@
-error: a `#[serde(transparent)]` struct is checked as its one field, and the derive does not read which field serde skips — give the struct a single field (a tuple newtype `struct X(Inner)` or one named field)
+error: #[serde(transparent)] requires struct to have at most one transparent field
+  --> tests/ui/transparent_with_two_fields.rs:6:1
+   |
+ 6 | / #[serde(transparent)]
+ 7 | | struct Billing {
+ 8 | |     city: String,
+ 9 | |     #[serde(skip_serializing)]
+10 | |     zip: Option<String>,
+11 | | }
+   | |_^
+
+error: serde reads a `#[serde(transparent)]` struct as its one field that is not `skip`, `skip_deserializing`, `default` or a `PhantomData`, and the derive checks that field; it has more — mark all but one of them `#[serde(skip)]`
   --> tests/ui/transparent_with_two_fields.rs:7:16
    |
  7 |   struct Billing {
    |  ________________^
  8 | |     city: String,
- 9 | |     #[serde(skip)]
-10 | |     cached: Option<String>,
+ 9 | |     #[serde(skip_serializing)]
+10 | |     zip: Option<String>,
 11 | | }
    | |_^

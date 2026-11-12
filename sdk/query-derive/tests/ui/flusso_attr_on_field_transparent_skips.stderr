@@ -1,0 +1,5 @@
+error: serde passes over this field of a `#[serde(transparent)]` struct, so the derive never checks it and its `#[flusso(…)]` is never read; remove the attribute
+  --> tests/ui/flusso_attr_on_field_transparent_skips.rs:10:5
+   |
+10 |     #[flusso(skip)]
+   |     ^^^^^^^^^^^^^^^

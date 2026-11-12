@@ -122,8 +122,8 @@ mod tests;
 
 pub use check::{
     FieldSpec, FlussoValueMeta, KindTag, OpaqueProbe, OpaqueWithoutMeta, array, array_shape_ok,
-    children, exists, has_variants, is_container, is_string, kind_is, map_kind_ok, map_value_is,
-    map_values_of, nullable, variants_covered, variants_exhausted,
+    children, exists, has_fields, has_variants, is_container, is_json, is_string, kind_is,
+    map_kind_ok, map_value_is, map_values_of, nullable, variants_covered, variants_exhausted,
 };
 pub use client::Client;
 pub use cursor::PageCursor;
