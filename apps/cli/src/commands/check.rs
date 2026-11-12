@@ -149,6 +149,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     let gaps = |gaps: &[source::PreImageGap]| gaps.iter().map(|gap| serde_json::json!({
                         "table": gap.table.to_string(),
                         "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                        "missing_key": gap.missing_key.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
                         "manageable": gap.manageable,
                         "will_manage": gap.will_manage(postgres.manage_replica_identity),
                         "blockers": gap.blockers,

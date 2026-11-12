@@ -25,11 +25,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
-use kernel::ColumnName;
 use kernel::Position;
+use kernel::{ColumnName, GenericValue};
 use pgwire_replication::{Lsn, PgWireError, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
-use source::{PreImageColumns, QualifiedTable, Result, SourceError};
+use source::{PreImageColumns, QualifiedTable, Result, RowKey, SourceError};
 use sqlx::PgPool;
 
 use super::ack::Positions;
@@ -87,6 +87,8 @@ struct DecodeState {
     untraceable: HashMap<u32, Vec<ColumnName>>,
     /// Relations already warned about as untraceable.
     warned: HashSet<u32>,
+    /// Relations already warned about for an old tuple without the key.
+    warned_unkeyed: HashSet<u32>,
     /// Row changes of the currently open transaction, awaiting its `Commit`.
     open_txn: Vec<ChangeEvent>,
     /// Changes ready to emit, each with the commit LSN to acknowledge at.
@@ -136,6 +138,7 @@ pub(crate) fn build<C: Replication>(
             pre_image_links,
             untraceable: HashMap::new(),
             warned: HashSet::new(),
+            warned_unkeyed: HashSet::new(),
             open_txn: Vec::new(),
             pending: VecDeque::new(),
             ack,
@@ -310,6 +313,18 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 Some(old) => Some(pgoutput::row_key(relation, old)?),
                 None => None,
             };
+            let old_key = match old_key {
+                Some(old_key) if !addressable(relation, &old_key) => {
+                    warn_unkeyed(
+                        state,
+                        rel,
+                        "an update arrived without it; its delete is skipped",
+                    );
+                    None
+                }
+                old_key => old_key,
+            };
+            let relation = lookup_relation(state, rel)?;
             let before = old
                 .as_ref()
                 .and_then(|old| pgoutput::pre_image(relation, old));
@@ -338,6 +353,10 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
             let relation = lookup_relation(state, rel)?;
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &old)?;
+            if !addressable(relation, &key) {
+                warn_unkeyed(state, rel, "a delete arrived without it and is skipped");
+                return Ok(());
+            }
             let before = pgoutput::pre_image(relation, &old);
             state
                 .open_txn
@@ -405,6 +424,34 @@ fn warn_untraceable(state: &mut DecodeState, oid: u32) {
         uncarried,
         "an update or delete arrived without it",
         &replica_identity::alter_sql(relation.namespace.as_ref(), relation.table.as_ref()),
+    );
+}
+
+/// Whether an old tuple's `key` can address a document. A table with a primary
+/// key never holds a null in it, so a null there means the tuple left the key
+/// out: a partition whose replica identity omits it, decoded under its
+/// parent's relation. A table without one is keyed by its identity columns,
+/// which may hold nulls under `FULL`.
+fn addressable(relation: &Relation, key: &RowKey) -> bool {
+    relation.primary_key.is_empty() || key.0.iter().all(|(_, value)| *value != GenericValue::Null)
+}
+
+/// Warn, once per relation, that a change's old tuple lacked the primary key,
+/// so its delete was skipped (`what`) and the document stays in the index.
+fn warn_unkeyed(state: &mut DecodeState, oid: u32, what: &str) {
+    let Some(relation) = state.relations.get(&oid) else {
+        return;
+    };
+    if !state.warned_unkeyed.insert(oid) {
+        return;
+    }
+    let table = QualifiedTable::new(relation.namespace.clone(), relation.table.clone());
+    replica_identity::warn_unkeyed(
+        &table,
+        &relation.primary_key,
+        what,
+        "set REPLICA IDENTITY FULL on each partition whose identity leaves out the primary key \
+         (`flusso check` names them)",
     );
 }
 

@@ -792,7 +792,25 @@ async fn a_root_is_kept_only_on_an_identity_index_carrying_its_primary_key() {
         .collect();
 
     let report = cap.ensure_pre_image(&roots, true).await.unwrap();
-    assert!(report.gaps.is_empty(), "a root has no link to miss");
+    let key_gaps: Vec<(String, Vec<String>, usize)> = report
+        .gaps
+        .iter()
+        .map(|gap| {
+            (
+                gap.table.to_string(),
+                gap.missing_key.iter().map(ToString::to_string).collect(),
+                gap.missing.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        key_gaps,
+        [
+            ("public.dropped".to_owned(), vec!["id".to_owned()], 0),
+            ("public.without_pk".to_owned(), vec!["id".to_owned()], 0),
+        ],
+        "a root has no link to miss, but an identity without its primary key is a key gap"
+    );
     let kept: Vec<String> = report
         .partial
         .iter()

@@ -7,6 +7,8 @@
 //! `prepare` sets `REPLICA IDENTITY FULL` across the child's partition tree, so
 //! a deleted child row still reaches its old parent through the pre-image.
 //! Backfill reads the partitions through the parent.
+//! A partition whose identity index leaves out the primary key (issue #224) is
+//! set to `FULL` alone, or, unmanaged, reported and its null-key delete skipped.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -207,6 +209,191 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
         .await
         .unwrap();
     assert!(dropped.is_empty());
+}
+
+/// Issue #224: a partition whose replica identity is an index without the
+/// primary key logs an old tuple without the key. Its changes arrive under the
+/// parent's relation, which flags the parent's primary key, so the key reads
+/// as null. `prepare` sets that partition (and only it) to `FULL`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_partition_whose_identity_leaves_out_the_primary_key_is_set_to_full() {
+    let (_container, pool, url, port) = keyless_partition_database().await;
+    let spec = Arc::new(logs_spec());
+    let capture = keyless_capture(&spec, &url, port, true);
+
+    let report = capture.inspect_pre_image(&spec.pre_images()).await.unwrap();
+    assert!(report.partial.is_empty(), "{report:?}");
+    let [gap] = report.gaps.as_slice() else {
+        panic!("the partitioned table is a correctness gap: {report:?}");
+    };
+    assert_eq!(gap.table.to_string(), "public.logs");
+    assert!(gap.missing.is_empty(), "no parent link is missing");
+    assert_eq!(gap.missing_key, [column("id")]);
+    assert_eq!(
+        gap.remediation, "ALTER TABLE \"public\".\"logs_low\" REPLICA IDENTITY FULL;",
+        "only the partition that leaves out the key is named",
+    );
+    assert!(gap.will_manage(true));
+
+    capture.prepare().await.unwrap();
+    assert_eq!(
+        identities(&pool, "logs%").await,
+        [
+            ("logs".to_owned(), "d".to_owned()),
+            ("logs_high".to_owned(), "d".to_owned()),
+            ("logs_low".to_owned(), "f".to_owned()),
+        ],
+        "only the partition whose identity leaves out the key is set",
+    );
+    assert!(
+        capture
+            .inspect_pre_image(&spec.pre_images())
+            .await
+            .unwrap()
+            .complete(),
+        "a partitioned table logging its key everywhere is left alone",
+    );
+
+    let changes = keyless_partition_changes(&capture, &pool).await;
+    assert_eq!(
+        changes,
+        [
+            ("upsert", row_key(1)),
+            ("delete", row_key(2)),
+            ("upsert", row_key(1500)),
+        ],
+        "the update and the delete in the partition land on their own ids",
+    );
+}
+
+/// The same partition with `manage_replica_identity = false`: the report names
+/// it as a correctness gap, and the stream skips the delete it can't address
+/// instead of emitting it under a null key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn an_unmanaged_partition_without_the_key_is_reported_and_its_null_key_delete_skipped() {
+    let (_container, pool, url, port) = keyless_partition_database().await;
+    let spec = Arc::new(logs_spec());
+    let capture = keyless_capture(&spec, &url, port, false);
+
+    capture.prepare().await.unwrap();
+    assert_eq!(
+        identities(&pool, "logs_low").await,
+        [("logs_low".to_owned(), "i".to_owned())],
+        "nothing is altered when management is off",
+    );
+    let report = capture.inspect_pre_image(&spec.pre_images()).await.unwrap();
+    let [gap] = report.gaps.as_slice() else {
+        panic!("the partitioned table is a correctness gap: {report:?}");
+    };
+    assert_eq!(gap.missing_key, [column("id")]);
+    assert!(!gap.will_manage(false));
+
+    let changes = keyless_partition_changes(&capture, &pool).await;
+    assert_eq!(
+        changes,
+        [("upsert", row_key(1)), ("upsert", row_key(1500))],
+        "no change is emitted under a null key: the update stays an upsert of its row, \
+         the unaddressable delete is skipped",
+    );
+}
+
+/// `logs`, range-partitioned on `id` (the primary key), with one partition on
+/// `REPLICA IDENTITY USING INDEX (code)`: legal, since a partition is an
+/// ordinary table and its own unique index need not hold the partition key.
+async fn keyless_partition_database() -> (
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    PgPool,
+    String,
+    u16,
+) {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd(["postgres", "-c", "wal_level=logical"])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE logs (id bigint PRIMARY KEY, code text NOT NULL) PARTITION BY RANGE (id)",
+        "CREATE TABLE logs_low PARTITION OF logs FOR VALUES FROM (0) TO (1000)",
+        "CREATE TABLE logs_high PARTITION OF logs FOR VALUES FROM (1000) TO (2000)",
+        "CREATE UNIQUE INDEX logs_low_code ON logs_low (code)",
+        "ALTER TABLE logs_low REPLICA IDENTITY USING INDEX logs_low_code",
+        "INSERT INTO logs VALUES (1, 'a'), (2, 'b')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    (container, pool, url, port)
+}
+
+fn keyless_capture(spec: &SourceSpec, url: &str, port: u16, manage: bool) -> WalChangeCapture {
+    WalChangeCapture::new(
+        ReplicationConfig::new(
+            "127.0.0.1",
+            "postgres",
+            "postgres",
+            "postgres",
+            "flusso",
+            "flusso",
+        )
+        .with_port(port),
+        url.to_owned(),
+    )
+    .with_publication_management(spec.all_tables(), true)
+    .with_pre_image_management(spec.pre_images(), manage)
+}
+
+/// Update row 1's identity column and delete row 2, both in the keyless
+/// partition, then insert a sentinel (1500) in the other one; every change
+/// read up to the sentinel, as `(op, key)`.
+async fn keyless_partition_changes(
+    capture: &WalChangeCapture,
+    pool: &PgPool,
+) -> Vec<(&'static str, RowKey)> {
+    let mut stream = capture.live().await.unwrap();
+    for statement in [
+        "UPDATE logs SET code = 'renamed' WHERE id = 1",
+        "DELETE FROM logs WHERE id = 2",
+        "INSERT INTO logs VALUES (1500, 'sentinel')",
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+    let mut changes = Vec::new();
+    loop {
+        let (_, change) = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for a change")
+            .unwrap()
+            .unwrap();
+        let op = match change {
+            ChangeEvent::Delete { .. } => "delete",
+            _ => "upsert",
+        };
+        let key = change.key().clone();
+        let sentinel = key == row_key(1500);
+        changes.push((op, key));
+        if sentinel {
+            return changes;
+        }
+    }
+}
+
+fn logs_spec() -> SourceSpec {
+    let logs = IndexSchema {
+        version: 1,
+        table: table("logs"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![column_field("id"), column_field("code")],
+    };
+    SourceSpec::new(BTreeMap::from([(index_name("logs"), logs)]))
 }
 
 /// Each relation matching `pattern` with its `relreplident`, sorted by name.

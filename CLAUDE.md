@@ -578,7 +578,15 @@ old identity), via `ensure_pre_image` when `manage_replica_identity` (default on
 nothing) and the role owns the table — each relation in its own transaction under a 5 s
 `lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned
 table is set on the parent and every partition (a partition added later is caught at the next
-start), but only when it misses a link: its updates carry no post-image, so `partial` never lists it. Guards: `replica_identity::tests` (`shortfall`), `publication`'s
+start), but only when it misses a link, or alone on each member whose identity leaves out the
+parent's primary key (issue #224: a partition's change is decoded under the parent's `Relation`,
+which flags the parent's key, so it would read null): its updates carry no post-image, so `partial`
+never lists it. A member short of the primary key, on any table, is a `gaps` entry with
+`PreImageGap.missing_key` set (`replica_identity::plan` decides for both `shortfall` and `apply`),
+and the stream skips a delete whose old-tuple key reads null, warning once per table (`stream.rs`
+`addressable`); guards: `a_partitioned_table_is_left_alone_only_while_every_member_logs_the_primary_key`,
+`a_delete_without_its_primary_key_is_skipped_and_warned_once`, `partitions`'
+`a_partition_whose_identity_leaves_out_the_primary_key_is_set_to_full`. Guards: `replica_identity::tests` (`shortfall`), `publication`'s
 `every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on
 one table), `an_identity_index_carrying_the_link_is_kept_and_the_rest_are_set_to_full`, and
 `a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s

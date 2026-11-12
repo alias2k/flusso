@@ -180,8 +180,9 @@ pub(crate) fn coverage(
 
 /// Report the tables an index reads whose replica identity isn't the whole old
 /// row, in two groups: the ones that miss a parent link (a delete or re-parent
-/// leaves the old parent's document stale) and the ones that only lose the
-/// unread-column skip. Each says whether `flusso run` will set it (`manage` is
+/// leaves the old parent's document stale) or part of the primary key (a
+/// delete can't be addressed, so its document stays) and the ones that only
+/// lose the unread-column skip. Each says whether `flusso run` will set it (`manage` is
 /// the effective `manage_replica_identity`) or keeps it on purpose; the SQL is
 /// printed for the ones it won't set and doesn't keep.
 pub(crate) fn pre_image(
@@ -221,23 +222,36 @@ pub(crate) fn pre_image(
     if report.satisfied() {
         writeln!(
             out,
-            "  {} every child table's changes carry the link to their parent",
+            "  {} every table's changes carry their primary key, and every child table's the \
+             link to its parent",
             pen.green("✓"),
         )?;
     } else {
         writeln!(
             out,
-            "  {} {} table(s) don't log their parent link on delete or update:",
+            "  {} {} table(s) don't log their primary key or parent link on delete or update:",
             pen.yellow("!"),
             report.gaps.len(),
         )?;
         for gap in &report.gaps {
-            let missing = gap
-                .missing
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
+            let columns = |label: &str, columns: &[config::ColumnName]| {
+                (!columns.is_empty()).then(|| {
+                    let names = columns
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{label} {names}")
+                })
+            };
+            let missing = [
+                columns("primary key", &gap.missing_key),
+                columns("parent link", &gap.missing),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
             writeln!(
                 out,
                 "    {} {} ({})  {}",
@@ -262,14 +276,23 @@ pub(crate) fn pre_image(
         }
     }
 
-    let manual = |gaps: &[PreImageGap]| -> Vec<String> {
+    fn manual(gaps: &[PreImageGap], manage: bool) -> Vec<&PreImageGap> {
         gaps.iter()
             .filter(|gap| gap.kept.is_none() && !gap.will_manage(manage))
-            .map(|gap| gap.remediation.clone())
             .collect()
-    };
-    let links = manual(&report.gaps);
-    if !links.is_empty() {
+    }
+    let unset = manual(&report.gaps, manage);
+    if unset.iter().any(|gap| !gap.missing_key.is_empty()) {
+        writeln!(
+            out,
+            "  {}",
+            pen.yellow(
+                "→ until the primary key is logged, a delete there can't reach its document, \
+                 which stays in the index",
+            ),
+        )?;
+    }
+    if unset.iter().any(|gap| !gap.missing.is_empty()) {
         writeln!(
             out,
             "  {}",
@@ -278,16 +301,22 @@ pub(crate) fn pre_image(
                  leaves the old parent's document stale",
             ),
         )?;
-        section(out, pen, "Run to trace deleted and re-parented rows")?;
-        for sql in links {
-            writeln!(out, "  {sql}")?;
+    }
+    if !unset.is_empty() {
+        section(
+            out,
+            pen,
+            "Run so deletes and re-parents reach the right documents",
+        )?;
+        for gap in unset {
+            writeln!(out, "  {}", gap.remediation)?;
         }
     }
-    let rows = manual(&report.partial);
+    let rows = manual(&report.partial, manage);
     if !rows.is_empty() {
         section(out, pen, "Run to skip updates of columns no document reads")?;
-        for sql in rows {
-            writeln!(out, "  {sql}")?;
+        for gap in rows {
+            writeln!(out, "  {}", gap.remediation)?;
         }
     }
     Ok(())
@@ -617,6 +646,7 @@ mod tests {
                 config::TableName::try_new(table).unwrap(),
             ),
             missing: Vec::new(),
+            missing_key: Vec::new(),
             manageable: true,
             blockers: Vec::new(),
             remediation: format!("ALTER TABLE {table} REPLICA IDENTITY FULL;"),
@@ -640,6 +670,28 @@ mod tests {
         );
         assert!(out.contains("ALTER TABLE teams"));
         assert!(!out.contains("ALTER TABLE orders"), "{out}");
+    }
+
+    #[test]
+    fn a_partition_without_the_primary_key_says_a_delete_stays_and_prints_its_sql() {
+        let report = source::PreImageReport {
+            gaps: vec![source::PreImageGap {
+                missing_key: vec![config::ColumnName::try_new("id").unwrap()],
+                manageable: false,
+                ..gap("logs", None)
+            }],
+            partial: Vec::new(),
+        };
+        let mut out = Vec::new();
+        pre_image(&mut out, Pen { color: false }, &report, true).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("logs (primary key id)"), "{out}");
+        assert!(
+            out.contains("a delete there can't reach its document, which stays in the index"),
+            "{out}"
+        );
+        assert!(!out.contains("re-parenting"), "{out}");
+        assert!(out.contains("ALTER TABLE logs"), "{out}");
     }
 
     #[test]

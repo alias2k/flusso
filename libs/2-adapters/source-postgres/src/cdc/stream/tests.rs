@@ -13,6 +13,7 @@ fn state() -> (DecodeState, Arc<Positions>) {
         pre_image_links: Default::default(),
         untraceable: HashMap::new(),
         warned: HashSet::new(),
+        warned_unkeyed: HashSet::new(),
         open_txn: Vec::new(),
         pending: VecDeque::new(),
         ack: Arc::clone(&ack),
@@ -404,6 +405,65 @@ fn an_identity_index_without_the_primary_key_is_untraceable() {
         .for_each(|c| c.is_key = c.name.as_ref() == "parent_id");
     record_untraceable(&mut decode, 16385);
     assert_eq!(decode.untraceable[&16385], vec![column("parent_id")]);
+}
+
+/// An old tuple whose primary key reads as null: a partition on an identity
+/// index without the key, decoded under its parent's relation (issue #224).
+fn old_tuple_without_the_key(message: u8) -> Vec<u8> {
+    let mut m = vec![message];
+    m.extend_from_slice(&16385u32.to_be_bytes());
+    m.push(b'K');
+    m.extend_from_slice(&2i16.to_be_bytes());
+    m.push(b'n');
+    m.extend(text("1"));
+    m
+}
+
+#[test]
+fn a_delete_without_its_primary_key_is_skipped_and_warned_once() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'd');
+    handle_xlog(&mut decode, &old_tuple_without_the_key(b'D')).unwrap();
+    handle_xlog(&mut decode, &old_tuple_without_the_key(b'D')).unwrap();
+    assert!(decode.open_txn.is_empty(), "{:?}", decode.open_txn);
+    assert_eq!(decode.warned_unkeyed, HashSet::from([16385]));
+}
+
+#[test]
+fn an_update_without_its_old_primary_key_is_an_upsert_of_its_row_alone() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'd');
+    let mut update = old_tuple_without_the_key(b'U');
+    update.push(b'N');
+    update.extend_from_slice(&2i16.to_be_bytes());
+    update.extend(text("7"));
+    update.extend(text("3"));
+    handle_xlog(&mut decode, &update).unwrap();
+
+    let [ChangeEvent::Upsert { key, .. }] = decode.open_txn.as_slice() else {
+        panic!("expected one upsert, got {:?}", decode.open_txn);
+    };
+    assert_eq!(key.0, vec![(column("id"), GenericValue::Int(7))]);
+    assert_eq!(decode.warned_unkeyed, HashSet::from([16385]));
+}
+
+#[test]
+fn a_table_without_a_primary_key_keeps_its_null_identity_values() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'f');
+    decode.relations.get_mut(&16385).unwrap().primary_key = Vec::new();
+    let mut delete = vec![b'D'];
+    delete.extend_from_slice(&16385u32.to_be_bytes());
+    delete.push(b'O');
+    delete.extend_from_slice(&2i16.to_be_bytes());
+    delete.extend(text("7"));
+    delete.push(b'n');
+    handle_xlog(&mut decode, &delete).unwrap();
+    assert!(matches!(
+        decode.open_txn.as_slice(),
+        [ChangeEvent::Delete { .. }]
+    ));
+    assert!(decode.warned_unkeyed.is_empty());
 }
 
 /// A replication connection that never sends an event and records what it
