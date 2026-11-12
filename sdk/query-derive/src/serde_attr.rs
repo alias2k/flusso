@@ -119,6 +119,14 @@ pub(crate) fn flatten(attrs: &[Attribute]) -> bool {
         .any(|meta| meta.name == "flatten" && matches!(meta.value, SerdeValue::Flag))
 }
 
+/// Whether deserialization never reads this field: `#[serde(skip)]` or
+/// `skip_deserializing`.
+pub(crate) fn skips_deserializing(attrs: &[Attribute]) -> bool {
+    serde_metas(attrs)
+        .iter()
+        .any(|meta| matches!(meta.name.as_str(), "skip" | "skip_deserializing"))
+}
+
 /// Whether `#[serde(transparent)]` is set.
 pub(crate) fn transparent(attrs: &[Attribute]) -> bool {
     serde_metas(attrs)

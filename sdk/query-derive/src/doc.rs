@@ -80,6 +80,7 @@ pub(crate) fn parse_fields<'a>(
         let read = doc_key(ident, serde.rename.clone(), rename_all);
         if let Some(renamed) = &attrs.rename
             && !flatten
+            && !crate::serde_attr::skips_deserializing(&field.attrs)
             && let Some(error) = unseen_rename(ident, renamed, &read, &serde)
         {
             return Err(error);
