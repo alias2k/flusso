@@ -1,0 +1,5 @@
+error: `email` is a leaf field in the schema, so it has no level to rename — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`
+ --> tests/ui/scope_on_leaf_field.rs:9:22
+  |
+9 |     #[flusso(scope = "Mail")]
+  |                      ^^^^^^

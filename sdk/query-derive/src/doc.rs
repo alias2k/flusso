@@ -223,7 +223,22 @@ pub(crate) fn validate(
 ) -> (Vec<syn::Error>, Vec<TokenStream>) {
     let mut errors = Vec::new();
     let mut asserts = Vec::new();
+    let mut renamed_keys = std::collections::HashSet::new();
     for field in fields {
+        if let Some(error) = misplaced_scope(field, level, scope) {
+            errors.push(error);
+        } else if let Some(renamed) = &field.scope
+            && !renamed_keys.insert(field.doc_key.as_str())
+        {
+            errors.push(syn::Error::new(
+                renamed.span(),
+                format!(
+                    "`{}` already has a `scope` on another field, and a level takes one name; \
+                     remove one of them",
+                    field.doc_key
+                ),
+            ));
+        }
         // A flattened group has no container field in the mapping — its keys
         // live at *this* level, so its type is checked against this level
         // instead (see `embed_checks`).
@@ -234,9 +249,6 @@ pub(crate) fn validate(
             errors.push(unknown_field(field, level, scope));
             continue;
         };
-        if let Some(error) = scope_without_handle(field, resolved) {
-            errors.push(error);
-        }
         if let Err(error) = check_nullability(field, resolved) {
             errors.push(error);
         }
@@ -249,20 +261,58 @@ pub(crate) fn validate(
     (errors, asserts)
 }
 
-/// An `indexed: false` field gets no handle, so a `scope` on it would rename
-/// nothing; rejected rather than silently ignored.
-fn scope_without_handle(field: &DocField, resolved: &ResolvedField) -> Option<syn::Error> {
-    let scope = field.scope.as_ref()?;
-    (!resolved.mapping.indexed).then(|| {
-        syn::Error::new(
-            scope.span(),
-            format!(
-                "`{}` is `indexed: false` in the schema, so it has no query scope to rename — \
-                 remove `scope`",
-                field.doc_key
-            ),
-        )
-    })
+/// Where `scope` is allowed, said once for every rejection.
+pub(crate) const SCOPE_ALLOWED: &str =
+    "`scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level";
+
+/// A `scope` renames a generated namespace, which only a root field at an
+/// indexed `nested` or `object` level has; anywhere else it would rename
+/// nothing, so it is rejected rather than silently ignored.
+///
+/// A `skip` field still names its level by its key, so its `scope` works there.
+fn misplaced_scope(field: &DocField, level: &[ResolvedField], scope: &str) -> Option<syn::Error> {
+    let renamed = field.scope.as_ref()?;
+    let key = &field.doc_key;
+    let mut fix = "remove `scope`";
+    let reason = if field.flatten {
+        fix = "remove `scope`, or to rename a level the flattened type carries, put `scope` \
+               on a `#[flusso(skip)]` field with that level's key";
+        "is `#[serde(flatten)]`, so it has no level of its own to rename".to_string()
+    } else {
+        let resolved = level.iter().find(|r| r.name.as_ref() == *key);
+        match resolved {
+            // A field the schema doesn't have is reported by `validate` itself.
+            None if !field.skip => return None,
+            None => format!("is not a field of {scope}, so it has no level to rename"),
+            Some(resolved) if !resolved.mapping.indexed => {
+                "is `indexed: false` in the schema, so it has no query scope to rename".to_string()
+            }
+            Some(resolved) if has_namespace(resolved) => return None,
+            Some(resolved) if resolved.mapping.map_values.is_some() => {
+                "is a `map` in the schema, so it has no level to rename".to_string()
+            }
+            Some(resolved) if matches!(resolved.mapping.mapping_type, MappingType::Object) => {
+                "is an opaque `json` object in the schema, so it has no level to rename".to_string()
+            }
+            Some(_) => "is a leaf field in the schema, so it has no level to rename".to_string(),
+        }
+    };
+    Some(syn::Error::new(
+        renamed.span(),
+        format!("`{key}` {reason} — {SCOPE_ALLOWED}; {fix}"),
+    ))
+}
+
+/// Whether an indexed field gets a namespace of its own: a `nested` array, or
+/// an `object` with children that isn't a `map`.
+fn has_namespace(resolved: &ResolvedField) -> bool {
+    match resolved.mapping.mapping_type {
+        MappingType::Nested => true,
+        MappingType::Object => {
+            resolved.mapping.map_values.is_none() && !resolved.children.is_empty()
+        }
+        _ => false,
+    }
 }
 
 fn unknown_field(field: &DocField, level: &[ResolvedField], scope: &str) -> syn::Error {
@@ -738,9 +788,7 @@ impl Namespaces {
                 }
                 // A group / to-one join flattens into the enclosing scope, so
                 // its namespace keeps `scope` and chains from here.
-                MappingType::Object
-                    if resolved.mapping.map_values.is_none() && !resolved.children.is_empty() =>
-                {
+                MappingType::Object if has_namespace(resolved) => {
                     self.emit_object(&child, scope, &path, &below, &resolved.children);
                     Some((quote! { #child_path }, quote! { #child_path }))
                 }

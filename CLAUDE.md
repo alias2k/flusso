@@ -1023,9 +1023,12 @@ forwards it; enum-only — on a newtype/`FlussoMap` it's a macro error, and at a
 declared variants it's a const error, so a schema edit can't silently disarm it).
 An `indexed: false` field gets **no handle** (`emit_level` skips it) but still deserializes and is
 shape-checked; a `subfields: false` field is stamped `NoSubfields` like a sink with
-`auto_subfields` off, and a `#[flusso(scope = "…")]` on an unindexed field is a compile error
-(`ui/unindexed_has_no_handle.rs`, `ui/subfields_false_has_no_keyword.rs`,
-`ui/scope_on_unindexed_field.rs`, the `stored` fixture index in `derive.rs`).
+`auto_subfields` off (`ui/unindexed_has_no_handle.rs`, `ui/subfields_false_has_no_keyword.rs`, the
+`stored` fixture index in `derive.rs`). A `#[flusso(scope = "…")]` that renames nothing is a compile
+error (issue #244, `doc.rs`'s `misplaced_scope`, `fragment.rs`): it is allowed only on a root field
+whose key names an indexed `nested` or `object` level (`has_namespace`, the same test `emit_level`
+uses), a `skip` field included; leaf, `map`, `json`, unindexed, flattened and fragment fields are
+rejected (`ui/scope_on_*.rs`, `ui/scope_in_fragment.rs`, `a_skipped_field_still_renames_its_level`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/
