@@ -1,4 +1,4 @@
-error: `contact` is `#[serde(flatten)]`, so it has no level of its own to rename — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`
+error: `contact` is `#[serde(flatten)]`, so it has no level of its own to rename — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`, or to rename a level the flattened type carries, put `scope` on a `#[flusso(skip)]` field with that level's key
   --> tests/ui/scope_on_flatten_field.rs:15:22
    |
 15 |     #[flusso(scope = "Reach")]

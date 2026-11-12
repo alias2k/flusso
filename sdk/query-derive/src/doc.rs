@@ -223,9 +223,21 @@ pub(crate) fn validate(
 ) -> (Vec<syn::Error>, Vec<TokenStream>) {
     let mut errors = Vec::new();
     let mut asserts = Vec::new();
+    let mut renamed_keys = std::collections::HashSet::new();
     for field in fields {
         if let Some(error) = misplaced_scope(field, level, scope) {
             errors.push(error);
+        } else if let Some(renamed) = &field.scope
+            && !renamed_keys.insert(field.doc_key.as_str())
+        {
+            errors.push(syn::Error::new(
+                renamed.span(),
+                format!(
+                    "`{}` already has a `scope` on another field, and a level takes one name; \
+                     remove one of them",
+                    field.doc_key
+                ),
+            ));
         }
         // A flattened group has no container field in the mapping — its keys
         // live at *this* level, so its type is checked against this level
@@ -261,7 +273,10 @@ pub(crate) const SCOPE_ALLOWED: &str =
 fn misplaced_scope(field: &DocField, level: &[ResolvedField], scope: &str) -> Option<syn::Error> {
     let renamed = field.scope.as_ref()?;
     let key = &field.doc_key;
+    let mut fix = "remove `scope`";
     let reason = if field.flatten {
+        fix = "remove `scope`, or to rename a level the flattened type carries, put `scope` \
+               on a `#[flusso(skip)]` field with that level's key";
         "is `#[serde(flatten)]`, so it has no level of its own to rename".to_string()
     } else {
         let resolved = level.iter().find(|r| r.name.as_ref() == *key);
@@ -284,7 +299,7 @@ fn misplaced_scope(field: &DocField, level: &[ResolvedField], scope: &str) -> Op
     };
     Some(syn::Error::new(
         renamed.span(),
-        format!("`{key}` {reason} — {SCOPE_ALLOWED}; remove `scope`"),
+        format!("`{key}` {reason} — {SCOPE_ALLOWED}; {fix}"),
     ))
 }
 
