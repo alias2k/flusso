@@ -42,6 +42,7 @@ sink.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 testcontainers-modules = { workspace = true, features = ["http_wait"] }
 criterion.workspace = true
+rustls = { workspace = true, features = ["ring", "std"] }
 
 # Component bench: bulk indexing throughput against a live OpenSearch, for
 # attribution. Spins up OpenSearch in a container, so requires Docker.

@@ -146,6 +146,9 @@ schemars = { version = "1.2.*", features = ["preserve_order"] }
 # reqwest 0.13 verifies against the OS trust store by default: our clients pin
 # the Mozilla bundle from `webpki-root-certs` instead (see `tls_roots`).
 reqwest = { version = "0.13.*", default-features = false }
+# Tests only: installing a process-default crypto provider, as
+# pgwire-replication does, to pin that our clients work under it.
+rustls = { version = "0.23.*", default-features = false }
 webpki-root-certs = { version = "1.*" }
 testcontainers-modules = { version = "0.15.*" }
 criterion = { version = "0.8.*", features = ["async_tokio"] }
