@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-source-postgres-v0.16.0...flusso-source-postgres-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(source-postgres)* set REPLICA IDENTITY FULL on every table an index reads
+- *(source)* validate_indexes checks every table and column a relation names
+- *(engine)* a document that fails to build is stopped on or skipped by its index's policy
+- *(schema)* an aggregate's column can be an arithmetic expression
+- *(kernel)* script fields and input-only fields in the schema model
+- *(source-postgres)* apply on: pairs in the document query and the read-column sets
+- *(config)* on: column pairs on joins, aggregates and via hops
+- *(schema)* aggregates across several hops with via, and the exists op
+- *(source-postgres)* positions answer how far a sink has reached in WAL terms
+- *(source-postgres)* resolution skips what an update's changed columns can't affect
+- *(source-postgres)* an update with a pre-image carries its post-image
+- *(kernel)* subfields and indexed opt-outs on columns and joins, hashed only when off
+
+### Fixed
+
+- *(source-postgres)* resolve a hop from the key when it carries the link
+- *(source-postgres)* word the key gap for live writes; skip intermediate partitioned tables
+- *(source-postgres)* emit a change without its key and never address a document by it
+- *(source-postgres)* set a partition whose replica identity leaves out the primary key
+- *(run)* refuse to start only on what cannot work as written
+- *(source-postgres)* keep a USING INDEX identity only when it carries the primary key
+- *(source-postgres)* keep a USING INDEX replica identity that carries every link
+- *(check)* verify the soft-delete marker, and make run refuse to start on an error diagnostic
+- *(source-postgres)* hand a confirmation to the replication client at once and report it every second
+- *(source-postgres)* leave a link-free partitioned table alone, one info line for unset tables; check's verdict says where it won't set
+- *(source-postgres)* a zero divisor in an aggregate expression nulls the row instead of failing the build
+- review — report script failures under both policies, ids in print context, debug log of the failing document, shared build-by-id, field docs
+- review findings for via and exists
+- review findings for the fence
+- *(source)* the soft-delete field resolves depth-first, as on main
+- *(source)* a raw filter anywhere in an index turns the skip off for it
+- *(source-postgres)* a partitioned table's update carries no post-image
+- *(source-postgres)* a root-table change also rebuilds the documents that embed it ([#167](https://github.com/alias2k/flusso/pull/167))
+- *(source-postgres)* set each partition's replica identity in its own transaction
+- *(source-postgres)* read publication membership from the catalog
+- *(source-postgres)* ensure the publication before the slot, and add a lone partition's parent
+- *(source-postgres)* warn once when a change arrives for a table no index reads
+- *(source-postgres)* set replica identity across a partitioned table's tree
+- *(source-postgres)* publish partitioned tables via their root
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into chore/pgwire-replication-0-5
+- *(source-postgres)* the URL's application_name does not rename the replication connection; reword the oversized-message hint
+- *(source-postgres)* upgrade pgwire-replication to 0.5
+- Merge pull request #222 from alias2k/fix/validate-soft-delete-and-run
+- say a kept identity carries the primary key wherever it says the link
+- say the root manual is the newest release and /main/ tracks main
+- *(source-postgres)* name the one select case that loses the worker's outcome
+- Merge remote-tracking branch 'origin/main' into feat/script-fields
+- REPLICA IDENTITY FULL on every table an index reads — what, cost, opt-out, the 0.17 upgrade step
+- REPLICA IDENTITY FULL by default on the root and a belongs_to target
+- *(source-postgres)* check reports a typo in every relation position
+- on: pairs in the joins and aggregates references, the guides, the plugin skill and CLAUDE.md
+- crate READMEs for fences (source, sinks, engine, daemon, flusso-query)
+- the unread-column fixtures set the indexed and subfields flags
+- an update that changes no read column rebuilds nothing, and needs REPLICA IDENTITY FULL
+- *(engine,source-postgres)* assert the row's own document and guard self-join cycles
+- *(source-postgres)* review fixes for the self-join resolve ([#167](https://github.com/alias2k/flusso/pull/167))
+- a join back at the root table rebuilds the documents that embed the row ([#167](https://github.com/alias2k/flusso/pull/167))
+- *(source-postgres)* a root-table change resolves its self-referencing parents ([#167](https://github.com/alias2k/flusso/pull/167))
+- partitioned tables publish via their root
+- *(source-postgres)* partitioned tables end to end
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-source-postgres-v0.15.1...flusso-source-postgres-v0.16.0) - 2026-10-09
 
 ### Added

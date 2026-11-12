@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.16.0...flusso-source-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(source)* SourceSpec::pre_images and a two-severity PreImageReport
+- *(source)* validate_indexes checks every table and column a relation names
+- *(design)* preview reports script compile errors; the sample runs the scripts on a chosen row
+- *(script)* the flusso-script crate: compile, run and strip, behind a DocumentBuilder decorator
+- *(engine)* a document that fails to build is stopped on or skipped by its index's policy
+- *(schema)* an aggregate's column can be an arithmetic expression
+- *(kernel)* script fields and input-only fields in the schema model
+- *(source-postgres)* apply on: pairs in the document query and the read-column sets
+- *(config)* on: column pairs on joins, aggregates and via hops
+- *(schema)* aggregates across several hops with via, and the exists op
+- *(source)* a source position a client can wait on, and how far a stream position reaches
+- *(source)* changes carry an after-image; the columns each path reads come from one place
+- *(kernel)* subfields and indexed opt-outs on columns and joins, hashed only when off
+
+### Fixed
+
+- *(source-postgres)* resolve a hop from the key when it carries the link
+- *(source-postgres)* word the key gap for live writes; skip intermediate partitioned tables
+- *(source-postgres)* emit a change without its key and never address a document by it
+- *(source-postgres)* set a partition whose replica identity leaves out the primary key
+- *(run)* refuse to start only on what cannot work as written
+- *(source-postgres)* keep a USING INDEX replica identity that carries every link
+- *(check)* verify the soft-delete marker, and make run refuse to start on an error diagnostic
+- review — report script failures under both policies, ids in print context, debug log of the failing document, shared build-by-id, field docs
+- review findings for aggregate expressions
+- review findings for on: pairs
+- *(source)* the soft-delete field resolves depth-first, as on main
+- *(source)* a raw filter anywhere in an index turns the skip off for it
+- *(source)* a declared primary key counts as read
+- *(source-postgres)* a root-table change also rebuilds the documents that embed it ([#167](https://github.com/alias2k/flusso/pull/167))
+- *(source-postgres)* publish partitioned tables via their root
+
+### Other
+
+- Merge pull request #222 from alias2k/fix/validate-soft-delete-and-run
+- say a kept identity carries the primary key wherever it says the link
+- say the root manual is the newest release and /main/ tracks main
+- Merge remote-tracking branch 'origin/main' into feat/script-fields
+- *(source)* drop the stray blank line in the columns module doc list
+- crate READMEs for fences (source, sinks, engine, daemon, flusso-query)
+- the unread-column fixtures set the indexed and subfields flags
+- an update that changes no read column rebuilds nothing, and needs REPLICA IDENTITY FULL
+- *(source-postgres)* a root-table change resolves its self-referencing parents ([#167](https://github.com/alias2k/flusso/pull/167))
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.15.1...flusso-source-v0.16.0) - 2026-10-09
 
 ### Added

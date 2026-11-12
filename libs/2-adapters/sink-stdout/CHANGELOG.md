@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-sink-stdout-v0.16.0...flusso-sink-stdout-v0.17.0) - 2026-11-12
+
+### Other
+
+- say the root manual is the newest release and /main/ tracks main
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-sink-stdout-v0.15.1...flusso-sink-stdout-v0.16.0) - 2026-10-09
 
 ### Added

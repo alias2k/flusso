@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.16.0...flusso-design-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(design)* script fields and input-only fields in the canvas, the inspector and the sample preview
+- *(design)* preview reports script compile errors; the sample runs the scripts on a chosen row
+- *(design)* an aggregate's input is a column or an expression, checked by the loader's parser
+- *(design)* check an aggregate expression through the loader's parser (POST /api/expression)
+- *(schema)* an aggregate's column can be an arithmetic expression
+- *(kernel)* script fields and input-only fields in the schema model
+- *(design)* author on: pairs on joins, aggregates and via hops
+- *(config)* on: column pairs on joins, aggregates and via hops
+- *(design)* switch an aggregate's op without losing its table, key, filters or hops
+- *(design)* author exists aggregates and via hops
+- *(schema)* aggregates across several hops with via, and the exists op
+- *(design)* author subfields and indexed opt-outs, show stored-only fields in the preview
+- *(kernel)* subfields and indexed opt-outs on columns and joins, hashed only when off
+- *(design)* per-sink options on each index
+
+### Fixed
+
+- *(design)* a lone apostrophe in a message renders literally, as in ICU
+- review — report script failures under both policies, ids in print context, debug log of the failing document, shared build-by-id, field docs
+- *(config)* an expression's sum/min/max needs a numeric value_type
+- review findings for aggregate expressions
+- *(design)* clear an aggregate's on: pairs when the table their local columns name changes
+- review findings for on: pairs
+- review findings for via and exists
+- *(design)* every retype drops the opt-outs the new type does not take
+- *(kernel)* [**breaking**] a map carries its keys' plain-field mapping and a new content hash
+- *(design)* drop per-index options when a sink's type takes none
+- *(design)* validate per-index sink options before connecting
+- review fixes for index settings (owned blocks/hidden, shared schema hoisting)
+- *(design)* re-apply persisted node uids by field name, not by path
+- *(design)* ignore node uids when deciding whether the doc is unsaved
+- *(design)* Code mode adopts node uids by name, duplicated indexes get fresh ones
+- *(design)* keep node uids across reloads and migrate before the canvas reads
+- *(design)* key canvas collapse and layout on stable node ids
+
+### Other
+
+- say the root manual is the newest release and /main/ tracks main
+- Merge remote-tracking branch 'origin/main' into feat/script-fields
+- lead with the decimal literal to avoid integer overflow; restore isColumnName's doc comment
+- *(design)* rebuild the SPA
+- *(design)* the mapping preview shows the mapping every map key gets
+- *(design)* rebuild the embedded SPA
+- *(design)* rebuild the embedded SPA
+- *(design)* rebuild the embedded SPA
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.15.1...flusso-design-v0.16.0) - 2026-10-09
 
 ### Added

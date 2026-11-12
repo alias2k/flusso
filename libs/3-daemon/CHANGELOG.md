@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.16.0...flusso-daemon-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(query)* [**breaking**] move every HTTP client to reqwest 0.13
+- *(daemon)* the ingest engine gets the failure policies; /status counts script failures per index
+- *(kernel)* script fields and input-only fields in the schema model
+- *(daemon)* a fence waits until a sink has reached a source position
+- *(source-postgres)* resolution skips what an update's changed columns can't affect
+
+### Fixed
+
+- review — report script failures under both policies, ids in print context, debug log of the failing document, shared build-by-id, field docs
+- review findings for the fence
+
+### Other
+
+- say the root manual is the newest release and /main/ tracks main
+- *(daemon)* the fence e2e sets the indexed and subfields flags from #187
+- crate READMEs for fences (source, sinks, engine, daemon, flusso-query)
+- *(daemon)* live fence e2e over real Postgres and OpenSearch
+- build every OpensearchConfig literal with index_settings
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.15.1...flusso-daemon-v0.16.0) - 2026-10-09
 
 ### Added
