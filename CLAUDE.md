@@ -200,7 +200,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   the build). Match these before assuming green. One scope note: on PRs confined to the query
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
-  query train's own `combined_search`, `cursor_paging` + `map_keys` live e2e still run); pushes to main always run everything.
+  query train's own `combined_search`, `cursor_paging`, `map_keys` + `tls` live e2e still run); pushes to main always run everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
