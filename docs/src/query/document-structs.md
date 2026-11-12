@@ -116,7 +116,7 @@ pub struct Product {
 | `date` | `time::Date` or chrono's | `Date` |
 | `timestamp` | `time::OffsetDateTime` or chrono's | `Date` |
 | `binary` | `String` (base64) | `Binary` |
-| `json` | `serde_json::Value`, or a `HashMap`/`BTreeMap<String, serde_json::Value>` | `Json`; none with `indexed: false` |
+| `json` | `serde_json::Value`, or any `HashMap`/`BTreeMap<String, _>` | `Json`; none with `indexed: false` |
 | `map` | `HashMap<String, V>`, `BTreeMap<String, V>`, or a `#[derive(FlussoMap)]` struct | `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` |
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `custom` | the matching scalar, else `serde_json::Value` | by OpenSearch type |
