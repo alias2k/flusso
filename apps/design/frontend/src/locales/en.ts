@@ -350,6 +350,7 @@ export const en: Record<string, string> = {
     "{n, plural, one {# field disagrees with the database} other {# fields disagree with the database}}",
   "node.keyDiagCount":
     "{n, plural, one {# index setting disagrees with the database} other {# index settings disagree with the database}}",
+  "node.selfDiagCount": "{n, plural, one {# finding on this relation} other {# findings on this relation}}",
   "node.joinIncomplete": "This join is missing a required key — set it in the inspector",
   "node.pickRoot": "Pick a root table to begin",
   "node.chooseTable": "choose a table…",

@@ -1,7 +1,7 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useRef, useState, type ReactNode } from "react";
 import { ChevronDownIcon } from "lucide-react";
-import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
+import { SCALAR_TYPES, type ColumnShape, type DiagnosticDto, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
 import { aggregateIncomplete, joinIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
@@ -65,15 +65,15 @@ export function DocNodeView({ data, selected }: NodeProps) {
 
   // Field diagnostics carry their path from the root, so a row matches only its
   // own field, not a namesake at another depth or an index-level key (`filters`,
-  // `soft_delete`, …), which the root node counts on its own badge. A node
+  // `soft_delete`, …), which the root node counts on its own badge. A join is a
+  // node, not a row, so a finding on the join itself goes on its header. A node
   // shows a count badge, a row shows its message on hover.
   const here = namePath(schema, node.path);
-  const diagByField = new Map(
-    diagnostics
-      .filter((d) => d.anchor === "field" && d.path.length === here.length + 1 && here.every((n, i) => d.path[i] === n))
-      .map((d) => [d.field, d]),
-  );
+  const fieldUnder = (d: DiagnosticDto, depth: number) =>
+    d.anchor === "field" && d.path.length === depth && here.every((n, i) => d.path[i] === n);
+  const diagByField = new Map(diagnostics.filter((d) => fieldUnder(d, here.length + 1)).map((d) => [d.field, d]));
   const keyIssues = node.path.length === 0 ? diagnostics.filter((d) => d.anchor === "index_key") : [];
+  const selfIssues = node.path.length > 0 ? diagnostics.filter((d) => fieldUnder(d, here.length)) : [];
   const preview = useDesignStore((st) => st.preview);
   const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
   const selfIncomplete = joinIncomplete(fieldAtPath(schema, node.path));
@@ -201,6 +201,14 @@ export function DocNodeView({ data, selected }: NodeProps) {
         {nodeIssues > 0 && (
           <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
             {nodeIssues}
+          </span>
+        )}
+        {selfIssues.length > 0 && (
+          <span
+            className={cn("issue-badge", selfIssues.every((d) => d.severity === "warning") && "warn")}
+            title={[t("node.selfDiagCount", { n: selfIssues.length }), ...selfIssues.map((d) => d.message)].join("\n")}
+          >
+            {selfIssues.length}
           </span>
         )}
         {keyIssues.length > 0 && (
