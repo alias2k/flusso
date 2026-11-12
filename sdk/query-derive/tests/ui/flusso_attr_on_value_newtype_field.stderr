@@ -1,0 +1,5 @@
+error: `#[flusso(…)]` on the newtype's field is never read — a kind tag goes on the type (`#[flusso(keyword)] struct Code(String)`); remove it
+ --> tests/ui/flusso_attr_on_value_newtype_field.rs:6:13
+  |
+6 | struct Code(#[flusso(keyword)] String);
+  |             ^^^^^^^^^^^^^^^^^^

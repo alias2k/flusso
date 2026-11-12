@@ -1,0 +1,23 @@
+error[E0080]: evaluation panicked: fragment `Address`: field `region` does not exist at the path this struct is embedded at
+  --> tests/ui/opaque_in_fragment_keeps_field_checks.rs:26:14
+   |
+26 |     billing: Address,
+   |              ^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Address::__flusso_check`
+  --> tests/ui/opaque_in_fragment_keeps_field_checks.rs:12:13
+   |
+12 |     region: Plain,
+   |             ^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `Order`: field `status` is declared `Option<…>`, but the schema field here is required
+  --> tests/ui/opaque_in_fragment_keeps_field_checks.rs:33:13
+   |
+33 |     orders: Vec<Order>,
+   |             ^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Order::__flusso_check`
+  --> tests/ui/opaque_in_fragment_keeps_field_checks.rs:18:13
+   |
+18 |     status: Option<Plain>,
+   |             ^^^^^^ the failure occurred here

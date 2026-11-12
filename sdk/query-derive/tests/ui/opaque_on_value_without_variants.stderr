@@ -1,0 +1,17 @@
+error[E0080]: evaluation panicked: `opaque` on `email` turns off nothing — the schema field `email` in index `users` declares no `variants:` and `Email` is not `exhaustive`, so no variant check runs here; remove `opaque`
+  --> tests/ui/opaque_on_value_without_variants.rs:20:14
+   |
+20 |     #[flusso(opaque)]
+   |              ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `opaque` on `tier` turns off nothing — the schema field `tier` in index `users` declares variants [free, pro, enterprise], but `Email` declares none (it is not an enum, nor a newtype over one), so there is no variant check to turn off; remove `opaque`
+  --> tests/ui/opaque_on_value_without_variants.rs:29:14
+   |
+29 |     #[flusso(opaque)]
+   |              ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `opaque` on `email` turns off nothing — the schema field `email` in index `users` declares no `variants:` and `Code` is not `exhaustive`, so no variant check runs here; remove `opaque`
+  --> tests/ui/opaque_on_value_without_variants.rs:38:14
+   |
+38 |     #[flusso(opaque)]
+   |              ^^^^^^ evaluation of `_` failed here

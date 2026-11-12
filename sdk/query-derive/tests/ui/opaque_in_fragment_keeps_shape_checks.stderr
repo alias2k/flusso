@@ -1,0 +1,59 @@
+error[E0080]: evaluation panicked: fragment `VecAtAnObject`: field `billingAddress` is declared `Vec<Plain>`, but the schema field here is not an array; drop the `Vec<…>`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:50:11
+   |
+50 |     part: VecAtAnObject,
+   |           ^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `VecAtAnObject::__flusso_check`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:17:14
+   |
+17 |     billing: Vec<Plain>,
+   |              ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `OneAtANestedArray`: field `orders` is `Plain`, but the schema field here is an array (a `nested` array or a flat array) — declare it `Vec<…>`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:58:11
+   |
+58 |     part: OneAtANestedArray,
+   |           ^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `OneAtANestedArray::__flusso_check`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:23:13
+   |
+23 |     orders: Plain,
+   |             ^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `KeywordAtALong`: field `orderCount` is `Code`, whose flusso kind does not match the schema field's type at this path
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:66:11
+   |
+66 |     part: KeywordAtALong,
+   |           ^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `KeywordAtALong::__flusso_check`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:30:18
+   |
+30 |     order_count: Code,
+   |                  ^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `NothingToTurnOff`: field `email` is `#[flusso(opaque)]`, which turns off nothing here — the schema field declares no `variants:` and `Code` is not `exhaustive`, so no variant check runs; remove `opaque`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:74:11
+   |
+74 |     part: NothingToTurnOff,
+   |           ^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `NothingToTurnOff::__flusso_check`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:36:12
+   |
+36 |     email: Code,
+   |            ^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `AtAMap`: field `title` is `#[flusso(opaque)]`, but the schema field here is a `map`, where its type is checked only by its value kind, which `opaque` does not turn off; remove `opaque`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:82:11
+   |
+82 |     part: AtAMap,
+   |           ^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `AtAMap::__flusso_check`
+  --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:42:12
+   |
+42 |     title: Plain,
+   |            ^^^^^ the failure occurred here

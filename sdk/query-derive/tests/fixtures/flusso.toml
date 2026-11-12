@@ -29,3 +29,13 @@ enabled = true
 name = "computed"
 schema = "computed.schema.yml"
 enabled = true
+
+[[index]]
+name = "reserved"
+schema = "reserved.schema.yml"
+enabled = true
+
+[[index]]
+name = "unnamable"
+schema = "unnamable.schema.yml"
+enabled = true

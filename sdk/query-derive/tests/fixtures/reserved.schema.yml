@@ -1,0 +1,20 @@
+# Document keys that are Rust keywords: a field spelled `r#type` reads `type`.
+version: 1
+table: things
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - keyword: type
+    required: true
+  - object: match
+    fields:
+      - keyword: loop
+        required: true
+  - keyword: gen
+    required: true
+  - keyword: try
+    required: true
+  - keyword: Self
+    required: true

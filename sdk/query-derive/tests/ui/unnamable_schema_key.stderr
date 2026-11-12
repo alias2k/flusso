@@ -1,0 +1,7 @@
+error: the schema key `_` gives the generated name `_`, which is not a Rust identifier, so it has no query handle — rename the field in the schema
+ --> tests/ui/unnamable_schema_key.rs:4:30
+  |
+4 | #[derive(serde::Deserialize, FlussoRoot)]
+  |                              ^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `FlussoRoot` (in Nightly builds, run with -Z macro-backtrace for more info)

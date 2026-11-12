@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Holder`: field `billingAddress` is `Date`, which cannot hold the schema field at this path (a fragment takes `Date` for the built-in leaf type by its name, so a type of your own named `Date` needs another name to be checked here)
+  --> tests/ui/user_type_named_like_a_leaf_in_fragment.rs:21:13
+   |
+21 |     holder: Holder,
+   |             ^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Holder::__flusso_check`
+  --> tests/ui/user_type_named_like_a_leaf_in_fragment.rs:13:14
+   |
+13 |     billing: Date,
+   |              ^^^^ the failure occurred here

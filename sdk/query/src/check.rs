@@ -160,6 +160,46 @@ pub const fn array(level: &[FieldSpec], name: &str) -> bool {
     }
 }
 
+/// Whether a Rust type that is (`vec`) or is not a `Vec<…>` fits `name`'s
+/// array shape, as a root checks it: a `nested` array wants a `Vec`, an
+/// `object` with fields wants none, a leaf wants one exactly when it is a flat
+/// array. A `map`, an opaque `json` object and an unmodeled kind take either.
+/// Absent → `true`; the generated check reports the absence separately.
+#[must_use]
+pub const fn array_shape_ok(level: &[FieldSpec], name: &str, vec: bool) -> bool {
+    let Some(field) = find(level, name) else {
+        return true;
+    };
+    match field.kind {
+        KindTag::Nested => vec,
+        KindTag::Object => field.map_values.is_some() || field.children.is_empty() || !vec,
+        KindTag::Other => true,
+        _ => field.array == vec,
+    }
+}
+
+/// Whether `name` is a `keyword` or `text` field that is not a `map`. Absent →
+/// `false`.
+#[must_use]
+pub const fn is_string(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => {
+            field.map_values.is_none() && matches!(field.kind, KindTag::Keyword | KindTag::Text)
+        }
+        None => false,
+    }
+}
+
+/// Whether `name` is an `object` or a `nested` array: a level, a `map` or an
+/// opaque `json` object rather than a leaf. Absent → `false`.
+#[must_use]
+pub const fn is_container(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => matches!(field.kind, KindTag::Object | KindTag::Nested),
+        None => false,
+    }
+}
+
 /// Whether `name`'s mapping kind is one `accepted` Rust type can hold.
 ///
 /// `accepted` comes from the fragment's Rust field type — either inferred from a
@@ -385,6 +425,56 @@ pub trait FlussoValueMeta {
     /// forwarded by an untagged newtype. Off by default: a Rust enum covering
     /// only some of the schema's variants is a legal partial projection.
     const EXHAUSTIVE: bool = false;
+}
+
+/// What `#[flusso(opaque)]` turns off for a type, as constants a generated
+/// check reads to keep what `opaque` leaves on and to reject an `opaque` that
+/// turns off nothing.
+///
+/// `opaque` skips the checks that read the type's [`FlussoValueMeta`]. Whether
+/// a type implements that trait is not knowable at macro time, so this answers
+/// it during const evaluation: the inherent constants below exist only for a
+/// type with the metadata, and a type without it falls back to
+/// [`OpaqueWithoutMeta`]'s, where `opaque` is what spares the field the read,
+/// so it does turn something off.
+///
+/// ```
+/// use flusso_query::{OpaqueProbe, OpaqueWithoutMeta as _};
+///
+/// struct HandWritten;
+/// const _: () = assert!(OpaqueProbe::<HandWritten>::SKIPS_VARIANTS);
+/// const _: () = assert!(!OpaqueProbe::<String>::SKIPS_VARIANTS);
+/// const _: () = assert!(!OpaqueProbe::<HandWritten>::HAS_META);
+/// const _: () = assert!(OpaqueProbe::<bool>::KINDS.len() == 1);
+/// ```
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct OpaqueProbe<T: ?Sized>(core::marker::PhantomData<T>);
+
+/// The fallback for [`OpaqueProbe`] on a type without [`FlussoValueMeta`].
+#[doc(hidden)]
+pub trait OpaqueWithoutMeta {
+    /// Whether the type carries [`FlussoValueMeta`]: not this one.
+    const HAS_META: bool = false;
+    /// No metadata, so no opinion on the kind.
+    const KINDS: &'static [KindTag] = &[];
+    /// Whether `opaque` turns off a check at a field that declares variants.
+    const SKIPS_VARIANTS: bool = true;
+    /// Whether `opaque` turns off a check at a field that declares none.
+    const SKIPS_EXHAUSTIVE: bool = true;
+}
+
+impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
+
+impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
+    /// The type carries [`FlussoValueMeta`], so its kinds can be checked.
+    pub const HAS_META: bool = true;
+    /// The kinds the type may stand in for.
+    pub const KINDS: &'static [KindTag] = T::KINDS;
+    /// At a field that declares variants: the type has variants to check.
+    pub const SKIPS_VARIANTS: bool = !T::VARIANTS.is_empty() || T::EXHAUSTIVE;
+    /// At a field that declares none: only the `exhaustive` check runs.
+    pub const SKIPS_EXHAUSTIVE: bool = T::EXHAUSTIVE;
 }
 
 /// Mirrors the [`FlussoValue`](crate::FlussoValue) impls above, so a

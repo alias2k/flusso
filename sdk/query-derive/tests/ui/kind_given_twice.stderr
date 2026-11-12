@@ -1,0 +1,17 @@
+error: `keyword` and `text` are both given, and a type has one kind — keep the one the schema field is (`keyword` for an exact string, `text` for analyzed full text)
+ --> tests/ui/kind_given_twice.rs:6:10
+  |
+6 | #[flusso(text)]
+  |          ^^^^
+
+error: `text` is given twice — keep one `text`
+  --> tests/ui/kind_given_twice.rs:12:16
+   |
+12 | #[flusso(text, text)]
+   |                ^^^^
+
+error: `exhaustive` is given twice — keep one `exhaustive`
+  --> tests/ui/kind_given_twice.rs:16:31
+   |
+16 | #[flusso(keyword, exhaustive, exhaustive)]
+   |                               ^^^^^^^^^^

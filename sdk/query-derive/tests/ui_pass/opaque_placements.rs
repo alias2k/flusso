@@ -1,4 +1,4 @@
-use flusso_query::{FlussoFragment, FlussoRoot, FlussoValue};
+use flusso_query::{FlussoFragment, FlussoRoot, FlussoValue, kind};
 
 // Every placement where `#[flusso(opaque)]` turns a check off, so none of them
 // may be rejected as an attribute that does nothing.
@@ -29,12 +29,18 @@ enum LooseTier {
     Trial,
 }
 
+/// A hand-written `FlussoValue` carries no `FlussoValueMeta`, so at a root
+/// `keyword` field `opaque` is what spares it the variant checks' read.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HandWritten(String);
+impl FlussoValue<kind::Keyword> for HandWritten {}
+
 #[derive(serde::Deserialize, FlussoFragment)]
 struct Order {
     #[flusso(opaque)]
     status: LooseStatus,
     #[flusso(opaque)]
-    shipping: Plain,
+    shipping: Option<Plain>,
 }
 
 #[derive(serde::Deserialize, FlussoRoot)]
@@ -49,7 +55,6 @@ struct User {
     #[flusso(opaque)]
     #[serde(rename = "shippingAddress")]
     shipping_address: Plain,
-    #[flusso(opaque)]
     orders: Vec<serde_json::Value>,
 }
 
@@ -77,6 +82,79 @@ struct Flattened {
     #[serde(flatten)]
     #[flusso(opaque)]
     rest: Plain,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct HandWrittenEmail {
+    id: i32,
+    #[flusso(opaque)]
+    email: HandWritten,
+}
+
+/// A type of the user's own named like a built-in leaf: taken for its own where
+/// no built-in leaf could sit, so `opaque` works there.
+#[derive(serde::Deserialize)]
+struct Date {}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct NamedLikeALeaf {
+    id: i32,
+    #[flusso(opaque)]
+    #[serde(rename = "billingAddress")]
+    billing_address: Date,
+    #[serde(flatten)]
+    #[flusso(opaque)]
+    rest: Date,
+}
+
+/// A hand-written `FlussoValue` at a `long` field: a fragment reads a field
+/// type's metadata to check its kind, and `opaque` spares it that read.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HandWrittenCount(i64);
+impl FlussoValue<kind::Long> for HandWrittenCount {}
+
+/// In a fragment, `opaque` turns off at each placement what it turns off on a
+/// root, so a root's placements work here too.
+#[derive(serde::Deserialize, FlussoFragment)]
+struct UserParts {
+    #[flusso(opaque)]
+    tier: LooseTier,
+    #[flusso(opaque)]
+    email: HandWritten,
+    #[flusso(opaque)]
+    #[serde(rename = "billingAddress")]
+    billing_address: Plain,
+    #[flusso(opaque)]
+    orders: Vec<Plain>,
+    #[flusso(opaque)]
+    #[serde(rename = "orderCount")]
+    order_count: HandWrittenCount,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserFromParts {
+    id: i32,
+    #[serde(flatten)]
+    parts: UserParts,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct ListingParts {
+    #[flusso(opaque)]
+    snapshot: Option<Plain>,
+    #[flusso(opaque)]
+    variants: Vec<Plain>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "stored")]
+struct ListingFromParts {
+    id: String,
+    #[serde(flatten)]
+    parts: ListingParts,
 }
 
 fn main() {}

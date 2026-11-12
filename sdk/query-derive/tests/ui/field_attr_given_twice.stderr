@@ -1,0 +1,5 @@
+error: `rename` is given twice, and a field has one key — keep one `rename`
+ --> tests/ui/field_attr_given_twice.rs:8:32
+  |
+8 |     #[flusso(rename = "email", rename = "fullName")]
+  |                                ^^^^^^^^^^^^^^^^^^^

@@ -24,6 +24,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Fields};
 
@@ -86,6 +87,15 @@ impl Kind {
         }
     }
 
+    /// The tag as written in `#[flusso(…)]`, for the string kinds.
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Keyword => "keyword",
+            Kind::Text => "text",
+            _ => "",
+        }
+    }
+
     /// Whether this kind is string-valued (and so accepts a unit enum).
     fn is_string(self) -> bool {
         matches!(self, Kind::Keyword | Kind::Text)
@@ -143,6 +153,12 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                 ));
             }
             for variant in &data.variants {
+                unread_attr(
+                    &variant.attrs,
+                    "an enum variant",
+                    "the kind tag goes on the enum (`#[flusso(keyword)] enum …`), and a \
+                     variant's document spelling comes from `#[serde(rename = \"…\")]`",
+                )?;
                 if !matches!(variant.fields, Fields::Unit) {
                     return Err(syn::Error::new(
                         variant.span(),
@@ -184,10 +200,20 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
             // iterator (not indexing, which the workspace lints forbid).
             let mut fields = match &data.fields {
                 Fields::Unnamed(fields) => fields.unnamed.iter(),
+                Fields::Named(fields) if crate::serde_attr::transparent(&input.attrs) => {
+                    fields.named.iter()
+                }
                 _ => return Err(newtype_required(input)),
             };
             let inner = match (fields.next(), fields.next()) {
-                (Some(field), None) => &field.ty,
+                (Some(field), None) => {
+                    unread_attr(
+                        &field.attrs,
+                        "the newtype's field",
+                        "a kind tag goes on the type (`#[flusso(keyword)] struct Code(String)`)",
+                    )?;
+                    &field.ty
+                }
                 _ => return Err(newtype_required(input)),
             };
             let leaf_check = leaf_check(ident);
@@ -252,39 +278,20 @@ fn leaf_check(ident: &syn::Ident) -> TokenStream {
 /// This is what makes the schema's declared `variants:` comparable to the Rust
 /// enum — the schema lists document strings, not Rust identifiers.
 fn variant_keys(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<Vec<String>> {
-    let rename_all = crate::doc::container_rename_all(input);
+    let rename_all = crate::serde_attr::rename_all(&input.attrs);
     data.variants
         .iter()
         .map(|variant| {
-            if let Some(renamed) = serde_rename(&variant.attrs) {
+            if let Some(renamed) = crate::serde_attr::variant_rename(&variant.attrs) {
                 return Ok(renamed);
             }
-            let base = variant.ident.to_string();
+            let base = variant.ident.unraw().to_string();
             Ok(match rename_all.as_deref() {
                 Some(rule) => rename_variant(&base, rule),
                 None => base,
             })
         })
         .collect()
-}
-
-fn serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
-    let mut renamed = None;
-    for attr in attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename")
-                && let Ok(value) = meta.value()
-                && let Ok(lit) = value.parse::<syn::LitStr>()
-            {
-                renamed = Some(lit.value());
-            }
-            Ok(())
-        });
-    }
-    renamed
 }
 
 /// Apply a serde `rename_all` rule to a **variant** name.
@@ -337,7 +344,8 @@ fn newtype_required(input: &DeriveInput) -> syn::Error {
     syn::Error::new(
         input.ident.span(),
         "FlussoValue on a struct requires a single-field tuple struct \
-         (a newtype wrapper, e.g. `struct Country(String)`)",
+         (a newtype wrapper, e.g. `struct Country(String)`), or a \
+         `#[serde(transparent)]` struct with one named field",
     )
 }
 
@@ -363,23 +371,50 @@ pub(crate) fn value_attrs(input: &DeriveInput) -> syn::Result<ValueAttrs> {
             continue;
         }
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("keyword") {
-                attrs.kind = Some(Kind::Keyword);
+            let kind = if meta.path.is_ident("keyword") {
+                Kind::Keyword
             } else if meta.path.is_ident("text") {
-                attrs.kind = Some(Kind::Text);
+                Kind::Text
             } else if meta.path.is_ident("exhaustive") {
+                crate::once(&meta, attrs.exhaustive.is_some(), "")?;
                 attrs.exhaustive = Some(meta.path.span());
+                return Ok(());
             } else {
                 return Err(meta.error(
                     "unknown `flusso` token (expected `keyword` or `text` — numeric/date \
                      newtypes inherit their inner type's kinds, so need no tag — or \
                      `exhaustive` on an enum)",
                 ));
+            };
+            match attrs.kind {
+                Some(seen) if seen.name() != kind.name() => {
+                    return Err(meta.error(format!(
+                        "`{}` and `{}` are both given, and a type has one kind — keep the \
+                         one the schema field is (`keyword` for an exact string, `text` for \
+                         analyzed full text)",
+                        seen.name(),
+                        kind.name(),
+                    )));
+                }
+                seen => crate::once(&meta, seen.is_some(), "")?,
             }
+            attrs.kind = Some(kind);
             Ok(())
         })?;
     }
     Ok(attrs)
+}
+
+/// A `#[flusso(…)]` among `attrs` of a part of the type the derive never reads
+/// (a newtype's field, an enum variant), as an error saying where it goes.
+pub(crate) fn unread_attr(attrs: &[syn::Attribute], what: &str, instead: &str) -> syn::Result<()> {
+    match attrs.iter().find(|attr| attr.path().is_ident("flusso")) {
+        Some(attr) => Err(syn::Error::new_spanned(
+            attr,
+            format!("`#[flusso(…)]` on {what} is never read — {instead}; remove it"),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The kind for the `FlussoMap` derive — a **required** `#[flusso(keyword | text)]`

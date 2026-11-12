@@ -19,6 +19,8 @@ At compile time the macro:
 
 There is no `build.rs`, no generated file to `include!`, no committed mapping to keep in sync.
 
+A root takes one `index`, one `config` and one `scope_mod`: giving one twice is a compile error, not "last one wins".
+
 ## Index name and schema hash
 
 The resolved mapping's content hash is `SCHEMA_HASH`, the same hash `flusso build` writes into `flusso.lock` and the sink folds into the alias name. `User::INDEX` is the physical name `users_<hash>`, and `get`/`query` use it directly. A structural schema change rotates the hash and the mapping together, so the next `cargo build` regenerates the binding against the new index. Both consts are public for logging and admin.
@@ -70,6 +72,8 @@ impl FlussoRoot for User {
     const SCHEMA_HASH: &str = "3f2a1b9c…";
 }
 ```
+
+A handle is named for its schema key in snake_case (`fullName` → `full_name()`). A key that is a Rust keyword, strict or reserved in any edition (`type`, `try`, `gen`), gets a raw identifier (`type` → `User::r#type()`), and `self`, `Self`, `super` and `crate`, which a raw identifier can't spell, take a trailing `_`. A key no identifier can spell, such as `_`, is a compile error naming the key.
 
 Plus **one namespace per container level** in a generated module `flusso_<root>_query`, so nothing lands in your namespace and a `struct UserOrders` of your own can't collide:
 

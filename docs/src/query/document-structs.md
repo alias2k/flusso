@@ -51,7 +51,7 @@ A struct is a **projection**: it may omit schema fields (here `addresses`, `prof
 
 ## What the derive checks
 
-For each declared field, the derive finds the schema field by **document key**, honoring `#[serde(rename)]` and a container `#[serde(rename_all)]`, then checks three things.
+For each declared field, the derive finds the schema field by **document key**, honoring `#[serde(rename)]` (plain, or the `deserialize` name of `rename(serialize = …, deserialize = …)`) and a container `#[serde(rename_all)]` (the `deserialize` rule of `rename_all(serialize = …, deserialize = …)`), then checks three things. It reads those from among any other serde attributes (`bound`, `default`, `with`, …). A field spelled as a raw identifier reads the key serde reads: `r#type` is the key `type`.
 
 | Check | Compile error when |
 | --- | --- |
@@ -59,7 +59,16 @@ For each declared field, the derive finds the schema field by **document key**, 
 | type matches | `` email is `keyword` → expected `String`, found `i32` `` |
 | nullability matches | `` email is required → expected `String`, found `Option<String>` `` |
 
-Type matching is by **leaf identifier plus `Option` shape**: the macro compares the final path segment (`String`, `i32`, `OffsetDateTime`) against the table below, since it can't resolve aliases. An `object` field expects a struct, a `nested` field a `Vec<_>`, and the inner check is handed to that fragment.
+Type matching is by **leaf identifier plus `Option` shape**: the macro compares the final path segment (`String`, `i32`, `OffsetDateTime`) against the table below, since it can't resolve aliases. An `object` field expects a struct, a `nested` field a `Vec<_>`, and the inner check is handed to that fragment. A `Vec<_>` goes exactly where the schema field is an array (a `nested` array or a flat one), on a root and in a fragment.
+
+### Types named like a built-in
+
+Because a macro can't resolve paths, a built-in leaf type is recognized by that last segment alone: `Date`, `NaiveDate`, `NaiveDateTime`, `DateTime`, `OffsetDateTime`, `PrimitiveDateTime`, `Uuid`, `Decimal`, `GeoPoint`, and `Value` for `serde_json::Value`. Matching the whole path instead would reject re-exports such as `sqlx::types::Uuid` or a `pub use chrono::NaiveDate` in your own crate, so a type of your own with one of these names counts as the built-in, with two exceptions where no built-in leaf could sit:
+
+- on a root, at an `object` or `nested` field (a level with fields of its own), it is checked as your own type;
+- on a `#[serde(flatten)]` field, root or fragment, it is checked as your own type too, except `GeoPoint`: flattened, it is taken for flusso's own, which serde can flatten and which is not checked.
+
+Anywhere else it is taken for the built-in: in a fragment the field then fails to match the schema, and the error says to rename the type. A type named `Value` is always taken for `serde_json::Value`, which is never checked. Rename it to have it checked.
 
 Fragments are checked **where embedded**. The root bakes the resolved level into const data and drives one assertion per fragment field; the error's primary span is the embedding, with a note chain down to the offending field. Two limits follow from const evaluation: messages can't interpolate the schema's type name, and there are no warnings, only pass or fail.
 
@@ -81,9 +90,16 @@ pub struct Product {
 
 - `serde_json::Value` as a field type opts that field out of type checking.
 - `#[flusso(skip)]` drops a field from validation entirely, for a computed or app-only field (pair with `#[serde(skip)]` or `#[serde(default)]`).
-- `#[flusso(opaque)]` turns off the check the derive hands to a field's custom type, for a plain un-derived struct. It goes on a field whose type is a custom struct or enum, bare or in `Option<…>` or `Vec<…>` (`Vec<serde_json::Value>` included). On a root it keeps the field checked against the mapping (exists, nullability) and goes on an `object`, `nested` or `json` field, or on a `keyword`/`text` field where it turns off the variant check of a `FlussoValue` enum. On a fragment field it turns off every check of that field. Anywhere it would turn off nothing it is a compile error: a built-in leaf type (recognized by name, so a type of your own named `Date`, `Uuid`, `Decimal`, `GeoPoint` or `Value` counts as one: rename it), `serde_json::Value`, a `HashMap`/`BTreeMap` (flattened or not), a `#[flusso(skip)]` field, and on a root a `map` or any other leaf in the schema, where a custom type is checked by its `FlussoValue`/`FlussoMap` bound alone.
-- `#[flusso(rename = "…")]` sets the document key the derive looks up, ahead of `#[serde(rename)]` and `rename_all`. It is for a key serde reads that the derive cannot see, since the derive reads serde's attributes best-effort: an `alias`, or `rename(deserialize = "…")`. It must equal the key serde actually reads: the derive checks the schema under the `flusso` name while serde deserializes the other, so every real document would fail on that field. A plain `#[serde(rename = "x")]` beside a different `#[flusso(rename = "y")]` (and no `alias`) is that contradiction and a compile error; where serde already says the key in a plain `rename`, leave `#[flusso(rename)]` off. A `#[serde(flatten)]` field has no key of its own, so `rename` on one is a compile error too.
-- `#[serde(flatten)]` on a fragment field checks its fields against the enclosing level. A flattened `HashMap<String, serde_json::Value>`, `BTreeMap<…>` or `serde_json::Value`, serde's catch-all for the keys no other field reads, is never checked, on a root or a fragment. `#[serde(transparent)]` newtypes are checked against the enclosing level too.
+- `#[flusso(opaque)]` turns off the checks the derive hands to a field's custom type, for a plain un-derived struct. The field is still checked against the mapping: it exists, its nullability matches, and it is a `Vec<…>` exactly where the schema field is an array. It goes on a field whose type is a custom struct or enum, bare or in `Option<…>` or `Vec<…>`, at an `object`, `nested` or `json` field, where it turns off the walk into the type, or at a `keyword`/`text` field, where it turns off the variant check of a `FlussoValue` enum (or of a hand-written `FlussoValue` with no derive) and the type's kind is still checked. Anywhere it would turn off nothing it is a compile error:
+  - a built-in leaf type (see [Types named like a built-in](#types-named-like-a-built-in)), `serde_json::Value` (or a `Vec` of it), a `HashMap`/`BTreeMap` (flattened or not), a `#[flusso(skip)]` field;
+  - a `map` or a leaf other than `keyword`/`text` in the schema, where a custom type is checked by its kind alone;
+  - at a `keyword`/`text` field, a type with no variants to check: a newtype over a `String`, or an enum that isn't `exhaustive` where the schema field declares no `variants:`;
+  - the field of a `#[serde(transparent)]` newtype: put `opaque` on the field that embeds the newtype.
+
+  A fragment applies these rules where it is embedded, with one difference. It reads a type's kind from the metadata a flusso derive emits. A type without it (a hand-written `FlussoValue`, or a type with no flusso derive at all) cannot have its kind checked there, and `opaque` is what lets a fragment take such a type. In a fragment, `opaque` on such a type is accepted at any leaf but a `map`, and nothing about the type is checked; a root checks the type's `FlussoValue` bound instead, and rejects `opaque` outside `keyword`/`text`.
+- `#[flusso(rename = "…")]` sets the document key the derive looks up, ahead of `#[serde(rename)]` and `rename_all`. The derive already reads the key serde reads from `#[serde(rename = "…")]` or the `deserialize` name of `rename(serialize = …, deserialize = …)`, so leave `#[flusso(rename)]` off there; it is for a key the derive cannot tell, an `alias` beside the `rename` (serde reads either). It must equal the key serde actually reads: the derive checks the schema under the `flusso` name while serde deserializes the other, so every real document would fail on that field. A `#[serde(rename)]` beside a different `#[flusso(rename)]` (and no `alias`) is that contradiction and a compile error. A `#[serde(flatten)]` field has no key of its own, so `rename` on one is a compile error too.
+- `#[serde(flatten)]` on a fragment field checks its fields against the enclosing level. A flattened `HashMap<String, serde_json::Value>`, `BTreeMap<…>` or `serde_json::Value`, serde's catch-all for the keys no other field reads, is never checked, on a root or a fragment. `#[serde(transparent)]` newtypes, a tuple struct or a struct with one named field, are checked against the enclosing level too; the newtype's field takes no `#[flusso(…)]` attribute, and a transparent struct with more than one field is a compile error.
+- Each `#[flusso(…)]` key is given once per field or type: a repeat is a compile error, not "last one wins".
 
 ## flusso types to Rust types
 
