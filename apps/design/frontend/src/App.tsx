@@ -1312,7 +1312,7 @@ function ValidationDetail({ check }: { check: Check }) {
       {diagnostics.map((d, i) => (
         <div key={i} className={cn("py-0.5", d.severity === "warning" ? "text-warn" : "text-destructive")}>
           <span className="font-mono text-muted-foreground">
-            {d.index}.{d.field}
+            {d.index}.{d.path.join(".")}
           </span>{" "}
           {d.message}
         </div>

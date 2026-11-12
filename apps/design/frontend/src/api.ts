@@ -383,7 +383,15 @@ export interface ScriptErrorDto {
 
 export interface DiagnosticDto {
   index: string;
+  /// The last segment of `path`.
   field: string;
+  /// The field's path from the document root, or an index-level key alone
+  /// (`table`, `primary_key`, `filters`, `soft_delete`) when `anchor` is `index_key`.
+  path: string[];
+  /// What `path` names: a field, or an index-level key a root field may share a name with.
+  anchor: "field" | "index_key";
+  /// What the database check found, e.g. `unknown_column`; absent on client-side checks.
+  kind?: string;
   severity: string;
   message: string;
 }

@@ -33,7 +33,7 @@ Every panel, control, and shortcut in `flusso design`, and how saving maps to fi
 
 Node positions and collapsed nodes live in the browser, per index, not in the files. They follow the node, so removing, adding, or duplicating a field elsewhere leaves them alone, both while you edit and across a reload, including when the schema file changed on disk in between. Nodes are matched by field name within their parent; a node added since the last save, or renamed outside the designer, starts fresh after a reload. A node whose join is missing a required key, or has an `on` pair missing a side or listed twice, is flagged until it's set in the inspector.
 
-Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a nullable column; `=` = has a default; nothing = optional. A node header counts fields that disagree with the database after a validate.
+Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a nullable column; `=` = has a default; nothing = optional. A node header counts fields that disagree with the database after a validate, each matched by its path from the root, so a namesake elsewhere isn't flagged. The root's header has a second count for the index-level keys (`table`, `primary_key`, `filters`, `soft_delete`), with the messages on hover.
 
 ## Inspector
 

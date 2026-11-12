@@ -6,7 +6,7 @@ import { KIND_HELP } from "../fields";
 import { aggregateIncomplete, joinIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
 import { suggestRelations, type RelationSuggestion } from "../model/relations";
-import { fieldAtPath, nodeFields, type DocNode, type LeafField } from "../model/tree";
+import { fieldAtPath, namePath, nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { errorsFor, scriptIncomplete, scriptPath } from "../model/scripts";
@@ -63,9 +63,17 @@ export function DocNodeView({ data, selected }: NodeProps) {
     apply((s) => edit.setRootMeta(s, { table: t, primary_key: pk }));
   };
 
-  // Diagnostics are reported by field name (no path), so match by name. Build a
-  // lookup once; a node shows a count badge, a row shows its message on hover.
-  const diagByField = new Map(diagnostics.map((d) => [d.field, d]));
+  // Field diagnostics carry their path from the root, so a row matches only its
+  // own field, not a namesake at another depth or an index-level key (`filters`,
+  // `soft_delete`, …), which the root node counts on its own badge. A node
+  // shows a count badge, a row shows its message on hover.
+  const here = namePath(schema, node.path);
+  const diagByField = new Map(
+    diagnostics
+      .filter((d) => d.anchor === "field" && d.path.length === here.length + 1 && here.every((n, i) => d.path[i] === n))
+      .map((d) => [d.field, d]),
+  );
+  const keyIssues = node.path.length === 0 ? diagnostics.filter((d) => d.anchor === "index_key") : [];
   const preview = useDesignStore((st) => st.preview);
   const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
   const selfIncomplete = joinIncomplete(fieldAtPath(schema, node.path));
@@ -193,6 +201,17 @@ export function DocNodeView({ data, selected }: NodeProps) {
         {nodeIssues > 0 && (
           <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
             {nodeIssues}
+          </span>
+        )}
+        {keyIssues.length > 0 && (
+          <span
+            className={cn("issue-badge", keyIssues.every((d) => d.severity === "warning") && "warn")}
+            title={[
+              t("node.keyDiagCount", { n: keyIssues.length }),
+              ...keyIssues.map((d) => `${d.field}: ${d.message}`),
+            ].join("\n")}
+          >
+            {keyIssues.length}
           </span>
         )}
         {selfIncomplete && (

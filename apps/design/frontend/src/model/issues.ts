@@ -22,7 +22,7 @@ function columnMismatch(col: { column: string; ty: unknown }, src: ColumnShape |
 /// Enforces the source-guided nullability rule (a **required** field over a
 /// **nullable** column must set a `default`) and flags a **drastic type change**
 /// (a column mapped to a type its values can't satisfy). Returned as
-/// [`DiagnosticDto`]s keyed by field name so they flow through the same
+/// field-anchored [`DiagnosticDto`]s, by path, so they flow through the same
 /// highlight/tooltip/list surface as the database validation. Messages are
 /// translated through `t`.
 export function requiredDefaultIssues(
@@ -34,9 +34,10 @@ export function requiredDefaultIssues(
   if (!catalog || catalog.error) return []; // can't know the source columns offline
 
   const issues: DiagnosticDto[] = [];
-  const walk = (fields: Field[], table: string) => {
+  const walk = (fields: Field[], table: string, parent: string[]) => {
     for (const f of fields) {
       const s = f.source;
+      const path = [...parent, f.field];
       if ("column" in s) {
         const col = s.column;
         const src = sourceColOf(catalog, table, col.column);
@@ -44,6 +45,8 @@ export function requiredDefaultIssues(
           issues.push({
             index,
             field: f.field,
+            path,
+            anchor: "field",
             severity: "error",
             message: t("diag.requiredDefault", { col: col.column }),
           });
@@ -52,19 +55,21 @@ export function requiredDefaultIssues(
           issues.push({
             index,
             field: f.field,
+            path,
+            anchor: "field",
             severity: "warning",
             message: t("diag.typeMismatch", { ty: col.ty as string, col: col.column, src: src?.sql_type ?? "" }),
           });
         }
       } else if ("group" in s) {
-        walk(s.group, table); // a group stays on the same table
+        walk(s.group, table, path); // a group stays on the same table
       } else if ("relation" in s && "join" in s.relation) {
-        walk(s.relation.join.fields, s.relation.join.table);
+        walk(s.relation.join.fields, s.relation.join.table, path);
       }
       // geo (two columns) and aggregates/constants have no single source column.
     }
   };
-  walk(schema.fields, schema.table);
+  walk(schema.fields, schema.table, []);
   return issues;
 }
 

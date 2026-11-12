@@ -98,6 +98,20 @@ export function withNodeFields(schema: IndexSchema, path: number[], next: Field[
   return { ...schema, fields: rebuild(schema.fields, 0) };
 }
 
+/// The field names from the document root to the container at `path`: the
+/// path a diagnostic names it by.
+export function namePath(schema: IndexSchema, path: number[]): string[] {
+  const names: string[] = [];
+  let fields = schema.fields;
+  for (const idx of path) {
+    const field = fields[idx];
+    if (!field) return names;
+    names.push(field.field);
+    fields = childFields(field) ?? [];
+  }
+  return names;
+}
+
 /// The container field that *is* the node at `path` (null for the root).
 export function fieldAtPath(schema: IndexSchema, path: number[]): Field | null {
   if (path.length === 0) return null;
