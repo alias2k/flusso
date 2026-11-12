@@ -31,7 +31,8 @@ impl PgDocumentBuilder {
     /// Resolve one path (root → … → changed table) back to root key values, by
     /// walking the relations from the changed table up to the root. `before`
     /// feeds only the first hop: rows further up are matched by their current
-    /// state.
+    /// state. A key with a null part (a change feed that left the key out)
+    /// matches no stored row, so its hop reads only `before`.
     pub(super) async fn resolve_path(
         &self,
         schema: &IndexSchema,
@@ -117,6 +118,11 @@ impl PgDocumentBuilder {
         key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
         match step.key() {
+            RelationKey::Through(through) if *current_table == through.table => {
+                self.reverse_through_junction(schema, &through.table, &through.left_key, key)
+                    .await
+            }
+            _ if key.has_null() => Ok(Vec::new()),
             RelationKey::Direct(foreign_key) => {
                 self.reverse_direct(schema, step.table(), foreign_key, key)
                     .await
@@ -128,10 +134,6 @@ impl PgDocumentBuilder {
                     ));
                 };
                 self.reverse_local(schema, relation, parent_table, parent_pk, column, key)
-                    .await
-            }
-            RelationKey::Through(through) if *current_table == through.table => {
-                self.reverse_through_junction(schema, &through.table, &through.left_key, key)
                     .await
             }
             RelationKey::Through(through) => {
@@ -204,7 +206,8 @@ impl PgDocumentBuilder {
 
     /// Many-to-many, change on the junction itself: if the key already carries
     /// `left_key` (a composite junction key) use it directly — which also
-    /// handles deletes — otherwise look it up by the junction key.
+    /// handles deletes, and a key whose other part is null — otherwise look it
+    /// up by the junction key.
     async fn reverse_through_junction(
         &self,
         schema: &DatabaseSchema,
@@ -213,7 +216,13 @@ impl PgDocumentBuilder {
         junction_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
         if let Some((_, value)) = junction_key.0.iter().find(|(column, _)| column == left_key) {
-            return Ok(vec![value.clone()]);
+            return Ok(match value {
+                GenericValue::Null => Vec::new(),
+                value => vec![value.clone()],
+            });
+        }
+        if junction_key.has_null() {
+            return Ok(Vec::new());
         }
         let col_types = self.key_types(schema, junction, &junction_key.0).await?;
         let (sql, params) =

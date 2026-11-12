@@ -8,7 +8,9 @@
 //! a deleted child row still reaches its old parent through the pre-image.
 //! Backfill reads the partitions through the parent.
 //! A partition whose identity index leaves out the primary key (issue #224) is
-//! set to `FULL` alone, or, unmanaged, reported and its null-key delete skipped.
+//! set to `FULL` alone, or, unmanaged, reported: its delete arrives under a
+//! null key that addresses no document, while a child's old row still rebuilds
+//! its parent when the partitioned table is `FULL`.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -268,11 +270,12 @@ async fn a_partition_whose_identity_leaves_out_the_primary_key_is_set_to_full() 
 }
 
 /// The same partition with `manage_replica_identity = false`: the report names
-/// it as a correctness gap, and the stream skips the delete it can't address
-/// instead of emitting it under a null key.
+/// it as a correctness gap. Its delete arrives under a null key, which
+/// resolves to no document rather than to one rendered as `"null"`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn an_unmanaged_partition_without_the_key_is_reported_and_its_null_key_delete_skipped() {
+async fn an_unmanaged_partition_without_the_key_is_reported_and_its_null_key_delete_addresses_nothing()
+ {
     let (_container, pool, url, port) = keyless_partition_database().await;
     let spec = Arc::new(logs_spec());
     let capture = keyless_capture(&spec, &url, port, false);
@@ -291,12 +294,157 @@ async fn an_unmanaged_partition_without_the_key_is_reported_and_its_null_key_del
     assert!(!gap.will_manage(false));
 
     let changes = keyless_partition_changes(&capture, &pool).await;
+    let null_key = RowKey(vec![(column("id"), GenericValue::Null)]);
     assert_eq!(
         changes,
-        [("upsert", row_key(1)), ("upsert", row_key(1500))],
-        "no change is emitted under a null key: the update stays an upsert of its row, \
-         the unaddressable delete is skipped",
+        [
+            ("upsert", row_key(1)),
+            ("delete", null_key.clone()),
+            ("upsert", row_key(1500)),
+        ],
+        "the update stays an upsert of its row; the delete can't name its row",
     );
+    let builder = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
+        .await
+        .unwrap();
+    let resolved = builder
+        .resolve(&table("logs"), &null_key, None, None)
+        .await
+        .unwrap();
+    assert!(resolved.is_empty(), "{resolved:?}");
+}
+
+/// A partitioned `has_many` child whose partitioned table is `FULL` and one
+/// partition on an identity index holding the link but not the primary key,
+/// with management off. The partition's old row reaches the stream under the
+/// parent's relation, every column flagged: the key reads null, but the link
+/// is there, so a deleted child and a re-parented one still rebuild the parent
+/// they left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_keyless_child_partition_under_a_full_parent_still_rebuilds_the_parent_it_left() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd(["postgres", "-c", "wal_level=logical"])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text)",
+        "CREATE TABLE orders (id bigint PRIMARY KEY, user_id bigint NOT NULL, \
+         code text NOT NULL) PARTITION BY RANGE (id)",
+        "ALTER TABLE orders REPLICA IDENTITY FULL",
+        "CREATE TABLE orders_low PARTITION OF orders FOR VALUES FROM (0) TO (1000)",
+        "CREATE TABLE orders_high PARTITION OF orders FOR VALUES FROM (1000) TO (2000)",
+        "CREATE UNIQUE INDEX orders_low_link ON orders_low (user_id, code)",
+        "ALTER TABLE orders_low REPLICA IDENTITY USING INDEX orders_low_link",
+        "INSERT INTO users VALUES (77, 'ada@x.io'), (78, 'bob@x.io')",
+        "INSERT INTO orders VALUES (1, 77, 'a'), (2, 77, 'b')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let spec = Arc::new(users_spec());
+    let capture = keyless_capture(&spec, &url, port, false);
+    capture.prepare().await.unwrap();
+    assert_eq!(
+        identities(&pool, "orders%").await,
+        [
+            ("orders".to_owned(), "f".to_owned()),
+            ("orders_high".to_owned(), "d".to_owned()),
+            ("orders_low".to_owned(), "i".to_owned()),
+        ],
+        "nothing is altered when management is off",
+    );
+    let report = capture.inspect_pre_image(&spec.pre_images()).await.unwrap();
+    let [gap] = report.gaps.as_slice() else {
+        panic!("the child is a correctness gap: {report:?}");
+    };
+    assert_eq!(gap.missing_key, [column("id")]);
+    assert!(!gap.will_manage(false));
+
+    let mut stream = capture.live().await.unwrap();
+    for statement in [
+        "DELETE FROM orders WHERE id = 2",
+        "UPDATE orders SET user_id = 78 WHERE id = 1",
+        "INSERT INTO orders VALUES (1500, 78, 'sentinel')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let mut changes = Vec::new();
+    while changes.len() < 3 {
+        let (_, change) = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for a change")
+            .unwrap()
+            .unwrap();
+        changes.push(change);
+    }
+    let [delete, reparent, _sentinel] = changes.as_slice() else {
+        unreachable!()
+    };
+    assert!(
+        matches!(delete, ChangeEvent::Delete { .. }),
+        "the delete is emitted, not skipped: {delete:?}"
+    );
+    assert_eq!(
+        delete.key(),
+        &RowKey(vec![(column("id"), GenericValue::Null)])
+    );
+    assert!(
+        matches!(reparent, ChangeEvent::Upsert { .. }),
+        "{reparent:?}"
+    );
+    assert_eq!(reparent.key(), &row_key(1));
+
+    let builder = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
+        .await
+        .unwrap();
+    let resolve = async |change: &ChangeEvent| {
+        let mut ids = builder
+            .resolve(
+                change.table(),
+                change.key(),
+                change.before(),
+                change.after(),
+            )
+            .await
+            .unwrap();
+        ids.sort_by_key(DocumentId::rendered);
+        ids
+    };
+    assert_eq!(
+        resolve(delete).await,
+        [document_id("users", 77)],
+        "the deleted child's old row names its parent",
+    );
+    assert_eq!(
+        resolve(reparent).await,
+        [document_id("users", 77), document_id("users", 78)],
+        "the re-parented child rebuilds the parent it left and the one it joined",
+    );
+
+    let source::document::Document::Upsert { body, .. } =
+        builder.build(&document_id("users", 77)).await.unwrap()
+    else {
+        panic!("user 77 is still there");
+    };
+    let GenericValue::Map(body) = body else {
+        panic!("a document is an object: {body:?}");
+    };
+    assert!(
+        matches!(body.get("orders"), Some(GenericValue::Array(orders)) if orders.is_empty())
+            || matches!(body.get("orders"), None | Some(GenericValue::Null)),
+        "user 77 is rebuilt without its deleted and re-parented orders: {body:?}",
+    );
+}
+
+/// [`spec`]'s `users` index alone: `orders` as its partitioned `has_many`.
+fn users_spec() -> SourceSpec {
+    let users = spec().schema(&index_name("users")).unwrap().clone();
+    SourceSpec::new(BTreeMap::from([(index_name("users"), users)]))
 }
 
 /// `logs`, range-partitioned on `id` (the primary key), with one partition on

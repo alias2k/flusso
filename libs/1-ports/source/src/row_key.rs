@@ -10,6 +10,15 @@ use kernel::{ColumnName, GenericValue};
 pub struct RowKey(pub Vec<(ColumnName, GenericValue)>);
 
 impl RowKey {
+    /// Whether some part of the key is null. Such a key addresses no row and
+    /// no document: a null never equals a stored key, so a source reads it as
+    /// a change feed that left the key out.
+    pub fn has_null(&self) -> bool {
+        self.0
+            .iter()
+            .any(|(_, value)| matches!(value, GenericValue::Null))
+    }
+
     /// A one-column key from text a person typed, typed the way the database
     /// most likely holds it: an integer, else a uuid, else text.
     pub fn from_text(column: ColumnName, text: &str) -> Self {

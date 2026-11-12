@@ -480,13 +480,16 @@ impl DocumentBuilder for PgDocumentBuilder {
         let mut ids = Vec::new();
         let mut read = false;
         let mut skipped = 0_usize;
+        let mut unaddressed = 0_usize;
         let diff = RowDiff::new(key, before, after);
         for (name, schema) in self.spec.indexes() {
             let is_root = schema.table == *table;
             let mut seen = HashSet::new();
             if is_root {
                 read = true;
-                if self.reads.root(name).touched_by(&diff) {
+                if key.has_null() {
+                    unaddressed += 1;
+                } else if self.reads.root(name).touched_by(&diff) {
                     ids.push(DocumentId {
                         index: name.clone(),
                         key: key.clone(),
@@ -535,6 +538,12 @@ impl DocumentBuilder for PgDocumentBuilder {
         }
         if skipped > 0 {
             tracing::trace!(skipped, "update changed no column these documents read");
+        }
+        if unaddressed > 0 {
+            tracing::debug!(
+                unaddressed,
+                "a change whose key has a null part addresses no document of its own"
+            );
         }
         if !read {
             self.warn_unread(table);
