@@ -1,11 +1,13 @@
-//! The root row's own document follows the changed-columns rule, and a key
-//! with a null part addresses no document. These schemas resolve without
-//! touching the database, so the pool is never opened.
+//! The root row's own document follows the changed-columns rule, a key with a
+//! null part addresses no document, and a key carrying a hop's link names the
+//! parent itself. These schemas resolve without touching the database, so the
+//! pool is never opened.
 
 use std::collections::BTreeMap;
 
 use kernel::{
-    Column, Field, FieldName, FieldSource, FlussoType, GenericValue, Join, JoinKind, Relation,
+    Aggregate, AggregateKey, AggregateOp, Column, Field, FieldName, FieldSource, FlussoType,
+    GenericValue, Join, JoinKind, Relation, Through,
 };
 
 use super::*;
@@ -206,4 +208,188 @@ async fn a_child_change_with_a_null_key_still_rebuilds_the_parent_its_old_row_na
         .await
         .unwrap();
     assert!(ids.is_empty(), "nothing names a parent: {ids:?}");
+}
+
+fn users_id(id: i32) -> DocumentId {
+    DocumentId {
+        index: IndexName::try_new("users").unwrap(),
+        key: RowKey(vec![(column("id"), GenericValue::Int(id))]),
+    }
+}
+
+fn join_field(name: &str, table: &str, kind: JoinKind) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: TableName::try_new(table).unwrap(),
+            kind,
+            primary_key: column("id"),
+            nullable: true,
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: Vec::new(),
+            indexed: true,
+            on: vec![],
+        })),
+    }
+}
+
+/// `count: eventCount` over `events.user_id`, a table without a primary key.
+fn event_count() -> Field {
+    Field {
+        field: FieldName::try_new("eventCount").unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: TableName::try_new("events").unwrap(),
+            op: AggregateOp::Count,
+            key: AggregateKey::Direct(column("user_id")),
+            value_type: None,
+            filters: None,
+            distinct: false,
+            via: Vec::new(),
+            on: vec![],
+        })),
+    }
+}
+
+/// An `events` row keyed the way a table without a primary key is under
+/// `REPLICA IDENTITY FULL`: by every column.
+fn event(user_id: i32, note: Option<&str>) -> RowKey {
+    RowKey(vec![
+        (column("user_id"), GenericValue::Int(user_id)),
+        (column("kind"), GenericValue::String("click".into())),
+        (
+            column("note"),
+            note.map_or(GenericValue::Null, |note| GenericValue::String(note.into())),
+        ),
+    ])
+}
+
+#[tokio::test]
+async fn a_keyless_child_row_with_a_null_column_resolves_to_its_parent() {
+    let builder = builder_with(vec![event_count()]);
+    let events = TableName::try_new("events").unwrap();
+    for key in [event(77, None), event(77, Some("x"))] {
+        let ids = builder.resolve(&events, &key, None, None).await.unwrap();
+        assert_eq!(ids, [users_id(77)], "insert {key:?}");
+    }
+}
+
+/// A re-parenting update of a keyless row changes its key, so the stream emits
+/// a delete of the old key and an upsert of the new one; a delete logs no
+/// pre-image beyond that key. Each names its own parent.
+#[tokio::test]
+async fn a_keyless_child_resolves_a_reparent_and_a_delete_from_its_keys() {
+    let builder = builder_with(vec![event_count()]);
+    let events = TableName::try_new("events").unwrap();
+    let old = builder
+        .resolve(&events, &event(1, None), None, None)
+        .await
+        .unwrap();
+    let new = builder
+        .resolve(&events, &event(2, None), None, None)
+        .await
+        .unwrap();
+    assert_eq!((old, new), (vec![users_id(1)], vec![users_id(2)]));
+
+    let before = RowImage(event(3, None).0);
+    let deleted = builder
+        .resolve(&events, &event(3, None), Some(&before), None)
+        .await
+        .unwrap();
+    assert_eq!(deleted, [users_id(3)]);
+}
+
+#[tokio::test]
+async fn a_keyless_child_row_with_a_null_link_names_no_parent() {
+    let builder = builder_with(vec![event_count()]);
+    let events = TableName::try_new("events").unwrap();
+    let key = RowKey(vec![
+        (column("user_id"), GenericValue::Null),
+        (column("kind"), GenericValue::String("click".into())),
+    ]);
+    let ids = builder.resolve(&events, &key, None, None).await.unwrap();
+    assert!(ids.is_empty(), "{ids:?}");
+}
+
+#[tokio::test]
+async fn a_junction_key_names_its_parent_by_left_key_alone() {
+    let builder = builder_with(vec![join_field(
+        "tags",
+        "tags",
+        JoinKind::ManyToMany {
+            through: Through {
+                table: TableName::try_new("user_tags").unwrap(),
+                left_key: column("user_id"),
+                right_key: column("tag_id"),
+                filters: None,
+            },
+        },
+    )]);
+    let user_tags = TableName::try_new("user_tags").unwrap();
+    let resolve = async |user_id: GenericValue, tag_id: GenericValue| {
+        let key = RowKey(vec![
+            (column("user_id"), user_id),
+            (column("tag_id"), tag_id),
+        ]);
+        builder.resolve(&user_tags, &key, None, None).await.unwrap()
+    };
+    assert_eq!(
+        resolve(GenericValue::Int(7), GenericValue::Null).await,
+        [users_id(7)],
+        "a null in the other part still names the parent"
+    );
+    assert!(
+        resolve(GenericValue::Null, GenericValue::Int(3))
+            .await
+            .is_empty(),
+        "a null `left_key` links no parent"
+    );
+}
+
+#[tokio::test]
+async fn a_belongs_to_target_with_a_null_key_resolves_nothing_without_a_query() {
+    let builder = builder_with(vec![join_field(
+        "team",
+        "teams",
+        JoinKind::BelongsTo {
+            column: column("team_id"),
+        },
+    )]);
+    let teams = TableName::try_new("teams").unwrap();
+    let before = RowImage(vec![
+        (column("id"), GenericValue::Null),
+        (column("name"), GenericValue::String("core".into())),
+    ]);
+    for before in [None, Some(&before)] {
+        let ids = builder
+            .resolve(&teams, &null_key(), before, None)
+            .await
+            .unwrap();
+        assert!(ids.is_empty(), "{ids:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_self_referencing_row_with_a_null_key_rebuilds_the_parent_its_old_row_names() {
+    let builder = builder_with(vec![join_field(
+        "children",
+        "users",
+        JoinKind::HasMany {
+            foreign_key: column("parent_id"),
+        },
+    )]);
+    let before = RowImage(vec![
+        (column("id"), GenericValue::Null),
+        (column("parent_id"), GenericValue::Int(5)),
+    ]);
+    let ids = builder
+        .resolve(&users(), &null_key(), Some(&before), None)
+        .await
+        .unwrap();
+    assert_eq!(ids, [users_id(5)], "the old parent, never the row itself");
 }

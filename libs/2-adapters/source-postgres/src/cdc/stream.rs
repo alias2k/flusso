@@ -441,7 +441,8 @@ fn addressable(relation: &Relation, key: &RowKey) -> bool {
 /// warned once per relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Unkeyed {
-    /// A delete whose old row was logged: emitted, so parents still rebuild.
+    /// A delete whose old row was logged: emitted, so parents rebuild where it
+    /// carries the link.
     DeleteTraced,
     /// A delete that logged neither: emitted, but it reaches nothing.
     DeleteUntraced,
@@ -454,7 +455,8 @@ impl Unkeyed {
         match self {
             Self::DeleteTraced => {
                 "a delete arrived without its primary key: a document keyed by the row can't be \
-                 addressed and stays in the index; parents are still rebuilt from the old row"
+                 addressed and stays in the index; parents are rebuilt only where the old row carries \
+                 the link"
             }
             Self::DeleteUntraced => {
                 "a delete arrived without its primary key or its old row: neither the row's key \

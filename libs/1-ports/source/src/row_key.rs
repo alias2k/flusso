@@ -10,9 +10,11 @@ use kernel::{ColumnName, GenericValue};
 pub struct RowKey(pub Vec<(ColumnName, GenericValue)>);
 
 impl RowKey {
-    /// Whether some part of the key is null. Such a key addresses no row and
-    /// no document: a null never equals a stored key, so a source reads it as
-    /// a change feed that left the key out.
+    /// Whether some part of the key is null. Such a key matches no stored row
+    /// by equality, so it addresses no document. Two ways to get one: a table
+    /// with a primary key whose change feed left the key out, or a table
+    /// without one, keyed by its replica identity's columns (every column
+    /// under `FULL`), where a null is ordinary row data.
     pub fn has_null(&self) -> bool {
         self.0
             .iter()

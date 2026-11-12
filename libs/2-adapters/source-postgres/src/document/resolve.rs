@@ -12,6 +12,13 @@
 //! document they used to sit in. Without a pre-image (a table whose replica
 //! identity doesn't carry the link column) only the current parent is found.
 //!
+//! When the changed row's key itself carries that link column, the parent is
+//! read straight from the key, with no query: the value a reverse query would
+//! return for that row, and still there once the row is deleted. That is how
+//! a table without a primary key resolves: under `REPLICA IDENTITY FULL` its
+//! change is keyed by every column, so its link is in the key, and a null in
+//! another column is ordinary row data. A null link links no parent.
+//!
 //! A hop's `on` pairs are not applied: the key alone finds every parent a row
 //! is linked to, a superset of the ones it joins, and each rebuild evaluates
 //! the pairs. A row that only changes a `related` column keeps its key, so the
@@ -31,8 +38,9 @@ impl PgDocumentBuilder {
     /// Resolve one path (root → … → changed table) back to root key values, by
     /// walking the relations from the changed table up to the root. `before`
     /// feeds only the first hop: rows further up are matched by their current
-    /// state. A key with a null part (a change feed that left the key out)
-    /// matches no stored row, so its hop reads only `before`.
+    /// state. A key carrying the hop's link column names the parent itself; a
+    /// key with a null part and no link in it matches no stored row, so its
+    /// hop reads only `before` (see [`reverse_hop`](Self::reverse_hop)).
     pub(super) async fn resolve_path(
         &self,
         schema: &IndexSchema,
@@ -108,6 +116,16 @@ impl PgDocumentBuilder {
     /// values via `step`. `parent_table`/`parent_pk` name the hop's parent
     /// side — a `belongs_to` stores its key *there*, so its reverse query runs
     /// against the parent table rather than the changed one.
+    ///
+    /// A key that carries the hop's link column (see [`link_on_row`]) answers
+    /// without a query. Otherwise a key with a null part runs none: it matches
+    /// no stored row, and binding the null would fail the query. Only a table
+    /// with a primary key reaches that, when its old row left the key out (a
+    /// partition decoded under its partitioned parent); its parent comes from
+    /// `before` alone, since such an update carries no post-image. A table
+    /// without one never does on an index that builds: under `FULL` its key is
+    /// every column, so a link on its row is in the key, and any other relation
+    /// over it fails every document build first ("has no primary key").
     async fn reverse_hop(
         &self,
         schema: &DatabaseSchema,
@@ -117,12 +135,22 @@ impl PgDocumentBuilder {
         parent_pk: &ColumnName,
         key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
+        if let Some(link) = link_on_row(step, current_table)
+            && let Some((_, value)) = key.0.iter().find(|(column, _)| column == link)
+        {
+            return Ok(match value {
+                GenericValue::Null => Vec::new(),
+                value => vec![value.clone()],
+            });
+        }
+        if key.has_null() {
+            return Ok(Vec::new());
+        }
         match step.key() {
             RelationKey::Through(through) if *current_table == through.table => {
                 self.reverse_through_junction(schema, &through.table, &through.left_key, key)
                     .await
             }
-            _ if key.has_null() => Ok(Vec::new()),
             RelationKey::Direct(foreign_key) => {
                 self.reverse_direct(schema, step.table(), foreign_key, key)
                     .await
@@ -204,10 +232,9 @@ impl PgDocumentBuilder {
         self.run_reverse(sql, params, left_key.as_ref()).await
     }
 
-    /// Many-to-many, change on the junction itself: if the key already carries
-    /// `left_key` (a composite junction key) use it directly — which also
-    /// handles deletes, and a key whose other part is null — otherwise look it
-    /// up by the junction key.
+    /// Many-to-many, change on the junction itself, keyed without `left_key`
+    /// (a surrogate key): look `left_key` up by the junction key. A key that
+    /// carries it never gets here (see [`reverse_hop`](Self::reverse_hop)).
     async fn reverse_through_junction(
         &self,
         schema: &DatabaseSchema,
@@ -215,15 +242,6 @@ impl PgDocumentBuilder {
         left_key: &ColumnName,
         junction_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
-        if let Some((_, value)) = junction_key.0.iter().find(|(column, _)| column == left_key) {
-            return Ok(match value {
-                GenericValue::Null => Vec::new(),
-                value => vec![value.clone()],
-            });
-        }
-        if junction_key.has_null() {
-            return Ok(Vec::new());
-        }
         let col_types = self.key_types(schema, junction, &junction_key.0).await?;
         let (sql, params) =
             query::reverse_query(schema, junction, left_key, &junction_key.0, &col_types)?;
@@ -278,7 +296,8 @@ impl PgDocumentBuilder {
 
 /// The column on `row_table` that names its parent across `step`, when the
 /// link lives on that row: a direct child's or `via` table's `foreign_key`, or
-/// a junction's `left_key` when the junction itself changed.
+/// a junction's `left_key` when the junction itself changed. Read from the
+/// pre-image on the first hop, and from the key on any hop that carries it.
 fn link_on_row<'a>(step: Step<'a>, row_table: &TableName) -> Option<&'a ColumnName> {
     step.row_link()
         .filter(|(table, _)| *table == row_table)

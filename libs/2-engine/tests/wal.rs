@@ -9,7 +9,10 @@
 //! expression rebuilds from a change to any of its operands, and from nothing
 //! else.
 //! A child kept on a `USING INDEX` identity carrying its link still traces
-//! deleted and re-parented rows to the old parent.
+//! deleted and re-parented rows to the old parent. A junction without a
+//! primary key, keyed by its whole row, rebuilds every parent its rows link,
+//! nulls in its other columns included; a `count:` over a child without one
+//! stops the engine on its first change instead of resolving to nothing.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -1633,6 +1636,194 @@ async fn an_aggregate_expression_rebuilds_from_each_operand() {
     engine.abort();
 }
 
+async fn start_logical_postgres() -> (
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    u16,
+    String,
+) {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    (container, port, url)
+}
+
+fn replication(port: u16) -> ReplicationConfig {
+    ReplicationConfig::new(
+        "127.0.0.1",
+        "postgres",
+        "postgres",
+        "postgres",
+        "flusso",
+        "flusso",
+    )
+    .with_port(port)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_keyless_junction_rebuilds_every_parent_its_rows_link() {
+    let (_container, port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text)",
+        "CREATE TABLE tags (id int PRIMARY KEY, name text)",
+        "CREATE TABLE user_tags (user_id int, tag_id int, note text)",
+        "ALTER TABLE user_tags REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE users, tags, user_tags",
+        "INSERT INTO users VALUES (1, 'a@x'), (2, 'b@x')",
+        "INSERT INTO tags VALUES (10, 'red'), (11, 'blue')",
+        "INSERT INTO user_tags VALUES (1, 10, NULL)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(users_with_keyless_tags_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    expect_op(&mut engine, &recorded, "upsert users 1").await;
+    expect_op(&mut engine, &recorded, "upsert users 2").await;
+
+    // (tag count, tag names) of user `id`.
+    let tags = async |id: i32| {
+        let id = DocumentId {
+            index: index_name("users"),
+            key: RowKey(vec![(column("id"), kernel::GenericValue::Int(id))]),
+        };
+        let Document::Upsert { body, .. } = documents.build(&id).await.unwrap() else {
+            panic!("users {id:?} is not a document");
+        };
+        let body = sink::to_json(&body);
+        let mut names: Vec<String> = body["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tag| tag["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort_unstable();
+        (body["tagCount"].as_i64().unwrap(), names)
+    };
+    assert_eq!(tags(1).await, (1, vec!["red".to_owned()]));
+
+    let marker_sql = "INSERT INTO users (id) VALUES ($1)";
+    let mut marker = 900;
+    let mut rebuilt = async |sql: &'static str| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            sql,
+            marker_sql,
+            marker,
+            &format!("upsert users {marker}"),
+        )
+        .await
+    };
+
+    assert_eq!(
+        rebuilt("INSERT INTO user_tags VALUES (1, 11, NULL)").await,
+        sorted(&["upsert users 1"]),
+        "a null `note` is row data, not a missing key"
+    );
+    assert_eq!(
+        tags(1).await,
+        (2, vec!["blue".to_owned(), "red".to_owned()])
+    );
+    assert_eq!(
+        rebuilt("UPDATE user_tags SET note = 'pinned' WHERE tag_id = 11").await,
+        sorted(&["upsert users 1"])
+    );
+    assert_eq!(
+        rebuilt("UPDATE user_tags SET user_id = 2 WHERE tag_id = 11").await,
+        sorted(&["upsert users 1", "upsert users 2"]),
+        "a re-parented row rebuilds the parent it left and the one it joined"
+    );
+    assert_eq!(tags(1).await, (1, vec!["red".to_owned()]));
+    assert_eq!(tags(2).await, (1, vec!["blue".to_owned()]));
+    assert_eq!(
+        rebuilt("DELETE FROM user_tags WHERE tag_id = 11").await,
+        sorted(&["upsert users 2"])
+    );
+    assert_eq!(tags(2).await, (0, Vec::new()));
+    assert_eq!(
+        rebuilt("INSERT INTO user_tags VALUES (NULL, 10, NULL)").await,
+        Vec::<String>::new(),
+        "a null `user_id` links no parent"
+    );
+
+    engine.abort();
+}
+
+/// A table without a primary key can't be a relation's target outside a
+/// junction: every document build needs its key (issue #225). Its change used
+/// to resolve to nothing when a column was null, so the index stayed stale with
+/// no error; it now names the parent, whose build fails loudly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_change_on_a_keyless_counted_table_stops_the_engine() {
+    let (_container, port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, email text)",
+        "CREATE TABLE events (user_id int, kind text, note text)",
+        "ALTER TABLE events REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR TABLE users, events",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let documents = PgDocumentBuilder::connect(&url, Arc::new(users_with_event_count_spec()))
+        .await
+        .unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::new(documents),
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    sqlx::query("INSERT INTO events VALUES (1, 'click', NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let stopped = tokio::time::timeout(Duration::from_secs(30), engine)
+        .await
+        .expect("the engine kept running: the change resolved to nothing")
+        .unwrap();
+    let error = stopped.unwrap_err().to_string();
+    assert!(error.contains("has no primary key"), "{error}");
+    assert!(recorded.lock().unwrap().is_empty());
+}
+
 /// One deployment the way the daemon runs it: stage the sink engine, then run
 /// it and the ingest engine together until either stops. `Ok` when the live
 /// stream ends; the first engine error otherwise.
@@ -2282,6 +2473,80 @@ fn order_values_spec() -> SourceSpec {
         (index_name("orders"), orders),
         (index_name("customers"), customers),
     ]))
+}
+
+fn users_schema(fields: Vec<Field>) -> IndexSchema {
+    let mut all = vec![column_field("email", "email")];
+    all.extend(fields);
+    IndexSchema {
+        version: 1,
+        table: table("users"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: all,
+    }
+}
+
+/// `users` with `tags` (many-to-many) and `tagCount` (a count), both through
+/// `user_tags`, a junction without a primary key.
+fn users_with_keyless_tags_spec() -> SourceSpec {
+    let through = || Through {
+        table: table("user_tags"),
+        left_key: column("user_id"),
+        right_key: column("tag_id"),
+        filters: None,
+    };
+    let tags = Join {
+        table: table("tags"),
+        kind: JoinKind::ManyToMany { through: through() },
+        primary_key: column("id"),
+        nullable: true,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields: vec![column_field("name", "name")],
+        indexed: true,
+        on: vec![],
+    };
+    let tag_count = Aggregate {
+        table: table("tags"),
+        op: AggregateOp::Count,
+        key: AggregateKey::Through(through()),
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via: Vec::new(),
+        on: vec![],
+    };
+    let schema = users_schema(vec![
+        Field {
+            field: field("tags"),
+            options: Default::default(),
+            emit: true,
+            source: FieldSource::Relation(Relation::Join(tags)),
+        },
+        aggregate_field("tagCount", tag_count),
+    ]);
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
+}
+
+/// `users` counting `events`, a table without a primary key.
+fn users_with_event_count_spec() -> SourceSpec {
+    let events = Aggregate {
+        table: table("events"),
+        op: AggregateOp::Count,
+        key: AggregateKey::Direct(column("user_id")),
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via: Vec::new(),
+        on: vec![],
+    };
+    let schema = users_schema(vec![aggregate_field("eventCount", events)]);
+    SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))
 }
 
 fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {

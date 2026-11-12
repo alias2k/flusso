@@ -116,6 +116,9 @@ pub struct PgDocumentBuilder {
     col_type_cache: Arc<Mutex<ColTypeCache>>,
     /// Tables a change arrived for that no index reads, already warned about.
     unread_warned: Arc<Mutex<HashSet<TableName>>>,
+    /// Root tables without a primary key already warned about for a key with
+    /// a null part.
+    keyless_warned: Arc<Mutex<HashSet<TableName>>>,
 }
 
 impl PgDocumentBuilder {
@@ -127,6 +130,7 @@ impl PgDocumentBuilder {
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: Arc::new(Mutex::new(HashMap::new())),
             unread_warned: Arc::new(Mutex::new(HashSet::new())),
+            keyless_warned: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -145,6 +149,37 @@ impl PgDocumentBuilder {
                 "a change arrived for a table no index reads and was dropped; if it is a \
                  partition, publish its partitioned table via the root \
                  (publish_via_partition_root)",
+            );
+        }
+    }
+
+    /// Warn, once per table, that a root row keyed by something other than the
+    /// index's `primary_key` has a null in its key. That is a table without a
+    /// primary key: its changes are keyed by the replica identity's columns
+    /// (every column under `FULL`), where a null is ordinary row data, and a
+    /// key with a null addresses no document. A key that *is* the primary key
+    /// with a null in it is a change feed that left it out, which the stream
+    /// already warned about.
+    fn warn_keyless_root(&self, schema: &IndexSchema, table: &TableName, key: &RowKey) {
+        let keyed_by_primary_key = matches!(
+            key.0.as_slice(),
+            [(column, _)] if Some(column) == schema.primary_key.as_ref()
+        );
+        if keyed_by_primary_key {
+            return;
+        }
+        let first = self
+            .keyless_warned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(table.clone());
+        if first {
+            tracing::warn!(
+                table = %table,
+                remediation = "give the table a primary key",
+                "a change on a root table without a primary key has a NULL in a column that \
+                 keys it, so it addresses no document; that row's document is not built or \
+                 updated",
             );
         }
     }
@@ -489,6 +524,7 @@ impl DocumentBuilder for PgDocumentBuilder {
                 read = true;
                 if key.has_null() {
                     unaddressed += 1;
+                    self.warn_keyless_root(schema, table, key);
                 } else if self.reads.root(name).touched_by(&diff) {
                     ids.push(DocumentId {
                         index: name.clone(),
