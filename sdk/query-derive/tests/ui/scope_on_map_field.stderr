@@ -1,0 +1,5 @@
+error: `title` is a `map` in the schema, so it has no level to rename — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`
+  --> tests/ui/scope_on_map_field.rs:11:22
+   |
+11 |     #[flusso(scope = "Titles")]
+   |                      ^^^^^^^^

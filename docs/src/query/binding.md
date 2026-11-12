@@ -92,7 +92,7 @@ pub mod flusso_user_query {
 }
 ```
 
-Rename a generated scope from the field, and everything under it follows: `#[flusso(scope = "Purchases")]` on `orders` gives `Purchases::total()` and `PurchasesItems::quantity()`. Only a root nested or object field can carry it, and only one the index searches: on an `indexed: false` field, which gets no handle, it's a compile error. Rename the module with `#[flusso(index = "users", scope_mod = "user_queries")]`.
+Rename a generated scope from the field, and everything under it follows: `#[flusso(scope = "Purchases")]` on `orders` gives `Purchases::total()` and `PurchasesItems::quantity()`. It goes on a field of the `FlussoRoot` struct whose schema field is a `nested` or `object` level the index searches, and nowhere else: a leaf, a `map`, a `json` object, an `indexed: false` field, a `#[serde(flatten)]` field, and any field of a `FlussoFragment` have no generated scope to rename, so `scope` there is a compile error. A `#[flusso(skip)]` field still names its level by its key, so `scope` on one at a `nested` or `object` level renames it; that is also how to rename a level a flattened type carries. A level takes one name: a second `scope` for the same key is a compile error. Rename the module with `#[flusso(index = "users", scope_mod = "user_queries")]`.
 
 Finally the root bakes the resolved subtree into const data and drives the check into every fragment it embeds:
 

@@ -1,0 +1,11 @@
+error: a fragment generates no query scopes, so `scope` here renames nothing — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`
+  --> tests/ui/scope_in_fragment.rs:12:22
+   |
+12 |     #[flusso(scope = "State")]
+   |                      ^^^^^^^
+
+error: a fragment generates no query scopes, so `scope` here renames nothing — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`
+  --> tests/ui/scope_in_fragment.rs:14:22
+   |
+14 |     #[flusso(scope = "Delivery")]
+   |                      ^^^^^^^^^^

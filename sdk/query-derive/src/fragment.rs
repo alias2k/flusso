@@ -74,7 +74,21 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         Err(error) => return error.to_compile_error(),
     };
 
-    embeddable(&input.ident, &fields)
+    let mut out = embeddable(&input.ident, &fields);
+    for renamed in fields.iter().filter_map(|field| field.scope.as_ref()) {
+        out.extend(
+            syn::Error::new(
+                renamed.span(),
+                format!(
+                    "a fragment generates no query scopes, so `scope` here renames nothing — \
+                     {}; remove `scope`",
+                    doc::SCOPE_ALLOWED
+                ),
+            )
+            .to_compile_error(),
+        );
+    }
+    out
 }
 
 /// Make a **schema-bound** struct embeddable — a root, or a legacy `path =` child.

@@ -1,0 +1,5 @@
+error: `cache` is not a field of index `users`, so it has no level to rename — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`
+  --> tests/ui/scope_on_skipped_field.rs:11:28
+   |
+11 |     #[flusso(skip, scope = "Cache")]
+   |                            ^^^^^^^

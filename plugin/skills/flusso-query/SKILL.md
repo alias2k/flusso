@@ -27,7 +27,8 @@ a shape with no index and no path, validated by whichever root embeds it. So one
 several paths or indexes; embed it twice and it is checked twice. Generated scope types live in a
 `flusso_<root>_query` module (`flusso_user_query::Orders`, `flusso_user_query::OrdersItems`), never
 in your namespace, so a struct already named after a level is fine. Import what you query. Rename a
-level with `#[flusso(scope = "Purchases")]` on the root field, or the module with
+level with `#[flusso(scope = "Purchases")]` on the root field at that `nested` or `object` level
+(anywhere else it is a compile error), or the module with
 `#[flusso(scope_mod = "user_queries")]`.
 
 ## Read next, when the task reaches it
