@@ -152,8 +152,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   writes and reads back. The sink's is one sequential test, since it changes process-wide state:
   `SSL_CERT_FILE` names the demo CA (an OS-trust-store client accepts, the pinned sink still
   refuses), then both checks run with no process-default rustls provider and again with `ring`
-  installed. The sink's error string keeps only reqwest's top line, so its refusal is pinned by
-  difference.
+  installed. The refusal must name the certificate: the sink renders a transport error's whole
+  source chain (`transport.rs`'s `request_error`).
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update

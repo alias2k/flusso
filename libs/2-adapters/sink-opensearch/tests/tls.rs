@@ -14,10 +14,10 @@
 //! 2. **No process-default rustls provider** (asserted; the client falls back
 //!    to aws-lc-rs):
 //!    - `tls_verify = true` refuses the certificate: `ensure_index` and a flush
-//!      fail promptly with a transport error, never a panic or a hang. The
-//!      certificate names `127.0.0.1` and the OS store trusts its issuer, so
-//!      the refusal is the Mozilla bundle (`tls_certs_only`) in force, not the
-//!      OS store.
+//!      fail well within the request timeout, never a panic or a hang, and the
+//!      error names the certificate as its cause. The certificate names
+//!      `127.0.0.1` and the OS store trusts its issuer, so the refusal is the
+//!      Mozilla bundle (`tls_certs_only`) in force, not the OS store.
 //!    - `tls_verify = false` creates the index, flushes a document, and the
 //!      document reads back over `https://`.
 //! 3. **`ring` installed as the process default**, as `pgwire-replication`
@@ -63,9 +63,11 @@ const PASSWORD: &str = "Fl-usso_e2e_9Tls!";
 const HASH: u32 = 0x239;
 /// Where the demo installer writes the CA that signed the HTTP certificate.
 const ROOT_CA: &str = "/usr/share/opensearch/config/root-ca.pem";
-/// Long enough for a TLS handshake on a loaded runner, short enough that a
-/// hang fails the test instead of the nextest slow-timeout.
-const PROMPT: Duration = Duration::from_secs(30);
+/// The sink's request timeout.
+const TIMEOUT_SECS: u64 = 10;
+/// A refusal returns well within the request timeout: a request that timed out
+/// is not a refused certificate, whatever its message says.
+const PROMPT: Duration = Duration::from_secs(TIMEOUT_SECS / 2);
 
 /// A client for the test's own reads: it trusts anything, like `curl -k`.
 fn insecure_reader() -> reqwest::Client {
@@ -124,7 +126,7 @@ fn sink(base: &str, tls_verify: bool) -> OpensearchSink {
         tls_verify,
         batch_size: 1000,
         max_bytes: 10 * 1024 * 1024,
-        timeout_secs: 10,
+        timeout_secs: TIMEOUT_SECS,
         max_retries: 0,
         pipeline: None,
         number_of_shards: 1,
@@ -170,10 +172,10 @@ fn upsert(logical: &str, id: &str, title: &str) -> Envelope {
     )
 }
 
-/// A request that never got an HTTP response: what a refused handshake
-/// surfaces as. A status error or a panic is not this.
-fn is_transport_error(message: &str) -> bool {
-    message.contains("error sending request")
+/// The sink's error names the certificate as the cause, from the source chain
+/// it renders (rustls says `invalid peer certificate: UnknownIssuer`).
+fn is_certificate_error(message: &str) -> bool {
+    message.to_lowercase().contains("certificate")
 }
 
 /// The sink with `tls_verify = true` refuses the demo certificate on every
@@ -182,22 +184,30 @@ async fn verifying_sink_refuses_the_certificate(base: &str, logical: &str) {
     let sink = sink(base, true);
     let mapping = mapping(logical);
 
-    let ensure = tokio::time::timeout(PROMPT, sink.ensure_index(&mapping))
+    let started = Instant::now();
+    let error = sink
+        .ensure_index(&mapping)
         .await
-        .expect("ensure_index must fail promptly, not hang");
-    let error = ensure
         .expect_err("an untrusted certificate must be refused")
         .to_string();
-    assert!(is_transport_error(&error), "not a transport error: {error}");
+    assert!(started.elapsed() < PROMPT, "refused too slowly: {error}");
+    assert!(
+        is_certificate_error(&error),
+        "not a certificate error: {error}"
+    );
 
     sink.apply(&upsert(logical, "1", "refused")).await.unwrap();
-    let flush = tokio::time::timeout(PROMPT, sink.flush(true))
+    let started = Instant::now();
+    let error = sink
+        .flush(true)
         .await
-        .expect("flush must fail promptly, not hang");
-    let error = flush
         .expect_err("an untrusted certificate must be refused")
         .to_string();
-    assert!(is_transport_error(&error), "not a transport error: {error}");
+    assert!(started.elapsed() < PROMPT, "refused too slowly: {error}");
+    assert!(
+        is_certificate_error(&error),
+        "not a certificate error: {error}"
+    );
 }
 
 /// The sink with `tls_verify = false` creates the index, flushes a document,

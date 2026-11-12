@@ -8,10 +8,11 @@
 //! impl drives them from `ensure_index`/`mark_seeded`/`reindex`.
 
 use serde_json::{Value, json};
-use sink::{Result, SinkError};
+use sink::Result;
 use tracing::debug;
 
 use crate::OpensearchSink;
+use crate::transport::request_error;
 
 impl OpensearchSink {
     /// Point the convenience alias `alias` (the logical index name) at
@@ -56,7 +57,7 @@ impl OpensearchSink {
             .maybe_auth(self.client.get(&url))
             .send()
             .await
-            .map_err(|e| SinkError::Write(format!("alias lookup failed: {e}")))?;
+            .map_err(|e| request_error("alias lookup failed", e))?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
@@ -68,7 +69,7 @@ impl OpensearchSink {
         let body: Value = resp
             .json()
             .await
-            .map_err(|e| SinkError::Write(format!("failed to parse alias response: {e}")))?;
+            .map_err(|e| request_error("failed to parse alias response", e))?;
         Ok(body
             .as_object()
             .map(|indexes| indexes.keys().cloned().collect())
@@ -94,7 +95,7 @@ impl OpensearchSink {
             .maybe_auth(self.client.get(&url))
             .send()
             .await
-            .map_err(|e| SinkError::Write(format!("meta get failed: {e}")))?;
+            .map_err(|e| request_error("meta get failed", e))?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -104,7 +105,7 @@ impl OpensearchSink {
             let body: Value = resp
                 .json()
                 .await
-                .map_err(|e| SinkError::Write(format!("failed to parse meta response: {e}")))?;
+                .map_err(|e| request_error("failed to parse meta response", e))?;
             Ok(Some(body))
         } else {
             Err(Self::status_error(resp, "meta get failed").await)

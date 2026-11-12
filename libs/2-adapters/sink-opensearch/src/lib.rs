@@ -164,7 +164,7 @@ impl OpensearchSink {
 
         let client = builder
             .build()
-            .map_err(|e| SinkError::Write(format!("failed to build HTTP client: {e}")))?;
+            .map_err(|e| transport::request_error("failed to build HTTP client", e))?;
 
         let url = config
             .resolve_url(name)

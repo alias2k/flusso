@@ -6,6 +6,14 @@ A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk opt
 
 `<NAME>` in the override variables is the uppercased sink name: `[sinks.primary]` reads `PRIMARY_OPENSEARCH_URL`. Precedence is in [Environment variables](environment.md#config-values).
 
+A request that gets no HTTP response is reported, in the log and in [`/status`](http.md#get-status), with its cause. A certificate `tls_verify` refuses reads:
+
+```text
+write failed: listing indices failed: error sending request for url (https://127.0.0.1:9200/_cat/indices/users_00000239?h=index&format=json): client error (Connect): invalid peer certificate: UnknownIssuer
+```
+
+A refused connection ends in `tcp connect error: Connection refused` instead. Credentials written into the `url` (`https://user:pass@host`) never appear in the message.
+
 ## Cluster requirements
 
 | Requirement | Detail |
