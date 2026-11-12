@@ -12,6 +12,12 @@ pub enum Error {
     #[error("invalid base url: {0}")]
     Url(String),
 
+    /// A CA certificate handed to [`crate::Client::ca_pem`] or
+    /// [`crate::Client::ca_file`] could not be used: the file is unreadable,
+    /// holds no PEM certificate, or a certificate in it does not parse.
+    #[error("CA certificate: {0}")]
+    Ca(String),
+
     /// The underlying HTTP transport failed (connection, timeout, TLS, …).
     #[error("http transport error: {0}")]
     Http(#[from] reqwest::Error),

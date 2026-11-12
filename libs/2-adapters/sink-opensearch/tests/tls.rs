@@ -1,5 +1,6 @@
-//! Real-service e2e for the sink over `https://` (issue #239): the trust
-//! roots the sink pins, and the crypto provider underneath them.
+//! Real-service e2e for the sink over `https://` (issues #239, #243): the trust
+//! roots the sink pins, a private CA added with `ca_file`, and the crypto
+//! provider underneath them.
 //!
 //! The container is the stock OpenSearch image with its security plugin's
 //! **demo configuration**: TLS on the HTTP layer with a certificate signed by
@@ -17,12 +18,15 @@
 //!      fail well within the request timeout, never a panic or a hang, and the
 //!      error names the certificate as its cause. The certificate names
 //!      `127.0.0.1` and the OS store trusts its issuer, so the refusal is the
-//!      Mozilla bundle (`tls_certs_only`) in force, not the OS store.
-//!    - `tls_verify = false` creates the index, flushes a document, and the
-//!      document reads back over `https://`.
+//!      Mozilla bundle (`tls_certs_only`) in force, not the OS store. The sink
+//!      allows six bulk retries, whose backoff alone outlasts the deadline, so
+//!      a prompt flush failure also proves a refused certificate is not retried.
+//!    - `tls_verify = true` with `ca_file` naming the demo root CA creates the
+//!      index, flushes a document, and the document reads back.
+//!    - `tls_verify = false` does the same with no `ca_file`.
 //! 3. **`ring` installed as the process default**, as `pgwire-replication`
 //!    does on its first TLS connection: new sinks (a reqwest client keeps the
-//!    provider it was built with), the same two checks, on a second index.
+//!    provider it was built with), the same three checks, on other indexes.
 //!
 //! The steps share process-wide state (the provider, `SSL_CERT_FILE`), so they
 //! are one test: the binary is safe under plain `cargo test` as well as nextest.
@@ -43,7 +47,7 @@
 )]
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use kernel::{
@@ -68,6 +72,20 @@ const TIMEOUT_SECS: u64 = 10;
 /// A refusal returns well within the request timeout: a request that timed out
 /// is not a refused certificate, whatever its message says.
 const PROMPT: Duration = Duration::from_secs(TIMEOUT_SECS / 2);
+/// Bulk retries for the refusing sink: their backoff (200 ms doubling, 12.6 s
+/// in all) outlasts [`PROMPT`], so a prompt failure was not retried.
+const RETRIES: u32 = 6;
+
+/// How a sink verifies the cluster's certificate.
+#[derive(Clone, Copy)]
+enum Trust<'a> {
+    /// The pinned Mozilla bundle only.
+    Pinned,
+    /// The Mozilla bundle plus this `ca_file`.
+    CaFile(&'a Path),
+    /// `tls_verify = false`.
+    Off,
+}
 
 /// A client for the test's own reads: it trusts anything, like `curl -k`.
 fn insecure_reader() -> reqwest::Client {
@@ -118,16 +136,20 @@ async fn wait_until_healthy(base: &str) {
     }
 }
 
-fn sink(base: &str, tls_verify: bool) -> OpensearchSink {
+fn sink(base: &str, trust: Trust<'_>) -> OpensearchSink {
     let config = OpensearchConfig {
         url: Secret::Value(base.to_owned()),
         username: Some(Secret::Value("admin".to_owned())),
         password: Some(Secret::Value(PASSWORD.to_owned())),
-        tls_verify,
+        tls_verify: !matches!(trust, Trust::Off),
+        ca_file: match trust {
+            Trust::CaFile(path) => Some(path.to_owned()),
+            Trust::Pinned | Trust::Off => None,
+        },
         batch_size: 1000,
         max_bytes: 10 * 1024 * 1024,
         timeout_secs: TIMEOUT_SECS,
-        max_retries: 0,
+        max_retries: RETRIES,
         pipeline: None,
         number_of_shards: 1,
         number_of_replicas: 0,
@@ -178,10 +200,10 @@ fn is_certificate_error(message: &str) -> bool {
     message.to_lowercase().contains("certificate")
 }
 
-/// The sink with `tls_verify = true` refuses the demo certificate on every
-/// request path, promptly.
+/// The sink with `tls_verify = true` and no `ca_file` refuses the demo
+/// certificate on every request path, promptly: the bulk path does not retry.
 async fn verifying_sink_refuses_the_certificate(base: &str, logical: &str) {
-    let sink = sink(base, true);
+    let sink = sink(base, Trust::Pinned);
     let mapping = mapping(logical);
 
     let started = Instant::now();
@@ -203,17 +225,18 @@ async fn verifying_sink_refuses_the_certificate(base: &str, logical: &str) {
         .await
         .expect_err("an untrusted certificate must be refused")
         .to_string();
-    assert!(started.elapsed() < PROMPT, "refused too slowly: {error}");
+    assert!(started.elapsed() < PROMPT, "retried or too slow: {error}");
     assert!(
-        is_certificate_error(&error),
+        is_certificate_error(&error) && error.contains("not retried"),
         "not a certificate error: {error}"
     );
 }
 
-/// The sink with `tls_verify = false` creates the index, flushes a document,
-/// and the document reads back over `https://`.
-async fn insecure_sink_writes_over_https(base: &str, logical: &str) {
-    let sink = sink(base, false);
+/// The sink trusting the cluster, through `ca_file` or with `tls_verify =
+/// false`, creates the index, flushes a document, and the document reads back
+/// over `https://`.
+async fn trusting_sink_writes_over_https(base: &str, logical: &str, trust: Trust<'_>) {
+    let sink = sink(base, trust);
     let mapping = mapping(logical);
 
     sink.ensure_index(&mapping).await.unwrap();
@@ -237,7 +260,7 @@ async fn insecure_sink_writes_over_https(base: &str, logical: &str) {
 }
 
 /// Copy the container's demo root CA to `path`, where `SSL_CERT_FILE` points.
-async fn copy_root_ca(container: &ContainerAsync<GenericImage>, path: &PathBuf) {
+async fn copy_root_ca(container: &ContainerAsync<GenericImage>, path: &Path) {
     let mut cat = container
         .exec(ExecCommand::new(["cat", ROOT_CA]))
         .await
@@ -267,7 +290,7 @@ async fn os_store_client_reads(base: &str) {
 
 #[test]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
-fn https_trusts_only_the_pinned_bundle_under_either_crypto_provider() {
+fn https_trusts_the_pinned_bundle_and_ca_file_under_either_crypto_provider() {
     let ca_file = std::env::temp_dir()
         .join(format!("flusso-sink-tls-{}", std::process::id()))
         .join("root-ca.pem");
@@ -291,14 +314,16 @@ fn https_trusts_only_the_pinned_bundle_under_either_crypto_provider() {
             os_store_client_reads(&base).await;
 
             verifying_sink_refuses_the_certificate(&base, "secure").await;
-            insecure_sink_writes_over_https(&base, "secure").await;
+            trusting_sink_writes_over_https(&base, "secure", Trust::CaFile(&ca_file)).await;
+            trusting_sink_writes_over_https(&base, "secure_off", Trust::Off).await;
             assert!(rustls::crypto::CryptoProvider::get_default().is_none());
 
             rustls::crypto::ring::default_provider()
                 .install_default()
                 .expect("no provider is installed yet in this process");
             verifying_sink_refuses_the_certificate(&base, "secure_ring").await;
-            insecure_sink_writes_over_https(&base, "secure_ring").await;
+            trusting_sink_writes_over_https(&base, "secure_ring", Trust::CaFile(&ca_file)).await;
+            trusting_sink_writes_over_https(&base, "secure_ring_off", Trust::Off).await;
         });
     let _ = std::fs::remove_dir_all(ca_file.parent().unwrap());
 }

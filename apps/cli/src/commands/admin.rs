@@ -5,6 +5,7 @@
 //! same endpoints a browser or `curl` would hit, just wrapped for ergonomics.
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::Args;
@@ -27,6 +28,11 @@ pub(crate) struct ConnectArgs {
     /// Password for HTTP Basic auth.
     #[arg(long, env = "FLUSSO_ADMIN_PASSWORD", default_value = DEFAULT_ADMIN_PASSWORD)]
     admin_password: String,
+
+    /// PEM bundle of CA certificates trusted on top of the built-in Mozilla
+    /// roots, for an `https://` server behind a private CA.
+    #[arg(long, env = "FLUSSO_CA_FILE")]
+    ca_file: Option<PathBuf>,
 }
 
 impl ConnectArgs {
@@ -40,6 +46,21 @@ impl ConnectArgs {
         }
     }
 
+    /// The certificates in `--ca-file`, which must hold at least one.
+    fn private_roots(&self) -> anyhow::Result<Vec<reqwest::Certificate>> {
+        let Some(path) = &self.ca_file else {
+            return Ok(Vec::new());
+        };
+        let shown = path.display();
+        let pem = std::fs::read(path).with_context(|| format!("reading --ca-file {shown}"))?;
+        let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+            .with_context(|| format!("parsing --ca-file {shown}"))?;
+        if certificates.is_empty() {
+            bail!("--ca-file {shown} holds no PEM certificate (`-----BEGIN CERTIFICATE-----`)");
+        }
+        Ok(certificates)
+    }
+
     /// A request to `path` on the private surface, with Basic auth applied.
     fn request(
         &self,
@@ -48,7 +69,8 @@ impl ConnectArgs {
     ) -> anyhow::Result<reqwest::RequestBuilder> {
         let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
             .iter()
-            .filter_map(|der| reqwest::Certificate::from_der(der).ok());
+            .filter_map(|der| reqwest::Certificate::from_der(der).ok())
+            .chain(self.private_roots()?);
         let client = reqwest::Client::builder()
             .tls_certs_only(roots)
             .build()

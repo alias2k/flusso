@@ -6,7 +6,22 @@ A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk opt
 
 `<NAME>` in the override variables is the uppercased sink name: `[sinks.primary]` reads `PRIMARY_OPENSEARCH_URL`. Precedence is in [Environment variables](environment.md#config-values).
 
-A request that gets no HTTP response is reported, in the log and in [`/status`](http.md#get-status), with its cause. A certificate `tls_verify` refuses reads:
+## TLS and transport errors
+
+An `https://` cluster's certificate is verified against the Mozilla root bundle built into flusso. The operating system's trust store is never read, so a CA installed into the container's store changes nothing. For a cluster behind a private or company CA, point `ca_file` at its PEM bundle: those certificates are trusted on top of the Mozilla roots, verification stays on.
+
+```toml
+[sinks.primary]
+type = "opensearch"
+url = "https://search.internal:9200"
+ca_file = "/etc/flusso/opensearch-ca.pem"
+```
+
+The file is read when the sink starts: a missing file, or one with no `-----BEGIN CERTIFICATE-----` block, stops the start with the path in the message. `flusso check` and `flusso build` don't read it, so the file only has to exist where flusso runs. To trust the OS store's CAs as well, point `ca_file` at its bundle (`/etc/ssl/certs/ca-certificates.crt` on Debian). `tls_verify = false` skips verification altogether, `ca_file` included (flusso warns at start when both are set); keep it for a local cluster.
+
+A refused certificate is configuration, not a network blip, so a bulk request it fails is **not** retried: the flush fails at once, whatever `max_retries` says, and the sink engine restarts with backoff until the certificate is trusted.
+
+A request that gets no HTTP response is reported, in the log and in [`/status`](http.md#get-status), with its cause. A refused certificate reads:
 
 ```text
 write failed: listing indices failed: error sending request for url (https://127.0.0.1:9200/_cat/indices/users_00000239?h=index&format=json): client error (Connect): invalid peer certificate: UnknownIssuer

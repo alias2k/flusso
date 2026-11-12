@@ -1,13 +1,15 @@
-//! Live e2e for `flusso-query` over `https://` (issue #239): the client pins
-//! the Mozilla root bundle (`tls_certs_only`), so a certificate no public root
-//! vouches for is refused.
+//! Live e2e for `flusso-query` over `https://` (issues #239, #243): the client
+//! pins the Mozilla root bundle (`tls_certs_only`), so a certificate no public
+//! root vouches for is refused, until its CA is added with `Client::ca_file`.
 //!
 //! The container is the stock OpenSearch image with its security plugin's
 //! **demo configuration**: TLS on the HTTP layer with a certificate signed by
 //! the demo "Example Com Inc. Root CA" and naming `127.0.0.1`, plus HTTP Basic
 //! auth as `admin`. The sink, with `tls_verify = false`, seeds one document;
 //! the client, which has no switch to skip verification, must refuse to read
-//! it with an [`Error::Http`] whose cause is the certificate.
+//! it with an [`Error::Http`] whose cause is the certificate. Given the
+//! container's root CA through `ca_file`, the same client reads the document,
+//! verification on.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -31,7 +33,7 @@ use flusso_query::{Client, Error};
 use kernel::{MappingType, Secret, SinkName};
 use serde_json::Value;
 use sink_opensearch::OpensearchSink;
-use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers_modules::testcontainers::core::{ExecCommand, IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
@@ -40,6 +42,8 @@ use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, Image
 const PASSWORD: &str = "Fl-usso_e2e_9Tls!";
 const LOGICAL: &str = "secure";
 const HASH: u32 = 0x239;
+/// Where the demo installer writes the CA that signed the HTTP certificate.
+const ROOT_CA: &str = "/usr/share/opensearch/config/root-ca.pem";
 
 async fn start_tls_opensearch() -> (ContainerAsync<GenericImage>, String) {
     let container = GenericImage::new("opensearchproject/opensearch", "2")
@@ -91,6 +95,7 @@ fn insecure_sink(base: &str) -> OpensearchSink {
         username: Some(Secret::Value("admin".to_owned())),
         password: Some(Secret::Value(PASSWORD.to_owned())),
         tls_verify: false,
+        ca_file: None,
         batch_size: 1000,
         max_bytes: 10 * 1024 * 1024,
         timeout_secs: 30,
@@ -104,6 +109,22 @@ fn insecure_sink(base: &str) -> OpensearchSink {
         index_settings: Default::default(),
     };
     OpensearchSink::from_config(&SinkName::try_new("e2e").unwrap(), &config).unwrap()
+}
+
+/// The container's demo root CA, written to a file of this test's own.
+async fn root_ca_file(container: &ContainerAsync<GenericImage>) -> std::path::PathBuf {
+    let mut cat = container
+        .exec(ExecCommand::new(["cat", ROOT_CA]))
+        .await
+        .unwrap();
+    let pem = cat.stdout_to_vec().await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&pem).contains("BEGIN CERTIFICATE"),
+        "no CA at {ROOT_CA}"
+    );
+    let path = std::env::temp_dir().join(format!("flusso-query-tls-{}.pem", std::process::id()));
+    std::fs::write(&path, pem).unwrap();
+    path
 }
 
 /// Every message in the error's cause chain, lowercased.
@@ -120,8 +141,8 @@ fn cause_chain(error: &reqwest::Error) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
-async fn the_client_refuses_a_certificate_no_public_root_vouches_for() {
-    let (_container, base) = start_tls_opensearch().await;
+async fn the_client_refuses_a_private_ca_until_it_is_given_its_ca_file() {
+    let (container, base) = start_tls_opensearch().await;
     common::seed(
         &insecure_sink(&base),
         common::mapping(LOGICAL, HASH, "title", MappingType::Keyword),
@@ -150,4 +171,18 @@ async fn the_client_refuses_a_certificate_no_public_root_vouches_for() {
         }
         other => panic!("expected a certificate error, got {other:?}"),
     }
+
+    let ca_file = root_ca_file(&container).await;
+    let trusting = Client::connect(&base)
+        .unwrap()
+        .basic_auth("admin", PASSWORD)
+        .ca_file(&ca_file)
+        .unwrap();
+    let document = trusting
+        .get_one::<Value>(LOGICAL, &format!("{HASH:08x}"), "1")
+        .await
+        .expect("the client trusts the private CA from ca_file")
+        .expect("the seeded document");
+    assert_eq!(document["title"], "over tls", "{document}");
+    let _ = std::fs::remove_file(ca_file);
 }

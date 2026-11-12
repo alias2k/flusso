@@ -33,6 +33,8 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 webpki-root-certs.workspace = true
+# Only to read a refused certificate off a reqwest error (`is_certificate_error`).
+rustls.workspace = true
 
 [dev-dependencies]
 chrono = { workspace = true, features = ["clock"] }

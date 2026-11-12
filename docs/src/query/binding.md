@@ -36,6 +36,19 @@ let client = Client::connect("https://localhost:9200")?
 
 The prefix is applied at **runtime**, on the transport: the derive still bakes the unprefixed `INDEX`, and the client prepends the prefix to every request path (and strips it from `_index` when decoding combined search). One compiled binary serves every environment. It must match the writer's prefix exactly.
 
+## Connecting over TLS
+
+An `https://` certificate is verified against the Mozilla root bundle built into the client; the operating system's trust store is never read. For a cluster behind a private CA, add its PEM bundle:
+
+```rust
+let client = Client::connect("https://search.internal:9200")?
+    .ca_file("/etc/flusso/opensearch-ca.pem")?;
+```
+
+`ca_pem(bytes)` does the same from memory. Both add to the Mozilla roots; call either more than once to add several bundles. The certificates are read and parsed right there, so a missing file or a bundle with no certificate is an `Error::Ca` from the builder, not a failure at the first request. They also cover the fence's flusso endpoint ([`Client::flusso`](read-your-writes.md)).
+
+There's no switch to skip verification. For a local cluster with a self-signed certificate, hand its certificate to `ca_file`.
+
 ## What the derive expands to
 
 For `User`, roughly:

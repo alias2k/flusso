@@ -511,8 +511,15 @@
         },
         "tls_verify": {
           "type": "boolean",
-          "description": "Verify TLS certificates against the Mozilla root bundle built into\nflusso; the OS trust store is not read. Set `false` for a local cluster\nwith a self-signed certificate.",
+          "description": "Verify TLS certificates against the Mozilla root bundle built into\nflusso, plus `ca_file`; the OS trust store is not read. Set `false` for\na local cluster with a self-signed certificate.",
           "default": true
+        },
+        "ca_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A PEM bundle of CA certificates trusted on top of the built-in Mozilla\nroots, for a cluster behind a private CA. Read when the sink starts: a\nmissing file, or one with no certificate, stops the start. A relative\npath is resolved against flusso's working directory."
         },
         "batch_size": {
           "type": "integer",
@@ -539,7 +546,7 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0,
-          "description": "Retries for a transient failure of a whole request.",
+          "description": "Retries for a transient failure of a whole bulk request. A refused TLS\ncertificate is never retried.",
           "default": 3
         },
         "pipeline": {

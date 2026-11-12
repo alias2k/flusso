@@ -47,6 +47,7 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
 }
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
 use std::time::Duration;
 
@@ -148,23 +149,55 @@ fn mozilla_roots() -> impl Iterator<Item = reqwest::Certificate> {
         .filter_map(|der| reqwest::Certificate::from_der(der).ok())
 }
 
+/// The certificates in the PEM bundle at `path`, which must hold at least one.
+fn ca_file_roots(path: &Path) -> Result<Vec<reqwest::Certificate>> {
+    let shown = path.display();
+    let pem = std::fs::read(path)
+        .map_err(|e| SinkError::Write(format!("reading ca_file {shown}: {e}")))?;
+    let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+        .map_err(|e| transport::request_error(&format!("parsing ca_file {shown}"), e))?;
+    if certificates.is_empty() {
+        return Err(SinkError::Write(format!(
+            "ca_file {shown} holds no PEM certificate (`-----BEGIN CERTIFICATE-----`)"
+        )));
+    }
+    Ok(certificates)
+}
+
 impl OpensearchSink {
     /// Build a sink from the schema's OpenSearch sink configuration. The
     /// connection URL and credentials are resolved here, in the running
     /// environment, applying the `<NAME>_OPENSEARCH_*` deployment overrides for
     /// the sink named `name`.
     pub fn from_config(name: &SinkName, config: &OpensearchConfig) -> Result<Self> {
+        let private_roots = match &config.ca_file {
+            Some(path) => ca_file_roots(path)?,
+            None => Vec::new(),
+        };
         let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
-            .tls_certs_only(mozilla_roots());
+            .tls_certs_only(mozilla_roots().chain(private_roots));
 
         if !config.tls_verify {
+            if config.ca_file.is_some() {
+                tracing::warn!(
+                    sink = %name,
+                    "tls_verify = false skips certificate verification, so ca_file has no effect"
+                );
+            }
             builder = builder.danger_accept_invalid_certs(true);
         }
 
-        let client = builder
-            .build()
-            .map_err(|e| transport::request_error("failed to build HTTP client", e))?;
+        let client = builder.build().map_err(|e| {
+            let context = match &config.ca_file {
+                Some(path) => format!(
+                    "failed to build HTTP client with ca_file {}",
+                    path.display()
+                ),
+                None => "failed to build HTTP client".to_owned(),
+            };
+            transport::request_error(&context, e)
+        })?;
 
         let url = config
             .resolve_url(name)
@@ -350,5 +383,56 @@ mod time_value_tests {
         assert_eq!(parse_time_value("10"), None);
         assert_eq!(parse_time_value("ten seconds"), None);
         assert_eq!(parse_time_value(""), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use kernel::AdapterConfig;
+
+    fn build(ca_file: &Path) -> Result<OpensearchSink> {
+        let toml = format!(
+            "url = \"https://search:9200\"\nca_file = {:?}",
+            ca_file.display().to_string()
+        );
+        let config = OpensearchConfig::from_options(toml::from_str(&toml).unwrap()).unwrap();
+        assert_eq!(config.ca_file.as_deref(), Some(ca_file));
+        OpensearchSink::from_config(&SinkName::try_new("primary").unwrap(), &config)
+    }
+
+    fn write(name: &str, contents: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("flusso-ca-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_missing_ca_file_stops_the_start_and_names_the_path() {
+        let path = std::env::temp_dir().join("flusso-no-such-ca.pem");
+        let error = build(&path).unwrap_err().to_string();
+        assert!(error.contains("reading ca_file"), "{error}");
+        assert!(error.contains("flusso-no-such-ca.pem"), "{error}");
+    }
+
+    #[test]
+    fn a_ca_file_without_a_certificate_stops_the_start() {
+        let path = write("empty.pem", "not a certificate\n");
+        let error = build(&path).unwrap_err().to_string();
+        assert!(error.contains("holds no PEM certificate"), "{error}");
+    }
+
+    #[test]
+    fn a_ca_file_with_a_broken_certificate_stops_the_start() {
+        let path = write(
+            "broken.pem",
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        );
+        let error = build(&path).unwrap_err().to_string();
+        assert!(error.contains("ca_file"), "{error}");
+        assert!(error.contains("broken.pem"), "{error}");
     }
 }

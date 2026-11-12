@@ -21,6 +21,8 @@
 //! assert_eq!(config.text_analysis, TextAnalysis::Icu);
 //! ```
 
+use std::path::PathBuf;
+
 use kernel::{AdapterConfig, HttpUrl, ResolveError, Secret, SinkName, override_var};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,10 +46,17 @@ pub struct OpensearchConfig {
     #[adapter(example = Secret::env("OPENSEARCH_PASSWORD"))]
     pub password: Option<Secret>,
     /// Verify TLS certificates against the Mozilla root bundle built into
-    /// flusso; the OS trust store is not read. Set `false` for a local cluster
-    /// with a self-signed certificate.
+    /// flusso, plus `ca_file`; the OS trust store is not read. Set `false` for
+    /// a local cluster with a self-signed certificate.
     #[serde(default = "default_tls_verify")]
     pub tls_verify: bool,
+    /// A PEM bundle of CA certificates trusted on top of the built-in Mozilla
+    /// roots, for a cluster behind a private CA. Read when the sink starts: a
+    /// missing file, or one with no certificate, stops the start. A relative
+    /// path is resolved against flusso's working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[adapter(example = "/etc/flusso/opensearch-ca.pem")]
+    pub ca_file: Option<PathBuf>,
     /// Documents per bulk request.
     #[serde(default = "default_batch_size")]
     pub batch_size: u32,
@@ -60,7 +69,8 @@ pub struct OpensearchConfig {
     /// Request timeout, in seconds.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// Retries for a transient failure of a whole request.
+    /// Retries for a transient failure of a whole bulk request. A refused TLS
+    /// certificate is never retried.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     /// An ingest pipeline applied to every indexed document.

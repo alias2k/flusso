@@ -58,6 +58,7 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_BATCH_MAX_CHANGES` | `--batch-max-changes` | `run` |
 | `FLUSSO_BATCH_MAX_DELAY_MS` | `--batch-max-delay-ms` | `run` |
 | `FLUSSO_SERVER` | `--server` | `indexes`, `reindex` |
+| `FLUSSO_CA_FILE` | `--ca-file` | `indexes`, `reindex` |
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
 | `FLUSSO_FORMAT` | `--format` | `check` |
 | `FLUSSO_DESIGN_ADDRESS` | `--address` | `design` |
