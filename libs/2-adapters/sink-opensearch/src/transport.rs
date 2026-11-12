@@ -56,6 +56,34 @@ pub(crate) fn request_error(context: &str, mut error: reqwest::Error) -> SinkErr
     SinkError::Write(message)
 }
 
+/// Whether `error` is the server's certificate being refused: an untrusted
+/// issuer, a name mismatch, an expired or missing certificate. No retry can
+/// fix one. Read from the rustls error in the source chain.
+pub(crate) fn is_certificate_error(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if matches!(
+            rustls_error(cause),
+            Some(rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented)
+        ) {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
+/// The rustls error `cause` is or wraps. tokio-rustls hands it up inside an
+/// `io::Error`, which hyper may wrap in another, and `io::Error::source` skips
+/// the error it wraps, so each one is opened with `get_ref`.
+fn rustls_error<'a>(cause: &'a (dyn std::error::Error + 'static)) -> Option<&'a rustls::Error> {
+    if let Some(tls) = cause.downcast_ref::<rustls::Error>() {
+        return Some(tls);
+    }
+    let inner = cause.downcast_ref::<std::io::Error>()?.get_ref()?;
+    rustls_error(inner)
+}
+
 impl OpensearchSink {
     /// Send one prebuilt NDJSON `body` (the actions in `actions`, in order) as a
     /// single bulk request. The caller (`flush`) is responsible for keeping
@@ -68,7 +96,9 @@ impl OpensearchSink {
     ///
     /// **Transport and request-wide failures** (connection error, a non-2xx
     /// status for the whole request) are transient and **retried** with
-    /// exponential backoff. **Item-level rejections** — a 2xx bulk response in
+    /// exponential backoff, except a refused server certificate, which fails
+    /// at once: it is configuration (`ca_file`, `tls_verify`), not a blip.
+    /// **Item-level rejections** — a 2xx bulk response in
     /// which OpenSearch accepted some actions and refused others (a mapping
     /// conflict, a malformed value) — are **not** retried: re-sending the same
     /// document yields the same rejection. They are returned as
@@ -131,6 +161,12 @@ impl OpensearchSink {
                     last_err = Some(SinkError::Write(format!(
                         "bulk request failed: HTTP {status}: {text}"
                     )));
+                }
+                Err(e) if is_certificate_error(&e) => {
+                    return Err(request_error(
+                        "bulk request refused the server certificate (not retried)",
+                        e,
+                    ));
                 }
                 Err(e) => {
                     last_err = Some(request_error("bulk request error", e));

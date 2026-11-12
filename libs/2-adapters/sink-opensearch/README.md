@@ -9,6 +9,7 @@ A [`Sink`] that writes documents to an OpenSearch cluster via the bulk API, with
 | `url` | — | cluster URL (`<NAME>_OPENSEARCH_URL` overrides) |
 | `username` / `password` | none | basic auth (`<NAME>_OPENSEARCH_{USERNAME,PASSWORD}`) |
 | `tls_verify` | `true` | verify TLS certs (set false for local dev) |
+| `ca_file` | none | PEM bundle of a private CA, trusted on top of the built-in Mozilla roots |
 | `batch_size` | `1000` | documents per bulk request |
 | `max_bytes` | 10 MiB | max serialized bytes per request, split independently of `batch_size` |
 | `timeout_secs` | `30` | request timeout |

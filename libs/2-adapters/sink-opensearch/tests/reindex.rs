@@ -93,6 +93,7 @@ fn sink_config(base_url: &str) -> sink_opensearch::OpensearchConfig {
         username: None,
         password: None,
         tls_verify: false,
+        ca_file: None,
         batch_size: 1000,
         max_bytes: 10 * 1024 * 1024,
         timeout_secs: 30,
