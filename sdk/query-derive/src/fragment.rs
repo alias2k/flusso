@@ -200,9 +200,12 @@ fn field_check(fragment: &Ident, field: &DocField) -> TokenStream {
 
     // A flattened group's keys belong to the *enclosing* level, so there is no
     // container field to look up — hand the same level straight through.
+    // A flattened `serde_json::Value` or map is serde's catch-all for the
+    // leftover keys, so there is nothing to check — the same rule a root follows.
     if field.flatten {
-        let ty = strip_option(field.ty);
-        return quote_spanned! {span=> <#ty>::__flusso_check(level); };
+        return embedded_type(field).map_or_else(TokenStream::new, |ty| {
+            quote_spanned! {span=> <#ty>::__flusso_check(level); }
+        });
     }
 
     let exists = message(

@@ -79,15 +79,19 @@ pub(crate) fn parse_fields<'a>(
             .as_ref()
             .ok_or_else(|| syn::Error::new(field.span(), "field must be named"))?;
         let attrs = flusso_field_attr(field)?;
+        let serde = serde_key(field);
+        if let Some(error) = contradicting_rename(ident, attrs.rename.as_ref(), &serde) {
+            return Err(error);
+        }
         out.push(DocField {
             ident: Some(ident),
             ty: &field.ty,
             doc_key: doc_key(
-                field,
                 ident,
                 attrs.rename.as_ref().map(LitStr::value),
+                serde.rename,
                 rename_all,
-            )?,
+            ),
             skip: attrs.skip,
             opaque: attrs.opaque,
             renamed: attrs.rename.as_ref().map(LitStr::span),
@@ -102,42 +106,88 @@ pub(crate) fn parse_fields<'a>(
 /// then `#[serde(rename = "…")]`, then the container `rename_all` applied to the
 /// field name, else the name itself.
 fn doc_key(
-    field: &Field,
     ident: &Ident,
     flusso_rename: Option<String>,
+    serde_rename: Option<String>,
     rename_all: Option<&str>,
-) -> syn::Result<String> {
-    if let Some(renamed) = flusso_rename {
-        return Ok(renamed);
-    }
-    if let Some(renamed) = serde_rename(field)? {
-        return Ok(renamed);
+) -> String {
+    if let Some(renamed) = flusso_rename.or(serde_rename) {
+        return renamed;
     }
     let base = ident.to_string();
-    Ok(match rename_all {
+    match rename_all {
         Some(rule) => apply_rename_all(&base, rule),
         None => base,
-    })
+    }
 }
 
-fn serde_rename(field: &Field) -> syn::Result<Option<String>> {
-    let mut renamed = None;
+/// What a field's `#[serde(…)]` attributes say about its key.
+struct SerdeKey {
+    /// A plain `rename = "…"`: the one key serde both reads and writes.
+    rename: Option<String>,
+    /// An `alias`, or a `rename(serialize = …, deserialize = …)` list: serde
+    /// may read a key the derive does not see.
+    other_names: bool,
+}
+
+/// Best-effort: reads `rename` and `alias`, and steps over every other serde
+/// field attribute (flags, `key = value`, `key(…)` lists) without failing.
+fn serde_key(field: &Field) -> SerdeKey {
+    let mut key = SerdeKey {
+        rename: None,
+        other_names: false,
+    };
     for attr in &field.attrs {
         if !attr.path().is_ident("serde") {
             continue;
         }
-        // Best-effort: pull `rename`, ignore other serde attrs (flags, etc.).
         let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename")
-                && let Ok(value) = meta.value()
-                && let Ok(lit) = value.parse::<LitStr>()
-            {
-                renamed = Some(lit.value());
+            let rename = meta.path.is_ident("rename");
+            let names = rename || meta.path.is_ident("alias");
+            if meta.input.peek(syn::Token![=]) {
+                let value: syn::Expr = meta.value()?.parse()?;
+                match value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(lit),
+                        ..
+                    }) if rename => key.rename = Some(lit.value()),
+                    _ => key.other_names |= names,
+                }
+            } else if meta.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                content.parse::<TokenStream>()?;
+                key.other_names |= names;
             }
             Ok(())
         });
     }
-    Ok(renamed)
+    key
+}
+
+/// `#[flusso(rename)]` that names a different key than the one serde provably
+/// reads: the struct compiles, but every real document fails to deserialize.
+fn contradicting_rename(
+    ident: &Ident,
+    flusso: Option<&LitStr>,
+    serde: &SerdeKey,
+) -> Option<syn::Error> {
+    let flusso = flusso?;
+    let serde_key = serde.rename.as_ref()?;
+    if serde.other_names || flusso.value() == *serde_key {
+        return None;
+    }
+    Some(syn::Error::new(
+        flusso.span(),
+        format!(
+            "`{ident}` is read by serde from `{serde_key}` (`#[serde(rename = \"{serde_key}\")]`), \
+             but `#[flusso(rename = \"{}\")]` checks it against the schema as `{}` — the two \
+             must name the key serde reads; remove `#[flusso(rename)]`, which is for a key the \
+             derive cannot read from serde (`alias`, `rename(deserialize = …)`)",
+            flusso.value(),
+            flusso.value(),
+        ),
+    ))
 }
 
 /// A field's `#[flusso(…)]` attributes: `skip`, `opaque`, `rename = "…"`,
@@ -297,9 +347,7 @@ pub(crate) const OPAQUE_ALLOWED: &str = "`opaque` goes on a field whose type is 
 /// field's declaration alone. Shared by roots and fragments; a root also checks
 /// `opaque` against the schema ([`opaque_without_a_shape_check`]).
 pub(crate) fn misplaced_attrs(field: &DocField) -> Vec<syn::Error> {
-    let name = field
-        .ident
-        .map_or_else(|| field.doc_key.clone(), ToString::to_string);
+    let name = field_label(field);
     let mut errors = Vec::new();
     if let Some(span) = field.renamed
         && field.flatten
@@ -307,7 +355,7 @@ pub(crate) fn misplaced_attrs(field: &DocField) -> Vec<syn::Error> {
         errors.push(syn::Error::new(
             span,
             format!(
-                "`{name}` is `#[serde(flatten)]`, so it has no key of its own to rename — \
+                "{name} is `#[serde(flatten)]`, so it has no key of its own to rename — \
                  `rename` goes on a field that has a key in the document; remove `rename`"
             ),
         ));
@@ -315,14 +363,14 @@ pub(crate) fn misplaced_attrs(field: &DocField) -> Vec<syn::Error> {
     if let Some(span) = field.opaque {
         let message = if field.skip {
             Some(format!(
-                "`{name}` is `#[flusso(skip)]`, which already turns off every check on it — \
+                "{name} is `#[flusso(skip)]`, which already turns off every check on it — \
                  {OPAQUE_ALLOWED}; remove `opaque`"
             ))
         } else if crate::fragment::checked_type(field).is_none() {
             Some(format!(
-                "`{name}` is {}, so there is no shape to opt out of — {OPAQUE_ALLOWED}; remove \
-                 `opaque` (`skip` turns off every check on a field)",
-                unshaped(field.ty)
+                "{name} is {} — {OPAQUE_ALLOWED}; remove `opaque` (`skip` turns off every \
+                 check on a field)",
+                unshaped(field)
             ))
         } else {
             None
@@ -334,15 +382,44 @@ pub(crate) fn misplaced_attrs(field: &DocField) -> Vec<syn::Error> {
     errors
 }
 
-/// Names a type with no sub-shape, for the `opaque` error.
-fn unshaped(ty: &Type) -> String {
+/// A field as an error names it: the Rust field name, plus the document key
+/// when that differs.
+fn field_label(field: &DocField) -> String {
+    match field.ident {
+        Some(ident) if *ident != field.doc_key && !field.flatten => {
+            format!("`{ident}` (document key `{}`)", field.doc_key)
+        }
+        Some(ident) => format!("`{ident}`"),
+        None => "the newtype's field".to_string(),
+    }
+}
+
+/// Why a type has no sub-shape for `opaque` to opt out of, for its error.
+fn unshaped(field: &DocField) -> String {
+    let ty = field.ty;
     let inner = option_inner(ty).unwrap_or(ty);
+    if field.flatten
+        && (leaf_ident(inner).as_deref() == Some("Value") || map_container_value(inner).is_some())
+    {
+        return format!(
+            "a flattened `{}`, which collects the keys no other field reads and is never \
+             checked",
+            crate::fragment::render(ty)
+        );
+    }
     if leaf_ident(inner).as_deref() == Some("Value") {
-        "`serde_json::Value`, which the derive never checks".to_string()
+        "a `serde_json::Value`, which the derive never checks".to_string()
     } else if map_container_value(inner).is_some() {
-        "a `HashMap`/`BTreeMap`, which is checked as a `map` by its value type".to_string()
+        "a `HashMap`/`BTreeMap`, checked as a `map` by its value type, so there is no shape to \
+         opt out of"
+            .to_string()
     } else {
-        format!("`{}`, a built-in leaf type", crate::fragment::render(ty))
+        let name = crate::fragment::render(ty);
+        format!(
+            "`{name}`, which the derive treats as a built-in leaf type because of its name (a \
+             type of your own named `{name}` is treated the same: rename it to have it checked), \
+             so there is no shape to opt out of"
+        )
     }
 }
 
@@ -371,10 +448,10 @@ fn opaque_without_a_shape_check(field: &DocField, resolved: &ResolvedField) -> O
     Some(syn::Error::new(
         span,
         format!(
-            "`{}` is {what} in the schema, where its type is checked only by its `{bound}` \
+            "{} is {what} in the schema, where its type is checked only by its `{bound}` \
              bound, which `opaque` does not turn off — on a root, `opaque` goes on an `object`, \
              `nested`, `json`, `keyword` or `text` field; remove `opaque`",
-            field.doc_key
+            field_label(field)
         ),
     ))
 }

@@ -1,4 +1,4 @@
-error: `snapshot` is `serde_json::Value`, which the derive never checks, so there is no shape to opt out of — `opaque` goes on a field whose type is a custom struct or enum (bare, or in `Option<…>` or `Vec<…>`) that the derive would otherwise check against the schema; remove `opaque` (`skip` turns off every check on a field)
+error: `snapshot` is a `serde_json::Value`, which the derive never checks — `opaque` goes on a field whose type is a custom struct or enum (bare, or in `Option<…>` or `Vec<…>`) that the derive would otherwise check against the schema; remove `opaque` (`skip` turns off every check on a field)
  --> tests/ui/opaque_on_json_value_field.rs:8:14
   |
 8 |     #[flusso(opaque)]

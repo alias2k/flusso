@@ -1,4 +1,4 @@
-error: `city` is `String`, a built-in leaf type, so there is no shape to opt out of — `opaque` goes on a field whose type is a custom struct or enum (bare, or in `Option<…>` or `Vec<…>`) that the derive would otherwise check against the schema; remove `opaque` (`skip` turns off every check on a field)
+error: `city` is `String`, which the derive treats as a built-in leaf type because of its name (a type of your own named `String` is treated the same: rename it to have it checked), so there is no shape to opt out of — `opaque` goes on a field whose type is a custom struct or enum (bare, or in `Option<…>` or `Vec<…>`) that the derive would otherwise check against the schema; remove `opaque` (`skip` turns off every check on a field)
  --> tests/ui/opaque_in_fragment_on_leaf_field.rs:8:14
   |
 8 |     #[flusso(opaque)]
