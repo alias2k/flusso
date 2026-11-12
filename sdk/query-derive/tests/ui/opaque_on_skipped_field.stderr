@@ -1,0 +1,5 @@
+error: `extra` is `#[flusso(skip)]`, which already turns off every check on it — `opaque` goes on a field whose type is a custom struct or enum (bare, or in `Option<…>` or `Vec<…>`) that the derive would otherwise check against the schema; remove `opaque`
+  --> tests/ui/opaque_on_skipped_field.rs:11:20
+   |
+11 |     #[flusso(skip, opaque)]
+   |                    ^^^^^^

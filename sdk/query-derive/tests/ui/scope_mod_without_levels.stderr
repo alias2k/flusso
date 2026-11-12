@@ -1,0 +1,5 @@
+error: index `flags` has no `nested` or `object` level the index searches, so no module of query scopes is generated and `scope_mod` renames nothing — `scope_mod` goes on a root whose index has such a level; remove `scope_mod`
+ --> tests/ui/scope_mod_without_levels.rs:6:39
+  |
+6 | #[flusso(index = "flags", scope_mod = "flag_queries")]
+  |                                       ^^^^^^^^^^^^^^

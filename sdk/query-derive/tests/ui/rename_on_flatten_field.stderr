@@ -1,0 +1,5 @@
+error: `contact` is `#[serde(flatten)]`, so it has no key of its own to rename — `rename` goes on a field that has a key in the document; remove `rename`
+  --> tests/ui/rename_on_flatten_field.rs:15:23
+   |
+15 |     #[flusso(rename = "contact")]
+   |                       ^^^^^^^^^

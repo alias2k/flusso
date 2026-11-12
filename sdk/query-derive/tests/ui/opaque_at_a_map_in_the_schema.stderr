@@ -1,0 +1,5 @@
+error: `title` is a `map` in the schema, where its type is checked only by its `FlussoMap` bound, which `opaque` does not turn off — on a root, `opaque` goes on an `object`, `nested`, `json`, `keyword` or `text` field; remove `opaque`
+  --> tests/ui/opaque_at_a_map_in_the_schema.rs:15:14
+   |
+15 |     #[flusso(opaque)]
+   |              ^^^^^^
