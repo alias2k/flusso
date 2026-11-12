@@ -3,7 +3,8 @@
 import { create, useStore } from "zustand";
 import { temporal } from "zundo";
 import type { CatalogResponse, ConfigToml, DiagnosticDto, IndexSchema, PreviewResponse, Project } from "../api";
-import { cloneJson } from "../model/exact";
+import { cloneJson, parseJson } from "../model/exact";
+import { dropPendingValues, flushPendingValues } from "../model/pending";
 import { adoptIds, stampIds, stripUids, uidSkeleton } from "../model/ids";
 import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
 import { type Graph, pathId, projectGraph } from "../model/tree";
@@ -91,7 +92,7 @@ const readUids = (index: string): Pick<IndexSchema, "fields"> | undefined => {
 
 const persistUids = (saved: string) => {
   try {
-    const doc = JSON.parse(saved) as Doc;
+    const doc = parseJson(saved) as Doc;
     for (const [name, schema] of Object.entries(doc.schemas))
       localStorage.setItem(uidsKey(name), JSON.stringify(uidSkeleton(schema)));
   } catch {
@@ -126,6 +127,9 @@ interface DesignState {
 
   loadProject: (project: Project, resetActive: boolean) => void;
   apply: (fn: (s: IndexSchema) => IndexSchema) => void;
+  /// `apply` on the index `index`, whichever is active now (an edit that lands
+  /// after its index was left).
+  applyTo: (index: string, fn: (s: IndexSchema) => IndexSchema) => void;
   setConfig: (next: ConfigToml) => void;
   openIndex: (name: string) => void;
   createIndex: (name: string, table: string, schemaPath: string) => void;
@@ -187,15 +191,16 @@ export const useDesignStore = create<DesignState>()(
         useDesignStore.temporal.getState().clear();
       },
 
-      apply: (fn) => {
-        const { active } = get();
-        if (active === "config") return;
+      apply: (fn) => get().applyTo(get().active, fn),
+
+      applyTo: (index, fn) => {
+        if (index === "config") return;
         set((s) =>
-          s.doc
+          s.doc && (index === s.active || index in s.doc.schemas)
             ? {
                 doc: {
                   ...s.doc,
-                  schemas: { ...s.doc.schemas, [active]: stampIds(fn(s.doc.schemas[active] ?? emptySchema(""))) },
+                  schemas: { ...s.doc.schemas, [index]: stampIds(fn(s.doc.schemas[index] ?? emptySchema(""))) },
                 },
               }
             : {},
@@ -295,7 +300,8 @@ export const useDesignStore = create<DesignState>()(
       revertChanges: () => {
         const { saved, active } = get();
         if (!saved) return;
-        const doc = JSON.parse(saved) as Doc;
+        dropPendingValues();
+        const doc = parseJson(saved) as Doc;
         // A reverted just-created index no longer exists; don't strand `active`
         // on it (that renders a blank canvas) — fall back to a real index/config.
         const active2 =
@@ -347,8 +353,9 @@ export const useDesignStore = create<DesignState>()(
   ),
 );
 
-export const undo = () => useDesignStore.temporal.getState().undo();
-export const redo = () => useDesignStore.temporal.getState().redo();
+// A value still being read joins the history first, so undo takes it back.
+export const undo = () => void flushPendingValues().then(() => useDesignStore.temporal.getState().undo());
+export const redo = () => void flushPendingValues().then(() => useDesignStore.temporal.getState().redo());
 
 export const useCanUndo = () => useStore(useDesignStore.temporal, (s) => s.pastStates.length > 0);
 export const useCanRedo = () => useStore(useDesignStore.temporal, (s) => s.futureStates.length > 0);

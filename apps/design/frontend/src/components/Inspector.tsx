@@ -349,11 +349,16 @@ function RootInspector() {
 }
 
 function NodeInspector({ path }: { path: number[] }) {
-  const { schema, apply, catalog, columnsFor } = useDesign();
+  const { schema, catalog, columnsFor, indexName } = useDesign();
+  const applyTo = useDesignStore((s) => s.applyTo);
   const { t } = useT();
   const field = fieldAtPath(schema, path);
   if (!field) return null;
-  const setField = (f: Field) => apply((s) => edit.setNode(s, path, f));
+  const setField = (f: Field) =>
+    applyTo(indexName, (s) => {
+      const now = fieldAtPath(s, path);
+      return now?.field === field.field ? edit.setNode(s, path, edit.rebase(field, f, now)) : s;
+    });
 
   if ("group" in field.source) {
     return (
@@ -507,7 +512,8 @@ function NodeInspector({ path }: { path: number[] }) {
 }
 
 function FieldInspector({ path, index }: { path: number[]; index: number }) {
-  const { schema, apply, catalog, columnsFor } = useDesign();
+  const { schema, catalog, columnsFor, indexName } = useDesign();
+  const applyTo = useDesignStore((s) => s.applyTo);
   const { t } = useT();
   const field = nodeFields(schema, path)[index];
   if (!field) return null;
@@ -515,7 +521,11 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const colShapes = columnsFor(table);
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
   const junctions = new Set(catalog?.junctions.map((j) => j.table.table) ?? []);
-  const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
+  const set = (f: Field) =>
+    applyTo(indexName, (s) => {
+      const now = nodeFields(s, path)[index];
+      return now?.field === field.field ? edit.setLeaf(s, path, index, edit.rebase(field, f, now)) : s;
+    });
   const s = field.source;
 
   // The bound source column, when known — drives the source-guided required/

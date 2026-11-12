@@ -3,6 +3,7 @@ import { CheckIcon, ChevronDownIcon, ChevronRight, Link2, Plus, X } from "lucide
 import { api, type ColumnShape, type ValueCheck } from "../api";
 import { useT, type Translate } from "../i18n";
 import { exactIntegers, hasRoundedInteger } from "../model/exact";
+import { settlePendingValue, trackPendingValue } from "../model/pending";
 import { type Generic, genericText } from "../model/generic";
 import { LABEL, NO_PW_MANAGER } from "../styles";
 import { typeClass } from "../theme";
@@ -205,8 +206,10 @@ export function Text({
 /// form. The typed text is read by the backend (`/api/value`) exactly as the
 /// saved file will read it, and reaches the model only once it is accepted: a
 /// number the file can't hold exactly is refused with the reason, never
-/// rounded. Empty maps to `undefined` (a cleared default) unless `emptyTo`
-/// overrides it.
+/// rounded. It is read after a pause in typing, and at once when the box loses
+/// focus or leaves the screen (see `model/pending.ts`); only the newest text's
+/// reply is applied. Empty maps to `undefined` (a cleared default) unless
+/// `emptyTo` overrides it.
 export function GenericInput({
   value,
   onChange,
@@ -225,67 +228,140 @@ export function GenericInput({
   const external = value === undefined ? "" : genericText(value);
   const [text, setText] = useState(external);
   const [problem, setProblem] = useState<ValueProblem | undefined>(undefined);
-  const [accepted, setAccepted] = useState<string | null>(null);
-  const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const ticket = useRef(0);
+  const [accepted, setAccepted] = useState<{ text: string; savedAs?: string } | null>(null);
+  // What the box does with a reply, kept current for one that outlives a render.
+  const hooks = useRef<BoxHooks>({ onChange, show: () => undefined });
+  const [box] = useState(() => new ValueBox(hooks));
   // The text of the value this box last committed: the model coming back with
   // it keeps what was typed (`1e3` stays, with a "saved as 1000.0" note).
   const committed = useRef(external);
-  const cancel = () => {
-    clearTimeout(pending.current);
-    ticket.current += 1;
-  };
+  useEffect(() => {
+    hooks.current = {
+      onChange: (v) => {
+        committed.current = genericText(v);
+        onChange(v);
+      },
+      show: (result) => {
+        setProblem(result.problem);
+        if (result.text !== undefined) setAccepted({ text: result.text, savedAs: result.savedAs });
+        if (result.reset) {
+          setText(external);
+          setAccepted(null);
+        }
+      },
+    };
+  });
   useEffect(() => {
     if (external === committed.current) return;
     committed.current = external;
-    cancel();
+    box.drop(false);
     setText(external);
     setProblem(undefined);
     setAccepted(null);
-  }, [external]);
-  useEffect(() => cancel, []);
+  }, [external, box]);
+  useEffect(
+    () => () => {
+      hooks.current = { ...hooks.current, show: undefined };
+      void box.flush();
+    },
+    [box],
+  );
   const handle = (s: string) => {
     setText(s);
-    cancel();
+    box.drop(false);
     if (s.trim() === "") {
       setProblem(undefined);
       committed.current = emptyTo === undefined ? "" : genericText(emptyTo);
       return onChange(emptyTo);
     }
-    const mine = ticket.current;
-    pending.current = setTimeout(() => {
-      void api
-        .value(s)
-        .then((result) => {
-          if (mine !== ticket.current) return;
-          const error =
-            result.error ??
-            (!exactIntegers && hasRoundedInteger(result.value) ? { code: "browser_precision" as const } : undefined);
-          setProblem(error);
-          if (error) return;
-          setAccepted(s);
-          committed.current = genericText(result.value);
-          onChange(result.value);
-        })
-        .catch(() => undefined);
-    }, VALUE_CHECK_DELAY_MS);
+    box.wait(s);
   };
-  const bare = (s: string) => s.replace(/\s+/g, "");
-  const savedAs = accepted === text && bare(text) !== bare(external) ? external : null;
+  const savedAs = accepted?.text === text ? accepted.savedAs : undefined;
   return (
     <div className="min-w-0">
-      <Text value={text} onChange={handle} placeholder={placeholder} invalid={!!invalid || !!problem} />
+      <Text
+        value={text}
+        onChange={handle}
+        onBlur={() => void box.flush()}
+        placeholder={placeholder}
+        invalid={!!invalid || !!problem}
+      />
       {problem && (
         <p className="mt-1 flex items-start gap-1 text-2xs text-warn" role="alert">
           <span aria-hidden>⚠</span>
           <span>{valueProblem(t, problem)}</span>
         </p>
       )}
-      {savedAs !== null && (
+      {savedAs !== undefined && (
         <p className="mt-1 text-2xs text-muted-foreground">{t("value.savedAs", { value: savedAs })}</p>
       )}
     </div>
   );
+}
+
+/// What a `ValueBox` does with a reply, set by its `GenericInput` each render.
+interface BoxHooks {
+  onChange: (v: Generic) => void;
+  /// Shows a reply in the box; unset once the box left the screen.
+  show?: (result: { problem?: ValueProblem; text?: string; savedAs?: string; reset?: boolean }) => void;
+}
+
+/// The text one `GenericInput` is waiting to have read, outliving the box: a
+/// reply for a box that left the screen still reaches the model.
+class ValueBox {
+  constructor(private readonly hooks: { readonly current: BoxHooks }) {}
+
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private waiting: string | null = null;
+  private inFlight: Promise<void> | null = null;
+  private ticket = 0;
+
+  /// Read `text` after a pause in typing.
+  wait(text: string) {
+    this.waiting = text;
+    this.timer = setTimeout(() => void this.flush(), VALUE_CHECK_DELAY_MS);
+    trackPendingValue(this, { flush: () => this.flush(), drop: () => this.drop() });
+  }
+
+  /// Read the waiting text now; resolves once its reply was applied.
+  flush(): Promise<void> {
+    clearTimeout(this.timer);
+    const text = this.waiting;
+    if (text === null) return this.inFlight ?? Promise.resolve();
+    this.waiting = null;
+    const mine = ++this.ticket;
+    const request = api
+      .value(text)
+      .then((result) => {
+        if (mine !== this.ticket) return;
+        const problem: ValueProblem | undefined =
+          result.error ??
+          (!exactIntegers && hasRoundedInteger(result.value) ? { code: "browser_precision" } : undefined);
+        if (problem) return this.hooks.current.show?.({ problem });
+        this.hooks.current.show?.({ text, savedAs: result.saved_as });
+        this.hooks.current.onChange(result.value);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.inFlight !== request) return;
+        this.inFlight = null;
+        if (this.waiting === null) settlePendingValue(this);
+      });
+    this.inFlight = request;
+    return request;
+  }
+
+  /// Forget the waiting text and any reply still out; `reset` shows the
+  /// model's value again (Reset), typing over it doesn't.
+  drop(reset = true) {
+    clearTimeout(this.timer);
+    const had = this.waiting !== null || this.inFlight !== null;
+    this.waiting = null;
+    this.inFlight = null;
+    this.ticket += 1;
+    settlePendingValue(this);
+    if (had && reset) this.hooks.current.show?.({ reset: true });
+  }
 }
 
 /// How long typing pauses before a value is read.
@@ -303,6 +379,8 @@ function valueProblem(t: Translate, problem: ValueProblem): string {
       return t("value.inexact", { number: problem.number });
     case "out_of_range":
       return t("value.outOfRange", { number: problem.number });
+    case "too_deep":
+      return t("value.tooDeep", { limit: problem.limit });
     case "reads_back_differently":
       return t("value.readsBack");
     case "browser_precision":
@@ -310,6 +388,8 @@ function valueProblem(t: Translate, problem: ValueProblem): string {
   }
 }
 
+/// A number box. An integer a JS number can't hold exactly (past 2^53) is
+/// refused rather than rounded: the box turns red and the model keeps its value.
 export function Num({
   value,
   onChange,
@@ -319,12 +399,20 @@ export function Num({
   onChange: (v: number | undefined) => void;
   placeholder?: string;
 }) {
+  const [refused, setRefused] = useState<string | null>(null);
   return (
     <Input
       type="number"
-      value={value ?? ""}
+      value={refused ?? value ?? ""}
       placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value === "" ? undefined : Number(e.target.value))}
+      className={cn(refused !== null && "invalid")}
+      aria-invalid={refused !== null ? true : undefined}
+      onChange={(e) => {
+        const n = e.target.value === "" ? undefined : Number(e.target.value);
+        const rounded = n !== undefined && Number.isInteger(n) && !Number.isSafeInteger(n);
+        setRefused(rounded ? e.target.value : null);
+        if (!rounded) onChange(n);
+      }}
     />
   );
 }

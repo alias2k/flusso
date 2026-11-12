@@ -324,6 +324,9 @@ export const en: Record<string, string> = {
   "value.browserPrecision":
     "This browser rounds integers past 9007199254740991, so this value would be saved as another number. Edit it in a current browser.",
   "value.savedAs": "Saved as {value}",
+  "value.tooDeep": "Lists and objects nest deeper than {limit} levels here, more than the schema file reads back.",
+  "value.roundedSave":
+    "Not saved: this browser rounded an integer past 9007199254740991 in {fields}, so the file would get another number. Open the designer in a current browser, or fix the value there.",
   "preview.parseError": "This schema does not parse:",
   "preview.leftOut": "Left out of this preview until complete: {list}",
   "preview.notIndexed": "not indexed",

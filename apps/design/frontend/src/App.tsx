@@ -30,7 +30,8 @@ import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
 import { DiffView } from "./components/DiffView";
 import { diffStats, type DiffMode } from "./model/diff";
-import { parseJson } from "./model/exact";
+import { parseJson, roundedFields } from "./model/exact";
+import { flushPendingValues } from "./model/pending";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
@@ -684,12 +685,21 @@ export default function App() {
     if (!doc || useUiStore.getState().saving) return;
     setSaving(true);
     try {
+      await flushPendingValues();
       if (!(await flushBuffer())) {
         setToast({ kind: "error", text: t("code.unparsedSave") });
         return;
       }
       const current = useDesignStore.getState().doc;
       if (!current) return;
+      const rounded = [
+        ...roundedFields(current.config, "flusso.toml"),
+        ...Object.entries(current.schemas).flatMap(([name, s]) => roundedFields(s, name)),
+      ];
+      if (rounded.length) {
+        setToast({ kind: "error", text: t("value.roundedSave", { fields: rounded.join(", ") }) });
+        return;
+      }
       const result = await api.diff(
         current.config,
         buildOps(current).map((p) => p.op),
@@ -763,9 +773,11 @@ export default function App() {
   // buffer re-seeds from the reverted schema (the seed effect).
   const reset = revertChanges;
 
-  const openRaw = () => {
-    if (!codeBlocked(pruned?.left)) setRawMode(true);
-  };
+  const openRaw = () =>
+    void flushPendingValues().then(() => {
+      const current = useDesignStore.getState().doc?.schemas[active];
+      if (!codeBlocked(current ? pruneIncomplete(current).left : undefined)) setRawMode(true);
+    });
   const closeRaw = () => leaveBuffer(() => setRawMode(false));
 
   const validate = async () => {

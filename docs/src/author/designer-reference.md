@@ -108,21 +108,26 @@ Saving is canonical regeneration: meaning is preserved (the written file parses 
 
 ### Typed values
 
-A `constant`, a `default` and each `options` value are typed as JSON: text in double quotes (`"like this"`), `true`, `null`, lists, objects, numbers. The designer reads what you type the way the saved file will be read, so the preview and the content hash (the physical index name) match what flusso deploys from that file. A value goes into the schema only once it is accepted; a refused one keeps the field red with the reason underneath.
+A `constant`, a `default` and each `options` value are typed as JSON: text in double quotes (`"like this"`), `true`, `null`, lists, objects, numbers. Numbers are a little looser than JSON: a leading `+`, leading zeros, and a bare point on either side (`5.`, `.5`) are accepted and read as the number they spell. The designer reads what you type the way the saved file will be read, so the preview and the content hash (the physical index name) match what flusso deploys from that file. A value is read once typing pauses, or at once when the box loses focus; Save, Code mode, undo and redo wait for it. It goes into the schema only once it is accepted; a refused one keeps the field red with the reason underneath and leaves the previous value in the schema. **Reset** discards a value still being read.
 
 | Typed | Stored as | A `constant` maps as |
 |---|---|---|
 | an integer that fits a signed 64-bit integer (`5`, `-12`, `9007199254740993`) | that integer | `long` |
 | a larger integer the file holds exactly (`9223372036854775808`) | a decimal | `double` |
-| a fraction or an exponent (`1.5`, `5.0`, `1e3`, `1e-7`) | a decimal, as the file reads a float: `1e3` is `1000.0` | `double` |
+| a fraction or an exponent (`1.5`, `5.`, `.5`, `1e3`, `1e-7`) | a decimal, as the file reads a float: `1e3` is `1000.0` | `double` |
 | `+5`, `007`, `-0`, spaces around the number | the same number: `5`, `7`, `0` | as above |
 
-When the stored spelling differs from what you typed, a *Saved as* note shows it (`1e3` → `1000.0`). Refused, with a message, and never rounded:
+When the saved file spells a number differently from what you typed, a *Saved as* note under the box shows the value as the file writes it (`1e3` → `1000.0`, `+5` → `5`, `[1, 1e3]` → `[1, 1000.0]`); when every number is written as typed (`1e-7`, `1.5`), there is no note. Refused, with a message, and never rounded:
 
 - a number with more digits than the file keeps, such as `0.1000000000000000000001`, or most integers past 2⁶⁴ (`18446744073709551616`);
-- a number too large or too small to be a number in the file, such as `1.5e300` or `1e-30`.
+- a number too large or too small to be a number in the file, such as `1.5e300` or `1e-30`;
+- lists and objects nested more than 64 levels deep.
 
-To keep either as written, quote it: `"1.5e300"` is stored as text. In a browser without `JSON.rawJSON`, an integer past 9007199254740991 is refused too, since the browser would round it.
+To keep a number as written, quote it: `"1.5e300"` is stored as text.
+
+Integers past 9007199254740991 need a browser with `JSON.rawJSON` (current Chrome, Edge, Firefox and Safari). Without it, the browser rounds such an integer as it reads it: typing one is refused, and when a loaded file holds one, **Save** refuses to write and names each field that holds it, so the file never gets another number. Open the designer in a current browser to edit it.
+
+**Format** and **Auto-format** in Code mode change only layout: every scalar keeps its text (`9007199254740993`, `0.1000000000000000000001`, `007`, `0x10`, `.inf`, `'007'`, `yes`), and comments stay.
 
 ## Catalog browser
 

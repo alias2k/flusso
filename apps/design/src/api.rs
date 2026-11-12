@@ -198,6 +198,10 @@ pub struct ValueResponse {
     /// The value, as a `GenericValue`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<kernel::GenericValue>,
+    /// The value as the saved file spells it, when a number in it is written
+    /// other than typed (`1e3` → `1000.0`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_as: Option<String>,
     /// Why the text was refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::value::ValueProblem>,
@@ -205,13 +209,15 @@ pub struct ValueResponse {
 
 /// Read a typed value the way its saved file will (see [`crate::value`]).
 pub fn read_value(request: &ValueRequest) -> ValueResponse {
-    match crate::value::read_typed(&request.text) {
-        Ok(value) => ValueResponse {
-            value: Some(value),
+    match crate::value::read(&request.text) {
+        Ok(typed) => ValueResponse {
+            value: Some(typed.value),
+            saved_as: typed.saved_as,
             error: None,
         },
         Err(problem) => ValueResponse {
             value: None,
+            saved_as: None,
             error: Some(problem),
         },
     }

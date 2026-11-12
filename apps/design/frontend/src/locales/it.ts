@@ -334,6 +334,10 @@ export const it: Record<string, string> = {
   "value.browserPrecision":
     "Questo browser arrotonda gli interi oltre 9007199254740991, quindi il valore verrebbe salvato come un altro numero. Modificalo in un browser aggiornato.",
   "value.savedAs": "Salvato come {value}",
+  "value.tooDeep":
+    "Liste e oggetti sono annidati oltre {limit} livelli, più di quanti il file dello schema ne rilegga.",
+  "value.roundedSave":
+    "Non salvato: questo browser ha arrotondato un intero oltre 9007199254740991 in {fields}, quindi il file riceverebbe un altro numero. Apri il designer in un browser aggiornato, o correggi lì il valore.",
   "preview.parseError": "Questo schema non è analizzabile:",
   "preview.leftOut": "Esclusi da questa anteprima finché non sono completi: {list}",
   "preview.notIndexed": "non indicizzato",

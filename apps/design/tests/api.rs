@@ -372,4 +372,12 @@ fn a_typed_value_is_read_as_its_saved_file_reads_it() {
         read("[1,"),
         serde_json::json!({ "error": { "code": "syntax", "position": 4 } })
     );
+    assert_eq!(
+        read("1e3"),
+        serde_json::json!({ "value": { "Decimal": "1000.0" }, "saved_as": "1000.0" })
+    );
+    assert_eq!(
+        read(&"[".repeat(500)),
+        serde_json::json!({ "error": { "code": "too_deep", "limit": 64 } })
+    );
 }

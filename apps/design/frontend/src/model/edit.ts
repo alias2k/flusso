@@ -179,3 +179,25 @@ export function retypeField(field: Field, column: Column, ty: FlussoType): Field
   else delete retyped.keptOptions;
   return retyped;
 }
+
+/// `mine` (an edit of `base`) carried onto `theirs` (what `base` became since):
+/// a key `mine` left as it was in `base` takes `theirs`, one it changed takes
+/// `mine`, objects key by key. So an edit made from an older render, such as
+/// a typed value read after its box lost focus, keeps newer edits to the rest.
+export function rebase<T>(base: T, mine: T, theirs: T): T {
+  if (sameJson(mine, base)) return theirs;
+  if (sameJson(theirs, base)) return mine;
+  if (!isRecord(base) || !isRecord(mine) || !isRecord(theirs)) return mine;
+  const out: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(mine), ...Object.keys(theirs)])) {
+    const value = rebase(base[key], mine[key], theirs[key]);
+    if (value !== undefined) out[key] = value;
+  }
+  return out as T;
+}
+
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/// A plain JSON object (not an array, and not an exact integer held as raw JSON).
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;

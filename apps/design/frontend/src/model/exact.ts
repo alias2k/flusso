@@ -8,7 +8,8 @@
 // - `cloneJson` copies a piece of the model (`structuredClone` would turn a raw
 //   JSON value into a plain object).
 // - `exactIntegers` is false in a browser that can't do this; the inspector then
-//   refuses such an integer instead of rounding it.
+//   refuses such an integer instead of rounding it, and `roundedFields` names
+//   every field a loaded file's integer was rounded in, so Save can refuse.
 
 type RawJson = (text: string) => unknown;
 
@@ -39,4 +40,24 @@ export function hasRoundedInteger(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(hasRoundedInteger);
   if (value && typeof value === "object") return Object.values(value).some(hasRoundedInteger);
   return false;
+}
+
+/// Every place in `value` holding an integer a JS number has already rounded,
+/// as `label` followed by the dotted names of the fields it sits in
+/// (`orders.items.total`), each named once.
+export function roundedFields(value: unknown, label: string): string[] {
+  const found = new Set<string>();
+  const walk = (v: unknown, path: string[]) => {
+    if (typeof v === "number") {
+      if (Number.isInteger(v) && !Number.isSafeInteger(v)) found.add(path.join("."));
+    } else if (Array.isArray(v)) {
+      for (const item of v) walk(item, path);
+    } else if (v && typeof v === "object") {
+      const name = (v as { field?: unknown }).field;
+      const here = typeof name === "string" ? [...path, name] : path;
+      for (const child of Object.values(v)) walk(child, here);
+    }
+  };
+  walk(value, [label]);
+  return [...found];
 }

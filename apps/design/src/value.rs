@@ -13,9 +13,12 @@
 //! [`ValueProblem::Inexact`] when it has more digits than the file keeps
 //! (`0.1000000000000000000001`), [`ValueProblem::OutOfRange`] when it's too large
 //! or too small to be a number in the file (`1.5e300`). Negative zero is zero.
+//! Nesting deeper than [`MAX_DEPTH`] is [`ValueProblem::TooDeep`].
 //!
 //! The result is the value after one real round trip (codegen, then the parser),
 //! so the preview and the content hash are computed from what the file reads.
+//! [`read`] also says how the file spells it, when a number is written other
+//! than typed (`1e3` is saved as `1000.0`).
 //!
 //! ```
 //! use design::value::{ValueProblem, read_typed};
@@ -36,6 +39,21 @@ use serde::Serialize;
 
 use crate::codegen;
 
+/// How deep a typed value may nest: below what the schema file's own parser
+/// reads back (the value sits a few levels inside the file).
+pub const MAX_DEPTH: usize = 64;
+
+/// A typed value as its saved file reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Typed {
+    /// The value the file reads back as.
+    pub value: GenericValue,
+    /// The value as the file spells it, when a number in it is written other
+    /// than it was typed (`1e3` → `1000.0`); `None` when every number is
+    /// written as typed.
+    pub saved_as: Option<String>,
+}
+
 /// Why typed text can't become a value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
@@ -46,22 +64,67 @@ pub enum ValueProblem {
     Inexact { number: String },
     /// A number too large or too small to be a number in the saved file.
     OutOfRange { number: String },
+    /// Nested deeper than `limit` lists or objects.
+    TooDeep { limit: usize },
     /// The value would read back as something else (a codegen defect).
     ReadsBackDifferently,
 }
 
 /// Typed JSON → the value its saved file reads back as, or why it can't be one.
 pub fn read_typed(text: &str) -> Result<GenericValue, ValueProblem> {
+    read(text).map(|typed| typed.value)
+}
+
+/// Typed JSON → the value its saved file reads back as, and how the file
+/// spells it when that differs from what was typed.
+pub fn read(text: &str) -> Result<Typed, ValueProblem> {
     let mut reader = Reader {
         chars: text.chars().collect(),
         at: 0,
+        depth: 0,
+        numbers: Vec::new(),
     };
     let value = reader.value()?;
     reader.blank();
     if reader.at < reader.chars.len() {
         return Err(reader.syntax());
     }
-    read_back(&value)
+    let value = read_back(&value)?;
+    let respelled = reader
+        .numbers
+        .iter()
+        .any(|(typed, number)| codegen::scalar_text(number).map_or(true, |saved| saved != *typed));
+    let saved_as = if respelled {
+        Some(spelled(&value).ok_or(ValueProblem::ReadsBackDifferently)?)
+    } else {
+        None
+    };
+    Ok(Typed { value, saved_as })
+}
+
+/// `value` as typed JSON, each scalar spelled as the saved file writes it.
+fn spelled(value: &GenericValue) -> Option<String> {
+    Some(match value {
+        GenericValue::String(s) => serde_json::to_string(s).ok()?,
+        GenericValue::Array(items) => {
+            let items: Option<Vec<String>> = items.iter().map(spelled).collect();
+            format!("[{}]", items?.join(", "))
+        }
+        GenericValue::Map(map) => {
+            let entries: Option<Vec<String>> = map
+                .iter()
+                .map(|(k, v)| {
+                    Some(format!(
+                        "{}: {}",
+                        serde_json::to_string(k).ok()?,
+                        spelled(v)?
+                    ))
+                })
+                .collect();
+            format!("{{{}}}", entries?.join(", "))
+        }
+        scalar => codegen::scalar_text(scalar).ok()?,
+    })
 }
 
 /// `value` written as a constant and parsed back; refused if it changes.
@@ -98,6 +161,9 @@ fn same(a: &GenericValue, b: &GenericValue) -> bool {
 struct Reader {
     chars: Vec<char>,
     at: usize,
+    depth: usize,
+    /// Each number as typed, with the value it was read as.
+    numbers: Vec<(String, GenericValue)>,
 }
 
 impl Reader {
@@ -148,14 +214,27 @@ impl Reader {
         self.blank();
         match self.peek() {
             Some('"') => self.string().map(GenericValue::String),
-            Some('[') => self.array(),
-            Some('{') => self.map(),
+            Some('[') => self.nested(Self::array),
+            Some('{') => self.nested(Self::map),
             Some('t') => self.word("true", GenericValue::Bool(true)),
             Some('f') => self.word("false", GenericValue::Bool(false)),
             Some('n') => self.word("null", GenericValue::Null),
             Some(c) if c.is_ascii_digit() || matches!(c, '-' | '+' | '.') => self.number(),
             _ => Err(self.syntax()),
         }
+    }
+
+    fn nested(
+        &mut self,
+        read: fn(&mut Self) -> Result<GenericValue, ValueProblem>,
+    ) -> Result<GenericValue, ValueProblem> {
+        if self.depth == MAX_DEPTH {
+            return Err(ValueProblem::TooDeep { limit: MAX_DEPTH });
+        }
+        self.depth += 1;
+        let value = read(self);
+        self.depth -= 1;
+        value
     }
 
     fn string(&mut self) -> Result<String, ValueProblem> {
@@ -272,7 +351,9 @@ impl Reader {
                 return Err(self.syntax());
             }
         }
-        number_value(&text, integer)
+        let value = number_value(&text, integer)?;
+        self.numbers.push((text, value.clone()));
+        Ok(value)
     }
 }
 
@@ -486,6 +567,74 @@ mod tests {
                 ])
             )])))
         );
+    }
+
+    #[test]
+    fn nesting_past_the_cap_is_refused_without_overflowing_the_stack() {
+        let deep = "[".repeat(100_000) + "]".repeat(100_000).as_str();
+        assert_eq!(
+            read_typed(&deep),
+            Err(ValueProblem::TooDeep { limit: MAX_DEPTH })
+        );
+        let objects = r#"{"a":"#.repeat(100_000);
+        assert_eq!(
+            read_typed(&objects),
+            Err(ValueProblem::TooDeep { limit: MAX_DEPTH })
+        );
+    }
+
+    #[test]
+    fn nesting_up_to_the_cap_reads_back() {
+        let text = "[".repeat(MAX_DEPTH) + "1" + "]".repeat(MAX_DEPTH).as_str();
+        let mut expected = GenericValue::BigInt(1);
+        for _ in 0..MAX_DEPTH {
+            expected = GenericValue::Array(vec![expected]);
+        }
+        assert_eq!(super::read(&text).unwrap().value, expected);
+        let text = r#"{"a":"#.repeat(MAX_DEPTH) + "1" + "}".repeat(MAX_DEPTH).as_str();
+        assert!(super::read(&text).is_ok());
+    }
+
+    #[test]
+    fn saved_as_is_the_files_spelling_when_a_number_is_respelled() {
+        let saved = |text: &str| super::read(text).unwrap().saved_as;
+        assert_eq!(saved("1e3").as_deref(), Some("1000.0"));
+        assert_eq!(saved("+5").as_deref(), Some("5"));
+        assert_eq!(saved("[1, 1e3]").as_deref(), Some("[1, 1000.0]"));
+        assert_eq!(
+            saved(r#"{"b": 1E3, "a": "x"}"#).as_deref(),
+            Some(r#"{"a": "x", "b": 1000.0}"#)
+        );
+        for text in ["5", "1.5", "-12", r#""1e3""#, r#"{"a": [1, 2.5]}"#, "true"] {
+            assert_eq!(saved(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn saved_as_matches_the_generated_file() {
+        for text in ["1e-7", "1e21", "1e3", "5.0", "+.5", "007"] {
+            let typed = super::read(text).unwrap();
+            let schema = IndexSchema::try_from(
+                SchemaYaml::try_parse(
+                    "version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: c\n  value: null\n",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let mut schema = schema;
+            schema.fields[0].source = FieldSource::Constant(typed.value.clone());
+            let yaml = codegen::schema_to_yaml(&schema).unwrap();
+            let line = yaml
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("value: "))
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                typed.saved_as.unwrap_or_else(|| text.to_owned()),
+                line,
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -468,10 +468,14 @@ export interface ExpressionCheck {
 /// `GenericValue` to store, or why the text was refused.
 export interface ValueCheck {
   value?: unknown;
+  /// How the saved file spells the value, when a number in it is written
+  /// other than typed (`1e3` → `1000.0`).
+  saved_as?: string;
   error?:
     | { code: "syntax"; position: number }
     | { code: "inexact"; number: string }
     | { code: "out_of_range"; number: string }
+    | { code: "too_deep"; limit: number }
     | { code: "reads_back_differently" };
 }
 
