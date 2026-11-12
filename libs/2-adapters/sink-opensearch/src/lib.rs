@@ -179,6 +179,12 @@ impl OpensearchSink {
             .tls_certs_only(mozilla_roots().chain(private_roots));
 
         if !config.tls_verify {
+            if config.ca_file.is_some() {
+                tracing::warn!(
+                    sink = %name,
+                    "tls_verify = false skips certificate verification, so ca_file has no effect"
+                );
+            }
             builder = builder.danger_accept_invalid_certs(true);
         }
 

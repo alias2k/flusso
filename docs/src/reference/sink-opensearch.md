@@ -17,7 +17,7 @@ url = "https://search.internal:9200"
 ca_file = "/etc/flusso/opensearch-ca.pem"
 ```
 
-The file is read when the sink starts: a missing file, or one with no `-----BEGIN CERTIFICATE-----` block, stops the start with the path in the message. To trust the OS store's CAs as well, point `ca_file` at its bundle (`/etc/ssl/certs/ca-certificates.crt` on Debian). `tls_verify = false` skips verification altogether; keep it for a local cluster.
+The file is read when the sink starts: a missing file, or one with no `-----BEGIN CERTIFICATE-----` block, stops the start with the path in the message. `flusso check` and `flusso build` don't read it, so the file only has to exist where flusso runs. To trust the OS store's CAs as well, point `ca_file` at its bundle (`/etc/ssl/certs/ca-certificates.crt` on Debian). `tls_verify = false` skips verification altogether, `ca_file` included (flusso warns at start when both are set); keep it for a local cluster.
 
 A refused certificate is configuration, not a network blip, so a bulk request it fails is **not** retried: the flush fails at once, whatever `max_retries` says, and the sink engine restarts with backoff until the certificate is trusted.
 
