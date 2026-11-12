@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.16.0...flusso-engine-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(query)* [**breaking**] move every HTTP client to reqwest 0.13
+- *(engine)* a document that fails to build is stopped on or skipped by its index's policy
+- *(schema)* an aggregate's column can be an arithmetic expression
+- *(kernel)* script fields and input-only fields in the schema model
+- *(config)* on: column pairs on joins, aggregates and via hops
+- *(schema)* aggregates across several hops with via, and the exists op
+- *(daemon)* a fence waits until a sink has reached a source position
+- *(engine)* a sink engine reports its applied and searchable positions
+- *(sink)* [**breaking**] a flush reports when its documents become searchable
+- *(source-postgres)* resolution skips what an update's changed columns can't affect
+- *(kernel)* subfields and indexed opt-outs on columns and joins, hashed only when off
+
+### Fixed
+
+- *(source-postgres)* resolve a hop from the key when it carries the link
+- *(source-postgres)* keep a USING INDEX identity only when it carries the primary key
+- *(source-postgres)* keep a USING INDEX replica identity that carries every link
+- *(source-postgres)* a zero divisor in an aggregate expression nulls the row instead of failing the build
+- review — report script failures under both policies, ids in print context, debug log of the failing document, shared build-by-id, field docs
+- review findings for via and exists
+- *(source)* a raw filter anywhere in an index turns the skip off for it
+
+### Other
+
+- say the root manual is the newest release and /main/ tracks main
+- *(engine)* fold the last-flush guard into wal_release with a 5 s confirm bound
+- *(engine)* the slot releases WAL within 5 s of the last flush
+- *(engine)* exercise the minimum over lanes and split the wal_release bounds
+- list the wal_release e2e and its guards
+- *(engine)* guard that the replication slot releases WAL flusso has no use for
+- Merge remote-tracking branch 'origin/main' into feat/script-fields
+- REPLICA IDENTITY FULL by default on the root and a belongs_to target
+- *(engine)* run_deployment keeps its doc comment
+- *(engine)* aggregate expressions build Postgres arithmetic and rebuild from each operand
+- *(engine)* on: pairs rebuild the parent from either side of a pair
+- *(engine)* a self-reaching via and a via under a nested relation rebuild every ancestor
+- *(engine)* a via aggregate rebuilds its parent from every hop
+- *(engine)* a searchable flush with nothing waiting skips the queue and the timer
+- crate READMEs for fences (source, sinks, engine, daemon, flusso-query)
+- the unread-column fixtures set the indexed and subfields flags
+- *(engine)* the recording sink records a batch at its flush
+- *(engine)* seed the unread-column case before the slot so the backfill can't race it
+- *(engine)* an unread-column update leaves the OpenSearch documents unwritten
+- *(engine)* an update of unread columns rebuilds nothing, each read column still does
+- *(engine)* prove the guide's root-filtered self-referencing tree end to end
+- *(engine,source-postgres)* assert the row's own document and guard self-join cycles
+- *(engine)* a self-referencing has_many rebuilds the parent end to end ([#167](https://github.com/alias2k/flusso/pull/167))
+- build every OpensearchConfig literal with index_settings
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.15.1...flusso-engine-v0.16.0) - 2026-10-09
 
 ### Added

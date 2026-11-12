@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.16.0...flusso-config-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(query)* [**breaking**] move every HTTP client to reqwest 0.13
+- *(schema)* an aggregate's column can be an arithmetic expression
+- *(config)* parse script, array and emit in *.schema.yml
+- *(kernel)* script fields and input-only fields in the schema model
+- *(config)* on: column pairs on joins, aggregates and via hops
+- *(schema)* aggregates across several hops with via, and the exists op
+- *(config)* subfields and indexed siblings in *.schema.yml
+- *(kernel)* subfields and indexed opt-outs on columns and joins, hashed only when off
+- *(cli)* editor schema and Reference table for per-index sink options
+- *(config)* per-index sink options under [index.sinks.<name>]
+
+### Fixed
+
+- *(source-postgres)* keep a USING INDEX identity only when it carries the primary key
+- *(source-postgres)* keep a USING INDEX replica identity that carries every link
+- *(config)* an expression's sum/min/max needs a numeric value_type
+- *(kernel)* every accepted expression re-parses from its canonical text
+- review findings for on: pairs
+- *(config)* keep ConversionError small enough for clippy
+- *(config)* via rejections name the aggregate field
+- *(config)* say subfields can be turned off only on text, keyword or uuid
+- *(kernel)* [**breaking**] a map carries its keys' plain-field mapping and a new content hash
+- review fixes for index settings (owned blocks/hidden, shared schema hoisting)
+
+### Other
+
+- say the root manual is the newest release and /main/ tracks main
+- Merge remote-tracking branch 'origin/main' into feat/script-fields
+- REPLICA IDENTITY FULL on every table an index reads — what, cost, opt-out, the 0.17 upgrade step
+- *(config)* point the entity docs at FieldKind
+- read-your-writes in the manual (GET /wait, the status positions, the query chapter)
+- *(sink)* index settings need a restart before the reindex, and some weaken guarantees
+- *(config)* index settings never change the content hash
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.15.1...flusso-config-v0.16.0) - 2026-10-09
 
 ### Added

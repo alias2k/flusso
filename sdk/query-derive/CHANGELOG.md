@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.16.0...flusso-query-derive-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(query)* the exact family on a keyword map with subfields, over each key's .keyword
+- *(sink)* every key of a keyword map with subfields gets an exact .keyword subfield
+- *(query)* [**breaking**] a map handle mirrors its values kind across all keys
+- *(query-derive)* no handles for an unindexed field, NoSubfields for subfields: false
+- *(query-derive)* stamp the subfield type-state on string map handles
+- *(query)* [**breaking**] map keys have the plain-field surface; contains and a configurable cross-key search
+
+### Fixed
+
+- *(query-derive)* [**breaking**] reject scope on an indexed: false field
+- *(query-derive)* a decimal map's keys take the decimal kind, like a plain decimal field
+- *(kernel)* [**breaking**] a map carries its keys' plain-field mapping and a new content hash
+
+### Other
+
+- *(query-derive)* a subfields: false field has no subfield views
+- say the root manual is the newest release and /main/ tracks main
+- *(query-derive)* script fields get their declared handles; an input-only field is not in the index
+- *(query)* an exists aggregate gets the Bool handle
+- *(query-derive)* an unindexed field's stored shape is still checked
+- keep content without indexing it (subfields: false, indexed: false)
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.15.1...flusso-query-derive-v0.16.0) - 2026-10-09
 
 ### Added

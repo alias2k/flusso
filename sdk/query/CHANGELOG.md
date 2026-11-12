@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.16.0...flusso-query-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(query)* [**breaking**] move every HTTP client to reqwest 0.13
+- *(query)* the exact family on a keyword map with subfields, over each key's .keyword
+- *(query)* fenced reads through Client::after, and helpers to read the source position
+- *(query)* [**breaking**] a map handle mirrors its values kind across all keys
+- *(query)* [**breaking**] map keys have the plain-field surface; contains and a configurable cross-key search
+- *(query)* Walk — stream a whole cursor walk as pages, hits, or ids
+- *(query)* live cursor walks by default, point_in_time() to pin one
+- *(query)* page cursors over a point-in-time and search_after
+
+### Fixed
+
+- review findings for the fence
+- *(query)* cross-key terms keep operator words, wildcard escapes and an empty only_preferred literal
+- *(query)* cross-key fuzzy, regexp and wildcard keep the plain handle's edges
+- *(query)* a cross-key phrase prefix skips the keys' keyword subfields
+- *(query)* [**breaking**] a decimal map's keys take the decimal kind
+- *(query)* an empty or blank contains value matches nothing
+- *(query)* review fixes for Walk
+- *(query)* review fixes for live/pinned cursors
+- *(query)* review fixes for page cursors
+
+### Other
+
+- say the root manual is the newest release and /main/ tracks main
+- Merge pull request #193 from alias2k/feat/keyword-map-exact
+- crate READMEs for fences (source, sinks, engine, daemon, flusso-query)
+- maps mirror their values kind across every key
+- *(query)* document DateMap::at
+- *(query)* share the cross-key field list, the keyword_lowercase suffix and the first-present sort script
+- map keys are mapped, queried and sorted like a plain field of their values kind
+- *(query)* Streaming a walk gets its own manual page
+- *(query)* streaming a walk — manual, README, skill, CLAUDE.md
+- *(query)* cursor searches fetch from an explicit cursor
+- *(query)* live cursors by default, pinned walks opt-in — ADR 0008, manual, skill, glossary
+- *(plugin)* flusso-query skill owns paging — offset vs page cursor
+- *(query)* paging chapter — offset vs cursor, the token, expiry, nested and union notes
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.15.1...flusso-query-v0.16.0) - 2026-10-09
 
 ### Other

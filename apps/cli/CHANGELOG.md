@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.16.0...flusso-cli-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(query)* [**breaking**] move every HTTP client to reqwest 0.13
+- *(cli)* run and check ask every table read for its whole old row
+- *(cli)* check prints each diagnostic's field path
+- *(design)* preview reports script compile errors; the sample runs the scripts on a chosen row
+- *(cli)* run scripts in every build, compile them on build/check/run, loud failure log + metric, flusso script run
+- *(cli)* GET /wait holds a request until a commit is readable
+- *(cli)* editor schema and Reference table for per-index sink options
+- *(cli)* validate per-index sink options and hand them to the OpenSearch sink
+
+### Fixed
+
+- *(source-postgres)* word the key gap for live writes; skip intermediate partitioned tables
+- *(source-postgres)* set a partition whose replica identity leaves out the primary key
+- *(run)* refuse to start only on what cannot work as written
+- *(source-postgres)* keep a USING INDEX replica identity that carries every link
+- *(check)* verify the soft-delete marker, and make run refuse to start on an error diagnostic
+- *(source-postgres)* leave a link-free partitioned table alone, one info line for unset tables; check's verdict says where it won't set
+- review — report script failures under both policies, ids in print context, debug log of the failing document, shared build-by-id, field docs
+- *(cli)* check prints an unindexed field as one object (not indexed)
+- *(cli)* adopt flusso-kernel, flusso-config, flusso-sink-opensearch 0.17.0 (stored-but-not-indexed content)
+- *(cli)* [**breaking**] adopt flusso-kernel, flusso-sink-opensearch 0.17.0 (typed map keys)
+- *(cli)* check shows a map as map<values>
+- *(design)* validate per-index sink options before connecting
+- review fixes for index settings (owned blocks/hidden, shared schema hoisting)
+- *(cli)* report partitioned tables streamed under their partitions' names
+
+### Other
+
+- *(deps)* OpenTelemetry 0.33 and tracing-opentelemetry 0.34
+- Merge pull request #222 from alias2k/fix/validate-soft-delete-and-run
+- say the root manual is the newest release and /main/ tracks main
+- Merge remote-tracking branch 'origin/main' into feat/script-fields
+- flusso replaces a replica identity set on purpose; what FULL costs other consumers; check footnote names its group
+- script fields and input-only fields — reference, how-to, CLI, metrics, /status, glossary, CLAUDE.md
+- *(cli)* per-index settings skip disabled indexes and key by logical name
+- *(cli)* box the OpenSearch sink config variant
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.15.1...flusso-cli-v0.16.0) - 2026-10-09
 
 ### Added

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.16.0...flusso-sink-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(sink)* [**breaking**] a flush reports when its documents become searchable
+
+### Fixed
+
+- review findings for the fence
+
+### Other
+
+- say the root manual is the newest release and /main/ tracks main
+- crate READMEs for fences (source, sinks, engine, daemon, flusso-query)
+- *(sink-opensearch)* writes through the hash alias, a generation deleted while running, reindex while rebuilding
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.15.1...flusso-sink-v0.16.0) - 2026-10-09
 
 ### Added

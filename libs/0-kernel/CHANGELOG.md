@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-kernel-v0.16.0...flusso-kernel-v0.17.0) - 2026-11-12
+
+### Added
+
+- *(schema)* an aggregate's column can be an arithmetic expression
+- *(kernel)* script fields and input-only fields in the schema model
+- *(config)* on: column pairs on joins, aggregates and via hops
+- *(schema)* aggregates across several hops with via, and the exists op
+- *(sink)* every key of a keyword map with subfields gets an exact .keyword subfield
+- *(kernel)* subfields and indexed opt-outs on columns and joins, hashed only when off
+- *(kernel)* adapters can declare per-index options
+
+### Fixed
+
+- *(kernel)* every accepted expression re-parses from its canonical text
+- review findings for aggregate expressions
+- review findings for via and exists
+- *(kernel)* [**breaking**] a map carries its keys' plain-field mapping and a new content hash
+- review fixes for index settings (owned blocks/hidden, shared schema hoisting)
+
+### Other
+
+- *(kernel)* pin the content hash of a map schema at revision 2
+- say the root manual is the newest release and /main/ tracks main
+- Merge remote-tracking branch 'origin/main' into feat/script-fields
+- *(kernel)* link Display in the expression module doc
+- the kernel README names Expression; CLAUDE.md lists /api/expression
+- *(kernel)* name the subfields projection like is_indexed
+- *(kernel)* no intra-doc link to the private map revision constant
+- *(kernel)* Mapping::of_type is the one place a map key's mapping is built
+
 ## [0.16.0](https://github.com/alias2k/flusso/compare/flusso-kernel-v0.15.1...flusso-kernel-v0.16.0) - 2026-10-09
 
 ### Added
