@@ -47,19 +47,10 @@ pub(crate) fn parse_fields<'a>(
     rename_all: Option<&str>,
     transparent: bool,
 ) -> syn::Result<Vec<DocField<'a>>> {
+    if transparent {
+        return transparent_field(fields).map(|field| vec![field]);
+    }
     let named = match fields {
-        Fields::Named(named) if transparent => {
-            let mut named = named.named.iter();
-            return match (named.next(), named.next()) {
-                (Some(field), None) => newtype_field(field).map(|field| vec![field]),
-                _ => Err(syn::Error::new(
-                    fields.span(),
-                    "a `#[serde(transparent)]` struct is checked as its one field, and the \
-                     derive does not read which field serde skips — give the struct a single \
-                     field (a tuple newtype `struct X(Inner)` or one named field)",
-                )),
-            };
-        }
         Fields::Named(named) => &named.named,
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             return fields
@@ -85,38 +76,66 @@ pub(crate) fn parse_fields<'a>(
             .ok_or_else(|| syn::Error::new(field.span(), "field must be named"))?;
         let attrs = flusso_field_attr(field)?;
         let serde = serde_key(field);
-        if let Some(error) = contradicting_rename(ident, attrs.rename.as_ref(), &serde) {
+        let flatten = crate::serde_attr::flatten(&field.attrs);
+        let read = doc_key(ident, serde.rename.clone(), rename_all);
+        if let Some(renamed) = &attrs.rename
+            && !flatten
+            && !crate::serde_attr::skips_deserializing(&field.attrs)
+            && let Some(error) = unseen_rename(ident, renamed, &read, &serde)
+        {
             return Err(error);
         }
         out.push(DocField {
             ident: Some(ident),
             ty: &field.ty,
-            doc_key: doc_key(
-                ident,
-                attrs.rename.as_ref().map(LitStr::value),
-                serde.rename,
-                rename_all,
-            ),
+            doc_key: attrs.rename.as_ref().map_or(read, LitStr::value),
             skip: attrs.skip,
             opaque: attrs.opaque,
             renamed: attrs.rename.as_ref().map(LitStr::span),
-            flatten: crate::serde_attr::flatten(&field.attrs),
+            flatten,
             scope: attrs.scope,
         });
     }
     Ok(out)
 }
 
-/// The document key for a field, in precedence order: `#[flusso(rename = "…")]`,
-/// then `#[serde(rename = "…")]`, then the container `rename_all` applied to the
-/// field name, else the name itself.
-fn doc_key(
-    ident: &Ident,
-    flusso_rename: Option<String>,
-    serde_rename: Option<String>,
-    rename_all: Option<&str>,
-) -> String {
-    if let Some(renamed) = flusso_rename.or(serde_rename) {
+/// The one field serde reads a `#[serde(transparent)]` struct as: the one it
+/// does not pass over (see [`crate::serde_attr::passed_over_by_transparent`]).
+/// A `#[flusso(…)]` on a field it passes over is never read, so it is an error.
+fn transparent_field(fields: &Fields) -> syn::Result<DocField<'_>> {
+    let (passed_over, read): (Vec<&Field>, Vec<&Field>) = fields
+        .iter()
+        .partition(|field| crate::serde_attr::passed_over_by_transparent(field));
+    if let Some(attr) = passed_over
+        .iter()
+        .flat_map(|field| &field.attrs)
+        .find(|attr| attr.path().is_ident("flusso"))
+    {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "serde passes over this field of a `#[serde(transparent)]` struct, so the derive \
+             never checks it and its `#[flusso(…)]` is never read; remove the attribute",
+        ));
+    }
+    let fix = match read.as_slice() {
+        [field] => return newtype_field(field),
+        [] => "it has none — give it the one field serde reads",
+        _ => "it has more — mark all but one of them `#[serde(skip)]`",
+    };
+    Err(syn::Error::new(
+        fields.span(),
+        format!(
+            "serde reads a `#[serde(transparent)]` struct as its one field that is not `skip`, \
+             `skip_deserializing`, `default` or a `PhantomData`, and the derive checks that \
+             field; {fix}"
+        ),
+    ))
+}
+
+/// The key serde reads for a field: its `#[serde(rename)]`, else the container
+/// `rename_all` applied to the field name, else the name itself.
+fn doc_key(ident: &Ident, serde_rename: Option<String>, rename_all: Option<&str>) -> String {
+    if let Some(renamed) = serde_rename {
         return renamed;
     }
     let base = ident.unraw().to_string();
@@ -131,15 +150,15 @@ struct SerdeKey {
     /// The key serde reads: a plain `rename = "…"`, or the `deserialize` name
     /// of a `rename(serialize = …, deserialize = …)` list.
     rename: Option<String>,
-    /// An `alias`: serde may read a key the derive does not see.
-    aliased: bool,
+    /// Every `alias`: a key serde reads besides the one the derive sees.
+    aliases: Vec<String>,
 }
 
 /// Reads `rename` and `alias`; every other serde field attribute is stepped over.
 fn serde_key(field: &Field) -> SerdeKey {
     let mut key = SerdeKey {
         rename: None,
-        aliased: false,
+        aliases: Vec::new(),
     };
     for meta in serde_metas(&field.attrs) {
         match meta.name.as_str() {
@@ -148,37 +167,65 @@ fn serde_key(field: &Field) -> SerdeKey {
                     key.rename = Some(name.to_owned());
                 }
             }
-            "alias" => key.aliased = true,
+            "alias" => {
+                if let crate::serde_attr::SerdeValue::Str(alias) = &meta.value {
+                    key.aliases.push(alias.clone());
+                }
+            }
             _ => {}
         }
     }
     key
 }
 
-/// `#[flusso(rename)]` that names a different key than the one serde provably
-/// reads (no `alias` beside its `rename`): the struct compiles, but every real
-/// document fails to deserialize.
-fn contradicting_rename(
+/// A `#[flusso(rename)]` that does not name one of the field's `alias`es.
+///
+/// The derive reads the key serde reads (`read`) by itself, so a `flusso`
+/// rename is only ever needed to pick one of the `alias`es serde also accepts.
+/// Naming `read` again is redundant; naming any other key checks the schema
+/// under a key serde never reads, so every real document fails to deserialize.
+fn unseen_rename(
     ident: &Ident,
-    flusso: Option<&LitStr>,
+    flusso: &LitStr,
+    read: &str,
     serde: &SerdeKey,
 ) -> Option<syn::Error> {
-    let flusso = flusso?;
-    let serde_key = serde.rename.as_ref()?;
-    if serde.aliased || flusso.value() == *serde_key {
+    let named = flusso.value();
+    if serde.aliases.contains(&named) {
         return None;
     }
-    Some(syn::Error::new(
-        flusso.span(),
+    let message = if named == read {
         format!(
-            "`{ident}` is read by serde from `{serde_key}` (its `#[serde(rename)]`), but \
-             `#[flusso(rename = \"{}\")]` checks it against the schema as `{}` — the two must \
-             name the key serde reads; remove `#[flusso(rename)]`, which is for a key the \
-             derive cannot read from serde (one of its `alias`es)",
-            flusso.value(),
-            flusso.value(),
-        ),
-    ))
+            "`#[flusso(rename = \"{named}\")]` repeats the key the derive already reads from \
+             serde for `{ident}`; remove `#[flusso(rename)]`"
+        )
+    } else if serde.aliases.is_empty() {
+        let fix = if serde.rename.is_some() {
+            format!("change the `#[serde(rename)]` to `#[serde(rename = \"{named}\")]`")
+        } else {
+            format!("write `#[serde(rename = \"{named}\")]` instead")
+        };
+        format!(
+            "serde reads `{ident}` from the key `{read}`, but `#[flusso(rename = \"{named}\")]` \
+             checks it against the schema as `{named}`, so every real document would fail to \
+             deserialize — {fix}, and remove `#[flusso(rename)]`, which only picks one of a \
+             field's `#[serde(alias)]`es"
+        )
+    } else {
+        format!(
+            "serde reads `{ident}` from `{read}` or its aliases ({}), never from `{named}`, \
+             but `#[flusso(rename = \"{named}\")]` checks it against the schema as `{named}` — \
+             `#[flusso(rename)]` names one of the field's `#[serde(alias)]`es; name one, or \
+             add `#[serde(alias = \"{named}\")]`",
+            serde
+                .aliases
+                .iter()
+                .map(|alias| format!("`{alias}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
+    Some(syn::Error::new(flusso.span(), message))
 }
 
 /// A field's `#[flusso(…)]` attributes: `skip`, `opaque`, `rename = "…"`,
@@ -399,7 +446,10 @@ fn unshaped(field: &DocField) -> String {
         );
     }
     if leaf_ident(vec_inner(inner).unwrap_or(inner)).as_deref() == Some("Value") {
-        "a `serde_json::Value`, which the derive never checks".to_string()
+        format!(
+            "`{}`, which the derive never checks",
+            crate::fragment::render(ty)
+        )
     } else if map_container_value(inner).is_some() {
         "a `HashMap`/`BTreeMap`, checked as a `map` by its value type, so there is no shape to \
          opt out of"
@@ -576,6 +626,19 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             }
             if vec_inner(inner).is_some() || is_primitive(leaf_ident(inner).as_deref()) {
                 return Err(shape_error(field, os, "a struct (a sub-object)"));
+            }
+            if map_container_value(inner).is_some() {
+                return Err(syn::Error::new(
+                    field.ty.span(),
+                    format!(
+                        "field `{}` is an `object` with fields of its own in the schema, and a \
+                         `{}` is not that shape — declare a struct for it (a \
+                         `#[derive(FlussoFragment)]`, or a plain struct marked \
+                         `#[flusso(opaque)]`); a map type goes on a `map` or `json` field",
+                        field.doc_key,
+                        crate::fragment::render(inner),
+                    ),
+                ));
             }
             Ok(None)
         }
@@ -870,6 +933,7 @@ pub(crate) fn codegen(
         auto_subfields,
         renames,
         module: module.clone(),
+        scopes: std::collections::HashMap::new(),
         emitted: TokenStream::new(),
     };
 
@@ -943,7 +1007,48 @@ struct Namespaces {
     /// The module the namespaces live in — referenced from the root's handles,
     /// but not from inside the module, where the names are already in scope.
     module: Ident,
+    /// Every scope type generated so far, by name, with the level it is for:
+    /// they share one module, so two levels must not generate one name.
+    scopes: std::collections::HashMap<String, String>,
     emitted: TokenStream,
+}
+
+/// Record that the schema field at `path` generates the handle `name` on its
+/// level, or the error naming the field that already did. An object's level
+/// also has its presence check, `exists()`.
+fn claim_handle(
+    taken: &mut std::collections::HashMap<String, String>,
+    name: &Ident,
+    path: &str,
+    prefix: &str,
+    receiver: Receiver,
+) -> syn::Result<()> {
+    let generated = name.to_string();
+    let level = if prefix.is_empty() {
+        "the index root".to_string()
+    } else {
+        format!("`{prefix}`")
+    };
+    if receiver == Receiver::Method && generated == "exists" {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "the schema key `{path}` generates the query handle `exists()`, which the object \
+                 {level} already has as its presence check — rename the field in the schema"
+            ),
+        ));
+    }
+    if let Some(other) = taken.get(&generated) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "the schema keys `{other}` and `{path}` at {level} both generate the query \
+                 handle `{generated}()` — rename one of them in the schema"
+            ),
+        ));
+    }
+    taken.insert(generated, path.to_owned());
+    Ok(())
 }
 
 impl Namespaces {
@@ -961,6 +1066,7 @@ impl Namespaces {
         receiver: Receiver,
     ) -> TokenStream {
         let mut handles = TokenStream::new();
+        let mut handle_keys = std::collections::HashMap::new();
         // An `indexed: false` field has nothing in the index to query, so it
         // gets no handle; its value still deserializes into the document type.
         for resolved in level.iter().filter(|resolved| resolved.mapping.indexed) {
@@ -977,13 +1083,22 @@ impl Namespaces {
             let key = resolved.name.as_ref();
             let (name, child) = match generated_ident(&to_snake_case(key), key)
                 .and_then(|name| Ok((name, self.child_ident(base, key, segments.is_empty())?)))
-            {
+                .and_then(|(name, child)| {
+                    claim_handle(&mut handle_keys, &name, &path, prefix, receiver)?;
+                    Ok((name, child))
+                }) {
                 Ok(names) => names,
                 Err(error) => {
                     handles.extend(error.to_compile_error());
                     continue;
                 }
             };
+            let has_scope = matches!(resolved.mapping.mapping_type, MappingType::Nested)
+                || has_namespace(resolved);
+            if has_scope && let Err(error) = self.claim_scope(&child, &path) {
+                handles.extend(error.to_compile_error());
+                continue;
+            }
 
             // At the root the namespace is one module away; inside the module
             // its siblings are already in scope.
@@ -1080,6 +1195,25 @@ impl Namespaces {
                 #handles
             }
         });
+    }
+
+    /// Record that the level at `path` generates the scope type `child`, or
+    /// the error naming the level that already did.
+    fn claim_scope(&mut self, child: &Ident, path: &str) -> syn::Result<()> {
+        let name = child.to_string();
+        if let Some(other) = self.scopes.get(&name) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "the schema levels `{other}` and `{path}` both generate the query scope \
+                     `{}::{name}` — rename one of them in the schema, or give the root field \
+                     above one of them a `#[flusso(scope = \"…\")]`",
+                    self.module,
+                ),
+            ));
+        }
+        self.scopes.insert(name, path.to_owned());
+        Ok(())
     }
 
     /// The namespace type for a child level.

@@ -1,0 +1,22 @@
+# Opaque `json` blobs and a to-one object with fields of its own, for the
+# root/fragment parity tests (issue #262).
+version: 1
+table: shapes
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - json: blob
+    required: false
+  - json: settings
+    required: true
+  - has_one: profile
+    table: profiles
+    foreign_key: shape_id
+    primary_key: id
+    fields:
+      - keyword: bio
+        required: true
+  - long: score
+    required: true

@@ -16,10 +16,10 @@ type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 struct User {
     id: i32,
     email: String,
-    #[flusso(rename = "fullName")]
+    #[serde(rename = "fullName")]
     full_name: Option<String>,
     orders: Vec<Order>,
-    #[flusso(rename = "orderCount")]
+    #[serde(rename = "orderCount")]
     order_count: i64,
     // `location` (geo) and the orders' inner fields aren't projected here —
     // partial projections are allowed, and their handles still generate.
@@ -93,7 +93,7 @@ struct Money(flusso_query::Decimal);
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct TypedUser {
     email: Email,
-    #[flusso(rename = "fullName")]
+    #[serde(rename = "fullName")]
     full_name: Option<Headline>,
     orders: Vec<TypedOrder>,
 }
@@ -191,13 +191,13 @@ enum CustomerTier {
 #[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
 struct Customer {
     email: String,
-    #[flusso(rename = "fullName")]
+    #[serde(rename = "fullName")]
     full_name: Option<String>,
     // A `Uuid` keyword field — no `#[flusso(skip)]`, no `Keyword::at("ownerId")`.
-    #[flusso(rename = "ownerId")]
+    #[serde(rename = "ownerId")]
     owner_id: flusso_query::uuid::Uuid,
     tier: CustomerTier,
-    #[flusso(rename = "createdAt")]
+    #[serde(rename = "createdAt")]
     created_at: Option<String>,
 }
 
@@ -303,7 +303,7 @@ struct MappedProduct {
     title: HashMap<String, String>,
     codes: Option<HashMap<String, String>>,
     prices: Option<HashMap<String, f64>>,
-    #[flusso(rename = "releaseDates")]
+    #[serde(rename = "releaseDates")]
     release_dates: Option<HashMap<String, String>>,
 }
 
@@ -524,7 +524,7 @@ fn multi_document_derive_lists_targets_and_dispatches_hits() -> Result {
         &User::physical_index(),
         serde_json::json!({
             "id": 1, "email": "ada@example.com",
-            "full_name": null, "orders": [], "order_count": 0
+            "fullName": null, "orders": [], "orderCount": 0
         }),
     )?;
     assert!(matches!(hit, SearchItem::User(_)));
@@ -732,7 +732,7 @@ struct Common {
 struct FlatUser {
     #[serde(flatten)]
     common: Common,
-    #[flusso(rename = "fullName")]
+    #[serde(rename = "fullName")]
     full_name: Option<String>,
 }
 
@@ -956,9 +956,9 @@ fn opted_out_fields_deserialize_and_lose_only_what_the_index_lacks() -> Result {
 #[flusso(index = "flags", config = "tests/fixtures/flusso.toml")]
 struct UserFlags {
     id: i32,
-    #[flusso(rename = "hasPaidOrder")]
+    #[serde(rename = "hasPaidOrder")]
     has_paid_order: bool,
-    #[flusso(rename = "hasCompletedTask")]
+    #[serde(rename = "hasCompletedTask")]
     has_completed_task: bool,
 }
 

@@ -443,6 +443,36 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
     // A dynamic-key map: check the declared value kind, not the container.
     if let Some(value_ty) = map_container_value(inner) {
         let container = leaf_ident(inner).unwrap_or_else(|| "HashMap".to_string());
+        let fields_msg = message(
+            fragment,
+            key,
+            &format!(
+                "is a `{container}`, but the schema field here is an `object` with fields of its \
+                 own — declare a struct for it (a `#[derive(FlussoFragment)]`, or a plain struct \
+                 marked `#[flusso(opaque)]`); a map type goes on a `map` or `json` field"
+            ),
+        );
+        let mut checks = quote_spanned! {span=>
+            assert!(!::flusso_query::has_fields(level, #key), #fields_msg);
+        };
+        // `serde_json::Value` has no kind: it holds an opaque `json` field's
+        // values, and on a `map` a root checks its `FlussoValue` bound, which
+        // it does not have.
+        if leaf_ident(value_ty).as_deref() == Some("Value") {
+            let msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is a `{container}` of `serde_json::Value`, which only a `json` field takes, \
+                     and the schema field here is not one — at a `map`, give the map its value \
+                     type (`{container}<String, V>`)"
+                ),
+            );
+            checks.extend(quote_spanned! {span=>
+                assert!(::flusso_query::is_json(level, #key), #msg);
+            });
+            return checks;
+        }
         let msg = message(
             fragment,
             key,
@@ -452,7 +482,7 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 render(value_ty)
             ),
         );
-        return match primitive_kinds(value_ty) {
+        checks.extend(match primitive_kinds(value_ty) {
             Some(tags) => quote_spanned! {span=>
                 assert!(::flusso_query::map_value_is(level, #key, &[#(#tags),*]), #msg);
             },
@@ -465,7 +495,8 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                     #msg
                 );
             },
-        };
+        });
+        return checks;
     }
 
     // The array shape is `array_shape_check`'s; the kind is the element's.

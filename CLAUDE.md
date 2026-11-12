@@ -935,7 +935,8 @@ kind check at a leaf (issue #256). A fragment does this as const assertions
 (`fragment::opaque_check`, `OpaqueProbe::{HAS_META, KINDS}`); its one difference from a root: a
 type without `FlussoValueMeta` (a hand-written `FlussoValue`, or no flusso impl at all) under
 `opaque` is accepted at any non-`map` leaf with its kind unchecked, where a root checks its bound
-(kept on purpose: it is the only way a fragment takes a hand-written numeric value). `#[serde(flatten)]` and
+(kept on purpose: it is the only way a fragment takes a hand-written numeric value; a hand
+`FlussoValueMeta` can't replace it, since a fragment also calls the derive-only `__flusso_check`, issue #262). `#[serde(flatten)]` and
 `#[serde(transparent)]` newtypes are supported (both checked against the enclosing level).
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
@@ -1048,16 +1049,19 @@ rejected (`ui/scope_on_*.rs`, `ui/scope_in_fragment.rs`, `a_skipped_field_still_
 other attributes (issue #251): `opaque` only where a custom type's check would run (`misplaced_attrs`,
 shared by both derives, plus the root's mapping-aware `opaque_without_a_shape_check`; the placements
 that do something are pinned by `ui_pass/opaque_placements.rs`), no `rename` on a `#[serde(flatten)]`
-field, no `#[flusso(rename)]` contradicting a `#[serde(rename)]` with no `alias`, no
+field, a `#[flusso(rename)]` only naming one of the field's `#[serde(alias)]`es (issue #262: the derive
+reads serde's key itself, so any other is redundant or a key serde never reads; `doc::unseen_rename`), no
 `scope_mod` on a root that generates no module, and a fragment reads every container
 `#[flusso(…)]` (`ui/opaque_*.rs`, `ui/rename_on_flatten_field.rs`, `ui/rename_contradicts_serde.rs`,
+`ui/rename_serde_does_not_see.rs`,
 `ui/scope_mod_without_levels.rs`, `ui/fragment_location_in_second_attribute.rs`). A flattened
 `serde_json::Value` or map is serde's catch-all and is checked on neither derive (both go through
 `fragment::embedded_type`; `ui_pass/flattened_catch_all.rs`).
 Issue #256 closed the rest: a `#[flusso(…)]` the derive never reads is an error (a `FlussoValue`
 newtype's field or enum variant, a `FlussoMap` field, the field of a `#[serde(transparent)]`
-fragment/root: `value::unread_attr`, `doc::newtype_field`; a transparent struct takes one field,
-tuple or named); every key is given once
+fragment/root: `value::unread_attr`, `doc::newtype_field`; a transparent struct is read as the one
+field serde reads, `serde_attr::passed_over_by_transparent` mirroring serde's rule, tuple or named,
+issue #262); every key is given once
 (`lib.rs`'s `once`; `keyword` beside `text` is a conflict); on a root `keyword`/`text` field
 `opaque` on a type with no variants to check is a const error through `flusso_query::OpaqueProbe`
 (inherent consts exist only with `FlussoValueMeta`; its `OpaqueWithoutMeta` fallback lets a
@@ -1071,7 +1075,11 @@ A field's key is its `#[serde(rename)]`, plain or the `deserialize` name. A raw-
 (`r#type`) reads the unraw key; a schema key that is a keyword in any edition gets a
 raw-identifier handle (`doc::KEYWORDS`, `doc::generated_ident`; `reserved` fixture,
 `ui_pass/raw_identifiers.rs`), and one no identifier spells (`_`) is an error
-(`ui/unnamable_schema_key.rs`).
+(`ui/unnamable_schema_key.rs`), as are two keys giving one handle on a level or one scope type in the
+module (`doc::claim_handle`, `Namespaces::claim_scope`; `colliding` fixture, issue #262). A map type
+at an `object` with fields is rejected on both derives; a map of `serde_json::Value` fits a `json`
+field on both (`check::has_fields`/`is_json`, `ui/map_at_structured_object.rs`,
+`ui_pass/fragment_json_maps.rs`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/

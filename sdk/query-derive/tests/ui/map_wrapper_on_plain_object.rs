@@ -13,7 +13,7 @@ struct Translations(HashMap<String, String>);
 #[flusso(index = "users")]
 struct User {
     email: String,
-    #[flusso(rename = "billingAddress")]
+    #[serde(rename = "billingAddress")]
     billing_address: Translations,
 }
 

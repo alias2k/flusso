@@ -6,7 +6,7 @@ use flusso_query::FlussoRoot;
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
-    #[flusso(rename = "orderCount")]
+    #[serde(rename = "orderCount")]
     order_count: i64,
 }
 

@@ -1,0 +1,31 @@
+error: the schema keys `fullName` and `full_name` at the index root both generate the query handle `full_name()` — rename one of them in the schema
+ --> tests/ui/colliding_generated_names.rs:5:30
+  |
+5 | #[derive(serde::Deserialize, FlussoRoot)]
+  |                              ^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `FlussoRoot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: the schema levels `orders.items` and `ordersItems` both generate the query scope `flusso_colliding_query::OrdersItems` — rename one of them in the schema, or give the root field above one of them a `#[flusso(scope = "…")]`
+ --> tests/ui/colliding_generated_names.rs:5:30
+  |
+5 | #[derive(serde::Deserialize, FlussoRoot)]
+  |                              ^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `FlussoRoot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: the schema keys `orders.placedAt` and `orders.placed_at` at `orders` both generate the query handle `placed_at()` — rename one of them in the schema
+ --> tests/ui/colliding_generated_names.rs:5:30
+  |
+5 | #[derive(serde::Deserialize, FlussoRoot)]
+  |                              ^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `FlussoRoot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: the schema key `home.exists` generates the query handle `exists()`, which the object `home` already has as its presence check — rename the field in the schema
+ --> tests/ui/colliding_generated_names.rs:5:30
+  |
+5 | #[derive(serde::Deserialize, FlussoRoot)]
+  |                              ^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `FlussoRoot` (in Nightly builds, run with -Z macro-backtrace for more info)

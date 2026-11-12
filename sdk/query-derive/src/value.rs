@@ -196,26 +196,26 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                      exhaustiveness",
                 ));
             }
-            // The single field of a newtype tuple struct — pulled via the
-            // iterator (not indexing, which the workspace lints forbid).
-            let mut fields = match &data.fields {
-                Fields::Unnamed(fields) => fields.unnamed.iter(),
-                Fields::Named(fields) if crate::serde_attr::transparent(&input.attrs) => {
-                    fields.named.iter()
-                }
-                _ => return Err(newtype_required(input)),
-            };
+            // A transparent struct is read as its one field serde does not
+            // pass over; a plain tuple struct must have just the one.
+            let transparent = crate::serde_attr::transparent(&input.attrs);
+            if !transparent && !matches!(data.fields, Fields::Unnamed(_)) {
+                return Err(newtype_required(input));
+            }
+            let mut fields = data.fields.iter().filter(|field| {
+                !transparent || !crate::serde_attr::passed_over_by_transparent(field)
+            });
             let inner = match (fields.next(), fields.next()) {
-                (Some(field), None) => {
-                    unread_attr(
-                        &field.attrs,
-                        "the newtype's field",
-                        "a kind tag goes on the type (`#[flusso(keyword)] struct Code(String)`)",
-                    )?;
-                    &field.ty
-                }
+                (Some(field), None) => &field.ty,
                 _ => return Err(newtype_required(input)),
             };
+            for field in &data.fields {
+                unread_attr(
+                    &field.attrs,
+                    "the newtype's field",
+                    "a kind tag goes on the type (`#[flusso(keyword)] struct Code(String)`)",
+                )?;
+            }
             let leaf_check = leaf_check(ident);
             match explicit {
                 // Restrict to one string kind (e.g. a keyword-only code wrapper).
@@ -345,7 +345,7 @@ fn newtype_required(input: &DeriveInput) -> syn::Error {
         input.ident.span(),
         "FlussoValue on a struct requires a single-field tuple struct \
          (a newtype wrapper, e.g. `struct Country(String)`), or a \
-         `#[serde(transparent)]` struct with one named field",
+         `#[serde(transparent)]` struct with one field serde does not skip",
     )
 }
 
