@@ -1,4 +1,4 @@
-error: `variants` is `indexed: false` in the schema, so it has no query scope to rename — remove `scope`
+error: `variants` is `indexed: false` in the schema, so it has no query scope to rename — `scope` goes on a `FlussoRoot` field whose schema field is a `nested` or `object` level; remove `scope`
   --> tests/ui/scope_on_unindexed_field.rs:14:22
    |
 14 |     #[flusso(scope = "Variants")]

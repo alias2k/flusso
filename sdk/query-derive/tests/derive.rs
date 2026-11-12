@@ -853,6 +853,27 @@ fn a_field_can_rename_its_generated_namespace() -> Result {
     Ok(())
 }
 
+// A skipped field still names its level by its key, so its `scope` renames
+// that level: `skip` turns off the shape check, not the namespace.
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct SkippedScopeUser {
+    id: i32,
+    #[serde(skip)]
+    #[flusso(skip, scope = "Purchases")]
+    orders: Vec<String>,
+}
+
+#[test]
+fn a_skipped_field_still_renames_its_level() -> Result {
+    let body = SkippedScopeUser::query()
+        .sorts([flusso_skipped_scope_user_query::Purchases::total().desc()])
+        .body();
+    assert_eq!(body["sort"][0]["orders.total"]["nested"]["path"], "orders");
+    Ok(())
+}
+
 // Where you put the `Option` on a nested clause changes the meaning — the
 // compiler accepts both, so this pins the difference.
 #[test]
