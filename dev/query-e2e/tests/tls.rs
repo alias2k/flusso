@@ -66,19 +66,20 @@ async fn wait_until_healthy(base: &str) {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
-        let healthy = reader
+        let last = match reader
             .get(format!("{base}/_cluster/health"))
             .basic_auth("admin", Some(PASSWORD))
             .timeout(Duration::from_secs(5))
             .send()
             .await
-            .is_ok_and(|response| response.status().is_success());
-        if healthy {
-            return;
-        }
+        {
+            Ok(response) if response.status().is_success() => return,
+            Ok(response) => format!("HTTP {}", response.status()),
+            Err(error) => format!("{error:?}"),
+        };
         assert!(
             Instant::now() < deadline,
-            "opensearch at {base} never became healthy"
+            "opensearch at {base} never became healthy; last: {last}"
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
