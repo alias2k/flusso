@@ -24,7 +24,7 @@ name: release-plz
 # default GITHUB_TOKEN are suppressed by GitHub to avoid recursive runs, which
 # otherwise stops the release PR from getting CI and the `flusso-cli-v*` tag from
 # firing docker.yml. Setup: create a GitHub App (contents + pull-requests: write),
-# install it on this repo, then set repo variable RELEASE_PLZ_APP_ID and repo
+# install it on this repo, then set repo variable RELEASE_PLZ_APP_CLIENT_ID (the app's Client ID) and repo
 # secret RELEASE_PLZ_APP_PRIVATE_KEY. See https://release-plz.dev/docs/github/token.
 
 on:
@@ -48,7 +48,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.RELEASE_PLZ_APP_ID }}
+          client-id: ${{ vars.RELEASE_PLZ_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Checkout
@@ -82,7 +82,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.RELEASE_PLZ_APP_ID }}
+          client-id: ${{ vars.RELEASE_PLZ_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Checkout
