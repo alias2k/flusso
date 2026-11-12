@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use kernel::{ColumnName, DatabaseSchema, GenericValue, IndexSchema, TableName};
+use kernel::{ColumnName, DatabaseSchema, GenericValue, IndexSchema, TableName, Transform};
 use source::{Result, SourceError};
 use sqlx::Postgres;
 use sqlx::postgres::PgArguments;
@@ -96,6 +96,23 @@ pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result
             ));
         }
     })
+}
+
+/// A query that applies `transforms` to `column` exactly as a document query
+/// does, over no rows: Postgres resolves the functions while planning it, so it
+/// fails where a transform does not take the column's type, and costs nothing
+/// where it does.
+pub(super) fn transform_probe(
+    db: &DatabaseSchema,
+    table: &TableName,
+    column: &ColumnName,
+    transforms: &[Transform],
+) -> SqlString {
+    SqlString::new(format!(
+        "SELECT {} FROM {} AS \"{ROOT}\" WHERE false",
+        sql::column_value(column, transforms, None, ROOT),
+        qtable(db, table),
+    ))
 }
 
 /// Build the single query that assembles one document, given its key. Returns

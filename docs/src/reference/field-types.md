@@ -113,7 +113,7 @@ A fixed value in every document. `value` absent or `null` renders as JSON null. 
 
 ## transforms
 
-Applied in order to a column value before it lands in the document.
+Applied in order to a column value before it lands in the document. Each runs in Postgres (`lower`, `trim`), so the column's type must take it: a text type or a domain over one. Anything else, an `integer` or an enum, fails every document build; `flusso check` reports it and `run` refuses to start.
 
 | Transform | Effect |
 | --- | --- |

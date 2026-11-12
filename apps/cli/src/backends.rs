@@ -165,7 +165,7 @@ fn start_verdict(
         .count();
     ensure!(
         blocking == 0,
-        "the schemas name what the database does not have ({blocking} problem(s) above); \
+        "the schemas cannot be built against this database ({blocking} problem(s) above); \
          fix them, confirm with `flusso check`, then start again"
     );
     if diagnostics.iter().any(|d| d.severity == Severity::Error) {
@@ -178,19 +178,26 @@ fn start_verdict(
 }
 
 /// Whether a diagnostic of `kind` means the documents cannot be built as
-/// written: a table or column that does not exist, or a `soft_delete` marker
-/// that reads no column (it would be dropped, and deleted rows stay indexed).
+/// written: a table or column that does not exist, a `soft_delete` marker that
+/// reads no column (it would be dropped, and deleted rows stay indexed), a
+/// relation table without a single-column primary key, or `transforms` the
+/// column's type does not take (every build of the index fails on either).
 /// A type, numeric or nullability disagreement still builds, as it did before
-/// `run` validated, so it only prints.
+/// `run` validated, so it only prints. So does a root table without a primary
+/// key: its live inserts are still indexed, so refusing would stop a
+/// deployment that runs.
 fn stops_the_start(kind: DiagnosticKind) -> bool {
     match kind {
         DiagnosticKind::UnknownTable
         | DiagnosticKind::UnknownColumn
-        | DiagnosticKind::UnreadSoftDeleteMarker => true,
+        | DiagnosticKind::UnreadSoftDeleteMarker
+        | DiagnosticKind::RelationPrimaryKey
+        | DiagnosticKind::TransformNotApplicable => true,
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
         | DiagnosticKind::Nullability
-        | DiagnosticKind::IgnoredPrimaryKey => false,
+        | DiagnosticKind::IgnoredPrimaryKey
+        | DiagnosticKind::RootWithoutPrimaryKey => false,
     }
 }
 
@@ -315,6 +322,7 @@ mod tests {
             index: IndexName::try_new("products").unwrap(),
             path: vec![field.clone()],
             field,
+            anchor: source::Anchor::Field,
             kind,
             severity: kind.severity(),
             message: format!("a {kind:?} finding"),
@@ -367,6 +375,23 @@ mod tests {
     #[test]
     fn an_unread_soft_delete_marker_refuses_the_start() {
         refuses(DiagnosticKind::UnreadSoftDeleteMarker);
+    }
+
+    #[test]
+    fn a_relation_table_without_a_primary_key_refuses_the_start() {
+        refuses(DiagnosticKind::RelationPrimaryKey);
+    }
+
+    #[test]
+    fn a_transform_the_column_does_not_take_refuses_the_start() {
+        refuses(DiagnosticKind::TransformNotApplicable);
+    }
+
+    #[test]
+    fn a_root_table_without_a_primary_key_prints_and_starts() {
+        let printed = starts(DiagnosticKind::RootWithoutPrimaryKey);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
@@ -437,6 +462,24 @@ mod tests {
             &self,
             _: &kernel::DatabaseSchema,
             _: &kernel::TableName,
+        ) -> source::Result<bool> {
+            Ok(true)
+        }
+
+        async fn primary_key(
+            &self,
+            _: &kernel::DatabaseSchema,
+            _: &kernel::TableName,
+        ) -> source::Result<Vec<kernel::ColumnName>> {
+            Ok(vec![kernel::ColumnName::try_new("id").unwrap()])
+        }
+
+        async fn accepts_transforms(
+            &self,
+            _: &kernel::DatabaseSchema,
+            _: &kernel::TableName,
+            _: &kernel::ColumnName,
+            _: &[kernel::Transform],
         ) -> source::Result<bool> {
             Ok(true)
         }

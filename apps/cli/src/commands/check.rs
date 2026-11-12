@@ -130,6 +130,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                         "index": d.index.as_ref(),
                         "field": d.field.as_ref(),
                         "path": d.dotted_path(),
+                        "anchor": d.anchor.as_str(),
                         "severity": format!("{:?}", d.severity).to_lowercase(),
                         "kind": d.kind.as_str(),
                         "message": d.message,
