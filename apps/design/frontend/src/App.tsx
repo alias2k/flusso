@@ -326,6 +326,10 @@ export default function App() {
     [savedDoc],
   );
   const dirty = useMemo(() => !!doc && bareDocJson(doc) !== savedBare, [doc, savedBare]);
+  // Typed in Code mode but not applied yet (the sync's debounce): Save flushes
+  // it first, so it must not wait for the document to move.
+  const bufferAhead = useUiStore((s) => s.rawMode && !!s.seed && s.rawText !== s.seed.text);
+  const canSave = dirty || bufferAhead;
   const indexDirty = (name: string, of: Doc | null = doc): boolean => {
     if (!of || !savedDoc) return false;
     const current = of.schemas[name];
@@ -429,7 +433,11 @@ export default function App() {
           setCodeProblem(
             res.error ? { message: res.error, location: res.location, field: res.field, typeTag: res.type_tag } : null,
           );
-          if (res.schema) applyBuffer(active, rawText, res.schema);
+          // The text the document last agreed on is never applied: a seed
+          // whose YAML doesn't read back identically would rewrite the document
+          // on a mere visit. `seed.text` moves with every applied edit, so an
+          // edit back to the first seed's text after one is still applied.
+          if (res.schema && rawText !== useUiStore.getState().seed?.text) applyBuffer(active, rawText, res.schema);
         })
         .catch(() => setCodeProblem(null));
     }, 300);
@@ -448,6 +456,8 @@ export default function App() {
     const res = await api.parse(text).catch(() => null);
     if (!res?.schema) return !bufferLive(index);
     applyBuffer(index, text, res.schema);
+    // Typed while the parse was out: apply that too, or the move would leave it.
+    if (useUiStore.getState().rawText !== text) return flushBuffer();
     return true;
   };
 
@@ -502,8 +512,7 @@ export default function App() {
     if (s?.index === active && s.schema === at) return;
     if (!schema) {
       const text = project?.indexes.find((i) => i.name === active)?.raw ?? "";
-      setRawText(text);
-      setSeed({ index: active, text, schema: at });
+      useUiStore.setState({ rawText: text, seed: { index: active, text, schema: at } });
       return;
     }
     if (codeBlocked(pruneIncomplete(schema).left)) {
@@ -515,8 +524,8 @@ export default function App() {
       .preview(active, schema)
       .then((p) => {
         if (!alive || !useUiStore.getState().rawMode) return;
-        setRawText(p.yaml);
-        setSeed({ index: active, text: p.yaml, schema: at });
+        // One update, so the editor sees the new text and its seed together.
+        useUiStore.setState({ rawText: p.yaml, seed: { index: active, text: p.yaml, schema: at } });
       })
       .catch((e) => {
         if (!alive) return;
@@ -1121,10 +1130,10 @@ export default function App() {
               {t("topbar.reset")}
             </Button>
           </Hint>
-          <Hint label={dirty ? t("topbar.unsaved") : t("topbar.upToDate")}>
-            <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
+          <Hint label={canSave ? t("topbar.unsaved") : t("topbar.upToDate")}>
+            <Button size="sm" onClick={() => void save()} disabled={saving || !canSave}>
               <span className={BTN_ICON}>
-                {saving ? <span className="spinner" /> : dirty ? <span className="dirty-dot" /> : <Save />}
+                {saving ? <span className="spinner" /> : canSave ? <span className="dirty-dot" /> : <Save />}
               </span>
               {t("topbar.save")}
             </Button>
@@ -1219,12 +1228,19 @@ export default function App() {
                 <button
                   key={e.name}
                   className={cn(NAV, active === e.name && !browseCatalog && NAV_ACTIVE)}
-                  onClick={() =>
+                  onClick={() => {
+                    // The buffer's own index is not a way out of it: from Tables
+                    // this returns to its Code view, held text and all.
+                    const { rawMode: inCode, seed: buffer } = useUiStore.getState();
+                    if (inCode && buffer?.index === e.name && active === e.name) {
+                      setBrowseCatalog(false);
+                      return;
+                    }
                     void leaveBuffer(() => {
                       setBrowseCatalog(false);
                       openIndex(e.name);
-                    })
-                  }
+                    });
+                  }}
                 >
                   {indexDirty(e.name) && <span className="dirty-dot" />}
                   {e.name}
@@ -1295,6 +1311,7 @@ export default function App() {
               {rawFor === active ? (
                 <CodeView
                   value={rawText}
+                  seedText={seed?.text}
                   onChange={setRawText}
                   fileName={config.index?.find((e) => e.name === active)?.schema ?? `${active}.schema.yml`}
                   dirty={indexDirty(active)}
