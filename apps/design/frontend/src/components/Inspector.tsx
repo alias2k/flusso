@@ -751,7 +751,7 @@ function ScalarBody({
           <Select
             value={column.ty as string}
             options={scalarTypeOptions(t)}
-            onChange={(ty) => setCol(edit.retypeColumn(column, ty as FlussoType))}
+            onChange={(ty) => set(edit.retypeField(field, column, ty as FlussoType))}
             className={`font-mono ${typeClass(column.ty as string)}`}
           />
         </Row>
@@ -761,7 +761,7 @@ function ScalarBody({
             <button
               type="button"
               className="cursor-pointer text-primary hover:underline"
-              onClick={() => setCol(edit.retypeColumn(column, suggested))}
+              onClick={() => set(edit.retypeField(field, column, suggested))}
             >
               {t("inspector.use")}
             </button>
@@ -1016,7 +1016,7 @@ function RequiredDefault({
             <GenericInput
               invalid={defaultMissing}
               value={column.default}
-              onChange={(def) => setCol({ ...column, default: def })}
+              onChange={(def) => setCol({ ...column, default: def === "Null" ? undefined : def })}
               placeholder={t("inspector.defaultPlaceholder")}
             />
           </Row>
@@ -1057,10 +1057,10 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   const KNOBS: { key: string; seed: unknown }[] = [
     { key: "analyzer", seed: { String: "" } },
     { key: "search_analyzer", seed: { String: "" } },
-    { key: "boost", seed: { Double: 1 } },
+    { key: "boost", seed: { BigInt: 1 } },
     { key: "null_value", seed: { String: "" } },
     { key: "copy_to", seed: { String: "" } },
-    { key: "scaling_factor", seed: { Double: 100 } },
+    { key: "scaling_factor", seed: { BigInt: 100 } },
   ];
   const available = KNOBS.filter((k) => !(k.key in options));
   return (

@@ -473,17 +473,24 @@ fn generic_value(value: &GenericValue) -> Result<Value> {
 /// A decimal as a YAML number. The parser reads an integer past `i64` as that
 /// decimal and any other non-`i64` number through `f64` (`Decimal` of its
 /// shortest text), so a decimal it produced is written back as exactly that
-/// integer or `f64`. Any other decimal (a trailing zero, more digits than `f64`
-/// holds) is written at `f64` precision: no YAML number reads back closer. One
-/// the parser rounded to 28 places reads back equal, possibly at another scale.
+/// integer or `f64`. A decimal it can't produce is written as near as a YAML
+/// number reads back: a whole number `f64` can't hold exactly as the integer
+/// (reading back as a `BigInt`), anything else (a trailing zero, more digits
+/// than `f64` holds) at `f64` precision. One the parser rounded to 28 places
+/// reads back equal, possibly at another scale.
 fn decimal_value(d: &Decimal) -> Value {
     let text = d.to_string();
+    let float = text.parse::<f64>().unwrap_or(f64::NAN);
     if let Ok(n) = text.parse::<u64>()
         && n > i64::MAX.unsigned_abs()
     {
         return Value::from(n);
     }
-    let float = text.parse::<f64>().unwrap_or(f64::NAN);
+    if let Ok(n) = text.parse::<i64>()
+        && float.to_string() != text
+    {
+        return Value::from(n);
+    }
     Value::from(float)
 }
 
@@ -630,6 +637,19 @@ mod tests {
             plain.resolve(index).hash
         );
         assert_roundtrips(&schema_to_yaml(&tagged).unwrap());
+    }
+
+    #[test]
+    fn a_whole_decimal_past_f64_is_written_as_its_integer() {
+        let mut schema =
+            parse("version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: c\n  value: 1\n");
+        schema.fields[0].source =
+            FieldSource::Constant(GenericValue::Decimal("9007199254740993".parse().unwrap()));
+        assert!(
+            schema_to_yaml(&schema)
+                .unwrap()
+                .contains("value: 9007199254740993\n")
+        );
     }
 
     #[test]

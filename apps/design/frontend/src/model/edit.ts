@@ -2,7 +2,7 @@
 // action funnels through one of these; each returns a fresh `IndexSchema`.
 
 import type { Column, Field, FlussoType, IndexSchema } from "../api";
-import { defaultField } from "../fields";
+import { columnField, defaultField, retypeOptions } from "../fields";
 import { stripFieldUids } from "./ids";
 import { carryUid, nodeFields, setNodeField, withNodeFields } from "./tree";
 
@@ -17,8 +17,7 @@ export function toggleColumn(
 ): IndexSchema {
   const fields = nodeFields(schema, path);
   if (on) {
-    const field: Field = { field: column, source: { column: { column, ty, nullable } } };
-    return withNodeFields(schema, path, [...fields, field]);
+    return withNodeFields(schema, path, [...fields, columnField(column, { column, ty, nullable })]);
   }
   const next = fields.filter(
     (f) => !("column" in f.source && typeof f.source.column.ty === "string" && f.source.column.column === column),
@@ -45,10 +44,7 @@ export function includeColumns(
   );
   const added = columns
     .filter((c) => !present.has(c.name))
-    .map((c): Field => ({
-      field: c.name,
-      source: { column: { column: c.name, ty: c.ty ?? "keyword", nullable: c.nullable ?? true } },
-    }));
+    .map((c) => columnField(c.name, { column: c.name, ty: c.ty ?? "keyword", nullable: c.nullable ?? true }));
   return withNodeFields(schema, path, [...fields, ...added]);
 }
 
@@ -162,12 +158,17 @@ export function setRootMeta(
 /// The scalar types whose sink adds automatic subfields a field may turn off.
 export const SUBFIELD_TYPES: FlussoType[] = ["text", "keyword", "uuid"];
 
-/// Give a column a new type, dropping the opt-outs it no longer takes, so a
-/// retyped field never carries a sibling the schema would reject. Every retype
+/// Give a column field a new type, dropping the opt-outs it no longer takes, so
+/// a retyped field never carries a sibling the schema would reject, and moving
+/// the options the parser adds per type (see `retypeOptions`). Every retype
 /// (the type picker, the suggested-type chip, "fix all") goes through here.
-export function retypeColumn(column: Column, ty: FlussoType): Column {
+export function retypeField(field: Field, column: Column, ty: FlussoType): Field {
   const next: Column = { ...column, ty };
   if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
   if (ty !== "json") delete next.indexed;
-  return next;
+  const retyped: Field = { ...field, source: { column: next } };
+  const options = retypeOptions(field.options, column.ty, ty);
+  if (options) retyped.options = options;
+  else delete retyped.options;
+  return retyped;
 }

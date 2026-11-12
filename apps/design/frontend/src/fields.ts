@@ -4,7 +4,7 @@
 // shape — scalar types, map/custom/geo/object, the four join verbs, the seven
 // aggregate ops, and constant.
 
-import type { Aggregate, AggregateOp, Field, FieldSource, FlussoType, Join, JoinKind } from "./api";
+import type { Aggregate, AggregateOp, Column, Field, FieldSource, FlussoType, Join, JoinKind } from "./api";
 import { SCALAR_TYPES } from "./api";
 
 export const JOIN_KINDS = ["belongs_to", "has_one", "has_many", "many_to_many"] as const;
@@ -87,11 +87,44 @@ function aggOp(op: AggregateOp): FieldKind {
   return "ids";
 }
 
+/// The options the parser adds to a column of type `ty` when the YAML leaves
+/// them out: an `identifier`'s analyzer, a `map`'s `dynamic: true`. A field the
+/// canvas builds carries them too, so it equals what its YAML reads back as.
+export function typeOptions(ty: Column["ty"]): Record<string, unknown> {
+  if (ty === "identifier") return { analyzer: { String: "flusso_code" } };
+  if (typeof ty === "object" && "map" in ty) return { dynamic: { Bool: true } };
+  return {};
+}
+
+/// `options` moved from type `from` to type `to`: the options the parser added
+/// for `from` (still at their added value) go, the ones it adds for `to` come in.
+/// An option the user set keeps its value either way.
+export function retypeOptions(
+  options: Record<string, unknown> | undefined,
+  from: Column["ty"] | undefined,
+  to: Column["ty"],
+): Record<string, unknown> | undefined {
+  const next: Record<string, unknown> = { ...options };
+  if (from !== undefined) {
+    for (const [k, v] of Object.entries(typeOptions(from))) {
+      if (JSON.stringify(next[k]) === JSON.stringify(v)) delete next[k];
+    }
+  }
+  for (const [k, v] of Object.entries(typeOptions(to))) if (!(k in next)) next[k] = v;
+  return Object.keys(next).length ? next : undefined;
+}
+
+/// A column field as the parser builds it: with its type's added options.
+export function columnField(field: string, column: Column): Field {
+  const options = retypeOptions(undefined, undefined, column.ty);
+  return options ? { field, options, source: { column } } : { field, source: { column } };
+}
+
 /// Build a fresh field of `kind`, keeping the existing `name`. Reuses an obvious
 /// related table when changing between relation kinds.
 export function defaultField(name: string, kind: FieldKind, prevTable = ""): Field {
   const source = defaultSource(name, kind, prevTable);
-  return { field: name, source };
+  return "column" in source ? columnField(name, source.column) : { field: name, source };
 }
 
 function defaultSource(name: string, kind: FieldKind, table: string): FieldSource {
