@@ -30,6 +30,7 @@ import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
 import { DiffView } from "./components/DiffView";
 import { diffStats, type DiffMode } from "./model/diff";
+import { parseJson } from "./model/exact";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
@@ -319,7 +320,7 @@ export default function App() {
   // it must not re-parse the whole saved doc each call.
   // Compared without the client-only node uids: a uid-only change (a container
   // removed and re-added as-is) writes nothing, so it must not read as unsaved.
-  const savedDoc = useMemo(() => (saved ? (JSON.parse(saved) as Doc) : null), [saved]);
+  const savedDoc = useMemo(() => (saved ? (parseJson(saved) as Doc) : null), [saved]);
   const savedBare = useMemo(() => (savedDoc ? bareDocJson(savedDoc) : null), [savedDoc]);
   const savedSchemasBare = useMemo(
     () => new Map(Object.entries(savedDoc?.schemas ?? {}).map(([name, s]) => [name, JSON.stringify(stripUids(s))])),
@@ -1311,7 +1312,7 @@ export default function App() {
               {rawFor === active ? (
                 <CodeView
                   value={rawText}
-                  seedText={seed?.text}
+                  seed={seed ?? undefined}
                   onChange={setRawText}
                   fileName={config.index?.find((e) => e.name === active)?.schema ?? `${active}.schema.yml`}
                   dirty={indexDirty(active)}

@@ -137,7 +137,13 @@ export function Preview({
     <div className="flex min-h-0 flex-1 flex-col select-text" data-vaul-no-drag>
       {!preview.parse_ok && (
         <div className="banner error mx-3 mt-3">
-          <strong>{t("preview.parseError")}</strong> {preview.parse_error}
+          {preview.differs_at !== undefined ? (
+            <strong>{t("preview.differsAt", { field: preview.differs_at })}</strong>
+          ) : (
+            <>
+              <strong>{t("preview.parseError")}</strong> {preview.parse_error}
+            </>
+          )}
         </div>
       )}
       {left.length > 0 && (

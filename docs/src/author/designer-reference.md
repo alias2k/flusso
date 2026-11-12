@@ -106,6 +106,24 @@ Every changed file, in a folder tree: **New**, write, **Move** (rename or reloca
 
 Saving is canonical regeneration: meaning is preserved (the written file parses back to the same schema and mapping, which the preview self-checks on every edit), comments and incidental formatting are not. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned. The save is atomic.
 
+### Typed values
+
+A `constant`, a `default` and each `options` value are typed as JSON: text in double quotes (`"like this"`), `true`, `null`, lists, objects, numbers. The designer reads what you type the way the saved file will be read, so the preview and the content hash (the physical index name) match what flusso deploys from that file. A value goes into the schema only once it is accepted; a refused one keeps the field red with the reason underneath.
+
+| Typed | Stored as | A `constant` maps as |
+|---|---|---|
+| an integer that fits a signed 64-bit integer (`5`, `-12`, `9007199254740993`) | that integer | `long` |
+| a larger integer the file holds exactly (`9223372036854775808`) | a decimal | `double` |
+| a fraction or an exponent (`1.5`, `5.0`, `1e3`, `1e-7`) | a decimal, as the file reads a float: `1e3` is `1000.0` | `double` |
+| `+5`, `007`, `-0`, spaces around the number | the same number: `5`, `7`, `0` | as above |
+
+When the stored spelling differs from what you typed, a *Saved as* note shows it (`1e3` → `1000.0`). Refused, with a message, and never rounded:
+
+- a number with more digits than the file keeps, such as `0.1000000000000000000001`, or most integers past 2⁶⁴ (`18446744073709551616`);
+- a number too large or too small to be a number in the file, such as `1.5e300` or `1e-30`.
+
+To keep either as written, quote it: `"1.5e300"` is stored as text. In a browser without `JSON.rawJSON`, an integer past 9007199254740991 is refused too, since the browser would round it.
+
 ## Catalog browser
 
 **Tables** opens every table with its columns, primary key, foreign keys, "Referenced by", and a junction badge, independent of the canvas. Filter tables and columns by name.

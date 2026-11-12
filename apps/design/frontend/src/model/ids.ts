@@ -94,11 +94,13 @@ export function uidSkeleton(schema: IndexSchema): Pick<IndexSchema, "fields"> {
   return { fields: skeleton(schema.fields) };
 }
 
-/// The fields without any uid, recursively — the kernel shape.
+/// The fields without any uid (or other client-only marker), recursively —
+/// the kernel shape.
 export function stripFieldUids(fields: Field[]): Field[] {
   return fields.map((field) => {
     const rest = { ...field };
     delete rest.uid;
+    delete rest.keptOptions;
     const children = childFields(rest);
     return children === null ? rest : withChildFields(rest, stripFieldUids(children));
   });

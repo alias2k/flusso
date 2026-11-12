@@ -1,0 +1,503 @@
+//! A value typed into the inspector (a `constant`, a column `default`, an
+//! option) turned into the [`GenericValue`] its saved file reads back as.
+//!
+//! The inspector takes JSON. Each number keeps the text it was typed as and is
+//! read the way the schema parser reads a YAML number:
+//!
+//! - integer form (`5`, `-12`, `+7`, `007`): an `i64` is a `BigInt`; anything
+//!   larger is a `Decimal`;
+//! - fraction or exponent form (`1.5`, `5.0`, `1e3`): a `Decimal`, as the parser
+//!   reads a float.
+//!
+//! A number the file can't hold exactly is refused, never rounded:
+//! [`ValueProblem::Inexact`] when it has more digits than the file keeps
+//! (`0.1000000000000000000001`), [`ValueProblem::OutOfRange`] when it's too large
+//! or too small to be a number in the file (`1.5e300`). Negative zero is zero.
+//!
+//! The result is the value after one real round trip (codegen, then the parser),
+//! so the preview and the content hash are computed from what the file reads.
+//!
+//! ```
+//! use design::value::{ValueProblem, read_typed};
+//! use kernel::GenericValue;
+//!
+//! assert!(matches!(read_typed("9007199254740993"), Ok(GenericValue::BigInt(9_007_199_254_740_993))));
+//! assert!(matches!(read_typed("1e3"), Ok(GenericValue::Decimal(d)) if d == 1000.into()));
+//! assert!(matches!(read_typed("1.5e300"), Err(ValueProblem::OutOfRange { .. })));
+//! ```
+
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
+use config::yaml::SchemaYaml;
+use kernel::{FieldSource, GenericValue, IndexSchema, ParseFrom};
+use rust_decimal::Decimal;
+use serde::Serialize;
+
+use crate::codegen;
+
+/// Why typed text can't become a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum ValueProblem {
+    /// Not JSON; `position` is the 1-based character it stopped at.
+    Syntax { position: usize },
+    /// A number with more digits than the saved file keeps.
+    Inexact { number: String },
+    /// A number too large or too small to be a number in the saved file.
+    OutOfRange { number: String },
+    /// The value would read back as something else (a codegen defect).
+    ReadsBackDifferently,
+}
+
+/// Typed JSON → the value its saved file reads back as, or why it can't be one.
+pub fn read_typed(text: &str) -> Result<GenericValue, ValueProblem> {
+    let mut reader = Reader {
+        chars: text.chars().collect(),
+        at: 0,
+    };
+    let value = reader.value()?;
+    reader.blank();
+    if reader.at < reader.chars.len() {
+        return Err(reader.syntax());
+    }
+    read_back(&value)
+}
+
+/// `value` written as a constant and parsed back; refused if it changes.
+fn read_back(value: &GenericValue) -> Result<GenericValue, ValueProblem> {
+    let mut schema = IndexSchema::try_from(
+        SchemaYaml::try_parse(
+            "version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: c\n  value: null\n",
+        )
+        .map_err(|_| ValueProblem::ReadsBackDifferently)?,
+    )
+    .map_err(|_| ValueProblem::ReadsBackDifferently)?;
+    let Some(field) = schema.fields.first_mut() else {
+        return Err(ValueProblem::ReadsBackDifferently);
+    };
+    field.source = FieldSource::Constant(value.clone());
+    let yaml = codegen::schema_to_yaml(&schema).map_err(|_| ValueProblem::ReadsBackDifferently)?;
+    let reparsed = SchemaYaml::try_parse(&yaml)
+        .ok()
+        .and_then(|entity| IndexSchema::try_from(entity).ok());
+    match reparsed
+        .as_ref()
+        .and_then(|s| s.fields.first())
+        .map(|f| &f.source)
+    {
+        Some(FieldSource::Constant(back)) if same(back, value) => Ok(back.clone()),
+        _ => Err(ValueProblem::ReadsBackDifferently),
+    }
+}
+
+fn same(a: &GenericValue, b: &GenericValue) -> bool {
+    serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+}
+
+struct Reader {
+    chars: Vec<char>,
+    at: usize,
+}
+
+impl Reader {
+    fn syntax(&self) -> ValueProblem {
+        ValueProblem::Syntax {
+            position: self.at + 1,
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.at).copied()
+    }
+
+    fn blank(&mut self) {
+        while self
+            .peek()
+            .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+        {
+            self.at += 1;
+        }
+    }
+
+    fn expect(&mut self, c: char) -> Result<(), ValueProblem> {
+        self.blank();
+        if self.peek() == Some(c) {
+            self.at += 1;
+            Ok(())
+        } else {
+            Err(self.syntax())
+        }
+    }
+
+    fn word(&mut self, word: &str, value: GenericValue) -> Result<GenericValue, ValueProblem> {
+        let end = self.at + word.chars().count();
+        if self
+            .chars
+            .get(self.at..end)
+            .is_some_and(|s| s.iter().copied().eq(word.chars()))
+        {
+            self.at = end;
+            Ok(value)
+        } else {
+            Err(self.syntax())
+        }
+    }
+
+    fn value(&mut self) -> Result<GenericValue, ValueProblem> {
+        self.blank();
+        match self.peek() {
+            Some('"') => self.string().map(GenericValue::String),
+            Some('[') => self.array(),
+            Some('{') => self.map(),
+            Some('t') => self.word("true", GenericValue::Bool(true)),
+            Some('f') => self.word("false", GenericValue::Bool(false)),
+            Some('n') => self.word("null", GenericValue::Null),
+            Some(c) if c.is_ascii_digit() || matches!(c, '-' | '+' | '.') => self.number(),
+            _ => Err(self.syntax()),
+        }
+    }
+
+    fn string(&mut self) -> Result<String, ValueProblem> {
+        let start = self.at;
+        self.at += 1;
+        loop {
+            match self.peek() {
+                None => return Err(self.syntax()),
+                Some('\\') => self.at += 2,
+                Some('"') => break,
+                Some(_) => self.at += 1,
+            }
+        }
+        self.at += 1;
+        let raw: String = self
+            .chars
+            .get(start..self.at)
+            .unwrap_or_default()
+            .iter()
+            .collect();
+        serde_json::from_str(&raw).map_err(|_| ValueProblem::Syntax {
+            position: start + 1,
+        })
+    }
+
+    fn array(&mut self) -> Result<GenericValue, ValueProblem> {
+        self.at += 1;
+        let mut items = Vec::new();
+        self.blank();
+        if self.peek() == Some(']') {
+            self.at += 1;
+            return Ok(GenericValue::Array(items));
+        }
+        loop {
+            items.push(self.value()?);
+            self.blank();
+            match self.peek() {
+                Some(',') => self.at += 1,
+                Some(']') => {
+                    self.at += 1;
+                    return Ok(GenericValue::Array(items));
+                }
+                _ => return Err(self.syntax()),
+            }
+        }
+    }
+
+    fn map(&mut self) -> Result<GenericValue, ValueProblem> {
+        self.at += 1;
+        let mut entries = BTreeMap::new();
+        self.blank();
+        if self.peek() == Some('}') {
+            self.at += 1;
+            return Ok(GenericValue::Map(entries));
+        }
+        loop {
+            self.blank();
+            if self.peek() != Some('"') {
+                return Err(self.syntax());
+            }
+            let key = self.string()?;
+            self.expect(':')?;
+            entries.insert(key, self.value()?);
+            self.blank();
+            match self.peek() {
+                Some(',') => self.at += 1,
+                Some('}') => {
+                    self.at += 1;
+                    return Ok(GenericValue::Map(entries));
+                }
+                _ => return Err(self.syntax()),
+            }
+        }
+    }
+
+    fn number(&mut self) -> Result<GenericValue, ValueProblem> {
+        let start = self.at;
+        let mut text = String::new();
+        if let Some(sign @ ('-' | '+')) = self.peek() {
+            text.push(sign);
+            self.at += 1;
+        }
+        let digits = |r: &mut Self, text: &mut String| {
+            let mut n = 0;
+            while let Some(c) = r.peek().filter(char::is_ascii_digit) {
+                text.push(c);
+                r.at += 1;
+                n += 1;
+            }
+            n
+        };
+        let mut mantissa = digits(self, &mut text);
+        let mut integer = true;
+        if self.peek() == Some('.') {
+            integer = false;
+            text.push('.');
+            self.at += 1;
+            mantissa += digits(self, &mut text);
+        }
+        if mantissa == 0 {
+            return Err(ValueProblem::Syntax {
+                position: start + 1,
+            });
+        }
+        if let Some(e @ ('e' | 'E')) = self.peek() {
+            integer = false;
+            text.push(e);
+            self.at += 1;
+            if let Some(sign @ ('-' | '+')) = self.peek() {
+                text.push(sign);
+                self.at += 1;
+            }
+            if digits(self, &mut text) == 0 {
+                return Err(self.syntax());
+            }
+        }
+        number_value(&text, integer)
+    }
+}
+
+/// A number token as the parser reads its form (see the module docs), refused
+/// unless that value is exactly the one typed.
+fn number_value(text: &str, integer: bool) -> Result<GenericValue, ValueProblem> {
+    let typed = Exact::of(text).ok_or_else(|| ValueProblem::OutOfRange {
+        number: text.to_owned(),
+    })?;
+    let read = if integer {
+        let plain = typed.integer().unwrap_or_default();
+        if let Ok(n) = plain.parse::<i64>() {
+            return Ok(GenericValue::BigInt(n));
+        }
+        match plain.parse::<u64>() {
+            Ok(n) => Some(Decimal::from(n)),
+            Err(_) => float_decimal(text),
+        }
+    } else {
+        float_decimal(text)
+    };
+    let Some(read) = read else {
+        return Err(ValueProblem::OutOfRange {
+            number: text.to_owned(),
+        });
+    };
+    let number = text.to_owned();
+    if Exact::of(&read.to_string()) == Some(typed) {
+        Ok(GenericValue::Decimal(read))
+    } else if read.is_zero() {
+        Err(ValueProblem::OutOfRange { number })
+    } else {
+        Err(ValueProblem::Inexact { number })
+    }
+}
+
+/// The decimal the parser reads a YAML float as: the shortest text of its
+/// `f64`, when that is a decimal at all.
+fn float_decimal(text: &str) -> Option<Decimal> {
+    let float = text.trim_start_matches('+').parse::<f64>().ok()?;
+    if !float.is_finite() {
+        return None;
+    }
+    Decimal::from_str(&serde_yaml::Number::from(float).to_string()).ok()
+}
+
+/// A decimal number's exact value: `digits × 10^exponent`, without leading or
+/// trailing zeros, so two spellings of one value compare equal. Zero has no
+/// sign.
+#[derive(Debug, PartialEq, Eq)]
+struct Exact {
+    negative: bool,
+    digits: String,
+    exponent: i64,
+}
+
+impl Exact {
+    fn of(text: &str) -> Option<Self> {
+        let (negative, rest) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text.strip_prefix('+').unwrap_or(text)),
+        };
+        let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+            Some((m, e)) => (m, e.trim_start_matches('+').parse::<i64>().ok()?),
+            None => (rest, 0),
+        };
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        let all: String = whole.chars().chain(fraction.chars()).collect();
+        let mut exponent = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+        let leading = all.trim_start_matches('0');
+        let digits = leading.trim_end_matches('0');
+        exponent = exponent.checked_add(i64::try_from(leading.len() - digits.len()).ok()?)?;
+        if digits.is_empty() {
+            return Some(Self {
+                negative: false,
+                digits: String::new(),
+                exponent: 0,
+            });
+        }
+        Some(Self {
+            negative,
+            digits: digits.to_owned(),
+            exponent,
+        })
+    }
+
+    /// The value as integer text, when it is an integer short enough to spell.
+    fn integer(&self) -> Option<String> {
+        if self.digits.is_empty() {
+            return Some(String::from("0"));
+        }
+        let zeros = usize::try_from(self.exponent).ok().filter(|&n| n <= 40)?;
+        let sign = if self.negative { "-" } else { "" };
+        Some(format!("{sign}{}{}", self.digits, "0".repeat(zeros)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn decimal(text: &str) -> GenericValue {
+        GenericValue::Decimal(text.parse().unwrap())
+    }
+
+    fn read(text: &str) -> serde_json::Value {
+        serde_json::to_value(read_typed(text).unwrap()).unwrap()
+    }
+
+    fn json(value: &GenericValue) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    #[test]
+    fn an_exponent_form_is_the_decimal_the_parser_reads() {
+        assert_eq!(read("1e3"), json(&decimal("1000.0")));
+        assert_eq!(read("1e-7"), json(&decimal("0.0000001")));
+        assert_eq!(read("1e21"), json(&decimal("1000000000000000000000")));
+        assert_eq!(read("-2.5E+2"), json(&decimal("-250.0")));
+    }
+
+    #[test]
+    fn an_integer_past_2_53_keeps_its_digits() {
+        assert_eq!(
+            read("9007199254740993"),
+            json(&GenericValue::BigInt(9_007_199_254_740_993))
+        );
+        assert_eq!(
+            read("9223372036854775808"),
+            json(&decimal("9223372036854775808"))
+        );
+        assert_eq!(
+            read("18446744073709551615"),
+            json(&decimal("18446744073709551615"))
+        );
+    }
+
+    #[test]
+    fn an_integer_past_u64_is_a_decimal_when_it_is_exact_and_refused_otherwise() {
+        assert_eq!(
+            read("100000000000000000000000"),
+            json(&decimal("100000000000000000000000"))
+        );
+        assert_eq!(
+            read_typed("18446744073709551617"),
+            Err(ValueProblem::Inexact {
+                number: "18446744073709551617".into()
+            })
+        );
+    }
+
+    #[test]
+    fn negative_zero_is_zero() {
+        assert_eq!(read("-0"), json(&GenericValue::BigInt(0)));
+        assert_eq!(read("-0.0"), json(&decimal("0.0")));
+    }
+
+    #[test]
+    fn a_number_with_more_digits_than_the_file_keeps_is_refused() {
+        assert_eq!(
+            read_typed("0.1000000000000000000001"),
+            Err(ValueProblem::Inexact {
+                number: "0.1000000000000000000001".into()
+            })
+        );
+        assert_eq!(
+            read_typed("[1, 3.14159265358979323846]"),
+            Err(ValueProblem::Inexact {
+                number: "3.14159265358979323846".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_number_too_large_or_small_for_the_file_is_refused() {
+        for text in ["1.5e300", "1e400", "-1e400", "1e-30"] {
+            assert!(
+                matches!(read_typed(text), Err(ValueProblem::OutOfRange { .. })),
+                "{text}: {:?}",
+                read_typed(text)
+            );
+        }
+    }
+
+    #[test]
+    fn a_leading_plus_leading_zeros_and_whitespace_keep_the_value() {
+        assert_eq!(read("+5"), json(&GenericValue::BigInt(5)));
+        assert_eq!(read("007"), json(&GenericValue::BigInt(7)));
+        assert_eq!(read("  42 \n"), json(&GenericValue::BigInt(42)));
+        assert_eq!(read("+.5"), json(&decimal("0.5")));
+        assert_eq!(read("00.5"), json(&decimal("0.5")));
+    }
+
+    #[test]
+    fn strings_and_structures_read_as_json() {
+        assert_eq!(
+            read(r#""a\"b""#),
+            json(&GenericValue::String("a\"b".into()))
+        );
+        assert_eq!(read(r#""007""#), json(&GenericValue::String("007".into())));
+        assert_eq!(
+            read(r#"{"k": [true, null, 1.5]}"#),
+            json(&GenericValue::Map(BTreeMap::from([(
+                "k".to_owned(),
+                GenericValue::Array(vec![
+                    GenericValue::Bool(true),
+                    GenericValue::Null,
+                    decimal("1.5")
+                ])
+            )])))
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_json_is_a_syntax_problem() {
+        for text in [
+            "", "abc", "[1,", "{1: 2}", "1 2", ".", "-", "1e", "\"x", "tru",
+        ] {
+            assert!(
+                matches!(read_typed(text), Err(ValueProblem::Syntax { .. })),
+                "{text:?}: {:?}",
+                read_typed(text)
+            );
+        }
+    }
+}

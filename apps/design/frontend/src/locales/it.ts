@@ -323,6 +323,17 @@ export const it: Record<string, string> = {
   "kindHelp.script": "Un valore calcolato da uno script a partire dal documento costruito.",
   "preview.title": "Anteprima",
   "preview.empty": "Seleziona o modifica un indice per visualizzarne l'anteprima.",
+  "preview.differsAt":
+    "Lo YAML generato viene riletto diversamente in {field}, quindi l'anteprima non corrisponderebbe al file salvato.",
+  "value.syntax": 'JSON non valido (carattere {position}). Il testo va tra virgolette doppie: "così".',
+  "value.inexact":
+    "{number} ha più cifre di quante il file dello schema ne conservi, quindi verrebbe salvato arrotondato. Accorcialo, o mettilo tra virgolette per salvarlo come testo.",
+  "value.outOfRange":
+    "{number} è troppo grande o troppo piccolo per essere un numero nel file dello schema. Mettilo tra virgolette per salvarlo come testo.",
+  "value.readsBack": "Questo valore verrebbe riletto diversamente dal file salvato.",
+  "value.browserPrecision":
+    "Questo browser arrotonda gli interi oltre 9007199254740991, quindi il valore verrebbe salvato come un altro numero. Modificalo in un browser aggiornato.",
+  "value.savedAs": "Salvato come {value}",
   "preview.parseError": "Questo schema non è analizzabile:",
   "preview.leftOut": "Esclusi da questa anteprima finché non sono completi: {list}",
   "preview.notIndexed": "non indicizzato",

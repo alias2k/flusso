@@ -139,6 +139,75 @@ fn decimal() -> impl Strategy<Value = Decimal> {
     ]
 }
 
+/// A number as a user types it into the inspector: an optional sign (`+`
+/// too), leading zeros, integer digits up to past `u64`, a fraction up to past
+/// what a decimal holds, an exponent up to past `f64`, and whitespace around.
+fn typed_number() -> impl Strategy<Value = String> {
+    let digits = |max: usize| {
+        prop_oneof![
+            3 => prop::collection::vec(0u8..=9, 0..=max.min(6)),
+            1 => prop::collection::vec(0u8..=9, 0..=max),
+        ]
+        .prop_map(|d| {
+            d.into_iter()
+                .map(|n| char::from(b'0' + n))
+                .collect::<String>()
+        })
+    };
+    let pinned = prop::sample::select(vec![
+        "1e3",
+        "1E3",
+        "1e-7",
+        "1e21",
+        "1.5e300",
+        "1e400",
+        "9007199254740993",
+        "9223372036854775807",
+        "9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+        "-9223372036854775809",
+        "-0",
+        "-0.0",
+        "0e0",
+        "+5",
+        "007",
+        "+.5",
+        "0.1000000000000000000001",
+        "3.14159265358979323846",
+        " 42 ",
+    ])
+    .prop_map(String::from);
+    let built = (
+        prop::sample::select(vec!["", "-", "+"]),
+        prop::sample::select(vec!["", "0", "00"]),
+        digits(26),
+        prop::option::of(digits(30)),
+        prop::option::weighted(
+            0.3,
+            (prop::sample::select(vec!["e", "E", "e+", "e-"]), 0u32..=330),
+        ),
+        prop::sample::select(vec!["", " ", "\n "]),
+    )
+        .prop_filter_map("no digit", |(sign, zeros, int, fraction, exponent, pad)| {
+            let mantissa = match &fraction {
+                Some(f) => format!("{zeros}{int}.{f}"),
+                None => format!("{zeros}{int}"),
+            };
+            if !mantissa.chars().any(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let exponent = exponent.map(|(e, n)| format!("{e}{n}")).unwrap_or_default();
+            Some(format!("{pad}{sign}{mantissa}{exponent}{pad}"))
+        });
+    prop_oneof![1 => pinned, 3 => built]
+}
+
+/// A value the inspector accepts from a typed number (refused ones dropped).
+fn typed_value() -> impl Strategy<Value = GenericValue> {
+    typed_number().prop_filter_map("refused", |text| design::value::read_typed(&text).ok())
+}
+
 fn scalar_value() -> BoxedStrategy<GenericValue> {
     prop_oneof![
         Just(GenericValue::Null),
@@ -146,6 +215,7 @@ fn scalar_value() -> BoxedStrategy<GenericValue> {
         prop_oneof![any::<i64>(), -3i64..=3, Just(i64::MIN), Just(i64::MAX)]
             .prop_map(GenericValue::BigInt),
         decimal().prop_map(GenericValue::Decimal),
+        typed_value(),
         string().prop_map(GenericValue::String),
     ]
     .boxed()
@@ -713,8 +783,74 @@ fn schema() -> impl Strategy<Value = IndexSchema> {
     })
 }
 
+/// 256 cases, or `PROPTEST_CASES` when set.
+fn config() -> ProptestConfig {
+    ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(256),
+        ..ProptestConfig::default()
+    }
+}
+
+/// A typed number's exact value, read independently of the designer: `None`
+/// when no decimal holds it exactly.
+fn exact(text: &str) -> Option<Decimal> {
+    let text = text.trim().trim_start_matches('+');
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.trim_start_matches('+').parse::<i64>().ok()?),
+        None => (text, 0),
+    };
+    let mut value = Decimal::from_str_exact(mantissa).ok()?;
+    for _ in 0..exponent.unsigned_abs() {
+        value = if exponent > 0 {
+            value.checked_mul(Decimal::TEN)?
+        } else {
+            let next = value.checked_div(Decimal::TEN)?;
+            (next.checked_mul(Decimal::TEN)? == value).then_some(next)?
+        };
+    }
+    Some(value)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(config())]
+
+    /// A number typed into the inspector is either refused or stored as exactly
+    /// its typed value, in the form its saved file reads back as.
+    #[test]
+    fn a_typed_number_is_refused_or_saved_as_its_exact_value(text in typed_number()) {
+        let decimal = |v: &GenericValue| match v {
+            GenericValue::BigInt(n) => Some(Decimal::from(*n)),
+            GenericValue::Decimal(d) => Some(*d),
+            _ => None,
+        };
+        match design::value::read_typed(&text) {
+            Ok(value) => {
+                let read = decimal(&value);
+                prop_assert!(read.is_some(), "{text:?} became {value:?}");
+                prop_assert_eq!(read, exact(&text), "{:?} changed value", text);
+                let integer_form = !text.contains(['.', 'e', 'E']);
+                prop_assert_eq!(
+                    matches!(value, GenericValue::BigInt(_)),
+                    integer_form && text.trim().parse::<i64>().is_ok(),
+                    "{:?} read as {:?}", text, value
+                );
+            }
+            Err(problem) => {
+                use design::value::ValueProblem::{Inexact, OutOfRange};
+                prop_assert!(matches!(problem, Inexact { .. } | OutOfRange { .. }), "{text:?}: {problem:?}");
+                let short = text.trim().trim_start_matches(['+', '-']).trim_start_matches('0');
+                let significant = short.chars().filter(char::is_ascii_digit).count();
+                prop_assert!(
+                    !(text.trim().trim_start_matches('+').parse::<i64>().is_ok()
+                        || (significant <= 15 && !text.contains(['e', 'E']) && short.len() <= 18)),
+                    "{:?} refused as {:?} though the file holds it", text, problem
+                );
+            }
+        }
+    }
 
     #[test]
     fn any_valid_schema_roundtrips_through_codegen(schema in schema()) {

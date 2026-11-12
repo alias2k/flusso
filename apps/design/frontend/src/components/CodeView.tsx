@@ -205,7 +205,7 @@ interface Cursor {
 /// squiggles + gutter markers; the caret position streams out via `onCursor`.
 function YamlEditor({
   value,
-  seedText,
+  seed,
   onChange,
   vim: vimOn,
   problems,
@@ -217,9 +217,10 @@ function YamlEditor({
   className,
 }: {
   value: string;
-  /// The text the app seeded the buffer with; arriving from outside, it starts
-  /// the editor's own undo history afresh.
-  seedText?: string;
+  /// What the app last seeded the buffer with or agreed on. A new seed arriving
+  /// together with its text is a re-seed, which starts the editor's own undo
+  /// history afresh.
+  seed?: { text: string };
   onChange: (v: string) => void;
   vim?: boolean;
   problems: Problem[];
@@ -303,15 +304,20 @@ function YamlEditor({
 
   // External value changes replace the doc; the guard keeps the editor's own
   // keystrokes (already in `value`) from looping. Auto-format is an edit, so
-  // the editor can undo it. A re-seed (the app's undo, redo, Reset) is not: it
-  // starts the history afresh, so the editor's undo can't bring back text the
-  // app just undid and, by applying it, wipe the app's redo.
+  // the editor can undo it, even when it lands on the last agreed text. A
+  // re-seed (the app's undo, redo, Reset) is not: it starts the history afresh,
+  // so the editor's undo can't bring back text the app just undid and, by
+  // applying it, wipe the app's redo. A re-seed is a *new* seed arriving with
+  // its text in one update; `seenSeed` is the seed the editor last saw.
+  const seenSeed = useRef(seed);
   useEffect(() => {
     const ev = view.current;
+    const fresh = seed !== seenSeed.current;
+    seenSeed.current = seed;
     if (!ev) return;
     const current = ev.state.doc.toString();
     if (current === value) return;
-    const reseed = value === seedText;
+    const reseed = fresh && value === seed?.text;
     ev.dispatch({
       changes: { from: 0, to: current.length, insert: value },
       annotations: Transaction.addToHistory.of(!reseed),
@@ -320,9 +326,14 @@ function YamlEditor({
       ev.dispatch({ effects: historySwitch.current.reconfigure([]) });
       ev.dispatch({ effects: historySwitch.current.reconfigure(history()) });
     }
-    // seedText is read when the value moves; it moving alone changes no text.
+    // The seed is read when the value moves; it moving alone changes no text.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
+  // A seed moving alone (an agreement on text already in the buffer) is seen
+  // here, after the value effect, so a later format isn't taken for a re-seed.
+  useEffect(() => {
+    seenSeed.current = seed;
+  }, [seed]);
 
   // After the doc sync above, so positions always refer to the same text.
   useEffect(() => {
@@ -409,7 +420,7 @@ function Rail({ problems, onJump }: { problems: Problem[]; onJump: (p: Problem) 
 /// findings (by field name).
 export function CodeView({
   value,
-  seedText,
+  seed,
   onChange,
   fileName,
   dirty,
@@ -421,7 +432,7 @@ export function CodeView({
 }: {
   value: string;
   /// The text the buffer was last seeded with or agreed on (see `YamlEditor`).
-  seedText?: string;
+  seed?: { text: string };
   onChange: (v: string) => void;
   /// The schema file this buffer belongs to (from the config's index entry).
   fileName: string;
@@ -491,7 +502,7 @@ export function CodeView({
           <YamlEditor
             className="h-full"
             value={value}
-            seedText={seedText}
+            seed={seed}
             onChange={onChange}
             vim={vimOn}
             problems={problems}

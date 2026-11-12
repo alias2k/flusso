@@ -313,3 +313,63 @@ fn preview_reports_script_compile_errors_and_drops_input_only_fields() {
         .collect();
     assert_eq!(names, ["id", "label"]);
 }
+
+/// A schema whose YAML parses back as another schema fails the self-check and
+/// names the field: a `Double` constant (what the inspector used to post for
+/// `1e21`) reads back as a `Decimal`.
+#[test]
+fn preview_fails_when_the_yaml_reads_back_as_another_schema() {
+    use config::yaml::SchemaYaml;
+    use kernel::{FieldSource, GenericValue, IndexSchema, ParseFrom};
+
+    let preview = |value: GenericValue| {
+        let mut schema = IndexSchema::try_from(
+            SchemaYaml::try_parse(
+                "version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: big\n  value: 1\n",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        schema.fields[0].source = FieldSource::Constant(value);
+        api::build_preview(PreviewRequest {
+            index: IndexName::try_new("t").unwrap(),
+            schema,
+        })
+        .unwrap()
+    };
+    let response = preview(GenericValue::Double(1e21));
+    assert!(!response.parse_ok);
+    assert_eq!(response.differs_at.as_deref(), Some("big"));
+    assert!(response.parse_error.is_none());
+
+    let same = preview(GenericValue::Decimal(
+        "1000000000000000000000".parse().unwrap(),
+    ));
+    assert!(same.parse_ok, "{:?}", same.differs_at);
+}
+
+#[test]
+fn a_typed_value_is_read_as_its_saved_file_reads_it() {
+    let read = |text: &str| {
+        serde_json::to_value(api::read_value(&api::ValueRequest {
+            text: text.to_owned(),
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        read("9007199254740993"),
+        serde_json::json!({ "value": { "BigInt": 9_007_199_254_740_993_i64 } })
+    );
+    assert_eq!(
+        read("1e-7"),
+        serde_json::json!({ "value": { "Decimal": "0.0000001" } })
+    );
+    assert_eq!(
+        read("1.5e300"),
+        serde_json::json!({ "error": { "code": "out_of_range", "number": "1.5e300" } })
+    );
+    assert_eq!(
+        read("[1,"),
+        serde_json::json!({ "error": { "code": "syntax", "position": 4 } })
+    );
+}

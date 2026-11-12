@@ -185,6 +185,38 @@ pub fn check_expression(request: &ExpressionRequest) -> ExpressionResponse {
     }
 }
 
+/// A value typed into the inspector (`constant`, `default`, an option), as JSON.
+#[derive(Debug, Deserialize)]
+pub struct ValueRequest {
+    /// The text as typed.
+    pub text: String,
+}
+
+/// The value the saved file reads back as, or why the text can't be one.
+#[derive(Debug, Serialize)]
+pub struct ValueResponse {
+    /// The value, as a `GenericValue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<kernel::GenericValue>,
+    /// Why the text was refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::value::ValueProblem>,
+}
+
+/// Read a typed value the way its saved file will (see [`crate::value`]).
+pub fn read_value(request: &ValueRequest) -> ValueResponse {
+    match crate::value::read_typed(&request.text) {
+        Ok(value) => ValueResponse {
+            value: Some(value),
+            error: None,
+        },
+        Err(problem) => ValueResponse {
+            value: None,
+            error: Some(problem),
+        },
+    }
+}
+
 /// The 1-based position a parse error points at, when the parser's location is
 /// trustworthy (field-scoped errors deliberately carry none — see the parser).
 #[derive(Debug, Serialize)]
@@ -297,8 +329,12 @@ pub struct PreviewResponse {
     pub yaml: String,
     /// Derived mapping + document tree.
     pub preview: Preview,
-    /// Whether the generated YAML parses back cleanly.
+    /// Whether the generated YAML parses back to exactly this schema.
     pub parse_ok: bool,
+    /// When the YAML parses but reads back as a different schema: the first
+    /// field (dotted path, or a root key) that differs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub differs_at: Option<String>,
     /// The parse error, when `parse_ok` is false (should not happen for a valid
     /// schema — surfaced rather than hidden if it does).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -363,13 +399,14 @@ fn compile_index(
 pub fn build_preview(request: PreviewRequest) -> Result<PreviewResponse> {
     let yaml = codegen::schema_to_yaml(&request.schema)?;
     let preview = preview::preview(&request.schema, &request.index);
-    let (parse_ok, parse_error) = match SchemaYaml::try_parse(&yaml)
+    let (parse_error, differs_at) = match SchemaYaml::try_parse(&yaml)
         .map_err(|e| e.to_string())
         .and_then(|entity| IndexSchema::try_from(entity).map_err(|e| e.to_string()))
     {
-        Ok(_) => (true, None),
-        Err(e) => (false, Some(e)),
+        Ok(reparsed) => (None, first_difference(&request.schema, &reparsed)),
+        Err(e) => (Some(e), None),
     };
+    let parse_ok = parse_error.is_none() && differs_at.is_none();
     let script_errors = compile_index(&request.index, &request.schema, None)
         .err()
         .unwrap_or_default();
@@ -377,9 +414,56 @@ pub fn build_preview(request: PreviewRequest) -> Result<PreviewResponse> {
         yaml,
         preview,
         parse_ok,
+        differs_at,
         parse_error,
         script_errors,
     })
+}
+
+/// The first place `ours` and `theirs` differ, as a dotted path of field names
+/// (or the root key), or `None` when they are the same schema.
+fn first_difference(ours: &IndexSchema, theirs: &IndexSchema) -> Option<String> {
+    let (ours, theirs) = (
+        serde_json::to_value(ours).ok()?,
+        serde_json::to_value(theirs).ok()?,
+    );
+    if ours == theirs {
+        return None;
+    }
+    let mut path = Vec::new();
+    descend(&ours, &theirs, &mut path);
+    Some(if path.is_empty() {
+        String::from("schema")
+    } else {
+        path.join(".")
+    })
+}
+
+/// Walk into the first differing child, recording each named field passed.
+fn descend(ours: &serde_json::Value, theirs: &serde_json::Value, path: &mut Vec<String>) {
+    use serde_json::Value;
+    match (ours, theirs) {
+        (Value::Object(a), Value::Object(b)) => {
+            if let Some(Value::String(name)) = a.get("field") {
+                path.push(name.clone());
+            }
+            let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            let Some(key) = keys.into_iter().find(|k| a.get(*k) != b.get(*k)) else {
+                return;
+            };
+            match (a.get(key), b.get(key)) {
+                (Some(x), Some(y)) => descend(x, y, path),
+                _ if path.is_empty() => path.push(key.clone()),
+                _ => {}
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            if let Some((x, y)) = a.iter().zip(b).find(|(x, y)| x != y) {
+                descend(x, y, path);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// What to do with one schema file. The client computes these from its saved

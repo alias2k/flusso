@@ -2,7 +2,8 @@
 // action funnels through one of these; each returns a fresh `IndexSchema`.
 
 import type { Column, Field, FlussoType, IndexSchema } from "../api";
-import { columnField, defaultField, retypeOptions } from "../fields";
+import { columnField, defaultField, retypeOptions, typeOptions } from "../fields";
+import { cloneJson } from "./exact";
 import { stripFieldUids } from "./ids";
 import { carryUid, nodeFields, setNodeField, withNodeFields } from "./tree";
 
@@ -81,7 +82,7 @@ export function duplicateAt(schema: IndexSchema, path: number[], index: number):
   const fields = nodeFields(schema, path);
   const orig = fields[index];
   if (!orig) return schema;
-  const [clone] = stripFieldUids([structuredClone(orig)]);
+  const [clone] = stripFieldUids([cloneJson(orig)]);
   const copy: Field = {
     ...clone,
     field: uniqueName(
@@ -167,8 +168,14 @@ export function retypeField(field: Field, column: Column, ty: FlussoType): Field
   if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
   if (ty !== "json") delete next.indexed;
   const retyped: Field = { ...field, source: { column: next } };
-  const options = retypeOptions(field.options, column.ty, ty);
+  // An option `ty` would add that is already there was set by the user.
+  const userSet = Object.keys(typeOptions(ty)).filter((k) => field.options && k in field.options);
+  const kept = [...new Set([...(field.keptOptions ?? []), ...userSet])];
+  const options = retypeOptions(field.options, column.ty, ty, kept);
   if (options) retyped.options = options;
   else delete retyped.options;
+  const stillKept = kept.filter((k) => options && k in options);
+  if (stillKept.length) retyped.keptOptions = stillKept;
+  else delete retyped.keptOptions;
   return retyped;
 }

@@ -4,6 +4,7 @@
 // `{ variant: payload }`, unit variants become bare strings — so what the UI
 // builds round-trips through the Rust parser unchanged.
 
+import { parseJson } from "./model/exact";
 import { stripUids } from "./model/ids";
 
 export type FlussoType =
@@ -195,6 +196,10 @@ export interface Field {
   /// canvas node id that collapse state and manual positions key on, so they
   /// survive re-indexing. Stamped by `model/ids.ts`, stripped before any request.
   uid?: string;
+  /// Client-only: option keys the user set to the value a type adds (an
+  /// `identifier`'s analyzer), so retyping away keeps them (`retypeField`).
+  /// Stripped before any request.
+  keptOptions?: string[];
 }
 
 // Mirrors kernel's serde exactly: `Filter` is an externally-tagged enum
@@ -365,8 +370,11 @@ export interface DocumentNode {
 export interface PreviewResponse {
   yaml: string;
   preview: { mapping: unknown; document: DocumentNode[] };
+  /// Whether the generated YAML parses back to exactly this schema.
   parse_ok: boolean;
   parse_error?: string;
+  /// The first field that reads back differently, when the YAML parses.
+  differs_at?: string;
   // Every script field that does not compile.
   script_errors?: ScriptErrorDto[];
 }
@@ -428,7 +436,7 @@ async function json<T>(res: Response): Promise<T> {
     }
     throw new Error(message);
   }
-  return res.json() as Promise<T>;
+  return parseJson(await res.text()) as T;
 }
 
 /// An aggregate input checked by the loader's own parser: the columns it
@@ -454,6 +462,17 @@ export interface ExpressionCheck {
     /// The parser's own English message.
     message: string;
   };
+}
+
+/// A value typed into the inspector, read the way its saved file reads it: the
+/// `GenericValue` to store, or why the text was refused.
+export interface ValueCheck {
+  value?: unknown;
+  error?:
+    | { code: "syntax"; position: number }
+    | { code: "inexact"; number: string }
+    | { code: "out_of_range"; number: string }
+    | { code: "reads_back_differently" };
 }
 
 export interface ParseResponse {
@@ -509,6 +528,13 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ input }),
     }).then((r) => json<ExpressionCheck>(r)),
+  /// Read a typed JSON value (a constant, a default, an option) as its saved file will.
+  value: (text: string) =>
+    fetch("/api/value", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    }).then((r) => json<ValueCheck>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
   /// Relative subdirectories under the config dir, for the schema-folder picker.
   dirs: () => fetch("/api/dirs").then((r) => json<string[]>(r)),

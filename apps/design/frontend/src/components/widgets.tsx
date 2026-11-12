@@ -1,8 +1,9 @@
-import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { CheckIcon, ChevronDownIcon, ChevronRight, Link2, Plus, X } from "lucide-react";
-import type { ColumnShape } from "../api";
-import { useT } from "../i18n";
-import { type Generic, genericText, parseGeneric } from "../model/generic";
+import { api, type ColumnShape, type ValueCheck } from "../api";
+import { useT, type Translate } from "../i18n";
+import { exactIntegers, hasRoundedInteger } from "../model/exact";
+import { type Generic, genericText } from "../model/generic";
 import { LABEL, NO_PW_MANAGER } from "../styles";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
@@ -201,9 +202,11 @@ export function Text({
 
 /// A JSON value box for a `GenericValue`-typed field (`options`, a column
 /// `default`, a `constant`). Shows the plain decoded value, posts the tagged
-/// form. Keeps a local text buffer so half-typed JSON isn't reverted by the
-/// controlled value — the model only updates on a parse, and empty maps to
-/// `undefined` (a cleared default) unless `emptyTo` overrides it.
+/// form. The typed text is read by the backend (`/api/value`) exactly as the
+/// saved file will read it, and reaches the model only once it is accepted: a
+/// number the file can't hold exactly is refused with the reason, never
+/// rounded. Empty maps to `undefined` (a cleared default) unless `emptyTo`
+/// overrides it.
 export function GenericInput({
   value,
   onChange,
@@ -218,31 +221,93 @@ export function GenericInput({
   invalid?: boolean;
   emptyTo?: Generic;
 }) {
+  const { t } = useT();
   const external = value === undefined ? "" : genericText(value);
   const [text, setText] = useState(external);
-  // Resync from the model only when the model itself changes (undo, switching
-  // fields) — not on every keystroke, so partial JSON survives typing.
-  useEffect(() => setText(external), [external]);
-  const parseable =
-    text.trim() === "" ||
-    (() => {
-      try {
-        JSON.parse(text);
-        return true;
-      } catch {
-        return false;
-      }
-    })();
+  const [problem, setProblem] = useState<ValueProblem | undefined>(undefined);
+  const [accepted, setAccepted] = useState<string | null>(null);
+  const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const ticket = useRef(0);
+  // The text of the value this box last committed: the model coming back with
+  // it keeps what was typed (`1e3` stays, with a "saved as 1000.0" note).
+  const committed = useRef(external);
+  const cancel = () => {
+    clearTimeout(pending.current);
+    ticket.current += 1;
+  };
+  useEffect(() => {
+    if (external === committed.current) return;
+    committed.current = external;
+    cancel();
+    setText(external);
+    setProblem(undefined);
+    setAccepted(null);
+  }, [external]);
+  useEffect(() => cancel, []);
   const handle = (s: string) => {
     setText(s);
-    if (s.trim() === "") return onChange(emptyTo);
-    try {
-      onChange(parseGeneric(s));
-    } catch {
-      /* keep typing until valid JSON */
+    cancel();
+    if (s.trim() === "") {
+      setProblem(undefined);
+      committed.current = emptyTo === undefined ? "" : genericText(emptyTo);
+      return onChange(emptyTo);
     }
+    const mine = ticket.current;
+    pending.current = setTimeout(() => {
+      void api
+        .value(s)
+        .then((result) => {
+          if (mine !== ticket.current) return;
+          const error =
+            result.error ??
+            (!exactIntegers && hasRoundedInteger(result.value) ? { code: "browser_precision" as const } : undefined);
+          setProblem(error);
+          if (error) return;
+          setAccepted(s);
+          committed.current = genericText(result.value);
+          onChange(result.value);
+        })
+        .catch(() => undefined);
+    }, VALUE_CHECK_DELAY_MS);
   };
-  return <Text value={text} onChange={handle} placeholder={placeholder} invalid={!!invalid || !parseable} />;
+  const bare = (s: string) => s.replace(/\s+/g, "");
+  const savedAs = accepted === text && bare(text) !== bare(external) ? external : null;
+  return (
+    <div className="min-w-0">
+      <Text value={text} onChange={handle} placeholder={placeholder} invalid={!!invalid || !!problem} />
+      {problem && (
+        <p className="mt-1 flex items-start gap-1 text-2xs text-warn" role="alert">
+          <span aria-hidden>⚠</span>
+          <span>{valueProblem(t, problem)}</span>
+        </p>
+      )}
+      {savedAs !== null && (
+        <p className="mt-1 text-2xs text-muted-foreground">{t("value.savedAs", { value: savedAs })}</p>
+      )}
+    </div>
+  );
+}
+
+/// How long typing pauses before a value is read.
+const VALUE_CHECK_DELAY_MS = 250;
+
+/// Why a typed value was refused: the backend's reasons, plus a browser that
+/// would round an integer the file holds exactly.
+type ValueProblem = NonNullable<ValueCheck["error"]> | { code: "browser_precision" };
+
+function valueProblem(t: Translate, problem: ValueProblem): string {
+  switch (problem.code) {
+    case "syntax":
+      return t("value.syntax", { position: problem.position });
+    case "inexact":
+      return t("value.inexact", { number: problem.number });
+    case "out_of_range":
+      return t("value.outOfRange", { number: problem.number });
+    case "reads_back_differently":
+      return t("value.readsBack");
+    case "browser_precision":
+      return t("value.browserPrecision");
+  }
 }
 
 export function Num({
