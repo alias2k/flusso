@@ -79,7 +79,7 @@ fn field_value(field: &Field) -> Result<Value> {
         FieldSource::Relation(Relation::Join(join)) => join_field(join, &mut body)?,
         FieldSource::Relation(Relation::Aggregate(agg)) => aggregate_field(agg, &mut body)?,
         FieldSource::Constant(value) => {
-            body.insert(Value::from("value"), serde_yaml::to_value(value)?);
+            body.insert(Value::from("value"), generic_value(value)?);
             "constant"
         }
         FieldSource::Script(script) => script_field(script, &mut body)?,
@@ -135,7 +135,7 @@ fn column_field(name: &str, column: &Column, body: &mut Mapping) -> Result<&'sta
         );
     }
     if let Some(default) = &column.default {
-        body.insert(Value::from("default"), serde_yaml::to_value(default)?);
+        body.insert(Value::from("default"), generic_value(default)?);
     }
     if !column.subfields {
         body.insert(Value::from("subfields"), Value::from(false));
@@ -417,9 +417,19 @@ fn soft_delete_value(soft_delete: &SoftDelete) -> Result<Value> {
 fn options_value(options: &std::collections::BTreeMap<String, GenericValue>) -> Result<Value> {
     let mut map = Mapping::new();
     for (k, v) in options {
-        map.insert(Value::from(k.as_str()), serde_yaml::to_value(v)?);
+        map.insert(Value::from(k.as_str()), generic_value(v)?);
     }
     Ok(Value::Mapping(map))
+}
+
+/// A value in the form the parser reads back as the same value. Every variant
+/// but `Null` serializes tagged (`!String x`); `Null` serializes as the bare
+/// string `Null`, which the parser reads as a string, so it is written `null`.
+fn generic_value(value: &GenericValue) -> Result<Value> {
+    Ok(match value {
+        GenericValue::Null => Value::Null,
+        other => serde_yaml::to_value(other)?,
+    })
 }
 
 fn insert(map: &mut Mapping, key: &str, value: Value) {
@@ -490,6 +500,16 @@ mod tests {
     #[test]
     fn roundtrips_products_schema() {
         assert_roundtrips(include_str!("../../../dev/products.schema.yml"));
+    }
+
+    #[test]
+    fn roundtrips_null_and_tagged_values() {
+        assert_roundtrips(
+            "version: 1\ntable: users\nprimary_key: id\nfields:\n\
+             - constant: nothing\n  value: null\n\
+             - constant: label\n  value: hi\n\
+             - keyword: email\n  required: false\n  default: null\n",
+        );
     }
 
     #[test]
