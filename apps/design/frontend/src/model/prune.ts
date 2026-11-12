@@ -142,6 +142,3 @@ export function pruneIncomplete(schema: IndexSchema): { schema: IndexSchema; lef
   const filters = prunedFilters(schema.filters, "filters", left);
   return { schema: { ...schema, fields, soft_delete, filters }, left };
 }
-
-/// Just the preview-safe copy of `schema` (see `pruneIncomplete`).
-export const prunedForPreview = (schema: IndexSchema): IndexSchema => pruneIncomplete(schema).schema;

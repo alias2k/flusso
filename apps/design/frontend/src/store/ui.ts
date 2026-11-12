@@ -7,6 +7,16 @@ import type { OpDiff } from "../api";
 export interface Toast {
   kind: "ok" | "error" | "info";
   text: string;
+  /// A button in the toast, for a choice the user must make deliberately.
+  action?: { label: string; run: () => void };
+}
+
+/// What the Code buffer last agreed with the document on: the text it was
+/// seeded with or last applied, and that schema as bare JSON.
+export interface Seed {
+  index: string;
+  text: string;
+  schema: string;
 }
 
 const initialTheme = (): "dark" | "light" => {
@@ -43,6 +53,7 @@ interface UiState {
   validating: boolean;
   rawMode: boolean;
   rawText: string;
+  seed: Seed | null;
   /// VIM keybindings in the raw-YAML editor (persisted preference).
   vimMode: boolean;
   /// Auto-format the Code buffer on focus loss (persisted preference, off by default).
@@ -60,6 +71,7 @@ interface UiState {
   setValidating: (validating: boolean) => void;
   setRawMode: (rawMode: boolean) => void;
   setRawText: (rawText: string) => void;
+  setSeed: (seed: Seed | null) => void;
   toggleVim: () => void;
   toggleAutoFormat: () => void;
   setDiffs: (diffs: OpDiff[] | null) => void;
@@ -76,6 +88,7 @@ export const useUiStore = create<UiState>()((set) => ({
   validating: false,
   rawMode: false,
   rawText: "",
+  seed: null,
   vimMode: initialVim(),
   autoFormat: initialAutoFormat(),
   diffs: null,
@@ -91,6 +104,7 @@ export const useUiStore = create<UiState>()((set) => ({
   setValidating: (validating) => set({ validating }),
   setRawMode: (rawMode) => set({ rawMode }),
   setRawText: (rawText) => set({ rawText }),
+  setSeed: (seed) => set({ seed }),
   toggleVim: () =>
     set((s) => {
       const vimMode = !s.vimMode;

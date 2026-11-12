@@ -62,7 +62,15 @@ Source, stream, and sinks are edited from each adapter's own declaration: a kind
 
 A YAML editor over the selected index. Problems panel with a count, valid-YAML indicator, search, block folding, cursor position, **Format**, **Auto-format** on focus loss when valid, VIM keybindings. Edits sync into the project as you type; Save reviews and writes as usual.
 
-Code mode shows the whole schema, so it opens only when no field is [incomplete](#incomplete-fields): otherwise the canvas stays and a message names each piece to finish or remove (a field with a blank name by its position, `#3`). A schema the server refuses for another reason, such as a malformed column name, keeps the canvas too, with the server's message. Leaving Code mode applies the YAML at once. YAML that doesn't parse holds the switch once, since its latest edits aren't in the project yet; switching again discards them.
+Code mode shows the whole schema, so it opens only when no field is [incomplete](#incomplete-fields): otherwise the canvas stays and a message names each piece to finish or remove (a field with a blank name by its position, `#3`). A schema the server refuses for another reason, such as a malformed column name, keeps the canvas too, with the server's message. A Code URL reached with Back or Forward is refused the same way, and the history entry is replaced, so Back still moves past it.
+
+Opening Code mode and leaving it again changes nothing.
+
+- **Undo, Redo, Reset** change the project, and the YAML is rewritten from the result. Undo and redo stay one step each, whichever mode made the edit. If the result has an incomplete field, the canvas comes back with the message above; nothing is dropped.
+- **`⌘/Ctrl+Z` inside the editor** is the editor's own undo. It changes the YAML, and the project follows like any other edit.
+- **Leaving** (the toggle, another index, Deployment, the command palette, Back or Forward) applies YAML you typed that isn't in the project yet.
+- **Save** applies it first too, so the review shows exactly what gets written.
+- **YAML that doesn't parse** holds a move away with a message, since its latest edits aren't in the project. Fix it, or pick **Discard** in the message to drop them. Switching again only repeats the message. Save is refused until the YAML parses.
 
 ## Preview
 
@@ -85,6 +93,8 @@ A field is incomplete when:
 - a join's `table`, `primary_key`, or key (`column`, `foreign_key`, or the `through` table and keys) is blank;
 - an aggregate's table, key, or column is blank, or a `sum`, `min`, or `max` has no `value_type`;
 - a `via` hop's table or key is blank.
+
+A new field of any kind from **+ field** or **+ join** never errors the preview: it is either complete as added, or incomplete until filled in. A new `constant` starts at `null`.
 
 A half-written or duplicated `on` pair flags its field, but only the pair is left out of the preview. A filter, `order_by` entry, or soft-delete marker with a blank column, and a soft-delete `field` that isn't a valid field name, are left out too.
 

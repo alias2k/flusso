@@ -24,7 +24,7 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import type { ColumnShape, DiagnosticDto, FileOp, OpDiff, ValidateResponse } from "./api";
+import type { ColumnShape, DiagnosticDto, FileOp, IndexSchema, OpDiff, ValidateResponse } from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -156,6 +156,28 @@ const bareDocJson = (doc: Doc): string =>
     schemas: Object.fromEntries(Object.entries(doc.schemas).map(([name, s]) => [name, stripUids(s)])),
   });
 
+/// A schema as JSON without the client-only node uids ("" for none).
+const bareSchema = (schema: IndexSchema | undefined): string => (schema ? JSON.stringify(stripUids(schema)) : "");
+
+// Bumped to drop a Code-mode parse reply that a newer parse superseded.
+let parseSeq = 0;
+// Set when Code mode was refused: the route effect then replaces the URL
+// instead of pushing one, so a refusal can't bury forward history.
+let replaceNextRoute = false;
+
+/// The path of what the main area shows now (see router.ts).
+const shownPath = (): string => {
+  const { browseCatalog, rawMode } = useUiStore.getState();
+  const { active } = useDesignStore.getState();
+  return formatRoute(
+    browseCatalog
+      ? { view: "tables" }
+      : active === "config"
+        ? { view: "deployment" }
+        : { view: "index", name: active, code: rawMode },
+  );
+};
+
 export default function App() {
   const { t, lang, setLang } = useT();
 
@@ -225,48 +247,20 @@ export default function App() {
     }
   }, [theme]);
 
-  // Auto-dismiss toasts.
+  // Auto-dismiss toasts; one that asks for a choice stays longer.
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 3500);
+    const t = setTimeout(() => setToast(null), toast.action ? 10000 : 3500);
     return () => clearTimeout(t);
   }, [toast, setToast]);
-
-  // ── routing: the hash mirrors what the main area shows (see router.ts) ────
-
-  // URL → state. Behind a ref so the one popstate listener always sees the
-  // latest handlers; validated against the loaded project so a stale deep link
-  // can't select a nonexistent index.
-  const applyRoute = (route: Route) => {
-    if (route.view === "tables") {
-      setBrowseCatalog(true);
-      return;
-    }
-    setBrowseCatalog(false);
-    if (route.view === "deployment") {
-      setRawMode(false);
-      setActive("config");
-      return;
-    }
-    const known = useDesignStore.getState().doc?.config.index?.some((e) => e.name === route.name);
-    if (!known) return;
-    if (useDesignStore.getState().active !== route.name) openIndex(route.name);
-    // Entering Code via URL: the buffer re-seeds itself (the rawFor effect)
-    // once rawMode is on, so no openRaw here.
-    setRawMode(route.code);
-  };
-  const applyRouteRef = useRef(applyRoute);
+  // A choice about the buffer goes stale once the buffer changes.
   useEffect(() => {
-    applyRouteRef.current = applyRoute;
-  });
-  useEffect(() => {
-    const onPop = () => {
-      const route = parseRoute(window.location.pathname);
-      if (route) applyRouteRef.current(route);
-    };
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
+    if (useUiStore.getState().toast?.action) setToast(null);
+  }, [rawText, setToast]);
+
+  // URL → state, set below once its handlers exist; a ref so the one popstate
+  // listener always sees the latest ones.
+  const applyRouteRef = useRef<(route: Route) => void>(() => undefined);
 
   // State → URL. pushState doesn't fire popstate, so this can't loop; the very
   // first write replaces instead, keeping the entry the user landed on.
@@ -280,8 +274,10 @@ export default function App() {
   const routedOnce = useRef(false);
   useEffect(() => {
     if (!doc) return;
+    const replace = !routedOnce.current || replaceNextRoute;
+    replaceNextRoute = false;
     if (window.location.pathname === routePath) return;
-    window.history[routedOnce.current ? "pushState" : "replaceState"](null, "", routePath);
+    window.history[replace ? "replaceState" : "pushState"](null, "", routePath);
     routedOnce.current = true;
   }, [doc, routePath]);
 
@@ -330,9 +326,9 @@ export default function App() {
     [savedDoc],
   );
   const dirty = useMemo(() => !!doc && bareDocJson(doc) !== savedBare, [doc, savedBare]);
-  const indexDirty = (name: string): boolean => {
-    if (!doc || !savedDoc) return false;
-    const current = doc.schemas[name];
+  const indexDirty = (name: string, of: Doc | null = doc): boolean => {
+    if (!of || !savedDoc) return false;
+    const current = of.schemas[name];
     return (current ? JSON.stringify(stripUids(current)) : undefined) !== savedSchemasBare.get(name);
   };
   const configDirty = useMemo(
@@ -391,48 +387,97 @@ export default function App() {
     };
   }, [active, pruned, setPreview]);
 
-  // Code-mode live sync: the buffer parses server-side (the same strict parser
-  // that reads the file) and, when it converts, replaces the in-memory schema —
-  // so undo, the preview, and the one global Save all see YAML edits exactly
-  // like visual ones. The sequence guard drops out-of-order replies.
-  const parseSeq = useRef(0);
+  // Code mode: the buffer is another editor of the in-memory document. `seed`
+  // records the text the buffer last agreed with the document on (seeded from
+  // it, or applied to it) and that schema, bare. Two rules keep the two from
+  // disagreeing silently:
+  // - the schema moving away from `seed.schema` (undo, redo, Reset) re-seeds
+  //   the buffer, and the stale buffer is never applied;
+  // - the buffer is applied when its text moved away from `seed.text`: by the
+  //   debounced sync while typing, and at once by `flushBuffer` on every way
+  //   out of Code mode and on Save.
+  // The sync parses server-side (the same strict parser that reads the file),
+  // so undo, the preview, and Save see YAML edits exactly like visual ones.
+  const seed = useUiStore((s) => s.seed);
+  const setSeed = useUiStore((s) => s.setSeed);
+  const rawFor = seed?.index ?? "";
+  // Is the buffer the current, agreed-on editor of `index`'s schema?
+  const bufferLive = (index: string): boolean => {
+    const s = useUiStore.getState().seed;
+    return !!s && s.index === index && bareSchema(useDesignStore.getState().doc?.schemas[index]) === s.schema;
+  };
+  // Write a parsed buffer into the document, and record the agreement.
+  const applyBuffer = (index: string, text: string, parsed: IndexSchema) => {
+    if (useDesignStore.getState().active !== index || !bufferLive(index)) return;
+    const current = useDesignStore.getState().doc?.schemas[index];
+    if (!current || JSON.stringify(parsed) !== bareSchema(current)) apply((prev) => adoptIds(prev, parsed));
+    setSeed({ index, text, schema: bareSchema(useDesignStore.getState().doc?.schemas[index]) });
+  };
+
   const [codeProblem, setCodeProblem] = useState<ParseErrorInfo | null>(null);
-  // Which index the Code buffer belongs to. Gating the sync on it is what
-  // keeps an index switch from parsing the *previous* index's YAML into the
-  // new one; the re-seed effect below moves the buffer over.
-  const [rawFor, setRawFor] = useState("");
   useEffect(() => {
     if (!rawMode || active === "config" || rawFor !== active) {
       setCodeProblem(null);
       return;
     }
-    const seq = ++parseSeq.current;
+    const seq = ++parseSeq;
     const handle = setTimeout(() => {
       api
         .parse(rawText)
         .then((res) => {
-          if (seq !== parseSeq.current || !useUiStore.getState().rawMode) return;
+          if (seq !== parseSeq || !useUiStore.getState().rawMode) return;
           setCodeProblem(
             res.error ? { message: res.error, location: res.location, field: res.field, typeTag: res.type_tag } : null,
           );
-          const parsed = res.schema;
-          if (!parsed) return;
-          const current = useDesignStore.getState().doc?.schemas[active];
-          if (!current || JSON.stringify(parsed) !== JSON.stringify(stripUids(current)))
-            apply((prev) => adoptIds(prev, parsed));
+          if (res.schema) applyBuffer(active, rawText, res.schema);
         })
         .catch(() => setCodeProblem(null));
     }, 300);
     return () => clearTimeout(handle);
-  }, [rawMode, rawText, active, rawFor, apply]);
+    // applyBuffer reads the stores when the reply lands, so it is no dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawMode, rawText, active, rawFor]);
 
-  // Seeding the buffer, on entering Code mode or switching index in it, before
-  // the sync above may run. The sync writes the buffer back into the document,
-  // so the buffer must render the *whole* schema: never the preview's YAML,
-  // which leaves out incomplete fields and would delete them on the way back.
-  // A schema the backend can't render yet (incomplete, or refused) keeps the
-  // canvas instead, naming what to finish. Only an index whose file failed to
-  // load has no schema; its raw file is then the one thing to edit.
+  // Apply the buffer now, if it moved since it last agreed with the document.
+  // `false` means it doesn't parse, so its edits since then would be lost.
+  const flushBuffer = async (): Promise<boolean> => {
+    const index = useDesignStore.getState().active;
+    const text = useUiStore.getState().rawText;
+    if (!useUiStore.getState().rawMode || !bufferLive(index) || text === useUiStore.getState().seed?.text) return true;
+    parseSeq++;
+    const res = await api.parse(text).catch(() => null);
+    if (!res?.schema) return !bufferLive(index);
+    applyBuffer(index, text, res.schema);
+    return true;
+  };
+
+  // Every way out of the buffer (the toggle, another index, Deployment, back/
+  // forward) goes through here: flush, then go. A buffer that doesn't parse
+  // holds the move; only the toast's Discard drops those edits, so no click
+  // pattern can lose them by accident.
+  const leaveBuffer = async (go: () => void, held?: () => void) => {
+    if (await flushBuffer()) return go();
+    held?.();
+    setToast({
+      kind: "error",
+      text: t("code.unparsed"),
+      action: {
+        label: t("code.discard"),
+        run: () => {
+          setSeed(null);
+          go();
+        },
+      },
+    });
+  };
+
+  // Seeding the buffer: on entering Code mode, switching index in it, or the
+  // schema moving away from the buffer (undo, redo, Reset). The buffer renders
+  // the *whole* schema, never the preview's YAML, which leaves out incomplete
+  // fields and would delete them on the way back. A schema the backend can't
+  // render yet (incomplete, or refused) goes back to the canvas instead, naming
+  // what to finish. Only an index whose file failed to load has no schema; its
+  // raw file is then the one thing to edit.
   const codeBlocked = useCallback(
     (left: string[] | undefined): boolean => {
       if (!left?.length) return false;
@@ -441,20 +486,28 @@ export default function App() {
     },
     [t, setToast],
   );
+  const refuseCode = useCallback(() => {
+    replaceNextRoute = true;
+    setRawMode(false);
+  }, [setRawMode]);
   // Leaving Code mode, by any route, forgets the buffer: the canvas may change
   // the schema before Code opens again, so it must re-seed then.
   useEffect(() => {
-    if (!rawMode) setRawFor("");
-  }, [rawMode]);
+    if (!rawMode) setSeed(null);
+  }, [rawMode, setSeed]);
   useEffect(() => {
-    if (!rawMode || !doc || active === "config" || rawFor === active) return;
+    if (!rawMode || !doc || active === "config") return;
+    const at = bareSchema(schema);
+    const s = useUiStore.getState().seed;
+    if (s?.index === active && s.schema === at) return;
     if (!schema) {
-      setRawText(project?.indexes.find((i) => i.name === active)?.raw ?? "");
-      setRawFor(active);
+      const text = project?.indexes.find((i) => i.name === active)?.raw ?? "";
+      setRawText(text);
+      setSeed({ index: active, text, schema: at });
       return;
     }
     if (codeBlocked(pruneIncomplete(schema).left)) {
-      setRawMode(false);
+      refuseCode();
       return;
     }
     let alive = true;
@@ -463,17 +516,75 @@ export default function App() {
       .then((p) => {
         if (!alive || !useUiStore.getState().rawMode) return;
         setRawText(p.yaml);
-        setRawFor(active);
+        setSeed({ index: active, text: p.yaml, schema: at });
       })
       .catch((e) => {
         if (!alive) return;
-        setRawMode(false);
+        refuseCode();
         setToast({ kind: "error", text: t("code.renderFailed", { err: errText(e) }) });
       });
     return () => {
       alive = false;
     };
-  }, [rawMode, doc, active, rawFor, schema, project, setRawText, setRawMode, setToast, t, codeBlocked]);
+  }, [rawMode, doc, active, seed, schema, project, setRawText, setSeed, refuseCode, setToast, t, codeBlocked]);
+
+  // ── routing: the hash mirrors what the main area shows (see router.ts) ────
+
+  // URL → state. Behind a ref so the one popstate listener always sees the
+  // latest handlers; validated against the loaded project so a stale deep link
+  // can't select a nonexistent index.
+  const applyRoute = (route: Route) => {
+    // Back/forward out of the Code buffer leaves it like the toggle does; a
+    // held move puts the URL back on what is still shown.
+    const { active: current } = useDesignStore.getState();
+    const leaving = route.view === "deployment" || (route.view === "index" && (route.name !== current || !route.code));
+    if (useUiStore.getState().rawMode && useUiStore.getState().seed?.index === current && leaving) {
+      void leaveBuffer(
+        () => {
+          window.history.replaceState(null, "", formatRoute(route));
+          enterRoute(route);
+        },
+        () => window.history.replaceState(null, "", shownPath()),
+      );
+      return;
+    }
+    enterRoute(route);
+  };
+  const enterRoute = (route: Route) => {
+    if (route.view === "tables") {
+      setBrowseCatalog(true);
+      return;
+    }
+    setBrowseCatalog(false);
+    if (route.view === "deployment") {
+      setRawMode(false);
+      setActive("config");
+      return;
+    }
+    const known = useDesignStore.getState().doc?.config.index?.some((e) => e.name === route.name);
+    if (!known) return;
+    if (useDesignStore.getState().active !== route.name) openIndex(route.name);
+    // Code refused: replace the entry, never push, or Back could never get
+    // past it. Entering is otherwise the seed effect's job.
+    const schema = useDesignStore.getState().doc?.schemas[route.name];
+    if (route.code && schema && codeBlocked(pruneIncomplete(schema).left)) {
+      window.history.replaceState(null, "", formatRoute({ ...route, code: false }));
+      setRawMode(false);
+      return;
+    }
+    setRawMode(route.code);
+  };
+  useEffect(() => {
+    applyRouteRef.current = applyRoute;
+  });
+  useEffect(() => {
+    const onPop = () => {
+      const route = parseRoute(window.location.pathname);
+      if (route) applyRouteRef.current(route);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // …and the applied schema gets the *real* validation (columns exist, types
   // line up) against the database — it's fast, so problems surface in the rail
@@ -515,22 +626,22 @@ export default function App() {
   // current doc, correlated by the stable per-index id (so a rename or a path
   // change reads as a Move, not a delete + create). `name` is kept alongside so
   // the snapshot can advance per index after the save.
-  const buildOps = (): { op: FileOp; name: string; removed: boolean }[] => {
-    if (!doc) return [];
+  const buildOps = (of: Doc | null = doc): { op: FileOp; name: string; removed: boolean }[] => {
+    if (!of) return [];
     const prev = savedDoc?.config.index ?? [];
     const prevById = new Map(prev.filter((e) => e.id).map((e) => [e.id, e]));
-    const cur = doc.config.index ?? [];
+    const cur = of.config.index ?? [];
     const seen = new Set<string>();
     const planned: { op: FileOp; name: string; removed: boolean }[] = [];
     for (const e of cur) {
       if (e.id) seen.add(e.id);
-      const schema = doc.schemas[e.name];
+      const schema = of.schemas[e.name];
       if (!schema) continue; // no model to write (failed load) — leave the file alone
       const was = e.id ? prevById.get(e.id) : undefined;
       if (!was) planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
       else if (was.schema !== e.schema)
         planned.push({ op: { kind: "move", from: was.schema, path: e.schema, schema }, name: e.name, removed: false });
-      else if (indexDirty(e.name))
+      else if (indexDirty(e.name, of))
         planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
     }
     // Indexes dropped from the config → delete their previous files.
@@ -557,13 +668,21 @@ export default function App() {
   // When the config model is unchanged we hide its diff (a formatting/comment-only
   // reflow the user didn't ask for) so an untouched flusso.toml is neither shown
   // nor rewritten.
+  // In Code mode the buffer is flushed first, so the review shows exactly what
+  // a confirm writes; a buffer that doesn't parse refuses the save.
   const save = async () => {
-    if (!doc || saving) return;
+    if (!doc || useUiStore.getState().saving) return;
     setSaving(true);
     try {
+      if (!(await flushBuffer())) {
+        setToast({ kind: "error", text: t("code.unparsedSave") });
+        return;
+      }
+      const current = useDesignStore.getState().doc;
+      if (!current) return;
       const result = await api.diff(
-        doc.config,
-        buildOps().map((p) => p.op),
+        current.config,
+        buildOps(current).map((p) => p.op),
       );
       const shown = configDirty || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
       if (shown.some((d) => d.changed)) setDiffs(shown);
@@ -630,45 +749,14 @@ export default function App() {
     }
   };
 
-  // Reset the edited document to the last-saved snapshot. In Code mode the YAML
-  // buffer is a separate editor state, so revert alone would leave it showing the
-  // discarded edits (and the debounced parser would re-apply them); clearing
-  // `rawFor` re-seeds the buffer from the reverted schema, like an index switch.
-  const reset = () => {
-    revertChanges();
-    if (rawMode) setRawFor("");
-  };
+  // Reset the edited document to the last-saved snapshot. In Code mode the
+  // buffer re-seeds from the reverted schema (the seed effect).
+  const reset = revertChanges;
 
-  // Code mode: the buffer is just another editor of the in-memory document —
-  // it seeds from the current schema's YAML (the seed effect) and syncs back
-  // through /api/parse as you type. The one global Save then writes files, same
-  // as visual edits.
   const openRaw = () => {
     if (!codeBlocked(pruned?.left)) setRawMode(true);
   };
-
-  // Leaving Code mode applies the buffer at once, so an edit still inside the
-  // sync's debounce isn't dropped. A buffer that doesn't parse holds the switch
-  // once, since its edits since the last good parse never reached the document;
-  // asking again on the same text discards them.
-  const [refusedText, setRefusedText] = useState<string | null>(null);
-  const closeRaw = async () => {
-    if (rawFor === active && schema) {
-      const res = await api.parse(rawText).catch(() => null);
-      if (res?.schema) {
-        const parsed = res.schema;
-        const current = useDesignStore.getState().doc?.schemas[active];
-        if (!current || JSON.stringify(parsed) !== JSON.stringify(stripUids(current)))
-          apply((prev) => adoptIds(prev, parsed));
-      } else if (refusedText !== rawText) {
-        setRefusedText(rawText);
-        setToast({ kind: "error", text: t("code.unparsed") });
-        return;
-      }
-    }
-    setRefusedText(null);
-    setRawMode(false);
-  };
+  const closeRaw = () => leaveBuffer(() => setRawMode(false));
 
   const validate = async () => {
     if (!doc || validating) return;
@@ -735,10 +823,11 @@ export default function App() {
       title: t("sidebar.deployment"),
       keywords: "deployment settings config connection sinks",
       detail: { body: t("search.descDeployment"), enter: runAction },
-      run: () => {
-        setBrowseCatalog(false);
-        setActive("config");
-      },
+      run: () =>
+        void leaveBuffer(() => {
+          setBrowseCatalog(false);
+          setActive("config");
+        }),
     },
     {
       id: "cmd.tables",
@@ -1110,10 +1199,12 @@ export default function App() {
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               <button
                 className={cn(NAV, "flex items-center gap-1.5", active === "config" && !browseCatalog && NAV_ACTIVE)}
-                onClick={() => {
-                  setBrowseCatalog(false);
-                  setActive("config");
-                }}
+                onClick={() =>
+                  void leaveBuffer(() => {
+                    setBrowseCatalog(false);
+                    setActive("config");
+                  })
+                }
               >
                 <Settings className="size-3.5 shrink-0" /> {t("sidebar.deployment")}
               </button>
@@ -1128,10 +1219,12 @@ export default function App() {
                 <button
                   key={e.name}
                   className={cn(NAV, active === e.name && !browseCatalog && NAV_ACTIVE)}
-                  onClick={() => {
-                    setBrowseCatalog(false);
-                    openIndex(e.name);
-                  }}
+                  onClick={() =>
+                    void leaveBuffer(() => {
+                      setBrowseCatalog(false);
+                      openIndex(e.name);
+                    })
+                  }
                 >
                   {indexDirty(e.name) && <span className="dirty-dot" />}
                   {e.name}
@@ -1141,7 +1234,7 @@ export default function App() {
               <NewIndex
                 tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
                 junctions={catalog?.junctions.map((j) => j.table.table) ?? []}
-                onCreate={createIndex}
+                onCreate={(...args) => void leaveBuffer(() => createIndex(...args))}
                 open={newIndexOpen}
                 onOpenChange={setNewIndexOpen}
               />
@@ -1311,11 +1404,25 @@ export default function App() {
         catalog={catalog}
         active={active}
         commands={commands}
+        leave={(go) => void leaveBuffer(go)}
       />
 
       {toast && (
         <div className={`toast ${toast.kind}`} role="status">
           {toast.text}
+          {toast.action && (
+            <Button
+              variant="secondary"
+              size="sm"
+              className="ml-3"
+              onClick={() => {
+                toast.action?.run();
+                setToast(null);
+              }}
+            >
+              {toast.action.label}
+            </Button>
+          )}
         </div>
       )}
     </div>

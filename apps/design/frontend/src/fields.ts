@@ -110,7 +110,7 @@ function defaultSource(name: string, kind: FieldKind, table: string): FieldSourc
     case "object":
       return { group: [] };
     case "constant":
-      return { constant: "" };
+      return { constant: "Null" };
     case "script":
       return { script: { source: "", ty: "keyword", nullable: false } };
     case "belongs_to":
