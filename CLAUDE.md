@@ -587,12 +587,18 @@ neither reported nor set. A member short of the primary key, on any table, is a 
 A change whose old-tuple key reads null is still emitted (the stream warns once per table and kind,
 `stream.rs` `addressable`/`Unkeyed`; an update drops only its key-change delete), and
 `PgDocumentBuilder::resolve` never turns a key with a null part (`RowKey::has_null`) into a document
-id, and walks its paths from `before` alone (no query binds a null), so a deleted child's old row
-still rebuilds its parent. Guards: `replica_identity::tests` (`shortfall`,
+id (a root keyed by other columns than its `primary_key`, i.e. a table without one, warns once), and
+a hop whose link column (`link_on_row`) is in the key takes the parent from the key with no query,
+so a table without a primary key — keyed by every column under `FULL`, where a null is row data —
+resolves from its row; any other key with a null walks its hop from `before` alone (no query binds a
+null). Only a junction can be such a table: any other relation table without a primary key fails
+every build in `table_primary_key` (issue #225). Guards: `replica_identity::tests` (`shortfall`,
 `a_partitioned_table_is_left_alone_only_while_every_member_logs_the_primary_key`,
 `an_intermediate_partitioned_table_is_never_reported_or_set`), `stream::tests`'
 `a_delete_without_its_primary_key_under_a_full_parent_carries_the_old_row`, `document::tests`'
-`a_child_change_with_a_null_key_still_rebuilds_the_parent_its_old_row_names`, `partitions`'
+`a_child_change_with_a_null_key_still_rebuilds_the_parent_its_old_row_names` and the `keyless`/
+null-key cases, `wal`'s `a_keyless_junction_rebuilds_every_parent_its_rows_link` and
+`a_change_on_a_keyless_counted_table_stops_the_engine`, `partitions`'
 `a_partition_whose_identity_leaves_out_the_primary_key_is_set_to_full` and
 `a_keyless_child_partition_under_a_full_parent_still_rebuilds_the_parent_it_left`, `publication`'s
 `every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on

@@ -24,7 +24,7 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
 
    To let flusso manage the publication and set [`REPLICA IDENTITY FULL`](../reference/source-postgres.md#replica-identity) on the tables an index reads too, the role must own those tables (and hold `CREATE` on the database, for the publication). Otherwise flusso prints the SQL and you run it as a privileged role.
 
-3. **Confirm row identity.** Every replicated table needs a single-column primary key or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change.
+3. **Confirm row identity.** Every replicated table needs a single-column primary key or an explicit `REPLICA IDENTITY`. A table without a primary key works only as a junction; see [Tables without a primary key](../reference/source-postgres.md#tables-without-a-primary-key).
 
    ```sql
    SELECT relname FROM pg_class c

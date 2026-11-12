@@ -15,7 +15,7 @@ Postgres is the *substrate*. This covers only the slice flusso touches; for the 
 | --- | --- | --- |
 | `wal_level = logical` | Logical decoding can't run without it. Server-wide setting, **needs a restart**. | flusso can't start capture. |
 | A **replication slot** | The server's bookmark of how far flusso has consumed; it gates WAL retention. | flusso **creates it automatically** before the first backfill (needs only the `REPLICATION` role attribute). |
-| **Row identity** on every replicated table — a primary key (usual) or an explicit `REPLICA IDENTITY` | A change has to be addressable to a row so flusso can rebuild the right document. | A keyless table is **skipped in backfill** and a live change against it **errors** ("relation … carries no key columns"). |
+| **Row identity** on every replicated table — a primary key (usual) or an explicit `REPLICA IDENTITY` | A change has to be addressable to a row so flusso can rebuild the right document. | A table without a primary key works **only as a junction** (`many_to_many` / aggregate `through`), under `REPLICA IDENTITY FULL` (flusso sets it). As any other relation target every build fails ("has no primary key"); as a root it's skipped in backfill and its live documents are keyed by the whole row; under `DEFAULT`/`NOTHING` a live change errors ("relation … carries no key columns"). Fix: add a primary key. |
 
 ## The replication slot — the one operational gotcha
 
@@ -86,6 +86,6 @@ Full reference: the [Postgres source reference, TLS section](https://alias2k.git
 
 1. `wal_level = logical`? (`SHOW wal_level;` — needs a restart if you just changed it.)
 2. Is the changed table **in the publication**, under its own name? (New join target? Partitioned table without `publish_via_partition_root`? `flusso check` shows coverage.)
-3. Does the table have a **key** (PK or `REPLICA IDENTITY`)? Keyless = skipped/errored.
+3. Does the table have a **primary key**? Without one it works only as a junction (see the table above).
 4. Deleted or re-parented child rows still in the old parent's doc? → the child table's replica identity misses its link column and flusso couldn't set it (not the owner, or `manage_replica_identity = false`); `flusso check` says which and prints the `ALTER TABLE … REPLICA IDENTITY FULL`. Then `flusso reindex` to repair what went stale.
 5. Is another flusso (or a leftover slot) consuming the same slot? One slot, one consumer.

@@ -83,7 +83,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 | Postgres 14 or newer | |
 | `wal_level = logical` | Restart-required server setting. |
 | `max_wal_senders`, `max_replication_slots` | Room for flusso plus any other consumer. |
-| Row identity on every replicated table | A single-column primary key (the default `REPLICA IDENTITY` then carries it), or an explicit `REPLICA IDENTITY`. A keyless table is skipped in backfill and errors on a live change. A change is always keyed by the primary key, whatever the replica identity. |
+| Row identity on every replicated table | A single-column primary key (the default `REPLICA IDENTITY` then carries it), or an explicit `REPLICA IDENTITY`. A change is always keyed by the primary key, whatever the replica identity. A table without one works only as a junction; see [Tables without a primary key](#tables-without-a-primary-key). |
 | `REPLICA IDENTITY FULL` on every table an index reads | Set by flusso when the role owns the table; see [Replica identity](#replica-identity). Without the parent link in a child table's identity, deleting or re-parenting a child row leaves its old parent's document stale. |
 | A role with `REPLICATION` and `SELECT` on the read tables | Enough to stream and create the slot. Publication management needs the stronger grant above. |
 
@@ -140,6 +140,18 @@ Documents are rebuilt from the current rows. A child row that holds its parent's
 flusso sets `FULL` on these tables by default, except where a `USING INDEX` identity already carries the primary key and the link; see [Replica identity](#replica-identity).
 
 - A delete or re-parent that happened *before* the identity was set left its old parent stale; [`flusso reindex`](cli.md#reindex) the index to repair it.
+
+## Tables without a primary key
+
+A table without a primary key is keyed by its replica identity's columns. Under `FULL`, which flusso sets on it, that is the whole row, and a null in a column is just data. Under `DEFAULT` or `NOTHING` it logs no key: Postgres refuses its updates and deletes once it's published, and an insert fails the change stream (`carries no key columns`), so keep [`manage_replica_identity`](#replica-identity) on or set `FULL` yourself. Where such a table can sit:
+
+| Position | Works? |
+| --- | --- |
+| `many_to_many` junction, aggregate `through` junction | Yes. The parent comes from the row's own `left_key`, so an insert, an update (a null `note` included), a re-parent (both parents), and a delete each rebuild the right documents. A row whose `left_key` is null links no parent. |
+| `has_one` / `has_many` target, direct aggregate, `via` table, `belongs_to` target, `many_to_many` far table | No. Every document build needs the table's primary key and fails with `has no primary key`, at backfill or at the first change that reaches the index. `flusso check` doesn't report it yet. |
+| Index root | No. Backfill skips the table with a warning, live documents are keyed by the whole row, so an update moves a document to a new id, and a row with a null column addresses no document (warned once per table). |
+
+The fix in each case is the same: give the table a primary key.
 
 ## Updates that change nothing a document reads
 
