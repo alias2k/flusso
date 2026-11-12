@@ -3,6 +3,7 @@
 //! fence, so a read sees a commit that was just made (see [`crate::fence`]).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,10 +20,13 @@ use crate::fence::{After, FenceConfig, Level};
 ///
 /// Cheap to clone (it shares one connection pool). Construct with
 /// [`Client::connect`], optionally adding credentials with
-/// [`Client::basic_auth`].
+/// [`Client::basic_auth`] and a private CA with [`Client::ca_file`].
 #[derive(Debug, Clone)]
 pub struct Client {
     pub(crate) http: reqwest::Client,
+    /// CA certificates trusted on top of the Mozilla roots; see
+    /// [`Client::ca_pem`].
+    private_roots: Vec<reqwest::Certificate>,
     /// Base URL with any trailing slash trimmed.
     base: String,
     auth: Option<(String, String)>,
@@ -45,11 +49,25 @@ fn mozilla_roots() -> impl Iterator<Item = reqwest::Certificate> {
         .filter_map(|der| reqwest::Certificate::from_der(der).ok())
 }
 
+/// `error` and each cause in its source chain, joined with `": "`: reqwest's
+/// own line names no certificate.
+fn chain(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 impl Client {
     /// Connect to the cluster at `url` (`http` or `https`). This validates the
     /// URL and builds the HTTP client; it does not perform any I/O. An `https`
     /// certificate is verified against the Mozilla root bundle built into the
-    /// client, not the OS trust store.
+    /// client, not the OS trust store; add a private CA with
+    /// [`Client::ca_file`]. There is no switch to skip verification.
     pub fn connect(url: impl AsRef<str>) -> Result<Self> {
         let raw = url.as_ref();
         let parsed = Url::parse(raw).map_err(|error| Error::Url(format!("{raw}: {error}")))?;
@@ -57,11 +75,11 @@ impl Client {
             "http" | "https" => {}
             other => return Err(Error::Url(format!("unsupported scheme `{other}` in {raw}"))),
         }
-        let http = reqwest::Client::builder()
-            .tls_certs_only(mozilla_roots())
-            .build()?;
         Ok(Self {
-            http,
+            http: reqwest::Client::builder()
+                .tls_certs_only(mozilla_roots())
+                .build()?,
+            private_roots: Vec::new(),
             base: raw.trim_end_matches('/').to_string(),
             auth: None,
             index_prefix: String::new(),
@@ -75,6 +93,47 @@ impl Client {
     pub fn basic_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
         self.auth = Some((username.into(), password.into()));
         self
+    }
+
+    /// Also trust the CA certificates in the PEM bundle at `path`, for a
+    /// cluster (or a flusso fence endpoint) behind a private CA. They are added
+    /// to the Mozilla roots; the OS trust store stays unread. The file is read
+    /// here, so a missing or broken one fails now, not at the first request.
+    ///
+    /// ```no_run
+    /// # fn main() -> flusso_query::Result<()> {
+    /// let client = flusso_query::Client::connect("https://search.internal:9200")?
+    ///     .ca_file("/etc/flusso/opensearch-ca.pem")?;
+    /// # Ok(()) }
+    /// ```
+    pub fn ca_file(self, path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let pem = std::fs::read(path)
+            .map_err(|error| Error::Ca(format!("reading {}: {error}", path.display())))?;
+        self.trust(&pem)
+            .map_err(|reason| Error::Ca(format!("{}: {reason}", path.display())))
+    }
+
+    /// Also trust the CA certificates in `pem`, a PEM bundle (one or more
+    /// `-----BEGIN CERTIFICATE-----` blocks). Like [`Client::ca_file`], from
+    /// bytes already in memory. Fails when `pem` holds no certificate or one
+    /// does not parse.
+    pub fn ca_pem(self, pem: impl AsRef<[u8]>) -> Result<Self> {
+        self.trust(pem.as_ref()).map_err(Error::Ca)
+    }
+
+    fn trust(mut self, pem: &[u8]) -> std::result::Result<Self, String> {
+        let certificates =
+            reqwest::Certificate::from_pem_bundle(pem).map_err(|error| chain(&error))?;
+        if certificates.is_empty() {
+            return Err("no PEM certificate (`-----BEGIN CERTIFICATE-----`) found".to_owned());
+        }
+        self.private_roots.extend(certificates);
+        self.http = reqwest::Client::builder()
+            .tls_certs_only(mozilla_roots().chain(self.private_roots.iter().cloned()))
+            .build()
+            .map_err(|error| chain(&error))?;
+        Ok(self)
     }
 
     /// Set the literal index prefix prepended to every index this client
@@ -371,4 +430,47 @@ struct GetResponse<T> {
 /// would, but a missing `_source` should just be absent for any `T`.
 fn none<T>() -> Option<T> {
     None
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn refused(result: Result<Client>) -> String {
+        match result {
+            Err(Error::Ca(reason)) => reason,
+            other => panic!("expected a CA error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_ca_file_fails_when_it_is_added() {
+        let reason = refused(
+            Client::connect("https://localhost:9200")
+                .unwrap()
+                .ca_file("/no/such/flusso-ca.pem"),
+        );
+        assert!(reason.contains("/no/such/flusso-ca.pem"), "{reason}");
+    }
+
+    #[test]
+    fn a_bundle_without_a_certificate_is_refused() {
+        let reason = refused(
+            Client::connect("https://localhost:9200")
+                .unwrap()
+                .ca_pem("not a certificate"),
+        );
+        assert!(reason.contains("no PEM certificate"), "{reason}");
+    }
+
+    #[test]
+    fn a_certificate_that_does_not_parse_is_refused() {
+        let broken = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        refused(
+            Client::connect("https://localhost:9200")
+                .unwrap()
+                .ca_pem(broken),
+        );
+    }
 }
