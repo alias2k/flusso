@@ -1014,3 +1014,38 @@ fn script_fields_get_their_declared_handles() -> Result {
     assert!((person.orders[0].gross - 12.3).abs() < f64::EPSILON);
     Ok(())
 }
+
+// serde's catch-all for leftover keys, flattened bare: nothing to check, on a
+// fragment or a root, and it still collects what no other field reads.
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct CatchAllOrder {
+    status: String,
+    #[serde(flatten)]
+    rest: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users", config = "tests/fixtures/flusso.toml")]
+struct CatchAllUser {
+    id: i32,
+    orders: Vec<CatchAllOrder>,
+    #[serde(flatten)]
+    rest: HashMap<String, serde_json::Value>,
+}
+
+#[test]
+fn a_flattened_catch_all_collects_the_keys_no_field_reads() -> Result {
+    let user: CatchAllUser = serde_json::from_value(serde_json::json!({
+        "id": 7,
+        "email": "ada@x.com",
+        "orders": [{ "status": "paid", "total": 12.5, "shipping": { "carrier": "dhl" } }],
+    }))?;
+    assert_eq!(user.id, 7);
+    assert_eq!(user.rest["email"], "ada@x.com");
+    let order = user.orders.first().ok_or("no order")?;
+    assert_eq!(order.status, "paid");
+    assert_eq!(order.rest["total"], 12.5);
+    assert_eq!(order.rest["shipping"]["carrier"], "dhl");
+    Ok(())
+}

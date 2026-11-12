@@ -48,13 +48,14 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         .to_compile_error();
     }
 
-    if let Some(attr) = input
+    for attr in input
         .attrs
         .iter()
-        .find(|attr| attr.path().is_ident("flusso"))
-        && let Err(error) = reject_location(attr)
+        .filter(|attr| attr.path().is_ident("flusso"))
     {
-        return error.to_compile_error();
+        if let Err(error) = reject_location(attr) {
+            return error.to_compile_error();
+        }
     }
 
     let struct_fields = match &input.data {
@@ -75,6 +76,9 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     };
 
     let mut out = embeddable(&input.ident, &fields);
+    for error in fields.iter().flat_map(doc::misplaced_attrs) {
+        out.extend(error.to_compile_error());
+    }
     for renamed in fields.iter().filter_map(|field| field.scope.as_ref()) {
         out.extend(
             syn::Error::new(
@@ -165,9 +169,15 @@ fn reject_location(attr: &syn::Attribute) -> syn::Result<()> {
 /// type, told apart only at const-evaluation time, where a value type's check
 /// turns out to be a no-op.
 pub(crate) fn embedded_type<'a>(field: &DocField<'a>) -> Option<&'a Type> {
-    if field.skip || field.opaque {
+    if field.skip || field.opaque.is_some() {
         return None;
     }
+    checked_type(field)
+}
+
+/// The custom type a field would hand a check to, `skip` and `opaque` aside —
+/// the only kind of type `opaque` has anything to opt out of.
+pub(crate) fn checked_type<'a>(field: &DocField<'a>) -> Option<&'a Type> {
     let inner = strip_option(field.ty);
     if leaf_ident(inner).as_deref() == Some("Value") || map_container_value(inner).is_some() {
         return None;
@@ -181,7 +191,7 @@ pub(crate) fn embedded_type<'a>(field: &DocField<'a>) -> Option<&'a Type> {
 
 /// The assertions for one field, with every message baked in at macro time.
 fn field_check(fragment: &Ident, field: &DocField) -> TokenStream {
-    if field.skip || field.opaque {
+    if field.skip || field.opaque.is_some() {
         return quote! {};
     }
 
@@ -190,9 +200,12 @@ fn field_check(fragment: &Ident, field: &DocField) -> TokenStream {
 
     // A flattened group's keys belong to the *enclosing* level, so there is no
     // container field to look up — hand the same level straight through.
+    // A flattened `serde_json::Value` or map is serde's catch-all for the
+    // leftover keys, so there is nothing to check — the same rule a root follows.
     if field.flatten {
-        let ty = strip_option(field.ty);
-        return quote_spanned! {span=> <#ty>::__flusso_check(level); };
+        return embedded_type(field).map_or_else(TokenStream::new, |ty| {
+            quote_spanned! {span=> <#ty>::__flusso_check(level); }
+        });
     }
 
     let exists = message(

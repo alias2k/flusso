@@ -1038,7 +1038,16 @@ shape-checked; a `subfields: false` field is stamped `NoSubfields` like a sink w
 error (issue #244, `doc.rs`'s `misplaced_scope`, `fragment.rs`): it is allowed only on a root field
 whose key names an indexed `nested` or `object` level (`has_namespace`, the same test `emit_level`
 uses), a `skip` field included; leaf, `map`, `json`, unindexed, flattened and fragment fields are
-rejected (`ui/scope_on_*.rs`, `ui/scope_in_fragment.rs`, `a_skipped_field_still_renames_its_level`).
+rejected (`ui/scope_on_*.rs`, `ui/scope_in_fragment.rs`, `a_skipped_field_still_renames_its_level`). The same holds for the
+other attributes (issue #251): `opaque` only where a custom type's check would run (`misplaced_attrs`,
+shared by both derives, plus the root's mapping-aware `opaque_without_a_shape_check`; the placements
+that do something are pinned by `ui_pass/opaque_placements.rs`), no `rename` on a `#[serde(flatten)]`
+field, no `#[flusso(rename)]` contradicting a plain `#[serde(rename)]` with no `alias`, no
+`scope_mod` on a root that generates no module, and a fragment reads every container
+`#[flusso(…)]` (`ui/opaque_*.rs`, `ui/rename_on_flatten_field.rs`, `ui/rename_contradicts_serde.rs`,
+`ui/scope_mod_without_levels.rs`, `ui/fragment_location_in_second_attribute.rs`). A flattened
+`serde_json::Value` or map is serde's catch-all and is checked on neither derive (both go through
+`fragment::embedded_type`; `ui_pass/flattened_catch_all.rs`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/

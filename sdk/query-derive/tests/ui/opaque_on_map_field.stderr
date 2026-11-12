@@ -1,0 +1,5 @@
+error: `title` is a `HashMap`/`BTreeMap`, checked as a `map` by its value type, so there is no shape to opt out of — `opaque` goes on a field whose type is a custom struct or enum (bare, or in `Option<…>` or `Vec<…>`) that the derive would otherwise check against the schema; remove `opaque` (`skip` turns off every check on a field)
+  --> tests/ui/opaque_on_map_field.rs:11:14
+   |
+11 |     #[flusso(opaque)]
+   |              ^^^^^^
