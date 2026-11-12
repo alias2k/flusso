@@ -540,8 +540,8 @@ impl Checker<'_> {
                 Err(SourceError::UnknownColumn(what)) => self.report(
                     DiagnosticKind::RootPrimaryKey,
                     format!(
-                        "`primary_key` references unknown column `{what}`; nothing reads it \
-                         while the index has no relation"
+                        "`primary_key` references unknown column `{what}`; a root change \
+                         built by its whole key does not read it"
                     ),
                 ),
                 Err(e) => return Err(e),
@@ -556,7 +556,7 @@ impl Checker<'_> {
                 DiagnosticKind::RootPrimaryKeyMismatch,
                 format!(
                     "`primary_key` is `{declared}`, but `{}.{table}` is keyed by `{single}`: \
-                     the backfill and every root change would write a tombstone",
+                     the backfill and every root change would match the wrong row or none",
                     self.db_schema
                 ),
             );
@@ -1926,8 +1926,8 @@ mod tests {
                 (
                     "@primary_key",
                     DiagnosticKind::RootPrimaryKey,
-                    "`primary_key` references unknown column `public.notes.id`; nothing reads \
-                     it while the index has no relation"
+                    "`primary_key` references unknown column `public.notes.id`; a root change \
+                     built by its whole key does not read it"
                 ),
             ]),
         );
@@ -1941,7 +1941,7 @@ mod tests {
                 "@primary_key",
                 DiagnosticKind::RootPrimaryKeyMismatch,
                 "`primary_key` is `team_id`, but `public.users` is keyed by `id`: the backfill \
-                 and every root change would write a tombstone"
+                 and every root change would match the wrong row or none"
             )]),
         );
     }

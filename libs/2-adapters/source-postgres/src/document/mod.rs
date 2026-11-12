@@ -523,6 +523,16 @@ impl Catalog for PgDocumentBuilder {
             {
                 Ok(false)
             }
+            // The probe casts to the column's type, which needs USAGE on the
+            // type's schema; reading the column does not. Only "no such
+            // function" is a verdict, so any other refusal leaves it unknown.
+            Err(sqlx::Error::Database(error)) => {
+                tracing::warn!(
+                    %table, %column, sql_type, error = %error.message(),
+                    "could not check the column's transforms against its type; skipping the check"
+                );
+                Ok(true)
+            }
             Err(error) => Err(query_err(error)),
         }
     }

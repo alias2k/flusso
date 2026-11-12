@@ -1658,7 +1658,7 @@ async fn validation_reports_what_no_document_build_gets_past() {
             "@primary_key",
             DiagnosticKind::RootPrimaryKeyMismatch,
             "`primary_key` is `email`, but `public.users` is keyed by `id`: the backfill and \
-             every root change would write a tombstone"
+             every root change would match the wrong row or none"
         )]),
     );
     assert!(
@@ -1760,6 +1760,28 @@ async fn validation_reports_what_no_document_build_gets_past() {
         "{diagnostics:?}"
     );
 
+    for statement in [
+        "CREATE SCHEMA hidden",
+        "CREATE DOMAIN hidden.label AS text",
+        "ALTER TABLE users ADD COLUMN label hidden.label DEFAULT 'ADA'",
+        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO reader",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let (_, address) = url.rsplit_once('@').unwrap();
+    let reader_url = format!("postgres://reader:reader@{address}");
+    let schema = users_schema(vec![transformed("label", lower)], None);
+    let documents = builder(&reader_url, schema.clone()).await;
+    let diagnostics = validate_indexes(&spec(schema), &documents).await.unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.kind != DiagnosticKind::TransformNotApplicable),
+        "a type the role cannot cast to is not a verdict: {diagnostics:?}"
+    );
+    assert!(upserted(&documents.build_many(&[doc(1)]).await));
+
     let keyless_root = |primary_key: Option<&str>, related: Option<Field>| {
         let mut fields = vec![col("body", "body")];
         fields.extend(related);
@@ -1785,8 +1807,8 @@ async fn validation_reports_what_no_document_build_gets_past() {
             (
                 "@primary_key".to_owned(),
                 DiagnosticKind::RootPrimaryKey,
-                "`primary_key` references unknown column `public.notes.id`; nothing reads it \
-                 while the index has no relation"
+                "`primary_key` references unknown column `public.notes.id`; a root change built by \
+                 its whole key does not read it"
                     .to_owned(),
             ),
         ],
