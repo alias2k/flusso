@@ -1,0 +1,10 @@
+error: a `#[serde(transparent)]` struct is checked as its one field, and the derive does not read which field serde skips — give the struct a single field (a tuple newtype `struct X(Inner)` or one named field)
+  --> tests/ui/transparent_with_two_fields.rs:7:16
+   |
+ 7 |   struct Billing {
+   |  ________________^
+ 8 | |     city: String,
+ 9 | |     #[serde(skip)]
+10 | |     cached: Option<String>,
+11 | | }
+   | |_^

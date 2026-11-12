@@ -13,9 +13,16 @@ struct Thing {
     id: String,
     r#type: String,
     r#match: Match,
+    r#gen: String,
+    r#try: String,
+    #[serde(rename = "Self")]
+    self_: String,
 }
 
 fn main() {
     let _ = Thing::r#type().eq("a");
     let _ = Thing::r#match().r#loop().eq("b");
+    let _ = Thing::r#gen().eq("c");
+    let _ = Thing::r#try().eq("d");
+    let _ = Thing::self_().eq("e");
 }

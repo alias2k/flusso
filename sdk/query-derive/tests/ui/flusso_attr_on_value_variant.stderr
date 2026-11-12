@@ -2,4 +2,4 @@ error: `#[flusso(…)]` on an enum variant is never read — the kind tag goes o
   --> tests/ui/flusso_attr_on_value_variant.rs:10:5
    |
 10 |     #[flusso(rename = "pro")]
-   |     ^
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^

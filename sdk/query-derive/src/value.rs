@@ -405,8 +405,8 @@ pub(crate) fn value_attrs(input: &DeriveInput) -> syn::Result<ValueAttrs> {
 /// (a newtype's field, an enum variant), as an error saying where it goes.
 pub(crate) fn unread_attr(attrs: &[syn::Attribute], what: &str, instead: &str) -> syn::Result<()> {
     match attrs.iter().find(|attr| attr.path().is_ident("flusso")) {
-        Some(attr) => Err(syn::Error::new(
-            attr.span(),
+        Some(attr) => Err(syn::Error::new_spanned(
+            attr,
             format!("`#[flusso(…)]` on {what} is never read — {instead}; remove it"),
         )),
         None => Ok(()),

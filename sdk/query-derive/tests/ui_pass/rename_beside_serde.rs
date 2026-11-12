@@ -1,7 +1,7 @@
 use flusso_query::FlussoRoot;
 
-// `#[flusso(rename)]` names the key when the derive cannot read serde's: an
-// `alias`, or a `rename(deserialize = …)` list. Neither is a contradiction.
+// `#[flusso(rename)]` names the key when the derive cannot tell which serde
+// reads (an `alias` beside the `rename`), or repeats the one it can read.
 
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]

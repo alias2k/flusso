@@ -1,5 +1,6 @@
 // Every serde attribute the derive does not read is stepped over, so the ones
-// it does read (`rename_all`, `rename`, `flatten`) are found wherever they sit.
+// it does read (`rename_all`, `rename` — plain or its `deserialize` name — and
+// `flatten`) are found wherever they sit.
 use flusso_query::{FlussoFragment, FlussoRoot, FlussoValue};
 
 #[derive(serde::Deserialize, FlussoFragment)]
@@ -24,6 +25,16 @@ struct User {
 struct UserRead {
     id: i32,
     full_name: Option<String>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct SplitRename {
+    id: i32,
+    #[serde(rename(serialize = "name", deserialize = "fullName"))]
+    name: Option<String>,
+    #[serde(rename(deserialize = "billingAddress"))]
+    billing: Address,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]

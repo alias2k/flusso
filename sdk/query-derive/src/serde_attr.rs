@@ -1,8 +1,8 @@
 //! Reading serde's own attributes, the one place the derives do it.
 //!
-//! The derives need four things serde decides: a container's `rename_all`, a
-//! field's or variant's `rename`, an `alias`, and `flatten`. Everything else in
-//! `#[serde(…)]` is stepped over, so an attribute the derive doesn't care
+//! The derives need five things serde decides: a container's `rename_all` and
+//! `transparent`, a field's or variant's `rename`, an `alias`, and `flatten`.
+//! Everything else in `#[serde(…)]` is stepped over, so an attribute the derive doesn't care
 //! about (`bound = ""`, `default = "…"`, `with = "…"`, `from = "…"`) never
 //! stops it from reading the ones it does.
 //!
@@ -118,6 +118,13 @@ pub(crate) fn flatten(attrs: &[Attribute]) -> bool {
         .any(|meta| meta.name == "flatten" && matches!(meta.value, SerdeValue::Flag))
 }
 
+/// Whether `#[serde(transparent)]` is set.
+pub(crate) fn transparent(attrs: &[Attribute]) -> bool {
+    serde_metas(attrs)
+        .iter()
+        .any(|meta| meta.name == "transparent" && matches!(meta.value, SerdeValue::Flag))
+}
+
 /// The key deserialization reads for a variant: its `rename`, plain or the
 /// `deserialize` entry.
 pub(crate) fn variant_rename(attrs: &[Attribute]) -> Option<String> {
@@ -132,7 +139,7 @@ pub(crate) fn variant_rename(attrs: &[Attribute]) -> Option<String> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{flatten, rename_all, variant_rename};
+    use super::{flatten, rename_all, transparent, variant_rename};
 
     fn attrs(source: &str) -> Vec<syn::Attribute> {
         let item: syn::DeriveInput = syn::parse_str(&format!("{source} struct S;")).unwrap();
@@ -168,6 +175,7 @@ mod tests {
     #[test]
     fn flatten_and_rename_are_read_after_any_other_item() {
         assert!(flatten(&attrs(r#"#[serde(with = "module", flatten)]"#)));
+        assert!(transparent(&attrs(r#"#[serde(bound = "", transparent)]"#)));
         assert_eq!(
             variant_rename(&attrs(r#"#[serde(alias = "p", rename = "pro")]"#)).as_deref(),
             Some("pro")

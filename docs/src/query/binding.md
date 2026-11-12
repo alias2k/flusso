@@ -73,7 +73,7 @@ impl FlussoRoot for User {
 }
 ```
 
-A handle is named for its schema key in snake_case (`fullName` → `full_name()`). A key that is a Rust keyword gets a raw identifier (`type` → `User::r#type()`), and `self`, `Self`, `super` and `crate`, which a raw identifier can't spell, take a trailing `_`.
+A handle is named for its schema key in snake_case (`fullName` → `full_name()`). A key that is a Rust keyword, strict or reserved in any edition (`type`, `try`, `gen`), gets a raw identifier (`type` → `User::r#type()`), and `self`, `Self`, `super` and `crate`, which a raw identifier can't spell, take a trailing `_`. A key no identifier can spell, such as `_`, is a compile error naming the key.
 
 Plus **one namespace per container level** in a generated module `flusso_<root>_query`, so nothing lands in your namespace and a `struct UserOrders` of your own can't collide:
 

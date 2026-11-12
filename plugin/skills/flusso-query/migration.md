@@ -113,8 +113,9 @@ that name.
 
 Embedding is checked by default now, so a plain un-derived struct in an `object`/`nested` field is
 an error naming the fix. Prefer `#[derive(FlussoFragment)]`, which gets validated, over
-`#[flusso(opaque)]`, which turns off the check of the type's shape (the field must still exist,
-with the schema's nullability, on a root and a fragment alike).
+`#[flusso(opaque)]`, which turns off the walk into the type (the field must still exist, with the
+schema's nullability and array shape). The full rules, and the one way a fragment differs, are in
+the manual's [Escape hatches](https://alias2k.github.io/flusso/main/query/document-structs.html#escape-hatches).
 
 ### 5. Verify and report
 

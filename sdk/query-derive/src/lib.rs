@@ -224,7 +224,8 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         }
     };
 
-    let fields = match doc::parse_fields(struct_fields, attrs.rename_all.as_deref()) {
+    let transparent = serde_attr::transparent(&input.attrs);
+    let fields = match doc::parse_fields(struct_fields, attrs.rename_all.as_deref(), transparent) {
         Ok(fields) => fields,
         Err(error) => return error.to_compile_error(),
     };

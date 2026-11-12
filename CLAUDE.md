@@ -929,8 +929,12 @@ const fn can't name `FlussoValue<K>` for a `K` it only has as a value) — which
 enum-variant coverage is checked. Constraints: const `panic!` takes a literal (no
 interpolation) and const eval **can't warn**, so a Rust variant the schema doesn't declare
 is a hard error while a subset is silently fine. Embedding is checked by default;
-`#[flusso(opaque)]` opts a plain struct out of the shape check only; the field still has to exist
-with the schema's nullability, on a root and a fragment alike (issue #256). `#[serde(flatten)]` and
+`#[flusso(opaque)]` opts a plain struct out of the walk into its type only; the field still has to
+exist, with the schema's nullability and array shape, and a type with `FlussoValueMeta` keeps its
+kind check at a leaf (issue #256). A fragment does this as const assertions
+(`fragment::opaque_check`, `OpaqueProbe::{HAS_META, KINDS}`); its one difference from a root: a
+hand-written `FlussoValue` (no metadata) under `opaque` is accepted at any non-`map` leaf with its
+kind unchecked, where a root checks its bound. `#[serde(flatten)]` and
 `#[serde(transparent)]` newtypes are supported (both checked against the enclosing level).
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
@@ -1043,7 +1047,7 @@ rejected (`ui/scope_on_*.rs`, `ui/scope_in_fragment.rs`, `a_skipped_field_still_
 other attributes (issue #251): `opaque` only where a custom type's check would run (`misplaced_attrs`,
 shared by both derives, plus the root's mapping-aware `opaque_without_a_shape_check`; the placements
 that do something are pinned by `ui_pass/opaque_placements.rs`), no `rename` on a `#[serde(flatten)]`
-field, no `#[flusso(rename)]` contradicting a plain `#[serde(rename)]` with no `alias`, no
+field, no `#[flusso(rename)]` contradicting a `#[serde(rename)]` with no `alias`, no
 `scope_mod` on a root that generates no module, and a fragment reads every container
 `#[flusso(…)]` (`ui/opaque_*.rs`, `ui/rename_on_flatten_field.rs`, `ui/rename_contradicts_serde.rs`,
 `ui/scope_mod_without_levels.rs`, `ui/fragment_location_in_second_attribute.rs`). A flattened
@@ -1051,7 +1055,8 @@ field, no `#[flusso(rename)]` contradicting a plain `#[serde(rename)]` with no `
 `fragment::embedded_type`; `ui_pass/flattened_catch_all.rs`).
 Issue #256 closed the rest: a `#[flusso(…)]` the derive never reads is an error (a `FlussoValue`
 newtype's field or enum variant, a `FlussoMap` field, the field of a `#[serde(transparent)]`
-fragment/root: `value::unread_attr`, `doc::newtype_field_attr`); every key is given once
+fragment/root: `value::unread_attr`, `doc::newtype_field`; a transparent struct takes one field,
+tuple or named); every key is given once
 (`lib.rs`'s `once`; `keyword` beside `text` is a conflict); on a root `keyword`/`text` field
 `opaque` on a type with no variants to check is a const error through `flusso_query::OpaqueProbe`
 (inherent consts exist only with `FlussoValueMeta`; its `OpaqueWithoutMeta` fallback lets a
@@ -1060,9 +1065,12 @@ hand-written `FlussoValue` keep `opaque`). Serde attributes are read in one plac
 Built-in leaf types are matched by **name** (a macro can't resolve paths, and path matching would
 reject re-exports like `sqlx::types::Uuid`), except where no built-in could sit: a flattened field
 and a root `object`/`nested` field take a `Date`/`Uuid`/… as the user's own type
-(`fragment::checked_type`'s `structured`). A raw-identifier field (`r#type`) reads the unraw key;
-a keyword schema key gets a raw-identifier handle (`doc::generated_ident`; `reserved` fixture,
-`ui_pass/raw_identifiers.rs`).
+(`fragment::checked_type`'s `structured`), but a flattened `GeoPoint` stays flusso's (unchecked).
+A field's key is its `#[serde(rename)]`, plain or the `deserialize` name. A raw-identifier field
+(`r#type`) reads the unraw key; a schema key that is a keyword in any edition gets a
+raw-identifier handle (`doc::KEYWORDS`, `doc::generated_ident`; `reserved` fixture,
+`ui_pass/raw_identifiers.rs`), and one no identifier spells (`_`) is an error
+(`ui/unnamable_schema_key.rs`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/

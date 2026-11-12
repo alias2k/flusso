@@ -2,4 +2,4 @@ error: the field of a `#[serde(transparent)]` newtype takes no `#[flusso(…)]` 
   --> tests/ui/opaque_on_transparent_newtype_field.rs:12:16
    |
 12 | struct Billing(#[flusso(opaque)] Address);
-   |                ^
+   |                ^^^^^^^^^^^^^^^^^

@@ -12,3 +12,9 @@ fields:
     fields:
       - keyword: loop
         required: true
+  - keyword: gen
+    required: true
+  - keyword: try
+    required: true
+  - keyword: Self
+    required: true

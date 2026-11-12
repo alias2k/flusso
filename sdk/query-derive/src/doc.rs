@@ -10,13 +10,13 @@ use syn::{Field, Fields, Ident, LitStr, Type};
 use config::{Mapping, MappingType, ResolvedField};
 
 use crate::resolve::PathSegment;
-use crate::serde_attr::{SerdeValue, serde_metas};
+use crate::serde_attr::serde_metas;
 use crate::value::Kind;
 
 /// One struct field, with its resolved document key.
 pub(crate) struct DocField<'a> {
     /// `None` for the single field of a `#[serde(transparent)]` newtype, which
-    /// has no name of its own.
+    /// has no key of its own.
     pub(crate) ident: Option<&'a Ident>,
     pub(crate) ty: &'a Type,
     pub(crate) doc_key: String,
@@ -40,33 +40,33 @@ pub(crate) struct DocField<'a> {
 
 /// Parse a struct's named fields, resolving each document key from serde's
 /// `rename` / `rename_all` so validation matches what the document actually uses.
+///
+/// `transparent`: the struct is `#[serde(transparent)]`.
 pub(crate) fn parse_fields<'a>(
     fields: &'a Fields,
     rename_all: Option<&str>,
+    transparent: bool,
 ) -> syn::Result<Vec<DocField<'a>>> {
     let named = match fields {
+        Fields::Named(named) if transparent => {
+            let mut named = named.named.iter();
+            return match (named.next(), named.next()) {
+                (Some(field), None) => newtype_field(field).map(|field| vec![field]),
+                _ => Err(syn::Error::new(
+                    fields.span(),
+                    "a `#[serde(transparent)]` struct is checked as its one field, and the \
+                     derive does not read which field serde skips — give the struct a single \
+                     field (a tuple newtype `struct X(Inner)` or one named field)",
+                )),
+            };
+        }
         Fields::Named(named) => &named.named,
-        // A `#[serde(transparent)]` newtype inherits the inner type's shape:
-        // there is no field of its own to name, so the inner type is checked
-        // against this very level (like a flattened group).
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-            let mut out = Vec::with_capacity(1);
-            for field in &fields.unnamed {
-                if let Some(error) = newtype_field_attr(field) {
-                    return Err(error);
-                }
-                out.push(DocField {
-                    ident: None,
-                    ty: &field.ty,
-                    doc_key: String::new(),
-                    skip: false,
-                    opaque: None,
-                    renamed: None,
-                    flatten: true,
-                    scope: None,
-                });
-            }
-            return Ok(out);
+            return fields
+                .unnamed
+                .iter()
+                .map(newtype_field)
+                .collect::<syn::Result<_>>();
         }
         _ => {
             return Err(syn::Error::new(
@@ -128,23 +128,27 @@ fn doc_key(
 
 /// What a field's `#[serde(…)]` attributes say about its key.
 struct SerdeKey {
-    /// A plain `rename = "…"`: the one key serde both reads and writes.
+    /// The key serde reads: a plain `rename = "…"`, or the `deserialize` name
+    /// of a `rename(serialize = …, deserialize = …)` list.
     rename: Option<String>,
-    /// An `alias`, or a `rename(serialize = …, deserialize = …)` list: serde
-    /// may read a key the derive does not see.
-    other_names: bool,
+    /// An `alias`: serde may read a key the derive does not see.
+    aliased: bool,
 }
 
 /// Reads `rename` and `alias`; every other serde field attribute is stepped over.
 fn serde_key(field: &Field) -> SerdeKey {
     let mut key = SerdeKey {
         rename: None,
-        other_names: false,
+        aliased: false,
     };
     for meta in serde_metas(&field.attrs) {
-        match (meta.name.as_str(), meta.value) {
-            ("rename", SerdeValue::Str(value)) => key.rename = Some(value),
-            ("rename" | "alias", _) => key.other_names = true,
+        match meta.name.as_str() {
+            "rename" => {
+                if let Some(name) = meta.value.deserialize() {
+                    key.rename = Some(name.to_owned());
+                }
+            }
+            "alias" => key.aliased = true,
             _ => {}
         }
     }
@@ -152,7 +156,8 @@ fn serde_key(field: &Field) -> SerdeKey {
 }
 
 /// `#[flusso(rename)]` that names a different key than the one serde provably
-/// reads: the struct compiles, but every real document fails to deserialize.
+/// reads (no `alias` beside its `rename`): the struct compiles, but every real
+/// document fails to deserialize.
 fn contradicting_rename(
     ident: &Ident,
     flusso: Option<&LitStr>,
@@ -160,16 +165,16 @@ fn contradicting_rename(
 ) -> Option<syn::Error> {
     let flusso = flusso?;
     let serde_key = serde.rename.as_ref()?;
-    if serde.other_names || flusso.value() == *serde_key {
+    if serde.aliased || flusso.value() == *serde_key {
         return None;
     }
     Some(syn::Error::new(
         flusso.span(),
         format!(
-            "`{ident}` is read by serde from `{serde_key}` (`#[serde(rename = \"{serde_key}\")]`), \
-             but `#[flusso(rename = \"{}\")]` checks it against the schema as `{}` — the two \
-             must name the key serde reads; remove `#[flusso(rename)]`, which is for a key the \
-             derive cannot read from serde (`alias`, `rename(deserialize = …)`)",
+            "`{ident}` is read by serde from `{serde_key}` (its `#[serde(rename)]`), but \
+             `#[flusso(rename = \"{}\")]` checks it against the schema as `{}` — the two must \
+             name the key serde reads; remove `#[flusso(rename)]`, which is for a key the \
+             derive cannot read from serde (one of its `alias`es)",
             flusso.value(),
             flusso.value(),
         ),
@@ -234,20 +239,33 @@ fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
     })
 }
 
-/// A `#[flusso(…)]` on the single field of a `#[serde(transparent)]` newtype:
-/// the field has no key of its own and is checked as the newtype itself, so
-/// nothing there is read.
-fn newtype_field_attr(field: &Field) -> Option<syn::Error> {
-    let attr = field
+/// The single field of a `#[serde(transparent)]` newtype, tuple or named. It
+/// inherits the inner type's shape: there is no key of its own, so the inner
+/// type is checked against this very level (like a flattened group), and a
+/// `#[flusso(…)]` on it is never read, so it is an error.
+fn newtype_field(field: &Field) -> syn::Result<DocField<'_>> {
+    if let Some(attr) = field
         .attrs
         .iter()
-        .find(|attr| attr.path().is_ident("flusso"))?;
-    Some(syn::Error::new(
-        attr.span(),
-        "the field of a `#[serde(transparent)]` newtype takes no `#[flusso(…)]` attribute — \
-         it is checked as the newtype itself; put `opaque` or `skip` on the field that embeds \
-         the newtype, and remove this attribute",
-    ))
+        .find(|attr| attr.path().is_ident("flusso"))
+    {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "the field of a `#[serde(transparent)]` newtype takes no `#[flusso(…)]` attribute \
+             — it is checked as the newtype itself; put `opaque` or `skip` on the field that \
+             embeds the newtype, and remove this attribute",
+        ));
+    }
+    Ok(DocField {
+        ident: None,
+        ty: &field.ty,
+        doc_key: String::new(),
+        skip: false,
+        opaque: None,
+        renamed: None,
+        flatten: true,
+        scope: None,
+    })
 }
 
 /// Validate each declared field against the resolved fields at this level.
@@ -380,7 +398,7 @@ fn unshaped(field: &DocField) -> String {
             crate::fragment::render(ty)
         );
     }
-    if leaf_ident(inner).as_deref() == Some("Value") {
+    if leaf_ident(vec_inner(inner).unwrap_or(inner)).as_deref() == Some("Value") {
         "a `serde_json::Value`, which the derive never checks".to_string()
     } else if map_container_value(inner).is_some() {
         "a `HashMap`/`BTreeMap`, checked as a `map` by its value type, so there is no shape to \
@@ -956,7 +974,16 @@ impl Namespaces {
                 name: resolved.name.to_string(),
                 nested: matches!(resolved.mapping.mapping_type, MappingType::Nested),
             });
-            let child = self.child_ident(base, resolved.name.as_ref(), segments.is_empty());
+            let key = resolved.name.as_ref();
+            let (name, child) = match generated_ident(&to_snake_case(key), key)
+                .and_then(|name| Ok((name, self.child_ident(base, key, segments.is_empty())?)))
+            {
+                Ok(names) => names,
+                Err(error) => {
+                    handles.extend(error.to_compile_error());
+                    continue;
+                }
+            };
 
             // At the root the namespace is one module away; inside the module
             // its siblings are already in scope.
@@ -992,7 +1019,6 @@ impl Namespaces {
                 continue;
             };
 
-            let name = generated_ident(&to_snake_case(resolved.name.as_ref()));
             handles.extend(match receiver {
                 Receiver::Associated => quote! { pub fn #name() -> #ret { #ctor } },
                 Receiver::Method => quote! { pub fn #name(&self) -> #ret { #ctor } },
@@ -1065,19 +1091,16 @@ impl Namespaces {
     /// At the root level a `#[flusso(scope = "…")]` replaces the name outright,
     /// and since it becomes the `base` for the recursion, everything under it
     /// follows.
-    fn child_ident(&self, base: &Ident, field: &str, at_root: bool) -> Ident {
+    fn child_ident(&self, base: &Ident, field: &str, at_root: bool) -> syn::Result<Ident> {
         if at_root {
             if let Some(renamed) = self.renames.get(field) {
-                return renamed.clone();
+                return Ok(renamed.clone());
             }
             // Directly under the root the module supplies the qualification, so
             // the type is named for its level alone: `flusso_user_query::Orders`.
-            return generated_ident(&to_pascal_case(field));
+            return generated_ident(&to_pascal_case(field), field);
         }
-        Ident::new(
-            &format!("{base}{}", to_pascal_case(field)),
-            Span::call_site(),
-        )
+        generated_ident(&format!("{base}{}", to_pascal_case(field)), field)
     }
 }
 
@@ -1221,18 +1244,39 @@ fn leaf_handle(
     }
 }
 
-/// A name generated from a document key, as an identifier. A Rust keyword
-/// becomes a raw identifier (`type` → `r#type`, matching a field the caller
-/// spells `r#type`); the few a raw identifier cannot spell (`self`, `Self`,
-/// `super`, `crate`) take a trailing `_`.
-fn generated_ident(name: &str) -> Ident {
-    if syn::parse_str::<Ident>(name).is_ok() {
-        return Ident::new(name, Span::call_site());
-    }
+/// Every Rust keyword, strict and reserved, in any edition: what a generated
+/// name must not be spelled as bare. `syn` parses by its own edition, which
+/// misses the newest (`gen`), so the set is spelled out.
+const KEYWORDS: &[&str] = &[
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate",
+    "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl",
+    "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
+    "return", "self", "Self", "static", "struct", "super", "trait", "true", "try", "type",
+    "typeof", "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+];
+
+/// A name generated from the document key `key`, as an identifier. A Rust
+/// keyword becomes a raw identifier (`type` → `r#type`, matching a field the
+/// caller spells `r#type`); the few a raw identifier cannot spell (`self`,
+/// `Self`, `super`, `crate`) take a trailing `_`. A name no identifier can
+/// spell (key `_`) is an error naming the key.
+fn generated_ident(name: &str, key: &str) -> syn::Result<Ident> {
     match name {
-        "self" | "Self" | "super" | "crate" => Ident::new(&format!("{name}_"), Span::call_site()),
-        _ => Ident::new_raw(name, Span::call_site()),
+        "self" | "Self" | "super" | "crate" => {
+            return Ok(Ident::new(&format!("{name}_"), Span::call_site()));
+        }
+        _ if KEYWORDS.contains(&name) => return Ok(Ident::new_raw(name, Span::call_site())),
+        _ => {}
     }
+    syn::parse_str::<Ident>(name).map_err(|_| {
+        syn::Error::new(
+            Span::call_site(),
+            format!(
+                "the schema key `{key}` gives the generated name `{name}`, which is not a Rust \
+                 identifier, so it has no query handle — rename the field in the schema"
+            ),
+        )
+    })
 }
 
 /// A document key as a type-name fragment: `orders` → `Orders`,

@@ -1,0 +1,11 @@
+# A document key no generated name can spell: `_` is neither an identifier nor
+# a raw one.
+version: 1
+table: unnamable
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - keyword: _
+    required: true
