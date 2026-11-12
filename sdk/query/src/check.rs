@@ -387,6 +387,45 @@ pub trait FlussoValueMeta {
     const EXHAUSTIVE: bool = false;
 }
 
+/// What `#[flusso(opaque)]` turns off at a root `keyword` or `text` field, as
+/// constants the root's check reads to reject an `opaque` that turns off nothing.
+///
+/// There `opaque` skips the variant checks, which read the type's
+/// [`FlussoValueMeta`]. Whether a type implements that trait is not knowable at
+/// macro time, so this answers it during const evaluation: the inherent
+/// constants below exist only for a type with the metadata, and a type without
+/// it falls back to [`OpaqueWithoutMeta`]'s, where `opaque` is what spares the
+/// field the read, so it does turn something off.
+///
+/// ```
+/// use flusso_query::{OpaqueProbe, OpaqueWithoutMeta as _};
+///
+/// struct HandWritten;
+/// const _: () = assert!(OpaqueProbe::<HandWritten>::SKIPS_VARIANTS);
+/// const _: () = assert!(!OpaqueProbe::<String>::SKIPS_VARIANTS);
+/// ```
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct OpaqueProbe<T: ?Sized>(core::marker::PhantomData<T>);
+
+/// The fallback for [`OpaqueProbe`] on a type without [`FlussoValueMeta`].
+#[doc(hidden)]
+pub trait OpaqueWithoutMeta {
+    /// Whether `opaque` turns off a check at a field that declares variants.
+    const SKIPS_VARIANTS: bool = true;
+    /// Whether `opaque` turns off a check at a field that declares none.
+    const SKIPS_EXHAUSTIVE: bool = true;
+}
+
+impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
+
+impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
+    /// At a field that declares variants: the type has variants to check.
+    pub const SKIPS_VARIANTS: bool = !T::VARIANTS.is_empty() || T::EXHAUSTIVE;
+    /// At a field that declares none: only the `exhaustive` check runs.
+    pub const SKIPS_EXHAUSTIVE: bool = T::EXHAUSTIVE;
+}
+
 /// Mirrors the [`FlussoValue`](crate::FlussoValue) impls above, so a
 /// `#[derive(FlussoValue)]` newtype with no explicit kind can forward its inner
 /// type's kinds as *data* (`const KINDS = <Inner as FlussoValueMeta>::KINDS`)

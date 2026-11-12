@@ -1,0 +1,63 @@
+error[E0277]: `Date` cannot be used as a document field type
+  --> tests/ui/user_type_named_like_a_leaf_is_checked.rs:16:14
+   |
+16 |     billing: Date,
+   |              ^^^^ needs a flusso derive
+   |
+help: the trait `FlussoValueMeta` is not implemented for `Date`
+  --> tests/ui/user_type_named_like_a_leaf_is_checked.rs:7:1
+   |
+ 7 | struct Date {
+   | ^^^^^^^^^^^
+   = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it
+   = help: the following other types implement trait `FlussoValueMeta`:
+             Order
+             User
+             Uuid
+             bool
+             f32
+             f64
+             flusso_query::Decimal
+             i16
+           and $N others
+
+error[E0599]: no associated item named `__flusso_check` found for struct `Date` in the current scope
+  --> tests/ui/user_type_named_like_a_leaf_is_checked.rs:16:14
+   |
+ 7 | struct Date {
+   | ----------- associated item `__flusso_check` not found for this struct
+...
+16 |     billing: Date,
+   |              ^^^^ associated item not found in `Date`
+
+error[E0277]: `Date` cannot be used as a document field type
+  --> tests/ui/user_type_named_like_a_leaf_is_checked.rs:22:11
+   |
+22 |     rest: Date,
+   |           ^^^^ needs a flusso derive
+   |
+help: the trait `FlussoValueMeta` is not implemented for `Date`
+  --> tests/ui/user_type_named_like_a_leaf_is_checked.rs:7:1
+   |
+ 7 | struct Date {
+   | ^^^^^^^^^^^
+   = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it
+   = help: the following other types implement trait `FlussoValueMeta`:
+             Order
+             User
+             Uuid
+             bool
+             f32
+             f64
+             flusso_query::Decimal
+             i16
+           and $N others
+
+error[E0599]: no associated item named `__flusso_check` found for struct `Date` in the current scope
+  --> tests/ui/user_type_named_like_a_leaf_is_checked.rs:22:11
+   |
+ 7 | struct Date {
+   | ----------- associated item `__flusso_check` not found for this struct
+...
+22 |     rest: Date,
+   |           ^^^^ associated item not found in `Date`

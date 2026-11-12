@@ -113,7 +113,8 @@ that name.
 
 Embedding is checked by default now, so a plain un-derived struct in an `object`/`nested` field is
 an error naming the fix. Prefer `#[derive(FlussoFragment)]`, which gets validated, over
-`#[flusso(opaque)]`, which only silences the check.
+`#[flusso(opaque)]`, which turns off the check of the type's shape (the field must still exist,
+with the schema's nullability, on a root and a fragment alike).
 
 ### 5. Verify and report
 

@@ -1,0 +1,5 @@
+error: `index` is given twice, and a root binds one index — keep one `index`
+ --> tests/ui/index_given_twice.rs:6:10
+  |
+6 | #[flusso(index = "users")]
+  |          ^^^^^^^^^^^^^^^

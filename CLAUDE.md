@@ -929,7 +929,8 @@ const fn can't name `FlussoValue<K>` for a `K` it only has as a value) — which
 enum-variant coverage is checked. Constraints: const `panic!` takes a literal (no
 interpolation) and const eval **can't warn**, so a Rust variant the schema doesn't declare
 is a hard error while a subset is silently fine. Embedding is checked by default;
-`#[flusso(opaque)]` opts a plain struct out. `#[serde(flatten)]` and
+`#[flusso(opaque)]` opts a plain struct out of the shape check only; the field still has to exist
+with the schema's nullability, on a root and a fragment alike (issue #256). `#[serde(flatten)]` and
 `#[serde(transparent)]` newtypes are supported (both checked against the enclosing level).
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
@@ -1048,6 +1049,20 @@ field, no `#[flusso(rename)]` contradicting a plain `#[serde(rename)]` with no `
 `ui/scope_mod_without_levels.rs`, `ui/fragment_location_in_second_attribute.rs`). A flattened
 `serde_json::Value` or map is serde's catch-all and is checked on neither derive (both go through
 `fragment::embedded_type`; `ui_pass/flattened_catch_all.rs`).
+Issue #256 closed the rest: a `#[flusso(…)]` the derive never reads is an error (a `FlussoValue`
+newtype's field or enum variant, a `FlussoMap` field, the field of a `#[serde(transparent)]`
+fragment/root: `value::unread_attr`, `doc::newtype_field_attr`); every key is given once
+(`lib.rs`'s `once`; `keyword` beside `text` is a conflict); on a root `keyword`/`text` field
+`opaque` on a type with no variants to check is a const error through `flusso_query::OpaqueProbe`
+(inherent consts exist only with `FlussoValueMeta`; its `OpaqueWithoutMeta` fallback lets a
+hand-written `FlussoValue` keep `opaque`). Serde attributes are read in one place,
+`serde_attr.rs`, which steps over every item it doesn't read (`bound = ""` before `rename_all`).
+Built-in leaf types are matched by **name** (a macro can't resolve paths, and path matching would
+reject re-exports like `sqlx::types::Uuid`), except where no built-in could sit: a flattened field
+and a root `object`/`nested` field take a `Date`/`Uuid`/… as the user's own type
+(`fragment::checked_type`'s `structured`). A raw-identifier field (`r#type`) reads the unraw key;
+a keyword schema key gets a raw-identifier handle (`doc::generated_ident`; `reserved` fixture,
+`ui_pass/raw_identifiers.rs`).
 `Text`/`Keyword` expose `.keyword()`/`.keyword_lowercase()`/`.text()` subfield accessors
 (runtime methods, not derive codegen — keeps the field method returning the shared handle
 type for `multi_match`/composition). Issue #19 acceptance test: `sdk/query-derive/tests/

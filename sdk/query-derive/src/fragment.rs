@@ -69,14 +69,17 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         }
     };
 
-    let rename_all = doc::container_rename_all(&input);
+    let rename_all = crate::serde_attr::rename_all(&input.attrs);
     let fields = match doc::parse_fields(struct_fields, rename_all.as_deref()) {
         Ok(fields) => fields,
         Err(error) => return error.to_compile_error(),
     };
 
     let mut out = embeddable(&input.ident, &fields);
-    for error in fields.iter().flat_map(doc::misplaced_attrs) {
+    for error in fields
+        .iter()
+        .flat_map(|field| doc::misplaced_attrs(field, false))
+    {
         out.extend(error.to_compile_error());
     }
     for renamed in fields.iter().filter_map(|field| field.scope.as_ref()) {
@@ -168,30 +171,79 @@ fn reject_location(attr: &syn::Attribute) -> syn::Result<()> {
 /// built-in leaf. What is left is a custom type — a sub-fragment *or* a value
 /// type, told apart only at const-evaluation time, where a value type's check
 /// turns out to be a no-op.
-pub(crate) fn embedded_type<'a>(field: &DocField<'a>) -> Option<&'a Type> {
+///
+/// `structured`: the schema field is a level with fields of its own (a root
+/// knows this; a fragment never does), where no built-in leaf could sit.
+pub(crate) fn embedded_type<'a>(field: &DocField<'a>, structured: bool) -> Option<&'a Type> {
     if field.skip || field.opaque.is_some() {
         return None;
     }
-    checked_type(field)
+    checked_type(field, structured)
 }
 
 /// The custom type a field would hand a check to, `skip` and `opaque` aside —
 /// the only kind of type `opaque` has anything to opt out of.
-pub(crate) fn checked_type<'a>(field: &DocField<'a>) -> Option<&'a Type> {
+///
+/// A built-in leaf is recognized by its name, so a type of the user's own named
+/// `Date` is taken for one — except where a built-in leaf could never sit: a
+/// flattened field (serde flattens a struct or a map only) and, on a root, a
+/// `structured` field. There the name must be the user's own type, so it is
+/// checked like any other.
+pub(crate) fn checked_type<'a>(field: &DocField<'a>, structured: bool) -> Option<&'a Type> {
     let inner = strip_option(field.ty);
     if leaf_ident(inner).as_deref() == Some("Value") || map_container_value(inner).is_some() {
         return None;
     }
     let element = vec_inner(inner).unwrap_or(inner);
-    if primitive_kinds(element).is_some() {
-        return None;
+    match primitive_kinds(element) {
+        None => Some(element),
+        Some(_) if (field.flatten || structured) && is_foreign_leaf(element) => Some(element),
+        Some(_) => None,
     }
-    Some(element)
+}
+
+/// A built-in leaf from another crate (`chrono`, `time`, `uuid`, `rust_decimal`,
+/// flusso's geo point), as opposed to a Rust primitive or `String`. Matched by
+/// name, so a type of the user's own with one of these names matches too.
+pub(crate) fn is_foreign_leaf(ty: &Type) -> bool {
+    matches!(
+        leaf_ident(ty).as_deref(),
+        Some(
+            "Decimal"
+                | "Uuid"
+                | "NaiveDate"
+                | "NaiveDateTime"
+                | "DateTime"
+                | "OffsetDateTime"
+                | "PrimitiveDateTime"
+                | "Date"
+                | "GeoPoint"
+        )
+    )
+}
+
+/// The check of a flattened field's type against the enclosing `level`.
+///
+/// Reading `FlussoValueMeta` first is only for the error: a plain un-derived
+/// struct then fails with the trait's note saying which derive to add (or
+/// `opaque`), not just a bare "no `__flusso_check`".
+pub(crate) fn flattened_check(
+    ty: &Type,
+    span: proc_macro2::Span,
+    level: TokenStream,
+) -> TokenStream {
+    quote_spanned! {span=>
+        let _ = <#ty as ::flusso_query::FlussoValueMeta>::KINDS;
+        <#ty>::__flusso_check(#level);
+    }
 }
 
 /// The assertions for one field, with every message baked in at macro time.
+///
+/// `opaque` keeps the field-exists and nullability checks, exactly as on a root,
+/// and turns off only the shape check.
 fn field_check(fragment: &Ident, field: &DocField) -> TokenStream {
-    if field.skip || field.opaque.is_some() {
+    if field.skip {
         return quote! {};
     }
 
@@ -203,8 +255,8 @@ fn field_check(fragment: &Ident, field: &DocField) -> TokenStream {
     // A flattened `serde_json::Value` or map is serde's catch-all for the
     // leftover keys, so there is nothing to check — the same rule a root follows.
     if field.flatten {
-        return embedded_type(field).map_or_else(TokenStream::new, |ty| {
-            quote_spanned! {span=> <#ty>::__flusso_check(level); }
+        return embedded_type(field, false).map_or_else(TokenStream::new, |ty| {
+            flattened_check(ty, span, quote! { level })
         });
     }
 
@@ -218,7 +270,9 @@ fn field_check(fragment: &Ident, field: &DocField) -> TokenStream {
     };
 
     checks.extend(nullability_check(fragment, field, span));
-    checks.extend(shape_check(fragment, field, span));
+    if field.opaque.is_none() {
+        checks.extend(shape_check(fragment, field, span));
+    }
     checks
 }
 
@@ -302,11 +356,20 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
         });
     }
 
+    let named_like_a_leaf = if is_foreign_leaf(element) {
+        let name = leaf_ident(element).unwrap_or_default();
+        format!(
+            " (a fragment takes `{name}` for the built-in leaf type by its name, so a type of \
+             your own named `{name}` needs another name to be checked here)"
+        )
+    } else {
+        String::new()
+    };
     let kind_msg = message(
         fragment,
         key,
         &format!(
-            "is `{}`, which cannot hold the schema field at this path",
+            "is `{}`, which cannot hold the schema field at this path{named_like_a_leaf}",
             render(element)
         ),
     );

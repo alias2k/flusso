@@ -18,7 +18,7 @@ struct Sku(String);               // a keyword and text value
 Customer::balance().gte(Money(Decimal::ONE));
 ```
 
-**An enum declares a string kind**, `#[flusso(keyword)]` or `#[flusso(text)]`; there is no default, and numeric or date tags don't exist (use a newtype). It's matched against its serde string form.
+**An enum declares a string kind**, `#[flusso(keyword)]` or `#[flusso(text)]`; there is no default, and numeric or date tags don't exist (use a newtype). It's matched against its serde string form: a variant's `#[serde(rename = "…")]` (or its `deserialize` name), else the container `rename_all`. The tag goes on the type and is given once: `keyword` beside `text`, a repeated tag, and a `#[flusso(…)]` on a variant or on a newtype's field are compile errors.
 
 ```rust
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]

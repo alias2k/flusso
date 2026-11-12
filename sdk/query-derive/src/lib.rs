@@ -10,6 +10,7 @@ mod fragment;
 mod map;
 mod multi;
 mod resolve;
+mod serde_attr;
 mod spec;
 mod value;
 
@@ -121,53 +122,46 @@ impl Attrs {
         let mut index_span = input.ident.span();
         let mut scope_mod: Option<Ident> = None;
         let mut config: Option<String> = None;
-        let mut rename_all: Option<String> = None;
 
-        for attr in &input.attrs {
-            if attr.path().is_ident("flusso") {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("index") {
-                        let lit: LitStr = meta.value()?.parse()?;
-                        index_span = lit.span();
-                        index = Some(lit.value());
-                    } else if meta.path.is_ident("path") {
-                        return Err(meta.error(
-                            "`path` no longer exists — the root generates handles for every \
-                             level of its index. Make this a `#[derive(FlussoFragment)]` shape \
-                             and embed it; it is validated at whatever path it lands on",
-                        ));
-                    } else if meta.path.is_ident("scope_mod") {
-                        let lit: LitStr = meta.value()?.parse()?;
-                        scope_mod = Some(lit.parse::<Ident>().map_err(|_| {
-                            syn::Error::new(
-                                lit.span(),
-                                "`scope_mod` must be a valid module name, e.g. \
-                                 `scope_mod = \"user_queries\"`",
-                            )
-                        })?);
-                    } else if meta.path.is_ident("config") {
-                        let lit: LitStr = meta.value()?.parse()?;
-                        config = Some(lit.value());
-                    } else {
-                        return Err(meta.error(
-                            "unknown `flusso` attribute (expected `index`, `config`, \
-                             or `scope_mod`)",
-                        ));
-                    }
-                    Ok(())
-                })?;
-            } else if attr.path().is_ident("serde") {
-                // Best-effort: read the container `rename_all`, ignore the rest.
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("rename_all")
-                        && let Ok(value) = meta.value()
-                        && let Ok(lit) = value.parse::<LitStr>()
-                    {
-                        rename_all = Some(lit.value());
-                    }
-                    Ok(())
-                });
-            }
+        for attr in input
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("flusso"))
+        {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("index") {
+                    let lit: LitStr = meta.value()?.parse()?;
+                    once(&meta, index.is_some(), "a root binds one index")?;
+                    index_span = lit.span();
+                    index = Some(lit.value());
+                } else if meta.path.is_ident("path") {
+                    return Err(meta.error(
+                        "`path` no longer exists — the root generates handles for every \
+                         level of its index. Make this a `#[derive(FlussoFragment)]` shape \
+                         and embed it; it is validated at whatever path it lands on",
+                    ));
+                } else if meta.path.is_ident("scope_mod") {
+                    let lit: LitStr = meta.value()?.parse()?;
+                    once(&meta, scope_mod.is_some(), "the scopes live in one module")?;
+                    scope_mod = Some(lit.parse::<Ident>().map_err(|_| {
+                        syn::Error::new(
+                            lit.span(),
+                            "`scope_mod` must be a valid module name, e.g. \
+                             `scope_mod = \"user_queries\"`",
+                        )
+                    })?);
+                } else if meta.path.is_ident("config") {
+                    let lit: LitStr = meta.value()?.parse()?;
+                    once(&meta, config.is_some(), "a root reads one `flusso.toml`")?;
+                    config = Some(lit.value());
+                } else {
+                    return Err(meta.error(
+                        "unknown `flusso` attribute (expected `index`, `config`, \
+                         or `scope_mod`)",
+                    ));
+                }
+                Ok(())
+            })?;
         }
 
         let index = index.ok_or_else(|| {
@@ -182,9 +176,27 @@ impl Attrs {
             index_span,
             scope_mod,
             config,
-            rename_all,
+            rename_all: serde_attr::rename_all(&input.attrs),
         })
     }
+}
+
+/// Reject a `#[flusso(…)]` key given a second time, rather than letting the
+/// last one win. `why`, when not empty, says why one is all it takes.
+pub(crate) fn once(meta: &syn::meta::ParseNestedMeta, seen: bool, why: &str) -> syn::Result<()> {
+    if !seen {
+        return Ok(());
+    }
+    let key = meta
+        .path
+        .get_ident()
+        .map_or_else(String::new, ToString::to_string);
+    let why = if why.is_empty() {
+        String::new()
+    } else {
+        format!(", and {why}")
+    };
+    Err(meta.error(format!("`{key}` is given twice{why} — keep one `{key}`")))
 }
 
 fn expand(input: DeriveInput) -> TokenStream2 {

@@ -1,0 +1,5 @@
+error: the field of a `#[serde(transparent)]` newtype takes no `#[flusso(…)]` attribute — it is checked as the newtype itself; put `opaque` or `skip` on the field that embeds the newtype, and remove this attribute
+  --> tests/ui/opaque_on_transparent_newtype_field.rs:12:16
+   |
+12 | struct Billing(#[flusso(opaque)] Address);
+   |                ^

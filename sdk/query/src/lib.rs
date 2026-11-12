@@ -121,8 +121,9 @@ mod walk;
 mod tests;
 
 pub use check::{
-    FieldSpec, FlussoValueMeta, KindTag, array, children, exists, has_variants, kind_is,
-    map_kind_ok, map_value_is, map_values_of, nullable, variants_covered, variants_exhausted,
+    FieldSpec, FlussoValueMeta, KindTag, OpaqueProbe, OpaqueWithoutMeta, array, children, exists,
+    has_variants, kind_is, map_kind_ok, map_value_is, map_values_of, nullable, variants_covered,
+    variants_exhausted,
 };
 pub use client::Client;
 pub use cursor::PageCursor;

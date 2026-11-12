@@ -1,0 +1,5 @@
+error: `#[flusso(…)]` on an enum variant is never read — the kind tag goes on the enum (`#[flusso(keyword)] enum …`), and a variant's document spelling comes from `#[serde(rename = "…")]`; remove it
+  --> tests/ui/flusso_attr_on_value_variant.rs:10:5
+   |
+10 |     #[flusso(rename = "pro")]
+   |     ^

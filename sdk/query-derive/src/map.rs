@@ -81,7 +81,14 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
 /// against the schema, so the shape here carries no extra information.
 fn validate(input: &DeriveInput) -> syn::Result<()> {
     match &input.data {
-        Data::Struct(_) => Ok(()),
+        Data::Struct(data) => data.fields.iter().try_for_each(|field| {
+            crate::value::unread_attr(
+                &field.attrs,
+                "a field of a `FlussoMap` type",
+                "the value kind goes on the type (`#[flusso(text)] struct Translations(…)`), \
+                 and the fields are never checked one by one",
+            )
+        }),
         Data::Enum(_) => Err(syn::Error::new(
             input.ident.span(),
             "FlussoMap cannot be derived for an enum — a map is an object of same-kind \

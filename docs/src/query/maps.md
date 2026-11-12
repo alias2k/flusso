@@ -83,7 +83,7 @@ Product::query().query(Product::name().contains("excav"))   // "Excavator", in a
 
 ## Document types
 
-A map field deserializes into `HashMap<String, V>` or `BTreeMap<String, V>`, with `V` checked against the declared value kind like a scalar. A type of your own stands in for the whole map with `#[derive(FlussoMap)]` and a **required** value-kind tag, `#[flusso(keyword)]` or `#[flusso(text)]`; untagged is a compile error. Any shape works: a newtype, or named fields whose on-disk form is a flat object of same-kind values.
+A map field deserializes into `HashMap<String, V>` or `BTreeMap<String, V>`, with `V` checked against the declared value kind like a scalar. A type of your own stands in for the whole map with `#[derive(FlussoMap)]` and a **required** value-kind tag, `#[flusso(keyword)]` or `#[flusso(text)]`; untagged is a compile error. Any shape works: a newtype, or named fields whose on-disk form is a flat object of same-kind values. The tag goes on the type, once; the fields take no `#[flusso(…)]`, since they are never checked one by one.
 
 ```rust
 #[derive(serde::Deserialize, FlussoMap)]

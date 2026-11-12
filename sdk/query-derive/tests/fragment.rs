@@ -121,6 +121,17 @@ const LINE_ITEM: &[FieldSpec] = &[
         map_values: Some(KindTag::Keyword),
         children: &[],
     },
+    // `opaque` turns off only the shape check: the field must still be here,
+    // with the nullability its Rust type declares.
+    FieldSpec {
+        name: "raw",
+        kind: KindTag::Object,
+        nullable: false,
+        array: false,
+        variants: &[],
+        map_values: None,
+        children: &[],
+    },
 ];
 
 // ── what the root emits, once per embedding ─────────────────────────────────

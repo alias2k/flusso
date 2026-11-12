@@ -3,12 +3,14 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::{Field, Fields, Ident, LitStr, Type};
 
 use config::{Mapping, MappingType, ResolvedField};
 
 use crate::resolve::PathSegment;
+use crate::serde_attr::{SerdeValue, serde_metas};
 use crate::value::Kind;
 
 /// One struct field, with its resolved document key.
@@ -50,6 +52,9 @@ pub(crate) fn parse_fields<'a>(
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             let mut out = Vec::with_capacity(1);
             for field in &fields.unnamed {
+                if let Some(error) = newtype_field_attr(field) {
+                    return Err(error);
+                }
                 out.push(DocField {
                     ident: None,
                     ty: &field.ty,
@@ -95,7 +100,7 @@ pub(crate) fn parse_fields<'a>(
             skip: attrs.skip,
             opaque: attrs.opaque,
             renamed: attrs.rename.as_ref().map(LitStr::span),
-            flatten: serde_flatten(field),
+            flatten: crate::serde_attr::flatten(&field.attrs),
             scope: attrs.scope,
         });
     }
@@ -114,7 +119,7 @@ fn doc_key(
     if let Some(renamed) = flusso_rename.or(serde_rename) {
         return renamed;
     }
-    let base = ident.to_string();
+    let base = ident.unraw().to_string();
     match rename_all {
         Some(rule) => apply_rename_all(&base, rule),
         None => base,
@@ -130,37 +135,18 @@ struct SerdeKey {
     other_names: bool,
 }
 
-/// Best-effort: reads `rename` and `alias`, and steps over every other serde
-/// field attribute (flags, `key = value`, `key(…)` lists) without failing.
+/// Reads `rename` and `alias`; every other serde field attribute is stepped over.
 fn serde_key(field: &Field) -> SerdeKey {
     let mut key = SerdeKey {
         rename: None,
         other_names: false,
     };
-    for attr in &field.attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
+    for meta in serde_metas(&field.attrs) {
+        match (meta.name.as_str(), meta.value) {
+            ("rename", SerdeValue::Str(value)) => key.rename = Some(value),
+            ("rename" | "alias", _) => key.other_names = true,
+            _ => {}
         }
-        let _ = attr.parse_nested_meta(|meta| {
-            let rename = meta.path.is_ident("rename");
-            let names = rename || meta.path.is_ident("alias");
-            if meta.input.peek(syn::Token![=]) {
-                let value: syn::Expr = meta.value()?.parse()?;
-                match value {
-                    syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(lit),
-                        ..
-                    }) if rename => key.rename = Some(lit.value()),
-                    _ => key.other_names |= names,
-                }
-            } else if meta.input.peek(syn::token::Paren) {
-                let content;
-                syn::parenthesized!(content in meta.input);
-                content.parse::<TokenStream>()?;
-                key.other_names |= names;
-            }
-            Ok(())
-        });
     }
     key
 }
@@ -204,37 +190,41 @@ fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
     let mut opaque = None;
     let mut rename = None;
     let mut scope = None;
-    for attr in &field.attrs {
-        if attr.path().is_ident("flusso") {
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("skip") {
-                    skip = true;
-                    Ok(())
-                } else if meta.path.is_ident("opaque") {
-                    opaque = Some(meta.path.span());
-                    Ok(())
-                } else if meta.path.is_ident("rename") {
-                    rename = Some(meta.value()?.parse::<LitStr>()?);
-                    Ok(())
-                } else if meta.path.is_ident("scope") {
-                    let lit: LitStr = meta.value()?.parse()?;
-                    // It becomes a type name, so reject anything that isn't one
-                    // here rather than emitting code that won't parse.
-                    scope = Some(lit.parse::<Ident>().map_err(|_| {
-                        syn::Error::new(
-                            lit.span(),
-                            "`scope` must be a valid type name, e.g. `scope = \"Orders\"`",
-                        )
-                    })?);
-                    Ok(())
-                } else {
-                    Err(meta.error(
-                        "unknown `flusso` field attribute (expected `skip`, `opaque`, \
-                         `rename`, or `scope`)",
-                    ))
-                }
-            })?;
-        }
+    for attr in field
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("flusso"))
+    {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("skip") {
+                crate::once(&meta, skip, "")?;
+                skip = true;
+            } else if meta.path.is_ident("opaque") {
+                crate::once(&meta, opaque.is_some(), "")?;
+                opaque = Some(meta.path.span());
+            } else if meta.path.is_ident("rename") {
+                let lit = meta.value()?.parse::<LitStr>()?;
+                crate::once(&meta, rename.is_some(), "a field has one key")?;
+                rename = Some(lit);
+            } else if meta.path.is_ident("scope") {
+                let lit: LitStr = meta.value()?.parse()?;
+                crate::once(&meta, scope.is_some(), "a level takes one name")?;
+                // It becomes a type name, so reject anything that isn't one
+                // here rather than emitting code that won't parse.
+                scope = Some(lit.parse::<Ident>().map_err(|_| {
+                    syn::Error::new(
+                        lit.span(),
+                        "`scope` must be a valid type name, e.g. `scope = \"Orders\"`",
+                    )
+                })?);
+            } else {
+                return Err(meta.error(
+                    "unknown `flusso` field attribute (expected `skip`, `opaque`, \
+                     `rename`, or `scope`)",
+                ));
+            }
+            Ok(())
+        })?;
     }
     Ok(FieldAttrs {
         skip,
@@ -244,43 +234,20 @@ fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
     })
 }
 
-/// The container `#[serde(rename_all = "…")]`, if any. Best-effort: every other
-/// serde container attribute is ignored.
-pub(crate) fn container_rename_all(input: &syn::DeriveInput) -> Option<String> {
-    let mut rename_all = None;
-    for attr in &input.attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename_all")
-                && let Ok(value) = meta.value()
-                && let Ok(lit) = value.parse::<LitStr>()
-            {
-                rename_all = Some(lit.value());
-            }
-            Ok(())
-        });
-    }
-    rename_all
-}
-
-/// Whether the field carries `#[serde(flatten)]`.
-fn serde_flatten(field: &Field) -> bool {
-    let mut flatten = false;
-    for attr in &field.attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
-        // Best-effort: `flatten` is a bare path among other serde attributes.
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("flatten") {
-                flatten = true;
-            }
-            Ok(())
-        });
-    }
-    flatten
+/// A `#[flusso(…)]` on the single field of a `#[serde(transparent)]` newtype:
+/// the field has no key of its own and is checked as the newtype itself, so
+/// nothing there is read.
+fn newtype_field_attr(field: &Field) -> Option<syn::Error> {
+    let attr = field
+        .attrs
+        .iter()
+        .find(|attr| attr.path().is_ident("flusso"))?;
+    Some(syn::Error::new(
+        attr.span(),
+        "the field of a `#[serde(transparent)]` newtype takes no `#[flusso(…)]` attribute — \
+         it is checked as the newtype itself; put `opaque` or `skip` on the field that embeds \
+         the newtype, and remove this attribute",
+    ))
 }
 
 /// Validate each declared field against the resolved fields at this level.
@@ -296,7 +263,11 @@ pub(crate) fn validate(
     let mut asserts = Vec::new();
     let mut renamed_keys = std::collections::HashSet::new();
     for field in fields {
-        let misplaced = misplaced_attrs(field);
+        let structured = level
+            .iter()
+            .find(|r| r.name.as_ref() == field.doc_key)
+            .is_some_and(|resolved| !field.flatten && is_structured(resolved));
+        let misplaced = misplaced_attrs(field, structured);
         let attrs_placed = misplaced.is_empty();
         errors.extend(misplaced);
         if let Some(error) = misplaced_scope(field, level, scope) {
@@ -346,7 +317,9 @@ pub(crate) const OPAQUE_ALLOWED: &str = "`opaque` goes on a field whose type is 
 /// The `#[flusso(…)]` field attributes that do nothing where they are, by the
 /// field's declaration alone. Shared by roots and fragments; a root also checks
 /// `opaque` against the schema ([`opaque_without_a_shape_check`]).
-pub(crate) fn misplaced_attrs(field: &DocField) -> Vec<syn::Error> {
+///
+/// `structured`: see [`crate::fragment::checked_type`].
+pub(crate) fn misplaced_attrs(field: &DocField, structured: bool) -> Vec<syn::Error> {
     let name = field_label(field);
     let mut errors = Vec::new();
     if let Some(span) = field.renamed
@@ -366,7 +339,7 @@ pub(crate) fn misplaced_attrs(field: &DocField) -> Vec<syn::Error> {
                 "{name} is `#[flusso(skip)]`, which already turns off every check on it — \
                  {OPAQUE_ALLOWED}; remove `opaque`"
             ))
-        } else if crate::fragment::checked_type(field).is_none() {
+        } else if crate::fragment::checked_type(field, structured).is_none() {
             Some(format!(
                 "{name} is {} — {OPAQUE_ALLOWED}; remove `opaque` (`skip` turns off every \
                  check on a field)",
@@ -386,7 +359,7 @@ pub(crate) fn misplaced_attrs(field: &DocField) -> Vec<syn::Error> {
 /// when that differs.
 fn field_label(field: &DocField) -> String {
     match field.ident {
-        Some(ident) if *ident != field.doc_key && !field.flatten => {
+        Some(ident) if ident.unraw() != field.doc_key && !field.flatten => {
             format!("`{ident}` (document key `{}`)", field.doc_key)
         }
         Some(ident) => format!("`{ident}`"),
@@ -496,6 +469,19 @@ fn misplaced_scope(field: &DocField, level: &[ResolvedField], scope: &str) -> Op
         renamed.span(),
         format!("`{key}` {reason} — {SCOPE_ALLOWED}; {fix}"),
     ))
+}
+
+/// Whether a field is a level with fields of its own, where no built-in leaf
+/// type could sit: a `nested` array, or an `object` with children that isn't a
+/// `map`. Unlike [`has_namespace`], an unindexed level counts.
+fn is_structured(resolved: &ResolvedField) -> bool {
+    match resolved.mapping.mapping_type {
+        MappingType::Nested => true,
+        MappingType::Object => {
+            resolved.mapping.map_values.is_none() && !resolved.children.is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// Whether an indexed field gets a namespace of its own: a `nested` array, or
@@ -1006,7 +992,7 @@ impl Namespaces {
                 continue;
             };
 
-            let name = Ident::new(&to_snake_case(resolved.name.as_ref()), Span::call_site());
+            let name = generated_ident(&to_snake_case(resolved.name.as_ref()));
             handles.extend(match receiver {
                 Receiver::Associated => quote! { pub fn #name() -> #ret { #ctor } },
                 Receiver::Method => quote! { pub fn #name(&self) -> #ret { #ctor } },
@@ -1086,7 +1072,7 @@ impl Namespaces {
             }
             // Directly under the root the module supplies the qualification, so
             // the type is named for its level alone: `flusso_user_query::Orders`.
-            return Ident::new(&to_pascal_case(field), Span::call_site());
+            return generated_ident(&to_pascal_case(field));
         }
         Ident::new(
             &format!("{base}{}", to_pascal_case(field)),
@@ -1235,6 +1221,20 @@ fn leaf_handle(
     }
 }
 
+/// A name generated from a document key, as an identifier. A Rust keyword
+/// becomes a raw identifier (`type` → `r#type`, matching a field the caller
+/// spells `r#type`); the few a raw identifier cannot spell (`self`, `Self`,
+/// `super`, `crate`) take a trailing `_`.
+fn generated_ident(name: &str) -> Ident {
+    if syn::parse_str::<Ident>(name).is_ok() {
+        return Ident::new(name, Span::call_site());
+    }
+    match name {
+        "self" | "Self" | "super" | "crate" => Ident::new(&format!("{name}_"), Span::call_site()),
+        _ => Ident::new_raw(name, Span::call_site()),
+    }
+}
+
 /// A document key as a type-name fragment: `orders` → `Orders`,
 /// `billingAddress` → `BillingAddress`, `postal_code` → `PostalCode`.
 fn to_pascal_case(name: &str) -> String {
@@ -1330,6 +1330,61 @@ fn capitalize(word: &str) -> String {
     }
 }
 
+/// At a root `keyword` or `text` field, `opaque` turns off the variant checks
+/// below, which read the type's `FlussoValueMeta`. For a type with no variants
+/// (a newtype over a `String`, a non-`exhaustive` enum where the schema declares
+/// none) those checks pass anyway, so `opaque` there turns off nothing. Whether
+/// the type has the metadata is only knowable at const evaluation, so this is a
+/// const assertion through `OpaqueProbe`, which also lets a hand-written
+/// `FlussoValue` without the metadata keep its `opaque`.
+fn opaque_turns_off_something(
+    field: &DocField,
+    resolved: &ResolvedField,
+    scope: &str,
+) -> Option<TokenStream> {
+    field.opaque?;
+    if field.skip
+        || resolved.mapping.map_values.is_some()
+        || !matches!(
+            resolved.mapping.mapping_type,
+            MappingType::Keyword | MappingType::Text
+        )
+    {
+        return None;
+    }
+    let element = crate::fragment::checked_type(field, false)?;
+    let key = &field.doc_key;
+    let label = field_label(field);
+    let rendered = crate::fragment::render(element);
+    let (probe, message) = match &resolved.mapping.enum_order {
+        Some(order) => (
+            quote! { SKIPS_VARIANTS },
+            format!(
+                "`opaque` on {label} turns off nothing — the schema field `{key}` in {scope} \
+                 declares variants [{}], but `{rendered}` declares none (it is not an enum, nor \
+                 a newtype over one), so there is no variant check to turn off; remove `opaque`",
+                order.join(", "),
+            ),
+        ),
+        None => (
+            quote! { SKIPS_EXHAUSTIVE },
+            format!(
+                "`opaque` on {label} turns off nothing — the schema field `{key}` in {scope} \
+                 declares no `variants:` and `{rendered}` is not `exhaustive`, so no variant \
+                 check runs here; remove `opaque`"
+            ),
+        ),
+    };
+    let span = field.opaque.unwrap_or_else(|| field.ty.span());
+    Some(quote::quote_spanned! {span=>
+        {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(::flusso_query::OpaqueProbe::<#element>::#probe, #message);
+        }
+    })
+}
+
 /// Drive the fragment check into every embedded field.
 ///
 /// The root is the only type that resolves the schema, so it bakes the whole
@@ -1347,18 +1402,26 @@ pub(crate) fn embed_checks(
 ) -> TokenStream {
     let mut calls = TokenStream::new();
     for field in fields {
-        let Some(element) = crate::fragment::embedded_type(field) else {
-            continue;
-        };
         let span = field.ty.span();
         if field.flatten {
-            calls.extend(quote::quote_spanned! {span=>
-                <#element>::__flusso_check(__FLUSSO_LEVEL);
-            });
+            if let Some(element) = crate::fragment::embedded_type(field, false) {
+                calls.extend(crate::fragment::flattened_check(
+                    element,
+                    span,
+                    quote! { __FLUSSO_LEVEL },
+                ));
+            }
             continue;
         }
         let key = &field.doc_key;
         let Some(resolved) = level.iter().find(|r| r.name.as_ref() == *key) else {
+            continue;
+        };
+        if let Some(check) = opaque_turns_off_something(field, resolved, scope) {
+            calls.extend(check);
+            continue;
+        }
+        let Some(element) = crate::fragment::embedded_type(field, is_structured(resolved)) else {
             continue;
         };
         // Unlike a fragment, a root *has* the mapping — so it drives the check
