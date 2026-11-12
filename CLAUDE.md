@@ -591,7 +591,7 @@ id (a root keyed by other columns than its `primary_key`, i.e. a table without o
 a hop whose link column (`link_on_row`) is in the key takes the parent from the key with no query,
 so a table without a primary key — keyed by every column under `FULL`, where a null is row data —
 resolves from its row; any other key with a null walks its hop from `before` alone (no query binds a
-null). Only a junction can be such a table: any other relation table without a primary key fails
+null). Only a junction can be such a relation table: any other relation table without a primary key fails
 every build in `table_primary_key` (issue #225). Guards: `replica_identity::tests` (`shortfall`,
 `a_partitioned_table_is_left_alone_only_while_every_member_logs_the_primary_key`,
 `an_intermediate_partitioned_table_is_never_reported_or_set`), `stream::tests`'
