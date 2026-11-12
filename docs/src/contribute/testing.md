@@ -22,11 +22,13 @@ Match this before assuming green:
 
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace`
-3. `cargo check --workspace --all-targets` (compiles benches and examples, which clippy and nextest skip)
+3. `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench` (compiles benches and examples, which clippy and nextest skip; the features unlock the two in-process bench targets)
 4. `cargo check -p flusso-cli --no-default-features` (the server-only image build)
 5. `cargo nextest run --profile ci --workspace --run-ignored all`
 6. `cargo test --workspace --doc`
 7. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
+
+On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), step 5 skips the `source-postgres`, `engine` and `sink-opensearch` integration tests, which those paths can't break; the query train's own e2e still run. Pushes to `main` run everything.
 
 A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
 
@@ -49,8 +51,14 @@ The `#[ignore]`d suites spin up containers with `testcontainers`. They're legiti
 | `engine` | `wal` | which op the engine emits per change, against a recording sink, including none for an update of columns no document reads |
 | `engine` | `wal_release` | the slot releases WAL that produces no document (unread tables and columns, filtered, soft-deleted and orphaned rows, large and split transactions, idle WAL) and the sinks get exactly the expected ops; it confirms within 5 s of the commit, or of the sink flush for a change that produces a document; a stalled sink pins the slot at the last position it flushed until it catches up, a `backfill = false` sink does not |
 | `engine` | `pipeline` | the full source to OpenSearch path, reading the index back over HTTP: live insert/update/delete across key types, soft-delete tombstoning, backfill, the two seed-marker contradictions, and an unread-column update leaving `_version` alone |
-| `sink-opensearch` | `reindex` | generations, alias swap, retracted markers |
+| `sink-opensearch` | `reindex` | generations, alias swap, retracted markers, index-prefix isolation, per-index `index_settings`, and the visibility a flush reports |
+| `sink-opensearch` | `map_keys` | map keys take their `values` type under the strict root and inside a `nested` array; an `indexed: false` subtree is stored but matches no query |
+| `sink-opensearch` | `tls` | over `https://` with an untrusted CA: `tls_verify = true` refuses promptly and without retrying, `ca_file` makes it trusted, `false` writes anyway; under either rustls crypto provider, and the refusal comes from the pinned roots, not the OS store |
+| `daemon` | `fence` | the real daemon over Postgres and OpenSearch: one unpolled read after a fence sees the commit (applied by get, searchable by search), including a position behind unwatched WAL, a transaction split across batches and concurrent writers; a stalled sibling sink blocks an all-sinks fence but not one on the healthy sink |
 | `flusso-query-e2e` | `combined_search` | generation-suffix normalization against a real cluster |
+| `flusso-query-e2e` | `cursor_paging` | page cursors: a live walk follows a reindex (a prefixed union too), a pinned walk reads one view until its generation drops, a streamed walk closes its point-in-time |
+| `flusso-query-e2e` | `map_keys` | every cross-key map query matches the per-key `or`, adversarial values included; sorting a map by key |
+| `flusso-query-e2e` | `tls` | `flusso-query` refuses an untrusted certificate and reads once given the CA |
 
 The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf source must not dev-depend on the engine or it can't be published first.
 
