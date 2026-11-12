@@ -200,6 +200,9 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
             // iterator (not indexing, which the workspace lints forbid).
             let mut fields = match &data.fields {
                 Fields::Unnamed(fields) => fields.unnamed.iter(),
+                Fields::Named(fields) if crate::serde_attr::transparent(&input.attrs) => {
+                    fields.named.iter()
+                }
                 _ => return Err(newtype_required(input)),
             };
             let inner = match (fields.next(), fields.next()) {
@@ -341,7 +344,8 @@ fn newtype_required(input: &DeriveInput) -> syn::Error {
     syn::Error::new(
         input.ident.span(),
         "FlussoValue on a struct requires a single-field tuple struct \
-         (a newtype wrapper, e.g. `struct Country(String)`)",
+         (a newtype wrapper, e.g. `struct Country(String)`), or a \
+         `#[serde(transparent)]` struct with one named field",
     )
 }
 

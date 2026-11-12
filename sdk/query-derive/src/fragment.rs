@@ -301,7 +301,9 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
         message(
             fragment,
             key,
-            &format!("is declared `{rendered}`, but the schema field here is not an array"),
+            &format!(
+                "is declared `{rendered}`, but the schema field here is not an array; drop the `Vec<…>`"
+            ),
         )
     } else {
         message(
@@ -336,7 +338,9 @@ fn opaque_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> 
     let kind_msg = message(
         fragment,
         key,
-        &format!("is `{rendered}`, which cannot hold the schema field at this path"),
+        &format!(
+            "is `{rendered}`, whose flusso kind does not match the schema field's type at this path"
+        ),
     );
     let map_msg = message(
         fragment,

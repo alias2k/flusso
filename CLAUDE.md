@@ -933,8 +933,9 @@ is a hard error while a subset is silently fine. Embedding is checked by default
 exist, with the schema's nullability and array shape, and a type with `FlussoValueMeta` keeps its
 kind check at a leaf (issue #256). A fragment does this as const assertions
 (`fragment::opaque_check`, `OpaqueProbe::{HAS_META, KINDS}`); its one difference from a root: a
-hand-written `FlussoValue` (no metadata) under `opaque` is accepted at any non-`map` leaf with its
-kind unchecked, where a root checks its bound. `#[serde(flatten)]` and
+type without `FlussoValueMeta` (a hand-written `FlussoValue`, or no flusso impl at all) under
+`opaque` is accepted at any non-`map` leaf with its kind unchecked, where a root checks its bound
+(kept on purpose: it is the only way a fragment takes a hand-written numeric value). `#[serde(flatten)]` and
 `#[serde(transparent)]` newtypes are supported (both checked against the enclosing level).
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one

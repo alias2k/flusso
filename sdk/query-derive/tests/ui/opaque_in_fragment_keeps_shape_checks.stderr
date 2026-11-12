@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: fragment `VecAtAnObject`: field `billingAddress` is declared `Vec<Plain>`, but the schema field here is not an array
+error[E0080]: evaluation panicked: fragment `VecAtAnObject`: field `billingAddress` is declared `Vec<Plain>`, but the schema field here is not an array; drop the `Vec<…>`
   --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:50:11
    |
 50 |     part: VecAtAnObject,
@@ -22,7 +22,7 @@ note: inside `OneAtANestedArray::__flusso_check`
 23 |     orders: Plain,
    |             ^^^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `KeywordAtALong`: field `orderCount` is `Code`, which cannot hold the schema field at this path
+error[E0080]: evaluation panicked: fragment `KeywordAtALong`: field `orderCount` is `Code`, whose flusso kind does not match the schema field's type at this path
   --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:66:11
    |
 66 |     part: KeywordAtALong,
