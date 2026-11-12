@@ -146,6 +146,14 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   behind unwatched WAL, a transaction split across batches, concurrent writers, a stalled sibling
   sink. `sink-opensearch`'s `reindex` binary also pins the visibility a flush reports
   (`a_flush_reports_when_its_documents_become_searchable`).
+  `sink-opensearch`'s and `dev/query-e2e`'s `tls` binaries (issue #239) run OpenSearch over
+  `https://` with its security plugin's demo certificate (an untrusted CA, basic auth): the sink
+  with `tls_verify = true` and `flusso-query` (no switch) refuse it promptly, the sink with `false`
+  writes and reads back. The sink's is one sequential test, since it changes process-wide state:
+  `SSL_CERT_FILE` names the demo CA (an OS-trust-store client accepts, the pinned sink still
+  refuses), then both checks run with no process-default rustls provider and again with `ring`
+  installed. The refusal must name the certificate: the sink renders a transport error's whole
+  source chain (`transport.rs`'s `request_error`).
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update

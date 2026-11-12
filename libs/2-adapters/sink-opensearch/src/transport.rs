@@ -3,6 +3,16 @@
 //! generic per-index operations (create, exists, delete, refresh, settings,
 //! listing). Higher layers ([`generations`](crate) and the [`Sink`](crate) impl)
 //! build on these.
+//!
+//! Every `reqwest` failure becomes a [`SinkError::Write`] through
+//! [`request_error`]: the operation, reqwest's own line, then each cause in its
+//! source chain, with any credentials in the URL removed. reqwest's `Display`
+//! alone stops at "error sending request for url (…)", so a refused
+//! certificate, a refused connection, and a DNS failure would read the same:
+//!
+//! ```text
+//! listing indices failed: error sending request for url (https://127.0.0.1:9200/_cat/indices/…): client error (Connect): invalid peer certificate: UnknownIssuer
+//! ```
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -15,6 +25,36 @@ use tracing::{debug, warn};
 use crate::OpensearchSink;
 use crate::bulk::{BulkAction, build_bulk_url, bulk_rejected};
 use crate::mapping::build_index_body;
+
+/// A `reqwest` failure as a [`SinkError::Write`]: `context`, the error, and
+/// every cause in its source chain, joined with `": "`. A cause whose text its
+/// parent already printed is skipped.
+///
+/// The URL reqwest prints loses its userinfo first, username included:
+/// userinfo in a configured `url` is a credential of some kind (a password, or
+/// a token passed as the user) and must not reach the logs or `/status`.
+/// reqwest already moves it into an `Authorization` header when it builds a
+/// request; this keeps that true for any error whose URL came from elsewhere.
+pub(crate) fn request_error(context: &str, mut error: reqwest::Error) -> SinkError {
+    if let Some(url) = error.url_mut() {
+        // Both fail only for a URL that cannot carry userinfo, which then has none.
+        let _ = url.set_password(None);
+        let _ = url.set_username("");
+    }
+    let mut message = format!("{context}: {error}");
+    let mut parent = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !parent.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        parent = text;
+        source = cause.source();
+    }
+    SinkError::Write(message)
+}
 
 impl OpensearchSink {
     /// Send one prebuilt NDJSON `body` (the actions in `actions`, in order) as a
@@ -71,9 +111,10 @@ impl OpensearchSink {
 
             match self.maybe_auth(req).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    let result: Value = resp.json().await.map_err(|e| {
-                        SinkError::Write(format!("failed to read bulk response: {e}"))
-                    })?;
+                    let result: Value = resp
+                        .json()
+                        .await
+                        .map_err(|e| request_error("failed to read bulk response", e))?;
 
                     let rejected = bulk_rejected(&result, actions)?;
                     debug!(
@@ -92,7 +133,7 @@ impl OpensearchSink {
                     )));
                 }
                 Err(e) => {
-                    last_err = Some(SinkError::Write(format!("bulk request error: {e}")));
+                    last_err = Some(request_error("bulk request error", e));
                 }
             }
         }
@@ -122,7 +163,7 @@ impl OpensearchSink {
             .maybe_auth(req)
             .send()
             .await
-            .map_err(|e| SinkError::Write(format!("{context}: {e}")))?;
+            .map_err(|e| request_error(context, e))?;
         if resp.status().is_success() {
             Ok(resp)
         } else {
@@ -137,7 +178,7 @@ impl OpensearchSink {
             .maybe_auth(self.client.head(&url))
             .send()
             .await
-            .map_err(|e| SinkError::Write(format!("index check failed: {e}")))?;
+            .map_err(|e| request_error("index check failed", e))?;
 
         if resp.status().is_success() {
             return Ok(true);
@@ -165,7 +206,7 @@ impl OpensearchSink {
             .maybe_auth(req)
             .send()
             .await
-            .map_err(|e| SinkError::Write(format!("index create failed: {e}")))?;
+            .map_err(|e| request_error("index create failed", e))?;
 
         if resp.status().is_success() {
             debug!(index, "created index with explicit mapping");
@@ -244,7 +285,7 @@ impl OpensearchSink {
             .maybe_auth(self.client.get(&url))
             .send()
             .await
-            .map_err(|e| SinkError::Write(format!("listing indices failed: {e}")))?;
+            .map_err(|e| request_error("listing indices failed", e))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }
@@ -254,7 +295,7 @@ impl OpensearchSink {
         let body: Value = resp
             .json()
             .await
-            .map_err(|e| SinkError::Write(format!("failed to parse _cat/indices: {e}")))?;
+            .map_err(|e| request_error("failed to parse _cat/indices", e))?;
         Ok(body
             .as_array()
             .map(|rows| {
@@ -273,7 +314,7 @@ impl OpensearchSink {
             .maybe_auth(self.client.delete(&url))
             .send()
             .await
-            .map_err(|e| SinkError::Write(format!("index delete failed: {e}")))?;
+            .map_err(|e| request_error("index delete failed", e))?;
         if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
             debug!(index, "dropped superseded generation");
             Ok(())
@@ -282,3 +323,7 @@ impl OpensearchSink {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;
