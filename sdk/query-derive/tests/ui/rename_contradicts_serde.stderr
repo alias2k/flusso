@@ -1,10 +1,10 @@
-error: `email` is read by serde from `mail` (its `#[serde(rename)]`), but `#[flusso(rename = "email")]` checks it against the schema as `email` — the two must name the key serde reads; remove `#[flusso(rename)]`, which is for a key the derive cannot read from serde (one of its `alias`es)
+error: serde reads `email` from the key `mail`, but `#[flusso(rename = "email")]` checks it against the schema as `email`, so every real document would fail to deserialize — change the `#[serde(rename)]` to `#[serde(rename = "email")]`, and remove `#[flusso(rename)]`, which only picks one of a field's `#[serde(alias)]`es
   --> tests/ui/rename_contradicts_serde.rs:10:23
    |
 10 |     #[flusso(rename = "email")]
    |                       ^^^^^^^
 
-error: `email` is read by serde from `mail` (its `#[serde(rename)]`), but `#[flusso(rename = "email")]` checks it against the schema as `email` — the two must name the key serde reads; remove `#[flusso(rename)]`, which is for a key the derive cannot read from serde (one of its `alias`es)
+error: serde reads `email` from the key `mail`, but `#[flusso(rename = "email")]` checks it against the schema as `email`, so every real document would fail to deserialize — change the `#[serde(rename)]` to `#[serde(rename = "email")]`, and remove `#[flusso(rename)]`, which only picks one of a field's `#[serde(alias)]`es
   --> tests/ui/rename_contradicts_serde.rs:19:23
    |
 19 |     #[flusso(rename = "email")]

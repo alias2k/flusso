@@ -1,0 +1,35 @@
+error: serde reads `mail` from the key `mail`, but `#[flusso(rename = "email")]` checks it against the schema as `email`, so every real document would fail to deserialize — write `#[serde(rename = "email")]` instead, and remove `#[flusso(rename)]`, which only picks one of a field's `#[serde(alias)]`es
+  --> tests/ui/rename_serde_does_not_see.rs:10:23
+   |
+10 |     #[flusso(rename = "email")]
+   |                       ^^^^^^^
+
+error: serde reads `mail` from the key `mail`, but `#[flusso(rename = "email")]` checks it against the schema as `email`, so every real document would fail to deserialize — write `#[serde(rename = "email")]` instead, and remove `#[flusso(rename)]`, which only picks one of a field's `#[serde(alias)]`es
+  --> tests/ui/rename_serde_does_not_see.rs:16:23
+   |
+16 |     #[flusso(rename = "email")]
+   |                       ^^^^^^^
+
+error: `#[flusso(rename = "fullName")]` repeats the key the derive already reads from serde for `full_name`; remove `#[flusso(rename)]`
+  --> tests/ui/rename_serde_does_not_see.rs:25:23
+   |
+25 |     #[flusso(rename = "fullName")]
+   |                       ^^^^^^^^^^
+
+error: `#[flusso(rename = "email")]` repeats the key the derive already reads from serde for `email`; remove `#[flusso(rename)]`
+  --> tests/ui/rename_serde_does_not_see.rs:34:23
+   |
+34 |     #[flusso(rename = "email")]
+   |                       ^^^^^^^
+
+error: `#[flusso(rename = "fullName")]` repeats the key the derive already reads from serde for `full_name`; remove `#[flusso(rename)]`
+  --> tests/ui/rename_serde_does_not_see.rs:43:23
+   |
+43 |     #[flusso(rename = "fullName")]
+   |                       ^^^^^^^^^^
+
+error: serde reads `address` from `address` or its aliases (`mail`), never from `email`, but `#[flusso(rename = "email")]` checks it against the schema as `email` — `#[flusso(rename)]` names one of the field's `#[serde(alias)]`es; name one, or add `#[serde(alias = "email")]`
+  --> tests/ui/rename_serde_does_not_see.rs:52:23
+   |
+52 |     #[flusso(rename = "email")]
+   |                       ^^^^^^^

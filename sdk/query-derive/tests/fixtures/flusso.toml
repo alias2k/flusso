@@ -39,3 +39,13 @@ enabled = true
 name = "unnamable"
 schema = "unnamable.schema.yml"
 enabled = true
+
+[[index]]
+name = "shapes"
+schema = "shapes.schema.yml"
+enabled = true
+
+[[index]]
+name = "colliding"
+schema = "colliding.schema.yml"
+enabled = true

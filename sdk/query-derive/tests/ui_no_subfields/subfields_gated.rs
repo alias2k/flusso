@@ -8,7 +8,7 @@ use flusso_query::FlussoRoot;
 #[flusso(index = "users")]
 struct User {
     email: String,
-    #[flusso(rename = "fullName")]
+    #[serde(rename = "fullName")]
     full_name: Option<String>,
 }
 

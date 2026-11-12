@@ -13,8 +13,8 @@ struct User {
     id: i32,
     #[flusso(scope = "Purchases")]
     orders: Vec<Order>,
-    #[serde(skip)]
-    #[flusso(skip, rename = "orders", scope = "Buys")]
+    #[serde(skip, rename = "orders")]
+    #[flusso(skip, scope = "Buys")]
     cached: (),
 }
 

@@ -1,5 +1,5 @@
 error: `orders` already has a `scope` on another field, and a level takes one name; remove one of them
-  --> tests/ui/scope_twice_on_one_level.rs:17:47
+  --> tests/ui/scope_twice_on_one_level.rs:17:28
    |
-17 |     #[flusso(skip, rename = "orders", scope = "Buys")]
-   |                                               ^^^^^^
+17 |     #[flusso(skip, scope = "Buys")]
+   |                            ^^^^^^

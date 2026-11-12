@@ -6,7 +6,7 @@ Use your own Rust types as query values and struct fields: newtypes inherit thei
 
 `FlussoValue<K>` is what a handle accepts for kind `K`; it requires `serde::Serialize`. `#[derive(FlussoValue)]` implements it for your types.
 
-**A newtype inherits its inner type's kinds.** No tag needed. A newtype is a single-field tuple struct, or a `#[serde(transparent)]` struct with one named field.
+**A newtype inherits its inner type's kinds.** No tag needed. A newtype is a single-field tuple struct, or a `#[serde(transparent)]` struct, read as its one field serde does not skip (see [Escape hatches](document-structs.md#escape-hatches)).
 
 ```rust
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, FlussoValue)]
