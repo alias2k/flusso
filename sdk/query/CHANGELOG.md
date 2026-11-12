@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.17.0...flusso-query-v0.18.0) - 2026-11-12
+
+### Added
+
+- *(query)* Client::ca_file and ca_pem add a private CA to the pinned roots
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.16.0...flusso-query-v0.17.0) - 2026-11-12
 
 ### Added

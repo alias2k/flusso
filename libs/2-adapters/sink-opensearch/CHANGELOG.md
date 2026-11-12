@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.17.0...flusso-sink-opensearch-v0.18.0) - 2026-11-12
+
+### Added
+
+- *(sink-opensearch)* [**breaking**] warn when ca_file is set with tls_verify off; say when the file is read
+- *(sink-opensearch)* trust a private CA with ca_file; never retry a refused certificate
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.16.0...flusso-sink-opensearch-v0.17.0) - 2026-11-12
 
 ### Added

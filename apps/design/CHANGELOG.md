@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.17.0...flusso-design-v0.18.0) - 2026-11-12
+
+### Fixed
+
+- *(design)* badge a finding on a join on the join's own header
+- *(design)* match validation findings by path and anchor
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into fix/check-validation-gaps
+- *(design)* move to zustand 5
+- *(design)* bump the npm-compatible group (34 updates)
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.16.0...flusso-design-v0.17.0) - 2026-11-12
 
 ### Added

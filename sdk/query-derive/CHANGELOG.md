@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.17.0...flusso-query-derive-v0.18.0) - 2026-11-12
+
+### Fixed
+
+- *(query-derive)* reject a second scope for one level; the flatten error names the way out
+- *(query-derive)* [**breaking**] a scope attribute that renames nothing is a compile error
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.16.0...flusso-query-derive-v0.17.0) - 2026-11-12
 
 ### Added
