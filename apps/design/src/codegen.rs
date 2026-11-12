@@ -29,6 +29,7 @@ use kernel::{
     Through, Transform, ViaHop,
 };
 use kernel::{FlussoType, GenericValue};
+use rust_decimal::Decimal;
 use serde_yaml::{Mapping, Value};
 
 /// Render an [`IndexSchema`] as a type-first `*.schema.yml` document.
@@ -134,7 +135,12 @@ fn column_field(name: &str, column: &Column, body: &mut Mapping) -> Result<&'sta
             transforms_value(&column.transforms),
         );
     }
-    if let Some(default) = &column.default {
+    // `default: null` reads back as no default, which is what a null default means.
+    if let Some(default) = column
+        .default
+        .as_ref()
+        .filter(|d| !matches!(d, GenericValue::Null))
+    {
         body.insert(Value::from("default"), generic_value(default)?);
     }
     if !column.subfields {
@@ -422,14 +428,63 @@ fn options_value(options: &std::collections::BTreeMap<String, GenericValue>) -> 
     Ok(Value::Mapping(map))
 }
 
-/// A value in the form the parser reads back as the same value. Every variant
-/// but `Null` serializes tagged (`!String x`); `Null` serializes as the bare
-/// string `Null`, which the parser reads as a string, so it is written `null`.
+/// A value as plain YAML — no `!Tag` — in the form the parser reads back as the
+/// same [`GenericValue`].
+///
+/// The parser yields only `Null`, `Bool`, `BigInt` (an integer in `i64`),
+/// `Decimal` (any other number, through `f64`), `String`, `Array` and `Map`; a
+/// string that would read as another kind is quoted (`'123'`, `'null'`).
+/// Variants it never yields are written as the nearest form it reads: the
+/// narrower integers and floats as numbers, temporals and `Uuid` as strings,
+/// `Bytes` as a list of integers.
 fn generic_value(value: &GenericValue) -> Result<Value> {
     Ok(match value {
         GenericValue::Null => Value::Null,
-        other => serde_yaml::to_value(other)?,
+        GenericValue::Bool(b) => Value::Bool(*b),
+        GenericValue::SmallInt(n) => Value::from(*n),
+        GenericValue::Int(n) => Value::from(*n),
+        GenericValue::BigInt(n) => Value::from(*n),
+        GenericValue::Float(n) => Value::from(f64::from(*n)),
+        GenericValue::Double(n) => Value::from(*n),
+        GenericValue::Decimal(d) => decimal_value(d),
+        GenericValue::String(s) => Value::from(s.as_str()),
+        GenericValue::Uuid(v) => serde_yaml::to_value(v)?,
+        GenericValue::Date(v) => serde_yaml::to_value(v)?,
+        GenericValue::Time(v) => serde_yaml::to_value(v)?,
+        GenericValue::Timestamp(v) => serde_yaml::to_value(v)?,
+        GenericValue::TimestampTz(v) => serde_yaml::to_value(v)?,
+        GenericValue::Bytes(v) => serde_yaml::to_value(v)?,
+        GenericValue::Array(items) => Value::Sequence(
+            items
+                .iter()
+                .map(generic_value)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        GenericValue::Map(map) => {
+            let mut out = Mapping::new();
+            for (k, v) in map {
+                out.insert(Value::from(k.as_str()), generic_value(v)?);
+            }
+            Value::Mapping(out)
+        }
     })
+}
+
+/// A decimal as a YAML number. The parser reads an integer past `i64` as that
+/// decimal and any other non-`i64` number through `f64` (`Decimal` of its
+/// shortest text), so a decimal it produced is written back as exactly that
+/// integer or `f64`. Any other decimal (a trailing zero, more digits than `f64`
+/// holds) is written at `f64` precision: no YAML number reads back closer. One
+/// the parser rounded to 28 places reads back equal, possibly at another scale.
+fn decimal_value(d: &Decimal) -> Value {
+    let text = d.to_string();
+    if let Ok(n) = text.parse::<u64>()
+        && n > i64::MAX.unsigned_abs()
+    {
+        return Value::from(n);
+    }
+    let float = text.parse::<f64>().unwrap_or(f64::NAN);
+    Value::from(float)
 }
 
 fn insert(map: &mut Mapping, key: &str, value: Value) {
@@ -502,14 +557,90 @@ mod tests {
         assert_roundtrips(include_str!("../../../dev/products.schema.yml"));
     }
 
+    const VALUES: &str = "version: 1\ntable: users\nprimary_key: id\nfields:\n\
+         - constant: nothing\n  value: null\n\
+         - constant: label\n  value: hi\n\
+         - constant: rate\n  value: 1.5\n\
+         - constant: scaled\n  value: 1.50\n\
+         - constant: huge\n  value: 12345678901234567890\n\
+         - constant: exp\n  value: 1e3\n\
+         - constant: yes\n  value: true\n\
+         - constant: count\n  value: -7\n\
+         - constant: word_null\n  value: 'null'\n\
+         - constant: digits\n  value: '123'\n\
+         - constant: nested\n  value: { a: [1, 0.5, 'true'], 'null': ~ }\n\
+         - keyword: email\n  required: false\n  default: null\n\
+         - double: score\n  required: true\n  default: 0.1\n  options: { boost: 2.5, null_value: 'NaN' }\n";
+
     #[test]
-    fn roundtrips_null_and_tagged_values() {
-        assert_roundtrips(
-            "version: 1\ntable: users\nprimary_key: id\nfields:\n\
-             - constant: nothing\n  value: null\n\
-             - constant: label\n  value: hi\n\
-             - keyword: email\n  required: false\n  default: null\n",
+    fn roundtrips_every_value_kind_as_plain_yaml() {
+        assert_roundtrips(VALUES);
+        let generated = schema_to_yaml(&parse(VALUES)).unwrap();
+        assert!(!generated.contains('!'), "a tag was written:\n{generated}");
+        for line in [
+            "value: 1.5\n",
+            "value: 12345678901234567890\n",
+            "value: 1000.0\n",
+            "value: 'null'\n",
+            "value: '123'\n",
+            "default: 0.1\n",
+        ] {
+            assert!(generated.contains(line), "missing {line:?}:\n{generated}");
+        }
+    }
+
+    /// What every designer Save wrote before plain values: a tagged decimal,
+    /// which the parser reads as a string, so a numeric constant became text.
+    #[test]
+    fn a_tagged_decimal_reads_back_as_a_string() {
+        let tagged = serde_yaml::to_string(&GenericValue::Decimal("1.5".parse().unwrap())).unwrap();
+        assert_eq!(tagged.trim(), "!Decimal '1.5'");
+        let schema = parse(&format!(
+            "version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: rate\n  value: {tagged}"
+        ));
+        let FieldSource::Constant(value) = &schema.fields[0].source else {
+            panic!("not a constant");
+        };
+        assert!(matches!(value, GenericValue::String(s) if s == "1.5"));
+    }
+
+    /// A file a released designer wrote, tags and all, still loads to the same
+    /// schema and content hash as its plain spelling; a tagged decimal keeps
+    /// reading as the string it always read as.
+    #[test]
+    fn a_tagged_file_keeps_its_meaning_and_content_hash() {
+        let index = kernel::common::IndexName::try_new("users").unwrap();
+        let head = "version: 1\ntable: users\nprimary_key: id\nfields:\n";
+        let tagged = parse(&format!(
+            "{head}- constant: a\n  value: !String hi\n- constant: b\n  value: !BigInt 5\n\
+             - constant: c\n  value: !Bool true\n- constant: d\n  value: !Decimal '1.5'\n\
+             - keyword: e\n  required: false\n  default: !String x\n  options:\n    boost: !Double 2.5\n"
+        ));
+        let plain = parse(&format!(
+            "{head}- constant: a\n  value: hi\n- constant: b\n  value: 5\n\
+             - constant: c\n  value: true\n- constant: d\n  value: '1.5'\n\
+             - keyword: e\n  required: false\n  default: x\n  options:\n    boost: 2.5\n"
+        ));
+        assert_eq!(
+            serde_json::to_value(&tagged).unwrap(),
+            serde_json::to_value(&plain).unwrap()
         );
+        assert_eq!(
+            tagged.resolve(index.clone()).hash,
+            plain.resolve(index).hash
+        );
+        assert_roundtrips(&schema_to_yaml(&tagged).unwrap());
+    }
+
+    #[test]
+    fn a_null_default_is_left_out() {
+        let mut schema = parse(
+            "version: 1\ntable: t\nprimary_key: id\nfields:\n- keyword: k\n  required: false\n",
+        );
+        if let FieldSource::Column(column) = &mut schema.fields[0].source {
+            column.default = Some(GenericValue::Null);
+        }
+        assert!(!schema_to_yaml(&schema).unwrap().contains("default"));
     }
 
     #[test]
