@@ -1,12 +1,12 @@
 // The live preview strictly deserializes the schema on the backend, where names
-// are validated newtypes (ColumnName, …) that reject the empty string. So a
-// field still being built — a blank order_by column, a just-added join with no
-// key yet — would 400 the whole preview with a raw serde error. This prunes the
+// are validated newtypes (FieldName, ColumnName, …) that reject the empty string.
+// So a field still being built — a cleared name, a blank order_by column, a
+// just-added join with no key yet — would 422 the whole preview with a raw serde error. This prunes the
 // incomplete pieces so the preview shows everything that *is* valid; it runs
 // only for preview, the edited doc keeps the in-progress work untouched.
 
 import type { Aggregate, ColumnPair, Field, Filter, IndexSchema, SoftDelete, Through } from "../api";
-import { aggregateIncomplete, joinIncomplete } from "./complete";
+import { fieldIncomplete } from "./complete";
 
 const filterOk = (f: Filter): boolean =>
   "raw" in f ? !!f.raw.raw : "null_check" in f ? !!f.null_check.column : !!f.value_op.column;
@@ -50,14 +50,13 @@ function prunedAggregate(agg: Aggregate): Aggregate {
 
 function prunedField(input: Field): Field | null {
   const field = withPrunedPairs(input);
+  if (fieldIncomplete(field)) return null;
   const s = field.source;
   if ("relation" in s) {
     if ("aggregate" in s.relation) {
-      if (aggregateIncomplete(field)) return null;
       return { ...field, source: { relation: { aggregate: prunedAggregate(s.relation.aggregate) } } };
     }
     if ("join" in s.relation) {
-      if (joinIncomplete(field)) return null;
       const join = s.relation.join;
       const fields = join.fields.map(prunedField).filter((x): x is Field => x !== null);
       const order_by = (join.order_by ?? []).filter((o) => o.column);
@@ -84,9 +83,6 @@ function prunedField(input: Field): Field | null {
   if ("group" in s) {
     return { ...field, source: { group: s.group.map(prunedField).filter((x): x is Field => x !== null) } };
   }
-  if ("column" in s && !s.column.column) return null;
-  if ("script" in s && !s.script.source.trim()) return null;
-  if ("geo" in s && (!s.geo.lat || !s.geo.lon)) return null;
   return field;
 }
 

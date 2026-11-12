@@ -26,6 +26,7 @@ import {
 import { AGGREGATE_OPS, KIND_HELP, LEAF_TYPES, withAggregateOp } from "../fields";
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
+import { nameIncomplete } from "../model/complete";
 import { errorsFor, retypeScript, scriptPath } from "../model/scripts";
 import { useDesignStore } from "../store/design";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
@@ -674,10 +675,12 @@ function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
   const chips = nameSuggestions(field)
     .filter((n, i, a) => n && n !== field.field && a.indexOf(n) === i)
     .slice(0, 3);
+  const badName = nameIncomplete(field);
   return (
     <div className="field mb-2 flex flex-col gap-1">
       <span className={cn("field-label", LABEL)}>{t("inspector.fieldName")}</span>
-      <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
+      <Text value={field.field} invalid={badName} onChange={(name) => set({ ...field, field: name })} />
+      {badName && <p className="error-hint mt-0.5 text-xs text-destructive">{t("inspector.fieldNameInvalid")}</p>}
       {chips.length > 0 && (
         <div className="rename-chips mt-1.5 flex flex-wrap items-center gap-1.5">
           <span className="text-3xs uppercase tracking-caps text-muted-foreground">{t("inspector.renameTo")}</span>

@@ -361,20 +361,33 @@ export default function App() {
   const [ignoreTypeWarn, setIgnoreTypeWarn] = useState(false);
   useEffect(() => setIgnoreTypeWarn(false), [active]);
 
-  // Debounced live preview of the active index.
+  // Debounced live preview of the active index. Its failure is its own banner,
+  // not the shared `error`, so the next preview that succeeds can clear it
+  // without wiping a project or catalog load error. A reply for a schema that
+  // has since changed is dropped, so a slow failure can't land after a success.
+  const [previewError, setPreviewError] = useState("");
   useEffect(() => {
     if (!schema || active === "config") {
       setPreview(null);
+      setPreviewError("");
       return;
     }
+    let current = true;
     const handle = setTimeout(() => {
       api
         .preview(active, prunedForPreview(schema))
-        .then(setPreview)
-        .catch((e) => setError(String(e)));
+        .then((p) => {
+          if (!current) return;
+          setPreview(p);
+          setPreviewError("");
+        })
+        .catch((e) => current && setPreviewError(String(e)));
     }, 250);
-    return () => clearTimeout(handle);
-  }, [active, schema, setPreview, setError]);
+    return () => {
+      current = false;
+      clearTimeout(handle);
+    };
+  }, [active, schema, setPreview]);
 
   // Code-mode live sync: the buffer parses server-side (the same strict parser
   // that reads the file) and, when it converts, replaces the in-memory schema —
@@ -981,7 +994,9 @@ export default function App() {
         </div>
       </header>
 
-      {error && <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
+      {(error || previewError) && (
+        <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error || previewError}</div>
+      )}
       {catalog?.error && (
         <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>
       )}

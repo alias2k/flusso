@@ -72,7 +72,7 @@ A YAML editor over the selected index. Problems panel with a count, valid-YAML i
 
 The document tree marks a stored-only field (`indexed: false`) with a *not indexed* chip.
 
-Incomplete pieces (a field with a blank name mid-edit) are pruned from the live preview payload only, so a half-typed field doesn't error the panel.
+Incomplete fields are flagged on the canvas and left out of the live preview payload only, so a half-typed field doesn't error the panel; the field and everything under it come back once it is complete. A field is incomplete when its name is blank or not a valid field name, or its column, a `geo` coordinate, a script's source, or a join or aggregate key is still blank. If a preview fails anyway, its error banner clears at the next preview that succeeds.
 
 ## Save review
 

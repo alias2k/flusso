@@ -153,6 +153,8 @@ export const it: Record<string, string> = {
   "inspector.join": "Relazione",
   "inspector.field": "Campo",
   "inspector.fieldName": "nome campo",
+  "inspector.fieldNameInvalid":
+    "Lettere, cifre e _, senza iniziare con una cifra, al massimo 63 caratteri. L'anteprima esclude questo campo finché non ne ha uno.",
   "inspector.verb": "verbo",
   "inspector.table": "tabella",
   "inspector.btColumn": "colonna (questa tabella → destinazione)",
@@ -362,6 +364,7 @@ export const it: Record<string, string> = {
   "node.selfDiagCount":
     "{n, plural, one {# segnalazione su questa relazione} other {# segnalazioni su questa relazione}}",
   "node.joinIncomplete": "A questa relazione manca una chiave obbligatoria — impostala nell'ispettore",
+  "node.nameIncomplete": "Questo campo ha bisogno di un nome valido — impostalo nell'ispettore",
   "node.pickRoot": "Scegli una tabella radice per iniziare",
   "node.chooseTable": "scegli una tabella…",
   "node.rootTableEnter": "nome tabella radice, Invio",
@@ -372,7 +375,7 @@ export const it: Record<string, string> = {
   "node.reqAligned": "obbligatorio (la colonna è NOT NULL)",
   "node.reqOverride": "obbligatorio — forza una colonna che ammette null",
   "node.colDefault": "ha un valore predefinito",
-  "node.incomplete": "incompleto — imposta la sua chiave/colonna nell'ispettore",
+  "node.incomplete": "incompleto — completa il suo nome, la chiave o la colonna nell'ispettore",
   "node.inputOnly": "solo input: letto per gli script, non emesso",
   "node.addJoin": "+ relazione",
   "node.addField": "+ campo",
