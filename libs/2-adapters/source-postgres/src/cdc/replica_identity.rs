@@ -41,14 +41,16 @@
 //! WAL logs, and Postgres doesn't pass a parent's setting down — not to
 //! existing partitions, nor to ones created or attached later. So every member
 //! that isn't `FULL` is altered, and a partition added later is caught at the
-//! next start. The kept rule is per member: a parent or partition whose
+//! next start. A partitioned table *below* the root is the exception: it stores
+//! no rows and its leaves' changes are announced under the root, so its
+//! identity decides nothing and it is neither reported nor set. The kept rule is per member: a parent or partition whose
 //! identity index carries its primary key and every link stays as it is while its siblings that
 //! miss one are set. A partitioned table whose every member logs the primary
 //! key and every link is left alone: its updates carry no post-image, so the
 //! whole row would buy nothing. A member that leaves out part of the primary
 //! key is not: its changes are decoded under the parent's relation, which
-//! flags the parent's key, so they would carry a null key (a delete removes
-//! nothing). Such a member is a correctness gap (`missing_key`) and is set,
+//! flags the parent's key, so they would carry a null key (a delete addresses
+//! no document of its own). Such a member is a correctness gap (`missing_key`) and is set,
 //! alone, even with no link missing. Postgres keeps a partition's primary key
 //! index (it can't be dropped), so `DEFAULT` always logs it; `NOTHING` and a
 //! dropped identity index make Postgres refuse the partition's updates and
@@ -75,7 +77,7 @@ const MEMBERS_SQL: &str = "WITH target AS ( \
          WHERE t.level > 0 \
        ) \
      SELECT n.nspname::text AS schema, c.relname::text AS name, \
-       c.relreplident::text AS identity, c.relkind = 'p' AS partitioned, \
+       c.relreplident::text AS identity, c.relkind = 'p' AS partitioned, m.level AS level, \
        ARRAY(SELECT a.attname::text FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
              WHERE i.indrelid = c.oid \
@@ -98,12 +100,21 @@ struct Member {
     name: String,
     identity: ReplicaIdentity,
     partitioned: bool,
+    /// Depth in the partition tree: 0 for the named table.
+    level: i32,
     carried: Vec<String>,
     primary_key: Vec<String>,
     owned: bool,
 }
 
 impl Member {
+    /// A partitioned table below the named one. It stores no rows and its
+    /// changes are announced under the root's relation, so its identity
+    /// decides nothing: it is never reported or set.
+    fn is_intermediate(&self) -> bool {
+        self.partitioned && self.level > 0
+    }
+
     /// The `required` columns this relation's old tuple can't deliver.
     fn uncarried(&self, required: &[ColumnName]) -> Vec<ColumnName> {
         let carries = |column: &str| match self.identity {
@@ -171,6 +182,7 @@ async fn members<'e>(
                 name: row.try_get("name")?,
                 identity: ReplicaIdentity::from_code(&row.try_get::<String, _>("identity")?),
                 partitioned: row.try_get("partitioned")?,
+                level: row.try_get("level")?,
                 carried: row.try_get("columns")?,
                 primary_key: row.try_get("primary_key")?,
                 owned: row.try_get("owned")?,
@@ -229,7 +241,7 @@ struct Plan<'m> {
 fn plan<'m>(required: &[ColumnName], members: &'m [Member]) -> Option<Plan<'m>> {
     let short: Vec<&Member> = members
         .iter()
-        .filter(|member| member.identity != ReplicaIdentity::Full)
+        .filter(|member| member.identity != ReplicaIdentity::Full && !member.is_intermediate())
         .collect();
     if short.is_empty() {
         return None;
@@ -470,8 +482,9 @@ pub(crate) fn warn_unkeyed(
         missing_key = %join_columns(missing),
         reason = %reason,
         remediation = %remediation,
-        "replica identity leaves out the primary key: a delete there can't be addressed to its \
-         document, which stays in the index; run the printed SQL",
+        "replica identity leaves out the primary key: changes there are keyed by other columns \
+         or by none, so live writes can land under other ids than the backfill's and a delete \
+         can leave its document in the index; run the printed SQL",
     );
 }
 

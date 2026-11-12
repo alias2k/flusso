@@ -75,8 +75,9 @@ pub struct CoverageReport {
 ///
 /// - [`gaps`](Self::gaps) — the pre-image misses a **link** column (a delete
 ///   or re-parent of that table's rows leaves the old parent's document
-///   stale) or part of the **row key** (a delete can't be addressed, so its
-///   document stays in the index). A correctness gap.
+///   stale) or part of the **row key** (its changes are keyed by other
+///   columns or by none: live writes can land under other document ids, and a
+///   delete can leave its document in the index). A correctness gap.
 /// - [`partial`](Self::partial) — the key and every link are there, but not the rest of
 ///   the old row: an update can't be told apart from one that changes a column
 ///   a document reads, so it always rebuilds. Correct, only slower.
@@ -120,7 +121,7 @@ pub struct PreImageGap {
     pub missing: Vec<ColumnName>,
     /// The row-key columns the pre-image does not carry, somewhere in the
     /// table (for Postgres, on the table or one of its partitions): a change
-    /// there can't be addressed to its document. Empty for a
+    /// there can't be addressed by its own key. Empty for a
     /// [`partial`](PreImageReport::partial) entry.
     pub missing_key: Vec<ColumnName>,
     /// Whether this source, with its current credentials, can close the gap.

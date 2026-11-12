@@ -180,8 +180,9 @@ pub(crate) fn coverage(
 
 /// Report the tables an index reads whose replica identity isn't the whole old
 /// row, in two groups: the ones that miss a parent link (a delete or re-parent
-/// leaves the old parent's document stale) or part of the primary key (a
-/// delete can't be addressed, so its document stays) and the ones that only
+/// leaves the old parent's document stale) or part of the primary key (changes
+/// are keyed by other columns: live writes can land under other ids and a
+/// delete can leave its document) and the ones that only
 /// lose the unread-column skip. Each says whether `flusso run` will set it (`manage` is
 /// the effective `manage_replica_identity`) or keeps it on purpose; the SQL is
 /// printed for the ones it won't set and doesn't keep.
@@ -287,8 +288,9 @@ pub(crate) fn pre_image(
             out,
             "  {}",
             pen.yellow(
-                "→ until the primary key is logged, a delete there can't reach its document, \
-                 which stays in the index",
+                "→ until the primary key is logged, changes there are keyed by other columns or \
+                 by none: live writes can land under other ids and a delete can leave its \
+                 document in the index",
             ),
         )?;
     }
@@ -687,7 +689,10 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("logs (primary key id)"), "{out}");
         assert!(
-            out.contains("a delete there can't reach its document, which stays in the index"),
+            out.contains(
+                "live writes can land under other ids and a delete can leave its document in the \
+                 index"
+            ),
             "{out}"
         );
         assert!(!out.contains("re-parenting"), "{out}");

@@ -88,6 +88,7 @@ fn member(name: &str, identity: ReplicaIdentity, owned: bool) -> Member {
         name: name.to_owned(),
         identity,
         partitioned: false,
+        level: 0,
         carried: vec!["id".to_owned()],
         primary_key: vec!["id".to_owned()],
         owned,
@@ -382,6 +383,51 @@ fn a_partitioned_table_is_left_alone_only_while_every_member_logs_the_primary_ke
                 .collect::<Vec<_>>()
         });
         assert_eq!(planned.as_deref(), expected, "apply sets what is reported");
+    }
+}
+
+#[test]
+fn an_intermediate_partitioned_table_is_never_reported_or_set() {
+    let intermediate = |identity, carried: &[&str]| Member {
+        partitioned: true,
+        level: 1,
+        carried: carried.iter().map(|c| (*c).to_owned()).collect(),
+        ..member("orders_eu", identity, true)
+    };
+    let leaf = |identity| Member {
+        level: 2,
+        ..member("orders_eu_2025", identity, true)
+    };
+    let root = |identity| Member {
+        partitioned: true,
+        ..member("orders", identity, true)
+    };
+    for (identity, carried) in [
+        (ReplicaIdentity::Index, &["code"][..]),
+        (ReplicaIdentity::Index, &[][..]),
+        (ReplicaIdentity::Nothing, &[][..]),
+    ] {
+        let members = [
+            root(ReplicaIdentity::Default),
+            intermediate(identity, carried),
+            leaf(ReplicaIdentity::Default),
+        ];
+        assert_eq!(
+            shortfall(&orders(), &[], &members),
+            None,
+            "{identity:?} {carried:?}"
+        );
+
+        let members = [
+            root(ReplicaIdentity::Full),
+            intermediate(identity, carried),
+            leaf(ReplicaIdentity::Full),
+        ];
+        assert_eq!(
+            shortfall(&orders(), &columns(&["user_id"]), &members),
+            None,
+            "a link the leaves log is not missing: {identity:?} {carried:?}"
+        );
     }
 }
 
