@@ -143,6 +143,7 @@ Both schemas are also published per release at `https://alias2k.github.io/flusso
 | --- | --- | --- |
 | `--server <addr>` | `127.0.0.1:9465` | The private surface. A bare `host:port` means `http://`. |
 | `--admin-user`, `--admin-password` | `admin` / `flusso` | Its Basic-auth credentials. |
+| `--ca-file <path>` | none | A PEM bundle of CA certificates trusted on top of the built-in Mozilla roots, for an `https://` `--server` behind a private CA. The OS trust store is never read. A missing file or one with no certificate fails before any request. |
 
 ## reindex
 

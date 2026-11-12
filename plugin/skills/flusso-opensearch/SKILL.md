@@ -58,6 +58,7 @@ Each flush reports when its documents become searchable (at once when caught up,
 | `url` | — (**required**) | cluster base URL |
 | `username` / `password` | — | HTTP Basic; each an `env_or_value` (`{ env = "VAR" }`), resolved at run time |
 | `tls_verify` | `true` | set `false` only for local dev |
+| `ca_file` | — | PEM bundle of a private CA, trusted on top of the built-in Mozilla roots (the OS store is never read) |
 | `batch_size` | `1000` | docs per bulk chunk |
 | `max_bytes` | `10 MiB` | bytes per bulk chunk; an oversized doc goes alone |
 | `timeout_secs` | `30` | HTTP timeout |

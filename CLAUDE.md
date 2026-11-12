@@ -146,13 +146,15 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   behind unwatched WAL, a transaction split across batches, concurrent writers, a stalled sibling
   sink. `sink-opensearch`'s `reindex` binary also pins the visibility a flush reports
   (`a_flush_reports_when_its_documents_become_searchable`).
-  `sink-opensearch`'s and `dev/query-e2e`'s `tls` binaries (issue #239) run OpenSearch over
+  `sink-opensearch`'s and `dev/query-e2e`'s `tls` binaries (issues #239, #243) run OpenSearch over
   `https://` with its security plugin's demo certificate (an untrusted CA, basic auth): the sink
-  with `tls_verify = true` and `flusso-query` (no switch) refuse it promptly, the sink with `false`
-  writes and reads back. The sink's is one sequential test, since it changes process-wide state:
-  `SSL_CERT_FILE` names the demo CA (an OS-trust-store client accepts, the pinned sink still
-  refuses), then both checks run with no process-default rustls provider and again with `ring`
-  installed. The refusal must name the certificate: the sink renders a transport error's whole
+  with `tls_verify = true` and `flusso-query` (no verify-off switch) refuse it promptly, and both
+  read back once given the demo CA as `ca_file`, verification on; the sink with `false` writes too.
+  The refusing sink allows six bulk retries whose backoff outlasts the deadline, so a prompt flush
+  failure proves a refused certificate is not retried. The sink's is one sequential test, since it
+  changes process-wide state: `SSL_CERT_FILE` names the demo CA (an OS-trust-store client accepts,
+  the pinned sink still refuses), then the checks run with no process-default rustls provider and
+  again with `ring` installed. The refusal must name the certificate: the sink renders a transport error's whole
   source chain (`transport.rs`'s `request_error`).
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
@@ -1203,7 +1205,11 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 - **Every `reqwest` client flusso builds pins its trust roots.** reqwest 0.13 verifies against the
   OS trust store by default; the OpenSearch sink, `flusso-query` and the CLI's admin client each
   call `tls_certs_only` with the Mozilla bundle from `webpki-root-certs` (`mozilla_roots`), as 0.12's
-  `rustls-tls` did. A new client that skips it silently changes which certificates it trusts. The
+  `rustls-tls` did. A new client that skips it silently changes which certificates it trusts. A
+  private CA is *added* to that set, never swapped for the OS store: the sink's `ca_file` option,
+  `Client::ca_file`/`ca_pem`, the admin client's `--ca-file` (each read at build time, so a bad file
+  fails the start). The sink's bulk retry skips a refused certificate (`transport::is_certificate_error`,
+  typed: the `rustls::Error` inside nested `io::Error`s, opened with `get_ref`). The
   OTLP exporter builds its own client and reads the OS store.
 - **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`

@@ -29,7 +29,7 @@ Before the first deployment anywhere other than a laptop. The private surface (`
 
 ## Options and variations
 
-- **Expose it deliberately** only behind something that adds TLS and its own authentication (an ingress with client certificates, a service mesh). The surface itself speaks plain HTTP with Basic auth.
+- **Expose it deliberately** only behind something that adds TLS and its own authentication (an ingress with client certificates, a service mesh). The surface itself speaks plain HTTP with Basic auth. When that TLS uses a private CA, give the client subcommands its bundle: `flusso indexes --server https://flusso.internal --ca-file ca.pem` (see [`indexes`](../reference/cli.md#indexes)).
 - **The public surface is read-only** and unauthenticated by design: `/status` reveals counters and the last error string, nothing more. Gate it by network if that's sensitive.
 - **Credential checks are constant-time** on both user and password.
 
