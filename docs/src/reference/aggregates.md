@@ -14,7 +14,7 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 
 | Sibling | Type | Applies to | Meaning |
 | --- | --- | --- | --- |
-| `table` | [Postgres identifier](identifiers.md) | all | The related table. Required. |
+| `table` | [Postgres identifier](identifiers.md) | all | The related table. Required. It needs a primary key, as does every `via` table; a `through` junction doesn't ([details](source-postgres.md#tables-without-a-primary-key)). |
 | `foreign_key` | Postgres identifier | all | The related table's column pointing back at the parent. Exactly one of `foreign_key` or `through`. |
 | `through` | table | all | A junction, as in [Joins](joins.md#through), including its own `filters`. Exactly one of `foreign_key` or `through`. See [Over a junction](#over-a-junction). |
 | `via` | list of hops | all | The tables between the parent and `table`, in order from the parent. With `via`, `foreign_key` (or `through.left_key`) points at the last hop instead of the parent. See [Across several hops](#across-several-hops). |

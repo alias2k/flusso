@@ -10,6 +10,17 @@ use kernel::{ColumnName, GenericValue};
 pub struct RowKey(pub Vec<(ColumnName, GenericValue)>);
 
 impl RowKey {
+    /// Whether some part of the key is null. Such a key matches no stored row
+    /// by equality, so it addresses no document. Two ways to get one: a table
+    /// with a primary key whose change feed left the key out, or a table
+    /// without one, keyed by its replica identity's columns (every column
+    /// under `FULL`), where a null is ordinary row data.
+    pub fn has_null(&self) -> bool {
+        self.0
+            .iter()
+            .any(|(_, value)| matches!(value, GenericValue::Null))
+    }
+
     /// A one-column key from text a person typed, typed the way the database
     /// most likely holds it: an integer, else a uuid, else text.
     pub fn from_text(column: ColumnName, text: &str) -> Self {

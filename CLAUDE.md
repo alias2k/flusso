@@ -586,7 +586,29 @@ old identity), via `ensure_pre_image` when `manage_replica_identity` (default on
 nothing) and the role owns the table — each relation in its own transaction under a 5 s
 `lock_timeout`, so a timeout or an unowned table never stops the others or the start; a partitioned
 table is set on the parent and every partition (a partition added later is caught at the next
-start), but only when it misses a link: its updates carry no post-image, so `partial` never lists it. Guards: `replica_identity::tests` (`shortfall`), `publication`'s
+start), but only when it misses a link, or alone on each member whose identity leaves out the
+parent's primary key (issue #224: a partition's change is decoded under the parent's `Relation`,
+which flags the parent's key, so it would read null): its updates carry no post-image, so `partial`
+never lists it; an intermediate partitioned table (stores no rows, announced under the root) is
+neither reported nor set. A member short of the primary key, on any table, is a `gaps` entry with
+`PreImageGap.missing_key` set (`replica_identity::plan` decides for both `shortfall` and `apply`).
+A change whose old-tuple key reads null is still emitted (the stream warns once per table and kind,
+`stream.rs` `addressable`/`Unkeyed`; an update drops only its key-change delete), and
+`PgDocumentBuilder::resolve` never turns a key with a null part (`RowKey::has_null`) into a document
+id (a root keyed by other columns than its `primary_key`, i.e. a table without one, warns once), and
+a hop whose link column (`link_on_row`) is in the key takes the parent from the key with no query,
+so a table without a primary key — keyed by every column under `FULL`, where a null is row data —
+resolves from its row; any other key with a null walks its hop from `before` alone (no query binds a
+null). Only a junction can be such a relation table: any other relation table without a primary key fails
+every build in `table_primary_key` (issue #225). Guards: `replica_identity::tests` (`shortfall`,
+`a_partitioned_table_is_left_alone_only_while_every_member_logs_the_primary_key`,
+`an_intermediate_partitioned_table_is_never_reported_or_set`), `stream::tests`'
+`a_delete_without_its_primary_key_under_a_full_parent_carries_the_old_row`, `document::tests`'
+`a_child_change_with_a_null_key_still_rebuilds_the_parent_its_old_row_names` and the `keyless`/
+null-key cases, `wal`'s `a_keyless_junction_rebuilds_every_parent_its_rows_link` and
+`a_change_on_a_keyless_counted_table_stops_the_engine`, `partitions`'
+`a_partition_whose_identity_leaves_out_the_primary_key_is_set_to_full` and
+`a_keyless_child_partition_under_a_full_parent_still_rebuilds_the_parent_it_left`, `publication`'s
 `every_table_an_index_reads_is_set_to_full` (root + `belongs_to` target, opt-out, a lock timeout on
 one table), `an_identity_index_carrying_the_link_is_kept_and_the_rest_are_set_to_full`, and
 `a_table_the_role_does_not_own_is_reported_and_the_rest_are_set`, `wal`'s

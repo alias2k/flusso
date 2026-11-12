@@ -13,6 +13,7 @@ fn state() -> (DecodeState, Arc<Positions>) {
         pre_image_links: Default::default(),
         untraceable: HashMap::new(),
         warned: HashSet::new(),
+        warned_unkeyed: HashSet::new(),
         open_txn: Vec::new(),
         pending: VecDeque::new(),
         ack: Arc::clone(&ack),
@@ -404,6 +405,152 @@ fn an_identity_index_without_the_primary_key_is_untraceable() {
         .for_each(|c| c.is_key = c.name.as_ref() == "parent_id");
     record_untraceable(&mut decode, 16385);
     assert_eq!(decode.untraceable[&16385], vec![column("parent_id")]);
+}
+
+/// An old tuple whose primary key reads as null: a partition on an identity
+/// index without the key, decoded under its parent's relation (issue #224).
+/// `kind` is `K` under a parent flagging only the key, `O` under a `FULL` one.
+fn old_tuple_without_the_key(message: u8, kind: u8, parent: &str) -> Vec<u8> {
+    let mut m = vec![message];
+    m.extend_from_slice(&16385u32.to_be_bytes());
+    m.push(kind);
+    m.extend_from_slice(&2i16.to_be_bytes());
+    m.push(b'n');
+    m.extend(text(parent));
+    m
+}
+
+#[test]
+fn a_delete_without_its_primary_key_or_old_row_is_emitted_and_warned_once() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'd');
+    handle_xlog(&mut decode, &old_tuple_without_the_key(b'D', b'K', "1")).unwrap();
+    handle_xlog(&mut decode, &old_tuple_without_the_key(b'D', b'K', "1")).unwrap();
+    let [first, second] = decode.open_txn.as_slice() else {
+        panic!("expected two deletes, got {:?}", decode.open_txn);
+    };
+    for change in [first, second] {
+        let ChangeEvent::Delete { key, before, .. } = change else {
+            panic!("expected a delete, got {change:?}");
+        };
+        assert!(key.has_null(), "{key:?}");
+        assert_eq!(before, &None);
+    }
+    assert_eq!(
+        decode.warned_unkeyed,
+        HashSet::from([(16385, Unkeyed::DeleteUntraced)])
+    );
+}
+
+#[test]
+fn a_delete_without_its_primary_key_under_a_full_parent_carries_the_old_row() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'f');
+    decode.relations.get_mut(&16385).unwrap().partitioned = Some(true);
+    handle_xlog(&mut decode, &old_tuple_without_the_key(b'D', b'O', "77")).unwrap();
+
+    let [ChangeEvent::Delete { key, before, .. }] = decode.open_txn.as_slice() else {
+        panic!("expected one delete, got {:?}", decode.open_txn);
+    };
+    assert_eq!(key.0, vec![(column("id"), GenericValue::Null)]);
+    assert_eq!(
+        before.as_ref().unwrap().get(&column("parent_id")),
+        Some(&GenericValue::Int(77))
+    );
+    assert_eq!(
+        decode.warned_unkeyed,
+        HashSet::from([(16385, Unkeyed::DeleteTraced)])
+    );
+}
+
+#[test]
+fn a_commit_of_only_unaddressable_deletes_is_emitted_at_its_position() {
+    let (mut decode, ack) = state();
+    announce_child(&mut decode, b'd');
+    handle_xlog(&mut decode, &old_tuple_without_the_key(b'D', b'K', "1")).unwrap();
+    handle(&mut decode, commit(100)).unwrap();
+    assert_eq!(decode.pending.len(), 1);
+    assert_eq!(decode.pending.front().map(|(_, lsn)| *lsn), Some(100));
+    assert_eq!(ack.confirmed_lsn(), 0, "the engine's confirm moves it");
+}
+
+/// An update whose old tuple lacks the key, then its new tuple `(id, parent)`.
+fn update_without_the_old_key(kind: u8, old_parent: &str, id: &str, parent: &str) -> Vec<u8> {
+    let mut update = old_tuple_without_the_key(b'U', kind, old_parent);
+    update.push(b'N');
+    update.extend_from_slice(&2i16.to_be_bytes());
+    update.extend(text(id));
+    update.extend(text(parent));
+    update
+}
+
+#[test]
+fn an_update_without_its_old_primary_key_is_an_upsert_of_its_row_alone() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'd');
+    handle_xlog(
+        &mut decode,
+        &update_without_the_old_key(b'K', "1", "7", "3"),
+    )
+    .unwrap();
+
+    let [ChangeEvent::Upsert { key, .. }] = decode.open_txn.as_slice() else {
+        panic!("expected one upsert, got {:?}", decode.open_txn);
+    };
+    assert_eq!(key.0, vec![(column("id"), GenericValue::Int(7))]);
+    assert_eq!(
+        decode.warned_unkeyed,
+        HashSet::from([(16385, Unkeyed::Update)])
+    );
+}
+
+#[test]
+fn a_reparent_without_its_old_primary_key_under_a_full_parent_carries_the_old_parent() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'f');
+    decode.relations.get_mut(&16385).unwrap().partitioned = Some(true);
+    handle_xlog(
+        &mut decode,
+        &update_without_the_old_key(b'O', "1", "7", "2"),
+    )
+    .unwrap();
+
+    let [
+        ChangeEvent::Upsert {
+            key, before, after, ..
+        },
+    ] = decode.open_txn.as_slice()
+    else {
+        panic!("expected one upsert, got {:?}", decode.open_txn);
+    };
+    assert_eq!(key.0, vec![(column("id"), GenericValue::Int(7))]);
+    assert_eq!(
+        before.as_ref().unwrap().get(&column("parent_id")),
+        Some(&GenericValue::Int(1))
+    );
+    assert_eq!(
+        after, &None,
+        "a partitioned table's update carries no post-image"
+    );
+}
+
+#[test]
+fn a_table_without_a_primary_key_keeps_its_null_identity_values() {
+    let (mut decode, _) = state();
+    announce_child(&mut decode, b'f');
+    decode.relations.get_mut(&16385).unwrap().primary_key = Vec::new();
+    let mut delete = vec![b'D'];
+    delete.extend_from_slice(&16385u32.to_be_bytes());
+    delete.push(b'O');
+    delete.extend_from_slice(&2i16.to_be_bytes());
+    delete.extend(text("7"));
+    delete.push(b'n');
+    handle_xlog(&mut decode, &delete).unwrap();
+    assert!(matches!(
+        decode.open_txn.as_slice(),
+        [ChangeEvent::Delete { .. }]
+    ));
+    assert!(decode.warned_unkeyed.is_empty());
 }
 
 /// A replication connection that never sends an event and records what it

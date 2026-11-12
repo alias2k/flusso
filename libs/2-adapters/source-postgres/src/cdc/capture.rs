@@ -521,6 +521,7 @@ impl CaptureProvisioning for WalChangeCapture {
                     tracing::info!(
                         table = %gap.table,
                         missing = %replica_identity::join_columns(&gap.missing),
+                        missing_key = %replica_identity::join_columns(&gap.missing_key),
                         "set REPLICA IDENTITY FULL: deleted and re-parented rows reach their old \
                          parent's document, and an update that changes no column a document reads \
                          rebuilds nothing",
@@ -531,9 +532,19 @@ impl CaptureProvisioning for WalChangeCapture {
             } else {
                 "automatic replica identity management is disabled".to_owned()
             };
-            if gap.missing.is_empty() {
+            if gap.missing.is_empty() && gap.missing_key.is_empty() {
                 unset.push((gap, reason));
-            } else {
+                continue;
+            }
+            if !gap.missing_key.is_empty() {
+                replica_identity::warn_unkeyed(
+                    &gap.table,
+                    &gap.missing_key,
+                    &reason,
+                    &gap.remediation,
+                );
+            }
+            if !gap.missing.is_empty() {
                 replica_identity::warn_untraceable(
                     &gap.table,
                     &gap.missing,

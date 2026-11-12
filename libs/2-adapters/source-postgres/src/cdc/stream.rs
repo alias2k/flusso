@@ -29,7 +29,7 @@ use kernel::ColumnName;
 use kernel::Position;
 use pgwire_replication::{Lsn, PgWireError, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
-use source::{PreImageColumns, QualifiedTable, Result, SourceError};
+use source::{PreImageColumns, QualifiedTable, Result, RowKey, SourceError};
 use sqlx::PgPool;
 
 use super::ack::Positions;
@@ -87,6 +87,9 @@ struct DecodeState {
     untraceable: HashMap<u32, Vec<ColumnName>>,
     /// Relations already warned about as untraceable.
     warned: HashSet<u32>,
+    /// Relations already warned about for an old tuple without the key, per
+    /// kind of change.
+    warned_unkeyed: HashSet<(u32, Unkeyed)>,
     /// Row changes of the currently open transaction, awaiting its `Commit`.
     open_txn: Vec<ChangeEvent>,
     /// Changes ready to emit, each with the commit LSN to acknowledge at.
@@ -136,6 +139,7 @@ pub(crate) fn build<C: Replication>(
             pre_image_links,
             untraceable: HashMap::new(),
             warned: HashSet::new(),
+            warned_unkeyed: HashSet::new(),
             open_txn: Vec::new(),
             pending: VecDeque::new(),
             ack,
@@ -310,6 +314,14 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 Some(old) => Some(pgoutput::row_key(relation, old)?),
                 None => None,
             };
+            let old_key = match old_key {
+                Some(old_key) if !addressable(relation, &old_key) => {
+                    warn_unkeyed(state, rel, Unkeyed::Update);
+                    None
+                }
+                old_key => old_key,
+            };
+            let relation = lookup_relation(state, rel)?;
             let before = old
                 .as_ref()
                 .and_then(|old| pgoutput::pre_image(relation, old));
@@ -339,9 +351,17 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
             let table = relation.table.clone();
             let key = pgoutput::row_key(relation, &old)?;
             let before = pgoutput::pre_image(relation, &old);
+            let unkeyed = match &before {
+                _ if addressable(relation, &key) => None,
+                Some(_) => Some(Unkeyed::DeleteTraced),
+                None => Some(Unkeyed::DeleteUntraced),
+            };
             state
                 .open_txn
                 .push(ChangeEvent::Delete { table, key, before });
+            if let Some(unkeyed) = unkeyed {
+                warn_unkeyed(state, rel, unkeyed);
+            }
             warn_untraceable(state, rel);
         }
         Decoded::Truncate { rels } => {
@@ -405,6 +425,69 @@ fn warn_untraceable(state: &mut DecodeState, oid: u32) {
         uncarried,
         "an update or delete arrived without it",
         &replica_identity::alter_sql(relation.namespace.as_ref(), relation.table.as_ref()),
+    );
+}
+
+/// Whether an old tuple's `key` can address a document. A table with a primary
+/// key never holds a null in it, so a null there means the tuple left the key
+/// out: a partition whose replica identity omits it, decoded under its
+/// parent's relation. A table without one is keyed by its identity columns,
+/// which may hold nulls under `FULL`.
+fn addressable(relation: &Relation, key: &RowKey) -> bool {
+    relation.primary_key.is_empty() || !key.has_null()
+}
+
+/// What an old tuple without its primary key costs, by kind of change. Each is
+/// warned once per relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Unkeyed {
+    /// A delete whose old row was logged: emitted, so parents rebuild where it
+    /// carries the link.
+    DeleteTraced,
+    /// A delete that logged neither: emitted, but it reaches nothing.
+    DeleteUntraced,
+    /// An update: its upsert stands, a key change's delete is dropped.
+    Update,
+}
+
+impl Unkeyed {
+    fn consequence(self) -> &'static str {
+        match self {
+            Self::DeleteTraced => {
+                "a delete arrived without its primary key: a document keyed by the row can't be \
+                 addressed and stays in the index; parents are rebuilt only where the old row carries \
+                 the link"
+            }
+            Self::DeleteUntraced => {
+                "a delete arrived without its primary key or its old row: neither the row's key \
+                 nor its old row was logged, so a document keyed by the row stays in the index \
+                 and no parent is rebuilt"
+            }
+            Self::Update => {
+                "an update arrived without its old primary key: the row's document is rebuilt, \
+                 but if the update changed the key, the old document stays until a \
+                 `flusso reindex` of that index"
+            }
+        }
+    }
+}
+
+/// Warn, once per relation and [`Unkeyed`] kind, that a change's old tuple
+/// lacked the primary key.
+fn warn_unkeyed(state: &mut DecodeState, oid: u32, unkeyed: Unkeyed) {
+    let Some(relation) = state.relations.get(&oid) else {
+        return;
+    };
+    if !state.warned_unkeyed.insert((oid, unkeyed)) {
+        return;
+    }
+    tracing::warn!(
+        table = %QualifiedTable::new(relation.namespace.clone(), relation.table.clone()),
+        missing_key = %replica_identity::join_columns(&relation.primary_key),
+        remediation = "set REPLICA IDENTITY FULL on each partition whose identity leaves out the \
+                       primary key (`flusso check` names them)",
+        "{}",
+        unkeyed.consequence(),
     );
 }
 

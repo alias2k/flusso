@@ -41,11 +41,20 @@
 //! WAL logs, and Postgres doesn't pass a parent's setting down — not to
 //! existing partitions, nor to ones created or attached later. So every member
 //! that isn't `FULL` is altered, and a partition added later is caught at the
-//! next start. The kept rule is per member: a parent or partition whose
+//! next start. A partitioned table *below* the root is the exception: it stores
+//! no rows and its leaves' changes are announced under the root, so its
+//! identity decides nothing and it is neither reported nor set. The kept rule is per member: a parent or partition whose
 //! identity index carries its primary key and every link stays as it is while its siblings that
-//! miss one are set. A partitioned table with no gap is left alone whatever
-//! its members' identities: its updates carry no post-image, so the whole
-//! row would buy nothing.
+//! miss one are set. A partitioned table whose every member logs the primary
+//! key and every link is left alone: its updates carry no post-image, so the
+//! whole row would buy nothing. A member that leaves out part of the primary
+//! key is not: its changes are decoded under the parent's relation, which
+//! flags the parent's key, so they would carry a null key (a delete addresses
+//! no document of its own). Such a member is a correctness gap (`missing_key`) and is set,
+//! alone, even with no link missing. Postgres keeps a partition's primary key
+//! index (it can't be dropped), so `DEFAULT` always logs it; `NOTHING` and a
+//! dropped identity index make Postgres refuse the partition's updates and
+//! deletes once it is published, and are set too.
 
 use kernel::ColumnName;
 use source::{PreImageColumns, PreImageGap, PreImageReport, QualifiedTable, Result, SourceError};
@@ -68,7 +77,7 @@ const MEMBERS_SQL: &str = "WITH target AS ( \
          WHERE t.level > 0 \
        ) \
      SELECT n.nspname::text AS schema, c.relname::text AS name, \
-       c.relreplident::text AS identity, c.relkind = 'p' AS partitioned, \
+       c.relreplident::text AS identity, c.relkind = 'p' AS partitioned, m.level AS level, \
        ARRAY(SELECT a.attname::text FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
              WHERE i.indrelid = c.oid \
@@ -91,12 +100,21 @@ struct Member {
     name: String,
     identity: ReplicaIdentity,
     partitioned: bool,
+    /// Depth in the partition tree: 0 for the named table.
+    level: i32,
     carried: Vec<String>,
     primary_key: Vec<String>,
     owned: bool,
 }
 
 impl Member {
+    /// A partitioned table below the named one. It stores no rows and its
+    /// changes are announced under the root's relation, so its identity
+    /// decides nothing: it is never reported or set.
+    fn is_intermediate(&self) -> bool {
+        self.partitioned && self.level > 0
+    }
+
     /// The `required` columns this relation's old tuple can't deliver.
     fn uncarried(&self, required: &[ColumnName]) -> Vec<ColumnName> {
         let carries = |column: &str| match self.identity {
@@ -131,6 +149,17 @@ impl Member {
         self.identity != ReplicaIdentity::Full && !self.kept(required)
     }
 
+    /// The `key` columns this relation's old tuple leaves out.
+    fn uncarried_key<'k>(&self, key: &'k [String]) -> Vec<&'k String> {
+        key.iter()
+            .filter(|column| match self.identity {
+                ReplicaIdentity::Full => false,
+                ReplicaIdentity::Default | ReplicaIdentity::Index => !self.carried.contains(column),
+                ReplicaIdentity::Nothing => true,
+            })
+            .collect()
+    }
+
     fn alter_sql(&self) -> String {
         alter_sql(&self.schema, &self.name)
     }
@@ -153,6 +182,7 @@ async fn members<'e>(
                 name: row.try_get("name")?,
                 identity: ReplicaIdentity::from_code(&row.try_get::<String, _>("identity")?),
                 partitioned: row.try_get("partitioned")?,
+                level: row.try_get("level")?,
                 carried: row.try_get("columns")?,
                 primary_key: row.try_get("primary_key")?,
                 owned: row.try_get("owned")?,
@@ -163,7 +193,8 @@ async fn members<'e>(
 
 /// Inspect every `required` table's replica identity, read-only. A table that
 /// is not `FULL` throughout is listed: under [`PreImageReport::gaps`] when a
-/// member misses a link column, else under [`PreImageReport::partial`]. A
+/// member misses a link column or part of the primary key, else under
+/// [`PreImageReport::partial`]. A
 /// partitioned table is checked across its whole tree: the parent's identity
 /// flags the columns of the relation pgoutput announces, while each
 /// partition's decides what its WAL actually logs.
@@ -176,7 +207,7 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
         let Some(gap) = shortfall(table, columns, &members) else {
             continue;
         };
-        if gap.missing.is_empty() {
+        if gap.missing.is_empty() && gap.missing_key.is_empty() {
             report.partial.push(gap);
         } else {
             report.gaps.push(gap);
@@ -185,22 +216,32 @@ pub(crate) async fn inspect(pool: &PgPool, required: &PreImageColumns) -> Result
     Ok(report)
 }
 
-/// What `table` (its `members`) falls short of a `FULL` identity throughout:
-/// the `required` link columns some member's old tuple misses, the members the
-/// role can't alter, and the statements for every member flusso sets. `None`
-/// when every member is `FULL`, and for a partitioned table that misses no
-/// link: its updates always rebuild (they carry no post-image), so the rest of
-/// the row would buy nothing. A table whose only shortfall is a kept identity
-/// (see the module doc) is reported with [`PreImageGap::kept`] set, its
-/// remediation still the statement an operator could run by hand.
-fn shortfall(
-    table: &QualifiedTable,
-    required: &[ColumnName],
-    members: &[Member],
-) -> Option<PreImageGap> {
+/// What a table's `members` fall short of a `FULL` identity throughout, and
+/// which of them flusso sets.
+struct Plan<'m> {
+    /// The `required` link columns some member's old tuple misses.
+    missing: Vec<ColumnName>,
+    /// The table's primary-key columns some member's old tuple misses.
+    missing_key: Vec<ColumnName>,
+    /// Every member short of `FULL`.
+    short: Vec<&'m Member>,
+    /// The members flusso sets to `FULL`.
+    altered: Vec<&'m Member>,
+}
+
+/// The [`Plan`] for a table's `members`, parent first. `None` when every
+/// member is `FULL`, and for a partitioned table whose every member logs the
+/// primary key and every link: its updates always rebuild (they carry no
+/// post-image), so the rest of the row would buy nothing.
+///
+/// The key is the parent's: a partition's changes are decoded under the
+/// parent's relation, which flags the parent's primary key, so a partition
+/// whose identity leaves it out yields a null key. When that is a partitioned
+/// table's only shortfall, only those members are set.
+fn plan<'m>(required: &[ColumnName], members: &'m [Member]) -> Option<Plan<'m>> {
     let short: Vec<&Member> = members
         .iter()
-        .filter(|member| member.identity != ReplicaIdentity::Full)
+        .filter(|member| member.identity != ReplicaIdentity::Full && !member.is_intermediate())
         .collect();
     if short.is_empty() {
         return None;
@@ -214,15 +255,62 @@ fn shortfall(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let partitioned = members.first().is_some_and(|root| root.partitioned);
-    if missing.is_empty() && partitioned {
-        return None;
-    }
-    let altered: Vec<&Member> = short
+    let key = members
+        .first()
+        .map(|root| root.primary_key.as_slice())
+        .unwrap_or_default();
+    let missing_key = key
         .iter()
-        .copied()
-        .filter(|member| member.to_alter(required))
-        .collect();
+        .filter(|column| {
+            short
+                .iter()
+                .any(|member| member.uncarried_key(key).contains(column))
+        })
+        .filter_map(|column| ColumnName::try_new(column.clone()).ok())
+        .collect::<Vec<_>>();
+    let partitioned = members.first().is_some_and(|root| root.partitioned);
+    let altered: Vec<&Member> = if partitioned && missing.is_empty() {
+        if missing_key.is_empty() {
+            return None;
+        }
+        short
+            .iter()
+            .copied()
+            .filter(|member| !member.uncarried_key(key).is_empty())
+            .collect()
+    } else {
+        short
+            .iter()
+            .copied()
+            .filter(|member| member.to_alter(required))
+            .collect()
+    };
+    Some(Plan {
+        missing,
+        missing_key,
+        short,
+        altered,
+    })
+}
+
+/// What `table` (its `members`) falls short of a `FULL` identity throughout:
+/// the `required` link columns and primary-key columns some member's old tuple
+/// misses, the members the role can't alter, and the statements for every
+/// member flusso sets. `None` when [`plan`] finds nothing to report. A table
+/// whose only shortfall is a kept identity (see the module doc) is reported
+/// with [`PreImageGap::kept`] set, its remediation still the statement an
+/// operator could run by hand.
+fn shortfall(
+    table: &QualifiedTable,
+    required: &[ColumnName],
+    members: &[Member],
+) -> Option<PreImageGap> {
+    let Plan {
+        missing,
+        missing_key,
+        short,
+        altered,
+    } = plan(required, members)?;
     let (listed, kept) = if altered.is_empty() {
         (
             short,
@@ -243,6 +331,7 @@ fn shortfall(
     Some(PreImageGap {
         table: table.clone(),
         missing,
+        missing_key,
         manageable: blockers.is_empty(),
         blockers,
         remediation: listed
@@ -258,9 +347,9 @@ fn shortfall(
 const LOCK_TIMEOUT: &str = "5s";
 
 /// `REPLICA IDENTITY FULL` on every member of `gap`'s table (the table alone,
-/// or its partition tree) that isn't `FULL`, isn't a kept identity for the
-/// `required` links, and that the role owns; the members it doesn't own are
-/// already the gap's blockers. A gap that is [`kept`](PreImageGap::kept) alters
+/// or its partition tree) that [`plan`] sets for the `required` links and
+/// that the role owns; the members it doesn't own are already the gap's
+/// blockers. A gap that is [`kept`](PreImageGap::kept) alters
 /// nothing. Each relation gets its own transaction under [`LOCK_TIMEOUT`], so a
 /// busy partition neither holds the parent's lock while it waits nor undoes its
 /// siblings. A timeout or a denied grant is a [`SourceError::Setup`] naming the
@@ -275,12 +364,16 @@ pub(crate) async fn apply(pool: &PgPool, gap: &PreImageGap, required: &[ColumnNa
             gap.table
         ))
     };
+    let members = members(pool, &gap.table).await.map_err(setup)?;
+    let Some(plan) = plan(required, &members) else {
+        return Ok(());
+    };
     let mut first_error = None;
-    for member in members(pool, &gap.table).await.map_err(setup)? {
-        if !member.to_alter(required) || !member.owned {
+    for member in plan.altered {
+        if !member.owned {
             continue;
         }
-        if let Err(e) = alter(pool, &member).await {
+        if let Err(e) = alter(pool, member).await {
             first_error.get_or_insert(setup(e));
         }
     }
@@ -372,6 +465,26 @@ pub(crate) fn warn_untraceable(
         remediation = %remediation,
         "replica identity does not carry the parent link: a deleted or re-parented row leaves \
          its old parent's document stale; run the printed SQL",
+    );
+}
+
+/// Warn that `table`'s replica identity (or one of its partitions') leaves out
+/// part of its primary key, `missing`, and flusso won't fix it, for `reason`.
+/// Shared by startup and the stream.
+pub(crate) fn warn_unkeyed(
+    table: &dyn std::fmt::Display,
+    missing: &[ColumnName],
+    reason: &str,
+    remediation: &str,
+) {
+    tracing::warn!(
+        table = %table,
+        missing_key = %join_columns(missing),
+        reason = %reason,
+        remediation = %remediation,
+        "replica identity leaves out the primary key: changes there are keyed by other columns \
+         or by none, so live writes can land under other ids than the backfill's and a delete \
+         can leave its document in the index; run the printed SQL",
     );
 }
 

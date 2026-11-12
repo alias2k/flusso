@@ -88,6 +88,7 @@ fn member(name: &str, identity: ReplicaIdentity, owned: bool) -> Member {
         name: name.to_owned(),
         identity,
         partitioned: false,
+        level: 0,
         carried: vec!["id".to_owned()],
         primary_key: vec!["id".to_owned()],
         owned,
@@ -305,14 +306,195 @@ fn a_root_on_an_identity_index_without_its_primary_key_is_set_to_full() {
         &lone(ReplicaIdentity::Index, &["tenant", "slug"]),
     )
     .unwrap();
-    assert!(
-        gap.missing.is_empty(),
-        "partial, not a gap: no link to miss"
+    assert!(gap.missing.is_empty(), "no link to miss");
+    assert_eq!(
+        gap.missing_key,
+        columns(&["id"]),
+        "a gap all the same: changes are keyed by (tenant, slug)"
     );
     assert_eq!(gap.kept, None);
     assert!(gap.will_manage(true));
     assert_eq!(
         gap.remediation,
         "ALTER TABLE \"public\".\"orders\" REPLICA IDENTITY FULL;"
+    );
+}
+
+/// A partitioned `orders(id PK)` whose parent has `parent` and one partition
+/// `partition`, each identity index (or primary key) holding `carried`.
+fn tree(parent: (ReplicaIdentity, &[&str]), partition: (ReplicaIdentity, &[&str])) -> [Member; 3] {
+    let carrying = |(identity, carried): (ReplicaIdentity, &[&str]), name: &str| Member {
+        carried: carried.iter().map(|c| (*c).to_owned()).collect(),
+        ..member(name, identity, true)
+    };
+    [
+        Member {
+            partitioned: true,
+            ..carrying(parent, "orders")
+        },
+        carrying(partition, "orders_2025"),
+        member("orders_2026", ReplicaIdentity::Default, true),
+    ]
+}
+
+#[test]
+fn a_partitioned_table_is_left_alone_only_while_every_member_logs_the_primary_key() {
+    use ReplicaIdentity::{Default, Full, Index, Nothing};
+    let pk = &["id"][..];
+    // (parent, partition) → the members set, `None` when left alone.
+    let cases: [(
+        (ReplicaIdentity, &[&str]),
+        (ReplicaIdentity, &[&str]),
+        Option<&[&str]>,
+    ); 9] = [
+        ((Default, pk), (Default, pk), None),
+        ((Default, pk), (Full, pk), None),
+        ((Default, pk), (Index, &["id", "code"]), None),
+        ((Full, pk), (Index, &["code"]), Some(&["orders_2025"])),
+        ((Default, pk), (Index, &["code"]), Some(&["orders_2025"])),
+        ((Default, pk), (Index, &[]), Some(&["orders_2025"])),
+        ((Default, pk), (Nothing, &[]), Some(&["orders_2025"])),
+        ((Index, &["code", "id"]), (Default, pk), None),
+        ((Index, &["code"]), (Default, pk), Some(&["orders"])),
+    ];
+    for (parent, partition, expected) in cases {
+        let members = tree(parent, partition);
+        let gap = shortfall(&orders(), &[], &members);
+        let set = gap.as_ref().map(|gap| {
+            assert!(gap.missing.is_empty());
+            assert_eq!(gap.missing_key, columns(&["id"]));
+            assert_eq!(gap.kept, None);
+            assert!(gap.will_manage(true));
+            members
+                .iter()
+                .filter(|m| gap.remediation.contains(&format!("\"{}\"", m.name)))
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            set.as_deref(),
+            expected,
+            "parent {parent:?}, partition {partition:?}"
+        );
+        let planned = plan(&[], &members).map(|plan| {
+            plan.altered
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(planned.as_deref(), expected, "apply sets what is reported");
+    }
+}
+
+#[test]
+fn an_intermediate_partitioned_table_is_never_reported_or_set() {
+    let intermediate = |identity, carried: &[&str]| Member {
+        partitioned: true,
+        level: 1,
+        carried: carried.iter().map(|c| (*c).to_owned()).collect(),
+        ..member("orders_eu", identity, true)
+    };
+    let leaf = |identity| Member {
+        level: 2,
+        ..member("orders_eu_2025", identity, true)
+    };
+    let root = |identity| Member {
+        partitioned: true,
+        ..member("orders", identity, true)
+    };
+    for (identity, carried) in [
+        (ReplicaIdentity::Index, &["code"][..]),
+        (ReplicaIdentity::Index, &[][..]),
+        (ReplicaIdentity::Nothing, &[][..]),
+    ] {
+        let members = [
+            root(ReplicaIdentity::Default),
+            intermediate(identity, carried),
+            leaf(ReplicaIdentity::Default),
+        ];
+        assert_eq!(
+            shortfall(&orders(), &[], &members),
+            None,
+            "{identity:?} {carried:?}"
+        );
+
+        let members = [
+            root(ReplicaIdentity::Full),
+            intermediate(identity, carried),
+            leaf(ReplicaIdentity::Full),
+        ];
+        assert_eq!(
+            shortfall(&orders(), &columns(&["user_id"]), &members),
+            None,
+            "a link the leaves log is not missing: {identity:?} {carried:?}"
+        );
+    }
+}
+
+#[test]
+fn a_partition_without_the_primary_key_and_a_missing_link_sets_every_member_short_of_both() {
+    let members = tree(
+        (ReplicaIdentity::Default, &["id"]),
+        (ReplicaIdentity::Index, &["code"]),
+    );
+    let gap = shortfall(&orders(), &columns(&["user_id"]), &members).unwrap();
+    assert_eq!(gap.missing, columns(&["user_id"]));
+    assert_eq!(gap.missing_key, columns(&["id"]));
+    assert_eq!(
+        gap.remediation,
+        "ALTER TABLE \"public\".\"orders\" REPLICA IDENTITY FULL; \
+         ALTER TABLE \"public\".\"orders_2025\" REPLICA IDENTITY FULL; \
+         ALTER TABLE \"public\".\"orders_2026\" REPLICA IDENTITY FULL;"
+    );
+}
+
+#[test]
+fn an_unowned_partition_without_the_primary_key_blocks_and_is_still_a_gap() {
+    let mut members = tree(
+        (ReplicaIdentity::Default, &["id"]),
+        (ReplicaIdentity::Index, &["code"]),
+    );
+    if let Some(partition) = members.get_mut(1) {
+        partition.owned = false;
+    }
+    let gap = shortfall(&orders(), &[], &members).unwrap();
+    assert_eq!(gap.missing_key, columns(&["id"]));
+    assert!(!gap.manageable);
+    assert_eq!(gap.blockers, ["role does not own table public.orders_2025"]);
+}
+
+#[test]
+fn a_plain_table_short_of_its_primary_key_is_a_key_gap_and_set_as_before() {
+    use ReplicaIdentity::{Default, Index, Nothing};
+    // (identity, carried) → missing_key; every one is set to FULL, as #223 does.
+    let cases = [
+        (Nothing, &[][..], &["id"][..]),
+        (Index, &[][..], &["id"][..]),
+        (Index, &["tenant", "slug"][..], &["id"][..]),
+        (Default, &["id"][..], &[][..]),
+    ];
+    for (identity, carried, missing_key) in cases {
+        let gap = shortfall(&orders(), &[], &lone(identity, carried)).unwrap();
+        assert_eq!(
+            gap.missing_key,
+            columns(missing_key),
+            "{identity:?} {carried:?}"
+        );
+        assert_eq!(gap.kept, None);
+        assert_eq!(
+            gap.remediation,
+            "ALTER TABLE \"public\".\"orders\" REPLICA IDENTITY FULL;"
+        );
+    }
+    let no_key = [Member {
+        primary_key: Vec::new(),
+        ..member("orders", Index, true)
+    }];
+    assert!(
+        shortfall(&orders(), &[], &no_key)
+            .unwrap()
+            .missing_key
+            .is_empty(),
+        "a table without a primary key has none to miss"
     );
 }

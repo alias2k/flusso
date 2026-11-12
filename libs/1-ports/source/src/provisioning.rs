@@ -9,9 +9,10 @@
 //! **ensure** they are.
 //!
 //! The same surface covers a second prerequisite: whether the change feed
-//! carries each table's whole **pre-image** (old row). Reverse resolution needs
-//! its link columns to trace a deleted or re-parented row to its old parent,
-//! and the rest lets an update that changes no column a document reads rebuild
+//! carries each table's whole **pre-image** (old row). A delete is addressed
+//! by the row key the pre-image carries, reverse resolution needs its link
+//! columns to trace a deleted or re-parented row to its old parent, and the
+//! rest lets an update that changes no column a document reads rebuild
 //! nothing ([`SourceSpec::pre_images`](crate::SourceSpec::pre_images)).
 //! It follows the same inspect / ensure split, per table:
 //! [`inspect_pre_image`](CaptureProvisioning::inspect_pre_image) reports,
@@ -72,18 +73,21 @@ pub struct CoverageReport {
 ///
 /// Two severities, kept apart:
 ///
-/// - [`gaps`](Self::gaps) — the pre-image misses a **link** column: a delete
-///   or re-parent of that table's rows leaves the old parent's document stale.
-///   A correctness gap.
-/// - [`partial`](Self::partial) — every link is there, but not the rest of
+/// - [`gaps`](Self::gaps) — the pre-image misses a **link** column (a delete
+///   or re-parent of that table's rows leaves the old parent's document
+///   stale) or part of the **row key** (its changes are keyed by other
+///   columns or by none: live writes can land under other document ids, and a
+///   delete can leave its document in the index). A correctness gap.
+/// - [`partial`](Self::partial) — the key and every link are there, but not the rest of
 ///   the old row: an update can't be told apart from one that changes a column
 ///   a document reads, so it always rebuilds. Correct, only slower.
 #[derive(Debug, Clone, Default)]
 pub struct PreImageReport {
-    /// Tables whose pre-image misses a required link column.
+    /// Tables whose pre-image misses a required link column or part of the
+    /// row key.
     pub gaps: Vec<PreImageGap>,
-    /// Tables whose pre-image carries every link column but not the whole
-    /// row. Each entry's `missing` is empty.
+    /// Tables whose pre-image carries the row key and every link column but
+    /// not the whole row. Each entry's `missing` and `missing_key` are empty.
     pub partial: Vec<PreImageGap>,
 }
 
@@ -95,7 +99,7 @@ impl PreImageGap {
 }
 
 impl PreImageReport {
-    /// Every table's pre-image carries what resolution needs (its links).
+    /// Every table's pre-image carries what resolution needs (its key and links).
     pub fn satisfied(&self) -> bool {
         self.gaps.is_empty()
     }
@@ -115,6 +119,11 @@ pub struct PreImageGap {
     /// The required link columns the pre-image does not carry. Empty for a
     /// [`partial`](PreImageReport::partial) entry.
     pub missing: Vec<ColumnName>,
+    /// The row-key columns the pre-image does not carry, somewhere in the
+    /// table (for Postgres, on the table or one of its partitions): a change
+    /// there can't be addressed by its own key. Empty for a
+    /// [`partial`](PreImageReport::partial) entry.
+    pub missing_key: Vec<ColumnName>,
     /// Whether this source, with its current credentials, can close the gap.
     pub manageable: bool,
     /// Why `manageable` is false (e.g. "role does not own table public.orders").
@@ -152,13 +161,13 @@ pub trait CaptureProvisioning: Send + Sync {
     ) -> Result<CoverageReport>;
 
     /// Read-only: report which `required` tables' pre-images are not the whole
-    /// row, and which of those miss a link column. A table the source can't
+    /// row, and which of those miss a link column or part of the row key. A table the source can't
     /// find is skipped — coverage reports it.
     async fn inspect_pre_image(&self, required: &PreImageColumns) -> Result<PreImageReport>;
 
     /// When `manage` is set, make the pre-image the whole row on every listed
     /// table the source is allowed to and doesn't [keep](PreImageGap::kept),
-    /// and report (log) the rest: a link gap loudly, a partial or kept one
+    /// and report (log) the rest: a link or key gap loudly, a partial or kept one
     /// quietly. Returns the report as observed *before*
     /// acting, so a gap it just closed is still listed — re-inspect for the
     /// current state. One table that can't be set doesn't stop the others, nor
