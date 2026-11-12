@@ -15,7 +15,7 @@ import {
 } from "@codemirror/language";
 import { lintGutter, lintKeymap, setDiagnostics } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorState, type Range } from "@codemirror/state";
+import { Compartment, EditorState, type Range, Transaction } from "@codemirror/state";
 import {
   crosshairCursor,
   Decoration,
@@ -56,7 +56,6 @@ const editorSetup = [
   lineNumbers(),
   highlightActiveLineGutter(),
   highlightSpecialChars(),
-  history(),
   foldGutter({
     // The same chevron glyph the rest of the app draws (lucide's ChevronDown
     // path), rotated as one piece when folded — hand-drawn CSS triangles can't
@@ -206,6 +205,7 @@ interface Cursor {
 /// squiggles + gutter markers; the caret position streams out via `onCursor`.
 function YamlEditor({
   value,
+  seedText,
   onChange,
   vim: vimOn,
   problems,
@@ -217,6 +217,9 @@ function YamlEditor({
   className,
 }: {
   value: string;
+  /// The text the app seeded the buffer with; arriving from outside, it starts
+  /// the editor's own undo history afresh.
+  seedText?: string;
   onChange: (v: string) => void;
   vim?: boolean;
   problems: Problem[];
@@ -231,6 +234,7 @@ function YamlEditor({
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const vimSwitch = useRef(new Compartment());
+  const historySwitch = useRef(new Compartment());
   // Latest callbacks behind refs, so the view is created exactly once.
   const cb = useRef({ onChange, onFormat, onSave, onCursor, onBlur });
   useEffect(() => {
@@ -245,6 +249,7 @@ function YamlEditor({
       parent: host.current,
       extensions: [
         vimSwitch.current.of(vimOn ? vim() : []),
+        historySwitch.current.of(history()),
         editorSetup,
         yaml(),
         indentUnit.of("  "),
@@ -296,13 +301,27 @@ function YamlEditor({
     view.current?.dispatch({ effects: vimSwitch.current.reconfigure(vimOn ? vim() : []) });
   }, [vimOn]);
 
-  // External value changes (auto-format) replace the doc; the guard keeps the
-  // editor's own keystrokes (already in `value`) from looping.
+  // External value changes replace the doc; the guard keeps the editor's own
+  // keystrokes (already in `value`) from looping. Auto-format is an edit, so
+  // the editor can undo it. A re-seed (the app's undo, redo, Reset) is not: it
+  // starts the history afresh, so the editor's undo can't bring back text the
+  // app just undid and, by applying it, wipe the app's redo.
   useEffect(() => {
     const ev = view.current;
     if (!ev) return;
     const current = ev.state.doc.toString();
-    if (current !== value) ev.dispatch({ changes: { from: 0, to: current.length, insert: value } });
+    if (current === value) return;
+    const reseed = value === seedText;
+    ev.dispatch({
+      changes: { from: 0, to: current.length, insert: value },
+      annotations: Transaction.addToHistory.of(!reseed),
+    });
+    if (reseed) {
+      ev.dispatch({ effects: historySwitch.current.reconfigure([]) });
+      ev.dispatch({ effects: historySwitch.current.reconfigure(history()) });
+    }
+    // seedText is read when the value moves; it moving alone changes no text.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
 
   // After the doc sync above, so positions always refer to the same text.
@@ -390,6 +409,7 @@ function Rail({ problems, onJump }: { problems: Problem[]; onJump: (p: Problem) 
 /// findings (by field name).
 export function CodeView({
   value,
+  seedText,
   onChange,
   fileName,
   dirty,
@@ -400,6 +420,8 @@ export function CodeView({
   diagnostics,
 }: {
   value: string;
+  /// The text the buffer was last seeded with or agreed on (see `YamlEditor`).
+  seedText?: string;
   onChange: (v: string) => void;
   /// The schema file this buffer belongs to (from the config's index entry).
   fileName: string;
@@ -469,6 +491,7 @@ export function CodeView({
           <YamlEditor
             className="h-full"
             value={value}
+            seedText={seedText}
             onChange={onChange}
             vim={vimOn}
             problems={problems}

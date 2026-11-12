@@ -3,13 +3,13 @@ import { useRef, useState, type ReactNode } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { SCALAR_TYPES, type ColumnShape, type DiagnosticDto, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
-import { aggregateIncomplete, joinIncomplete } from "../model/complete";
+import { fieldIncomplete, nameIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
 import { suggestRelations, type RelationSuggestion } from "../model/relations";
 import { fieldAtPath, namePath, nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useT } from "../i18n";
 import { useDesign } from "../state";
-import { errorsFor, scriptIncomplete, scriptPath } from "../model/scripts";
+import { errorsFor, scriptPath } from "../model/scripts";
 import { useDesignStore } from "../store/design";
 import { kindColorClass, typeClass } from "../theme";
 import { Hint } from "./Hint";
@@ -76,7 +76,8 @@ export function DocNodeView({ data, selected }: NodeProps) {
   const selfIssues = node.path.length > 0 ? diagnostics.filter((d) => fieldUnder(d, here.length)) : [];
   const preview = useDesignStore((st) => st.preview);
   const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
-  const selfIncomplete = joinIncomplete(fieldAtPath(schema, node.path));
+  const self = fieldAtPath(schema, node.path);
+  const selfIncomplete = node.path.length > 0 && fieldIncomplete(self ?? undefined);
 
   const includedByCol = new Map<string, LeafField>();
   for (const l of node.leaves) {
@@ -223,7 +224,10 @@ export function DocNodeView({ data, selected }: NodeProps) {
           </span>
         )}
         {selfIncomplete && (
-          <span className="issue-badge warn" title={t("node.joinIncomplete")}>
+          <span
+            className="issue-badge warn"
+            title={nameIncomplete(self ?? undefined) ? t("node.nameIncomplete") : t("node.joinIncomplete")}
+          >
             !
           </span>
         )}
@@ -317,11 +321,12 @@ export function DocNodeView({ data, selected }: NodeProps) {
                   const override = required && c.nullable;
                   const hasDefault = col?.default !== undefined;
                   const rowSelected = rowsSelected.includes(c.name) || (inc !== undefined && fieldSelected(inc.index));
+                  const incomplete = fieldIncomplete(field);
                   return (
                     <div
-                      className={`col-row${inc ? " on" : ""}${rowSelected ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}`}
+                      className={`col-row${inc ? " on" : ""}${rowSelected ? " sel" : ""}${diag ? ` diag-${diag.severity}` : ""}${incomplete ? " diag-warning" : ""}`}
                       key={c.name}
-                      title={diag?.message}
+                      title={diag?.message ?? (incomplete ? t("node.incomplete") : undefined)}
                       onPointerDown={rowPointerDown}
                       onClick={(e) => selectRow(c.name, e, inc?.index)}
                     >
@@ -365,7 +370,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                 {visibleLeaves.map((l) => {
                   const diag = diagByField.get(l.name);
                   const leaf = fields[l.index];
-                  const incomplete = aggregateIncomplete(leaf) || scriptIncomplete(leaf);
+                  const incomplete = fieldIncomplete(leaf);
                   const scriptErrors = errorsFor(preview?.script_errors, scriptPath(schema, node.path, l.index));
                   const hidden = leaf?.emit === false;
                   const rowTitle =

@@ -1248,6 +1248,7 @@ dependencies = [
  "open",
  "proptest",
  "rust-embed",
+ "rust_decimal",
  "serde",
  "serde_json",
  "serde_yaml",

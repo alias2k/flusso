@@ -62,23 +62,49 @@ Source, stream, and sinks are edited from each adapter's own declaration: a kind
 
 A YAML editor over the selected index. Problems panel with a count, valid-YAML indicator, search, block folding, cursor position, **Format**, **Auto-format** on focus loss when valid, VIM keybindings. Edits sync into the project as you type; Save reviews and writes as usual.
 
+Code mode shows the whole schema, so it opens only when no field is [incomplete](#incomplete-fields): otherwise the canvas stays and a message names each piece to finish or remove (a field with a blank name by its position, `#3`). A schema the server refuses for another reason, such as a malformed column name, keeps the canvas too, with the server's message. A Code URL reached with Back or Forward is refused the same way, and the history entry is replaced, so Back still moves past it.
+
+Opening Code mode and leaving it again changes nothing: the YAML it opens with is never applied back, only what you type.
+
+- **Undo, Redo, Reset** change the project, and the YAML is rewritten from the result. Undo and redo stay one step each, whichever mode made the edit. If the result has an incomplete field, the canvas comes back with the message above; nothing is dropped.
+- **`⌘/Ctrl+Z` inside the editor** is the editor's own undo. It changes the YAML, and the project follows like any other edit. It starts afresh when Undo, Redo or Reset rewrites the YAML, so it can't bring back what they took out.
+- **Leaving** (the toggle, another index, Deployment, the command palette, Back or Forward) applies YAML you typed that isn't in the project yet. **Tables** is not leaving: the index stays in Code mode behind it, and picking that index in the sidebar comes back to its YAML as you left it, even YAML that doesn't parse.
+- **Save** applies it first too, so the review shows exactly what gets written. It is enabled as soon as you type.
+- **YAML that doesn't parse** holds a move away with a message, since its latest edits aren't in the project. Fix it, or pick **Discard** in the message to drop them. Switching again only repeats the message. Save is refused until the YAML parses.
+
 ## Preview
 
 | Tab | Shows |
 | --- | --- |
-| YAML | the canonical file that would be written |
+| YAML | the canonical file that would be written, minus anything [left out](#incomplete-fields) |
 | Mapping | the derived OpenSearch mapping, database-free; an opted-out field shows `subfields: false` or `indexed: false` |
 | Sample | a document built from one live row via the same path the sink uses, scripts run and input-only fields stripped; **Row id** picks the row (blank: the first); a failing script shows its field, message and line with a caret over the row as built; what the scripts printed; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
 
 The document tree marks a stored-only field (`indexed: false`) with a *not indexed* chip.
 
-Incomplete pieces (a field with a blank name mid-edit) are pruned from the live preview payload only, so a half-typed field doesn't error the panel.
+### Incomplete fields
+
+The canvas flags an incomplete field and the live preview leaves it out, so a half-built field doesn't error the panel. A warning above the preview tabs lists what's left out, and the YAML and Mapping tabs show the schema without it. The document keeps it: it comes back in the preview once it's complete.
+
+A field is incomplete when:
+
+- its name is blank or not a valid field name;
+- its column, a `geo` coordinate, or a script's source is blank;
+- a join's `table`, `primary_key`, or key (`column`, `foreign_key`, or the `through` table and keys) is blank;
+- an aggregate's table, key, or column is blank, or a `sum`, `min`, or `max` has no `value_type`;
+- a `via` hop's table or key is blank.
+
+A new field of any kind from **+ field** or **+ join** never errors the preview: it is either complete as added, or incomplete until filled in. A new `constant` starts at `null`.
+
+A half-written or duplicated `on` pair flags its field, but only the pair is left out of the preview. A filter, `order_by` entry, or soft-delete marker with a blank column, and a soft-delete `field` that isn't a valid field name, are left out too.
+
+A preview that fails anyway shows an error banner, cleared by the next preview that succeeds or by switching index.
 
 ## Save review
 
 Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"), **Delete** (a removed index). A warning marks any path resolving outside the config directory. Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
 
-Saving is canonical regeneration: meaning is preserved (the written file parses back to the same schema and mapping, which the preview self-checks on every edit), comments and incidental formatting are not. Moves are real: the old file is removed and emptied folders pruned. The save is atomic.
+Saving is canonical regeneration: meaning is preserved (the written file parses back to the same schema and mapping, which the preview self-checks on every edit), comments and incidental formatting are not. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned. The save is atomic.
 
 ## Catalog browser
 

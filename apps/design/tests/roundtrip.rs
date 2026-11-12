@@ -13,7 +13,11 @@
 //!  - `belongs_to` takes no `order_by`/`limit`, `has_one` no `limit`,
 //!  - `distinct` only on an aggregate over `through`,
 //!  - `subfields: false` only on `text`/`keyword`/`uuid`, `indexed: false` only
-//!    on `json` and joins (none of which get generated `options`).
+//!    on `json` and joins (none of which get generated `options`),
+//!  - values (`constant`, `default`, `options`) are ones the parser can produce:
+//!    `Null`, `Bool`, `BigInt`, a `Decimal` read from an `f64` or an integer past
+//!    `i64`, `String` (including ones that look like another kind), and, outside
+//!    a `default`, `Array`/`Map` of those.
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
@@ -28,8 +32,155 @@ use kernel::{
     ViaHop,
 };
 use proptest::prelude::*;
+use rust_decimal::Decimal;
 
 const DEPTH: u32 = 2;
+
+/// Strings that read as another kind, or need quoting or a block, unquoted.
+const TRICKY: &[&str] = &[
+    "null",
+    "~",
+    "Null",
+    "NULL",
+    "true",
+    "False",
+    "yes",
+    "on",
+    "123",
+    "-5",
+    "+5",
+    "0x1F",
+    "0o17",
+    "1e3",
+    "1.5",
+    "1.50",
+    ".nan",
+    ".inf",
+    "-.inf",
+    "1_000",
+    "",
+    " ",
+    " a",
+    "a ",
+    "a: b",
+    "a:b",
+    "#x",
+    "a #b",
+    "x\ny",
+    "x\n",
+    "x\n\n",
+    " x\ny",
+    "\n",
+    "- a",
+    "-",
+    "?",
+    "'",
+    "\"",
+    "@x",
+    "!x",
+    "!Decimal 1.5",
+    "&x",
+    "*x",
+    "|",
+    ">",
+    "{a}",
+    "[a]",
+    ",",
+    "%x",
+    "2024-01-01",
+    "1:20",
+    "\t",
+    "a\tb",
+    "\u{feff}x",
+    "\r",
+    "é",
+    "<<",
+];
+
+fn string() -> impl Strategy<Value = String> {
+    prop_oneof![
+        prop::sample::select(TRICKY).prop_map(String::from),
+        any::<String>(),
+    ]
+}
+
+/// A decimal the parser produces: a non-`i64` YAML number is read through
+/// `f64` as the `Decimal` of its shortest text, an integer past `i64` exactly.
+/// Left out: a text past `Decimal`'s 28 places, which the parser rounds (scale
+/// 28); it comes back equal in value and content hash, its scale may not.
+fn decimal() -> impl Strategy<Value = Decimal> {
+    let typed = prop::sample::select(vec![
+        "1.5",
+        "1.50",
+        "0.1",
+        "1e3",
+        "1E3",
+        "1e16",
+        "1e-7",
+        "-0.0",
+        "5.0",
+        "-2.5e10",
+        "0.30000000000000004",
+        "123456.789",
+    ])
+    .prop_map(|text| text.parse::<f64>().unwrap());
+    let float = prop_oneof![typed, any::<f64>()].prop_filter_map("no decimal reads it", |f| {
+        serde_yaml::Number::from(f)
+            .to_string()
+            .parse::<Decimal>()
+            .ok()
+            .filter(|d| d.scale() < 28)
+    });
+    let wide = ((i64::MAX.unsigned_abs() + 1)..=u64::MAX).prop_map(Decimal::from);
+    prop_oneof![
+        3 => float,
+        1 => Just(Decimal::from(12_345_678_901_234_567_890_u64)),
+        1 => wide,
+    ]
+}
+
+fn scalar_value() -> BoxedStrategy<GenericValue> {
+    prop_oneof![
+        Just(GenericValue::Null),
+        any::<bool>().prop_map(GenericValue::Bool),
+        prop_oneof![any::<i64>(), -3i64..=3, Just(i64::MIN), Just(i64::MAX)]
+            .prop_map(GenericValue::BigInt),
+        decimal().prop_map(GenericValue::Decimal),
+        string().prop_map(GenericValue::String),
+    ]
+    .boxed()
+}
+
+/// A column `default`: `default: null` reads as no default, so never `Null`.
+fn default() -> impl Strategy<Value = Option<GenericValue>> {
+    prop::option::of(
+        scalar_value().prop_filter("reads as no default", |v| !matches!(v, GenericValue::Null)),
+    )
+}
+
+fn value() -> BoxedStrategy<GenericValue> {
+    scalar_value()
+        .prop_recursive(2, 8, 3, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..=3).prop_map(GenericValue::Array),
+                prop::collection::btree_map(string(), inner, 0..=3).prop_map(GenericValue::Map),
+            ]
+        })
+        .boxed()
+}
+
+/// Mapping options; never `dynamic`, which the parser sets on a `map`.
+fn options() -> BoxedStrategy<BTreeMap<String, GenericValue>> {
+    prop_oneof![
+        2 => Just(BTreeMap::new()),
+        1 => prop::collection::btree_map(
+            string().prop_filter("set by the parser", |k| k != "dynamic"),
+            value(),
+            1..=3,
+        ),
+    ]
+    .boxed()
+}
 
 fn col() -> impl Strategy<Value = ColumnName> {
     prop::sample::select(vec!["a", "b", "c", "col1", "amount", "val"])
@@ -188,9 +339,10 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
         enum_variants(),
         any::<bool>(),
         any::<bool>(),
+        default(),
     )
         .prop_map(
-            |(ty, column, nullable, transforms, variants, bare, stored)| {
+            |(ty, column, nullable, transforms, variants, bare, stored, default)| {
                 // A declared order only rides an `enum`; every other type has none.
                 let enum_order = if matches!(ty, FlussoType::Enum) {
                     variants
@@ -201,7 +353,7 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
                     column,
                     nullable,
                     transforms,
-                    default: None,
+                    default,
                     enum_order,
                     subfields: !(bare
                         && matches!(
@@ -281,8 +433,8 @@ fn custom_source() -> BoxedStrategy<FieldSource> {
         1..=2,
     );
     let os = prop::sample::select(vec!["keyword", "text", "integer"]);
-    (pg, os, col(), any::<bool>())
-        .prop_map(|(postgres, opensearch, column, nullable)| {
+    (pg, os, col(), any::<bool>(), default())
+        .prop_map(|(postgres, opensearch, column, nullable, default)| {
             FieldSource::Column(Column {
                 column,
                 ty: FlussoType::Custom {
@@ -291,13 +443,16 @@ fn custom_source() -> BoxedStrategy<FieldSource> {
                 },
                 nullable,
                 transforms: Vec::new(),
-                default: None,
+                default,
                 enum_order: Vec::new(),
                 subfields: true,
                 indexed: true,
             })
         })
         .boxed()
+}
+fn constant_source() -> BoxedStrategy<FieldSource> {
+    value().prop_map(FieldSource::Constant).boxed()
 }
 fn aggregate_source() -> BoxedStrategy<FieldSource> {
     let mk =
@@ -491,6 +646,7 @@ fn source(depth: u32) -> BoxedStrategy<FieldSource> {
         custom_source(),
         aggregate_source(),
         script_source(),
+        constant_source(),
     ];
     if depth == 0 {
         return leaves.boxed();
@@ -504,31 +660,42 @@ fn source(depth: u32) -> BoxedStrategy<FieldSource> {
 }
 
 fn fields(depth: u32) -> BoxedStrategy<Vec<Field>> {
-    prop::collection::vec((source(depth), prop::bool::weighted(0.85)), 1..=4)
-        .prop_map(|sources| {
-            sources
-                .into_iter()
-                .enumerate()
-                .map(|(i, (source, emit))| Field {
-                    field: FieldName::try_new(format!("f{i}")).unwrap(),
-                    options: options_for(&source),
-                    emit,
-                    source,
-                })
-                .collect()
-        })
-        .boxed()
+    prop::collection::vec(
+        (source(depth), prop::bool::weighted(0.85), options()),
+        1..=4,
+    )
+    .prop_map(|sources| {
+        sources
+            .into_iter()
+            .enumerate()
+            .map(|(i, (source, emit, options))| Field {
+                field: FieldName::try_new(format!("f{i}")).unwrap(),
+                options: options_for(&source, options),
+                emit,
+                source,
+            })
+            .collect()
+    })
+    .boxed()
 }
 
-/// The options the *parser* would attach to a field of this source, so the
-/// generated schema matches what re-parsing produces.
-fn options_for(source: &FieldSource) -> BTreeMap<String, GenericValue> {
-    if let FieldSource::Column(c) = source
-        && matches!(c.ty, FlussoType::Map { .. })
-    {
-        return BTreeMap::from([("dynamic".to_owned(), GenericValue::Bool(true))]);
+/// The options a field of this source carries after parsing: the generated
+/// ones where the field takes options (an unindexed field, a constant and a
+/// group take none here), plus the `dynamic` the parser sets on a `map`.
+fn options_for(
+    source: &FieldSource,
+    mut options: BTreeMap<String, GenericValue>,
+) -> BTreeMap<String, GenericValue> {
+    match source {
+        FieldSource::Column(c) if matches!(c.ty, FlussoType::Map { .. }) => {
+            options.insert("dynamic".to_owned(), GenericValue::Bool(true));
+            options
+        }
+        FieldSource::Column(c) if c.indexed => options,
+        FieldSource::Geo(_) | FieldSource::Script(_) => options,
+        FieldSource::Relation(Relation::Aggregate(_)) => options,
+        _ => BTreeMap::new(),
     }
-    BTreeMap::new()
 }
 
 fn schema() -> impl Strategy<Value = IndexSchema> {

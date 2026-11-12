@@ -94,6 +94,12 @@ export const it: Record<string, string> = {
   "code.fold": "Comprimi blocco",
   "code.cursor": "Riga {l}, Col {c}",
   "code.autoFormat": "Formattazione automatica",
+  "code.incomplete": "Completa o rimuovi prima questi elementi, la modalità Codice li perderebbe: {list}",
+  "code.renderFailed": "La modalità Codice non può ancora mostrare questo indice: {err}",
+  "code.unparsed":
+    "Lo YAML non è analizzabile, quindi le ultime modifiche non sono nel documento. Correggilo, oppure scartale.",
+  "code.unparsedSave": "Lo YAML non è analizzabile, quindi non si può salvare. Correggilo prima.",
+  "code.discard": "Scarta",
   "code.autoFormatHint": "Formatta il buffer quando perde il focus, se lo YAML è valido",
 
   // diff modal
@@ -153,6 +159,8 @@ export const it: Record<string, string> = {
   "inspector.join": "Relazione",
   "inspector.field": "Campo",
   "inspector.fieldName": "nome campo",
+  "inspector.fieldNameInvalid":
+    "Lettere, cifre e _, senza iniziare con una cifra, al massimo 63 caratteri. L'anteprima esclude questo campo finché non ne ha uno.",
   "inspector.verb": "verbo",
   "inspector.table": "tabella",
   "inspector.btColumn": "colonna (questa tabella → destinazione)",
@@ -316,6 +324,7 @@ export const it: Record<string, string> = {
   "preview.title": "Anteprima",
   "preview.empty": "Seleziona o modifica un indice per visualizzarne l'anteprima.",
   "preview.parseError": "Questo schema non è analizzabile:",
+  "preview.leftOut": "Esclusi da questa anteprima finché non sono completi: {list}",
   "preview.notIndexed": "non indicizzato",
   "preview.document": "Documento",
   "preview.tabYaml": "YAML",
@@ -362,6 +371,7 @@ export const it: Record<string, string> = {
   "node.selfDiagCount":
     "{n, plural, one {# segnalazione su questa relazione} other {# segnalazioni su questa relazione}}",
   "node.joinIncomplete": "A questa relazione manca una chiave obbligatoria — impostala nell'ispettore",
+  "node.nameIncomplete": "Questo campo ha bisogno di un nome valido — impostalo nell'ispettore",
   "node.pickRoot": "Scegli una tabella radice per iniziare",
   "node.chooseTable": "scegli una tabella…",
   "node.rootTableEnter": "nome tabella radice, Invio",
@@ -372,7 +382,7 @@ export const it: Record<string, string> = {
   "node.reqAligned": "obbligatorio (la colonna è NOT NULL)",
   "node.reqOverride": "obbligatorio — forza una colonna che ammette null",
   "node.colDefault": "ha un valore predefinito",
-  "node.incomplete": "incompleto — imposta la sua chiave/colonna nell'ispettore",
+  "node.incomplete": "incompleto — completa il suo nome, la chiave o la colonna nell'ispettore",
   "node.inputOnly": "solo input: letto per gli script, non emesso",
   "node.addJoin": "+ relazione",
   "node.addField": "+ campo",

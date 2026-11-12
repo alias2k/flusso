@@ -1,10 +1,39 @@
-// Structural completeness checks: a join/aggregate is "incomplete" when a key
-// the grammar requires is still blank. Surfacing this on the canvas turns a
-// late `flusso check` error ("aggregate must specify a key") into an immediate
-// visual hint while building.
+// Structural completeness checks: a field is "incomplete" when something the
+// strict backend requires is still blank or malformed — its name, its column,
+// a join/aggregate key. Surfacing this on the canvas turns a late `flusso check`
+// error ("aggregate must specify a key") into an immediate visual hint while
+// building, and `prune.ts` uses the same checks to keep such a field out of the
+// live preview.
 
 import type { Aggregate, AggregateKey, ColumnPair, Field } from "../api";
+import { scriptIncomplete } from "./scripts";
 import { joinOf } from "./tree";
+
+/// The kernel's `FieldName` rule, applied after its trim.
+const FIELD_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const FIELD_NAME_MAX_CHARS = 63;
+
+/// Is this a name the backend's `FieldName` refuses (blank included)?
+export function nameInvalid(raw: string): boolean {
+  const name = raw.trim();
+  return !FIELD_NAME.test(name) || [...name].length > FIELD_NAME_MAX_CHARS;
+}
+
+/// Is this field's name one the backend's `FieldName` refuses (blank included)?
+export const nameIncomplete = (field: Field | undefined): boolean => !!field && nameInvalid(field.field);
+
+/// Is this field, of any kind, incomplete on its own level: a bad name, a blank
+/// column or geo coordinate, a blank script, or an incomplete join/aggregate?
+/// Its children are not checked; a group or join with an incomplete child is
+/// still complete itself.
+export function fieldIncomplete(field: Field | undefined): boolean {
+  if (!field) return false;
+  if (nameIncomplete(field)) return true;
+  const s = field.source;
+  if ("column" in s) return !s.column.column;
+  if ("geo" in s) return !s.geo.lat || !s.geo.lon;
+  return scriptIncomplete(field) || joinIncomplete(field) || aggregateIncomplete(field);
+}
 
 /// A pair missing a side, or listed twice: both are rejected at load.
 export const pairsIncomplete = (on: ColumnPair[] | undefined): boolean =>

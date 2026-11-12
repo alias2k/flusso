@@ -26,6 +26,7 @@ import {
 import { AGGREGATE_OPS, KIND_HELP, LEAF_TYPES, withAggregateOp } from "../fields";
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
+import { nameIncomplete } from "../model/complete";
 import { errorsFor, retypeScript, scriptPath } from "../model/scripts";
 import { useDesignStore } from "../store/design";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
@@ -674,10 +675,12 @@ function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
   const chips = nameSuggestions(field)
     .filter((n, i, a) => n && n !== field.field && a.indexOf(n) === i)
     .slice(0, 3);
+  const badName = nameIncomplete(field);
   return (
     <div className="field mb-2 flex flex-col gap-1">
       <span className={cn("field-label", LABEL)}>{t("inspector.fieldName")}</span>
-      <Text value={field.field} onChange={(name) => set({ ...field, field: name })} />
+      <Text value={field.field} invalid={badName} onChange={(name) => set({ ...field, field: name })} />
+      {badName && <p className="error-hint mt-0.5 text-xs text-destructive">{t("inspector.fieldNameInvalid")}</p>}
       {chips.length > 0 && (
         <div className="rename-chips mt-1.5 flex flex-wrap items-center gap-1.5">
           <span className="text-3xs uppercase tracking-caps text-muted-foreground">{t("inspector.renameTo")}</span>
@@ -748,7 +751,7 @@ function ScalarBody({
           <Select
             value={column.ty as string}
             options={scalarTypeOptions(t)}
-            onChange={(ty) => setCol(edit.retypeColumn(column, ty as FlussoType))}
+            onChange={(ty) => set(edit.retypeField(field, column, ty as FlussoType))}
             className={`font-mono ${typeClass(column.ty as string)}`}
           />
         </Row>
@@ -758,7 +761,7 @@ function ScalarBody({
             <button
               type="button"
               className="cursor-pointer text-primary hover:underline"
-              onClick={() => setCol(edit.retypeColumn(column, suggested))}
+              onClick={() => set(edit.retypeField(field, column, suggested))}
             >
               {t("inspector.use")}
             </button>
@@ -1013,7 +1016,7 @@ function RequiredDefault({
             <GenericInput
               invalid={defaultMissing}
               value={column.default}
-              onChange={(def) => setCol({ ...column, default: def })}
+              onChange={(def) => setCol({ ...column, default: def === "Null" ? undefined : def })}
               placeholder={t("inspector.defaultPlaceholder")}
             />
           </Row>
@@ -1054,10 +1057,10 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   const KNOBS: { key: string; seed: unknown }[] = [
     { key: "analyzer", seed: { String: "" } },
     { key: "search_analyzer", seed: { String: "" } },
-    { key: "boost", seed: { Double: 1 } },
+    { key: "boost", seed: { BigInt: 1 } },
     { key: "null_value", seed: { String: "" } },
     { key: "copy_to", seed: { String: "" } },
-    { key: "scaling_factor", seed: { Double: 100 } },
+    { key: "scaling_factor", seed: { BigInt: 100 } },
   ];
   const available = KNOBS.filter((k) => !(k.key in options));
   return (

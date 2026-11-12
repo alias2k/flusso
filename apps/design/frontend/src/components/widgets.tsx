@@ -2,7 +2,7 @@ import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "
 import { CheckIcon, ChevronDownIcon, ChevronRight, Link2, Plus, X } from "lucide-react";
 import type { ColumnShape } from "../api";
 import { useT } from "../i18n";
-import { fromGeneric, type Generic, toGeneric } from "../model/generic";
+import { type Generic, genericText, parseGeneric } from "../model/generic";
 import { LABEL, NO_PW_MANAGER } from "../styles";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
@@ -218,7 +218,7 @@ export function GenericInput({
   invalid?: boolean;
   emptyTo?: Generic;
 }) {
-  const external = value === undefined ? "" : JSON.stringify(fromGeneric(value));
+  const external = value === undefined ? "" : genericText(value);
   const [text, setText] = useState(external);
   // Resync from the model only when the model itself changes (undo, switching
   // fields) — not on every keystroke, so partial JSON survives typing.
@@ -237,7 +237,7 @@ export function GenericInput({
     setText(s);
     if (s.trim() === "") return onChange(emptyTo);
     try {
-      onChange(toGeneric(JSON.parse(s)));
+      onChange(parseGeneric(s));
     } catch {
       /* keep typing until valid JSON */
     }

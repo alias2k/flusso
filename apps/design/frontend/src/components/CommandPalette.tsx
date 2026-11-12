@@ -156,6 +156,7 @@ export function CommandPalette({
   catalog,
   active,
   commands,
+  leave,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -163,6 +164,8 @@ export function CommandPalette({
   catalog: CatalogResponse | null;
   active: string;
   commands: SearchRecord[];
+  /// Runs a move away from what is shown, once the Code buffer allows it.
+  leave: (go: () => void) => void;
 }) {
   const { t } = useT();
   const [q, setQ] = useState("");
@@ -276,7 +279,8 @@ export function CommandPalette({
   // (e.g. opening an index while the Tables browser is up). A field/node jump
   // also leaves Code mode so the canvas focus is visible; a plain index open
   // preserves Code mode (it survives index switches).
-  const navigate = (target: SearchTarget) => {
+  const navigate = (target: SearchTarget) => leave(() => go(target));
+  const go = (target: SearchTarget) => {
     switch (target.kind) {
       case "index":
         setBrowseCatalog(false);
