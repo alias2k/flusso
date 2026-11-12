@@ -38,7 +38,7 @@ import { useDefaultLayout } from "react-resizable-panels";
 import { parseDocument, type YAMLError } from "yaml";
 import type { DiagnosticDto } from "../api";
 import { useT } from "../i18n";
-import { anchorField, anchorParseError, type ParseErrorInfo } from "../model/anchors";
+import { anchorFieldPath, anchorParseError, anchorRootKey, type ParseErrorInfo } from "../model/anchors";
 import { formatYaml } from "../model/format";
 import { LABEL } from "../styles";
 import { Button } from "@/components/ui/button";
@@ -427,8 +427,11 @@ export function CodeView({
     const list = [...syntaxProblems];
     for (const d of diagnostics) {
       list.push({
-        ...(anchorField(ydoc, d.field)?.span ?? { from: 0, to: 0 }),
-        label: d.field,
+        ...((d.anchor === "index_key" ? anchorRootKey(ydoc, d.field) : anchorFieldPath(ydoc, d.path)) ?? {
+          from: 0,
+          to: 0,
+        }),
+        label: d.path.join("."),
         severity: d.severity === "warning" ? "warning" : "error",
         message: d.message,
       });

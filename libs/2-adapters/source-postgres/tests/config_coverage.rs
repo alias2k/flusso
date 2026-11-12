@@ -29,7 +29,7 @@ use kernel::{
     Through, Transform, ValueOpFilter, ViaHop,
 };
 use source::document::{Document, DocumentBuilder, DocumentId};
-use source::{DiagnosticKind, RowKey, SourceSpec, validate_indexes};
+use source::{Anchor, DiagnosticKind, RowKey, SourceSpec, validate_indexes};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
@@ -1566,6 +1566,326 @@ async fn an_enum_or_domain_column_is_a_type_mismatch_that_still_builds() {
     let body = upsert(&documents, 1).await;
     assert_eq!(str_of(&body, "mood"), "calm");
     assert_eq!(str_of(&body, "contact"), "ada@example.com");
+}
+
+/// What `validate_indexes` reports that a document build can't get past
+/// (issue #225), each against what the build really does:
+///
+/// - a declared root `primary_key` naming no column on a table keyed by one
+///   column, or naming a column other than that key;
+/// - a relation table without a single-column primary key;
+/// - `transforms` the column's type doesn't take. Postgres decides, so every
+///   type that takes `lower`/`trim` through an implicit cast or its own
+///   function passes, and a chain fails on its first refused step;
+/// - a root table without a single-column primary key: reported, the build
+///   runs. On one, a declared `primary_key` naming no column breaks only a
+///   relation: a `has_many` fails the root's build, a `belongs_to` fails the
+///   change on its target, and with no relation the build runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn validation_reports_what_no_document_build_gets_past() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE notes (user_id int, body text)",
+        "INSERT INTO notes (user_id, body) VALUES (1, 'first')",
+        "CREATE EXTENSION citext",
+        "CREATE TYPE mood AS ENUM ('calm', 'busy')",
+        "CREATE DOMAIN email_address AS text",
+        "CREATE DOMAIN score AS int",
+        "ALTER TABLE users ADD COLUMN mood mood DEFAULT 'calm', \
+         ADD COLUMN contact email_address DEFAULT 'ADA@example.com', \
+         ADD COLUMN handle varchar(20) DEFAULT 'Ada', \
+         ADD COLUMN code char(4) DEFAULT 'AB', \
+         ADD COLUMN nick name DEFAULT 'Ada', \
+         ADD COLUMN login citext DEFAULT 'Ada', \
+         ADD COLUMN span int4range DEFAULT '[1,5)', \
+         ADD COLUMN aliases text[] DEFAULT '{a}', \
+         ADD COLUMN extra jsonb DEFAULT '{}', \
+         ADD COLUMN rank score DEFAULT 1",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let found = |schema: IndexSchema| {
+        let url = url.clone();
+        async move {
+            let documents = builder(&url, schema.clone()).await;
+            let found = validate_indexes(&spec(schema), &documents)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|d| {
+                    let at = match d.anchor {
+                        Anchor::Field => d.dotted_path(),
+                        Anchor::IndexKey => format!("@{}", d.dotted_path()),
+                        _ => unreachable!("a new anchor"),
+                    };
+                    (at, d.kind, d.message)
+                })
+                .collect::<Vec<_>>();
+            (found, documents.build_many(&[doc(1)]).await)
+        }
+    };
+    let expected = |pairs: &[(&str, DiagnosticKind, &str)]| {
+        pairs
+            .iter()
+            .map(|(path, kind, message)| ((*path).to_owned(), *kind, (*message).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let upserted = |build: &source::Result<Vec<Document>>| {
+        matches!(build.as_deref(), Ok([Document::Upsert { .. }]))
+    };
+
+    let mut unknown_key = users_schema(vec![col("name", "name")], None);
+    unknown_key.primary_key = Some(column("user_id"));
+    let (diagnostics, build) = found(unknown_key).await;
+    assert_eq!(
+        diagnostics,
+        expected(&[(
+            "@primary_key",
+            DiagnosticKind::UnknownColumn,
+            "`primary_key` references unknown column `public.users.user_id`"
+        )]),
+    );
+    assert!(build.is_err(), "the batched build reads the declared key");
+
+    let mut other_key = users_schema(vec![col("name", "name")], None);
+    other_key.primary_key = Some(column("email"));
+    let (diagnostics, build) = found(other_key).await;
+    assert_eq!(
+        diagnostics,
+        expected(&[(
+            "@primary_key",
+            DiagnosticKind::RootPrimaryKeyMismatch,
+            "`primary_key` is `email`, but `public.users` is keyed by `id`: the backfill and \
+             every root change would match the wrong row or none"
+        )]),
+    );
+    assert!(
+        matches!(build.as_deref(), Ok([Document::Delete { .. }])),
+        "a live row keyed by `id` is matched on `email`: {build:?}"
+    );
+
+    let has_many = |name: &str, table_name: &str| {
+        join_field(
+            name,
+            Join {
+                table: table(table_name),
+                primary_key: column("user_id"),
+                nullable: true,
+                kind: JoinKind::HasMany {
+                    foreign_key: column("user_id"),
+                },
+                filters: None,
+                order_by: None,
+                limit: None,
+                fields: vec![],
+                indexed: true,
+                on: vec![],
+            },
+        )
+    };
+    for (name, problem) in [
+        ("notes", "has no primary key"),
+        (
+            "user_tags",
+            "has a composite primary key (`user_id`, `tag_id`)",
+        ),
+    ] {
+        let (diagnostics, build) = found(users_schema(vec![has_many(name, name)], None)).await;
+        assert_eq!(
+            diagnostics,
+            vec![(
+                name.to_owned(),
+                DiagnosticKind::RelationPrimaryKey,
+                format!(
+                    "`table` `public.{name}` {problem}; a relation table needs a single-column one"
+                ),
+            )],
+        );
+        assert!(build.is_err(), "{name}: the build needs the key");
+    }
+
+    let transformed = |name: &str, transforms: &[Transform]| Field {
+        source: FieldSource::Column(Column {
+            column: column(name),
+            ty: FlussoType::Keyword,
+            nullable: true,
+            transforms: transforms.to_vec(),
+            default: None,
+            enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
+        }),
+        ..base(name)
+    };
+    let lower = &[Transform::Lowercase][..];
+    let lower_trim = &[Transform::Lowercase, Transform::Trim][..];
+    for (name, transforms, accepted) in [
+        ("handle", lower_trim, true),
+        ("code", lower_trim, true),
+        ("nick", lower_trim, true),
+        ("login", lower_trim, true),
+        ("contact", lower_trim, true),
+        ("span", lower, true),
+        ("id", lower, false),
+        ("aliases", lower, false),
+        ("extra", lower, false),
+        ("mood", lower, false),
+        ("rank", lower, false),
+        ("span", lower_trim, false),
+    ] {
+        let (diagnostics, build) =
+            found(users_schema(vec![transformed(name, transforms)], None)).await;
+        let refused = diagnostics
+            .iter()
+            .any(|(_, kind, _)| *kind == DiagnosticKind::TransformNotApplicable);
+        assert_eq!(
+            !refused, accepted,
+            "{name} {transforms:?}: reported {diagnostics:?}"
+        );
+        assert_eq!(
+            upserted(&build),
+            accepted,
+            "{name} {transforms:?}: built {build:?}"
+        );
+    }
+    let (diagnostics, _) = found(users_schema(vec![transformed("mood", lower)], None)).await;
+    assert!(
+        diagnostics.contains(&(
+            "mood".to_owned(),
+            DiagnosticKind::TransformNotApplicable,
+            "`transforms` `lowercase` do not apply to the column's database type `mood`".to_owned(),
+        )),
+        "{diagnostics:?}"
+    );
+
+    for statement in [
+        "CREATE SCHEMA hidden",
+        "CREATE DOMAIN hidden.label AS text",
+        "ALTER TABLE users ADD COLUMN label hidden.label DEFAULT 'ADA'",
+        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO reader",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let (_, address) = url.rsplit_once('@').unwrap();
+    let reader_url = format!("postgres://reader:reader@{address}");
+    let schema = users_schema(vec![transformed("label", lower)], None);
+    let documents = builder(&reader_url, schema.clone()).await;
+    let diagnostics = validate_indexes(&spec(schema), &documents).await.unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.kind != DiagnosticKind::TransformNotApplicable),
+        "a type the role cannot cast to is not a verdict: {diagnostics:?}"
+    );
+    assert!(upserted(&documents.build_many(&[doc(1)]).await));
+
+    let keyless_root = |primary_key: Option<&str>, related: Option<Field>| {
+        let mut fields = vec![col("body", "body")];
+        fields.extend(related);
+        let mut schema = users_schema(fields, None);
+        schema.table = table("notes");
+        schema.primary_key = primary_key.map(column);
+        schema
+    };
+    let no_key = (
+        "@table".to_owned(),
+        DiagnosticKind::RootPrimaryKey,
+        "`public.notes` has no primary key: the backfill skips it; live changes are still \
+         indexed"
+            .to_owned(),
+    );
+    let (diagnostics, _) = found(keyless_root(None, None)).await;
+    assert_eq!(diagnostics, vec![no_key.clone()]);
+    let (diagnostics, _) = found(keyless_root(Some("id"), None)).await;
+    assert_eq!(
+        diagnostics,
+        vec![
+            no_key.clone(),
+            (
+                "@primary_key".to_owned(),
+                DiagnosticKind::RootPrimaryKey,
+                "`primary_key` references unknown column `public.notes.id`; a root change built by \
+                 its whole key does not read it"
+                    .to_owned(),
+            ),
+        ],
+    );
+    let whole_row = DocumentId {
+        index: index_name("users"),
+        key: RowKey(vec![
+            (column("user_id"), GenericValue::Int(1)),
+            (column("body"), GenericValue::String("first".into())),
+        ]),
+    };
+    let documents = builder(&url, keyless_root(Some("id"), None)).await;
+    assert!(
+        matches!(
+            documents.build_many(&[whole_row.clone()]).await.as_deref(),
+            Ok([Document::Upsert { .. }])
+        ),
+        "a root change keyed by its whole row never reads the declared key"
+    );
+
+    let unknown = (
+        "@primary_key".to_owned(),
+        DiagnosticKind::UnknownColumn,
+        "`primary_key` references unknown column `public.notes.id`".to_owned(),
+    );
+    let orders = join_field(
+        "orders",
+        Join {
+            table: table("orders"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let (diagnostics, _) = found(keyless_root(Some("id"), Some(orders.clone()))).await;
+    assert_eq!(diagnostics, vec![no_key.clone(), unknown.clone()]);
+    let documents = builder(&url, keyless_root(Some("id"), Some(orders))).await;
+    assert!(
+        documents.build_many(&[whole_row]).await.is_err(),
+        "a `has_many` keys on the declared column"
+    );
+
+    let author = join_field(
+        "author",
+        Join {
+            table: table("users"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::BelongsTo {
+                column: column("user_id"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![col("name", "name")],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let (diagnostics, _) = found(keyless_root(Some("id"), Some(author.clone()))).await;
+    assert_eq!(diagnostics, vec![no_key, unknown]);
+    let documents = builder(&url, keyless_root(Some("id"), Some(author))).await;
+    assert!(
+        documents
+            .resolve(&table("users"), &key(1), None, None)
+            .await
+            .is_err(),
+        "a change on a `belongs_to` target is traced to the root by the declared column"
+    );
 }
 
 // ---------------------------------------------------------------------------

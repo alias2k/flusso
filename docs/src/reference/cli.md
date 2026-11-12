@@ -56,10 +56,14 @@ Once connected, and before any index is touched, `run` runs the same check as [`
 - **These stop the start:**
   - a table that doesn't exist, in any position;
   - a column the document query reads that doesn't exist: a field's column, a key (`column`, `foreign_key`, `left_key`, `right_key`, a hop's `foreign_key`), either side of an `on:` pair, a value or null-check filter column (relation, junction, hop, root `filters`, `soft_delete` `when`), an `order_by` column, a geo coordinate, an aggregate's input column or expression operand, and the `soft_delete` column;
-  - a `soft_delete` `field` that reads no column.
+  - a `soft_delete` `field` that reads no column;
+  - a root `primary_key` that names no column, when the root table has a single-column primary key or the index has any relation (a relation keys on the root, or traces a change back to it, by that column);
+  - a root `primary_key` that names a column other than the root table's single-column primary key: changes and the backfill carry the table's key, the build matches it on the declared column, so a document is built from another row or written as a tombstone, and a change on a related table fails;
+  - a relation table without a single-column primary key (none, or a composite one): a join's, an aggregate's or a `via` hop's table, at any depth (a junction needs none);
+  - [`transforms`](field-types.md#transforms) the column's type doesn't take, such as `lowercase` over an `integer` or an enum column. When flusso can't ask (the role has no `USAGE` on the type's schema), it warns and skips this check.
 
-  `run` exits non-zero with `the schemas name what the database does not have (N problem(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
-- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, and a join `primary_key` that names no column. The documents build as they did in 0.16; `check` still exits non-zero on the errors.
+  The last three fail document builds of the index, so 0.17 started and then wrote nothing, or failed on the first build. `run` exits non-zero with `the schemas cannot be built against this database (N problem(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
+- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, a join `primary_key` that names no column, and a root table without a single-column primary key (none, or a composite one: the backfill skips it, its live changes are still indexed; see [Tables without a primary key](source-postgres.md#tables-without-a-primary-key)). On such a root, with no relation in the index, a `primary_key` that names no column is printed too: a root change built by its whole key never reads it (one whose key is a single column does, and fails, as do `flusso script run --id` and the designer's sample). The documents build as they did in 0.16; `check` still exits non-zero on the errors.
 - **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
 
 There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
@@ -72,7 +76,7 @@ Loads and validates the config and every schema, validates every port table agai
 
 Every problem of one run is listed together, each naming the index, the field path (`users.orders.items`), and the missing table or column, with the schema key that names it (`` `foreign_key` references unknown column `public.orders.userid` ``).
 
-- **Fields.** Each column a field reads exists, and its database type is one the declared type accepts. A field declared `required` over a nullable column is a warning.
+- **Fields.** Each column a field reads exists, and its database type is one the declared type accepts. Its [`transforms`](field-types.md#transforms) take that type: Postgres plans them over no rows, so a domain over `text` passes and an enum fails. A field declared `required` over a nullable column is a warning.
 - **Geo points.** Both coordinate columns exist and are numeric.
 - **Aggregate input.** A `sum`/`min`/`max` column's type is one `value_type` accepts; each column of an [expression](aggregates.md#arithmetic-input) exists and is numeric.
 - **Relations, at any depth.** For every join and aggregate:
@@ -82,10 +86,11 @@ Every problem of one run is listed together, each naming the index, the field pa
   - each `via` hop's `table` and `foreign_key`;
   - both sides of every `on:` pair: `local` on the table before the hop, `related` on the hop's table;
   - the columns of the value and null-check `filters` on the relation, its junction, and each hop (a `raw` filter is passed to the database unread, so it isn't checked);
-  - every `order_by` column, and a join's `primary_key` (a warning: relations are keyed by the table's own primary key, so a name that misses is ignored).
+  - every `order_by` column, and a join's `primary_key` (a warning: relations are keyed by the table's own primary key, so a name that misses is ignored);
+  - that the related table, and each hop's, has a single-column primary key.
 
   A missing table is reported once, and nothing on it is looked up.
-- **Root keys, on the root table.** The columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
+- **Root keys, on the root table.** That the table has a single-column primary key, reported under `table`; that the declared `primary_key` column exists and is that key, reported under `primary_key`, whether or not a field reads it; the columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
 
 Everything above is an error except the two warnings, `required` over a nullable column and a join `primary_key` that names no column. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the one problem that needs no database: a `soft_delete` `field` that reads no column.
 
@@ -98,7 +103,21 @@ Everything above is an error except the two warnings, `required` over a nullable
 | `--manage-replica-identity <bool>` | config, else `true` | Affects the replica-identity report's phrasing only. |
 | `--format <human\|json>` | `human` | `json` prints one machine-readable document. |
 
-Exit status is non-zero when validation fails or any diagnostic is an error. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`: each has `index`, `field`, `path`, `severity` (`error`/`warning`), `kind`, and `message`. `kind` is one of `unknown_table`, `unknown_column`, `unread_soft_delete_marker` (the three that stop `run`), `type_mismatch`, `not_numeric`, `nullability`, `ignored_primary_key`.
+Exit status is non-zero when validation fails or any diagnostic is an error. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`: each has `index`, `field`, `path`, `anchor`, `severity` (`error`/`warning`), `kind`, and `message`. `anchor` says what `path` names: `field`, a field's path from the document root, or `index_key`, one of the index-level keys `table`, `primary_key`, `filters`, `soft_delete` (a root field may have the same name). `kind` is one of:
+
+| `kind` | Found | Severity | Stops `run` |
+| --- | --- | --- | --- |
+| `unknown_table` | A table that doesn't exist. | error | yes |
+| `unknown_column` | A column the document query reads that doesn't exist. | error | yes |
+| `unread_soft_delete_marker` | A `soft_delete` `field` that reads no column. | error | yes |
+| `relation_primary_key` | A relation table without a single-column primary key. | error | yes |
+| `transform_not_applicable` | `transforms` the column's type doesn't take. | error | yes |
+| `root_primary_key_mismatch` | A root `primary_key` other than the table's own single-column key. | error | yes |
+| `root_primary_key` | A root table with no primary key or a composite one (the message says which); on one, with no relation, a `primary_key` that names no column. | error | no |
+| `type_mismatch` | A declared type that doesn't accept the column's type. | error | no |
+| `not_numeric` | An expression or geo column that isn't numeric. | error | no |
+| `nullability` | `required` over a nullable column. | warning | no |
+| `ignored_primary_key` | A join `primary_key` that names no column. | warning | no |
 
 ## design
 

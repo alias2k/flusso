@@ -70,7 +70,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use kernel::{
-    ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete, TableName,
+    ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
+    TableName, Transform,
 };
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{
@@ -494,7 +495,53 @@ impl Catalog for PgDocumentBuilder {
     async fn has_table(&self, schema: &DatabaseSchema, table: &TableName) -> Result<bool> {
         self.table_exists(schema, table).await
     }
+
+    async fn primary_key(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+    ) -> Result<Option<Vec<ColumnName>>> {
+        self.fetch_primary_key(schema, table).await.map(Some)
+    }
+
+    async fn accepts_transforms(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+        transforms: &[Transform],
+    ) -> Result<bool> {
+        let sql_type = self.column_type(schema, table, column).await?;
+        let probe = query::transform_probe(&sql_type, transforms);
+        match sqlx::query(probe).execute(&self.pool).await {
+            Ok(_) => Ok(true),
+            Err(sqlx::Error::Database(error))
+                if matches!(
+                    error.code().as_deref(),
+                    Some(UNDEFINED_FUNCTION | AMBIGUOUS_FUNCTION)
+                ) =>
+            {
+                Ok(false)
+            }
+            // The probe casts to the column's type, which needs USAGE on the
+            // type's schema; reading the column does not. Only "no such
+            // function" is a verdict, so any other refusal leaves it unknown.
+            Err(sqlx::Error::Database(error)) => {
+                tracing::warn!(
+                    %table, %column, sql_type, error = %error.message(),
+                    "could not check the column's transforms against its type; skipping the check"
+                );
+                Ok(true)
+            }
+            Err(error) => Err(query_err(error)),
+        }
+    }
 }
+
+/// SQLSTATE `42883`: no function takes the argument's type.
+const UNDEFINED_FUNCTION: &str = "42883";
+/// SQLSTATE `42725`: several functions could take it.
+const AMBIGUOUS_FUNCTION: &str = "42725";
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {

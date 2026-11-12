@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use kernel::{ColumnName, DatabaseSchema, GenericValue, IndexSchema, TableName};
+use kernel::{ColumnName, DatabaseSchema, GenericValue, IndexSchema, TableName, Transform};
 use source::{Result, SourceError};
 use sqlx::Postgres;
 use sqlx::postgres::PgArguments;
@@ -96,6 +96,17 @@ pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result
             ));
         }
     })
+}
+
+/// A query that applies `transforms` to a `NULL` of `sql_type` (a column's
+/// `format_type`) exactly as a document query applies them to the column.
+/// Postgres resolves the functions the same way, so it fails where a transform
+/// does not take the type. It reads no table, so it takes no lock.
+pub(super) fn transform_probe(sql_type: &str, transforms: &[Transform]) -> SqlString {
+    SqlString::new(format!(
+        "SELECT {}",
+        sql::transformed(format!("NULL::{sql_type}"), transforms)
+    ))
 }
 
 /// Build the single query that assembles one document, given its key. Returns

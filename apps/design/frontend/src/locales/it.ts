@@ -357,6 +357,10 @@ export const it: Record<string, string> = {
   "node.fields": "{n, plural, one {# campo} other {# campi}}",
   "node.diagCount":
     "{n, plural, one {# campo non concorda con il database} other {# campi non concordano con il database}}",
+  "node.keyDiagCount":
+    "{n, plural, one {# impostazione dell'indice non concorda con il database} other {# impostazioni dell'indice non concordano con il database}}",
+  "node.selfDiagCount":
+    "{n, plural, one {# segnalazione su questa relazione} other {# segnalazioni su questa relazione}}",
   "node.joinIncomplete": "A questa relazione manca una chiave obbligatoria — impostala nell'ispettore",
   "node.pickRoot": "Scegli una tabella radice per iniziare",
   "node.chooseTable": "scegli una tabella…",

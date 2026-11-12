@@ -823,8 +823,17 @@ pub struct ValidateResponse {
 pub struct DiagnosticDto {
     /// The index the disagreement is in.
     pub index: String,
-    /// The field involved.
+    /// The field involved: the last segment of `path`.
     pub field: String,
+    /// The field's path from the document root, or an index-level key alone
+    /// (`table`, `primary_key`, `filters`, `soft_delete`); see `anchor`.
+    pub path: Vec<String>,
+    /// `field` when `path` names a field, `index_key` when it names an
+    /// index-level key (a root field may share its name).
+    pub anchor: String,
+    /// What was found, e.g. `unknown_column` (absent on the designer's own
+    /// client-side checks).
+    pub kind: String,
     /// `error` or `warning`.
     pub severity: String,
     /// Human-readable explanation.
@@ -1090,6 +1099,9 @@ fn diagnostic_dto(diagnostic: Diagnostic) -> DiagnosticDto {
     DiagnosticDto {
         index: diagnostic.index.to_string(),
         field: diagnostic.field.to_string(),
+        path: diagnostic.path.iter().map(ToString::to_string).collect(),
+        anchor: diagnostic.anchor.as_str().to_owned(),
+        kind: diagnostic.kind.as_str().to_owned(),
         severity: match diagnostic.severity {
             Severity::Error => "error",
             Severity::Warning => "warning",

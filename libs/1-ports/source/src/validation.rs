@@ -22,18 +22,25 @@
 //! cannot; a type, numeric or nullability disagreement still builds. A join's
 //! `primary_key` that names no column is only a warning
 //! ([`DiagnosticKind::IgnoredPrimaryKey`]): relations are keyed by the table's
-//! own primary key.
+//! own primary key, which every relation table must have, on one column
+//! ([`DiagnosticKind::RelationPrimaryKey`]). A column field's `transforms` must
+//! apply to its column's type ([`DiagnosticKind::TransformNotApplicable`]).
 //!
-//! The root's own keys are checked on the root table: the columns its
-//! `filters` name, and the `soft_delete` marker — its `column` (or the column
-//! behind its `field`) and its `when` filters. A diagnostic on one of these is
-//! anchored at the key's name (`filters`, `soft_delete`) instead of a field.
+//! The root's own keys are checked on the root table: that it has a
+//! single-column primary key ([`DiagnosticKind::RootPrimaryKey`]), that the
+//! declared `primary_key` exists and is that key
+//! ([`DiagnosticKind::RootPrimaryKeyMismatch`]), the columns its `filters` name, and the `soft_delete` marker — its
+//! `column` (or the column behind its `field`) and its `when` filters. A
+//! diagnostic on one of these is anchored at the key's name (`table`,
+//! `primary_key`, `filters`, `soft_delete`) instead of a field, and its
+//! [`Anchor`] says so: a field may carry the same name.
 //! One check needs no database at all: a `soft_delete` `field` that names no
 //! column field, which [`validate_spec`] reports on its own (`flusso check
 //! --offline`) and [`validate_indexes`] reports with the rest.
 //!
 //! The one store-specific piece is the [`Catalog`] trait: how a store reports a
-//! table and a column. Everything else — the field walk, which table each name
+//! table and a column, and, when it can, a table's primary key and whether a
+//! column's type takes its `transforms`. Everything else — the field walk, which table each name
 //! lives on — is shared here.
 //!
 //! ```
@@ -66,7 +73,7 @@
 //! }
 //!
 //! let schema: IndexSchema = serde_json::from_value(serde_json::json!({
-//!     "version": 1, "table": "users", "db_schema": "public",
+//!     "version": 1, "table": "users", "db_schema": "public", "primary_key": "id",
 //!     "fields": [{ "field": "orderCount", "source": { "relation": { "aggregate": {
 //!         "table": "order", "op": "count", "key": { "direct": "user_id" },
 //!     } } } }],
@@ -88,6 +95,7 @@ use kernel::common::{ColumnName, FieldName, IndexName};
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnPair, DatabaseSchema, Field, FieldSource,
     Filter, FlussoType, Geo, IndexSchema, Join, JoinKind, Relation, SoftDelete, TableName, Through,
+    Transform,
 };
 
 use crate::spec::first_named;
@@ -119,6 +127,33 @@ pub trait Catalog: Send + Sync {
 
     /// Whether `table` exists in `schema`.
     async fn has_table(&self, schema: &DatabaseSchema, table: &TableName) -> Result<bool>;
+
+    /// The columns of `table`'s primary key, in key order: `Some(vec![])`
+    /// when it has none, `None` when the store can't say. Only asked of a
+    /// table that exists.
+    ///
+    /// The default is `None`: every primary-key check is skipped.
+    async fn primary_key(
+        &self,
+        _schema: &DatabaseSchema,
+        _table: &TableName,
+    ) -> Result<Option<Vec<ColumnName>>> {
+        Ok(None)
+    }
+
+    /// Whether `transforms`, applied in order, accept the type of `column` in
+    /// `table`. Only asked of a column that exists.
+    ///
+    /// The default is `true`: the check is skipped.
+    async fn accepts_transforms(
+        &self,
+        _schema: &DatabaseSchema,
+        _table: &TableName,
+        _column: &ColumnName,
+        _transforms: &[Transform],
+    ) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 /// How serious a [`Diagnostic`] is.
@@ -153,6 +188,23 @@ pub enum DiagnosticKind {
     /// A join's `primary_key` names no column. Nothing builds on it: the join
     /// is keyed by the table's own primary key.
     IgnoredPrimaryKey,
+    /// A relation table (a join's, an aggregate's or a `via` hop's) has no
+    /// single-column primary key: none, or a composite one. Every document
+    /// build of the index needs it, so every build fails.
+    RelationPrimaryKey,
+    /// A column field's `transforms` do not apply to the column's type (e.g.
+    /// `lowercase` over an `integer`): every document build fails.
+    TransformNotApplicable,
+    /// The index's root table has no single-column primary key: none, or a
+    /// composite one. The backfill skips the table; live changes are still
+    /// indexed. Also reported, instead of [`UnknownColumn`](Self::UnknownColumn),
+    /// for a declared `primary_key` that names no column on such a table.
+    RootPrimaryKey,
+    /// The declared `primary_key` names a column of the root table other than
+    /// its single-column primary key. Changes and the backfill carry the
+    /// table's own key while the build matches on the declared column, so no
+    /// document is ever written.
+    RootPrimaryKeyMismatch,
 }
 
 impl DiagnosticKind {
@@ -163,7 +215,11 @@ impl DiagnosticKind {
             | Self::UnknownColumn
             | Self::UnreadSoftDeleteMarker
             | Self::TypeMismatch
-            | Self::NotNumeric => Severity::Error,
+            | Self::NotNumeric
+            | Self::RelationPrimaryKey
+            | Self::TransformNotApplicable
+            | Self::RootPrimaryKey
+            | Self::RootPrimaryKeyMismatch => Severity::Error,
             Self::Nullability | Self::IgnoredPrimaryKey => Severity::Warning,
         }
     }
@@ -178,21 +234,50 @@ impl DiagnosticKind {
             Self::NotNumeric => "not_numeric",
             Self::Nullability => "nullability",
             Self::IgnoredPrimaryKey => "ignored_primary_key",
+            Self::RelationPrimaryKey => "relation_primary_key",
+            Self::TransformNotApplicable => "transform_not_applicable",
+            Self::RootPrimaryKey => "root_primary_key",
+            Self::RootPrimaryKeyMismatch => "root_primary_key_mismatch",
+        }
+    }
+}
+
+/// What a [`Diagnostic`]'s [`path`](Diagnostic::path) names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Anchor {
+    /// A field of the document, by its path from the root.
+    Field,
+    /// An index-level schema key (`table`, `primary_key`, `filters`,
+    /// `soft_delete`), alone. A root field may have the same name.
+    IndexKey,
+}
+
+impl Anchor {
+    /// The anchor as a stable `snake_case` token: `field` or `index_key`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Field => "field",
+            Self::IndexKey => "index_key",
         }
     }
 }
 
 /// One disagreement between a declared schema and the live database.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Diagnostic {
     /// The index whose schema disagrees.
     pub index: IndexName,
     /// The field the disagreement is on: the last segment of [`path`](Self::path).
     pub field: FieldName,
     /// The field's path from the document root, e.g. `orders`, `items`, `sku`.
-    /// A disagreement on an index-level key is anchored at that key alone:
-    /// `filters` or `soft_delete`.
+    /// A disagreement on an index-level key is anchored at that key alone
+    /// (`table`, `primary_key`, `filters` or `soft_delete`), and
+    /// [`anchor`](Self::anchor) is [`Anchor::IndexKey`].
     pub path: Vec<FieldName>,
+    /// Whether [`path`](Self::path) names a field or an index-level key.
+    pub anchor: Anchor,
     /// What was found.
     pub kind: DiagnosticKind,
     /// The kind's [`severity`](DiagnosticKind::severity).
@@ -201,6 +286,26 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// A diagnostic on a top-level `field` (or, with [`Anchor::IndexKey`], an
+    /// index-level key) of `index`; the severity follows from `kind`.
+    pub fn new(
+        index: IndexName,
+        field: FieldName,
+        anchor: Anchor,
+        kind: DiagnosticKind,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            index,
+            path: vec![field.clone()],
+            field,
+            anchor,
+            kind,
+            severity: kind.severity(),
+            message: message.into(),
+        }
+    }
+
     /// The field path joined with `.`, e.g. `orders.items.sku`.
     pub fn dotted_path(&self) -> String {
         self.path
@@ -222,7 +327,9 @@ pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Resul
             db_schema: &schema.db_schema,
             catalog,
             tables: HashMap::new(),
+            primary_keys: HashMap::new(),
             path: Vec::new(),
+            anchor: Anchor::Field,
             out: &mut diagnostics,
         };
         checker
@@ -246,23 +353,24 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
         let Some(key) = schema_key(SOFT_DELETE) else {
             continue;
         };
-        diagnostics.push(Diagnostic {
-            index: name.clone(),
-            field: key.clone(),
-            path: vec![key],
-            kind: DiagnosticKind::UnreadSoftDeleteMarker,
-            severity: DiagnosticKind::UnreadSoftDeleteMarker.severity(),
+        diagnostics.push(Diagnostic::new(
+            name.clone(),
+            key,
+            Anchor::IndexKey,
+            DiagnosticKind::UnreadSoftDeleteMarker,
             message,
-        });
+        ));
     }
     diagnostics
 }
 
+const TABLE: &str = "table";
+const PRIMARY_KEY: &str = "primary_key";
 const FILTERS: &str = "filters";
 const SOFT_DELETE: &str = "soft_delete";
 
-/// An index-level schema key as a diagnostic's anchor. Both keys are valid
-/// field names, so this is never `None`.
+/// An index-level schema key as a diagnostic's anchor. Every key is a valid
+/// field name, so this is never `None`.
 fn schema_key(key: &str) -> Option<FieldName> {
     FieldName::try_new(key).ok()
 }
@@ -291,7 +399,9 @@ struct Checker<'a> {
     db_schema: &'a DatabaseSchema,
     catalog: &'a dyn Catalog,
     tables: HashMap<TableName, bool>,
+    primary_keys: HashMap<TableName, Option<Vec<ColumnName>>>,
     path: Vec<FieldName>,
+    anchor: Anchor,
     out: &'a mut Vec<Diagnostic>,
 }
 
@@ -318,15 +428,27 @@ impl Checker<'_> {
             index: self.index.clone(),
             field: field.clone(),
             path: self.path.clone(),
+            anchor: self.anchor,
             kind,
             severity: kind.severity(),
             message,
         });
     }
 
-    /// The root's own keys, on the root table: the `filters` columns, then the
-    /// `soft_delete` marker's column and `when` columns.
+    /// The root's own keys, on the root table: its primary key and the
+    /// declared `primary_key` column, the `filters` columns, then the
+    /// `soft_delete` marker's column and `when` columns. A missing root table
+    /// is already reported on the fields.
     async fn root(&mut self, schema: &IndexSchema) -> Result<()> {
+        self.anchor = Anchor::IndexKey;
+        if self.has(&schema.table).await? {
+            self.root_key(
+                &schema.table,
+                schema.primary_key.as_ref(),
+                has_relation(&schema.fields),
+            )
+            .await?;
+        }
         if let Some(key) = schema_key(FILTERS) {
             self.path.push(key);
             self.filters(&schema.table, schema.filters.as_deref(), FILTERS)
@@ -362,6 +484,94 @@ impl Checker<'_> {
         self.filters(&schema.table, when, "when").await?;
         self.path.pop();
         Ok(())
+    }
+
+    /// The root table's own primary key, and the declared `primary_key`
+    /// against it. Changes and the backfill key a root row by the table's
+    /// primary key; the batched build matches it on the declared column.
+    ///
+    /// - A single-column key: the declared column must exist
+    ///   ([`DiagnosticKind::UnknownColumn`]) and be that key
+    ///   ([`DiagnosticKind::RootPrimaryKeyMismatch`]).
+    /// - None or a composite one: [`DiagnosticKind::RootPrimaryKey`] at
+    ///   `table`. A root change is then built by its whole key, so a declared
+    ///   column that doesn't exist is only read by a relation (which keys on
+    ///   the root, or traces a change back to it): with none, it is reported
+    ///   under the same kind; with one, as an unknown column.
+    /// - Unknown to the catalog: only the declared column's existence.
+    async fn root_key(
+        &mut self,
+        table: &TableName,
+        declared: Option<&ColumnName>,
+        related: bool,
+    ) -> Result<()> {
+        let key = self.primary_key(table).await?;
+        let single = match key.as_deref() {
+            Some([single]) => Some(single.clone()),
+            Some(columns) => {
+                let problem = match columns {
+                    [] => "has no primary key".to_owned(),
+                    composite => format!("has a composite primary key ({})", quoted(composite)),
+                };
+                self.at(TABLE, |checker| {
+                    checker.report(
+                        DiagnosticKind::RootPrimaryKey,
+                        format!(
+                            "`{}.{table}` {problem}: the backfill skips it; live changes are \
+                             still indexed",
+                            checker.db_schema
+                        ),
+                    );
+                });
+                None
+            }
+            None => None,
+        };
+        let Some(declared) = declared else {
+            return Ok(());
+        };
+        let Some(field) = schema_key(PRIMARY_KEY) else {
+            return Ok(());
+        };
+        self.path.push(field);
+        if key.is_some() && single.is_none() && !related {
+            match self.catalog.column(self.db_schema, table, declared).await {
+                Ok(_) => {}
+                Err(SourceError::UnknownColumn(what)) => self.report(
+                    DiagnosticKind::RootPrimaryKey,
+                    format!(
+                        "`primary_key` references unknown column `{what}`; a root change \
+                         built by its whole key does not read it"
+                    ),
+                ),
+                Err(e) => return Err(e),
+            }
+        } else if self
+            .column(table, declared, Some(PRIMARY_KEY))
+            .await?
+            .is_some()
+            && let Some(single) = single.filter(|single| single != declared)
+        {
+            self.report(
+                DiagnosticKind::RootPrimaryKeyMismatch,
+                format!(
+                    "`primary_key` is `{declared}`, but `{}.{table}` is keyed by `{single}`: \
+                     the backfill and every root change would match the wrong row or none",
+                    self.db_schema
+                ),
+            );
+        }
+        self.path.pop();
+        Ok(())
+    }
+
+    /// Run `check` with the path at the index-level `key`.
+    fn at(&mut self, key: &str, check: impl FnOnce(&mut Self)) {
+        if let Some(key) = schema_key(key) {
+            self.path.push(key);
+            check(self);
+            self.path.pop();
+        }
     }
 
     /// Validate a list of fields under `table`. Boxed because the recursion is
@@ -400,16 +610,51 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether `table` exists (cached).
+    async fn has(&mut self, table: &TableName) -> Result<bool> {
+        if let Some(exists) = self.tables.get(table) {
+            return Ok(*exists);
+        }
+        let exists = self.catalog.has_table(self.db_schema, table).await?;
+        self.tables.insert(table.clone(), exists);
+        Ok(exists)
+    }
+
+    /// The primary key of an existing `table` (cached); `None` when the
+    /// catalog can't say.
+    async fn primary_key(&mut self, table: &TableName) -> Result<Option<Vec<ColumnName>>> {
+        if let Some(columns) = self.primary_keys.get(table) {
+            return Ok(columns.clone());
+        }
+        let columns = self.catalog.primary_key(self.db_schema, table).await?;
+        self.primary_keys.insert(table.clone(), columns.clone());
+        Ok(columns)
+    }
+
+    /// A relation's existing `table`, named by `role`, must have a
+    /// single-column primary key: relations are joined and traced through it.
+    async fn relation_key(&mut self, table: &TableName, role: &str) -> Result<()> {
+        let Some(columns) = self.primary_key(table).await? else {
+            return Ok(());
+        };
+        let problem = match columns.as_slice() {
+            [_] => return Ok(()),
+            [] => "has no primary key".to_owned(),
+            composite => format!("has a composite primary key ({})", quoted(composite)),
+        };
+        self.report(
+            DiagnosticKind::RelationPrimaryKey,
+            format!(
+                "`{role}` `{}.{table}` {problem}; a relation table needs a single-column one",
+                self.db_schema
+            ),
+        );
+        Ok(())
+    }
+
     /// Whether `table` exists, reporting it under `role` when it doesn't.
     async fn table(&mut self, table: &TableName, role: &str) -> Result<bool> {
-        let exists = match self.tables.get(table) {
-            Some(exists) => *exists,
-            None => {
-                let exists = self.catalog.has_table(self.db_schema, table).await?;
-                self.tables.insert(table.clone(), exists);
-                exists
-            }
-        };
+        let exists = self.has(table).await?;
         if !exists {
             self.report(
                 DiagnosticKind::UnknownTable,
@@ -567,6 +812,7 @@ impl Checker<'_> {
         if !related {
             return Ok(());
         }
+        self.relation_key(&join.table, "table").await?;
         self.join_primary_key(&join.table, &join.primary_key)
             .await?;
         self.filters(&join.table, join.filters.as_deref(), "filters")
@@ -586,6 +832,7 @@ impl Checker<'_> {
             let exists = self.table(&hop.table, "via.table").await?;
             let here = exists.then_some(&hop.table);
             if let Some(table) = here {
+                self.relation_key(table, "via.table").await?;
                 self.exists(table, &hop.foreign_key, "via.foreign_key")
                     .await?;
             }
@@ -597,6 +844,9 @@ impl Checker<'_> {
             before = here;
         }
         let related = self.table(&aggregate.table, "table").await?;
+        if related {
+            self.relation_key(&aggregate.table, "table").await?;
+        }
         match &aggregate.key {
             AggregateKey::Direct(foreign_key) => {
                 if related {
@@ -705,6 +955,27 @@ impl Checker<'_> {
             );
         }
 
+        if !column.transforms.is_empty()
+            && !self
+                .catalog
+                .accepts_transforms(self.db_schema, table, &column.column, &column.transforms)
+                .await?
+        {
+            let names = column
+                .transforms
+                .iter()
+                .map(|transform| format!("`{}`", transform_name(*transform)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.report(
+                DiagnosticKind::TransformNotApplicable,
+                format!(
+                    "`transforms` {names} do not apply to the column's database type `{}`",
+                    info.sql_type
+                ),
+            );
+        }
+
         // A primary key or a `default` makes the field non-null regardless, so only
         // a plain non-null declaration over a nullable column is worth flagging.
         let forced_non_null = primary_key == Some(&column.column) || column.default.is_some();
@@ -715,6 +986,35 @@ impl Checker<'_> {
             );
         }
         Ok(())
+    }
+}
+
+/// Whether any field, at any depth, is a relation.
+fn has_relation(fields: &[Field]) -> bool {
+    fields.iter().any(|field| match &field.source {
+        FieldSource::Relation(_) => true,
+        FieldSource::Group(nested) => has_relation(nested),
+        FieldSource::Column(_)
+        | FieldSource::Geo(_)
+        | FieldSource::Constant(_)
+        | FieldSource::Script(_) => false,
+    })
+}
+
+/// Columns as `` `a`, `b` ``.
+fn quoted(columns: &[ColumnName]) -> String {
+    columns
+        .iter()
+        .map(|column| format!("`{column}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A transform as the schema spells it.
+fn transform_name(transform: Transform) -> &'static str {
+    match transform {
+        Transform::Lowercase => "lowercase",
+        Transform::Trim => "trim",
     }
 }
 
@@ -961,7 +1261,10 @@ mod tests {
 
     /// `users(id, name, team_id)`, `teams(id, name)`, `orders(id, user_id,
     /// status, region)`, `items(id, order_id, qty, region)`, `tags(id, label)`,
-    /// `user_tags(user_id, tag_id, kind)`; every column an `integer`.
+    /// `user_tags(user_id, tag_id, kind)`, `notes(user_id, body)`, `pairs(a, b,
+    /// user_id)`; every column an `integer`. Each table's key is `id`, except the
+    /// junction `user_tags` and `notes` (none) and `pairs` (`a`, `b`). Only a
+    /// `name` column takes `transforms`.
     struct Shop;
 
     const SHOP: &[(&str, &[&str])] = &[
@@ -971,6 +1274,8 @@ mod tests {
         ("items", &["id", "order_id", "qty", "region"]),
         ("tags", &["id", "label"]),
         ("user_tags", &["user_id", "tag_id", "kind"]),
+        ("notes", &["user_id", "body"]),
+        ("pairs", &["a", "b", "user_id"]),
     ];
 
     #[async_trait]
@@ -997,6 +1302,33 @@ mod tests {
 
         async fn has_table(&self, _: &DatabaseSchema, table: &TableName) -> Result<bool> {
             Ok(SHOP.iter().any(|(name, _)| *name == table.as_ref()))
+        }
+
+        async fn primary_key(
+            &self,
+            _: &DatabaseSchema,
+            table: &TableName,
+        ) -> Result<Option<Vec<ColumnName>>> {
+            let key: &[&str] = match table.as_ref() {
+                "user_tags" | "notes" => &[],
+                "pairs" => &["a", "b"],
+                _ => &["id"],
+            };
+            Ok(Some(
+                key.iter()
+                    .map(|c| ColumnName::try_new(*c).unwrap())
+                    .collect(),
+            ))
+        }
+
+        async fn accepts_transforms(
+            &self,
+            _: &DatabaseSchema,
+            _: &TableName,
+            column: &ColumnName,
+            _: &[Transform],
+        ) -> Result<bool> {
+            Ok(column.as_ref() == "name")
         }
     }
 
@@ -1048,7 +1380,11 @@ mod tests {
             .map(|d| {
                 assert_eq!(d.severity, d.kind.severity());
                 assert_eq!(d.path.last(), Some(&d.field));
-                (d.dotted_path(), d.kind, d.message)
+                let at = match d.anchor {
+                    Anchor::Field => d.dotted_path(),
+                    Anchor::IndexKey => format!("@{}", d.dotted_path()),
+                };
+                (at, d.kind, d.message)
             })
             .collect()
     }
@@ -1312,12 +1648,12 @@ mod tests {
             })),
             problems(&[
                 (
-                    "filters",
+                    "@filters",
                     DiagnosticKind::UnknownColumn,
                     "`filters` references unknown column `public.users.nme`"
                 ),
                 (
-                    "filters",
+                    "@filters",
                     DiagnosticKind::UnknownColumn,
                     "`filters` references unknown column `public.users.team`"
                 ),
@@ -1338,17 +1674,17 @@ mod tests {
             } } })),
             problems(&[
                 (
-                    "soft_delete",
+                    "@soft_delete",
                     DiagnosticKind::UnknownColumn,
                     "`column` references unknown column `public.users.deleted_at`"
                 ),
                 (
-                    "soft_delete",
+                    "@soft_delete",
                     DiagnosticKind::UnknownColumn,
                     "`when` references unknown column `public.users.stat`"
                 ),
                 (
-                    "soft_delete",
+                    "@soft_delete",
                     DiagnosticKind::UnknownColumn,
                     "`when` references unknown column `public.users.team`"
                 ),
@@ -1370,12 +1706,12 @@ mod tests {
             } } })),
             problems(&[
                 (
-                    "soft_delete",
+                    "@soft_delete",
                     DiagnosticKind::UnreadSoftDeleteMarker,
                     "`field` names `deleted`, but no field has that name"
                 ),
                 (
-                    "soft_delete",
+                    "@soft_delete",
                     DiagnosticKind::UnknownColumn,
                     "`when` references unknown column `public.users.nme`"
                 ),
@@ -1407,7 +1743,7 @@ mod tests {
                     "references unknown column `public.users.team`"
                 ),
                 (
-                    "soft_delete",
+                    "@soft_delete",
                     DiagnosticKind::UnreadSoftDeleteMarker,
                     "`field` names `team`, but the first field of that name is not a column"
                 ),
@@ -1431,7 +1767,7 @@ mod tests {
                 "soft_delete": { "field": { "field": "status" } },
             })),
             problems(&[(
-                "soft_delete",
+                "@soft_delete",
                 DiagnosticKind::UnknownColumn,
                 "`field` references unknown column `public.users.status`"
             )]),
@@ -1456,7 +1792,7 @@ mod tests {
                 "soft_delete": { "field": { "field": "deleted" } },
             })))),
             problems(&[(
-                "soft_delete",
+                "@soft_delete",
                 DiagnosticKind::UnreadSoftDeleteMarker,
                 "`field` names `deleted`, but no field has that name"
             )]),
@@ -1489,6 +1825,282 @@ mod tests {
         assert_eq!(
             diagnostics[0].message,
             "references unknown table `public.user`"
+        );
+    }
+
+    #[test]
+    fn the_declared_root_primary_key_must_exist_even_when_no_field_reads_it() {
+        assert_eq!(
+            root_problems(json!({ "primary_key": "uid" })),
+            problems(&[(
+                "@primary_key",
+                DiagnosticKind::UnknownColumn,
+                "`primary_key` references unknown column `public.users.uid`"
+            )]),
+        );
+    }
+
+    /// `(path, kind, message)` for an index over `table`, reading `user_id`,
+    /// with `primary_key` declared.
+    fn root_key_problems(table: &str, primary_key: Option<&str>) -> Vec<Found> {
+        let mut schema = json!({
+            "version": 1, "table": table, "db_schema": "public",
+            "fields": [int_field("user_id")],
+        });
+        if let Some(primary_key) = primary_key {
+            schema["primary_key"] = json!(primary_key);
+        }
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new(table).unwrap(),
+            serde_json::from_value(schema).unwrap(),
+        )]));
+        located(futures::executor::block_on(validate_indexes(&spec, &Shop)).unwrap())
+    }
+
+    #[test]
+    fn a_root_table_without_a_single_column_primary_key_is_reported_at_table() {
+        assert_eq!(
+            root_key_problems("notes", None),
+            problems(&[(
+                "@table",
+                DiagnosticKind::RootPrimaryKey,
+                "`public.notes` has no primary key: the backfill skips it; live changes are \
+                 still indexed"
+            )]),
+        );
+        assert_eq!(
+            root_key_problems("pairs", Some("a")),
+            problems(&[(
+                "@table",
+                DiagnosticKind::RootPrimaryKey,
+                "`public.pairs` has a composite primary key (`a`, `b`): the backfill skips it; \
+                 live changes are still indexed"
+            )]),
+        );
+    }
+
+    /// A root change on a table without a single-column key is built by its
+    /// whole key, so a declared `primary_key` naming no column is only read
+    /// by a relation: with none it is the same kind, which starts; with one
+    /// it is an unknown column, which doesn't.
+    #[test]
+    fn a_missing_declared_key_on_a_root_without_a_single_column_key_stops_only_with_a_relation() {
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new("notes").unwrap(),
+            serde_json::from_value(json!({
+                "version": 1, "table": "notes", "db_schema": "public", "primary_key": "id",
+                "fields": [{ "field": "meta", "source": { "group": [
+                    { "field": "user", "source": { "relation": { "join": {
+                        "table": "users", "kind": { "belongs_to": { "column": "user_id" } },
+                        "primary_key": "id", "fields": [],
+                    } } } },
+                ] } }],
+            }))
+            .unwrap(),
+        )]));
+        assert_eq!(
+            located(futures::executor::block_on(validate_indexes(&spec, &Shop)).unwrap()),
+            problems(&[
+                (
+                    "@table",
+                    DiagnosticKind::RootPrimaryKey,
+                    "`public.notes` has no primary key: the backfill skips it; live changes \
+                     are still indexed"
+                ),
+                (
+                    "@primary_key",
+                    DiagnosticKind::UnknownColumn,
+                    "`primary_key` references unknown column `public.notes.id`"
+                ),
+            ]),
+        );
+        assert_eq!(
+            root_key_problems("notes", Some("id")),
+            problems(&[
+                (
+                    "@table",
+                    DiagnosticKind::RootPrimaryKey,
+                    "`public.notes` has no primary key: the backfill skips it; live changes \
+                     are still indexed"
+                ),
+                (
+                    "@primary_key",
+                    DiagnosticKind::RootPrimaryKey,
+                    "`primary_key` references unknown column `public.notes.id`; a root change \
+                     built by its whole key does not read it"
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn a_declared_key_other_than_the_tables_own_is_a_mismatch() {
+        assert_eq!(
+            root_problems(json!({ "primary_key": "team_id" })),
+            problems(&[(
+                "@primary_key",
+                DiagnosticKind::RootPrimaryKeyMismatch,
+                "`primary_key` is `team_id`, but `public.users` is keyed by `id`: the backfill \
+                 and every root change would match the wrong row or none"
+            )]),
+        );
+    }
+
+    /// A catalog that can't tell a primary key (the trait's default) skips
+    /// every primary-key check but the declared column's existence.
+    #[test]
+    fn an_unknown_primary_key_skips_the_key_checks() {
+        struct Plain;
+
+        #[async_trait]
+        impl Catalog for Plain {
+            async fn column(
+                &self,
+                schema: &DatabaseSchema,
+                table: &TableName,
+                column: &ColumnName,
+            ) -> Result<ColumnInfo> {
+                Shop.column(schema, table, column).await
+            }
+
+            async fn has_table(&self, schema: &DatabaseSchema, table: &TableName) -> Result<bool> {
+                Shop.has_table(schema, table).await
+            }
+        }
+
+        let spec = users_spec(json!({
+            "primary_key": "uid",
+            "fields": [{ "field": "notes", "source": { "relation": { "join": {
+                "table": "notes", "kind": { "has_many": { "foreign_key": "user_id" } },
+                "primary_key": "user_id", "fields": [],
+            } } } }],
+        }));
+        assert_eq!(
+            located(futures::executor::block_on(validate_indexes(&spec, &Plain)).unwrap()),
+            problems(&[(
+                "@primary_key",
+                DiagnosticKind::UnknownColumn,
+                "`primary_key` references unknown column `public.users.uid`"
+            )]),
+        );
+    }
+
+    /// Every table a relation joins or hops through needs a single-column
+    /// primary key; a junction does not.
+    #[test]
+    fn a_relation_table_needs_a_single_column_primary_key() {
+        let has_many = |name: &str, table: &str| {
+            json!({ "field": name, "source": { "relation": { "join": {
+                "table": table, "kind": { "has_many": { "foreign_key": "user_id" } },
+                "primary_key": "id", "fields": [],
+            } } } })
+        };
+        let found = shop_problems(json!([
+            has_many("notes", "notes"),
+            has_many("pairs", "pairs"),
+            { "field": "noteItems", "source": { "relation": { "aggregate": {
+                "table": "items", "op": "count", "key": { "direct": "order_id" },
+                "via": [{ "table": "notes", "foreign_key": "user_id" }],
+            } } } },
+            { "field": "noteCount", "source": { "relation": { "aggregate": {
+                "table": "notes", "op": "count", "key": { "direct": "user_id" },
+            } } } },
+            { "field": "tags", "source": { "relation": { "join": {
+                "table": "tags", "primary_key": "id",
+                "kind": { "many_to_many": { "through": {
+                    "table": "user_tags", "left_key": "user_id", "right_key": "tag_id",
+                } } },
+                "fields": [],
+            } } } },
+        ]));
+        assert_eq!(
+            found,
+            problems(&[
+                (
+                    "notes",
+                    DiagnosticKind::RelationPrimaryKey,
+                    "`table` `public.notes` has no primary key; a relation table needs a \
+                     single-column one"
+                ),
+                (
+                    "notes",
+                    DiagnosticKind::IgnoredPrimaryKey,
+                    "`primary_key` references unknown column `public.notes.id`; ignored: the \
+                     join is keyed by the table's own primary key"
+                ),
+                (
+                    "pairs",
+                    DiagnosticKind::RelationPrimaryKey,
+                    "`table` `public.pairs` has a composite primary key (`a`, `b`); a relation \
+                     table needs a single-column one"
+                ),
+                (
+                    "pairs",
+                    DiagnosticKind::IgnoredPrimaryKey,
+                    "`primary_key` references unknown column `public.pairs.id`; ignored: the \
+                     join is keyed by the table's own primary key"
+                ),
+                (
+                    "noteItems",
+                    DiagnosticKind::RelationPrimaryKey,
+                    "`via.table` `public.notes` has no primary key; a relation table needs a \
+                     single-column one"
+                ),
+                (
+                    "noteCount",
+                    DiagnosticKind::RelationPrimaryKey,
+                    "`table` `public.notes` has no primary key; a relation table needs a \
+                     single-column one"
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn transforms_must_apply_to_the_column_type() {
+        let lowered = |name: &str, transforms: serde_json::Value| {
+            json!({ "field": name, "source": { "column": {
+                "column": name, "ty": "integer", "nullable": true, "transforms": transforms,
+            } } })
+        };
+        assert_eq!(
+            shop_problems(json!([
+                lowered("name", json!(["lowercase", "trim"])),
+                lowered("team_id", json!(["lowercase", "trim"])),
+            ])),
+            problems(&[(
+                "team_id",
+                DiagnosticKind::TransformNotApplicable,
+                "`transforms` `lowercase`, `trim` do not apply to the column's database type \
+                 `integer`"
+            )]),
+        );
+    }
+
+    /// The designer tells a root field named like an index-level key from the
+    /// key by the anchor.
+    #[test]
+    fn a_field_named_like_an_index_key_has_its_own_anchor() {
+        let field = json!({ "field": "filters", "source": { "column": {
+            "column": "nme", "ty": "integer", "nullable": true,
+        } } });
+        assert_eq!(
+            root_problems(json!({
+                "fields": [int_field("id"), field],
+                "filters": [value_filter("nme")],
+            })),
+            problems(&[
+                (
+                    "filters",
+                    DiagnosticKind::UnknownColumn,
+                    "references unknown column `public.users.nme`"
+                ),
+                (
+                    "@filters",
+                    DiagnosticKind::UnknownColumn,
+                    "`filters` references unknown column `public.users.nme`"
+                ),
+            ]),
         );
     }
 }

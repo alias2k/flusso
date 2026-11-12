@@ -1,12 +1,12 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useRef, useState, type ReactNode } from "react";
 import { ChevronDownIcon } from "lucide-react";
-import { SCALAR_TYPES, type ColumnShape, type FlussoType } from "../api";
+import { SCALAR_TYPES, type ColumnShape, type DiagnosticDto, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
 import { aggregateIncomplete, joinIncomplete } from "../model/complete";
 import * as edit from "../model/edit";
 import { suggestRelations, type RelationSuggestion } from "../model/relations";
-import { fieldAtPath, nodeFields, type DocNode, type LeafField } from "../model/tree";
+import { fieldAtPath, namePath, nodeFields, type DocNode, type LeafField } from "../model/tree";
 import { useT } from "../i18n";
 import { useDesign } from "../state";
 import { errorsFor, scriptIncomplete, scriptPath } from "../model/scripts";
@@ -63,9 +63,17 @@ export function DocNodeView({ data, selected }: NodeProps) {
     apply((s) => edit.setRootMeta(s, { table: t, primary_key: pk }));
   };
 
-  // Diagnostics are reported by field name (no path), so match by name. Build a
-  // lookup once; a node shows a count badge, a row shows its message on hover.
-  const diagByField = new Map(diagnostics.map((d) => [d.field, d]));
+  // Field diagnostics carry their path from the root, so a row matches only its
+  // own field, not a namesake at another depth or an index-level key (`filters`,
+  // `soft_delete`, …), which the root node counts on its own badge. A join is a
+  // node, not a row, so a finding on the join itself goes on its header. A node
+  // shows a count badge, a row shows its message on hover.
+  const here = namePath(schema, node.path);
+  const fieldUnder = (d: DiagnosticDto, depth: number) =>
+    d.anchor === "field" && d.path.length === depth && here.every((n, i) => d.path[i] === n);
+  const diagByField = new Map(diagnostics.filter((d) => fieldUnder(d, here.length + 1)).map((d) => [d.field, d]));
+  const keyIssues = node.path.length === 0 ? diagnostics.filter((d) => d.anchor === "index_key") : [];
+  const selfIssues = node.path.length > 0 ? diagnostics.filter((d) => fieldUnder(d, here.length)) : [];
   const preview = useDesignStore((st) => st.preview);
   const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
   const selfIncomplete = joinIncomplete(fieldAtPath(schema, node.path));
@@ -193,6 +201,25 @@ export function DocNodeView({ data, selected }: NodeProps) {
         {nodeIssues > 0 && (
           <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
             {nodeIssues}
+          </span>
+        )}
+        {selfIssues.length > 0 && (
+          <span
+            className={cn("issue-badge", selfIssues.every((d) => d.severity === "warning") && "warn")}
+            title={[t("node.selfDiagCount", { n: selfIssues.length }), ...selfIssues.map((d) => d.message)].join("\n")}
+          >
+            {selfIssues.length}
+          </span>
+        )}
+        {keyIssues.length > 0 && (
+          <span
+            className={cn("issue-badge", keyIssues.every((d) => d.severity === "warning") && "warn")}
+            title={[
+              t("node.keyDiagCount", { n: keyIssues.length }),
+              ...keyIssues.map((d) => `${d.field}: ${d.message}`),
+            ].join("\n")}
+          >
+            {keyIssues.length}
           </span>
         )}
         {selfIncomplete && (

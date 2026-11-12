@@ -633,17 +633,28 @@ predicate uses too) are the one derivation of "which columns a path reads" — f
 index "all" (raw SQL is pasted into a correlated subquery and can read `root.…`, a junction, an
 enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_that_column`). A third source-neutral capability is
 `SchemaIntrospection` (`libs/1-ports/source/src/introspection.rs`): where `Catalog` answers
-"the type of *this* column" (and "does *this* table exist": `validate_indexes` walks every
+"the type of *this* column" (plus "what is *this* table's primary key" and "do *these*
+`transforms` take *this* column", two methods whose defaults mean "unknown, skip the check";
+Postgres answers the second with a table-free `SELECT lower(NULL::<format_type>)`, so validation
+takes no lock — issue #225; and "does *this* table exist": `validate_indexes` walks every
 relation at any depth and looks up its table, key, junction keys, `via` hops, both sides of each
 `on:` pair, value/null-check filter columns, `order_by` and a join's `primary_key` on the table
 each lives on — issue #202; a missing table is a `SourceError::UnknownTable` diagnostic, reported
 once per relation; `Diagnostic.path` is the field path; and on the root table the root `filters`
-and the `soft_delete` marker's column, `when` and `field` (issue #211; anchored at the key name,
-`filters`/`soft_delete`; a `field` that reads no column — `source::soft_delete_column` is `None`,
+and the `soft_delete` marker's column, `when` and `field` (issue #211), and the root key (issue #225:
+the table's single-column catalog key, `RootPrimaryKey` when none or composite; the declared
+`primary_key` must exist and be that key, `RootPrimaryKeyMismatch` otherwise, since the batched
+build matches the table's key on the declared column and writes only tombstones — `wal`'s
+`a_root_primary_key_other_than_the_tables_writes_no_document`; on a root without a single-column
+key a missing declared column is `UnknownColumn` only when a relation reads it, else
+`RootPrimaryKey`; anchored at the key name,
+`table`/`primary_key`/`filters`/`soft_delete`, with `Diagnostic.anchor` = `Anchor::IndexKey` so the
+designer tells a key from a same-named field; every relation table also needs a single-column
+primary key; a `field` that reads no column — `source::soft_delete_column` is `None`,
 which the document query silently skips — is an error that `validate_spec` reports with no
 database, so `check --offline` shows it; guards: the `validation::tests` mock-catalog
 cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position` /
-`validation_reports_a_typo_in_every_root_position`). Every `Diagnostic` carries a
+`validation_reports_a_typo_in_every_root_position`, `validation_reports_what_no_document_build_gets_past`). Every `Diagnostic` carries a
 `DiagnosticKind`, which fixes its `Severity`; a join `primary_key` naming no column is the
 `IgnoredPrimaryKey` warning, since relations key on the catalog primary key) and `CaptureProvisioning` answers "is this table set coverable",
 `introspect` *enumerates* the whole relational catalog (`RelationalCatalog` — every table's
@@ -655,9 +666,12 @@ junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual 
 inside `Backends::source`, before anything is staged (`--locked` included; an unreachable database
 still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer,
 and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
-`DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker` stop;
-type, numeric, nullability and ignored-primary-key findings print and start, as they built in
-0.16), so a new kind forces a decision there. `check` still fails on every `Error`. No opt-out
+`DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
+`RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch` stop; type, numeric,
+nullability, ignored-primary-key and `RootPrimaryKey` findings print and start, as they built or ran
+in 0.17), so a new kind forces a decision there; stop only on a state no working 0.17 deployment can
+be in. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
+`#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
 flag. Guards: `backends::tests` (one per kind) and `config_coverage`'s
 `an_enum_or_domain_column_is_a_type_mismatch_that_still_builds`. The daemon
 wires a `StatusObserver` (`observer.rs`) that updates a shared per-sink `Status` (`status.rs`),

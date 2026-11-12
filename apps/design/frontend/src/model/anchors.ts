@@ -4,7 +4,7 @@
 // string searching, so a duplicate name in another block can't mislead the
 // squiggle.
 
-import { isMap, isScalar, visit, type Document, type YAMLMap } from "yaml";
+import { isMap, isScalar, isSeq, visit, type Document, type YAMLMap } from "yaml";
 import { SCALAR_TYPES } from "../api";
 
 export interface Span {
@@ -67,6 +67,43 @@ export function anchorField(doc: Document, name: string, tag?: string): { span: 
     },
   });
   return found;
+}
+
+/// The field at `path` (names from the document root, as a validation
+/// diagnostic carries it): its value node's span, descending each level's
+/// `fields` list. Falls back to the first field named like the last segment.
+export function anchorFieldPath(doc: Document, path: string[]): Span | null {
+  let map: unknown = doc.contents;
+  let span: Span | null = null;
+  for (const name of path) {
+    const fields = isMap(map) ? map.get("fields", true) : null;
+    const items: unknown[] = isSeq(fields) ? fields.items : [];
+    const item = items.find(
+      (it) =>
+        isMap(it) &&
+        it.items.some(
+          (p) =>
+            isScalar(p.key) &&
+            FIELD_TAGS.has(String(p.key.value)) &&
+            isScalar(p.value) &&
+            String(p.value.value) === name,
+        ),
+    );
+    if (!isMap(item)) {
+      const last = path[path.length - 1];
+      return last === undefined ? null : (anchorField(doc, last)?.span ?? null);
+    }
+    const pair = item.items.find((p) => isScalar(p.key) && FIELD_TAGS.has(String(p.key.value)));
+    span = spanOf(pair?.value);
+    map = item;
+  }
+  return span;
+}
+
+/// The index-level key `key` (`table`, `primary_key`, `filters`, `soft_delete`)
+/// at the document's top level.
+export function anchorRootKey(doc: Document, key: string): Span | null {
+  return isMap(doc.contents) ? anchorKeyIn(doc.contents, key) : null;
 }
 
 /// The first of `map`'s direct values whose scalar text equals `text` — the

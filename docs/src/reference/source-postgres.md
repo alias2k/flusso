@@ -148,8 +148,8 @@ A table without a primary key is keyed by its replica identity's columns. Under 
 | Position | Works? |
 | --- | --- |
 | `many_to_many` junction, aggregate `through` junction | Yes. The parent comes from the row's own `left_key`, so an insert, an update (a null `note` included), a re-parent (both parents), and a delete each rebuild the right documents. A row whose `left_key` is null links no parent. |
-| `has_one` / `has_many` target, direct aggregate, `via` table, `belongs_to` target, `many_to_many` far table | No. Every document build needs the table's primary key and fails with `has no primary key`, at backfill or at the first change that reaches the index. `flusso check` doesn't report it yet. |
-| Index root | No. Backfill skips the table with a warning, live documents are keyed by the whole row, so an update moves a document to a new id, and a row with a null column addresses no document (warned once per table). |
+| `has_one` / `has_many` target, direct aggregate, `via` table, `belongs_to` target, `many_to_many` far table | No. Every document build needs the table's primary key and fails with `has no primary key`, at backfill or at the first change that reaches the index. `flusso check` reports it as `relation_primary_key`; see [Validation at start](cli.md#validation-at-start) for `run`. |
+| Index root | No. Backfill skips the table with a warning, live documents are keyed by the whole row, so an update moves a document to a new id, and a row with a null column addresses no document (warned once per table). A composite primary key is skipped by the backfill too. `flusso check` reports both as `root_primary_key`; see [Validation at start](cli.md#validation-at-start) for `run`. |
 
 The fix in each case is the same: give the table a primary key.
 

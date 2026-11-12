@@ -33,17 +33,21 @@ pub(super) fn column_value(
     default: Option<&GenericValue>,
     alias: &str,
 ) -> String {
-    let mut expr = qcol(alias, column);
-    for transform in transforms {
-        expr = match transform {
-            Transform::Lowercase => format!("lower({expr})"),
-            Transform::Trim => format!("trim({expr})"),
-        };
-    }
+    let mut expr = transformed(qcol(alias, column), transforms);
     if let Some(literal) = default.and_then(scalar_literal) {
         expr = format!("coalesce({expr}, {literal})");
     }
     expr
+}
+
+/// `expr` wrapped by `transforms`, in order.
+pub(super) fn transformed(expr: String, transforms: &[Transform]) -> String {
+    transforms
+        .iter()
+        .fold(expr, |expr, transform| match transform {
+            Transform::Lowercase => format!("lower({expr})"),
+            Transform::Trim => format!("trim({expr})"),
+        })
 }
 
 /// A `geo_point` value: `{ "lat": …, "lon": … }`, or SQL `NULL` when either

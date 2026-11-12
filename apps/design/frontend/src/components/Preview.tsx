@@ -175,7 +175,7 @@ export function Preview({
                     )}
                   >
                     <span className="font-mono text-muted-foreground">
-                      {d.index}.{d.field}
+                      {d.index}.{d.path.join(".")}
                     </span>{" "}
                     {d.message}
                   </div>
