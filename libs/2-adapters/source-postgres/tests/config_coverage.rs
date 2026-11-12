@@ -1568,12 +1568,19 @@ async fn an_enum_or_domain_column_is_a_type_mismatch_that_still_builds() {
     assert_eq!(str_of(&body, "contact"), "ada@example.com");
 }
 
-/// The four configurations `validate_indexes` reports that no document build
-/// gets past (issue #225): a declared root `primary_key` no column carries, a
-/// relation table without a single-column primary key, `transforms` the
-/// column's type does not take, and a root table without a primary key. Each
-/// of the first three fails the build it is reported for. A domain over `text`
-/// takes `lowercase`; an enum does not.
+/// What `validate_indexes` reports that a document build can't get past
+/// (issue #225), each against what the build really does:
+///
+/// - a declared root `primary_key` naming no column on a table keyed by one
+///   column, or naming a column other than that key;
+/// - a relation table without a single-column primary key;
+/// - `transforms` the column's type doesn't take. Postgres decides, so every
+///   type that takes `lower`/`trim` through an implicit cast or its own
+///   function passes, and a chain fails on its first refused step;
+/// - a root table without a single-column primary key: reported, the build
+///   runs. On one, a declared `primary_key` naming no column breaks only a
+///   relation: a `has_many` fails the root's build, a `belongs_to` fails the
+///   change on its target, and with no relation the build runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn validation_reports_what_no_document_build_gets_past() {
@@ -1582,10 +1589,20 @@ async fn validation_reports_what_no_document_build_gets_past() {
     for statement in [
         "CREATE TABLE notes (user_id int, body text)",
         "INSERT INTO notes (user_id, body) VALUES (1, 'first')",
+        "CREATE EXTENSION citext",
         "CREATE TYPE mood AS ENUM ('calm', 'busy')",
         "CREATE DOMAIN email_address AS text",
+        "CREATE DOMAIN score AS int",
         "ALTER TABLE users ADD COLUMN mood mood DEFAULT 'calm', \
-         ADD COLUMN contact email_address DEFAULT 'ADA@example.com'",
+         ADD COLUMN contact email_address DEFAULT 'ADA@example.com', \
+         ADD COLUMN handle varchar(20) DEFAULT 'Ada', \
+         ADD COLUMN code char(4) DEFAULT 'AB', \
+         ADD COLUMN nick name DEFAULT 'Ada', \
+         ADD COLUMN login citext DEFAULT 'Ada', \
+         ADD COLUMN span int4range DEFAULT '[1,5)', \
+         ADD COLUMN aliases text[] DEFAULT '{a}', \
+         ADD COLUMN extra jsonb DEFAULT '{}', \
+         ADD COLUMN rank score DEFAULT 1",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -1601,11 +1618,12 @@ async fn validation_reports_what_no_document_build_gets_past() {
                     let at = match d.anchor {
                         Anchor::Field => d.dotted_path(),
                         Anchor::IndexKey => format!("@{}", d.dotted_path()),
+                        _ => unreachable!("a new anchor"),
                     };
                     (at, d.kind, d.message)
                 })
                 .collect::<Vec<_>>();
-            (found, documents.build(&doc(1)).await)
+            (found, documents.build_many(&[doc(1)]).await)
         }
     };
     let expected = |pairs: &[(&str, DiagnosticKind, &str)]| {
@@ -1614,10 +1632,13 @@ async fn validation_reports_what_no_document_build_gets_past() {
             .map(|(path, kind, message)| ((*path).to_owned(), *kind, (*message).to_owned()))
             .collect::<Vec<_>>()
     };
+    let upserted = |build: &source::Result<Vec<Document>>| {
+        matches!(build.as_deref(), Ok([Document::Upsert { .. }]))
+    };
 
     let mut unknown_key = users_schema(vec![col("name", "name")], None);
     unknown_key.primary_key = Some(column("user_id"));
-    let (diagnostics, _) = found(unknown_key).await;
+    let (diagnostics, build) = found(unknown_key).await;
     assert_eq!(
         diagnostics,
         expected(&[(
@@ -1625,6 +1646,24 @@ async fn validation_reports_what_no_document_build_gets_past() {
             DiagnosticKind::UnknownColumn,
             "`primary_key` references unknown column `public.users.user_id`"
         )]),
+    );
+    assert!(build.is_err(), "the batched build reads the declared key");
+
+    let mut other_key = users_schema(vec![col("name", "name")], None);
+    other_key.primary_key = Some(column("email"));
+    let (diagnostics, build) = found(other_key).await;
+    assert_eq!(
+        diagnostics,
+        expected(&[(
+            "@primary_key",
+            DiagnosticKind::RootPrimaryKeyMismatch,
+            "`primary_key` is `email`, but `public.users` is keyed by `id`: the backfill and \
+             every root change would write a tombstone"
+        )]),
+    );
+    assert!(
+        matches!(build.as_deref(), Ok([Document::Delete { .. }])),
+        "a live row keyed by `id` is matched on `email`: {build:?}"
     );
 
     let has_many = |name: &str, table_name: &str| {
@@ -1667,12 +1706,12 @@ async fn validation_reports_what_no_document_build_gets_past() {
         assert!(build.is_err(), "{name}: the build needs the key");
     }
 
-    let transformed = |name: &str, ty: FlussoType| Field {
+    let transformed = |name: &str, transforms: &[Transform]| Field {
         source: FieldSource::Column(Column {
             column: column(name),
-            ty,
+            ty: FlussoType::Keyword,
             nullable: true,
-            transforms: vec![Transform::Lowercase],
+            transforms: transforms.to_vec(),
             default: None,
             enum_order: Vec::new(),
             subfields: true,
@@ -1680,51 +1719,150 @@ async fn validation_reports_what_no_document_build_gets_past() {
         }),
         ..base(name)
     };
-    let (diagnostics, build) = found(users_schema(
-        vec![
-            transformed("email", FlussoType::Keyword),
-            transformed("contact", FlussoType::Keyword),
-        ],
-        None,
-    ))
-    .await;
-    let mismatch = (
-        "contact".to_owned(),
-        DiagnosticKind::TypeMismatch,
-        "declared type does not accept the column's database type `email_address`".to_owned(),
-    );
-    assert_eq!(diagnostics, vec![mismatch.clone()]);
-    assert!(build.is_ok(), "a domain over text takes `lowercase`");
-    for (name, ty, sql_type) in [
-        ("id", FlussoType::Integer, "integer"),
-        ("mood", FlussoType::Enum, "mood"),
+    let lower = &[Transform::Lowercase][..];
+    let lower_trim = &[Transform::Lowercase, Transform::Trim][..];
+    for (name, transforms, accepted) in [
+        ("handle", lower_trim, true),
+        ("code", lower_trim, true),
+        ("nick", lower_trim, true),
+        ("login", lower_trim, true),
+        ("contact", lower_trim, true),
+        ("span", lower, true),
+        ("id", lower, false),
+        ("aliases", lower, false),
+        ("extra", lower, false),
+        ("mood", lower, false),
+        ("rank", lower, false),
+        ("span", lower_trim, false),
     ] {
-        let (diagnostics, build) = found(users_schema(vec![transformed(name, ty)], None)).await;
-        assert!(
-            diagnostics.contains(&(
-                name.to_owned(),
-                DiagnosticKind::TransformNotApplicable,
-                format!(
-                    "`transforms` `lowercase` do not apply to the column's database type `{sql_type}`"
-                ),
-            )),
-            "{diagnostics:?}"
+        let (diagnostics, build) =
+            found(users_schema(vec![transformed(name, transforms)], None)).await;
+        let refused = diagnostics
+            .iter()
+            .any(|(_, kind, _)| *kind == DiagnosticKind::TransformNotApplicable);
+        assert_eq!(
+            !refused, accepted,
+            "{name} {transforms:?}: reported {diagnostics:?}"
         );
-        assert!(build.is_err(), "{name}: `lower` does not take `{sql_type}`");
+        assert_eq!(
+            upserted(&build),
+            accepted,
+            "{name} {transforms:?}: built {build:?}"
+        );
     }
+    let (diagnostics, _) = found(users_schema(vec![transformed("mood", lower)], None)).await;
+    assert!(
+        diagnostics.contains(&(
+            "mood".to_owned(),
+            DiagnosticKind::TransformNotApplicable,
+            "`transforms` `lowercase` do not apply to the column's database type `mood`".to_owned(),
+        )),
+        "{diagnostics:?}"
+    );
 
-    let mut keyless_root = users_schema(vec![col("body", "body")], None);
-    keyless_root.table = table("notes");
-    keyless_root.primary_key = None;
-    let (diagnostics, _) = found(keyless_root).await;
+    let keyless_root = |primary_key: Option<&str>, related: Option<Field>| {
+        let mut fields = vec![col("body", "body")];
+        fields.extend(related);
+        let mut schema = users_schema(fields, None);
+        schema.table = table("notes");
+        schema.primary_key = primary_key.map(column);
+        schema
+    };
+    let no_key = (
+        "@table".to_owned(),
+        DiagnosticKind::RootPrimaryKey,
+        "`public.notes` has no primary key: the backfill skips it; live changes are still \
+         indexed"
+            .to_owned(),
+    );
+    let (diagnostics, _) = found(keyless_root(None, None)).await;
+    assert_eq!(diagnostics, vec![no_key.clone()]);
+    let (diagnostics, _) = found(keyless_root(Some("id"), None)).await;
     assert_eq!(
         diagnostics,
-        expected(&[(
-            "@table",
-            DiagnosticKind::RootWithoutPrimaryKey,
-            "`public.notes` has no primary key: the backfill skips it, and an update moves its \
-             document to a new id"
-        )]),
+        vec![
+            no_key.clone(),
+            (
+                "@primary_key".to_owned(),
+                DiagnosticKind::RootPrimaryKey,
+                "`primary_key` references unknown column `public.notes.id`; nothing reads it \
+                 while the index has no relation"
+                    .to_owned(),
+            ),
+        ],
+    );
+    let whole_row = DocumentId {
+        index: index_name("users"),
+        key: RowKey(vec![
+            (column("user_id"), GenericValue::Int(1)),
+            (column("body"), GenericValue::String("first".into())),
+        ]),
+    };
+    let documents = builder(&url, keyless_root(Some("id"), None)).await;
+    assert!(
+        matches!(
+            documents.build_many(&[whole_row.clone()]).await.as_deref(),
+            Ok([Document::Upsert { .. }])
+        ),
+        "a root change keyed by its whole row never reads the declared key"
+    );
+
+    let unknown = (
+        "@primary_key".to_owned(),
+        DiagnosticKind::UnknownColumn,
+        "`primary_key` references unknown column `public.notes.id`".to_owned(),
+    );
+    let orders = join_field(
+        "orders",
+        Join {
+            table: table("orders"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_id"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let (diagnostics, _) = found(keyless_root(Some("id"), Some(orders.clone()))).await;
+    assert_eq!(diagnostics, vec![no_key.clone(), unknown.clone()]);
+    let documents = builder(&url, keyless_root(Some("id"), Some(orders))).await;
+    assert!(
+        documents.build_many(&[whole_row]).await.is_err(),
+        "a `has_many` keys on the declared column"
+    );
+
+    let author = join_field(
+        "author",
+        Join {
+            table: table("users"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::BelongsTo {
+                column: column("user_id"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![col("name", "name")],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let (diagnostics, _) = found(keyless_root(Some("id"), Some(author.clone()))).await;
+    assert_eq!(diagnostics, vec![no_key, unknown]);
+    let documents = builder(&url, keyless_root(Some("id"), Some(author))).await;
+    assert!(
+        documents
+            .resolve(&table("users"), &key(1), None, None)
+            .await
+            .is_err(),
+        "a change on a `belongs_to` target is traced to the root by the declared column"
     );
 }
 

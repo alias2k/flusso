@@ -98,20 +98,14 @@ pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result
     })
 }
 
-/// A query that applies `transforms` to `column` exactly as a document query
-/// does, over no rows: Postgres resolves the functions while planning it, so it
-/// fails where a transform does not take the column's type, and costs nothing
-/// where it does.
-pub(super) fn transform_probe(
-    db: &DatabaseSchema,
-    table: &TableName,
-    column: &ColumnName,
-    transforms: &[Transform],
-) -> SqlString {
+/// A query that applies `transforms` to a `NULL` of `sql_type` (a column's
+/// `format_type`) exactly as a document query applies them to the column.
+/// Postgres resolves the functions the same way, so it fails where a transform
+/// does not take the type. It reads no table, so it takes no lock.
+pub(super) fn transform_probe(sql_type: &str, transforms: &[Transform]) -> SqlString {
     SqlString::new(format!(
-        "SELECT {} FROM {} AS \"{ROOT}\" WHERE false",
-        sql::column_value(column, transforms, None, ROOT),
-        qtable(db, table),
+        "SELECT {}",
+        sql::transformed(format!("NULL::{sql_type}"), transforms)
     ))
 }
 

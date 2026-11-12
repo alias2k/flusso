@@ -178,26 +178,29 @@ fn start_verdict(
 }
 
 /// Whether a diagnostic of `kind` means the documents cannot be built as
-/// written: a table or column that does not exist, a `soft_delete` marker that
-/// reads no column (it would be dropped, and deleted rows stay indexed), a
-/// relation table without a single-column primary key, or `transforms` the
-/// column's type does not take (every build of the index fails on either).
+/// written, so no deployment in that state works: a table or column that does
+/// not exist, a `soft_delete` marker that reads no column (it would be dropped,
+/// and deleted rows stay indexed), a relation table without a single-column
+/// primary key, `transforms` the column's type does not take (every build of
+/// the index fails on either), or a root `primary_key` other than the table's
+/// own key (every document is written as a tombstone).
 /// A type, numeric or nullability disagreement still builds, as it did before
-/// `run` validated, so it only prints. So does a root table without a primary
-/// key: its live inserts are still indexed, so refusing would stop a
-/// deployment that runs.
+/// `run` validated, so it only prints. So does a root table without a
+/// single-column primary key: its live changes are still indexed, so refusing
+/// would stop a deployment that runs.
 fn stops_the_start(kind: DiagnosticKind) -> bool {
     match kind {
         DiagnosticKind::UnknownTable
         | DiagnosticKind::UnknownColumn
         | DiagnosticKind::UnreadSoftDeleteMarker
         | DiagnosticKind::RelationPrimaryKey
-        | DiagnosticKind::TransformNotApplicable => true,
+        | DiagnosticKind::TransformNotApplicable
+        | DiagnosticKind::RootPrimaryKeyMismatch => true,
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
         | DiagnosticKind::Nullability
         | DiagnosticKind::IgnoredPrimaryKey
-        | DiagnosticKind::RootWithoutPrimaryKey => false,
+        | DiagnosticKind::RootPrimaryKey => false,
     }
 }
 
@@ -317,16 +320,13 @@ mod tests {
     }
 
     fn diagnostic(kind: DiagnosticKind) -> Diagnostic {
-        let field = kernel::FieldName::try_new("title").unwrap();
-        Diagnostic {
-            index: IndexName::try_new("products").unwrap(),
-            path: vec![field.clone()],
-            field,
-            anchor: source::Anchor::Field,
+        Diagnostic::new(
+            IndexName::try_new("products").unwrap(),
+            kernel::FieldName::try_new("title").unwrap(),
+            source::Anchor::Field,
             kind,
-            severity: kind.severity(),
-            message: format!("a {kind:?} finding"),
-        }
+            format!("a {kind:?} finding"),
+        )
     }
 
     fn verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
@@ -388,8 +388,13 @@ mod tests {
     }
 
     #[test]
-    fn a_root_table_without_a_primary_key_prints_and_starts() {
-        let printed = starts(DiagnosticKind::RootWithoutPrimaryKey);
+    fn a_root_primary_key_other_than_the_tables_refuses_the_start() {
+        refuses(DiagnosticKind::RootPrimaryKeyMismatch);
+    }
+
+    #[test]
+    fn a_root_table_without_a_single_column_primary_key_prints_and_starts() {
+        let printed = starts(DiagnosticKind::RootPrimaryKey);
         assert!(printed.contains("[error]"), "{printed}");
         assert!(printed.contains("starting anyway"), "{printed}");
     }
@@ -462,24 +467,6 @@ mod tests {
             &self,
             _: &kernel::DatabaseSchema,
             _: &kernel::TableName,
-        ) -> source::Result<bool> {
-            Ok(true)
-        }
-
-        async fn primary_key(
-            &self,
-            _: &kernel::DatabaseSchema,
-            _: &kernel::TableName,
-        ) -> source::Result<Vec<kernel::ColumnName>> {
-            Ok(vec![kernel::ColumnName::try_new("id").unwrap()])
-        }
-
-        async fn accepts_transforms(
-            &self,
-            _: &kernel::DatabaseSchema,
-            _: &kernel::TableName,
-            _: &kernel::ColumnName,
-            _: &[kernel::Transform],
         ) -> source::Result<bool> {
             Ok(true)
         }

@@ -500,8 +500,8 @@ impl Catalog for PgDocumentBuilder {
         &self,
         schema: &DatabaseSchema,
         table: &TableName,
-    ) -> Result<Vec<ColumnName>> {
-        self.fetch_primary_key(schema, table).await
+    ) -> Result<Option<Vec<ColumnName>>> {
+        self.fetch_primary_key(schema, table).await.map(Some)
     }
 
     async fn accepts_transforms(
@@ -511,7 +511,8 @@ impl Catalog for PgDocumentBuilder {
         column: &ColumnName,
         transforms: &[Transform],
     ) -> Result<bool> {
-        let probe = query::transform_probe(schema, table, column, transforms);
+        let sql_type = self.column_type(schema, table, column).await?;
+        let probe = query::transform_probe(&sql_type, transforms);
         match sqlx::query(probe).execute(&self.pool).await {
             Ok(_) => Ok(true),
             Err(sqlx::Error::Database(error))

@@ -12,7 +12,8 @@
 //! deleted and re-parented rows to the old parent. A junction without a
 //! primary key, keyed by its whole row, rebuilds every parent its rows link,
 //! nulls in its other columns included; a `count:` over a child without one
-//! stops the engine on its first change instead of resolving to nothing.
+//! stops the engine on its first change instead of resolving to nothing. A
+//! root `primary_key` other than the table's own key writes no document.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -2556,4 +2557,99 @@ fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {
         emit: true,
         source: FieldSource::Relation(Relation::Aggregate(aggregate)),
     }
+}
+
+/// A root `primary_key` naming a unique column other than the table's own key
+/// writes no document (issue #225): the backfill and every root change carry
+/// the table's key, the batched build matches it against the declared column,
+/// finds nothing and writes a tombstone; a change on a related table is
+/// addressed by the declared column and stops the engine. This is why
+/// `root_primary_key_mismatch` refuses the start; if a build ever gets past
+/// it, revisit that decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_root_primary_key_other_than_the_tables_writes_no_document() {
+    let (_container, port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE users (id int PRIMARY KEY, code text UNIQUE NOT NULL, email text)",
+        "CREATE TABLE orders (id int PRIMARY KEY, user_code text, total text)",
+        "CREATE PUBLICATION flusso FOR TABLE users, orders",
+        "INSERT INTO users VALUES (1, 'u1', 'a@x'), (2, 'u2', 'b@x')",
+        "INSERT INTO orders VALUES (10, 'u1', '5')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let orders = Join {
+        table: table("orders"),
+        kind: JoinKind::HasMany {
+            foreign_key: column("user_code"),
+        },
+        primary_key: column("id"),
+        nullable: false,
+        filters: None,
+        order_by: None,
+        limit: None,
+        indexed: true,
+        fields: vec![column_field("total", "total")],
+        on: vec![],
+    };
+    let mut schema = users_schema(vec![Field {
+        field: field("orders"),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Join(orders)),
+    }]);
+    schema.primary_key = Some(column("code"));
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]));
+    let documents = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::new(documents),
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+
+    expect_op(&mut engine, &recorded, "delete users 1").await;
+    expect_op(&mut engine, &recorded, "delete users 2").await;
+    for (sql, op) in [
+        (
+            "INSERT INTO users VALUES (3, 'u3', 'c@x')",
+            "delete users 3",
+        ),
+        (
+            "UPDATE users SET email = 'z@x' WHERE id = 1",
+            "delete users 1",
+        ),
+    ] {
+        recorded.lock().unwrap().clear();
+        sqlx::query(sql).execute(&pool).await.unwrap();
+        expect_op(&mut engine, &recorded, op).await;
+    }
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|op| op.starts_with("delete")),
+        "{:?}",
+        recorded.lock().unwrap()
+    );
+
+    sqlx::query("INSERT INTO orders VALUES (11, 'u1', '7')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(30), engine)
+        .await
+        .expect("a change on the related table kept the engine running")
+        .unwrap();
+    assert!(stopped.is_err());
 }
