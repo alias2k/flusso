@@ -319,6 +319,75 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
     );
 }
 
+/// A row whose document fails to build (a scalar `array: true` field over a
+/// `jsonb` column holding an object) is reported as that failure, with its
+/// field path, by `document_by_id` and `sample_document`, not as a missing row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_document_that_fails_to_build_is_reported_as_the_failure() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE things (id bigint PRIMARY KEY, tags jsonb)",
+        "INSERT INTO things VALUES (1, '[\"a\", {\"b\": 1}]')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let mut tags = column_field("tags", "tags");
+    if let FieldSource::Column(column) = &mut tags.source {
+        column.array = true;
+    }
+    let schema = IndexSchema {
+        version: 1,
+        table: table("things"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![column_field("id", "id"), tags],
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("things"), schema)]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+
+    for (how, built) in [
+        (
+            "document_by_id",
+            builder
+                .document_by_id(&index_name("things"), "1")
+                .await
+                .unwrap(),
+        ),
+        (
+            "sample_document",
+            builder
+                .sample_document(&index_name("things"))
+                .await
+                .unwrap(),
+        ),
+    ] {
+        match built {
+            Some(Err(failure)) => {
+                assert_eq!(failure.field, "tags", "{how}");
+                assert!(failure.message.contains("at [1]"), "{how}: {failure}");
+            }
+            other => panic!("{how}: expected the build failure, got {other:?}"),
+        }
+    }
+    assert!(
+        builder
+            .document_by_id(&index_name("things"), "2")
+            .await
+            .unwrap()
+            .is_none(),
+        "a missing row is still `None`"
+    );
+}
+
 /// `items` is a tree: 1 is the root, 2 its child, 3 its grandchild, 4 a second
 /// root with no children.
 async fn items_tree(statements: &[&'static str]) -> (impl Drop, String) {

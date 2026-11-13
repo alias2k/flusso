@@ -73,7 +73,7 @@ use kernel::{
     ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
     TableName, Transform,
 };
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
+use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{
     Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
 };
@@ -100,6 +100,20 @@ struct ColumnMeta {
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
     nullable: bool,
+}
+
+/// One root row's document as [`PgDocumentBuilder::document_by_id`] and
+/// [`PgDocumentBuilder::sample_document`] build it: the body, or why it could
+/// not be finished.
+pub type Built = std::result::Result<kernel::GenericValue, BuildFailure>;
+
+/// A built document's body or failure; `None` for a tombstone.
+fn built(document: Document) -> Option<Built> {
+    match document {
+        Document::Upsert { body, .. } => Some(Ok(body)),
+        Document::Failed { failure, .. } => Some(Err(failure)),
+        Document::Delete { .. } => None,
+    }
 }
 
 /// Builds index documents from a Postgres database, driven by a [`SourceSpec`] —
@@ -199,13 +213,10 @@ impl PgDocumentBuilder {
 
     /// Build the document of the root row whose primary key reads as `id` (typed
     /// by [`RowKey::from_text`]), through the normal [`build`](DocumentBuilder::build)
-    /// path. `Ok(None)` when the row is missing or soft-deleted; an error when
-    /// the index has no single-column primary key.
-    pub async fn document_by_id(
-        &self,
-        index: &IndexName,
-        id: &str,
-    ) -> Result<Option<kernel::GenericValue>> {
+    /// path. `Ok(None)` when the row is missing or soft-deleted, `Some(Err(_))`
+    /// when the row's document fails to build; an error when the index has no
+    /// single-column primary key.
+    pub async fn document_by_id(&self, index: &IndexName, id: &str) -> Result<Option<Built>> {
         let primary_key = self
             .spec
             .schema(index)
@@ -217,18 +228,16 @@ impl PgDocumentBuilder {
             index: index.clone(),
             key: RowKey::from_text(primary_key, id),
         };
-        match self.build(&document).await? {
-            Document::Upsert { body, .. } => Ok(Some(body)),
-            Document::Delete { .. } | Document::Failed { .. } => Ok(None),
-        }
+        Ok(built(self.build(&document).await?))
     }
 
     /// Build a real document for one arbitrary row of an index's root table —
     /// exactly what the sink would write, for previewing a schema against live
     /// data. Picks any row with a non-null primary key, then runs it through the
     /// normal [`build`](DocumentBuilder::build) path. Returns `Ok(None)` when the
-    /// index has no single-column primary key or its root table is empty.
-    pub async fn sample_document(&self, index: &IndexName) -> Result<Option<kernel::GenericValue>> {
+    /// index has no single-column primary key or its root table is empty, and
+    /// `Some(Err(_))` when the row's document fails to build.
+    pub async fn sample_document(&self, index: &IndexName) -> Result<Option<Built>> {
         let schema = self
             .spec
             .schema(index)
@@ -257,10 +266,7 @@ impl PgDocumentBuilder {
             index: index.clone(),
             key: RowKey(vec![(pk_column, key_value)]),
         };
-        match self.build(&id).await? {
-            Document::Upsert { body, .. } => Ok(Some(body)),
-            Document::Delete { .. } | Document::Failed { .. } => Ok(None),
-        }
+        Ok(built(self.build(&id).await?))
     }
 
     /// The single-column primary key of a table, from the Postgres catalog

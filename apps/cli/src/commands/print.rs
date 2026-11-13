@@ -26,6 +26,12 @@ pub(crate) struct Pen {
 }
 
 impl Pen {
+    /// No color, for output a test reads.
+    #[cfg(test)]
+    pub(crate) fn plain() -> Self {
+        Self { color: false }
+    }
+
     /// Color when stdout is a terminal and `NO_COLOR` is not set.
     pub(crate) fn detect() -> Self {
         Self {

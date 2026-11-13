@@ -2782,6 +2782,8 @@ enum SampleOutcome {
     },
     /// No row has the requested id.
     NotFound(String),
+    /// The row's document failed to build (before any script ran).
+    BuildFailed(BuildFailure),
     /// The root table had no rows, so this is example data from the schema types.
     Synthetic(serde_json::Value),
     /// The index has no single-column primary key, so a row can't be keyed.
@@ -2808,6 +2810,11 @@ pub async fn sample(request: SampleRequest) -> SampleResponse {
             note: Some(format!(
                 "no row with id `{id}` (it is missing or soft-deleted)"
             )),
+            ..Default::default()
+        },
+        Ok(SampleOutcome::BuildFailed(failure)) => SampleResponse {
+            db_reachable: true,
+            note: Some(format!("the row's document failed to build: {failure}")),
             ..Default::default()
         },
         Ok(SampleOutcome::Synthetic(document)) => SampleResponse {
@@ -2864,7 +2871,7 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
             .await
             .context("building the document")?
         {
-            Some(body) => Some(body),
+            Some(built) => Some(built),
             None => return Ok(SampleOutcome::NotFound(id.clone())),
         },
         None => documents
@@ -2872,7 +2879,11 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
             .await
             .context("building a sample document")?,
     };
-    if let Some(body) = built {
+    if let Some(built) = built {
+        let body = match built {
+            Ok(body) => body,
+            Err(failure) => return Ok(SampleOutcome::BuildFailed(failure)),
+        };
         let schema = spec
             .schema(&name)
             .context("index missing from its own spec")?;

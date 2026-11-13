@@ -92,7 +92,7 @@ Opening Code mode and leaving it again changes nothing: the YAML it opens with i
 | --- | --- |
 | YAML | the file a save would write, minus anything [left out](#incomplete-fields) |
 | Mapping | the derived OpenSearch mapping, database-free; an opted-out field shows `subfields: false` or `indexed: false` |
-| Sample | a document built from one live row via the same path the sink uses, scripts run and input-only fields stripped; **Row id** picks the row (blank: the first); a failing script shows its field, message and line with a caret over the row as built; what the scripts printed; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
+| Sample | a document built from one live row via the same path the sink uses, scripts run and input-only fields stripped; **Row id** picks the row (blank: the first); a failing script shows its field, message and line with a caret over the row as built; a row whose document fails to build before any script runs shows that failure, with its field path, instead of a document; what the scripts printed; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
 
 The document tree marks a stored-only field (`indexed: false`) with a *not indexed* chip.
 
