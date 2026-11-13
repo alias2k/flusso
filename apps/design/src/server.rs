@@ -4,12 +4,13 @@
 //! API is rooted at `/api/*`; everything else falls through to the embedded
 //! frontend (the `assets` module). State is just the path to the `flusso.toml`
 //! being edited — the file is the source of truth, re-read per request, so the
-//! server holds no model of its own.
+//! server holds no model of its own. The one thing it remembers is what it
+//! recovered at start ([`api::recover_project`]), until a page load shows it.
 
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use axum::extract::State;
@@ -73,14 +74,33 @@ struct AppState {
     config_path: Arc<PathBuf>,
     adapters: Arc<Vec<AdapterDescription>>,
     validate: ConfigValidator,
+    /// Interrupted saves settled since the last page load, to tell it about.
+    recovered: Arc<Mutex<Vec<api::RecoveredSave>>>,
 }
 
 /// Bind `options.address` and serve the designer until the listener closes.
+///
+/// A save a killed designer left half done is settled first, before the
+/// project is read; what it did is logged and shown on the first page load.
 pub async fn serve(options: DesignOptions) -> Result<()> {
+    let config_path = options.config_path.clone();
+    let recovered = match blocking(move || {
+        api::prune_save_records();
+        api::recover_project(&config_path)
+    })
+    .await
+    {
+        Ok(recovery) => recovery.recovered,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "could not check for an interrupted save");
+            Vec::new()
+        }
+    };
     let state = AppState {
         config_path: Arc::new(options.config_path),
         adapters: Arc::new(options.adapters),
         validate: options.validate,
+        recovered: Arc::new(Mutex::new(recovered)),
     };
     let app = router(state);
 
@@ -148,8 +168,31 @@ fn router(state: AppState) -> Router {
         .fallback(assets::serve)
 }
 
+/// Run `work`, which may wait for the project's lock, off the async workers.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| anyhow::anyhow!("a designer request stopped: {e}"))?
+}
+
+/// Settle an interrupted save before the project is read; a blocked one
+/// keeps the project from loading (a 409 naming the files).
 async fn project(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let project = api::load_project(&state.config_path)?;
+    let config_path = Arc::clone(&state.config_path);
+    let (mut recovery, mut project) = blocking(move || {
+        let recovery = api::recover_project(&config_path)?;
+        if recovery.blocked.is_some() {
+            return Err(anyhow::Error::new(api::Interrupted(recovery)));
+        }
+        Ok((recovery, api::load_project(&config_path)?))
+    })
+    .await?;
+    if let Ok(mut earlier) = state.recovered.lock() {
+        recovery.recovered.splice(0..0, earlier.drain(..));
+    }
+    project.recovery = recovery;
     Ok(Json(project).into_response())
 }
 
@@ -207,21 +250,25 @@ async fn diff(
     State(state): State<AppState>,
     Json(request): Json<api::SaveRequest>,
 ) -> Result<Response, ApiError> {
-    let diffs = api::diff_project(&state.config_path, request)?;
-    Ok(Json(diffs).into_response())
+    let config_path = Arc::clone(&state.config_path);
+    let review = blocking(move || api::review_project(&config_path, request)).await?;
+    Ok(Json(review).into_response())
 }
 
 async fn save(
     State(state): State<AppState>,
     Json(request): Json<api::SaveRequest>,
 ) -> Result<Response, ApiError> {
-    let response = api::save_project(&state.config_path, request)?;
+    let config_path = Arc::clone(&state.config_path);
+    let response = blocking(move || api::save_project(&config_path, request)).await?;
     Ok(Json(response).into_response())
 }
 
 /// An unexpected handler failure — reported as a 500 with a JSON `{ "error" }`
 /// body. Recoverable, surfaced conditions (DB unreachable, a schema that won't
-/// parse) are *not* errors: they ride back in the normal response body.
+/// parse) are *not* errors: they ride back in the normal response body. An
+/// interrupted save ([`api::Interrupted`]) is a 409 whose body adds the
+/// `recovery`, so the editor can say what happened in the user's language.
 struct ApiError(anyhow::Error);
 
 impl From<anyhow::Error> for ApiError {
@@ -232,6 +279,13 @@ impl From<anyhow::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Some(api::Interrupted(recovery)) = self.0.downcast_ref::<api::Interrupted>() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": self.0.to_string(), "recovery": recovery })),
+            )
+                .into_response();
+        }
         tracing::error!(error = %format!("{:#}", self.0), "designer request failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,

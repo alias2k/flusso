@@ -4,6 +4,10 @@ target/
 # Temp files
 *.tmp
 
+# The designer's save journal, lock, temp files and backups (`flusso design` on dev/)
+.flusso-save.*
+.*.flusso-save.*
+
 # OS + coverage artifacts
 .DS_Store
 *.profraw

@@ -17,7 +17,9 @@ use kernel::IndexName;
 
 /// A unique scratch directory for this test process, seeded with the dev files.
 fn fixture() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("flusso-design-api-{}", std::process::id()));
+    keep_records_in_target();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("flusso-design-api-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("flusso.toml"),
@@ -94,6 +96,7 @@ fn project_previews_saves_and_reopens() {
             .collect(),
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     let written = api::save_project(&config_path, save).unwrap();
     assert!(written.written.is_empty(), "{:?}", written.written);
@@ -133,6 +136,7 @@ fn project_previews_saves_and_reopens() {
             .collect(),
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     let again = api::save_project(&config_path, resave).unwrap();
     assert!(
@@ -164,6 +168,7 @@ fn save_moves_and_prunes() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     let resp = api::save_project(&config_path, moved).unwrap();
     assert!(
@@ -184,6 +189,7 @@ fn save_moves_and_prunes() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     let resp = api::save_project(&config_path, back).unwrap();
     assert!(!dir.join("nested").exists(), "emptied folder pruned");
@@ -474,6 +480,7 @@ fn the_deepest_accepted_value_previews_diffs_and_saves_ten_joins_deep() {
 
 /// A scratch copy of the dev project of its own, for a test that rewrites files.
 fn own_fixture(tag: &str) -> PathBuf {
+    keep_records_in_target();
     let shared = fixture();
     let dir = shared.with_file_name(format!("flusso-design-api-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -571,6 +578,7 @@ fn a_save_refuses_two_different_writes_to_one_file() {
         ],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -596,6 +604,7 @@ fn a_save_refuses_two_indexes_with_one_normalized_name() {
             )],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         });
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -624,6 +633,7 @@ fn a_save_refuses_to_write_another_index_s_file() {
                 )],
                 skip: Vec::new(),
                 identity: None,
+                loaded_at_ms: None,
             });
         }
         refused(&dir, || SaveRequest {
@@ -631,6 +641,7 @@ fn a_save_refuses_to_write_another_index_s_file() {
             ops: vec![op(OpKind::Upsert, "users", path, None, "users: 1\n")],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         });
     }
     refused(&dir, || SaveRequest {
@@ -644,6 +655,7 @@ fn a_save_refuses_to_write_another_index_s_file() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -667,6 +679,7 @@ fn a_shared_file_is_written_only_by_every_index_that_uses_it() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
     let both = SaveRequest {
         config,
@@ -676,6 +689,7 @@ fn a_shared_file_is_written_only_by_every_index_that_uses_it() {
         ],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     api::save_project(&config_path, both).unwrap();
     assert_eq!(
@@ -703,6 +717,7 @@ fn a_save_refuses_a_schema_op_on_the_config_file() {
                 )],
                 skip: Vec::new(),
                 identity: None,
+                loaded_at_ms: None,
             });
         }
         refused(&dir, || SaveRequest {
@@ -716,6 +731,7 @@ fn a_save_refuses_a_schema_op_on_the_config_file() {
             )],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         });
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -752,6 +768,7 @@ fn a_save_removes_nothing_outside_the_project() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     refused(&dir, moved);
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
@@ -796,6 +813,7 @@ fn a_move_never_removes_a_file_an_index_uses() {
         ],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     let diffs = api::diff_project(&config_path, swap()).unwrap();
     assert!(diffs.iter().all(|d| d.op == api::DiffOp::Write));
@@ -830,6 +848,7 @@ fn a_move_never_removes_a_file_an_index_uses() {
         ],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     api::save_project(&config_path, replaced).unwrap();
     assert_eq!(read("archive/users.schema.yml"), "users: 1\n");
@@ -848,6 +867,7 @@ fn a_move_never_removes_a_file_an_index_uses() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
 
     std::fs::remove_dir_all(&dir).ok();
@@ -874,6 +894,7 @@ fn a_move_onto_an_existing_file_is_flagged() {
             )],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         };
         let diffs = api::diff_project(&config_path, request).unwrap();
         let moved = diffs.last().unwrap();
@@ -894,6 +915,7 @@ fn a_move_onto_an_existing_file_is_flagged() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     let diffs = api::diff_project(&config_path, request).unwrap();
     assert_eq!(diffs.last().unwrap().current, orders);
@@ -987,6 +1009,7 @@ fn a_rename_is_refused_when_the_config_is_left_out() {
             )],
             skip: skip.clone(),
             identity: identity(&project.config, &[Some(0), Some(1)]),
+            loaded_at_ms: None,
         });
     }
 
@@ -1006,6 +1029,7 @@ fn a_rename_is_refused_when_the_config_is_left_out() {
         )],
         skip: skip.clone(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+        loaded_at_ms: None,
     });
     assert!(dir.join("users.schema.yml").is_file());
     assert!(!dir.join("people.schema.yml").exists());
@@ -1035,6 +1059,7 @@ fn the_config_is_refused_when_a_file_it_needs_is_left_out() {
         )],
         skip,
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+        loaded_at_ms: None,
     };
     let diffs = api::diff_project(&dir.join("flusso.toml"), request(Vec::new())).unwrap();
     let moved = diffs.last().unwrap();
@@ -1048,6 +1073,7 @@ fn the_config_is_refused_when_a_file_it_needs_is_left_out() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1072,6 +1098,7 @@ fn an_edit_is_saved_with_the_config_left_out() {
         )],
         skip: vec![config_shown(&dir)],
         identity: None,
+        loaded_at_ms: None,
     };
     let diffs = api::diff_project(&config_path, request).unwrap();
     assert!(!diffs.last().unwrap().needs_config);
@@ -1086,6 +1113,7 @@ fn an_edit_is_saved_with_the_config_left_out() {
         )],
         skip: vec![config_shown(&dir)],
         identity: None,
+        loaded_at_ms: None,
     };
     api::save_project(&config_path, request).unwrap();
     assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config_text);
@@ -1121,6 +1149,7 @@ fn a_symlink_cannot_reach_another_index_s_file_or_the_config() {
                 )],
                 skip: Vec::new(),
                 identity: None,
+                loaded_at_ms: None,
             });
         }
     }
@@ -1135,6 +1164,7 @@ fn a_symlink_cannot_reach_another_index_s_file_or_the_config() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
 
     let orders = std::fs::read_to_string(dir.join("orders.schema.yml")).unwrap();
@@ -1149,6 +1179,7 @@ fn a_symlink_cannot_reach_another_index_s_file_or_the_config() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     refused(&dir, from_orders);
     assert_eq!(
@@ -1186,6 +1217,7 @@ fn a_project_opened_through_a_symlink_resolves_its_paths() {
             ops: vec![op(OpKind::Upsert, "users", path, None, "users: 1\n")],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         };
         assert!(
             api::diff_project(&config_path, request()).is_err(),
@@ -1221,6 +1253,7 @@ fn a_path_differing_only_in_case_is_refused() {
                 )],
                 skip: Vec::new(),
                 identity: None,
+                loaded_at_ms: None,
             });
         }
     }
@@ -1246,6 +1279,7 @@ fn a_folder_as_a_schema_path_changes_nothing() {
             )],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         });
     }
     assert_eq!(
@@ -1301,6 +1335,7 @@ fn a_failed_write_leaves_no_temp_file() {
         ],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     assert!(api::save_project(&dir.join("flusso.toml"), request).is_err());
     assert_eq!(files(&dir), before);
@@ -1332,6 +1367,7 @@ fn a_move_from_a_file_that_is_not_the_index_s_is_refused() {
             )],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         };
         refused(&dir, request);
         assert!(dir.join(from).is_file(), "{from}");
@@ -1367,6 +1403,7 @@ fn a_schema_path_is_saved_normalized() {
         }],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     };
     api::save_project(&config_path, request).unwrap();
     let text = std::fs::read_to_string(&config_path).unwrap();
@@ -1531,6 +1568,7 @@ fn the_config_and_its_linked_files_can_be_left_out_of_a_save() {
             ops: vec![linked.clone(), edit.clone()],
             skip,
             identity: identity.clone(),
+            loaded_at_ms: None,
         };
         let diffs = api::diff_project(&config_path, request(Vec::new())).unwrap();
         let linked_path = diffs.get(1).unwrap();
@@ -1580,6 +1618,7 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         ops: vec![upsert()],
         skip: vec![config_shown(&dir)],
         identity: users_is_orders.clone(),
+        loaded_at_ms: None,
     });
     // The config written without the op: `orders.schema.yml` holds the old
     // `orders`, which is not the new `orders`.
@@ -1588,6 +1627,7 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: users_is_orders.clone(),
+        loaded_at_ms: None,
     });
     // A move must start at the index's own file on disk.
     refused(&dir, || SaveRequest {
@@ -1601,6 +1641,7 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         )],
         skip: Vec::new(),
         identity: users_is_orders.clone(),
+        loaded_at_ms: None,
     });
     // The request's own `was` is not read.
     let forged = serde_json::json!({
@@ -1627,6 +1668,7 @@ fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
     refused(&dir, || SaveRequest {
         config: config_with(&project.config, &[("users", "orders.schema.yml")]),
@@ -1639,6 +1681,7 @@ fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
         )],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
 
     // Two indexes already sharing a file keep it without writing it.
@@ -1653,6 +1696,7 @@ fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
             ],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         },
     )
     .unwrap();
@@ -1665,6 +1709,7 @@ fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
             ops: Vec::new(),
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         },
     )
     .unwrap();
@@ -1703,6 +1748,7 @@ fn a_skip_path_through_a_symlink_is_skipped() {
         )],
         skip: skip.clone(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+        loaded_at_ms: None,
     });
     api::save_project(
         &config_path,
@@ -1717,6 +1763,7 @@ fn a_skip_path_through_a_symlink_is_skipped() {
             )],
             skip,
             identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+            loaded_at_ms: None,
         },
     )
     .unwrap();
@@ -1740,6 +1787,7 @@ fn an_added_index_needs_its_schema_file() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2), None]),
+        loaded_at_ms: None,
     };
     refused(&dir, request);
     let err = api::diff_project(&config_path, request())
@@ -1766,6 +1814,7 @@ fn a_new_index_cannot_take_a_file_that_is_not_a_schema() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2), None]),
+        loaded_at_ms: None,
     };
     refused(&dir, request);
     let err = format!(
@@ -1795,6 +1844,7 @@ fn a_new_index_over_a_removed_one_s_file_is_flagged() {
         )],
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), None]),
+        loaded_at_ms: None,
     };
     let diffs = api::diff_project(&config_path, request).unwrap();
     let written = diffs.last().unwrap();
@@ -1818,6 +1868,7 @@ fn a_new_index_over_a_removed_one_s_file_is_flagged() {
         }],
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), None]),
+        loaded_at_ms: None,
     };
     let diffs = api::diff_project(&config_path, readd).unwrap();
     let written = diffs.last().unwrap();
@@ -1835,6 +1886,7 @@ fn a_new_index_over_a_removed_one_s_file_is_flagged() {
         )],
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+        loaded_at_ms: None,
     };
     let diffs = api::diff_project(&config_path, edit).unwrap();
     assert_eq!(diffs.last().unwrap().warning, None);
@@ -1886,6 +1938,7 @@ fn a_crlf_schema_keeps_its_line_endings_and_comments() {
             }],
             skip: Vec::new(),
             identity: None,
+            loaded_at_ms: None,
         };
         let diffs = api::diff_project(&config_path, request).unwrap();
         let written = diffs.last().unwrap();
@@ -1903,4 +1956,10 @@ fn a_crlf_schema_keeps_its_line_endings_and_comments() {
         );
     }
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Keep the designer's save records in the build's temp folder, never in the
+/// user's state folder.
+fn keep_records_in_target() {
+    api::use_state_dir(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("design-saves"));
 }
