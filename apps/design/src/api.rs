@@ -703,6 +703,21 @@ pub struct SaveResponse {
     /// The digest of every file the save wrote, and `None` for each it
     /// removed: the page's digests from now on.
     pub digests: Digests,
+    /// Files another program wrote in the instant the save replaced them:
+    /// the file holds what the save wrote, the other bytes are in a copy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub displaced: Vec<DisplacedFile>,
+}
+
+/// A file another program wrote, in place, in the instant a save replaced
+/// it: it holds the save's text, and the program's bytes went to the save's
+/// backup of it, which is kept for the user to check and delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DisplacedFile {
+    /// The file, relative to the config's folder.
+    pub path: String,
+    /// The backup holding the other bytes, relative to the config's folder.
+    pub copy: String,
 }
 
 /// A file that is not as the page read it.
@@ -834,12 +849,33 @@ impl SaveRecovery {
 /// An interrupted save the designer settled.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecoveredSave {
+    /// Which save it was: a page shows each once.
+    pub id: String,
     /// Undone, or finished.
     pub outcome: RecoveryOutcome,
     /// When the save started, in milliseconds since the Unix epoch.
     pub started_at_ms: u64,
     /// The files the save changed, relative to the config's folder.
     pub files: Vec<String>,
+    /// Files another program wrote during or after the save, kept as they
+    /// are instead of rolled back or finished.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<KeptFile>,
+    /// Files whose backup holds what another program wrote to them as the
+    /// save replaced them ([`DisplacedFile`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub displaced: Vec<DisplacedFile>,
+}
+
+/// A file a recovered save left as another program wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeptFile {
+    /// The file, relative to the config's folder.
+    pub path: String,
+    /// The save's backup of the file's text from before it, kept for the
+    /// user to delete or copy back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
 }
 
 /// How an interrupted save was settled.
@@ -1053,9 +1089,6 @@ pub struct BlockedFile {
 pub enum BlockedProblem {
     /// The backup holding the text from before the save is gone or damaged.
     BackupMissing,
-    /// The file holds neither the text from before the save nor the one it
-    /// wrote: it was edited since.
-    Edited,
     /// The file could not be read.
     Unreadable,
     /// The save's journal can't be read, or names what no save of this
@@ -1128,19 +1161,15 @@ fn problem_help(problem: &BlockedFile, direction: Option<RecoveryDirection>) -> 
     let detail = problem.detail.as_deref().unwrap_or("");
     let back = direction != Some(RecoveryDirection::Forward);
     match problem.problem {
-        BlockedProblem::Edited | BlockedProblem::BackupMissing => {
-            let what = if problem.problem == BlockedProblem::Edited {
-                format!("{path} changed after the save was cut short.")
-            } else {
-                format!(
-                    "The backup of {path}{} no longer holds its text from before the save.",
-                    problem
-                        .backup
-                        .as_ref()
-                        .map(|b| format!(" ({b})"))
-                        .unwrap_or_default()
-                )
-            };
+        BlockedProblem::BackupMissing => {
+            let what = format!(
+                "The backup of {path}{} no longer holds its text from before the save.",
+                problem
+                    .backup
+                    .as_ref()
+                    .map(|b| format!(" ({b})"))
+                    .unwrap_or_default()
+            );
             let fix = match (&problem.fix, back) {
                 (Some(step), true) => format!(
                     "To let the designer roll the save back, {} and reload; what {path} holds now \
@@ -1274,10 +1303,7 @@ fn unseen_recoveries(
         .and_then(|c| c.get(&paths.base).cloned())
         .unwrap_or_default();
     for save in remembered {
-        if recovered
-            .iter()
-            .any(|r| r.started_at_ms == save.started_at_ms && r.files == save.files)
-        {
+        if recovered.iter().any(|r| r.id == save.id) {
             continue;
         }
         let unseen = save.files.iter().any(|file| {
@@ -1373,8 +1399,30 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
                     Outcome::RolledBack => RecoveryOutcome::RolledBack,
                     Outcome::Completed => RecoveryOutcome::Completed,
                 },
+                id: s.token.clone(),
                 started_at_ms: s.started_at_ms,
-                files: s.files.iter().map(rel).collect(),
+                files: s
+                    .files
+                    .iter()
+                    .filter(|f| !s.kept.iter().any(|k| k.path == **f))
+                    .map(rel)
+                    .collect(),
+                kept: s
+                    .kept
+                    .iter()
+                    .map(|k| KeptFile {
+                        path: rel(&k.path),
+                        backup: k.backup.as_ref().map(rel),
+                    })
+                    .collect(),
+                displaced: s
+                    .displaced
+                    .iter()
+                    .map(|d| DisplacedFile {
+                        path: rel(&d.path),
+                        copy: rel(&d.copy),
+                    })
+                    .collect(),
             })
             .collect(),
         blocked: recovery.blocked.as_ref().map(|b| BlockedSave {
@@ -1386,7 +1434,6 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
                     path: rel(&p.path),
                     problem: match p.kind {
                         ProblemKind::BackupMissing => BlockedProblem::BackupMissing,
-                        ProblemKind::Edited => BlockedProblem::Edited,
                         ProblemKind::Unreadable => BlockedProblem::Unreadable,
                         ProblemKind::JournalUnusable => BlockedProblem::JournalUnusable,
                         ProblemKind::Failed => BlockedProblem::Failed,
@@ -1535,15 +1582,34 @@ fn project_folders(paths: &Paths) -> Vec<PathBuf> {
 fn log_recovery(recovery: &SaveRecovery) {
     for save in &recovery.recovered {
         let files = save.files.join(", ");
+        let are = if save.files.len() == 1 { "is" } else { "are" };
         match save.outcome {
             RecoveryOutcome::RolledBack => tracing::warn!(
                 started_at_ms = save.started_at_ms,
-                "an interrupted save was rolled back: {files} are as they were before it"
+                "an interrupted save was rolled back: {files} {are} as before it"
             ),
             RecoveryOutcome::Completed => tracing::warn!(
                 started_at_ms = save.started_at_ms,
-                "an interrupted save was completed: {files} are as it wrote them; its backups are deleted"
+                "an interrupted save was completed: {files} {are} as it wrote them; its backups are deleted"
             ),
+        }
+        for d in &save.displaced {
+            tracing::warn!(
+                "{} was written by another program as the save replaced it: it holds what the save \
+                 wrote, and the other bytes are in {}; check them, then delete it",
+                d.path,
+                d.copy
+            );
+        }
+        for kept in &save.kept {
+            tracing::warn!(
+                "{} was written by another program during or after the save, and is kept as it is{}",
+                kept.path,
+                kept.backup
+                    .as_ref()
+                    .map(|b| format!("; its text from before the save is in {b}"))
+                    .unwrap_or_default()
+            );
         }
     }
     if let Some(blocked) = &recovery.blocked
@@ -2158,6 +2224,22 @@ fn stale_files(paths: &Paths, diff: &OpDiff, digests: &Digests) -> Result<Vec<St
     Ok(stale)
 }
 
+/// `path`, which a commit found not holding `expected` (`None`: no file).
+fn changed_file(paths: &Paths, path: &Path, expected: Option<&Digest>) -> Option<StaleFile> {
+    let on_disk = Digest::at(path).ok().flatten();
+    let change = match (expected, &on_disk) {
+        (Some(_), Some(_)) => StaleChange::Changed,
+        (Some(_), None) => StaleChange::Deleted,
+        (None, Some(_)) => StaleChange::Created,
+        (None, None) => return None,
+    };
+    Some(StaleFile {
+        path: paths.relative_path(path),
+        change,
+        on_disk: on_disk.map(|d| d.hex().to_owned()),
+    })
+}
+
 /// `path` when it is not as `digests` says the page read it.
 fn stale_file(paths: &Paths, path: &Path, digests: &Digests) -> Result<Option<StaleFile>> {
     let key = paths.relative_path(path);
@@ -2347,6 +2429,9 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
         return Err(Interrupted(recovery).into());
     }
     config_stale()?;
+    // Before anything is written: a file this save writes would otherwise
+    // read as unseen.
+    let recovered = unseen_recoveries(&paths, &request.digests, recovery.recovered);
     let plan = plan(&paths, request).map_err(|e| paths.relative(e))?;
     let (config, schemas) = plan
         .diffs
@@ -2402,17 +2487,15 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
     let state = State::for_saving();
     let committed = commit(&lock, &writes, &removals, state.as_ref(), disk).map_err(|e| {
         match e.downcast_ref::<Changed>() {
-            Some(Changed(path)) => paths
-                .stale(vec![
-                    stale_file(&paths, path, &request.digests)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| StaleFile {
-                            path: paths.relative_path(path),
-                            change: StaleChange::Changed,
-                            on_disk: None,
-                        }),
-                ])
+            Some(Changed(files)) => paths
+                .stale(
+                    files
+                        .iter()
+                        .filter_map(|(path, expected)| {
+                            changed_file(&paths, path, expected.as_ref())
+                        })
+                        .collect(),
+                )
                 .into(),
             None => paths.relative(e),
         }
@@ -2446,7 +2529,23 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
     }
     let removed: Vec<PathBuf> = removals.into_iter().map(|r| r.path).collect();
     resp.pruned = prune_empty_dirs(&paths.base, &removed);
-    resp.recovered = unseen_recoveries(&paths, &request.digests, recovery.recovered);
+    resp.recovered = recovered;
+    resp.displaced = committed
+        .displaced
+        .iter()
+        .map(|d| DisplacedFile {
+            path: paths.relative_path(&d.path),
+            copy: paths.relative_path(&d.copy),
+        })
+        .collect();
+    for d in &resp.displaced {
+        tracing::warn!(
+            "{} was written by another program as the save replaced it: it holds what the save \
+             wrote, and the other bytes are in {}; check them, then delete it",
+            d.path,
+            d.copy
+        );
+    }
     Ok(resp)
 }
 
@@ -3292,10 +3391,125 @@ mod tests {
         let saved = save_project(&fixture.config(), upsert("orders", Fixture::loaded())).unwrap();
         assert_eq!(saved.recovered.len(), 1, "{saved:?}");
         assert_eq!(saved.recovered[0].files, ["users.schema.yml"]);
+        let id = saved.recovered[0].id.clone();
+        assert!(
+            !id.is_empty(),
+            "a page tells one recovery from another by its id"
+        );
 
+        // A page that read the project after the recovery saves the very file
+        // the recovered save wrote: compared before writing, it has seen it.
         let fresh = load_project(&fixture.config()).unwrap().digests;
-        let saved = save_project(&fixture.config(), upsert("products", fresh)).unwrap();
+        let saved = save_project(&fixture.config(), upsert("users", fresh)).unwrap();
         assert!(saved.recovered.is_empty(), "{saved:?}");
+    }
+
+    /// Another program rewrites two files a save writes, right after any
+    /// step of the save: the save answers 200 (both files as it wrote them
+    /// except the rewritten ones), or the stale refusal naming only rewritten
+    /// files (everything else as before). Never another error, never a file
+    /// of the save left behind, and the project loads after.
+    #[test]
+    fn an_editor_writing_during_a_save_gets_a_save_or_the_refusal() {
+        let request = |fixture: &Fixture| -> SaveRequest {
+            serde_json::from_value(serde_json::json!({
+                "config": load_project(&fixture.config()).unwrap().config,
+                "digests": Fixture::loaded(),
+                "ops": [
+                    { "kind": "upsert", "index": "users", "path": "users.schema.yml", "raw": "users: 1\n" },
+                    { "kind": "upsert", "index": "products", "path": "products.schema.yml", "raw": "products: 1\n" },
+                ],
+            }))
+            .unwrap()
+        };
+        let edited = ["users.schema.yml", "products.schema.yml"];
+        let mut both = 0;
+        for n in 1..40 {
+            let fixture = Fixture::new(&format!("two-edits-{n}"));
+            let before = fixture.files();
+            let mut disk = Disk::counting();
+            for file in edited {
+                disk = disk.with_edit(commit::Edit {
+                    after_step: n,
+                    path: fixture.0.join(file),
+                    bytes: b"editor\n".to_vec(),
+                    by_rename: false,
+                    done: false,
+                });
+            }
+            let saved = save_with(&fixture.config(), &request(&fixture), &mut disk);
+            let done = disk.edits().iter().all(|e| e.done);
+            let files = fixture.files();
+            assert!(
+                files.keys().all(|f| !f.starts_with('.')),
+                "after {n}: {files:?}"
+            );
+            assert!(State::at(fixture.state_dir()).is_ok_and(|s| s.records().is_empty()));
+            match saved {
+                Ok(_) => {
+                    for file in edited {
+                        let want = if done {
+                            "editor\n".to_owned()
+                        } else {
+                            format!("{}: 1\n", &file[..file.find('.').unwrap()])
+                        };
+                        assert_eq!(files[file], want, "after {n}");
+                    }
+                }
+                Err(err) => {
+                    let stale = &err
+                        .downcast_ref::<Stale>()
+                        .unwrap_or_else(|| panic!("after {n}: {err:#}"))
+                        .files;
+                    assert!(
+                        stale.iter().all(|f| edited.contains(&f.path.as_str())),
+                        "after {n}: {stale:?}"
+                    );
+                    both += usize::from(stale.len() == 2);
+                    let mut expected = before;
+                    for file in edited {
+                        expected.insert(file.to_owned(), "editor\n".to_owned());
+                    }
+                    assert_eq!(files, expected, "after {n}");
+                }
+            }
+            load_project(&fixture.config()).unwrap();
+        }
+        assert!(both > 0, "no step had the undo meet a rewritten file");
+    }
+
+    /// The one write a save can't see coming: another program rewriting a
+    /// file in place in the instant between the save's last look and its
+    /// rename. The file ends as the save wrote it, but the program wrote
+    /// through the hard link the backup is: that backup, the only copy of
+    /// its bytes, is kept and named, and nothing else is left.
+    #[test]
+    fn a_write_in_the_last_instant_before_the_rename_is_kept_aside_and_named() {
+        let fixture = Fixture::new("displaced");
+        let request: SaveRequest = serde_json::from_value(serde_json::json!({
+            "config": load_project(&fixture.config()).unwrap().config,
+            "digests": Fixture::loaded(),
+            "ops": [{ "kind": "upsert", "index": "users", "path": "users.schema.yml",
+                      "raw": "users: 1\n" }],
+        }))
+        .unwrap();
+        let saved = save_with(
+            &fixture.config(),
+            &request,
+            &mut Disk::editing_after_look(1, "editor\n"),
+        )
+        .unwrap();
+        let files = fixture.files();
+        assert_eq!(files["users.schema.yml"], "users: 1\n");
+        assert_eq!(saved.displaced.len(), 1, "{saved:?}");
+        assert_eq!(saved.displaced[0].path, "users.schema.yml");
+        assert_eq!(files[&saved.displaced[0].copy], "editor\n");
+        let others: Vec<&String> = files
+            .keys()
+            .filter(|f| f.starts_with('.') && **f != saved.displaced[0].copy)
+            .collect();
+        assert!(others.is_empty(), "{others:?}");
+        assert!(State::at(fixture.state_dir()).is_ok_and(|s| s.records().is_empty()));
     }
 
     /// A journal naming a file outside the project blocks loading and saving
@@ -3336,38 +3550,34 @@ mod tests {
     }
 
     #[test]
-    fn a_file_edited_after_the_kill_blocks_loading_and_saving_and_is_kept() {
-        let fixture = Fixture::new("blocked");
+    fn a_file_edited_after_the_kill_is_kept_and_named() {
+        let fixture = Fixture::new("kept");
         fixture.kill_mid_swap();
         std::fs::write(fixture.0.join("products.schema.yml"), "mine\n").unwrap();
-        let left = fixture.files();
 
         let recovery = recover_project(&fixture.config()).unwrap();
-        let blocked = recovery.blocked.as_ref().expect("blocked");
-        assert!(!blocked.busy);
-        assert_eq!(blocked.problems.len(), 1);
-        assert_eq!(blocked.problems[0].path, "products.schema.yml");
-        assert_eq!(blocked.problems[0].problem, BlockedProblem::Edited);
-        assert!(
-            blocked
-                .leftovers
-                .contains(&".flusso-save.journal".to_owned())
+        assert!(recovery.blocked.is_none(), "{recovery:?}");
+        let save = &recovery.recovered[0];
+        assert_eq!(save.outcome, RecoveryOutcome::RolledBack);
+        assert!(!save.files.contains(&"products.schema.yml".to_owned()));
+        assert_eq!(save.kept.len(), 1, "{save:?}");
+        assert_eq!(save.kept[0].path, "products.schema.yml");
+        let backup = save.kept[0]
+            .backup
+            .as_ref()
+            .expect("the text before is named");
+        assert_eq!(
+            std::fs::read_to_string(fixture.0.join(backup)).unwrap(),
+            include_str!("../../../dev/products.schema.yml")
         );
-        assert!(
-            Interrupted(recovery.clone())
-                .to_string()
-                .contains("products.schema.yml changed after the save was cut short")
+        let files = fixture.files();
+        assert_eq!(files["products.schema.yml"], "mine\n");
+        assert_eq!(
+            files["flusso.toml"],
+            include_str!("../../../dev/flusso.toml")
         );
-        assert_eq!(blocked.direction, Some(RecoveryDirection::Back));
-        assert!(
-            matches!(&blocked.problems[0].fix, Some(Step::Copy { to, .. }) if to == "products.schema.yml"),
-            "{blocked:?}"
-        );
-        assert!(blocked.keep.is_some());
-
-        let refused = interrupted(save_project(&fixture.config(), fixture.swap()));
-        assert!(refused.blocked.is_some());
-        assert_eq!(fixture.files(), left);
+        assert!(!fixture.0.join(".flusso-save.journal").exists());
+        load_project(&fixture.config()).unwrap();
     }
 
     #[test]

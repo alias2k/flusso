@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::disk::Edit;
+use super::recover::Kept;
 use super::recover::{Problem, Recovery};
 use super::state::Record;
 use super::*;
@@ -443,34 +445,6 @@ fn a_missing_backup_stops_recovery_and_changes_nothing() {
             .any(|p| p.ends_with(journal::JOURNAL))
     );
     assert_eq!(snapshot(&project.dir), left, "recovery changed a file");
-}
-
-#[test]
-fn a_file_edited_since_the_kill_stops_recovery_and_changes_nothing() {
-    let project = half_swapped("edited");
-    std::fs::write(project.dir.join("users.schema.yml"), "typed by hand\n").unwrap();
-    let left = snapshot(&project.dir);
-
-    let blocked = project
-        .recover(&mut Disk::counting())
-        .blocked
-        .expect("blocked");
-    assert_eq!(blocked.problems.len(), 1, "{blocked:?}");
-    assert_eq!(blocked.problems[0].kind, ProblemKind::Edited);
-    assert_eq!(
-        blocked.problems[0].path,
-        project.dir.join("users.schema.yml")
-    );
-    assert_eq!(snapshot(&project.dir), left, "recovery changed a file");
-
-    // Putting the file back by hand lets recovery go on.
-    std::fs::write(project.dir.join("users.schema.yml"), "users\n").unwrap();
-    let recovery = project.recover(&mut Disk::counting());
-    assert!(recovery.blocked.is_none(), "{recovery:?}");
-    assert_eq!(
-        names(&snapshot(&project.dir)),
-        ["flusso.toml", "orders.schema.yml", "users.schema.yml"]
-    );
 }
 
 #[test]
@@ -1188,27 +1162,6 @@ fn a_journal_and_a_done_both_there_are_reported() {
     assert_eq!(report.journals.len(), 2);
 }
 
-/// A committed save whose files no longer all hold the text it wrote is not
-/// finished: nothing is deleted, the backups included, and the file is
-/// reported.
-#[test]
-fn finishing_checks_every_file_holds_the_saved_text_first() {
-    let point = commit_point(Shape::Swap);
-    let project = Project::new("finish-check");
-    project
-        .commit(Shape::Swap, &mut Disk::stopping_after(point))
-        .ok();
-    std::fs::write(project.dir.join("orders.schema.yml"), "typed since\n").unwrap();
-    let left = snapshot(&project.dir);
-    let blocked = project.recover(&mut Disk::counting()).blocked.unwrap();
-    assert_eq!(blocked.problems.len(), 1, "{blocked:?}");
-    assert_eq!(blocked.problems[0].kind, ProblemKind::Edited);
-    assert!(blocked.problems[0].path.ends_with("orders.schema.yml"));
-    assert_eq!(snapshot(&project.dir), left, "something was deleted");
-    assert_eq!(backups(&project.dir).len(), 3);
-    assert_eq!(project.records().len(), 1);
-}
-
 /// A report never looks outside the config's folder: a planted journal
 /// naming `../victim/secret.yml` with digests the attacker chose shows the
 /// path as text, marked outside, and no filesystem call touches it; the
@@ -1896,91 +1849,6 @@ fn edit_in_place(path: &Path, text: &str) {
         .unwrap();
 }
 
-/// Rolling back, a file edited since: given back its text from before (the
-/// backup the page names holds it), the designer rolls back; kept, the other
-/// files go back by hand and it keeps the edit.
-#[test]
-fn rolling_back_an_edited_file_either_way_ends_where_the_page_says() {
-    let (before, _, _) = reference(Shape::Swap);
-    let setup = |tag: &str| {
-        let project = half_swapped(tag);
-        std::fs::write(project.dir.join("users.schema.yml"), "typed by hand\n").unwrap();
-        project
-    };
-
-    let project = setup("back-edited-fix");
-    let (_, problem) = blocked_on(
-        &project,
-        Direction::RollBack,
-        "users.schema.yml",
-        ProblemKind::Edited,
-    );
-    let from = problem
-        .before_copy
-        .clone()
-        .expect("the backup holds the text before");
-    assert_eq!(std::fs::read_to_string(&from).unwrap(), "users\n");
-    assert_eq!(
-        problem.fix.as_deref(),
-        Some(&HandStep::Copy {
-            from,
-            to: project.lock().base().join("users.schema.yml")
-        })
-    );
-    follow(&[*problem.fix.unwrap()]);
-    reloads_to(&project, &before, "restored from the backup");
-
-    let project = setup("back-edited-keep");
-    let (blocked, _) = blocked_on(
-        &project,
-        Direction::RollBack,
-        "users.schema.yml",
-        ProblemKind::Edited,
-    );
-    follow(&blocked.keep.expect("a way to keep it"));
-    reloads_to(
-        &project,
-        &with(&before, "users.schema.yml", Some(b"typed by hand\n")),
-        "kept",
-    );
-}
-
-/// Rolling back, a file the save created and one it removed, each edited
-/// since: deleted, or given back its text from before, the designer rolls
-/// back; kept, every other file goes back by hand.
-#[test]
-fn rolling_back_a_created_or_removed_file_edited_either_way_ends_where_the_page_says() {
-    let (before, _, _) = reference(Shape::MoveAndRemove);
-    let point = commit_point(Shape::MoveAndRemove);
-    for (file, text) in [
-        ("new/deep/orders.schema.yml", "typed by hand\n"),
-        ("orders.schema.yml", "made again\n"),
-    ] {
-        let setup = |tag: &str| {
-            let project = Project::new(&format!("{tag}-{}", file.len()));
-            project
-                .commit(Shape::MoveAndRemove, &mut Disk::stopping_after(point - 1))
-                .unwrap_err();
-            std::fs::write(project.dir.join(file), text).unwrap();
-            project
-        };
-        let project = setup("back-made-fix");
-        let (_, problem) = blocked_on(&project, Direction::RollBack, file, ProblemKind::Edited);
-        follow(&[*problem.fix.expect("a fix")]);
-        reloads_to(&project, &before, file);
-
-        let project = setup("back-made-keep");
-        let (blocked, _) = blocked_on(&project, Direction::RollBack, file, ProblemKind::Edited);
-        follow(&blocked.keep.expect("a way to keep it"));
-        let mut kept = with(&before, file, Some(text.as_bytes()));
-        if file.starts_with("new/") {
-            kept.insert(PathBuf::from("new"), None);
-            kept.insert(PathBuf::from("new/deep"), None);
-        }
-        reloads_to(&project, &kept, file);
-    }
-}
-
 /// Rolling back, a backup gone: no copy of the text before is left, so the
 /// page says to put it back by hand; kept, the file holds what the save wrote
 /// and every other file goes back.
@@ -2094,153 +1962,6 @@ fn a_failed_step_either_way_carries_on_at_the_next_recovery() {
         assert!(blocked.keep.is_none(), "{blocked:?}");
         reloads_to(&project, expected, &format!("{direction:?}"));
     }
-}
-
-/// The review's finding: finishing a committed save, a file edited since.
-/// The page never offers its backup as a way to let the designer finish:
-/// it names the backup only as the text from before, and keeping the edit
-/// leaves every other file as the save wrote it.
-#[test]
-fn finishing_with_an_edited_file_keeps_the_edit_and_never_offers_the_backup() {
-    let (_, after, _) = reference(Shape::Edits);
-    let point = commit_point(Shape::Edits);
-    for (n, edit) in [(point, true), (point + 1, true), (point, false)] {
-        let label = format!("killed after {n}, edited: {edit}");
-        let project = Project::new(&format!("forward-{n}-{edit}"));
-        project
-            .commit(Shape::Edits, &mut Disk::stopping_after(n))
-            .ok();
-        let file = project.dir.join("users.schema.yml");
-        if edit {
-            edit_in_place(&file, "# typed by hand\n");
-        } else {
-            std::fs::remove_file(&file).unwrap();
-        }
-        let now = std::fs::read(&file).ok();
-        let (blocked, problem) = blocked_on(
-            &project,
-            Direction::Finish,
-            "users.schema.yml",
-            ProblemKind::Edited,
-        );
-        assert_eq!(problem.fix, None, "{label}");
-        let backup = problem
-            .before_copy
-            .expect("the backup holds the text before");
-        assert_eq!(std::fs::read_to_string(backup).unwrap(), "users\n");
-        follow(&blocked.keep.expect("a way to keep it"));
-        reloads_to(
-            &project,
-            &with(&after, "users.schema.yml", now.as_deref()),
-            &label,
-        );
-    }
-}
-
-/// Finishing, a file the save removed made again: deleted, the designer
-/// finishes; kept, it stays beside what the save wrote.
-#[test]
-fn finishing_with_a_removed_file_made_again_either_way_ends_where_the_page_says() {
-    let (_, after, _) = reference(Shape::MoveAndRemove);
-    let point = commit_point(Shape::MoveAndRemove);
-    let setup = |tag: &str| {
-        let project = Project::new(tag);
-        project
-            .commit(Shape::MoveAndRemove, &mut Disk::stopping_after(point))
-            .ok();
-        std::fs::write(project.dir.join("orders.schema.yml"), "made again\n").unwrap();
-        project
-    };
-    let project = setup("forward-made-fix");
-    let (_, problem) = blocked_on(
-        &project,
-        Direction::Finish,
-        "orders.schema.yml",
-        ProblemKind::Edited,
-    );
-    follow(&[*problem.fix.expect("delete it")]);
-    reloads_to(&project, &after, "deleted");
-
-    let project = setup("forward-made-keep");
-    let (blocked, _) = blocked_on(
-        &project,
-        Direction::Finish,
-        "orders.schema.yml",
-        ProblemKind::Edited,
-    );
-    follow(&blocked.keep.expect("a way to keep it"));
-    reloads_to(
-        &project,
-        &with(&after, "orders.schema.yml", Some(b"made again\n")),
-        "kept",
-    );
-}
-
-/// Killed anywhere before the commit point, then a file edited in place
-/// (`>>`, or an editor that keeps hard links): a backup hard-linked to it
-/// changed too, and the page names a copy of the text before only when one
-/// holds it. Either way out then ends where the page says.
-#[test]
-fn a_backup_edited_through_its_hard_link_is_never_named_as_the_text_before() {
-    let (before, _, _) = reference(Shape::Edits);
-    let point = commit_point(Shape::Edits);
-    let mut linked = 0;
-    for n in 1..point {
-        let setup = |tag: &str| {
-            let project = Project::new(&format!("{tag}-{n}"));
-            project
-                .commit(Shape::Edits, &mut Disk::stopping_after(n))
-                .unwrap_err();
-            let journaled = project.dir.join(journal::JOURNAL).exists();
-            edit_in_place(&project.dir.join("users.schema.yml"), "# typed by hand\n");
-            (project, journaled)
-        };
-        let (project, journaled) = setup("linked-fix");
-        if !journaled {
-            continue;
-        }
-        let file = project.lock().base().join("users.schema.yml");
-        let (_, problem) = blocked_on(
-            &project,
-            Direction::RollBack,
-            "users.schema.yml",
-            ProblemKind::Edited,
-        );
-        #[cfg(unix)]
-        if let Some(backup) = problem.backup.as_ref().filter(|b| b.exists()) {
-            use std::os::unix::fs::MetadataExt as _;
-            if backup.metadata().unwrap().ino() == file.metadata().unwrap().ino() {
-                linked += 1;
-                assert_eq!(problem.before_copy, None, "killed after {n}");
-            }
-        }
-        match &problem.before_copy {
-            Some(copy) => assert_eq!(std::fs::read_to_string(copy).unwrap(), "users\n"),
-            None => assert_eq!(problem.fix, None, "killed after {n}"),
-        }
-        match problem.fix {
-            Some(fix) => follow(&[*fix]),
-            None => std::fs::write(&file, "users\n").unwrap(),
-        }
-        reloads_to(&project, &before, &format!("killed after {n}, restored"));
-
-        let (project, _) = setup("linked-keep");
-        let (blocked, _) = blocked_on(
-            &project,
-            Direction::RollBack,
-            "users.schema.yml",
-            ProblemKind::Edited,
-        );
-        let edited = std::fs::read(project.dir.join("users.schema.yml")).unwrap();
-        follow(&blocked.keep.expect("a way to keep it"));
-        reloads_to(
-            &project,
-            &with(&before, "users.schema.yml", Some(&edited)),
-            &format!("killed after {n}, kept"),
-        );
-    }
-    #[cfg(unix)]
-    assert!(linked > 0, "no kill point left a hard-linked backup");
 }
 
 /// A move into a new nested folder, killed after each step, in a copied
@@ -2367,4 +2088,338 @@ fn a_failing_private_write_leaves_no_temp() {
         .map(|e| e.file_name())
         .collect();
     assert_eq!(left, ["1-2.json"]);
+}
+
+/// `snapshot` with `file` (relative) holding `bytes`, and every folder on its
+/// way there.
+fn with_edit(snapshot: &Snapshot, file: &str, bytes: &[u8]) -> Snapshot {
+    let mut out = with(snapshot, file, Some(bytes));
+    for folder in Path::new(file).ancestors().skip(1) {
+        if !folder.as_os_str().is_empty() {
+            out.entry(folder.to_path_buf()).or_insert(None);
+        }
+    }
+    out
+}
+
+/// Recover `project`: it settles (never blocks), nothing of the save is
+/// left but the backups its notice names, each holding its file's text from
+/// `before`, and the project is then `expected`. The files kept as another
+/// program wrote them.
+fn settles_keeping(
+    project: &Project,
+    expected: &Snapshot,
+    before: &Snapshot,
+    label: &str,
+) -> Vec<Kept> {
+    let recovery = project.recover(&mut Disk::counting());
+    assert!(recovery.blocked.is_none(), "{label}: {recovery:?}");
+    assert!(project.records().is_empty(), "{label}: a record is left");
+    let kept: Vec<Kept> = recovery
+        .settled
+        .iter()
+        .flat_map(|s| s.kept.clone())
+        .collect();
+    let base = project.lock().base().to_path_buf();
+    let mut now = snapshot(&project.dir);
+    for k in &kept {
+        if let Some(backup) = &k.backup {
+            let held = now
+                .remove(backup.strip_prefix(&base).unwrap())
+                .unwrap_or_else(|| panic!("{label}: the named backup {backup:?} is gone"));
+            let file = k.path.strip_prefix(&base).unwrap();
+            assert_eq!(held, before.get(file).cloned().flatten(), "{label}: {k:?}");
+        }
+    }
+    assert_eq!(names(&now), names(expected), "{label}");
+    assert_eq!(&now, expected, "{label}");
+    kept
+}
+
+/// Rolling back, a file written since the kill is kept as it is, its backup
+/// of the text before named; every other file goes back.
+#[test]
+fn a_file_edited_since_the_kill_is_kept_and_the_rest_rolled_back() {
+    let (before, _, _) = reference(Shape::Swap);
+    let project = half_swapped("edited");
+    std::fs::write(project.dir.join("users.schema.yml"), "typed by hand\n").unwrap();
+    let kept = settles_keeping(
+        &project,
+        &with(&before, "users.schema.yml", Some(b"typed by hand\n")),
+        &before,
+        "kept",
+    );
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].path.ends_with("users.schema.yml"));
+    assert!(
+        kept[0].backup.is_some(),
+        "the text before is kept and named"
+    );
+}
+
+/// Rolling back, a file the save created and one it removed, each written
+/// since: both kept, every other file back as before.
+#[test]
+fn rolling_back_keeps_a_created_or_removed_file_written_since() {
+    let (before, _, _) = reference(Shape::MoveAndRemove);
+    let point = commit_point(Shape::MoveAndRemove);
+    for (file, text) in [
+        ("new/deep/orders.schema.yml", "typed by hand\n"),
+        ("orders.schema.yml", "made again\n"),
+    ] {
+        let project = Project::new(&format!("back-made-{}", file.len()));
+        project
+            .commit(Shape::MoveAndRemove, &mut Disk::stopping_after(point - 1))
+            .unwrap_err();
+        std::fs::write(project.dir.join(file), text).unwrap();
+        let kept = settles_keeping(
+            &project,
+            &with_edit(&before, file, text.as_bytes()),
+            &before,
+            file,
+        );
+        assert!(
+            kept.iter().any(|k| k.path.ends_with(file)),
+            "{file}: {kept:?}"
+        );
+    }
+}
+
+/// Finishing a committed save, a file edited or deleted since, or one it
+/// removed made again: kept as it is; everything else is as the save wrote
+/// it, and the backups are gone.
+#[test]
+fn finishing_keeps_a_file_written_since_and_cleans_up() {
+    let (_, after, _) = reference(Shape::Edits);
+    let point = commit_point(Shape::Edits);
+    for (n, edit) in [(point, true), (point + 1, true), (point, false)] {
+        let label = format!("killed after {n}, edited: {edit}");
+        let project = Project::new(&format!("forward-{n}-{edit}"));
+        project
+            .commit(Shape::Edits, &mut Disk::stopping_after(n))
+            .ok();
+        let file = project.dir.join("users.schema.yml");
+        if edit {
+            edit_in_place(&file, "# typed by hand\n");
+        } else {
+            std::fs::remove_file(&file).unwrap();
+        }
+        let now = std::fs::read(&file).ok();
+        let kept = settles_keeping(
+            &project,
+            &with(&after, "users.schema.yml", now.as_deref()),
+            &after,
+            &label,
+        );
+        assert_eq!(kept.len(), 1, "{label}: {kept:?}");
+        assert_eq!(kept[0].backup, None, "{label}");
+    }
+
+    let (_, after, _) = reference(Shape::MoveAndRemove);
+    let point = commit_point(Shape::MoveAndRemove);
+    let project = Project::new("forward-made");
+    project
+        .commit(Shape::MoveAndRemove, &mut Disk::stopping_after(point))
+        .ok();
+    std::fs::write(project.dir.join("orders.schema.yml"), "made again\n").unwrap();
+    settles_keeping(
+        &project,
+        &with(&after, "orders.schema.yml", Some(b"made again\n")),
+        &after,
+        "made again",
+    );
+}
+
+/// Killed anywhere before the commit point, then a file edited in place
+/// (`>>`, or an editor that keeps hard links): the file is kept; a backup
+/// hard-linked to it holds its bytes, not the text before, and goes, while a
+/// backup that still holds the text before is kept and named.
+#[test]
+fn a_backup_edited_through_its_hard_link_is_never_named_as_the_text_before() {
+    let (before, _, _) = reference(Shape::Edits);
+    let point = commit_point(Shape::Edits);
+    let mut linked = 0;
+    for n in 1..point {
+        let project = Project::new(&format!("linked-{n}"));
+        project
+            .commit(Shape::Edits, &mut Disk::stopping_after(n))
+            .unwrap_err();
+        if !project.dir.join(journal::JOURNAL).exists() {
+            continue;
+        }
+        let file = project.dir.join("users.schema.yml");
+        #[cfg(unix)]
+        let shared = backups(&project.dir).iter().any(|b| {
+            use std::os::unix::fs::MetadataExt as _;
+            b.metadata().unwrap().ino() == file.metadata().unwrap().ino()
+        });
+        edit_in_place(&file, "# typed by hand\n");
+        let edited = std::fs::read(&file).unwrap();
+        let kept = settles_keeping(
+            &project,
+            &with(&before, "users.schema.yml", Some(&edited)),
+            &before,
+            &format!("killed after {n}"),
+        );
+        #[cfg(unix)]
+        if shared {
+            linked += 1;
+            assert!(
+                kept.iter().all(|k| k.backup.is_none()),
+                "killed after {n}: {kept:?}"
+            );
+        }
+    }
+    #[cfg(unix)]
+    assert!(linked > 0, "no kill point left a hard-linked backup");
+}
+
+/// Every file a save of `shape` writes or removes, relative.
+fn touched(project: &Project, shape: Shape) -> Vec<String> {
+    let (writes, removals) = project.save(shape);
+    let rel = |p: &Path| p.strip_prefix(&project.dir).unwrap().display().to_string();
+    writes
+        .iter()
+        .map(|w| rel(&w.dest))
+        .chain(removals.iter().map(|r| rel(&r.path)))
+        .collect()
+}
+
+const EDITOR: &[u8] = b"# the editor's\n";
+
+/// Another program writes a file a save touches right after any step of the
+/// save (in place, or by rename): the save ends as before it or after it,
+/// plus that write, never losing it, and leaves nothing behind. In process:
+/// refused as [`Changed`] when it undid itself. Killed right after the write
+/// or one step later: recovery settles the same way, never blocking, keeping
+/// only the backups its notice names.
+#[test]
+fn an_editor_write_after_any_step_is_kept_and_nothing_is_left() {
+    for shape in SHAPES {
+        let (before, after, steps) = reference(shape);
+        let files = touched(&Project::new("files"), shape);
+        for file in &files {
+            for by_rename in [false, true] {
+                for n in 1..=steps {
+                    for kill in [None, Some(n), Some(n + 1)] {
+                        let label =
+                            format!("{shape:?} {file} rename:{by_rename} after {n} kill:{kill:?}");
+                        let project = Project::new(&format!(
+                            "editor-{shape:?}-{}-{by_rename}-{n}-{kill:?}",
+                            file.len()
+                        ));
+                        let edit = Edit {
+                            after_step: n,
+                            path: project.dir.join(file),
+                            bytes: EDITOR.to_vec(),
+                            by_rename,
+                            done: false,
+                        };
+                        let mut disk = Disk::counting().with_edit(edit);
+                        if let Some(k) = kill {
+                            disk = disk.and_stopping_after(k);
+                        }
+                        let saved = project.commit(shape, &mut disk);
+                        let edited = disk.edits().iter().all(|e| e.done);
+                        let (b, a) = if edited {
+                            (
+                                with_edit(&before, file, EDITOR),
+                                with_edit(&after, file, EDITOR),
+                            )
+                        } else {
+                            (before.clone(), after.clone())
+                        };
+                        if kill.is_none() || !disk.stopped() {
+                            assert!(project.records().is_empty(), "{label}: a record is left");
+                            let now = snapshot(&project.dir);
+                            match saved {
+                                Ok(()) => assert_eq!(now, a, "{label}"),
+                                Err(e) => {
+                                    assert!(e.is::<Changed>(), "{label}: {e:#}");
+                                    assert_eq!(now, b, "{label}");
+                                }
+                            }
+                            continue;
+                        }
+                        let recovery = project.recover(&mut Disk::counting());
+                        assert!(recovery.blocked.is_none(), "{label}: {recovery:?}");
+                        assert!(project.records().is_empty(), "{label}: a record is left");
+                        let base = project.lock().base().to_path_buf();
+                        let mut now = snapshot(&project.dir);
+                        for k in recovery.settled.iter().flat_map(|s| &s.kept) {
+                            if let Some(backup) = &k.backup {
+                                now.remove(backup.strip_prefix(&base).unwrap())
+                                    .unwrap_or_else(|| {
+                                        panic!("{label}: {backup:?} named, not there")
+                                    });
+                            }
+                        }
+                        assert!(now == b || now == a, "{label}: {:?}", names(&now));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The review's case: after the first file is renamed into place, another
+/// program rewrites it and the next one. The save refuses, naming both;
+/// both keep the other program's bytes, the rest is as before, nothing is
+/// left. Killed at any step of that undo, recovery settles the same way.
+#[test]
+fn an_undo_meeting_files_written_meanwhile_keeps_them_all() {
+    let (before, _, steps) = reference(Shape::Edits);
+    // record, journal (2), temps (2), backups (2), then users' rename.
+    let renamed = 8;
+    let expected = with(
+        &with(&before, "users.schema.yml", Some(EDITOR)),
+        "flusso.toml",
+        Some(EDITOR),
+    );
+    let edits = |project: &Project| {
+        ["users.schema.yml", "flusso.toml"].map(|f| Edit {
+            after_step: renamed,
+            path: project.dir.join(f),
+            bytes: EDITOR.to_vec(),
+            by_rename: false,
+            done: false,
+        })
+    };
+    let project = Project::new("undo-meets");
+    let mut disk = Disk::counting();
+    for e in edits(&project) {
+        disk = disk.with_edit(e);
+    }
+    let err = project.commit(Shape::Edits, &mut disk).unwrap_err();
+    assert_eq!(
+        std::fs::read(project.dir.join("users.schema.yml")).unwrap(),
+        EDITOR,
+        "the first rename is the one edited"
+    );
+    let Changed(files) = err.downcast::<Changed>().expect("refused as changed");
+    let mut named: Vec<String> = files
+        .iter()
+        .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    named.sort();
+    assert_eq!(named, ["flusso.toml", "users.schema.yml"]);
+    assert_eq!(snapshot(&project.dir), expected);
+    assert!(project.records().is_empty());
+
+    for k in renamed..=steps + 4 {
+        let project = Project::new(&format!("undo-meets-{k}"));
+        let mut disk = Disk::counting().and_stopping_after(k);
+        for e in edits(&project) {
+            disk = disk.with_edit(e);
+        }
+        if project.commit(Shape::Edits, &mut disk).is_ok() || !disk.stopped() {
+            continue;
+        }
+        settles_keeping(
+            &project,
+            &expected,
+            &before,
+            &format!("undo killed after {k}"),
+        );
+    }
 }

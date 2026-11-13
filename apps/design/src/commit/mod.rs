@@ -84,9 +84,12 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 
 pub(crate) use disk::Disk;
+#[cfg(test)]
+pub(crate) use disk::Edit;
 pub(crate) use journal::Unusable;
 use journal::{DONE, JOURNAL, Journal, STAGING, Steps};
 pub(crate) use lock::{LockError, ProjectLock};
+use recover::Backups;
 pub(crate) use recover::{
     Blocked, Direction, Fix, HandStep, Holds, Outcome, ProblemKind, Report, recover, strays,
 };
@@ -131,7 +134,9 @@ impl Expect {
     fn check(&self, path: &std::path::Path) -> Result<Option<journal::Digest>> {
         let now = journal::Digest::at(path)?;
         match self {
-            Self::Holds(expected) if *expected != now => Err(Changed(path.to_path_buf()).into()),
+            Self::Holds(expected) if *expected != now => {
+                Err(Changed(vec![(path.to_path_buf(), expected.clone())]).into())
+            }
             #[cfg(test)]
             Self::AsFound => Ok(now),
             Self::Holds(_) => Ok(now),
@@ -139,15 +144,21 @@ impl Expect {
     }
 }
 
-/// A commit refused because a file it replaces or removes no longer holds
+/// A commit refused because files it replaces or removes no longer hold
 /// what it expects: written by someone who doesn't take the project's lock.
-/// Nothing the commit did is left.
+/// Each with what the save expected it to hold (`None`: no file). Nothing
+/// the commit did is left, and each of these files keeps what it holds.
 #[derive(Debug)]
-pub(crate) struct Changed(pub(crate) PathBuf);
+pub(crate) struct Changed(pub(crate) Vec<(PathBuf, Option<journal::Digest>)>);
 
 impl std::fmt::Display for Changed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} changed during the save", self.0.display())
+        let files: Vec<String> = self
+            .0
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        write!(f, "{} changed during the save", files.join(", "))
     }
 }
 
@@ -167,6 +178,9 @@ pub(crate) struct Committed {
     /// (its commit mark could not be flushed): that recovery finishes this
     /// save, not an interrupted one.
     pub(crate) cleanup_left: Option<String>,
+    /// Backups kept because they hold what another program wrote to their
+    /// file as the save replaced it ([`recover::Finished::displaced`]).
+    pub(crate) displaced: Vec<recover::Displaced>,
 }
 
 /// Write `writes` in order and remove `removals`, all or nothing (see the
@@ -217,12 +231,14 @@ pub(crate) fn commit(
         let undone = if failed.is::<Changed>() {
             undo_reached(&steps, &progress, &journal_path, disk)
         } else {
-            recover::roll_back(&steps, &journal_path, disk)
+            recover::roll_back(&steps, &journal_path, Backups::Drop, disk)
         };
-        let undone = undone.and_then(|()| {
-            disk.remove_file(&staging).map_err(|e| {
-                Blocked::new(Vec::new(), vec![staging.clone()]).with_error(&staging, e)
-            })
+        let undone = undone.and_then(|kept| {
+            disk.remove_file(&staging)
+                .map_err(|e| {
+                    Blocked::new(Vec::new(), vec![staging.clone()]).with_error(&staging, e)
+                })
+                .map(|()| kept)
         });
         if undone.is_ok()
             && let Some(state) = state
@@ -230,7 +246,7 @@ pub(crate) fn commit(
             state.remove(&steps.token, disk).ok();
         }
         return Err(match undone {
-            Ok(()) => failed,
+            Ok(kept) => with_kept(failed, kept),
             Err(left) => anyhow!(
                 "{failed:#}; restoring the project failed too ({}); the previous files are kept at: {}. \
                  The designer finishes restoring them the next time it opens this project",
@@ -264,6 +280,7 @@ pub(crate) fn commit(
         );
         Ok(Committed {
             cleanup_left: Some(steps.token.clone()),
+            displaced: Vec::new(),
         })
     };
     if let Some(state) = state {
@@ -277,28 +294,82 @@ pub(crate) fn commit(
     if let Err(e) = disk.sync_dir(base) {
         return left(&e);
     }
-    if let Err(blocked) = recover::finish(&steps, &done, disk) {
-        return left(&format!("{blocked:?}"));
+    let finished = match recover::finish(&steps, &done, disk) {
+        Err(blocked) => return left(&format!("{blocked:?}")),
+        Ok(finished) => finished,
+    };
+    if !finished.kept.is_empty() {
+        tracing::debug!(
+            files = ?finished.kept.iter().map(|k| &k.path).collect::<Vec<_>>(),
+            "files written by another program right after the save are kept as they are"
+        );
     }
     if let Some(state) = state
         && let Err(e) = state.remove(&steps.token, disk)
     {
         tracing::debug!(error = %e, "could not remove the record of a finished save");
     }
-    Ok(Committed { cleanup_left: None })
+    Ok(Committed {
+        cleanup_left: None,
+        displaced: finished.displaced,
+    })
+}
+
+/// `failed`, naming the files another program wrote meanwhile, which the undo
+/// kept: a [`Changed`] grows by them, any other failure says so.
+fn with_kept(failed: anyhow::Error, kept: Vec<recover::Kept>) -> anyhow::Error {
+    if kept.is_empty() {
+        return failed;
+    }
+    match failed.downcast::<Changed>() {
+        Ok(Changed(mut files)) => {
+            for k in kept {
+                if !files.iter().any(|(p, _)| *p == k.path) {
+                    files.push((k.path, k.before));
+                }
+            }
+            Changed(files).into()
+        }
+        Err(failed) => anyhow!(
+            "{failed:#}; nothing was saved, and {} changed meanwhile and kept what it holds",
+            kept.iter()
+                .map(|k| k.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// Undo a commit stopped by [`Changed`] at `progress`. The files it had not
-/// reached were never replaced, and one of them holds another program's text,
-/// which [`recover::roll_back`] would refuse to touch: their temp files and
-/// backups (a backup is a second name, never the file itself) are deleted,
-/// and the rest is rolled back as any failed commit.
+/// reached were never replaced: their temp files and backups (a backup is a
+/// second name, never the file itself) are deleted, and each that no longer
+/// holds its text from before is kept as another program's. The rest is
+/// rolled back as any failed commit, keeping a file written since its rename.
 fn undo_reached(
     steps: &Steps,
     progress: &Progress,
     journal: &std::path::Path,
     disk: &mut Disk,
-) -> Result<(), Blocked> {
+) -> Result<Vec<recover::Kept>, Blocked> {
+    let mut kept = Vec::new();
+    for write in steps.writes.iter().skip(progress.renamed) {
+        if journal::Digest::at(&write.dest).ok().flatten() != write.before {
+            kept.push(recover::Kept {
+                path: write.dest.clone(),
+                before: write.before.clone(),
+                backup: None,
+            });
+        }
+    }
+    for removal in steps.removals.iter().skip(progress.removed) {
+        if journal::Digest::at(&removal.path).ok().flatten().as_ref() != Some(&removal.before) {
+            kept.push(recover::Kept {
+                path: removal.path.clone(),
+                before: Some(removal.before.clone()),
+                backup: None,
+            });
+        }
+    }
     let failed = |path: &std::path::Path, e| {
         Blocked::new(Vec::new(), vec![path.to_path_buf()]).with_error(path, e)
     };
@@ -326,7 +397,8 @@ fn undo_reached(
             .cloned()
             .collect(),
     };
-    recover::roll_back(&reached, journal, disk)
+    kept.extend(recover::roll_back(&reached, journal, Backups::Drop, disk)?);
+    Ok(kept)
 }
 
 /// Steps 2–5: everything up to the commit point. Right before each rename
@@ -374,7 +446,7 @@ fn run(
             .holds(&planned.dest, planned.before.as_ref())
             .map_err(|e| anyhow!("reading {}: {e}", planned.dest.display()))?;
         if !unchanged {
-            return Err(Changed(planned.dest.clone()).into());
+            return Err(Changed(vec![(planned.dest.clone(), planned.before.clone())]).into());
         }
         disk.rename(&planned.temp, &planned.dest)
             .map_err(|e| anyhow!("writing {}: {e}", planned.dest.display()))?;
@@ -385,7 +457,7 @@ fn run(
             .holds(&removal.path, Some(&removal.before))
             .map_err(|e| anyhow!("reading {}: {e}", removal.path.display()))?;
         if !unchanged {
-            return Err(Changed(removal.path.clone()).into());
+            return Err(Changed(vec![(removal.path.clone(), Some(removal.before.clone()))]).into());
         }
         disk.rename(&removal.path, &removal.backup)
             .map_err(|e| anyhow!("removing {}: {e}", removal.path.display()))?;

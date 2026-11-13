@@ -36,7 +36,16 @@ import type {
   SchemaIdentity,
   ValidateResponse,
 } from "./api";
-import { api, type Digests, RecoveryError, ReloadError, type SaveRecovery, StaleError, type StaleFile } from "./api";
+import {
+  api,
+  type Digests,
+  type RecoveredSave,
+  RecoveryError,
+  ReloadError,
+  type SaveRecovery,
+  StaleError,
+  type StaleFile,
+} from "./api";
 import { RecoveryBlocked, RecoveryNotice } from "./components/Recovery";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -278,6 +287,14 @@ export default function App() {
   // An interrupted save the server settled (a notice) or could not (the
   // project is not shown).
   const [recovery, setRecovery] = useState<SaveRecovery | null>(null);
+  const notifyRecovered = (recovered: RecoveredSave[] | undefined) => {
+    const fresh = unshownRecoveries(recovered);
+    if (fresh.length) setRecovery({ recovered: fresh, leftovers: [] });
+  };
+  // The files the open review overwrites anyway, by path, with what changed
+  // on disk; and a key that opens each review fresh.
+  const [overwrites, setOverwrites] = useState<Record<string, StaleFile[]>>({});
+  const [reviewKey, setReviewKey] = useState(0);
   const [blocked, setBlocked] = useState<SaveRecovery | null>(null);
 
   const theme = useUiStore((s) => s.theme);
@@ -355,7 +372,10 @@ export default function App() {
     api
       .project()
       .then((p) => {
-        if (p.recovery) setRecovery(p.recovery);
+        if (p.recovery) {
+          unshownRecoveries(p.recovery.recovered);
+          setRecovery(p.recovery);
+        }
         loadProject(p, true);
         // A deep link wins over the default first index — applied after the
         // project loads so the index-name validation can see it.
@@ -849,6 +869,51 @@ export default function App() {
     }
     return true;
   };
+  // Compute the review of `current` with the files in `overwrite` taken as
+  // they are on disk now, and open it (a stale flusso.toml is shown even when
+  // nothing else changed: no save goes through until the page reloads).
+  const openReview = async (current: Doc, overwrite: Record<string, StaleFile[]>) => {
+    const { planned, refusal } = buildOps(current);
+    if (refusal) {
+      setToast({ kind: "error", text: refusal });
+      return;
+    }
+    const review = await api.diff(
+      current.config,
+      planned.map((p) => p.op),
+      configIdentity(current),
+      digestsOf(overwrite),
+    );
+    notifyRecovered(review.recovered);
+    const result = review.diffs;
+    const configPath = result[0]?.path;
+    const keepConfig =
+      isConfigDirty(current) || !result[0] || !!staleOf(result[0]) || (!!configPath && !!overwrite[configPath]);
+    const shown = keepConfig ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
+    if (shown.some((d) => d.changed || staleOf(d))) {
+      setOverwrites(overwrite);
+      setReviewKey((k) => k + 1);
+      setDiffs(shown);
+    } else setToast({ kind: "ok", text: t("toast.alreadyUpToDate") });
+  };
+
+  // Overwrite a review entry's files anyway: the review is computed again
+  // against the disk with them overwritten, so Write shows every file it
+  // writes before it is offered.
+  const overwriteAnyway = async (d: OpDiff) => {
+    const current = useDesignStore.getState().doc;
+    if (!current || !d.stale) return;
+    setSaving(true);
+    try {
+      await openReview(current, { ...overwrites, [d.path]: d.stale });
+    } catch (e) {
+      if (refusedOverRecovery(e)) return;
+      setToast({ kind: "error", text: t("toast.diffFailed", { err: errText(e) }) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const save = async () => {
     if (!doc || useUiStore.getState().saving) return;
     const nameDraft = useUiStore.getState().nameDraft;
@@ -887,24 +952,7 @@ export default function App() {
         setToast({ kind: "error", text: t("value.roundedSave", { fields: rounded.join(", ") }) });
         return;
       }
-      const { planned, refusal } = buildOps(current);
-      if (refusal) {
-        setToast({ kind: "error", text: refusal });
-        return;
-      }
-      const review = await api.diff(
-        current.config,
-        planned.map((p) => p.op),
-        configIdentity(current),
-      );
-      if (review.recovered?.length) setRecovery({ recovered: review.recovered, leftovers: [] });
-      const result = review.diffs;
-      const shown =
-        isConfigDirty(current) || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
-      // A stale flusso.toml is shown even when nothing else changed: no save
-      // goes through until the page reloads.
-      if (shown.some((d) => d.changed) || staleOf(result[0])) setDiffs(shown);
-      else setToast({ kind: "ok", text: t("toast.alreadyUpToDate") });
+      await openReview(current, {});
     } catch (e) {
       if (refusedOverRecovery(e)) return;
       setToast({ kind: "error", text: t("toast.diffFailed", { err: errText(e) }) });
@@ -917,12 +965,13 @@ export default function App() {
   // (plus the config whenever its model didn't change, so an untouched
   // flusso.toml keeps its comments). The saved snapshot advances per index for
   // exactly the ops that were applied, so Reset targets the true on-disk state.
-  const performSave = async (skipPaths: string[], overwrite: Digests) => {
+  const performSave = async (skipPaths: string[]) => {
     if (!doc || !diffs) return;
     const { planned } = buildOps();
     const configPath = diffs[0]?.path;
     const skip = new Set(skipPaths);
-    if (!configDirty && configPath) skip.add(configPath);
+    const configOverwritten = !!configPath && !!overwrites[configPath];
+    if (!configDirty && !configOverwritten && configPath) skip.add(configPath);
     let reviewAgain = false;
     setSaving(true);
     try {
@@ -931,14 +980,14 @@ export default function App() {
         planned.map((p) => p.op),
         [...skip],
         configIdentity(doc),
-        overwrite,
+        digestsOf(overwrites),
       );
       // Advance the saved snapshot to the new on-disk state. When everything was
       // applied (the common case) the doc *is* the disk, so snapshot it directly
       // — exact, no key-order drift. When the user skipped some entries, fold
       // only the applied ops onto the previous snapshot so the skipped ones stay
       // dirty.
-      const configSkipped = configDirty && !!configPath && skip.has(configPath);
+      const configSkipped = (configDirty || configOverwritten) && !!configPath && skip.has(configPath);
       const anySkipped =
         configSkipped ||
         planned.some((p) => {
@@ -963,7 +1012,8 @@ export default function App() {
         setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
       }
       setDiffs(null);
-      if (res.recovered?.length) setRecovery({ recovered: res.recovered, leftovers: [] });
+      notifyRecovered(res.recovered);
+      if (res.displaced?.length) setRecovery({ recovered: [], leftovers: [], displaced: res.displaced });
       const n = res.written.length + res.moved.length;
       setToast({ kind: "ok", text: t("toast.saved", { n }) });
     } catch (e) {
@@ -1651,7 +1701,10 @@ export default function App() {
           diffs={diffs}
           doc={doc}
           saving={saving}
-          onConfirm={(ignore, overwrite) => void performSave(ignore, overwrite)}
+          key={reviewKey}
+          overwritten={overwrites}
+          onOverwrite={(d) => void overwriteAnyway(d)}
+          onConfirm={(ignore) => void performSave(ignore)}
           onCancel={() => setDiffs(null)}
         />
       )}
@@ -1784,6 +1837,22 @@ function OpBadge({ d }: { d: OpDiff }) {
   return null;
 }
 
+/// The interrupted saves this page has told about, for the page's life:
+/// each is told once.
+const shownRecoveries = new Set<string>();
+
+/// The saves of `recovered` this page has not told about yet, marked told.
+const unshownRecoveries = (recovered: RecoveredSave[] | undefined): RecoveredSave[] => {
+  const fresh = (recovered ?? []).filter((r) => !shownRecoveries.has(r.id));
+  for (const r of fresh) shownRecoveries.add(r.id);
+  return fresh;
+};
+
+/// The digests a save sends for the files overwritten anyway: each as the
+/// review found it on disk.
+const digestsOf = (overwrites: Record<string, StaleFile[]>): Digests =>
+  Object.fromEntries(Object.values(overwrites).flatMap((files) => files.map((f) => [f.path, f.on_disk])));
+
 /// The files a review entry writes or removes that changed on disk since the
 /// page loaded them; `undefined` when none did.
 const staleOf = (d: OpDiff | undefined) => (d?.stale?.length ? d.stale : undefined);
@@ -1874,19 +1943,24 @@ function DiffModal({
   diffs,
   doc,
   saving,
+  overwritten,
+  onOverwrite,
   onConfirm,
   onCancel,
 }: {
   diffs: OpDiff[];
   doc: Doc;
   saving: boolean;
-  onConfirm: (paths: string[], overwrite: Digests) => void;
+  /// The files the user chose to overwrite anyway, by path, with what had
+  /// changed on disk: this review was computed with them overwritten.
+  overwritten: Record<string, StaleFile[]>;
+  /// Overwrite this entry's files anyway: the review is computed again.
+  onOverwrite: (d: OpDiff) => void;
+  onConfirm: (paths: string[]) => void;
   onCancel: () => void;
 }) {
   const { t } = useT();
   const [mode, setMode] = useState<DiffMode>("split");
-  // The files the user chose to overwrite anyway although they changed on disk.
-  const [overwritten, setOverwritten] = useState<ReadonlySet<string>>(new Set());
   const [selected, setSelected] = useState(0);
   const [check, setCheck] = useState<Check>({ state: "loading" });
   const searchRef = useRef<HTMLInputElement>(null);
@@ -1894,7 +1968,7 @@ function DiffModal({
   // folder's files sit together — the list reads as a folder tree, and ↑/↓ nav
   // walks it in the shown order.
   const changed = useMemo(() => {
-    const list = diffs.filter((d) => d.changed);
+    const list = diffs.filter((d) => d.changed || staleOf(d));
     const isConfig = (d: OpDiff) => d.path.endsWith("flusso.toml");
     return [...list.filter(isConfig), ...list.filter((d) => !isConfig(d)).sort((a, b) => a.path.localeCompare(b.path))];
   }, [diffs]);
@@ -1912,16 +1986,13 @@ function DiffModal({
   // the files linked to it) unless the user overwrites it anyway; while
   // flusso.toml did, nothing is, since every save is checked against it.
   const configDiff = diffs.find((d) => d.index === undefined);
-  const configBlocked = !!staleOf(configDiff) && !(configDiff && overwritten.has(configDiff.path));
-  // The files that can't be written with `over` overwritten anyway: every one
-  // while flusso.toml is stale.
-  const blockedBy = (over: ReadonlySet<string>) => {
-    if (staleOf(configDiff) && !(configDiff && over.has(configDiff.path))) return new Set(changed.map((d) => d.path));
-    const out = new Set(changed.filter((d) => staleOf(d) && !over.has(d.path)).map((d) => d.path));
+  const configBlocked = !!staleOf(configDiff);
+  const blocked = useMemo(() => {
+    if (configBlocked) return new Set(changed.map((d) => d.path));
+    const out = new Set(changed.filter((d) => staleOf(d)).map((d) => d.path));
     if ([...linked].some((p) => out.has(p))) for (const p of linked) out.add(p);
     return out;
-  };
-  const blocked = blockedBy(overwritten);
+  }, [changed, linked, configBlocked]);
 
   // Which files to actually write (default all that can be); the user can
   // uncheck any to save a subset.
@@ -1931,31 +2002,16 @@ function DiffModal({
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
   const shown = changed.filter((d) => !needle || d.path.toLowerCase().includes(needle));
-  const setPaths = (paths: string[], on: boolean, unblocked: ReadonlySet<string> = blocked) =>
+  const setPaths = (paths: string[], on: boolean) =>
     setInclude((s) => {
       const next = new Set(s);
       const all = paths.some((p) => linked.has(p)) ? [...paths, ...linked] : paths;
       for (const p of all)
         if (!on) next.delete(p);
-        else if (!unblocked.has(p)) next.add(p);
+        else if (!blocked.has(p)) next.add(p);
       return next;
     });
-  const overwrite = (path: string) => {
-    const next = new Set(overwritten).add(path);
-    setOverwritten(next);
-    const still = blockedBy(next);
-    // Overwriting flusso.toml lets every other unchanged-on-disk file be written again.
-    const freed = changed.map((d) => d.path).filter((p) => blocked.has(p) && !still.has(p));
-    setPaths([path, ...freed], true, still);
-  };
   const canWrite = !saving && include.size > 0 && !configBlocked;
-  // For each file overwritten anyway that is written, the digest it has on disk now.
-  const overwriteDigests = (): Digests =>
-    Object.fromEntries(
-      changed
-        .filter((d) => include.has(d.path) && overwritten.has(d.path))
-        .flatMap((d) => (d.stale ?? []).map((f) => [f.path, f.on_disk])),
-    );
   const toggle = (path: string) => setPaths([path], !include.has(path));
   // The select-all box acts on the currently-shown (filtered) files.
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
@@ -1989,7 +2045,7 @@ function DiffModal({
   const onDialogKey = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
-      if (canWrite) onConfirm(ignoreList(), overwriteDigests());
+      if (canWrite) onConfirm(ignoreList());
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
@@ -2084,11 +2140,6 @@ function DiffModal({
           </div>
         </DialogHeader>
         <ValidationDetail check={check} />
-        {configBlocked && configDiff && !changed.includes(configDiff) && (
-          <div className="overflow-hidden rounded-md border border-destructive/40">
-            <StaleNotice files={configDiff.stale ?? []} config overwritten={false} />
-          </div>
-        )}
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border">
           <div className="flex w-60 shrink-0 flex-col border-r border-border bg-secondary/40">
             {changed.length > 3 && (
@@ -2181,12 +2232,9 @@ function DiffModal({
                           >
                             <span className="flex items-center gap-1 truncate font-mono text-xs">
                               <span className="truncate font-medium text-foreground">{base}</span>
-                              {staleOf(d) && (
+                              {(staleOf(d) ?? overwritten[d.path]) && (
                                 <TriangleAlert
-                                  className={cn(
-                                    "size-3 shrink-0",
-                                    overwritten.has(d.path) ? "text-warn" : "text-destructive",
-                                  )}
+                                  className={cn("size-3 shrink-0", staleOf(d) ? "text-destructive" : "text-warn")}
                                   aria-label={t("stale.badge")}
                                 />
                               )}
@@ -2241,13 +2289,13 @@ function DiffModal({
             </div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
-            {active && staleOf(active) && (
+            {active && (staleOf(active) ?? overwritten[active.path]) && (
               <StaleNotice
                 key={active.path}
-                files={active.stale ?? []}
+                files={staleOf(active) ?? overwritten[active.path] ?? []}
                 config={active === configDiff}
-                overwritten={overwritten.has(active.path)}
-                onOverwrite={() => overwrite(active.path)}
+                overwritten={!staleOf(active)}
+                onOverwrite={() => onOverwrite(active)}
               />
             )}
             {active?.notice === "layout_reset" && (
@@ -2311,7 +2359,7 @@ function DiffModal({
             <Button variant="secondary" size="sm" onClick={onCancel}>
               {t("common.cancel")}
             </Button>
-            <Button size="sm" onClick={() => onConfirm(ignoreList(), overwriteDigests())} disabled={!canWrite}>
+            <Button size="sm" onClick={() => onConfirm(ignoreList())} disabled={!canWrite}>
               {saving && <span className="spinner" />}
               {t("diff.write", { n: include.size })}
             </Button>

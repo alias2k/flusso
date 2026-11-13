@@ -565,11 +565,16 @@ export const en: Record<string, string> = {
 
   // interrupted saves
   "recovery.rolledBack":
-    "A save from {time} was interrupted before it finished. It was rolled back: {files} are as they were before it.",
+    "{n, plural, one {A save from {time} was interrupted before it finished. It was rolled back: {files} is as it was before it.} other {A save from {time} was interrupted before it finished. It was rolled back: {files} are as they were before it.}}",
   "recovery.completed":
-    "A save from {time} was interrupted while it cleaned up. It was completed: {files} are as it wrote them.",
+    "{n, plural, one {A save from {time} was interrupted while it cleaned up. It was completed: {files} is as it wrote it.} other {A save from {time} was interrupted while it cleaned up. It was completed: {files} are as it wrote them.}}",
   "recovery.leftovers":
     "Files an earlier save left behind, which the designer does not touch: {files}. Each was left by that save and may hold a file's text from before it or the text it wrote; check them and delete them.",
+  "recovery.kept": "{path} was written by another program during or after that save, and is kept as it is.",
+  "recovery.keptBackup":
+    "{path} was written by another program during or after that save, and is kept as it is. Its text from before the save is in {backup}: copy it back, or delete it.",
+  "recovery.displaced":
+    "{path} was written by another program in the instant the save replaced it: it holds what the save wrote, and the other program's bytes are in {copy}. Check them, then delete that file.",
   "recovery.dismiss": "Dismiss",
   // a file changed on disk since the page loaded it
   "stale.changed": "{path} changed on disk since this page loaded it.",
@@ -579,7 +584,7 @@ export const en: Record<string, string> = {
   "stale.explain":
     "Writing it would discard what is on disk now, so it is not written. Reload the page to load what is on disk (your unsaved edits are lost), or copy your edit out first: the right side of the diff is what you would write.",
   "stale.configExplain":
-    "Every save is checked against flusso.toml, so nothing is written until the page is reloaded. Reloading loses your unsaved edits: copy them out first (the right side of each diff is what you would write).",
+    "Every save is checked against flusso.toml, so nothing is written while it differs from what this page loaded. The diff shows what this page would write to flusso.toml against the file on disk now. Your schema edits are not listed here: to copy them, open each index in Code mode. Reload the page to load what is on disk (unsaved edits are lost), or overwrite flusso.toml anyway to review every file against it first.",
   "stale.reload": "Reload page",
   "stale.overwrite": "Overwrite anyway…",
   "stale.overwriteConfirm":
@@ -597,7 +602,6 @@ export const en: Record<string, string> = {
     "A designer was stopped in the middle of a save, and the designer can't settle it by itself:",
   "recovery.problemBackupMissing":
     "the backup holding its text from before the save is missing or no longer holds that text",
-  "recovery.problemEdited": "it changed after the save was cut short",
   "recovery.problemUnreadable": "it could not be read",
   "recovery.problemJournalUnusable": "the designer does not act on this save's journal",
   "recovery.problemFailed": "a recovery step failed",

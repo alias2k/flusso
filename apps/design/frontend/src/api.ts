@@ -415,6 +415,15 @@ export interface SaveResult {
   recovered?: RecoveredSave[];
   /// The digest of each file the save wrote (`null`: removed).
   digests: Digests;
+  /// Files another program wrote in the instant the save replaced them.
+  displaced?: DisplacedFile[];
+}
+
+/// A file another program wrote in place in the instant a save replaced it:
+/// it holds the save's text, and the program's bytes are in `copy`.
+export interface DisplacedFile {
+  path: string;
+  copy: string;
 }
 
 /// What a diff found, and the interrupted saves it rolled back first.
@@ -435,14 +444,21 @@ export interface Project {
 
 /// A save a killed designer left half done, settled before the project was read.
 export interface RecoveredSave {
+  /// Which save it was: the page shows each once.
+  id: string;
   outcome: "rolled_back" | "completed";
   /// When the save started, in milliseconds since the Unix epoch.
   started_at_ms: number;
   /// The files it changed, relative to flusso.toml.
   files: string[];
+  /// Files another program wrote during or after the save, kept as they are,
+  /// with the save's backup of the text before when it kept one.
+  kept?: { path: string; backup?: string }[];
+  /// Files whose backup holds what another program wrote as the save replaced them.
+  displaced?: DisplacedFile[];
 }
 
-export type BlockedProblem = "backup_missing" | "edited" | "unreadable" | "journal_unusable" | "failed";
+export type BlockedProblem = "backup_missing" | "unreadable" | "journal_unusable" | "failed";
 
 /// Why the server does not act on a save's journal.
 export type JournalCause =
@@ -516,6 +532,8 @@ export interface SaveRecovery {
   blocked?: BlockedSave;
   /// Temp files and backups no journal names: reported, left alone.
   leftovers: string[];
+  /// Files a save of this page found written by another program as it replaced them.
+  displaced?: DisplacedFile[];
 }
 
 /// A save the server refused because files it writes changed on disk since the
@@ -802,11 +820,17 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ config: stripIds(config), name, schema: stripUids(schema), id }),
     }).then((r) => json<SampleResponse>(r)),
-  diff: (config: ConfigToml, ops: FileOp[], identity?: ConfigIdentity) =>
+  /// `overwrite` as for `save`: the review is computed with those files taken as they are on disk.
+  diff: (config: ConfigToml, ops: FileOp[], identity?: ConfigIdentity, overwrite: Digests = {}) =>
     fetch("/api/diff", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), identity, digests }),
+      body: JSON.stringify({
+        config: stripIds(config),
+        ops: ops.map(stripOpUids),
+        identity,
+        digests: { ...digests, ...overwrite },
+      }),
     }).then((r) => json<Review>(r)),
   /// `overwrite` gives, for the files the user chose to overwrite anyway, the
   /// digest they have on disk now (from the review), in place of the page's.
