@@ -16,11 +16,6 @@ struct Order {
     status: String,
 }
 
-/// `Option<Vec<…>>` reads `null` too, so it is no array newtype.
-#[derive(serde::Deserialize, FlussoFragment)]
-#[serde(transparent)]
-struct MaybeOrders(Option<Vec<Order>>);
-
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct User {
@@ -34,13 +29,6 @@ struct User {
 struct UserOrder {
     id: i32,
     orders: Order,
-}
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserMaybe {
-    id: i32,
-    orders: MaybeOrders,
 }
 
 #[derive(serde::Deserialize, FlussoFragment)]
@@ -95,18 +83,6 @@ struct FromArraysFragment {
     orders: ManyOrders,
 }
 
-/// One more newtype does not hide the array of arrays.
-#[derive(serde::Deserialize, FlussoFragment)]
-#[serde(transparent)]
-struct Batches(Vec<Orders>);
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserBatches {
-    id: i32,
-    orders: Batches,
-}
-
 /// A `Vec` of a value type reads no sub-documents.
 #[derive(serde::Serialize, serde::Deserialize, flusso_query::FlussoValue)]
 #[flusso(keyword)]
@@ -114,63 +90,16 @@ enum Status {
     Paid,
 }
 
+/// One more newtype does not hide the array of arrays.
 #[derive(serde::Deserialize, FlussoFragment)]
 #[serde(transparent)]
-struct Statuses(Vec<Status>);
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserStatuses {
-    id: i32,
-    orders: Statuses,
-}
-
-/// Nor does a third level, a newtype in between, or a nullable array.
-#[derive(serde::Deserialize, FlussoFragment)]
-#[serde(transparent)]
-struct Triple(Vec<Batches>);
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserTriple {
-    id: i32,
-    orders: Triple,
-}
-
-#[derive(serde::Deserialize, FlussoFragment)]
-#[serde(transparent)]
-struct Wrapped(Batches);
+struct Wrapped(Orders);
 
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
 struct UserVecOfWrapped {
     id: i32,
     orders: Vec<Wrapped>,
-}
-
-#[derive(serde::Deserialize, FlussoFragment)]
-struct VecOfMaybe {
-    orders: Vec<MaybeOrders>,
-}
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct FromVecOfMaybe {
-    id: i32,
-    #[serde(flatten)]
-    orders: VecOfMaybe,
-}
-
-#[derive(serde::Deserialize, FlussoFragment)]
-#[serde(transparent)]
-struct WrappedStatuses(Statuses);
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserVecOfStatuses {
-    id: i32,
-    #[flusso(opaque)]
-    orders: Vec<WrappedStatuses>,
 }
 
 /// A value type is no sub-document, wrapped or not.
@@ -191,17 +120,6 @@ struct UserVecOfStrings {
 #[derive(serde::Deserialize, FlussoFragment)]
 #[serde(transparent)]
 struct WrappedStatus(Status);
-
-#[derive(serde::Deserialize, FlussoFragment)]
-#[serde(transparent)]
-struct WrappedStatusList(Vec<WrappedStatus>);
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserWrappedStatusList {
-    id: i32,
-    orders: WrappedStatusList,
-}
 
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
@@ -233,17 +151,6 @@ struct Label(String);
 struct UserVecOfLabels {
     id: i32,
     orders: Vec<Label>,
-}
-
-#[derive(serde::Deserialize, FlussoFragment)]
-#[serde(transparent)]
-struct Labels(Vec<Label>);
-
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserLabels {
-    id: i32,
-    orders: Labels,
 }
 
 /// `opaque` in a fragment keeps the check a root keeps.

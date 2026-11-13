@@ -148,7 +148,7 @@ Order::tags().any_of([Tag::Urgent]);
 
 A [`FlussoValue` newtype over a `Vec`](enums-and-values.md#arrays) goes where that `Vec` would: `tags: Option<Tags>` with `struct Tags(Vec<Tag>)`, the shape an ORM decoding a `jsonb` column usually wants. A plain type (`Tag`, `String`) at an array field is a compile error, and so is a `Vec` or an array newtype at a field that isn't one. Sorting an array uses OpenSearch's default: the smallest element ascending, the largest descending.
 
-A `json` array takes `serde_json::Value`, a `Vec` of any value (`String`, a number, an enum, `serde_json::Value`, a map, an array newtype), or an array newtype of values. A `Vec` of a fragment and a bare struct are compile errors: a `json` field declares no fields to check a struct against. A root and a fragment agree on all of it.
+A `json` array takes `serde_json::Value`, a `Vec` of any value (`String`, a number, an enum, `serde_json::Value`, a map, an array newtype), or an array newtype of values. A `Vec` of a fragment and a bare struct are compile errors: a `json` field declares no fields to check a struct against. A root and a fragment agree on all of it, with `#[flusso(opaque)]` too, which there turns off the walk into a struct element.
 
 ### Two kinds of array newtype
 
@@ -156,10 +156,20 @@ Both read a whole JSON array and go where that `Vec` would. What the array holds
 
 | Newtype | Derive | Goes at | A compile error at |
 | --- | --- | --- | --- |
-| over `Vec<Struct>`, an array of sub-documents | `#[derive(FlussoFragment)]`, `#[serde(transparent)]` or a tuple struct | a `nested` field (`has_many`, `many_to_many`) | an array leaf, a `json` array, an `object` |
-| over `Vec<E>`, `E` a leaf value (`String`, a number, an enum, a `FlussoValue` newtype) | `#[derive(FlussoValue)]`, no kind tag | a field with `array: true` of `E`'s kind, or a `json` array | a `nested` field, a single-valued field |
+| over `Vec<Struct>`, an array of sub-documents | `#[derive(FlussoFragment)]`, `#[serde(transparent)]` or a tuple struct | a `nested` field (`has_many`, `many_to_many`) | an array leaf, a `json` array, an `object`, a `map`, a single-valued leaf |
+| over `Vec<E>`, `E` a leaf value (`String`, a number, an enum, a `FlussoValue` newtype) | `#[derive(FlussoValue)]`, no kind tag | a field with `array: true` of `E`'s kind, or a `json` array | a `nested` field, an `object`, a `map`, a single-valued leaf |
 
-A newtype over either one, with the same derive, is the same kind. The element of a `FlussoValue` one must be a leaf: a `Vec` of an array newtype or of a fragment is a compile error where the newtype is declared. Wrap the `Vec` directly: over `Option<Vec<_>>` the newtype reads `null` too, so put the `Option` on the field instead.
+A newtype over either one, with the same derive, is the same kind. A plain `json` field takes either, as it takes any JSON.
+
+These two are the only types that read an array in place of a `Vec`. Each derive refuses, where the newtype is declared, any other newtype that would:
+
+| Declared | Why | Instead |
+| --- | --- | --- |
+| over `Option<Vec<_>>`, or `Option<…>` of an array newtype | it reads `null` too, which no array field holds | wrap the `Vec`, and put the `Option` on the field: `Option<Tags>` |
+| over a `Vec` of an array newtype | an array of arrays | wrap the element type |
+| `FlussoFragment` over a `Vec` of values (`Vec<String>`, `Vec<i64>`, a `Vec` of a `FlussoValue` type), or over a `FlussoValue` array newtype | an array of values, the other kind | `#[derive(FlussoValue)]` on the newtype |
+| `FlussoFragment` over a `Vec` of maps or of `serde_json::Value` | opaque JSON | the `Vec` itself, at a `json` field |
+| `FlussoValue` over a `Vec` of a fragment or of a map type | not a leaf value | `Vec<Struct>` or a `FlussoFragment` newtype; a `Vec` of maps at a `json` field |
 
 ## Nullability
 

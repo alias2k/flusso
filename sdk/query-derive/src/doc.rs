@@ -708,7 +708,7 @@ fn single_value_check(field: &DocField, inner: &Type, os: &str) -> TokenStream {
         const _: () = {
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
-            assert!(!::flusso_query::OpaqueProbe::<#inner>::READS_ARRAY, #message);
+            assert!(!::flusso_query::OpaqueProbe::<#inner>::ARRAY, #message);
         };
     }
 }
@@ -1790,7 +1790,7 @@ fn array_newtype_check(
             {
                 #[allow(unused_imports)]
                 use ::flusso_query::OpaqueWithoutMeta as _;
-                assert!(!::flusso_query::OpaqueProbe::<#ty>::READS_ARRAY, #message);
+                assert!(!::flusso_query::OpaqueProbe::<#ty>::ARRAY, #message);
             }
         });
     }
@@ -1863,10 +1863,17 @@ pub(crate) fn embed_checks(
         // type (an enum at a keyword field) is already covered by the
         // `FlussoValue<K>` bound `check_type` emits; adding a no-op check there
         // would only pile a second, worse error onto a missing derive.
+        // A type other than a `Vec` at a `json` array: `json_array_check`
+        // asserts it is an array of values, whose walk is a no-op, so walking
+        // here would only add a second error about a missing field.
+        let json_array = resolved.array
+            && resolved.children.is_empty()
+            && vec_inner(option_inner(field.ty).unwrap_or(field.ty)).is_none();
         if matches!(
             resolved.mapping.mapping_type,
             MappingType::Object | MappingType::Nested
         ) && resolved.mapping.map_values.is_none()
+            && !json_array
         {
             // The `map_kind_ok` assert mirrors what a fragment checks: a map
             // wrapper (its `MAP_VALUES` is non-empty) cannot stand in for a

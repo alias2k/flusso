@@ -23,7 +23,7 @@
 //! type's flag.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Fields};
@@ -248,20 +248,23 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                          reads an array — drop the tag, and `{ident}` reads the array as \
                          `{rendered}` does"
                     );
+                    let array_check = quote_spanned! {inner.span()=>
+                        const _: () = {
+                            #[allow(unused_imports)]
+                            use ::flusso_query::OpaqueWithoutMeta as _;
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#inner>::ARRAY,
+                                #array_message
+                            );
+                        };
+                    };
                     Ok(quote! {
                         impl ::flusso_query::FlussoValue<#marker> for #ident {}
                         impl ::flusso_query::FlussoValueMeta for #ident {
                             const KINDS: &'static [::flusso_query::KindTag] = &[#tag];
                             const VARIANTS: &'static [&'static str] = &[];
                         }
-                        const _: () = {
-                            #[allow(unused_imports)]
-                            use ::flusso_query::OpaqueWithoutMeta as _;
-                            assert!(
-                                !::flusso_query::OpaqueProbe::<#inner>::READS_ARRAY,
-                                #array_message
-                            );
-                        };
+                        #array_check
                         #leaf_check
                     })
                 }
@@ -276,6 +279,17 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                          whose fields only a `FlussoFragment` checks — derive `FlussoFragment` \
                          on `{ident}` instead"
                     );
+                    let sub_document_check = quote_spanned! {inner.span()=>
+                        const _: () = {
+                            #[allow(unused_imports)]
+                            use ::flusso_query::OpaqueWithoutMeta as _;
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#inner>::HAS_META
+                                    || !::flusso_query::OpaqueProbe::<#inner>::AT_NESTED,
+                                #sub_document_message
+                            );
+                        };
+                    };
                     Ok(quote! {
                         impl<__FlussoK> ::flusso_query::FlussoValue<__FlussoK> for #ident
                         where #inner: ::flusso_query::FlussoValue<__FlussoK> {}
@@ -288,18 +302,8 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                                 <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
                             const ARRAY: bool =
                                 <#inner as ::flusso_query::FlussoValueMeta>::ARRAY;
-                            const READS_ARRAY: bool =
-                                <#inner as ::flusso_query::FlussoValueMeta>::READS_ARRAY;
                         }
-                        const _: () = {
-                            #[allow(unused_imports)]
-                            use ::flusso_query::OpaqueWithoutMeta as _;
-                            assert!(
-                                !::flusso_query::OpaqueProbe::<#inner>::HAS_META
-                                    || !::flusso_query::OpaqueProbe::<#inner>::AT_NESTED,
-                                #sub_document_message
-                            );
-                        };
+                        #sub_document_check
                         #leaf_check
                     })
                 }
@@ -349,15 +353,15 @@ fn array_newtype(
         "`{ident}` is a FlussoValue newtype over `Vec<{rendered}>`, but `{rendered}` stands for \
          an `object`, not a leaf value — a `json` array takes `Vec<{rendered}>` as it is"
     );
-    Ok(quote! {
-        // Read through `OpaqueProbe` behind `HAS_META`: an element without
-        // metadata already fails on `KINDS` below, with the trait's note.
+    // Read through `OpaqueProbe` behind `HAS_META`: an element without
+    // metadata already fails on `KINDS` below, with the trait's note.
+    let element_check = quote_spanned! {element.span()=>
         const _: () = {
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
             let meta = ::flusso_query::OpaqueProbe::<#element>::HAS_META;
             assert!(
-                !meta || !::flusso_query::OpaqueProbe::<#element>::READS_ARRAY,
+                !meta || !::flusso_query::OpaqueProbe::<#element>::ARRAY,
                 #nested_array
             );
             assert!(
@@ -366,6 +370,9 @@ fn array_newtype(
             );
             assert!(!meta || !::flusso_query::OpaqueProbe::<#element>::AT_OBJECT, #object);
         };
+    };
+    Ok(quote! {
+        #element_check
         impl ::flusso_query::FlussoValueMeta for #ident {
             const KINDS: &'static [::flusso_query::KindTag] =
                 <#element as ::flusso_query::FlussoValueMeta>::KINDS;
@@ -374,7 +381,6 @@ fn array_newtype(
             const EXHAUSTIVE: bool =
                 <#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
             const ARRAY: bool = true;
-            const READS_ARRAY: bool = true;
         }
         #leaf_check
     })
