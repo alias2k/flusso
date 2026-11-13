@@ -1589,3 +1589,23 @@ fn a_crlf_string_with_a_line_ending_backslash_is_patched_in_place() {
         )
     );
 }
+
+#[test]
+fn a_value_with_characters_toml_forbids_raw_is_escaped() {
+    let forbidden: String = (0u8..=0x1f)
+        .chain([0x7f])
+        .filter(|b| *b != b'\t')
+        .map(char::from)
+        .collect();
+    for base in [
+        format!("{BARE}\n[sinks.p]\ntype = \"stdout\"\n"),
+        to_crlf(&format!("{BARE}\n[sinks.p]\ntype = \"stdout\"\n")),
+    ] {
+        save_config(&base, |c| set_option(c, "p", "note", forbidden.as_str()));
+        save_config(&base, |c| set_option(c, "p", "note", "a\nb\u{7f}"));
+        save_config(&base, |c| set_option(c, "p", "note", "a\u{7f}\t"));
+    }
+    let base = to_crlf(&format!("{BARE}\n[sinks.p]\ntype = \"stdout\"\n"));
+    let text = save_config(&base, |c| set_option(c, "p", "note", "a\nb\u{7f}"));
+    assert_eq!(text, format!("{base}note = \"a\\nb\\u007F\"\r\n"));
+}

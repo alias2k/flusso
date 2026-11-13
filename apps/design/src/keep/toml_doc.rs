@@ -1416,8 +1416,7 @@ fn single_line(value: &mut Value) -> Option<()> {
     match value {
         Value::String(text) if text.display_repr().contains('\n') => {
             let decor = text.decor().clone();
-            let escaped = serde_json::to_string(text.value()).ok()?;
-            let mut line: Value = escaped.parse().ok()?;
+            let mut line: Value = basic_string(text.value()).parse().ok()?;
             *line.decor_mut() = decor;
             *value = line;
         }
@@ -1437,6 +1436,30 @@ fn single_line(value: &mut Value) -> Option<()> {
         _ => {}
     }
     Some(())
+}
+
+/// `text` as a one-line TOML basic string: every character TOML forbids raw
+/// there (U+0000–U+0008, U+000A–U+001F, U+007F), `"` and `\` escaped.
+fn basic_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if c.is_control() && u32::from(c) < 0x80 => {
+                out.push_str(&format!("\\u{:04X}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// A fresh value's decor holds only whitespace: a line break in it becomes a
