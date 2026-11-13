@@ -72,12 +72,17 @@ pub(super) fn patch(
         return None;
     }
     let eol = marked(super::dominant_ending(text));
-    let source = mark_strings(text)?;
+    let (source, swallowed) = mark_strings(text)?;
     let parsed = Document::parse(source.as_str()).ok()?;
     let ends = line_ends(parsed.as_table(), &source);
+    let keys = key_texts(parsed.as_table(), &source);
     let mut doc = parsed.into_mut();
     mark_decor(&mut doc);
     keep_line_ends(doc.as_table_mut(), &ends, eol)?;
+    let respelled = respelled_keys(&mut doc, keys)?;
+    if !respelled.is_empty() && text.contains([TAG_OPEN, TAG_CLOSE]) {
+        return None;
+    }
     if spells_a_sink_twice(doc.as_table()) {
         return None;
     }
@@ -104,16 +109,19 @@ pub(super) fn patch(
 
     mark(doc.as_table_mut(), &mut stash)?;
     let after = order(&doc.to_string());
-    let root_values = doc.as_table().iter().any(|(_, item)| item.is_value());
+    let root_values = doc
+        .as_table()
+        .iter()
+        .any(|(_, item)| writes_body_line(item));
     let prefixes = patcher.place(&stash, &before, &after, &trailing, root_values)?;
     for (id, prefix) in prefixes.headers {
         set_prefix(doc.as_table_mut(), id, &prefix);
     }
     doc.set_trailing(prefixes.trailing);
-    let text = format!("{header}{doc}");
+    let text = restore_keys(format!("{header}{doc}"), &respelled)?;
     Some(Patched {
         text: if stands_in {
-            text.replace(CR, "\r")
+            restore_swallowed(text.replace(CR, "\r"), &swallowed)?
         } else {
             text
         },
@@ -124,17 +132,13 @@ pub(super) fn patch(
 /// Remove and return the file's header: everything before the first key or
 /// header. Without it a new top-level key would be written above it.
 fn take_header(doc: &mut DocumentMut) -> Option<String> {
-    let first_key = doc
-        .as_table()
-        .iter()
-        .find(|(_, item)| item.is_value())
-        .map(|(k, _)| k.to_owned());
-    if let Some(key) = first_key {
-        let mut key = doc.as_table_mut().key_mut(&key)?;
-        let decor = key.leaf_decor_mut();
+    let first_key = on_first_key_decor(doc.as_table_mut(), &mut |decor| {
         let header = decor.prefix().map_or(Some(""), |p| p.as_str())?.to_owned();
         decor.set_prefix("");
-        return Some(header);
+        Some(header)
+    });
+    if let Some(header) = first_key {
+        return header;
     }
     let mut first: Option<isize> = None;
     for_each_header(doc.as_table_mut(), &mut |table| {
@@ -156,6 +160,35 @@ fn take_header(doc: &mut DocumentMut) -> Option<String> {
         }
     });
     header.unwrap_or(Some(String::new()))
+}
+
+/// `f` on the decor that starts the first line of `table`'s body: its first key's,
+/// or, when that is a dotted key (`sinks.primary.url = …`), the leaf's.
+/// `None` when the body has no line.
+fn on_first_key_decor<R>(
+    table: &mut Table,
+    f: &mut dyn FnMut(&mut toml_edit::Decor) -> R,
+) -> Option<R> {
+    let key = table
+        .iter()
+        .find(|(_, item)| writes_body_line(item))
+        .map(|(k, _)| k.to_owned())?;
+    if table.get(&key).is_some_and(Item::is_value) {
+        return Some(f(table.key_mut(&key)?.leaf_decor_mut()));
+    }
+    on_first_key_decor(table.get_mut(&key)?.as_table_mut()?, f)
+}
+
+/// Whether `item` writes a line in its table's body: a value, or a dotted
+/// table holding one.
+fn writes_body_line(item: &Item) -> bool {
+    match item {
+        Item::Value(_) => true,
+        Item::Table(table) => {
+            table.is_dotted() && table.iter().any(|(_, item)| writes_body_line(item))
+        }
+        _ => false,
+    }
 }
 
 /// Tag every header without a marker with the next id, stashing its prefix.
@@ -384,6 +417,72 @@ enum Level {
     Other,
 }
 
+/// How an inline table spaces its entries: `{ a = 1, b = 2 }` or `{a=1,b=2}`.
+struct InlineSpacing {
+    /// Around the key: before it (after `{` or `,`) and before its `=`.
+    key: toml_edit::Decor,
+    /// Between `=` and the value.
+    value_prefix: String,
+    /// After a value that a `,` follows.
+    before_comma: String,
+    /// After the last value, before `}`.
+    before_close: String,
+}
+
+impl InlineSpacing {
+    /// The spacing of `table`, whose keys are `keys`, read off its last entry.
+    fn of(table: &dyn TableLike, keys: &[String]) -> Option<Self> {
+        let raw =
+            |r: Option<&toml_edit::RawString>| r.and_then(|r| r.as_str()).unwrap_or("").to_owned();
+        let value = |key: &String| table.get(key).and_then(Item::as_value).map(Value::decor);
+        let last = keys.last()?;
+        let before_comma = keys
+            .len()
+            .checked_sub(2)
+            .and_then(|i| keys.get(i))
+            .and_then(value)
+            .map_or_else(String::new, |d| raw(d.suffix()));
+        let decor = value(last)?;
+        let key = table.key(last)?.leaf_decor();
+        Some(Self {
+            key: toml_edit::Decor::new(raw(key.prefix()), raw(key.suffix())),
+            value_prefix: raw(decor.prefix()),
+            before_comma,
+            before_close: raw(decor.suffix()),
+        })
+    }
+
+    /// Space the entries the patch added (keys not in `was`) like the rest,
+    /// and keep the space before `}` after whichever entry is last now.
+    fn apply(self, table: &mut dyn TableLike, was: &[String]) {
+        let keys: Vec<String> = table.iter().map(|(k, _)| k.to_owned()).collect();
+        let (Some(last), Some(was_last)) = (keys.last(), was.last()) else {
+            return;
+        };
+        for key in &keys {
+            let added = !was.contains(key);
+            if added && let Some(mut handle) = table.key_mut(key) {
+                *handle.leaf_decor_mut() = self.key.clone();
+            }
+            let Some(decor) = table
+                .get_mut(key)
+                .and_then(Item::as_value_mut)
+                .map(Value::decor_mut)
+            else {
+                continue;
+            };
+            if added {
+                decor.set_prefix(self.value_prefix.as_str());
+            }
+            if key == last && (added || key != was_last) {
+                decor.set_suffix(self.before_close.as_str());
+            } else if key != last && (added || key == was_last) {
+                decor.set_suffix(self.before_comma.as_str());
+            }
+        }
+    }
+}
+
 struct Patcher<'a> {
     /// Free comments of removed keys with no key after them, per table (`None`
     /// is the root): they go after the table's last key.
@@ -419,6 +518,7 @@ impl Patcher<'_> {
             }
         };
         let names: Vec<String> = keys.iter().map(|k| named(k)).collect();
+        let spacing = inline.then(|| InlineSpacing::of(doc, &keys)).flatten();
         let mut pending = String::new();
         for (key, name) in keys.iter().zip(&names) {
             let before = old.get(name);
@@ -482,6 +582,9 @@ impl Patcher<'_> {
                 };
                 doc.insert(key, item);
             }
+        }
+        if let Some(spacing) = spacing {
+            spacing.apply(doc, &keys);
         }
         Some(())
     }
@@ -853,7 +956,12 @@ fn blank(line: &str) -> bool {
 /// `text` with the `\r` inside every string value as [`CR`], so it outlives
 /// the render: a multi-line string keeps the CRLF it holds on purpose, and a
 /// bare `\n` it holds stays bare. `None` when `text` does not parse.
-fn mark_strings(text: &str) -> Option<String> {
+///
+/// A `\r` in the whitespace a line-ending backslash swallows can't be a
+/// [`CR`]: `\` + [`CR`] is not an escape. That whitespace is replaced whole
+/// by a [`Swallowed`] stand-in instead, which [`restore_swallowed`] turns
+/// back into the file's bytes.
+fn mark_strings(text: &str) -> Option<(String, Vec<Swallowed>)> {
     fn walk(value: &Value, out: &mut Vec<std::ops::Range<usize>>) {
         match value {
             Value::String(_) => out.extend(value.span()),
@@ -873,21 +981,108 @@ fn mark_strings(text: &str) -> Option<String> {
         }
     }
     if !text.contains('\r') {
-        return Some(text.to_owned());
+        return Some((text.to_owned(), Vec::new()));
     }
     let parsed = Document::parse(text).ok()?;
     let mut spans = Vec::new();
     strings(parsed.as_table(), &mut spans);
     spans.sort_by_key(|s| s.start);
+    let longest_tabs = text.split(|c| c != '\t').map(str::len).max().unwrap_or(0);
+    let mut swallowed = Vec::new();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     for span in spans {
         out.push_str(text.get(at..span.start)?);
-        out.push_str(&text.get(span.clone())?.replace('\r', &CR.to_string()));
+        let mut raw = text.get(span.clone())?.to_owned();
+        if raw.starts_with("\"\"\"") {
+            for region in swallowed_regions(&raw).into_iter().rev() {
+                let tabs = longest_tabs + 1 + swallowed.len();
+                let code = format!("\n{}", "\t".repeat(tabs));
+                swallowed.push(Swallowed {
+                    text: raw.get(region.clone())?.to_owned(),
+                    code: code.clone(),
+                });
+                raw.replace_range(region, &code);
+            }
+        }
+        out.push_str(&raw.replace('\r', &CR.to_string()));
         at = span.end;
     }
     out.push_str(text.get(at..)?);
-    Some(out)
+    Some((out, swallowed))
+}
+
+/// The whitespace a line-ending backslash swallows, holding a `\r`, while
+/// it stands in the file as `code`: a line break, then a run of tabs longer
+/// than any in the file and than every other stand-in's.
+#[derive(Debug)]
+struct Swallowed {
+    code: String,
+    text: String,
+}
+
+/// In the raw multi-line basic string `raw`, the whitespace each
+/// line-ending backslash swallows (spaces and tabs after it, the line break,
+/// and the whitespace up to the next character), where it holds a `\r`.
+fn swallowed_regions(raw: &str) -> Vec<std::ops::Range<usize>> {
+    let ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+    let bytes = raw.as_bytes();
+    let mut regions = Vec::new();
+    let mut i = 3;
+    while let Some(&b) = bytes.get(i) {
+        if b != b'\\' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let line = bytes
+            .get(start..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count();
+        let after = bytes.get(start + line..).unwrap_or(&[]);
+        if after.starts_with(b"\n") || after.starts_with(b"\r\n") {
+            let end = start
+                + bytes
+                    .get(start..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .take_while(|b| ws(b))
+                    .count();
+            if bytes.get(start..end).is_some_and(|r| r.contains(&b'\r')) {
+                regions.push(start..end);
+            }
+            i = end;
+        } else {
+            i += 2;
+        }
+    }
+    regions
+}
+
+/// `text` with each [`Swallowed`] stand-in back as the file's whitespace.
+/// A stand-in the save no longer writes (its string changed) is gone; one
+/// written twice is a guess, so the patch gives up.
+fn restore_swallowed(mut text: String, swallowed: &[Swallowed]) -> Option<String> {
+    for region in swallowed {
+        let found: Vec<usize> = text
+            .match_indices(&region.code)
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                text.get(..at).is_some_and(|b| b.ends_with('\\'))
+                    && !text
+                        .get(at + region.code.len()..)
+                        .is_some_and(|rest| rest.starts_with([' ', '\t', '\n', '\r']))
+            })
+            .collect();
+        match found.as_slice() {
+            [] => {}
+            [at] => text.replace_range(*at..*at + region.code.len(), &region.text),
+            _ => return None,
+        }
+    }
+    Some(text)
 }
 
 /// Every `\r` in the document's whitespace and comments as [`CR`].
@@ -944,6 +1139,123 @@ fn mark_decor(doc: &mut DocumentMut) {
     if let Some(trailing) = raw(Some(doc.trailing())) {
         doc.set_trailing(trailing);
     }
+}
+
+/// Open and close a tag ([`tag`]) in a value's decor. Private-use
+/// characters: a file holding either is not patched where a tag is needed.
+const TAG_OPEN: char = '\u{e00e}';
+const TAG_CLOSE: char = '\u{e00f}';
+
+/// The tag of the value [`Site`] `at`, written at the start of its decor.
+fn tag(at: usize) -> String {
+    format!("{TAG_OPEN}{at}{TAG_CLOSE}")
+}
+
+/// For every [`Site`] of the parsed `root`, in order, the text of its line
+/// in `source` before its value: indentation, key and `=` (`None` for a
+/// header).
+fn key_texts(root: &Table, source: &str) -> Vec<Option<String>> {
+    let mut found = Vec::new();
+    sites(root, false, &mut found);
+    found
+        .iter()
+        .map(|site| {
+            let Site::Value(value) = site else {
+                return None;
+            };
+            let end = value
+                .decor()
+                .prefix()
+                .and_then(|p| p.span())
+                .or_else(|| value.span())?
+                .start;
+            let before = source.get(..end)?;
+            let start = before.rfind('\n').map_or(0, |n| n + 1);
+            before.get(start..).map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A value line `toml_edit` writes differently from the file: what the file
+/// says before the value, and what `toml_edit` writes there.
+struct Respelled {
+    at: usize,
+    written: String,
+    file: String,
+}
+
+/// The value lines of `doc` whose key `toml_edit` does not write back as the
+/// file spells it, each tagged in `doc` so [`restore_keys`] can find it.
+///
+/// A dotted key shares its leading parts with every other key under the same
+/// dotted table, so `toml_edit` keeps one spelling of them: `x . z = 1` after
+/// `x.y = 2` would be written `x. z = 1`.
+fn respelled_keys(doc: &mut DocumentMut, keys: Vec<Option<String>>) -> Option<Vec<Respelled>> {
+    let mut probe = doc.clone();
+    let mut at = 0;
+    sites_mut(probe.as_table_mut(), false, &mut |site| {
+        if let SiteMut::Value(value) = site {
+            prepend_tag(value, at);
+        }
+        at += 1;
+    });
+    let written = probe.to_string();
+    let mut respelled = Vec::new();
+    for (at, file) in keys.into_iter().enumerate() {
+        let Some(file) = file else { continue };
+        let written = written_key(&written, at)?;
+        if written != file {
+            respelled.push(Respelled {
+                at,
+                written: written.to_owned(),
+                file,
+            });
+        }
+    }
+    let mut at = 0;
+    sites_mut(doc.as_table_mut(), false, &mut |site| {
+        if let SiteMut::Value(value) = site
+            && respelled.iter().any(|r| r.at == at)
+        {
+            prepend_tag(value, at);
+        }
+        at += 1;
+    });
+    Some(respelled)
+}
+
+fn prepend_tag(value: &mut Value, at: usize) {
+    let decor = value.decor_mut();
+    let prefix = decor.prefix().and_then(|p| p.as_str()).unwrap_or("");
+    let prefix = format!("{}{prefix}", tag(at));
+    decor.set_prefix(prefix);
+}
+
+/// The text before the tag of site `at` on its line in `written`.
+fn written_key(written: &str, at: usize) -> Option<&str> {
+    let end = written.find(&tag(at))?;
+    let before = written.get(..end)?;
+    before.get(before.rfind('\n').map_or(0, |n| n + 1)..)
+}
+
+/// `text` with every tag [`respelled_keys`] set removed, and the key of each
+/// tagged line spelled as the file had it while the save still writes the
+/// key `toml_edit` read: a renamed key keeps its new spelling.
+fn restore_keys(mut text: String, respelled: &[Respelled]) -> Option<String> {
+    for r in respelled {
+        let tag = tag(r.at);
+        let Some(end) = text.find(&tag) else { continue };
+        if text.get(end + tag.len()..)?.contains(&tag) {
+            return None;
+        }
+        let start = text.get(..end)?.rfind('\n').map_or(0, |n| n + 1);
+        if text.get(start..end)? == r.written {
+            text.replace_range(start..end + tag.len(), &r.file);
+        } else {
+            text.replace_range(end..end + tag.len(), "");
+        }
+    }
+    Some(text)
 }
 
 /// One place `toml_edit` ends a line itself: a table's header or a key's
@@ -1104,8 +1416,7 @@ fn single_line(value: &mut Value) -> Option<()> {
     match value {
         Value::String(text) if text.display_repr().contains('\n') => {
             let decor = text.decor().clone();
-            let escaped = serde_json::to_string(text.value()).ok()?;
-            let mut line: Value = escaped.parse().ok()?;
+            let mut line: Value = basic_string(text.value()).parse().ok()?;
             *line.decor_mut() = decor;
             *value = line;
         }
@@ -1125,6 +1436,30 @@ fn single_line(value: &mut Value) -> Option<()> {
         _ => {}
     }
     Some(())
+}
+
+/// `text` as a one-line TOML basic string: every character TOML forbids raw
+/// there (U+0000–U+0008, U+000A–U+001F, U+007F), `"` and `\` escaped.
+fn basic_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if c.is_control() && u32::from(c) < 0x80 => {
+                out.push_str(&format!("\\u{:04X}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// A fresh value's decor holds only whitespace: a line break in it becomes a

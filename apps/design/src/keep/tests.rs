@@ -1466,12 +1466,190 @@ fn a_sink_spelled_twice_is_written_in_the_designers_form() {
     }
 }
 
+// Layout a save keeps (issue #279).
+
+const BARE: &str = "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n";
+
 #[test]
-fn a_mixed_schema_is_written_in_its_dominant_ending() {
+fn a_byte_order_mark_stays() {
+    let edit = |c: &mut ConfigToml| c.index[0].enabled = false;
+    let text = save_config(&format!("\u{feff}{CONFIG}"), edit);
+    assert_eq!(text, format!("\u{feff}{}", save_config(CONFIG, edit)));
+    let edit = |s: &mut IndexSchema| rename(&mut s.fields[0], "key");
+    let text = save(&format!("\u{feff}{ORDERS}"), edit);
+    assert_eq!(text, format!("\u{feff}{}", save(ORDERS, edit)));
+
+    let bare = format!("\u{feff}{BARE}");
+    assert_eq!(save_config(&bare, |_| {}), bare);
+
+    let base = "\u{feff}x = 1\r\n";
+    let config = ConfigToml::try_parse(CONFIG).unwrap();
+    let saved = config_toml(Some(base), &config, None).unwrap();
+    assert_eq!(saved.notice, Some(Notice::LayoutReset));
+    assert_eq!(
+        saved.text,
+        format!(
+            "\u{feff}{}",
+            to_crlf(&codegen::config_to_toml(&config).unwrap())
+        )
+    );
+}
+
+#[test]
+fn editing_a_top_level_dotted_key_keeps_the_blank_line_below_it() {
+    let base =
+        format!("# head\n\nsinks.primary.type = \"stdout\"\nsinks.primary.pretty = true\n\n{BARE}");
+    let text = save_config(&base, |c| set_option(c, "primary", "pretty", "no"));
+    assert_eq!(text, base.replace("pretty = true", "pretty = \"no\""));
+    let base = format!("sinks.primary.type = \"stdout\"\n\n{BARE}");
+    let text = save_config(&base, |c| set_option(c, "primary", "pretty", "no"));
+    assert_eq!(
+        text,
+        base.replace(
+            "\"stdout\"\n",
+            "\"stdout\"\nsinks.primary.pretty = \"no\"\n"
+        )
+    );
+}
+
+#[test]
+fn a_key_added_to_an_inline_table_follows_its_spacing() {
+    let base = format!(
+        "{BARE}\n[sinks]\na = {{ type = \"stdout\", note = \"q\" }}\nb = {{type=\"stdout\"}}\nc = {{ type = \"stdout\", note = \"q\" }} # c\n"
+    );
+    let text = save_config(&base, |c| {
+        set_option(c, "a", "pretty", "yes");
+        set_option(c, "b", "pretty", "yes");
+        c.sinks
+            .get_mut(&sink("c"))
+            .unwrap()
+            .port
+            .options
+            .0
+            .remove("note");
+    });
+    assert_eq!(
+        text,
+        base.replace("\"q\" }\nb", "\"q\", pretty = \"yes\" }\nb")
+            .replace("{type=\"stdout\"}", "{type=\"stdout\",pretty=\"yes\"}")
+            .replace(
+                "{ type = \"stdout\", note = \"q\" } # c",
+                "{ type = \"stdout\" } # c"
+            )
+    );
+}
+
+#[test]
+fn an_untouched_dotted_key_keeps_its_spacing() {
+    let base = format!(
+        "{BARE}\n[sinks.p]\ntype = \"stdout\"\nx.y = 1\n  x . z = \"w\" # z\nx .\tv = 2\n\n[sinks.q]\ntype = \"stdout\"\n"
+    );
+    let text = save_config(&base, |c| set_option(c, "q", "pretty", "yes"));
+    assert_eq!(text, format!("{base}pretty = \"yes\"\n"));
+    let text = save_config(&base, |c| set_option(c, "p", "pretty", "yes"));
+    assert_eq!(text, base.replace("2\n\n", "2\npretty = \"yes\"\n\n"));
+    let text = save_config(&base, |c| {
+        let x = [
+            ("y".to_owned(), 1i64.into()),
+            ("z".to_owned(), "v".into()),
+            ("v".to_owned(), 2i64.into()),
+        ];
+        let x = kernel::OptionValue::Map(x.into_iter().collect());
+        c.sinks
+            .get_mut(&sink("p"))
+            .unwrap()
+            .port
+            .options
+            .insert("x", x);
+    });
+    assert_eq!(text, base.replace("z = \"w\"", "z = \"v\""));
+}
+
+#[test]
+fn a_crlf_string_with_a_line_ending_backslash_is_patched_in_place() {
+    let base = "[source]\r\ntype = \"postgres\"\r\nconnection_url = \"postgres://x\"\r\n\r\n# p\r\n[sinks.p]\r\ntype = \"stdout\"\r\nnote = \"\"\"a \\  \t\r\n\r\n  b \\\r\n c\\\\\r\nd\"\"\"\r\nmixed = \"\"\"x\\\n\r\n \r\n y\\\r\n\n\t\"\"\"\r\nsame = [\"\"\"a \\\r\n  b\"\"\", \"\"\"a \\\r\n  b\"\"\"] # s\r\n";
+    let text = save_config(base, |c| set_option(c, "p", "pretty", "yes"));
+    assert_eq!(text, format!("{base}pretty = \"yes\"\r\n"));
+    let text = save_config(base, |c| set_option(c, "p", "mixed", "z"));
+    assert_eq!(
+        text,
+        base.replace(
+            "mixed = \"\"\"x\\\n\r\n \r\n y\\\r\n\n\t\"\"\"\r\n",
+            "mixed = \"z\"\r\n"
+        )
+    );
+}
+
+#[test]
+fn a_value_with_characters_toml_forbids_raw_is_escaped() {
+    let forbidden: String = (0u8..=0x1f)
+        .chain([0x7f])
+        .filter(|b| *b != b'\t')
+        .map(char::from)
+        .collect();
+    for base in [
+        format!("{BARE}\n[sinks.p]\ntype = \"stdout\"\n"),
+        to_crlf(&format!("{BARE}\n[sinks.p]\ntype = \"stdout\"\n")),
+    ] {
+        save_config(&base, |c| set_option(c, "p", "note", forbidden.as_str()));
+        save_config(&base, |c| set_option(c, "p", "note", "a\nb\u{7f}"));
+        save_config(&base, |c| set_option(c, "p", "note", "a\u{7f}\t"));
+    }
+    let base = to_crlf(&format!("{BARE}\n[sinks.p]\ntype = \"stdout\"\n"));
+    let text = save_config(&base, |c| set_option(c, "p", "note", "a\nb\u{7f}"));
+    assert_eq!(text, format!("{base}note = \"a\\nb\\u007F\"\r\n"));
+}
+
+#[test]
+fn a_mixed_schema_keeps_each_untouched_line_and_writes_new_ones_in_the_dominant_ending() {
     let base = to_crlf(ORDERS).replacen("\r\n", "\n", 3);
     let text = save(&base, |s| rename(&mut s.fields[0], "key"));
-    assert!(all_crlf(&text), "{text:?}");
+    assert_eq!(
+        changed_raw(&base, &text),
+        (
+            vec!["  - integer: id\r\n".into()],
+            vec!["  - integer: key\r\n".into(), "    column: id\r\n".into()]
+        )
+    );
     let base = ORDERS.replacen('\n', "\r\n", 3);
-    let text = save(&base, |s| rename(&mut s.fields[0], "key"));
-    assert!(!text.contains('\r'), "{text:?}");
+    let text = save(&base, |s| {
+        let mut extra = s.fields[1].clone();
+        rename(&mut extra, "otherId");
+        s.fields.insert(2, extra);
+    });
+    let (removed, added) = changed_raw(&base, &text);
+    assert!(removed.is_empty(), "{removed:?}");
+    assert!(added.iter().all(|l| !l.contains('\r')), "{added:?}");
+    assert!(text.starts_with(&base[..base.match_indices('\n').nth(3).unwrap().0]));
+}
+
+/// The tags' padding grows with the square of the line count: a file where
+/// it would pass a few megabytes is written in its dominant ending instead
+/// of taking the memory.
+#[test]
+fn a_large_mixed_schema_is_written_in_its_dominant_ending() {
+    let mut base = String::from("version: 1\ntable: t\nprimary_key: f0\r\nfields:\n");
+    base.push_str(&format!(
+        "  # a comment with trailing spaces{}\n",
+        " ".repeat(2000)
+    ));
+    for n in 0..400 {
+        base.push_str(&format!("  - keyword: f{n}\n    required: true\n"));
+    }
+    let text = save(&base, |s| rename(&mut s.fields[1], "renamed"));
+    assert!(text.contains("- keyword: renamed\n"), "the edit is written");
+    assert!(
+        !text.contains('\r'),
+        "every line ends in the dominant ending"
+    );
+}
+
+#[test]
+fn a_moved_field_keeps_the_endings_of_its_own_lines() {
+    let base = "version: 1\r\ntable: t\r\nprimary_key: a\r\nfields:\r\n  - keyword: a\r\n    required: true\r\n  - keyword: b\n    required: true\n  - keyword: c\r\n    required: true\r\n";
+    let text = save(base, |s| s.fields.swap(0, 1));
+    assert_eq!(
+        text,
+        "version: 1\r\ntable: t\r\nprimary_key: a\r\nfields:\r\n  - keyword: b\n    required: true\n  - keyword: a\r\n    required: true\r\n  - keyword: c\r\n    required: true\r\n"
+    );
 }

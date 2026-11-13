@@ -28,7 +28,7 @@
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use config::toml::ConfigToml;
 use config::yaml::SchemaYaml;
@@ -970,6 +970,8 @@ struct Tracked {
     schema: IndexSchema,
     ids: Vec<FieldId>,
     next: usize,
+    /// The fields an edit renamed, replaced or changed a setting of.
+    touched: BTreeSet<String>,
 }
 
 impl Tracked {
@@ -978,6 +980,7 @@ impl Tracked {
             ids: Vec::new(),
             schema,
             next: 0,
+            touched: BTreeSet::new(),
         };
         tracked.ids = tracked.fresh(&tracked.schema.fields.clone());
         tracked
@@ -1018,6 +1021,9 @@ impl Tracked {
         };
         let (fields, ids) = lists_at(&mut self.schema.fields, &mut self.ids, &path);
         let n = fields.len();
+        if let Edit::Rename(i) | Edit::Replace(i, _) | Edit::Required(i) = edit {
+            self.touched.insert(ids[i % n].uid.clone());
+        }
         match edit {
             Edit::Remove(i) if n > 1 => {
                 fields.remove(i % n);
@@ -1118,6 +1124,7 @@ fn lists_at<'a>(
 struct Layout {
     /// Spaces per level.
     width: usize,
+    endings: Endings,
     /// A pseudo-random stream for the per-list and per-item choices.
     seed: u64,
 }
@@ -1132,10 +1139,16 @@ impl Layout {
 }
 
 fn layout() -> impl Strategy<Value = Layout> {
-    (2usize..=4, any::<u64>()).prop_map(|(width, seed)| Layout {
-        width,
-        seed: seed | 1,
-    })
+    (
+        2usize..=4,
+        prop::sample::select(vec![Endings::Lf, Endings::Crlf, Endings::Mixed]),
+        any::<u64>(),
+    )
+        .prop_map(|(width, endings, seed)| Layout {
+            width,
+            endings,
+            seed: seed | 1,
+        })
 }
 
 /// What a generated file wrote, to check a save against.
@@ -1146,6 +1159,10 @@ struct Written {
     list_comments: Vec<(String, String)>,
     /// Fields whose `# inner` comment was written.
     inner: Vec<String>,
+    /// Who each line belongs to, by line number: the field whose item holds
+    /// it, `""` for the root. Blank lines, headings and list comments
+    /// belong to nobody.
+    owners: BTreeMap<usize, String>,
 }
 
 /// `key: value` as serde_yaml prints it, indented to `col`.
@@ -1175,6 +1192,7 @@ fn write(
     };
     let mut out = vec!["# A header.".to_owned(), String::new()];
     let mut written = Written::default();
+    written.owners.insert(0, String::new());
     let mut headings = 0;
     for (key, value) in &root {
         if key.as_str() == Some("fields") {
@@ -1194,6 +1212,11 @@ fn write(
             );
         } else {
             out.extend(entry_lines(key, value, 0));
+        }
+    }
+    for (at, line) in out.iter().enumerate() {
+        if !line.starts_with([' ', '#', '-']) && !line.is_empty() {
+            written.owners.insert(at, String::new());
         }
     }
     (out.join("\n") + "\n", written)
@@ -1249,6 +1272,7 @@ fn write_fields(
         } else if layout.roll(4) {
             out.push(String::new());
         }
+        let start = out.len();
         out.push(format!("{pad}# about {}", id.uid));
         let map = item.as_mapping().unwrap();
         let col = dash + 2;
@@ -1278,6 +1302,15 @@ fn write_fields(
         if !ends_in_compact_list && layout.roll(3) {
             out.push(format!("{}# inner {}", " ".repeat(col), id.uid));
             written.inner.push(id.uid.clone());
+        }
+        for (at, line) in out.iter().enumerate().skip(start) {
+            let content = line.trim_start();
+            let nobody = content.is_empty()
+                || content.starts_with("# heading")
+                || content.starts_with("# end of list");
+            if !nobody {
+                written.owners.entry(at).or_insert_with(|| id.uid.clone());
+            }
         }
     }
     // At the key's own column, a comment above the next key is that key's.
@@ -1375,8 +1408,23 @@ proptest! {
         edits in prop::collection::vec(edit(), 1..=5),
     ) {
         let tracked = Tracked::new(schema);
-        let (base, written) = hand_written(&tracked, &layout);
-        prop_assert_eq!(read(&base), Ok(serde_json::to_value(&tracked.schema).unwrap()), "{}", base);
+        let (lf, written) = hand_written(&tracked, &layout);
+        let mut rolls = Rolls(layout.seed);
+        let raw_base: Vec<(Option<&String>, String)> = lf
+            .split_inclusive('\n')
+            .enumerate()
+            .map(|(at, line)| {
+                let crlf = match layout.endings {
+                    Endings::Lf => false,
+                    Endings::Crlf => true,
+                    Endings::Mixed => rolls.roll(2),
+                };
+                let line = if crlf { line.replace('\n', "\r\n") } else { line.to_owned() };
+                (written.owners.get(&at), line)
+            })
+            .collect();
+        let base: String = raw_base.iter().map(|(_, l)| l.as_str()).collect();
+        prop_assert_eq!(read(&base), Ok(serde_json::to_value(&tracked.schema).unwrap()), "{:?}", base);
 
         let untouched = design::keep::schema_yaml(Some(&base), &tracked.schema, None).unwrap();
         prop_assert_eq!(&untouched.text, &base);
@@ -1391,10 +1439,35 @@ proptest! {
         prop_assert_eq!(saved.dropped, 0, "{}\n--- base ---\n{}", saved.text, base);
         prop_assert_eq!(read(&saved.text), Ok(serde_json::to_value(&edited.schema).unwrap()), "{}", saved.text);
 
+        // Every line of a field the edits did not touch, byte for byte; every
+        // line the save writes in the file's dominant ending.
+        let ctx = format!("\n--- saved ---\n{:?}\n--- base ---\n{base:?}\n--- edits ---\n{edits:?}", saved.text);
+        let mut living = BTreeMap::new();
+        all_ids(&edited.ids, &mut living);
+        let kept_field = |uid: &str| uid.is_empty() || (living.contains_key(uid) && !edited.touched.contains(uid));
+        let raw: Vec<&str> = saved.text.split_inclusive('\n').collect();
+        let mut kept: BTreeMap<&str, usize> = BTreeMap::new();
+        for (owner, line) in &raw_base {
+            if owner.is_some_and(|uid| kept_field(uid)) {
+                *kept.entry(line.as_str()).or_default() += 1;
+            }
+        }
+        for (line, times) in &kept {
+            let now = raw.iter().filter(|l| *l == line).count();
+            prop_assert!(now >= *times, "{:?} kept {} of {} times{}", line, now, times, ctx);
+        }
+        let eol = dominant(&base);
+        for line in &raw {
+            if raw_base.iter().any(|(_, l)| l == line) {
+                continue;
+            }
+            let content = line.strip_suffix(eol);
+            prop_assert!(content.is_some_and(|c| !c.contains('\r')), "{:?} is written without ending in {:?}{}", line, eol, ctx);
+        }
+
         let text = &saved.text;
         let lines: Vec<&str> = text.lines().collect();
         let count = |needle: &str| lines.iter().filter(|l| l.trim_start() == needle || l.ends_with(&format!(" {needle}"))).count();
-        let ctx = format!("\n--- saved ---\n{text}\n--- base ---\n{base}\n--- edits ---\n{edits:?}");
         let (mut was, mut is) = (BTreeMap::new(), BTreeMap::new());
         all_ids(&tracked.ids, &mut was);
         all_ids(&edited.ids, &mut is);
@@ -1443,11 +1516,16 @@ proptest! {
 }
 
 /// A `flusso.toml` reduced to what the TOML save pairs: sinks and `[[index]]`
-/// entries, each with an id, and the per-index sink tables.
+/// entries, each with an id, and the per-index sink tables; plus a `note`
+/// string on some sinks and the `enabled` flag, for value edits.
 #[derive(Debug, Clone)]
 struct Deployment {
     sinks: Vec<(String, String)>,
     indexes: Vec<(String, String, Vec<String>)>,
+    /// Each sink's `note`, by sink id.
+    notes: BTreeMap<String, String>,
+    /// The ids of the entries written `enabled = false`.
+    disabled: BTreeSet<String>,
     next: usize,
 }
 
@@ -1462,6 +1540,21 @@ enum TomlEdit {
     MoveIndex(usize, usize),
     /// Add an index entry at this slot, using the sinks the flags pick.
     AddIndex(usize, Vec<bool>),
+    /// Set or remove a sink's `note`.
+    SetNote(usize, Option<String>),
+    /// Flip an entry's `enabled`.
+    Toggle(usize),
+}
+
+/// The characters a `note` is made of: plain ones, ones a string has to
+/// escape or quote, and every kind TOML forbids raw in a basic string.
+const NOTE_CHARS: &[char] = &[
+    'a', 'b', ' ', '\t', '\n', '\r', '"', '\'', '\\', '#', '=', '{', 'é', '\u{0}', '\u{1}',
+    '\u{8}', '\u{c}', '\u{1b}', '\u{1f}', '\u{7f}',
+];
+
+fn note() -> impl Strategy<Value = String> {
+    prop::collection::vec(prop::sample::select(NOTE_CHARS), 0..8).prop_map(String::from_iter)
 }
 
 fn toml_edit() -> impl Strategy<Value = TomlEdit> {
@@ -1474,6 +1567,8 @@ fn toml_edit() -> impl Strategy<Value = TomlEdit> {
         (0..8usize, 0..8usize).prop_map(|(a, b)| TomlEdit::MoveIndex(a, b)),
         (0..8usize, prop::collection::vec(any::<bool>(), 3))
             .prop_map(|(at, uses)| TomlEdit::AddIndex(at, uses)),
+        (0..8usize, prop::option::of(note())).prop_map(|(k, note)| TomlEdit::SetNote(k, note)),
+        (0..8usize).prop_map(TomlEdit::Toggle),
     ]
 }
 
@@ -1481,8 +1576,9 @@ fn deployment() -> impl Strategy<Value = Deployment> {
     (
         1..4usize,
         prop::collection::vec(prop::collection::vec(any::<bool>(), 3), 1..4),
+        prop::collection::vec(prop::option::of(note()), 3),
     )
-        .prop_map(|(sinks, indexes)| Deployment {
+        .prop_map(|(sinks, indexes, notes)| Deployment {
             sinks: (0..sinks)
                 .map(|k| (format!("s{k}"), format!("s{k}")))
                 .collect(),
@@ -1497,6 +1593,13 @@ fn deployment() -> impl Strategy<Value = Deployment> {
                     (format!("i{k}"), format!("i{k}"), used)
                 })
                 .collect(),
+            notes: notes
+                .into_iter()
+                .take(sinks)
+                .enumerate()
+                .filter_map(|(k, note)| Some((format!("s{k}"), note?)))
+                .collect(),
+            disabled: BTreeSet::new(),
             next: 0,
         })
 }
@@ -1504,11 +1607,41 @@ fn deployment() -> impl Strategy<Value = Deployment> {
 /// How the hand-written file spells everything around the deployment.
 #[derive(Debug, Clone)]
 struct TomlLayout {
-    crlf: bool,
+    endings: Endings,
+    /// A byte order mark first.
+    bom: bool,
     /// Per sink (by position), how its key is spelled: as named, capitalized
     /// or upper case. The loader reads all three as the name.
     spellings: Vec<u8>,
+    /// Per sink (by position), how its table is written.
+    sink_styles: Vec<KeyStyle>,
+    /// Per entry (by position), how its per-index sink tables are written.
+    index_styles: Vec<KeyStyle>,
+    /// Per sink (by position), how its `note` is written: basic, literal,
+    /// multi-line basic or multi-line literal (one its value allows).
+    note_styles: Vec<u8>,
+    /// Picks the line breaks of a mixed file, the line-ending backslashes in
+    /// multi-line strings and the spacing of inline tables.
+    seed: u64,
     end: EndComment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Endings {
+    Lf,
+    Crlf,
+    /// Each line break LF or CRLF.
+    Mixed,
+}
+
+/// How a sink's table is written: `[sinks.x]`, `x.type = …` under
+/// `[sinks]`, or `x = { … }` under `[sinks]` (an entry's sinks: under its
+/// `[[index]]`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum KeyStyle {
+    Header,
+    Dotted,
+    Inline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1520,17 +1653,35 @@ enum EndComment {
     Free,
 }
 
+fn key_style() -> impl Strategy<Value = KeyStyle> {
+    prop::sample::select(vec![KeyStyle::Header, KeyStyle::Dotted, KeyStyle::Inline])
+}
+
 fn toml_layout() -> impl Strategy<Value = TomlLayout> {
     (
+        prop::sample::select(vec![Endings::Lf, Endings::Crlf, Endings::Mixed]),
         any::<bool>(),
         prop::collection::vec(0..3u8, 3),
+        prop::collection::vec(key_style(), 3),
+        prop::collection::vec(key_style(), 3),
+        prop::collection::vec(0..4u8, 3),
+        any::<u64>(),
         prop::sample::select(vec![EndComment::None, EndComment::Owned, EndComment::Free]),
     )
-        .prop_map(|(crlf, spellings, end)| TomlLayout {
-            crlf,
-            spellings,
-            end,
-        })
+        .prop_map(
+            |(endings, bom, spellings, sink_styles, index_styles, note_styles, seed, end)| {
+                TomlLayout {
+                    endings,
+                    bom,
+                    spellings,
+                    sink_styles,
+                    index_styles,
+                    note_styles,
+                    seed: seed | 1,
+                    end,
+                }
+            },
+        )
 }
 
 fn spell(name: &str, spelling: u8) -> String {
@@ -1544,6 +1695,116 @@ fn spell(name: &str, spelling: u8) -> String {
         2 => name.to_uppercase(),
         _ => name.to_owned(),
     }
+}
+
+/// A pseudo-random stream for a layout's per-line choices.
+struct Rolls(u64);
+
+impl Rolls {
+    fn roll(&mut self, one_in: u64) -> bool {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % one_in == 0
+    }
+}
+
+/// `c` as an escape, when a basic string can't hold it raw.
+fn escaped(c: char) -> Option<String> {
+    Some(match c {
+        '"' => "\\\"".to_owned(),
+        '\\' => "\\\\".to_owned(),
+        '\n' => "\\n".to_owned(),
+        '\r' => "\\r".to_owned(),
+        '\u{8}' => "\\b".to_owned(),
+        '\u{c}' => "\\f".to_owned(),
+        c if c != '\t' && c.is_control() => format!("\\u{:04X}", u32::from(c)),
+        _ => return None,
+    })
+}
+
+fn basic(text: &str) -> String {
+    let body: String = text
+        .chars()
+        .map(|c| escaped(c).unwrap_or_else(|| c.to_string()))
+        .collect();
+    format!("\"{body}\"")
+}
+
+/// Whether a literal string can hold `text`: no `'`, and no control
+/// character but a tab (and, `multi_line`, line breaks after the first).
+fn literal_holds(text: &str, multi_line: bool) -> bool {
+    text.chars()
+        .all(|c| c != '\'' && (!c.is_control() || c == '\t' || (multi_line && c == '\n')))
+        && !(multi_line && text.starts_with('\n'))
+}
+
+/// `text` as a multi-line basic string: its line breaks raw, and before
+/// some characters a line-ending backslash, with spaces after it, and blank
+/// lines and indentation in the whitespace it swallows.
+fn multi_line_basic(text: &str, rolls: &mut Rolls) -> String {
+    let mut out = String::from("\"\"\"");
+    for (i, c) in text.chars().enumerate() {
+        if !matches!(c, ' ' | '\t' | '\n') && rolls.roll(3) {
+            out.push('\\');
+            if rolls.roll(2) {
+                out.push_str(" \t");
+            }
+            out.push('\n');
+            if rolls.roll(2) {
+                out.push_str("  \n");
+            }
+            if rolls.roll(2) {
+                out.push_str("    ");
+            }
+        }
+        match c {
+            '\n' if i > 0 => out.push('\n'),
+            c => out.push_str(&escaped(c).unwrap_or_else(|| c.to_string())),
+        }
+    }
+    if rolls.roll(3) {
+        out.push_str("\\\n");
+    }
+    out.push_str("\"\"\"");
+    out
+}
+
+/// `note` written in `style`, or the nearest style its value allows.
+fn written_note(note: &str, style: u8, single_line: bool, rolls: &mut Rolls) -> String {
+    let style = if single_line { style % 2 } else { style };
+    match style {
+        1 if literal_holds(note, false) => format!("'{note}'"),
+        3 if literal_holds(note, true) => format!("'''{note}'''"),
+        2 | 3 => multi_line_basic(note, rolls),
+        _ => basic(note),
+    }
+}
+
+/// Who a line of the generated file belongs to, to tell which lines an
+/// edit may change.
+#[derive(Debug, Clone, PartialEq)]
+enum Owner {
+    /// Blank lines and the end comments: checked on their own.
+    Nobody,
+    /// Stays whatever the edit.
+    File,
+    /// A sink's line; `name` when it spells the sink's name, `note` when it
+    /// holds its note.
+    Sink { uid: String, name: bool, note: bool },
+    /// An entry's line; `name`/`enabled` when it holds that key.
+    Index {
+        uid: String,
+        name: bool,
+        enabled: bool,
+    },
+    /// A line of an entry's per-index tables of `sinks`; `name` when it
+    /// spells their names.
+    IndexSinks {
+        uid: String,
+        sinks: Vec<String>,
+        name: bool,
+    },
 }
 
 impl Deployment {
@@ -1565,6 +1826,7 @@ impl Deployment {
             TomlEdit::RenameSink(k) => self.sinks[k % s].1 = format!("r{}", self.next),
             TomlEdit::RemoveSink(k) if s > 1 => {
                 let (uid, _) = self.sinks.remove(k % s);
+                self.notes.remove(&uid);
                 for index in &mut self.indexes {
                     index.2.retain(|u| *u != uid);
                 }
@@ -1572,6 +1834,7 @@ impl Deployment {
             TomlEdit::ReplaceSink(k) => {
                 let (uid, name) = self.sinks[k % s].clone();
                 self.sinks[k % s] = (format!("f{}", self.next), name);
+                self.notes.remove(&uid);
                 for index in &mut self.indexes {
                     index.2.retain(|u| *u != uid);
                 }
@@ -1595,80 +1858,262 @@ impl Deployment {
                 let uid = format!("a{}", self.next);
                 self.indexes.insert(at % (i + 1), (uid.clone(), uid, used));
             }
+            TomlEdit::SetNote(k, note) => {
+                let uid = self.sinks[k % s].0.clone();
+                match note {
+                    Some(note) => self.notes.insert(uid, note.clone()),
+                    None => self.notes.remove(&uid),
+                };
+            }
+            TomlEdit::Toggle(k) => {
+                let uid = self.indexes[k % i].0.clone();
+                if !self.disabled.remove(&uid) {
+                    self.disabled.insert(uid);
+                }
+            }
             _ => {}
         }
     }
 
-    /// The file, commented (every sink, entry and per-index table has a
-    /// comment naming its id above it; sinks one below too) and spelled as
-    /// `layout` says, or bare.
-    fn text(&self, layout: Option<&TomlLayout>) -> String {
-        let comments = layout.is_some();
-        let spelled = |uid: &str| {
-            let at = self.sinks.iter().position(|(u, _)| u == uid).unwrap();
-            let spelling = layout.map_or(0, |l| l.spellings[at % l.spellings.len()]);
-            spell(self.sink_name(uid), spelling)
-        };
-        let mut out = String::from(
-            "# A header.\n\n[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n",
-        );
-        for (uid, _) in &self.sinks {
-            out.push('\n');
-            if comments {
-                out.push_str(&format!("# about sink {uid}\n"));
-            }
-            out.push_str(&format!("[sinks.{}]\ntype = \"stdout\"\n", spelled(uid)));
-            if comments {
-                out.push_str(&format!("# below sink {uid}\n"));
+    /// The file bare: every sink under its own header, no comments, LF.
+    fn text(&self) -> String {
+        let mut out =
+            String::from("[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n");
+        for (uid, name) in &self.sinks {
+            out.push_str(&format!("\n[sinks.{name}]\ntype = \"stdout\"\n"));
+            if let Some(note) = self.notes.get(uid) {
+                out.push_str(&format!("note = {}\n", basic(note)));
             }
         }
         for (uid, name, used) in &self.indexes {
-            out.push('\n');
-            if comments {
-                out.push_str(&format!("# about index {uid}\n"));
-            }
+            let enabled = !self.disabled.contains(uid);
             out.push_str(&format!(
-                "[[index]]\nname = \"{name}\"\nschema = \"{uid}.schema.yml\"\nenabled = true\n"
+                "\n[[index]]\nname = \"{name}\"\nschema = \"{uid}.schema.yml\"\nenabled = {enabled}\n"
             ));
             for sink in used {
-                if comments {
-                    out.push_str(&format!("# about {uid} in {sink}\n"));
-                }
-                out.push_str(&format!("[index.sinks.{}]\nshards = 1\n", spelled(sink)));
+                out.push_str(&format!(
+                    "[index.sinks.{}]\nshards = 1\n",
+                    self.sink_name(sink)
+                ));
             }
         }
-        match layout.map(|l| l.end) {
-            Some(EndComment::Owned) => out.push_str("# end owned\n"),
-            Some(EndComment::Free) => out.push_str("\n# end free\n"),
-            _ => {}
-        }
-        if layout.is_some_and(|l| l.crlf) {
-            out = out.replace('\n', "\r\n");
-        }
         out
+    }
+
+    /// The file as `layout` writes it, with each of its lines (ending
+    /// included) and who that line belongs to. Every sink, entry and
+    /// per-index table that has a line of its own has a comment naming its
+    /// id above it; a sink under its own header one below too.
+    fn written(&self, layout: &TomlLayout) -> (String, Vec<(Owner, String)>) {
+        let mut rolls = Rolls(layout.seed);
+        let mut lines: Vec<(Owner, String)> = Vec::new();
+        let position = |uid: &str| self.sinks.iter().position(|(u, _)| u == uid).unwrap();
+        let spelled = |uid: &str| {
+            let at = position(uid);
+            spell(
+                self.sink_name(uid),
+                layout.spellings[at % layout.spellings.len()],
+            )
+        };
+        let style = |uid: &str| layout.sink_styles[position(uid) % layout.sink_styles.len()];
+        let note_style = |uid: &str| layout.note_styles[position(uid) % layout.note_styles.len()];
+        let sink = |uid: &str, name: bool, note: bool| Owner::Sink {
+            uid: uid.to_owned(),
+            name,
+            note,
+        };
+        lines.push((Owner::File, "# A header.".to_owned()));
+        lines.push((Owner::Nobody, String::new()));
+        for line in [
+            "[source]",
+            "type = \"postgres\"",
+            "connection_url = \"postgres://x\"",
+        ] {
+            lines.push((Owner::File, line.to_owned()));
+        }
+        let keyed: Vec<&String> = self
+            .sinks
+            .iter()
+            .map(|(uid, _)| uid)
+            .filter(|uid| style(uid) != KeyStyle::Header)
+            .collect();
+        if !keyed.is_empty() {
+            lines.push((Owner::Nobody, String::new()));
+            lines.push((Owner::File, "[sinks]".to_owned()));
+        }
+        for uid in keyed {
+            let inline = style(uid) == KeyStyle::Inline;
+            let note = self
+                .notes
+                .get(uid)
+                .map(|note| written_note(note, note_style(uid), inline, &mut rolls));
+            lines.push((sink(uid, false, false), format!("# about sink {uid}")));
+            let key = spelled(uid);
+            if inline {
+                let line = if rolls.roll(2) {
+                    let note = note.map_or_else(String::new, |n| format!(", note = {n}"));
+                    format!("{key} = {{ type = \"stdout\"{note} }}")
+                } else {
+                    let note = note.map_or_else(String::new, |n| format!(",note={n}"));
+                    format!("{key}={{type=\"stdout\"{note}}}")
+                };
+                lines.push((sink(uid, true, true), line));
+            } else {
+                lines.push((sink(uid, true, false), format!("{key}.type = \"stdout\"")));
+                if let Some(note) = note {
+                    lines.push((sink(uid, true, true), format!("{key}.note = {note}")));
+                }
+            }
+        }
+        for (uid, _) in &self.sinks {
+            if style(uid) != KeyStyle::Header {
+                continue;
+            }
+            lines.push((Owner::Nobody, String::new()));
+            lines.push((sink(uid, false, false), format!("# about sink {uid}")));
+            lines.push((sink(uid, true, false), format!("[sinks.{}]", spelled(uid))));
+            lines.push((sink(uid, false, false), "type = \"stdout\"".to_owned()));
+            if let Some(note) = self.notes.get(uid) {
+                let note = written_note(note, note_style(uid), false, &mut rolls);
+                lines.push((sink(uid, false, true), format!("note = {note}")));
+            }
+            lines.push((sink(uid, false, false), format!("# below sink {uid}")));
+        }
+        for (at, (uid, name, used)) in self.indexes.iter().enumerate() {
+            let entry = |name: bool, enabled: bool| Owner::Index {
+                uid: uid.clone(),
+                name,
+                enabled,
+            };
+            let tables = |sinks: &[String], name: bool| Owner::IndexSinks {
+                uid: uid.clone(),
+                sinks: sinks.to_vec(),
+                name,
+            };
+            lines.push((Owner::Nobody, String::new()));
+            lines.push((entry(false, false), format!("# about index {uid}")));
+            lines.push((entry(false, false), "[[index]]".to_owned()));
+            lines.push((entry(true, false), format!("name = \"{name}\"")));
+            lines.push((
+                entry(false, false),
+                format!("schema = \"{uid}.schema.yml\""),
+            ));
+            let enabled = !self.disabled.contains(uid);
+            lines.push((entry(false, true), format!("enabled = {enabled}")));
+            match layout.index_styles[at % layout.index_styles.len()] {
+                KeyStyle::Header => {
+                    for s in used {
+                        let one = std::slice::from_ref(s);
+                        lines.push((tables(one, false), format!("# about {uid} in {s}")));
+                        lines.push((tables(one, true), format!("[index.sinks.{}]", spelled(s))));
+                        lines.push((tables(one, false), "shards = 1".to_owned()));
+                    }
+                }
+                KeyStyle::Dotted => {
+                    for s in used {
+                        let one = std::slice::from_ref(s);
+                        lines.push((tables(one, false), format!("# about {uid} in {s}")));
+                        lines.push((
+                            tables(one, true),
+                            format!("sinks.{}.shards = 1", spelled(s)),
+                        ));
+                    }
+                }
+                KeyStyle::Inline if !used.is_empty() => {
+                    let line = if rolls.roll(2) {
+                        let each: Vec<String> = used
+                            .iter()
+                            .map(|s| format!("{} = {{ shards = 1 }}", spelled(s)))
+                            .collect();
+                        format!("sinks = {{ {} }}", each.join(", "))
+                    } else {
+                        let each: Vec<String> = used
+                            .iter()
+                            .map(|s| format!("{}={{shards=1}}", spelled(s)))
+                            .collect();
+                        format!("sinks={{{}}}", each.join(","))
+                    };
+                    lines.push((tables(used, true), line));
+                }
+                KeyStyle::Inline => {}
+            }
+        }
+        match layout.end {
+            EndComment::Owned => lines.push((Owner::Nobody, "# end owned".to_owned())),
+            EndComment::Free => {
+                lines.push((Owner::Nobody, String::new()));
+                lines.push((Owner::Nobody, "# end free".to_owned()));
+            }
+            EndComment::None => {}
+        }
+        let mut raw = Vec::new();
+        for (owner, line) in lines {
+            for part in line.split('\n') {
+                let crlf = match layout.endings {
+                    Endings::Lf => false,
+                    Endings::Crlf => true,
+                    Endings::Mixed => rolls.roll(2),
+                };
+                let end = if crlf { "\r\n" } else { "\n" };
+                raw.push((owner.clone(), format!("{part}{end}")));
+            }
+        }
+        if layout.bom {
+            raw[0].1.insert(0, '\u{feff}');
+        }
+        (raw.iter().map(|(_, l)| l.as_str()).collect(), raw)
+    }
+}
+
+/// The line ending most of `text`'s lines end with (LF on a tie).
+fn dominant(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    if crlf > text.matches('\n').count() - crlf {
+        "\r\n"
+    } else {
+        "\n"
     }
 }
 
 proptest! {
     #![proptest_config(config())]
 
-    /// Sink and `[[index]]` renames, removals, replacements, additions and
-    /// reorders saved with identity, into a file in either line ending with
-    /// sink keys in any case: every surviving table keeps exactly its own
-    /// comments and its key as spelled, a removed one's are gone, nothing
-    /// else is lost, and every line ends the way the file's lines do.
+    /// Sink and `[[index]]` renames, removals, replacements, additions,
+    /// reorders and value edits saved with identity, into a file in LF,
+    /// CRLF or mixed line endings, with or without a byte order mark, with
+    /// sink keys in any case, as headers, dotted or inline keys, and notes
+    /// in every kind of string: every surviving table keeps exactly its own
+    /// comments and its key as spelled, a removed one's are gone, every line
+    /// the edit does not touch is kept byte for byte, and every line the
+    /// save writes ends the way most of the file's lines do.
     #[test]
     fn each_toml_comment_stays_with_its_table_through_a_save(
         base in deployment(),
         layout in toml_layout(),
         edits in prop::collection::vec(toml_edit(), 1..=5),
     ) {
-        let text = base.text(Some(&layout));
+        let (text, raw_base) = base.written(&layout);
+        let ctx = format!("\n--- base ---\n{text:?}\n--- edits ---\n{edits:?}\n--- layout ---\n{layout:?}");
+        let parsed = ConfigToml::try_parse(&text);
+        prop_assert!(parsed.is_ok(), "{:?}{}", parsed.err(), ctx);
+        let parsed = parsed.unwrap();
+        // A multi-line string reads a CRLF it holds as one: the notes are
+        // what the file says.
+        let mut base = base;
+        for (uid, note) in &mut base.notes {
+            let sink = &parsed.sinks[&kernel::common::SinkName::try_new(uid).unwrap()];
+            *note = sink.port.options.get("note").and_then(|n| n.as_str()).unwrap().to_owned();
+        }
+        prop_assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::to_value(ConfigToml::try_parse(&base.text()).unwrap()).unwrap(),
+            "the generator wrote another config{}", ctx
+        );
         let mut edited = base.clone();
         for edit in &edits {
             edited.apply(edit);
         }
-        let config = ConfigToml::try_parse(&edited.text(None)).unwrap();
+        let config = ConfigToml::try_parse(&edited.text()).unwrap();
         let identity = ConfigIdentity {
             before: base.indexes.iter().map(|i| i.1.clone()).collect(),
             after: edited
@@ -1685,21 +2130,69 @@ proptest! {
             ),
         };
         let saved = design::keep::config_toml(Some(&text), &config, Some(&identity)).unwrap();
-        let ctx = format!("\n--- saved ---\n{}\n--- base ---\n{text}\n--- edits ---\n{edits:?}\n--- layout ---\n{layout:?}", saved.text);
+        let ctx = format!("\n--- saved ---\n{:?}{ctx}", saved.text);
         prop_assert!(saved.notice.is_none(), "fell back{}", ctx);
         prop_assert_eq!(saved.dropped, 0, "{}", ctx);
+        prop_assert_eq!(saved.text.starts_with('\u{feff}'), layout.bom, "{}", ctx);
 
-        let eol = if layout.crlf { "\r\n" } else { "\n" };
-        for line in saved.text.split_inclusive('\n') {
-            prop_assert!(line.ends_with(eol) && !line[..line.len() - eol.len()].contains('\r'), "{:?} does not end in {:?}{}", line, eol, ctx);
-        }
+        // Every line the edit does not touch, byte for byte.
+        let sink_gone = |uid: &str| !edited.sinks.iter().any(|(u, _)| u == uid);
+        let renamed = |uid: &str| edited.base_name(uid).is_some_and(|n| Some(n) != base.base_name(uid));
+        let entry = |uid: &str| edited.indexes.iter().find(|i| i.0 == uid);
+        let touched = |owner: &Owner| match owner {
+            Owner::Nobody => true,
+            Owner::File => false,
+            Owner::Sink { uid, name, note } => {
+                sink_gone(uid)
+                    || (*name && renamed(uid))
+                    || (*note && base.notes.get(uid) != edited.notes.get(uid))
+            }
+            Owner::Index { uid, name, enabled } => match entry(uid) {
+                None => true,
+                Some((_, now, _)) => {
+                    let was = base.indexes.iter().find(|i| i.0 == *uid).unwrap();
+                    (*name && *now != was.1)
+                        || (*enabled && base.disabled.contains(uid) != edited.disabled.contains(uid))
+                }
+            },
+            Owner::IndexSinks { uid, sinks, name } => match entry(uid) {
+                None => true,
+                Some((_, _, used)) => sinks.iter().any(|s| !used.contains(s) || (*name && renamed(s))),
+            },
+        };
         let raw: Vec<&str> = saved.text.split_inclusive('\n').collect();
-        let kept = |line: &str| raw.contains(&format!("{line}{eol}").as_str());
+        let mut kept: BTreeMap<&str, usize> = BTreeMap::new();
+        for (owner, line) in &raw_base {
+            if !touched(owner) {
+                *kept.entry(line.as_str()).or_default() += 1;
+            }
+        }
+        for (line, times) in &kept {
+            let now = raw.iter().filter(|l| *l == line).count();
+            prop_assert!(now >= *times, "{:?} kept {} of {} times{}", line, now, times, ctx);
+        }
+        // A line the save writes ends in the dominant ending, unless it
+        // stands where a line it edits in place stood: then it keeps that
+        // line's.
+        let eol = dominant(&text);
+        let other = |line: &str| !line.ends_with(eol) && line.ends_with('\n');
+        let mut keeps_other = raw_base.iter().filter(|(o, l)| touched(o) && other(l)).count();
+        for line in &raw {
+            if raw_base.iter().any(|(_, l)| l == line) {
+                continue;
+            }
+            let content = line.trim_end_matches('\n').trim_end_matches('\r');
+            prop_assert!(!content.contains('\r'), "{:?}{}", line, ctx);
+            if other(line) {
+                prop_assert!(keeps_other > 0, "{:?} is written without ending in {:?}{}", line, eol, ctx);
+                keeps_other -= 1;
+            }
+        }
 
-        let lines: Vec<&str> = saved.text.lines().collect();
+        let body = saved.text.strip_prefix('\u{feff}').unwrap_or(&saved.text);
+        let lines: Vec<&str> = body.lines().collect();
         let at = |needle: &str| -> Vec<usize> { lines.iter().enumerate().filter(|(_, l)| **l == needle).map(|(i, _)| i).collect() };
-        prop_assert_eq!(at("# A header.").len(), 1, "{}", ctx);
-        prop_assert!(kept("# A header."), "{}", ctx);
+        prop_assert_eq!(at("# A header."), vec![0], "{}", ctx);
         // The key a sink's tables are written under now: as the file spelled
         // it while the sink keeps its name, else its new name.
         let header_of = |uid: &str| -> String {
@@ -1709,30 +2202,32 @@ proptest! {
                 None => name.to_owned(),
             }
         };
-        for (uid, name) in &edited.sinks {
-            let headers = lines
-                .iter()
-                .filter(|l| l.to_lowercase() == format!("[sinks.{name}]"))
-                .count();
-            prop_assert_eq!(headers, 1, "sink {} written {} times{}", name, headers, ctx);
-            prop_assert!(kept(&format!("[sinks.{}]", header_of(uid))), "{}{}", uid, ctx);
-        }
-        for (uid, _) in &base.sinks {
+        for (k, (uid, _)) in base.sinks.iter().enumerate() {
             let about = at(&format!("# about sink {uid}"));
             let below = at(&format!("# below sink {uid}"));
-            match edited.sinks.iter().find(|(u, _)| u == uid) {
-                None => prop_assert!(about.is_empty() && below.is_empty(), "removed {}{}", uid, ctx),
-                Some(_) => {
-                    prop_assert_eq!(about.len(), 1, "{}{}", uid, ctx);
-                    prop_assert!(kept(&format!("# about sink {uid}")), "{}", ctx);
-                    prop_assert_eq!(lines.get(about[0] + 1).map(|l| l.to_string()), Some(format!("[sinks.{}]", header_of(uid))), "{}", ctx);
-                    prop_assert_eq!(below, vec![about[0] + 3], "{}{}", uid, ctx);
+            if sink_gone(uid) {
+                prop_assert!(about.is_empty() && below.is_empty(), "removed {}{}", uid, ctx);
+                continue;
+            }
+            prop_assert_eq!(about.len(), 1, "{}{}", uid, ctx);
+            let next = lines.get(about[0] + 1).copied().unwrap_or("");
+            let key = header_of(uid);
+            if layout.sink_styles[k % layout.sink_styles.len()] == KeyStyle::Header {
+                prop_assert_eq!(next, format!("[sinks.{key}]"), "{}", ctx);
+                prop_assert_eq!(below.len(), 1, "{}{}", uid, ctx);
+                if !base.notes.contains_key(uid) && !edited.notes.contains_key(uid) {
+                    prop_assert_eq!(below[0], about[0] + 3, "{}{}", uid, ctx);
                 }
+            } else {
+                prop_assert!(
+                    [".", " =", "="].iter().any(|after| next.starts_with(&format!("{key}{after}"))),
+                    "{} is not above its sink{}", uid, ctx
+                );
             }
         }
-        for (uid, _, used) in &base.indexes {
+        for (k, (uid, _, used)) in base.indexes.iter().enumerate() {
             let about = at(&format!("# about index {uid}"));
-            let now = edited.indexes.iter().find(|i| i.0 == *uid);
+            let now = entry(uid);
             match now {
                 None => prop_assert!(about.is_empty(), "removed {}{}", uid, ctx),
                 Some((_, name, _)) => {
@@ -1740,14 +2235,20 @@ proptest! {
                     prop_assert_eq!(lines.get(about[0] + 2).map(|l| l.to_string()), Some(format!("name = \"{name}\"")), "{}", ctx);
                 }
             }
+            let style = layout.index_styles[k % layout.index_styles.len()];
             for sink in used {
                 let own = at(&format!("# about {uid} in {sink}"));
                 match now.filter(|i| i.2.contains(sink)) {
                     None => prop_assert!(own.is_empty(), "{} in {}{}", uid, sink, ctx),
+                    Some(_) if style == KeyStyle::Inline => {}
                     Some(_) => {
                         prop_assert_eq!(own.len(), 1, "{} in {}{}", uid, sink, ctx);
-                        let header = format!("[index.sinks.{}]", header_of(sink));
-                        prop_assert_eq!(lines.get(own[0] + 1).copied(), Some(header.as_str()), "{}", ctx);
+                        let key = if style == KeyStyle::Header {
+                            format!("[index.sinks.{}]", header_of(sink))
+                        } else {
+                            format!("sinks.{}.shards = 1", header_of(sink))
+                        };
+                        prop_assert_eq!(lines.get(own[0] + 1).copied(), Some(key.as_str()), "{}", ctx);
                     }
                 }
             }
@@ -1765,17 +2266,20 @@ proptest! {
                 prop_assert_eq!(free[0], lines.len() - 1, "a free comment stays last{}", ctx);
             }
             EndComment::Owned => {
-                let (uid, _, used) = base.indexes.last().unwrap();
-                let now = edited.indexes.iter().find(|i| i.0 == *uid);
-                let owner_lives = match used.last() {
+                let last = base.indexes.len() - 1;
+                let (uid, _, used) = &base.indexes[last];
+                let now = entry(uid);
+                let header = layout.index_styles[last % layout.index_styles.len()] == KeyStyle::Header;
+                let owner_lives = match used.last().filter(|_| header) {
                     Some(sink) => now.is_some_and(|i| i.2.contains(sink)),
                     None => now.is_some(),
                 };
                 if owner_lives {
                     prop_assert_eq!(owned.len(), 1, "{}", ctx);
-                    let last_key = if used.is_empty() { "enabled = true" } else { "shards = 1" };
-                    prop_assert_eq!(lines.get(owned[0] - 1).copied(), Some(last_key), "{}", ctx);
-                    if let Some(sink) = used.last() {
+                    let above = lines.get(owned[0] - 1).copied().unwrap_or("");
+                    prop_assert!(!above.trim().is_empty(), "{}", ctx);
+                    if let Some(sink) = used.last().filter(|_| header) {
+                        prop_assert_eq!(above, "shards = 1", "{}", ctx);
                         let header = format!("[index.sinks.{}]", header_of(sink));
                         prop_assert_eq!(lines.get(owned[0] - 2).copied(), Some(header.as_str()), "{}", ctx);
                     }
