@@ -670,9 +670,15 @@ impl DocumentBuilder for PgDocumentBuilder {
             None => Ok(Document::Delete { id: id.clone() }),
             Some(row) => {
                 let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                Ok(Document::Upsert {
-                    id: id.clone(),
-                    body: value::coerce_document(document, &schema.fields),
+                Ok(match value::coerce_document(document, &schema.fields) {
+                    Ok(body) => Document::Upsert {
+                        id: id.clone(),
+                        body,
+                    },
+                    Err(failure) => Document::Failed {
+                        id: id.clone(),
+                        failure,
+                    },
                 })
             }
         }
@@ -732,8 +738,10 @@ impl DocumentBuilder for PgDocumentBuilder {
                 // Map each returned root key to its assembled body. `doc_key` is
                 // the first column, decoded through the same path live-change
                 // keys take, so it matches the ids' key values exactly.
-                let mut bodies: HashMap<kernel::GenericValue, kernel::GenericValue> =
-                    HashMap::with_capacity(rows.len());
+                let mut bodies: HashMap<
+                    kernel::GenericValue,
+                    std::result::Result<kernel::GenericValue, source::document::BuildFailure>,
+                > = HashMap::with_capacity(rows.len());
                 for row in &rows {
                     let key = value::first_column_to_generic(row);
                     let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
@@ -745,9 +753,13 @@ impl DocumentBuilder for PgDocumentBuilder {
                 // soft-deleted (both fold into the query's WHERE) → a tombstone.
                 for (value, id) in chunk {
                     let document = match bodies.remove(*value) {
-                        Some(body) => Document::Upsert {
+                        Some(Ok(body)) => Document::Upsert {
                             id: (*id).clone(),
                             body,
+                        },
+                        Some(Err(failure)) => Document::Failed {
+                            id: (*id).clone(),
+                            failure,
                         },
                         None => Document::Delete { id: (*id).clone() },
                     };
