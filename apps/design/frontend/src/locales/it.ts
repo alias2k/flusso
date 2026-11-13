@@ -570,4 +570,104 @@ export const it: Record<string, string> = {
   "search.descOnError": "Politica globale quando un documento non viene indicizzato.",
   "search.descServer": "Indirizzi HTTP per metriche, stato e amministrazione.",
   "search.descSink": "Una destinazione di output (OpenSearch o stdout).",
+
+  // salvataggi interrotti
+  "recovery.rolledBack":
+    "Un salvataggio delle {time} è stato interrotto prima di finire. È stato annullato: {files} sono com'erano prima.",
+  "recovery.completed":
+    "Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} sono come li ha scritti.",
+  "recovery.leftovers":
+    "File lasciati da un salvataggio precedente, che il designer non tocca: {files}. Ognuno è stato lasciato da quel salvataggio e può contenere il testo di un file prima del salvataggio o quello che ha scritto; controllali ed eliminali.",
+  "recovery.dismiss": "Chiudi",
+  "recovery.reloadToSave":
+    "Un salvataggio interrotto è stato completato sul disco dopo che questa pagina ha caricato il progetto, quindi ciò che mostra non è aggiornato. Ricarica il designer per salvare di nuovo (le modifiche non salvate vanno perse).",
+  "recovery.blockedTitle": "Impossibile recuperare un salvataggio interrotto",
+  "recovery.blockedIntro":
+    "Un designer è stato fermato a metà di un salvataggio e il designer non riesce a sistemarlo da solo:",
+  "recovery.problemBackupMissing":
+    "la copia con il suo testo di prima del salvataggio manca o non contiene più quel testo",
+  "recovery.problemEdited": "è cambiato dopo l'interruzione del salvataggio",
+  "recovery.problemUnreadable": "non è stato possibile leggerlo",
+  "recovery.problemJournalUnusable": "il designer non usa il journal di questo salvataggio",
+  "recovery.problemFailed": "un passo del recupero non è riuscito",
+  "recovery.leftoverList": "File lasciati sul disco dal salvataggio:",
+  "recovery.helpUnreadable":
+    "Se {path} può essere reso leggibile, fallo e ricarica: il designer riprende da dove si è fermato.",
+  "recovery.helpFailed": "Risolvi la causa e ricarica: il designer riprende da dove si è fermato.",
+  "recovery.busyTitle": "Un altro designer sta salvando questo progetto",
+  "recovery.busy": "Un altro designer è nel mezzo di un salvataggio. Ricarica tra un momento.",
+  "recovery.causeTooLarge": "È più grande di qualsiasi salvataggio, quindi il designer non l'ha letto.",
+  "recovery.causeUnreadable":
+    "Non è leggibile: è un collegamento, una cartella, o non ha i permessi. Il designer non lo usa.",
+  "recovery.causeMalformed": "È danneggiato, o scritto da un'altra versione del designer. Il designer non lo usa.",
+  "recovery.causeNotASave": "Nomina file che nessun salvataggio di questo progetto scrive. Il designer non lo usa.",
+  "recovery.reportIntro": "Il journal nomina questi file; ognuno ora contiene:",
+  "recovery.holdsBefore": "il suo testo di prima del salvataggio",
+  "recovery.holdsAfter": "il testo scritto dal salvataggio",
+  "recovery.holdsNeither": "né il testo di prima del salvataggio né quello scritto",
+  "recovery.holdsUnchecked":
+    "non controllato (non è un percorso che un salvataggio scrive, c'è un collegamento lungo il percorso, o non è un file normale)",
+  "recovery.reportBackup": "copia: {path}",
+  "recovery.reportTemp": "file temporaneo: {path}",
+  "recovery.reportMore": "…e altri {count} file.",
+  "recovery.foreignTitle": "Trovato un journal di salvataggio di cui questo designer non ha traccia",
+  "recovery.uncheckedTitle": "Trovato un journal di salvataggio che questo designer non può verificare",
+  "recovery.reportFound": "Trovato: {journals}.",
+  "recovery.nothingChanged": "Non è stato modificato nulla.",
+  "recovery.causeNoRecord":
+    "Questo designer non ha traccia di questo salvataggio: l'ha fatto un altro utente o un'altra macchina, il progetto è stato copiato o spostato, oppure la traccia non è stata conservata (la cartella di stato del designer non era utilizzabile al momento del salvataggio, o la traccia è stata eliminata). Può anche appartenere a un salvataggio già sistemato. Il designer non lo usa.",
+  "recovery.causeOtherFolder":
+    "Questo designer l'ha scritto salvando {folder}. Da allora il progetto, o il journal, è stato copiato o spostato, quindi qui il designer non lo usa. Se {folder} contiene ancora quel salvataggio, apri quella cartella per recuperarlo.",
+  "recovery.causeNoState":
+    "La cartella di stato del designer, dove registra i salvataggi in corso, non è utilizzabile, quindi il designer non può verificare se ha scritto questo journal, e non lo usa.",
+  "recovery.causeConflict":
+    "Ci sono sia .flusso-save.journal sia .flusso-save.done, cosa che nessun salvataggio lascia. Il designer non li usa.",
+  "recovery.holdsOutside": "fuori dal progetto, non controllato",
+  "recovery.outsideNote":
+    "I file fuori dal progetto non vengono mai esaminati e non fanno parte dei passi qui sotto: controllali tu.",
+  "recovery.wayOutTitle": "Cosa fare",
+  "recovery.wayCaution":
+    "Segui questi passi solo per un tuo salvataggio: rimettono il testo indicato da questo journal. Prima controlla ogni file (con il controllo di versione, per esempio).",
+  "recovery.wayBack": "Per riportare il progetto com'era prima del salvataggio:",
+  "recovery.wayForward": "Oppure, per tenere ciò che il salvataggio ha scritto:",
+  "recovery.stepCopy": "copia {from} in {path}",
+  "recovery.stepDelete": "elimina {path}",
+  "recovery.wayNone":
+    "Il designer non sa dire come completare a mano questo salvataggio: un file è cambiato da allora, non ha una copia del testo che serve, o non è stato controllato.",
+  "recovery.wayLeave": "Per lasciare ogni file com'è ora, elimina solo {journals} e ricarica.",
+  "recovery.directionBack":
+    "Il salvataggio è stato interrotto prima che ogni file fosse al suo posto, quindi il designer lo stava annullando: rimettendo ogni file com'era prima del salvataggio.",
+  "recovery.directionForward":
+    "Ogni file del salvataggio era al suo posto quando è stato interrotto, quindi il designer lo stava completando: eliminando le copie rimaste.",
+  "recovery.directionBackEnd":
+    "Appena il designer può proseguire, annulla da solo il salvataggio: ogni file torna com'era prima del salvataggio.",
+  "recovery.directionForwardEnd":
+    "Appena il designer può proseguire, completa da solo il salvataggio: ogni file è come l'ha scritto il salvataggio.",
+  "recovery.helpBackCopy":
+    "Perché il designer annulli il salvataggio, copia {from} in {path} ({from} contiene il suo testo di prima del salvataggio) e ricarica. Ciò che {path} contiene ora va perso: copialo altrove prima, se ti serve.",
+  "recovery.helpBackDelete":
+    "Perché il designer annulli il salvataggio, elimina {path} (l'ha creato il salvataggio) e ricarica. Ciò che {path} contiene ora va perso: copialo altrove prima, se ti serve.",
+  "recovery.helpBackNoCopy":
+    "Non resta nessuna copia del testo di {path} di prima del salvataggio. Perché il designer annulli il salvataggio, rimetti tu quel testo in {path} (dal controllo di versione, per esempio) e ricarica.",
+  "recovery.helpForwardCopy":
+    "Perché il designer completi il salvataggio, copia {from} in {path} ({from} contiene il testo scritto dal salvataggio) e ricarica. Ciò che {path} contiene ora va perso: copialo altrove prima, se ti serve.",
+  "recovery.helpForwardDelete":
+    "Perché il designer completi il salvataggio, elimina {path} (il salvataggio l'ha rimosso) e ricarica. Ciò che {path} contiene ora va perso: copialo altrove prima, se ti serve.",
+  "recovery.helpForwardNoCopy":
+    "Il testo che il salvataggio ha scritto in {path} non è conservato altrove, quindi il designer non può completare il salvataggio con quel testo. Tieni invece la tua modifica (qui sotto).",
+  "recovery.helpBeforeKept":
+    "{backup} contiene il testo di {path} di prima del salvataggio, se ti serve: copialo altrove prima di eliminarlo.",
+  "recovery.helpBeforeGone": "Non resta nessuna copia del testo di {path} di prima del salvataggio.",
+  "recovery.keepBack":
+    "Oppure, per tenere i file cambiati ({files}) così come sono ora, rimetti a mano ogni altro file com'era ed elimina ciò che il salvataggio ha lasciato, per ultimo il journal:",
+  "recovery.keepBackEnd":
+    "Il progetto è allora com'era prima del salvataggio, tranne i file cambiati ({files}), che tengono ciò che contengono ora.",
+  "recovery.keepForward":
+    "Oppure, per tenere i file cambiati ({files}) così come sono ora: ogni altro file contiene già ciò che il salvataggio ha scritto, quindi elimina solo ciò che il salvataggio ha lasciato, per ultimo il journal:",
+  "recovery.keepForwardEnd":
+    "Il progetto è allora come l'ha scritto il salvataggio, tranne i file cambiati ({files}), che tengono ciò che contengono ora.",
+  "recovery.stepRemoveDir": "rimuovi la cartella {path} se è vuota",
+  "recovery.thenReload": "Poi ricarica.",
+  "recovery.wayLeaveKept": "Gli altri file del salvataggio restano dove sono: controllali ed eliminali tu.",
+  "recovery.reload": "Ricarica",
 };

@@ -136,7 +136,74 @@ After any save, every index in the `flusso.toml` on disk has a file of its own, 
 
 A move removes its old file only when no index uses it after the save and it lies in the config directory; otherwise the old file stays. No other file is ever removed.
 
-Every check runs before anything is written. A save that fails anyway (permissions, a full disk) is undone: the project is left exactly as it was, with no temporary or backup file behind. A file that is replaced keeps its permissions. A designer killed in the middle of a save is not undone: its `*.flusso-save.*.bak` files beside the schemas hold what was there. Only if putting a file back fails too does the error name the backup files that still hold the previous content.
+Every check runs before anything is written. A save that fails anyway (permissions, a full disk) is undone: the project is left exactly as it was, with no temporary or backup file behind. A file that is replaced keeps its permissions. Only if putting a file back fails too does the error name the backup files that still hold the previous content.
+
+### When a save is cut short
+
+A save lands whole or not at all, even when the designer is killed or the machine loses power in the middle of it. Before its first write, the save records every step in `.flusso-save.journal` beside `flusso.toml`, and it flushes each file to disk before putting it in place. The next time a designer opens the project, or diffs or saves it, it finds the journal and settles the save before reading anything:
+
+- **rolled back**, when not every file was in place: each file is as it was before the save;
+- **completed**, when every file was: each file is as the save wrote it, and only the backups are deleted.
+
+The designer says which, with the files involved, in a notice on the page and on its log. After a rollback a diff or save goes on, since the files are as the page loaded them. After a completion, a page that loaded the project before that save is out of date: its diffs and saves are refused until it reloads. Two designers open on one project never touch each other's save: a save holds a lock (`.flusso-save.lock`, removed afterwards except on Windows) for as long as it runs, and a designer waits up to five seconds for it.
+
+#### Whose save is recovered
+
+A journal is a file in the project, so anyone who can put a file there (a repository, an archive, a shared folder) could write one, or bring a copy of one your designer really wrote. So the designer acts on a journal **once, for you, in the folder it was written in**. When a save starts, it records the save in your own state folder, before the journal appears: the digest of the journal's exact bytes and the canonical path of `flusso.toml`'s folder. Once every file is in place, it marks that record committed: that mark, not the journal's file name, says whether recovery rolls the save back or finishes it. The record goes when the save is settled (cleaned up, undone, or recovered).
+
+| Platform | State folder |
+| --- | --- |
+| Linux and other Unix | `$XDG_STATE_HOME/flusso/design-saves/`, else `~/.local/state/flusso/design-saves/` |
+| macOS | `~/Library/Application Support/io.github.alias2k.flusso/design-saves/` |
+| Windows | `%APPDATA%\alias2k\flusso\data\design-saves\` |
+
+The folder is private to you (mode 0700, each record 0600). One that others can read or write, or that another user owns, is not used.
+
+- **Recovered**: a save your designer was killed in the middle of, opened again by you, on this machine, in the same folder, once. A schema file the save wrote outside that folder (`../shared/x.schema.yml`, which a save allows with a warning) is recovered too.
+- **Only reported**: every other journal. One from another machine or user, or that came with the project. A project copied or moved after a cut-short save (open the original folder to recover it there). A save made while the state folder could not be used, or reopened after its record was pruned. A journal of a save that was settled already, found again. One that is damaged, larger than any save writes, or names a file no save of the project writes, and `.flusso-save.journal` and `.flusso-save.done` both there. The steps a report gives name only schema files (`.yml`, `.yaml`) and the config, never a hidden file or a file of another kind; any other path a journal names is shown as written and left alone. The first way out it offers changes no file: delete only the journal and reload.
+
+Deleting the state folder only means the saves cut short until then are reported instead of recovered. Where it can't be used (no home folder, a read-only one, wrong permissions or owner), saves still work and still undo themselves when they fail, but a save the designer is killed in the middle of is only reported. The designer logs this once. When it starts, the designer prunes records older than 180 days, and records whose project folder is missing once they are older than seven days (a folder moved away and back, or on a drive that is not mounted, keeps its record until then).
+
+Acting on your own save, recovery still checks every file against the text the journal records from before and after the save: it puts a file back, or removes one the save created, only when the file holds one of those texts, and it deletes a temporary file or backup only when it holds the text the save gave it. Before it finishes a committed save, it checks that every file holds the text the save wrote; when one doesn't, it deletes nothing and reports it.
+
+#### When recovery stops
+
+When recovery can't settle a save, the designer changes nothing and shows, instead of the project, what stops it and what to do.
+
+Every step the page lists can be followed literally, in order, and ends in the state it names. A backup or temporary file is named as holding a text only when it holds that text right now, checked by digest: a backup hard-linked to a file that was then edited in place (`>>`, or an editor that keeps hard links) changed with it, and the page says no copy of that text is left.
+
+**A journal it does not act on.** The heading says whether this designer wrote it (another folder, damaged, not a save), has no record of it, or can't tell (no usable state folder). The page gives why, then each file the journal names and what it holds now: its text from before the save, the text the save wrote, or neither, with its backup and temporary file when they hold the save's texts. The report only looks inside `flusso.toml`'s folder: a file outside it is shown as the journal writes it, marked *outside the project, not checked*, and is never opened. Then the way out, as numbered steps:
+
+- **to put the project back as it was before the save**: copy each named backup to its file, delete each file the save created, delete every temporary file and backup the save left (wherever it is in the project), remove each folder the save created if it is empty, delete the journal, and reload;
+- **or, to keep what the save wrote**: copy each named temporary file to its file, delete each file the save removed, delete the save's temporary files and backups, delete the journal, and reload.
+
+A route is shown only when every file inside the folder can take it. Follow either only for a save of yours: the steps put in the text the journal names, so check each file first (against version control, say). To leave every file as it is instead, delete only the journal and reload; the save's temporary files and backups, listed, stay where they are for you to check and delete.
+
+**A save of yours it can't settle by itself.** The page says which way the designer was taking it:
+
+- **rolling back**, when not every file was in place: every file goes back to its text from before the save;
+- **finishing**, when every file was: each keeps the text the save wrote, and only the backups go.
+
+Then, per file:
+
+| Problem | Rolling back | Finishing |
+| --- | --- | --- |
+| a file changed since the save stopped | give it back its text from before the save (copy the backup the page names, or put it back yourself when no copy is left; a file the save created: delete it) and reload | the text the save wrote is kept nowhere else, so the backup is never a way to let the designer finish; keep your edit (below). The page names the backup holding the text from before, in case you want it |
+| a backup gone, or no longer holding the text from before | put the file's text from before the save back yourself (from version control, say) and reload | does not happen: finishing needs no backup |
+| a file that can't be read, or a step that failed | fix the cause and reload: recovery carries on where it stopped | the same |
+
+To keep the changed files as they are instead, follow the page's numbered steps. Rolling back, they put every other file back by hand, delete what the save left (the folders it created too, when empty) and the journal last; the project is then as it was before the save, except the files you kept. Finishing, every other file already holds what the save wrote, so they only delete the backups and the journal; the project is then as the save wrote it, except the files you kept.
+
+A link, a folder or anything but a plain file at `.flusso-save.lock` stops the designer from locking the project; it names the file, and never opens what the link points at. Delete it and reload.
+
+`*.flusso-save.*` files (the journal, the lock, and each save's `*.flusso-save.*.tmp` and `.bak` files) are a save in progress or what one left: they don't belong in version control. Ignore them, in `.gitignore`:
+
+```gitignore
+.flusso-save.*
+.*.flusso-save.*
+```
+
+`*.flusso-save.*` files that no journal names (left by an older designer, by hand, or kept by a recovery because they held other text) are listed in the notice and never touched: those in `flusso.toml`'s folder, in the folders of its schema files, and in every folder a recovered save wrote in. The state folder lives outside the project and is never committed.
 
 ### What a save keeps
 

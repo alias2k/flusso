@@ -554,4 +554,104 @@ export const en: Record<string, string> = {
   "search.descOnError": "Global policy when a document fails to index.",
   "search.descServer": "HTTP addresses for metrics, status & admin.",
   "search.descSink": "An output destination (OpenSearch or stdout).",
+
+  // interrupted saves
+  "recovery.rolledBack":
+    "A save from {time} was interrupted before it finished. It was rolled back: {files} are as they were before it.",
+  "recovery.completed":
+    "A save from {time} was interrupted while it cleaned up. It was completed: {files} are as it wrote them.",
+  "recovery.leftovers":
+    "Files an earlier save left behind, which the designer does not touch: {files}. Each was left by that save and may hold a file's text from before it or the text it wrote; check them and delete them.",
+  "recovery.dismiss": "Dismiss",
+  "recovery.reloadToSave":
+    "An interrupted save was completed on disk after this page loaded the project, so what the page shows is out of date. Reload the designer to save again (unsaved changes are lost).",
+  "recovery.blockedTitle": "An interrupted save could not be recovered",
+  "recovery.blockedIntro":
+    "A designer was stopped in the middle of a save, and the designer can't settle it by itself:",
+  "recovery.problemBackupMissing":
+    "the backup holding its text from before the save is missing or no longer holds that text",
+  "recovery.problemEdited": "it changed after the save was cut short",
+  "recovery.problemUnreadable": "it could not be read",
+  "recovery.problemJournalUnusable": "the designer does not act on this save's journal",
+  "recovery.problemFailed": "a recovery step failed",
+  "recovery.leftoverList": "Files the save left on disk:",
+  "recovery.helpUnreadable":
+    "If {path} can be made readable, do so and reload: the designer then carries on where it stopped.",
+  "recovery.helpFailed": "Fix the cause and reload: the designer carries on where it stopped.",
+  "recovery.busyTitle": "Another designer is saving this project",
+  "recovery.busy": "Another designer is in the middle of a save. Reload in a moment.",
+  "recovery.causeTooLarge": "It is larger than any save writes, so the designer did not read it.",
+  "recovery.causeUnreadable":
+    "It can't be read: it is a link, a folder, or not readable. The designer does not act on it.",
+  "recovery.causeMalformed":
+    "It is damaged, or written by another version of the designer. The designer does not act on it.",
+  "recovery.causeNotASave": "It names files no save of this project writes. The designer does not act on it.",
+  "recovery.reportIntro": "The journal names these files; each now holds:",
+  "recovery.holdsBefore": "its text from before the save",
+  "recovery.holdsAfter": "the text the save wrote",
+  "recovery.holdsNeither": "neither the text from before the save nor the one it wrote",
+  "recovery.holdsUnchecked": "not checked (not a path a save writes, a link on the way, or not a plain file)",
+  "recovery.reportBackup": "backup: {path}",
+  "recovery.reportTemp": "temp file: {path}",
+  "recovery.reportMore": "…and {count} more files.",
+  "recovery.foreignTitle": "A save journal was found that this designer has no record of",
+  "recovery.uncheckedTitle": "A save journal was found that this designer can't check",
+  "recovery.reportFound": "Found: {journals}.",
+  "recovery.nothingChanged": "Nothing was changed.",
+  "recovery.causeNoRecord":
+    "This designer has no record of this save: it was made by another user or on another machine, the project was copied or moved, or the record could not be kept (the designer's state folder could not be used when it saved, or the record was pruned). It may also belong to a save that was settled already. The designer does not act on it.",
+  "recovery.causeOtherFolder":
+    "This designer wrote it while saving {folder}. The project, or the journal, was copied or moved since, so the designer does not act on it here. If {folder} still holds that save, open that folder to recover it.",
+  "recovery.causeNoState":
+    "The designer's state folder, where it records the saves in flight, can't be used, so the designer can't check whether it wrote this journal, and does not act on it.",
+  "recovery.causeConflict":
+    "Both .flusso-save.journal and .flusso-save.done are there, which no save leaves. The designer does not act on them.",
+  "recovery.holdsOutside": "outside the project, not checked",
+  "recovery.outsideNote":
+    "Files outside the project are never looked at, and are not part of the steps below: check them yourself.",
+  "recovery.wayOutTitle": "What to do",
+  "recovery.wayCaution":
+    "Follow these steps only for a save of yours: they put in the text this journal names. Check each file first (against version control, say).",
+  "recovery.wayBack": "To put the project back as it was before the save:",
+  "recovery.wayForward": "Or, to keep what the save wrote:",
+  "recovery.stepCopy": "copy {from} to {path}",
+  "recovery.stepDelete": "delete {path}",
+  "recovery.wayNone":
+    "The designer can't tell how to finish this save by hand: a file changed since, has no copy of the text it needs, or was not checked.",
+  "recovery.wayLeave": "To leave every file as it is now, delete only {journals} and reload.",
+  "recovery.directionBack":
+    "The save was cut short before every file was in place, so the designer was rolling it back: putting every file back as it was before the save.",
+  "recovery.directionForward":
+    "Every file of the save was in place when it was cut short, so the designer was finishing it: deleting the backups it left.",
+  "recovery.directionBackEnd":
+    "Once the designer can go on, it rolls the save back by itself: every file is then as it was before the save.",
+  "recovery.directionForwardEnd":
+    "Once the designer can go on, it finishes the save by itself: every file is then as the save wrote it.",
+  "recovery.helpBackCopy":
+    "To let the designer roll the save back, copy {from} to {path} ({from} holds its text from before the save) and reload. What {path} holds now is lost: copy it elsewhere first if you want it.",
+  "recovery.helpBackDelete":
+    "To let the designer roll the save back, delete {path} (the save created it) and reload. What {path} holds now is lost: copy it elsewhere first if you want it.",
+  "recovery.helpBackNoCopy":
+    "No copy of {path}'s text from before the save is left. To let the designer roll the save back, put that text back in {path} yourself (from version control, say) and reload.",
+  "recovery.helpForwardCopy":
+    "To let the designer finish the save, copy {from} to {path} ({from} holds the text the save wrote) and reload. What {path} holds now is lost: copy it elsewhere first if you want it.",
+  "recovery.helpForwardDelete":
+    "To let the designer finish the save, delete {path} (the save removed it) and reload. What {path} holds now is lost: copy it elsewhere first if you want it.",
+  "recovery.helpForwardNoCopy":
+    "The text the save wrote to {path} is kept nowhere else, so the designer can't finish the save with it. Keep your edit instead (below).",
+  "recovery.helpBeforeKept":
+    "{backup} holds {path}'s text from before the save, in case you want it: copy it elsewhere before you delete it.",
+  "recovery.helpBeforeGone": "No copy of {path}'s text from before the save is left.",
+  "recovery.keepBack":
+    "Or, to keep the changed files ({files}) as they are now, put every other file back by hand and delete what the save left, the journal last:",
+  "recovery.keepBackEnd":
+    "The project is then as it was before the save, except the changed files ({files}), which keep what they hold now.",
+  "recovery.keepForward":
+    "Or, to keep the changed files ({files}) as they are now: every other file already holds what the save wrote, so only delete what the save left, the journal last:",
+  "recovery.keepForwardEnd":
+    "The project is then as the save wrote it, except the changed files ({files}), which keep what they hold now.",
+  "recovery.stepRemoveDir": "remove the folder {path} if it is empty",
+  "recovery.thenReload": "Then reload.",
+  "recovery.wayLeaveKept": "The save's other files then stay where they are: check them, and delete them yourself.",
+  "recovery.reload": "Reload",
 };

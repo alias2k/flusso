@@ -36,7 +36,8 @@ import type {
   SchemaIdentity,
   ValidateResponse,
 } from "./api";
-import { api } from "./api";
+import { api, RecoveryError, type SaveRecovery } from "./api";
+import { RecoveryBlocked, RecoveryNotice } from "./components/Recovery";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
 import { DiffView } from "./components/DiffView";
@@ -274,6 +275,10 @@ export default function App() {
   const canRedo = useCanRedo();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newIndexOpen, setNewIndexOpen] = useState(false);
+  // An interrupted save the server settled (a notice) or could not (the
+  // project is not shown).
+  const [recovery, setRecovery] = useState<SaveRecovery | null>(null);
+  const [blocked, setBlocked] = useState<SaveRecovery | null>(null);
 
   const theme = useUiStore((s) => s.theme);
   const leftOpen = useUiStore((s) => s.leftOpen);
@@ -350,13 +355,14 @@ export default function App() {
     api
       .project()
       .then((p) => {
+        if (p.recovery) setRecovery(p.recovery);
         loadProject(p, true);
         // A deep link wins over the default first index — applied after the
         // project loads so the index-name validation can see it.
         const route = parseRoute(window.location.pathname);
         if (route) applyRouteRef.current(route);
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => (e instanceof RecoveryError ? setBlocked(e.recovery) : setError(String(e))));
     api
       .catalog()
       .then(setCatalog)
@@ -825,6 +831,23 @@ export default function App() {
   // nor rewritten.
   // In Code mode the buffer is flushed first, so the review shows exactly what
   // a confirm writes; a buffer that doesn't parse refuses the save.
+
+  // A diff or save the server refused over an interrupted save: one completed
+  // on disk after this page loaded (its view is out of date: reload to save)
+  // or one it can't settle (show the files instead of the project).
+  const refusedOverRecovery = (e: unknown): boolean => {
+    if (!(e instanceof RecoveryError)) return false;
+    if (e.recovery.blocked?.busy) {
+      setToast({ kind: "error", text: t("recovery.busy") });
+    } else if (e.recovery.blocked) {
+      setDiffs(null);
+      setBlocked(e.recovery);
+    } else {
+      if (e.recovery.recovered.length) setRecovery(e.recovery);
+      setToast({ kind: "error", text: t("recovery.reloadToSave") });
+    }
+    return true;
+  };
   const save = async () => {
     if (!doc || useUiStore.getState().saving) return;
     const nameDraft = useUiStore.getState().nameDraft;
@@ -868,16 +891,19 @@ export default function App() {
         setToast({ kind: "error", text: refusal });
         return;
       }
-      const result = await api.diff(
+      const review = await api.diff(
         current.config,
         planned.map((p) => p.op),
         configIdentity(current),
       );
+      if (review.recovered?.length) setRecovery({ recovered: review.recovered, leftovers: [] });
+      const result = review.diffs;
       const shown =
         isConfigDirty(current) || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
       if (shown.some((d) => d.changed)) setDiffs(shown);
       else setToast({ kind: "ok", text: t("toast.alreadyUpToDate") });
     } catch (e) {
+      if (refusedOverRecovery(e)) return;
       setToast({ kind: "error", text: t("toast.diffFailed", { err: errText(e) }) });
     } finally {
       setSaving(false);
@@ -932,9 +958,11 @@ export default function App() {
         setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
       }
       setDiffs(null);
+      if (res.recovered?.length) setRecovery({ recovered: res.recovered, leftovers: [] });
       const n = res.written.length + res.moved.length;
       setToast({ kind: "ok", text: t("toast.saved", { n }) });
     } catch (e) {
+      if (refusedOverRecovery(e)) return;
       setToast({ kind: "error", text: t("toast.saveFailed", { err: errText(e) }) });
     } finally {
       setSaving(false);
@@ -1176,6 +1204,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", fn);
   }, []);
 
+  if (blocked) return <RecoveryBlocked recovery={blocked} />;
   if (!project || !doc || !config)
     return <div className="p-10 text-muted-foreground">{error || t("common.loading")}</div>;
 
@@ -1335,6 +1364,7 @@ export default function App() {
       {(error || previewError) && (
         <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error || previewError}</div>
       )}
+      {recovery && <RecoveryNotice recovery={recovery} onDismiss={() => setRecovery(null)} />}
       {catalog?.error && (
         <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>
       )}

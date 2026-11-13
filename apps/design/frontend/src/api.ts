@@ -392,12 +392,121 @@ export interface SaveResult {
   written: string[];
   moved: MovedFile[];
   pruned: string[];
+  /// Interrupted saves rolled back before this one.
+  recovered?: RecoveredSave[];
+}
+
+/// What a diff found, and the interrupted saves it rolled back first.
+export interface Review {
+  diffs: OpDiff[];
+  recovered?: RecoveredSave[];
 }
 
 export interface Project {
   config_path: string;
   config: ConfigToml;
   indexes: IndexFile[];
+  /// What the server found of an earlier, interrupted save; absent when nothing.
+  recovery?: SaveRecovery;
+  /// When the server read the project; sent back with every diff and save.
+  loaded_at_ms: number;
+}
+
+/// A save a killed designer left half done, settled before the project was read.
+export interface RecoveredSave {
+  outcome: "rolled_back" | "completed";
+  /// When the save started, in milliseconds since the Unix epoch.
+  started_at_ms: number;
+  /// The files it changed, relative to flusso.toml.
+  files: string[];
+}
+
+export type BlockedProblem = "backup_missing" | "edited" | "unreadable" | "journal_unusable" | "failed";
+
+/// Why the server does not act on a save's journal.
+export type JournalCause =
+  "no_record" | "other_folder" | "no_state" | "too_large" | "unreadable" | "malformed" | "not_a_save" | "conflict";
+
+/// What a file a journal names holds now.
+export type FileHolds = "before" | "after" | "neither" | "unchecked" | "outside";
+
+/// One step by hand that brings a file to one side of a save.
+export type FileFix = { do: "nothing" } | { do: "copy"; from: string } | { do: "delete" } | { do: "unavailable" };
+
+/// One step by hand on the blocked page, paths relative to flusso.toml.
+export type HandStep =
+  { do: "copy"; from: string; to: string } | { do: "delete"; path: string } | { do: "remove_dir"; path: string };
+
+/// A journal the server does not act on, what each file it names holds now,
+/// and how to settle it by hand.
+export interface JournalReport {
+  cause: JournalCause;
+  /// The journal files found, each to be deleted.
+  journals: string[];
+  /// For a journal this designer wrote while saving another folder: that folder.
+  recorded_for?: string;
+  files: {
+    path: string;
+    /// Outside the project: never looked at.
+    outside?: boolean;
+    holds: FileHolds;
+    backup?: string;
+    temp?: string;
+    back: FileFix;
+    forward: FileFix;
+  }[];
+  /// How many more files it names, not listed.
+  more?: number;
+  /// Every step that takes the project back to before the save, the journal last.
+  back_route?: HandStep[];
+  /// Every step that takes the project forward to after the save, the journal last.
+  forward_route?: HandStep[];
+  /// The save's temp files and backups on disk, whatever they hold.
+  leftovers: string[];
+}
+
+/// An interrupted save the server could not settle: nothing was changed.
+export interface BlockedSave {
+  /// Another designer is saving this project right now.
+  busy: boolean;
+  problems: {
+    path: string;
+    problem: BlockedProblem;
+    detail?: string;
+    /// The backup the save keeps of the file, whatever it holds.
+    backup?: string;
+    /// The step that gives the file a text recovery accepts; absent when no copy is left.
+    fix?: HandStep;
+    /// A file that holds the file's text from before the save right now.
+    before_copy?: string;
+  }[];
+  /// The journal, temp files and backups still on disk.
+  leftovers: string[];
+  /// For a journal the server does not act on: what the files it names hold.
+  report?: JournalReport;
+  /// For a save of this designer's: which way recovery was taking it.
+  direction?: "back" | "forward";
+  /// The steps that keep the changed files as they are and settle the rest, the journal last.
+  keep?: HandStep[];
+}
+
+export interface SaveRecovery {
+  recovered: RecoveredSave[];
+  blocked?: BlockedSave;
+  /// Temp files and backups no journal names: reported, left alone.
+  leftovers: string[];
+  /// An interrupted save was completed after this page loaded: reload to save.
+  stale?: boolean;
+}
+
+/// A load, diff or save the server refused over an interrupted save (a 409).
+export class RecoveryError extends Error {
+  constructor(
+    message: string,
+    readonly recovery: SaveRecovery,
+  ) {
+    super(message);
+  }
 }
 
 export interface DocumentNode {
@@ -475,13 +584,15 @@ async function json<T>(res: Response): Promise<T> {
     // The server reports handler failures as `{ "error": "..." }`; surface that
     // message rather than the raw JSON/HTTP status.
     let message = body || `${res.status} ${res.statusText}`;
+    let recovery: SaveRecovery | undefined;
     try {
-      const parsed = JSON.parse(body) as { error?: string };
+      const parsed = JSON.parse(body) as { error?: string; recovery?: SaveRecovery };
       if (parsed.error) message = parsed.error;
+      recovery = parsed.recovery;
     } catch {
       /* not JSON — use the text */
     }
-    throw new Error(message);
+    throw recovery ? new RecoveryError(message, recovery) : new Error(message);
   }
   return parseJson(await res.text()) as T;
 }
@@ -569,8 +680,18 @@ export interface AdapterDescription {
   index_schema?: Record<string, unknown>;
 }
 
+/// When the server read the project this page shows: a diff or save from a
+/// page older than a save the server completed in recovery is refused.
+let loadedAt: number | undefined;
+
 export const api = {
-  project: () => fetch("/api/project").then((r) => json<Project>(r)),
+  project: () =>
+    fetch("/api/project")
+      .then((r) => json<Project>(r))
+      .then((p) => {
+        loadedAt = p.loaded_at_ms;
+        return p;
+      }),
   /// The registered adapters and their option schemas.
   adapters: () => fetch("/api/adapters").then((r) => json<AdapterDescription[]>(r)),
   /// Parse a raw schema buffer into the validated model (Code mode's live sync).
@@ -635,12 +756,18 @@ export const api = {
     fetch("/api/diff", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), identity }),
-    }).then((r) => json<OpDiff[]>(r)),
+      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), identity, loaded_at_ms: loadedAt }),
+    }).then((r) => json<Review>(r)),
   save: (config: ConfigToml, ops: FileOp[], skip: string[] = [], identity?: ConfigIdentity) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), skip, identity }),
+      body: JSON.stringify({
+        config: stripIds(config),
+        ops: ops.map(stripOpUids),
+        skip,
+        identity,
+        loaded_at_ms: loadedAt,
+      }),
     }).then((r) => json<SaveResult>(r)),
 };

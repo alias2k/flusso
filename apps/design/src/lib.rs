@@ -8,6 +8,7 @@ mod assets;
 pub mod api;
 pub mod codegen;
 mod commit;
+mod fspath;
 pub mod keep;
 pub mod preview;
 pub mod server;
