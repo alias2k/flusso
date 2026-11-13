@@ -446,8 +446,26 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
         fragment,
         key,
         &format!(
-            "is `{rendered}`, a newtype over a `Vec<…>`, but the schema field here is not an \
-             array — declare a struct for it"
+            "is `{rendered}`, a newtype over a `Vec<…>`, which reads an array, but the schema \
+             field here is not an array — declare its element type here"
+        ),
+    );
+    let values_at_nested_msg = message(
+        fragment,
+        key,
+        &format!(
+            "is `{rendered}`, a `FlussoValue` newtype over a `Vec<…>` of values, but the schema \
+             field here is a `nested` array, whose elements have fields of their own — declare \
+             `Vec<Struct>`, or a `#[serde(transparent)]` `FlussoFragment` newtype over one"
+        ),
+    );
+    let sub_documents_at_a_leaf_msg = message(
+        fragment,
+        key,
+        &format!(
+            "is `{rendered}`, which reads an array of sub-documents, but the schema field here is \
+             not a `nested` array, the only field that holds them; declare `Vec<…>` of the \
+             element type, or a `FlussoValue` newtype over one"
         ),
     );
     quote_spanned! {span=>
@@ -455,10 +473,19 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
             let array = ::flusso_query::OpaqueProbe::<#inner>::ARRAY;
+            let values = ::flusso_query::OpaqueProbe::<#inner>::LEAF_ARRAY;
             let shaped = array || ::flusso_query::array_shape_ok(level, #key, false);
             assert!(shaped || !::flusso_query::is_nested(level, #key), #nested_msg);
             assert!(shaped, #msg);
             assert!(!array || ::flusso_query::array_shape_ok(level, #key, true), #array_msg);
+            assert!(!values || !::flusso_query::is_nested(level, #key), #values_at_nested_msg);
+            assert!(
+                !array
+                    || values
+                    || !::flusso_query::exists(level, #key)
+                    || ::flusso_query::is_nested(level, #key),
+                #sub_documents_at_a_leaf_msg
+            );
         }
     }
 }

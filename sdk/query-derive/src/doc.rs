@@ -713,6 +713,10 @@ fn array_value_check(
         "field `{key}` is a flat array of `{os}` in the schema — `{rendered}` does not read one; \
          declare it `Vec<…>`, or derive `FlussoValue` on a newtype over a `Vec<…>`"
     );
+    let sub_document_message = format!(
+        "field `{key}` is a flat array of `{os}` in the schema — `{rendered}` reads an array of \
+         sub-documents, which only a `nested` field holds"
+    );
     let kind_message = format!(
         "field `{key}` is a flat array of `{os}` in the schema — the elements of `{rendered}` \
          are not a `{os}` value"
@@ -723,6 +727,7 @@ fn array_value_check(
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
             assert!(::flusso_query::OpaqueProbe::<#inner>::ARRAY, #array_message);
+            assert!(::flusso_query::OpaqueProbe::<#inner>::LEAF_ARRAY, #sub_document_message);
             assert!(
                 ::flusso_query::accepts_kind(::flusso_query::OpaqueProbe::<#inner>::KINDS, #tag),
                 #kind_message
@@ -732,8 +737,8 @@ fn array_value_check(
 }
 
 /// An opaque `json` field takes any type, unless it is an array (`array:
-/// true`): then a `Vec<…>`, or a custom type that reads an array
-/// (`FlussoValueMeta::ARRAY`, asserted since it is const data).
+/// true`): then a `Vec<…>`, or an array newtype of leaf values
+/// (`OpaqueProbe::LEAF_ARRAY`, asserted since it is const data).
 fn json_array_check(
     field: &DocField,
     inner: &Type,
@@ -745,17 +750,22 @@ fn json_array_check(
     let Some(_) = leaf_ident(inner).filter(|name| !is_primitive(Some(name))) else {
         return Err(shape_error(field, "json", "a `Vec<…>` (a `json` array)"));
     };
+    let key = &field.doc_key;
+    let rendered = crate::fragment::render(inner);
     let message = format!(
-        "field `{}` is a `json` array in the schema — `{}` does not read one; declare it \
-         `Vec<…>`",
-        field.doc_key,
-        crate::fragment::render(inner),
+        "field `{key}` is a `json` array in the schema — `{rendered}` does not read one; \
+         declare it `Vec<…>`"
+    );
+    let sub_document_message = format!(
+        "field `{key}` is a `json` array in the schema — `{rendered}` reads an array of \
+         sub-documents, which only a `nested` field holds; declare it `Vec<…>`"
     );
     Ok(Some(quote::quote_spanned! {inner.span()=>
         const _: () = {
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
             assert!(::flusso_query::OpaqueProbe::<#inner>::ARRAY, #message);
+            assert!(::flusso_query::OpaqueProbe::<#inner>::LEAF_ARRAY, #sub_document_message);
         };
     }))
 }

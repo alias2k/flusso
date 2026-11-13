@@ -1,0 +1,70 @@
+error[E0080]: evaluation panicked: field `lines` in index `lists` is a `nested` array with fields of its own — `Codes` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+  --> tests/ui/array_newtype_kinds_misplaced.rs:23:12
+   |
+23 |     lines: Codes,
+   |            ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `labels` is a flat array of `keyword` in the schema — `Lines` reads an array of sub-documents, which only a `nested` field holds
+  --> tests/ui/array_newtype_kinds_misplaced.rs:30:13
+   |
+30 |     labels: Lines,
+   |             ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `notes` is a `json` array in the schema — `Lines` reads an array of sub-documents, which only a `nested` field holds; declare it `Vec<…>`
+  --> tests/ui/array_newtype_kinds_misplaced.rs:37:19
+   |
+37 |     notes: Option<Lines>,
+   |                   ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `Line`: field `sku` does not exist at the path this struct is embedded at
+  --> tests/ui/array_newtype_kinds_misplaced.rs:37:12
+   |
+37 |     notes: Option<Lines>,
+   |            ^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Lines::__flusso_check`
+  --> tests/ui/array_newtype_kinds_misplaced.rs:17:14
+   |
+17 | struct Lines(Vec<Line>);
+   |              ^^^
+note: inside `Line::__flusso_check`
+  --> tests/ui/array_newtype_kinds_misplaced.rs:11:10
+   |
+11 |     sku: String,
+   |          ^^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `FlatValuesAtNested`: field `lines` is `Codes`, a `FlussoValue` newtype over a `Vec<…>` of values, but the schema field here is a `nested` array, whose elements have fields of their own — declare `Vec<Struct>`, or a `#[serde(transparent)]` `FlussoFragment` newtype over one
+  --> tests/ui/array_newtype_kinds_misplaced.rs:50:11
+   |
+50 |     flat: FlatValuesAtNested,
+   |           ^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `FlatValuesAtNested::__flusso_check`
+  --> tests/ui/array_newtype_kinds_misplaced.rs:42:12
+   |
+42 |     lines: Codes,
+   |            ^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `FlatSubDocumentsAtALeaf`: field `labels` is `Lines`, which reads an array of sub-documents, but the schema field here is not a `nested` array, the only field that holds them; declare `Vec<…>` of the element type, or a `FlussoValue` newtype over one
+  --> tests/ui/array_newtype_kinds_misplaced.rs:63:11
+   |
+63 |     flat: FlatSubDocumentsAtALeaf,
+   |           ^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `FlatSubDocumentsAtALeaf::__flusso_check`
+  --> tests/ui/array_newtype_kinds_misplaced.rs:55:13
+   |
+55 |     labels: Lines,
+   |             ^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `FlatSubDocumentsAtJson`: field `notes` is `Lines`, which reads an array of sub-documents, but the schema field here is not a `nested` array, the only field that holds them; declare `Vec<…>` of the element type, or a `FlussoValue` newtype over one
+  --> tests/ui/array_newtype_kinds_misplaced.rs:76:11
+   |
+76 |     flat: FlatSubDocumentsAtJson,
+   |           ^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `FlatSubDocumentsAtJson::__flusso_check`
+  --> tests/ui/array_newtype_kinds_misplaced.rs:68:12
+   |
+68 |     notes: Option<Lines>,
+   |            ^^^^^^ the failure occurred here

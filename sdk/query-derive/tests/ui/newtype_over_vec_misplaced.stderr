@@ -22,7 +22,7 @@ error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested`
 43 |     orders: MaybeOrders,
    |             ^^^^^^^^^^^ evaluation of `_` failed here
 
-error[E0080]: evaluation panicked: fragment `Billing`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, but the schema field here is not an array — declare a struct for it
+error[E0080]: evaluation panicked: fragment `Billing`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
   --> tests/ui/newtype_over_vec_misplaced.rs:57:14
    |
 57 |     billing: Billing,

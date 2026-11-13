@@ -269,6 +269,11 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
 /// with `ARRAY` set, which an array field reads to accept it, and no
 /// `FlussoValue<K>`, so query operators keep taking an element. A kind tag
 /// would restrict nothing the element does not already say, so it is refused.
+///
+/// `E` must be a leaf value that reads no array: a `Vec` of arrays fits no
+/// array leaf, and a sub-document's fields are checked only by a
+/// `FlussoFragment` newtype, which a value's no-op check never walks into.
+/// Both are const data, so they are asserted where the newtype is declared.
 fn array_newtype(
     ident: &syn::Ident,
     element: &syn::Type,
@@ -282,7 +287,37 @@ fn array_newtype(
              kind tag, and put it on the element type",
         ));
     }
+    let rendered = crate::fragment::render(element);
+    let nested_array = format!(
+        "`{ident}` is a newtype over `Vec<{rendered}>`, an array of arrays — `{rendered}` already \
+         reads an array; wrap its element type instead"
+    );
+    let sub_document = format!(
+        "`{ident}` is a FlussoValue newtype over `Vec<{rendered}>`, but `{rendered}` is a \
+         sub-document, not a value — for a `nested` array, write `Vec<{rendered}>` or derive \
+         `FlussoFragment` on a `#[serde(transparent)]` newtype"
+    );
+    let object = format!(
+        "`{ident}` is a FlussoValue newtype over `Vec<{rendered}>`, but `{rendered}` stands for \
+         an `object`, not a leaf value — a `json` array takes `Vec<{rendered}>` as it is"
+    );
     Ok(quote! {
+        // Read through `OpaqueProbe` behind `HAS_META`: an element without
+        // metadata already fails on `KINDS` below, with the trait's note.
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            let meta = ::flusso_query::OpaqueProbe::<#element>::HAS_META;
+            assert!(
+                !meta || !::flusso_query::OpaqueProbe::<#element>::READS_ARRAY,
+                #nested_array
+            );
+            assert!(
+                !meta || !::flusso_query::OpaqueProbe::<#element>::AT_NESTED,
+                #sub_document
+            );
+            assert!(!meta || !::flusso_query::OpaqueProbe::<#element>::AT_OBJECT, #object);
+        };
         impl ::flusso_query::FlussoValueMeta for #ident {
             const KINDS: &'static [::flusso_query::KindTag] =
                 <#element as ::flusso_query::FlussoValueMeta>::KINDS;

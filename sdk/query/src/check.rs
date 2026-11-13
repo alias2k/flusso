@@ -488,18 +488,29 @@ pub trait FlussoValueMeta {
     /// only some of the schema's variants is a legal partial projection.
     const EXHAUSTIVE: bool = false;
 
-    /// Whether the type reads a JSON array of sub-documents: a
-    /// `#[serde(transparent)]` (or tuple) `FlussoFragment` newtype over a
-    /// `Vec<…>` of a struct, or over another such newtype. A parent then places
-    /// it where it would place that `Vec`, at a `nested` array. Off by default.
-    /// `#[derive(FlussoFragment)]` sets it; leave it unset in a hand-written
-    /// impl, where nothing checks it against what the type reads.
+    /// Whether the type is an array newtype: it reads a JSON array, and a
+    /// parent places it where it would place that `Vec<…>`. Two derives set
+    /// it, for two kinds of array, told apart by [`KINDS`](Self::KINDS):
+    ///
+    /// - `#[derive(FlussoFragment)]` on a `#[serde(transparent)]` (or tuple)
+    ///   newtype over a `Vec<…>` of a struct: an array of sub-documents. Its
+    ///   kinds are the struct's, so it holds [`KindTag::Nested`], and it goes
+    ///   at a `nested` field only.
+    /// - `#[derive(FlussoValue)]` on an untagged newtype over a `Vec<…>` of a
+    ///   leaf value: a flat array of values. Its kinds are the element's, never
+    ///   `Nested` or `Object`, and it goes at an array leaf (`array: true`) or
+    ///   a `json` array only ([`OpaqueProbe`]'s `LEAF_ARRAY`).
+    ///
+    /// Both derives forward it from a newtype over another array newtype. Off
+    /// by default; leave it unset in a hand-written impl, where nothing checks
+    /// it against what the type reads.
     const ARRAY: bool = false;
 
-    /// Whether the type reads a JSON array at all: a newtype over a `Vec<…>`,
-    /// or over a type that does, through any `Option`. A `Vec<…>` of such a
-    /// type is an array of arrays, which no schema field is. Off by default;
-    /// `#[derive(FlussoFragment)]` sets it.
+    /// Whether the type reads a JSON array at all: an array newtype (see
+    /// [`ARRAY`](Self::ARRAY)), or a newtype over a `Vec<…>` or over a type
+    /// that reads one, through any `Option`. A `Vec<…>` of such a type is an
+    /// array of arrays, which no field but a `json` array holds. Off by
+    /// default; both derives set it beside `ARRAY`.
     const READS_ARRAY: bool = false;
 }
 
@@ -573,6 +584,8 @@ pub trait OpaqueWithoutMeta {
     const SKIPS_EXHAUSTIVE: bool = true;
     /// No metadata, so not an array newtype.
     const ARRAY: bool = false;
+    /// No metadata, so not an array newtype of values.
+    const LEAF_ARRAY: bool = false;
     /// No metadata, so not known to be a sub-document.
     const ARRAY_ELEMENT: bool = false;
     /// No metadata, so not known to read an array.
@@ -596,6 +609,12 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const SKIPS_EXHAUSTIVE: bool = T::EXHAUSTIVE;
     /// Whether the type reads a JSON array (see [`FlussoValueMeta::ARRAY`]).
     pub const ARRAY: bool = T::ARRAY;
+    /// Whether the type is an array newtype of leaf values, the kind an array
+    /// leaf or a `json` array takes: it reads an array, and its kinds hold
+    /// neither a sub-document nor an object.
+    pub const LEAF_ARRAY: bool = T::ARRAY
+        && !holds_kind(T::KINDS, KindTag::Nested)
+        && !holds_kind(T::KINDS, KindTag::Object);
     /// Whether a `Vec` of the type reads one array of sub-documents: the type
     /// is a sub-document and reads no array itself.
     pub const ARRAY_ELEMENT: bool = !T::READS_ARRAY && holds_kind(T::KINDS, KindTag::Nested);
