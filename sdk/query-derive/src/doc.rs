@@ -99,6 +99,12 @@ pub(crate) fn parse_fields<'a>(
     Ok(out)
 }
 
+/// The error for a `#[flusso(…)]` on a field serde passes over in a
+/// `#[serde(transparent)]` struct, the same from every derive.
+pub(crate) const PASSED_OVER: &str = "serde passes over this field of a \
+     `#[serde(transparent)]` struct, so the derive never checks it and its `#[flusso(…)]` is \
+     never read; remove the attribute";
+
 /// The one field serde reads a `#[serde(transparent)]` struct as: the one it
 /// does not pass over (see [`crate::serde_attr::passed_over_by_transparent`]).
 /// A `#[flusso(…)]` on a field it passes over is never read, so it is an error.
@@ -111,11 +117,7 @@ fn transparent_field(fields: &Fields) -> syn::Result<DocField<'_>> {
         .flat_map(|field| &field.attrs)
         .find(|attr| attr.path().is_ident("flusso"))
     {
-        return Err(syn::Error::new_spanned(
-            attr,
-            "serde passes over this field of a `#[serde(transparent)]` struct, so the derive \
-             never checks it and its `#[flusso(…)]` is never read; remove the attribute",
-        ));
+        return Err(syn::Error::new_spanned(attr, PASSED_OVER));
     }
     let fix = match read.as_slice() {
         [field] => return newtype_field(field),
@@ -607,9 +609,20 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
         return Ok(None);
     }
     let os = resolved.mapping.mapping_type.name();
+    if let Some(element) = vec_inner(inner)
+        && map_container_value(element).is_some()
+    {
+        return check_array_of_maps(field, inner, resolved);
+    }
     match &resolved.mapping.mapping_type {
         MappingType::Nested => {
-            if vec_inner(inner).is_none() {
+            if map_container_value(inner).is_some() {
+                return Err(structured_map_error(field, inner, resolved));
+            }
+            // A custom type may be a newtype over the `Vec`; whether it is
+            // is const data, which `embed_checks` asserts.
+            let custom = leaf_ident(inner).is_some_and(|name| !is_primitive(Some(&name)));
+            if vec_inner(inner).is_none() && !custom {
                 return Err(shape_error(field, os, "a `Vec<…>` (a nested array)"));
             }
             Ok(None)
@@ -628,17 +641,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
                 return Err(shape_error(field, os, "a struct (a sub-object)"));
             }
             if map_container_value(inner).is_some() {
-                return Err(syn::Error::new(
-                    field.ty.span(),
-                    format!(
-                        "field `{}` is an `object` with fields of its own in the schema, and a \
-                         `{}` is not that shape — declare a struct for it (a \
-                         `#[derive(FlussoFragment)]`, or a plain struct marked \
-                         `#[flusso(opaque)]`); a map type goes on a `map` or `json` field",
-                        field.doc_key,
-                        crate::fragment::render(inner),
-                    ),
-                ));
+                return Err(structured_map_error(field, inner, resolved));
             }
             Ok(None)
         }
@@ -674,6 +677,65 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             Err(scalar_error(field, os, &expected, found.as_deref()))
         }
     }
+}
+
+/// A map type, or an array of maps, at a level with fields of its own.
+fn structured_map_error(field: &DocField, ty: &Type, resolved: &ResolvedField) -> syn::Error {
+    let (level, fix) = if matches!(resolved.mapping.mapping_type, MappingType::Nested) {
+        (
+            "a `nested` array in the schema, whose elements have fields of their own",
+            crate::fragment::DECLARE_AN_ELEMENT,
+        )
+    } else {
+        (
+            "an `object` with fields of its own in the schema",
+            crate::fragment::DECLARE_A_STRUCT,
+        )
+    };
+    syn::Error::new(
+        field.ty.span(),
+        format!(
+            "field `{}` is {level}, and a `{}` is not that shape — {fix}",
+            field.doc_key,
+            crate::fragment::render(ty),
+        ),
+    )
+}
+
+/// An array of maps is opaque JSON: a `json` field (or a kind this derive does
+/// not model) takes it, a level with fields of its own wants a struct, and any
+/// other field is not that shape.
+fn check_array_of_maps(
+    field: &DocField,
+    ty: &Type,
+    resolved: &ResolvedField,
+) -> syn::Result<Option<TokenStream>> {
+    let mapping = &resolved.mapping;
+    let takes_json = match &mapping.mapping_type {
+        MappingType::Object => mapping.map_values.is_none() && resolved.children.is_empty(),
+        other @ MappingType::Other(_) => expected_leaves(other).is_empty(),
+        _ => false,
+    };
+    if takes_json {
+        return Ok(None);
+    }
+    if is_structured(resolved) {
+        return Err(structured_map_error(field, ty, resolved));
+    }
+    let what = if mapping.map_values.is_some() {
+        "a `map`".to_string()
+    } else {
+        format!("`{}`", mapping.mapping_type.name())
+    };
+    Err(syn::Error::new(
+        field.ty.span(),
+        format!(
+            "field `{}` is {what} in the schema, and a `{}` is an array of maps, which only a \
+             `json` field takes",
+            field.doc_key,
+            crate::fragment::render(ty),
+        ),
+    ))
 }
 
 /// The [`Kind`] a scalar mapping accepts values for, or `None` for kinds without
@@ -1563,6 +1625,66 @@ fn opaque_turns_off_something(
     })
 }
 
+/// At a level with fields of its own, whether a custom type that is not a
+/// `Vec` reads an array (`FlussoValueMeta::ARRAY`: a newtype fragment over a
+/// `Vec`) exactly where the schema field is a `nested` array, and that the
+/// element of a `Vec` does not read one too. `check_type`
+/// lets such a type through at a `nested` field, since only const evaluation
+/// knows. Read through `OpaqueProbe`, so `opaque` keeps this check, as it keeps
+/// the array shape of a `Vec`.
+fn array_newtype_check(
+    field: &DocField,
+    resolved: &ResolvedField,
+    scope: &str,
+) -> Option<TokenStream> {
+    if !is_structured(resolved) {
+        return None;
+    }
+    let inner = option_inner(field.ty).unwrap_or(field.ty);
+    let (ty, in_vec) = vec_inner(inner).map_or((inner, false), |element| (element, true));
+    if map_container_value(ty).is_some()
+        || leaf_ident(ty).is_none_or(|name| is_primitive(Some(&name)) || name == "Value")
+    {
+        return None;
+    }
+    let key = &field.doc_key;
+    let rendered = crate::fragment::render(ty);
+    let nested = matches!(resolved.mapping.mapping_type, MappingType::Nested);
+    let span = field.ty.span();
+    if in_vec {
+        let message = format!(
+            "field `{key}` in {scope} is `Vec<{rendered}>`, an array of arrays — `{rendered}` is \
+             a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`"
+        );
+        return Some(quote::quote_spanned! {span=>
+            {
+                #[allow(unused_imports)]
+                use ::flusso_query::OpaqueWithoutMeta as _;
+                assert!(!::flusso_query::OpaqueProbe::<#ty>::ARRAY, #message);
+            }
+        });
+    }
+    let message = if nested {
+        format!(
+            "field `{key}` in {scope} is a `nested` array — `{rendered}` does not read one; \
+             declare it `Vec<…>`, or make `{rendered}` a `#[serde(transparent)]` \
+             `FlussoFragment` newtype over a `Vec<…>`"
+        )
+    } else {
+        format!(
+            "field `{key}` in {scope} is an `object`, not an array — `{rendered}` is a newtype \
+             over a `Vec<…>`; declare a struct for it"
+        )
+    };
+    Some(quote::quote_spanned! {span=>
+        {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(::flusso_query::OpaqueProbe::<#ty>::ARRAY == #nested, #message);
+        }
+    })
+}
+
 /// Drive the fragment check into every embedded field.
 ///
 /// The root is the only type that resolves the schema, so it bakes the whole
@@ -1595,6 +1717,9 @@ pub(crate) fn embed_checks(
         let Some(resolved) = level.iter().find(|r| r.name.as_ref() == *key) else {
             continue;
         };
+        if !field.skip {
+            calls.extend(array_newtype_check(field, resolved, scope));
+        }
         if let Some(check) = opaque_turns_off_something(field, resolved, scope) {
             calls.extend(check);
             continue;

@@ -1,0 +1,23 @@
+error[E0080]: evaluation panicked: fragment `EmailPart`: field `email` is `#[flusso(opaque)]` on `HandWritten`, which has no flusso metadata, so a fragment cannot check its kind at this leaf, as a root checks it — derive `FlussoValue` for it, or for a hand-written `FlussoValue` implement `FlussoValueMeta` and call `flusso_query::embeddable!(HandWritten)`
+  --> tests/ui/opaque_in_fragment_without_meta.rs:25:12
+   |
+25 |     email: EmailPart,
+   |            ^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `EmailPart::__flusso_check`
+  --> tests/ui/opaque_in_fragment_without_meta.rs:17:12
+   |
+17 |     email: HandWritten,
+   |            ^^^^^^^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `CountPart`: field `orderCount` is `#[flusso(opaque)]` on `HandWrittenCount`, which has no flusso metadata, so a fragment cannot check its kind at this leaf, as a root checks it — derive `FlussoValue` for it, or for a hand-written `FlussoValue` implement `FlussoValueMeta` and call `flusso_query::embeddable!(HandWrittenCount)`
+  --> tests/ui/opaque_in_fragment_without_meta.rs:40:12
+   |
+40 |     count: CountPart,
+   |            ^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `CountPart::__flusso_check`
+  --> tests/ui/opaque_in_fragment_without_meta.rs:32:18
+   |
+32 |     order_count: HandWrittenCount,
+   |                  ^^^^^^^^^^^^^^^^ the failure occurred here

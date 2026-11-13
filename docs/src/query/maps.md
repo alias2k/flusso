@@ -98,7 +98,7 @@ struct Translation {
 struct Localized { name: Translation }
 ```
 
-Use the derive rather than a hand-written `impl FlussoMap<K>`: a fragment validates through const metadata only the derive emits, so a hand impl compiles at a root but fails inside a `FlussoFragment`, with the error pointing at the derive. The value kind is checked symmetrically: a `text` wrapper at a `keyword` map fails the build. Number and date maps have no derive tag; use `HashMap`/`BTreeMap` for those.
+Use the derive rather than a hand-written `impl FlussoMap<K>`: a fragment validates through const metadata the derive emits, so a hand impl alone compiles at a root but fails inside a `FlussoFragment`, with the error pointing at the derive. Writing that metadata by hand works too: `FlussoValueMeta` with `KINDS = [Object]` and `MAP_VALUES` set to the value kind, plus [`embeddable!`](enums-and-values.md#hand-written-values). The value kind is checked symmetrically: a `text` wrapper at a `keyword` map fails the build. Number and date maps have no derive tag; use `HashMap`/`BTreeMap` for those.
 
 ## Sorting by key
 

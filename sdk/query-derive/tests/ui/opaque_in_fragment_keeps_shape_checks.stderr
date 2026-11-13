@@ -10,7 +10,7 @@ note: inside `VecAtAnObject::__flusso_check`
 17 |     billing: Vec<Plain>,
    |              ^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `OneAtANestedArray`: field `orders` is `Plain`, but the schema field here is an array (a `nested` array or a flat array) — declare it `Vec<…>`
+error[E0080]: evaluation panicked: fragment `OneAtANestedArray`: field `orders` is `Plain`, but the schema field here is an array (a `nested` array or a flat array) — declare it `Vec<…>`, or make `Plain` a `#[serde(transparent)]` `FlussoFragment` newtype over one
   --> tests/ui/opaque_in_fragment_keeps_shape_checks.rs:58:11
    |
 58 |     part: OneAtANestedArray,

@@ -210,6 +210,12 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                 _ => return Err(newtype_required(input)),
             };
             for field in &data.fields {
+                if transparent && crate::serde_attr::passed_over_by_transparent(field) {
+                    if let Some(attr) = field.attrs.iter().find(|a| a.path().is_ident("flusso")) {
+                        return Err(syn::Error::new_spanned(attr, crate::doc::PASSED_OVER));
+                    }
+                    continue;
+                }
                 unread_attr(
                     &field.attrs,
                     "the newtype's field",

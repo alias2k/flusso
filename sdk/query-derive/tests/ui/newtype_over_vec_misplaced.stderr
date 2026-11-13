@@ -1,0 +1,59 @@
+error[E0080]: evaluation panicked: field `billingAddress` in index `users` is an `object`, not an array — `Addresses` is a newtype over a `Vec<…>`; declare a struct for it
+  --> tests/ui/newtype_over_vec_misplaced.rs:29:22
+   |
+29 |     billing_address: Addresses,
+   |                      ^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array — `Order` does not read one; declare it `Vec<…>`, or make `Order` a `#[serde(transparent)]` `FlussoFragment` newtype over a `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:36:13
+   |
+36 |     orders: Order,
+   |             ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array — `MaybeOrders` does not read one; declare it `Vec<…>`, or make `MaybeOrders` a `#[serde(transparent)]` `FlussoFragment` newtype over a `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:43:13
+   |
+43 |     orders: MaybeOrders,
+   |             ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `Billing`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, but the schema field here is not an array — declare a struct for it
+  --> tests/ui/newtype_over_vec_misplaced.rs:57:14
+   |
+57 |     billing: Billing,
+   |              ^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Billing::__flusso_check`
+  --> tests/ui/newtype_over_vec_misplaced.rs:49:22
+   |
+49 |     billing_address: Addresses,
+   |                      ^^^^^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `OneOrder`: field `orders` is `Order`, but the schema field here is an array (a `nested` array or a flat array) — declare it `Vec<…>`, or make `Order` a `#[serde(transparent)]` `FlussoFragment` newtype over one
+  --> tests/ui/newtype_over_vec_misplaced.rs:70:13
+   |
+70 |     orders: OneOrder,
+   |             ^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `OneOrder::__flusso_check`
+  --> tests/ui/newtype_over_vec_misplaced.rs:62:13
+   |
+62 |     orders: Order,
+   |             ^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is `Vec<Orders>`, an array of arrays — `Orders` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:82:13
+   |
+82 |     orders: Vec<Orders>,
+   |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `ManyOrders`: field `orders` is `Vec<Orders>`, an array of arrays — `Orders` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:95:13
+   |
+95 |     orders: ManyOrders,
+   |             ^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `ManyOrders::__flusso_check`
+  --> tests/ui/newtype_over_vec_misplaced.rs:87:13
+   |
+87 |     orders: Vec<Orders>,
+   |             ^^^ the failure occurred here
