@@ -242,7 +242,7 @@ export function GenericInput({
   const where =
     slot === "constant"
       ? ""
-      : slot === "default" || slot === "array_default"
+      : slot === "default" || slot === "array_default" || slot === "json_array_default"
         ? ".default"
         : `.options.${optionKey ?? ""}`;
   const target = { id: `${field.id}/${slot}/${row ?? optionKey ?? ""}`, label: `${field.label}${where}` };
@@ -435,6 +435,8 @@ function valueProblem(t: Translate, problem: ValueProblem): string {
       return t("value.notAList");
     case "null_element":
       return t("value.nullElement");
+    case "not_scalar_element":
+      return t("value.notScalarElement");
     case "reads_back_differently":
       return t("value.readsBack");
     case "unchecked":

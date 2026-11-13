@@ -627,7 +627,8 @@ export interface ExpressionCheck {
 
 /// Where a typed value goes; each has the schema parser's own rules (a
 /// `default` takes only a scalar).
-export type ValueSlot = "constant" | "default" | "array_default" | "option";
+/// `array_default` lists scalars, `json_array_default` any non-null JSON.
+export type ValueSlot = "constant" | "default" | "array_default" | "json_array_default" | "option";
 
 /// A value typed into the inspector, read the way its saved file reads it: the
 /// `GenericValue` to store, or why the text was refused.
@@ -644,6 +645,7 @@ export interface ValueCheck {
     | { code: "not_scalar" }
     | { code: "not_a_list" }
     | { code: "null_element" }
+    | { code: "not_scalar_element" }
     | { code: "reads_back_differently" };
 }
 

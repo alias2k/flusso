@@ -1963,3 +1963,46 @@ fn a_crlf_schema_keeps_its_line_endings_and_comments() {
 fn keep_records_in_target() {
     api::use_state_dir(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("design-saves"));
 }
+
+/// A schema whose file would not load (here a `keyword` array whose `default`
+/// lists an object, which the parser refuses) is refused by the review and the
+/// save, and the file on disk keeps its comments: `keep` writes the canonical
+/// form when the patched file does not read back, and that form would not
+/// load either.
+#[test]
+fn a_schema_that_would_not_load_is_not_saved() {
+    use config::yaml::SchemaYaml;
+    use kernel::{FieldSource, GenericValue, IndexSchema, ParseFrom};
+
+    let dir = own_fixture("not-loading");
+    let project = api::load_project(&dir.join("flusso.toml")).unwrap();
+    let text = std::fs::read_to_string(dir.join("orders.schema.yml")).unwrap();
+    assert!(text.contains('#'), "the fixture keeps comments to lose");
+    let mut schema = IndexSchema::try_from(SchemaYaml::try_parse(&text).unwrap()).unwrap();
+    let tags = IndexSchema::try_from(
+        SchemaYaml::try_parse(
+            "version: 1\ntable: t\nprimary_key: id\nfields:\n- keyword: tags\n  required: false\n  array: true\n",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut field = tags.fields.into_iter().next().unwrap();
+    let FieldSource::Column(column) = &mut field.source else {
+        panic!("a column field");
+    };
+    column.default = Some(GenericValue::Array(vec![GenericValue::Map(
+        [("a".to_owned(), GenericValue::BigInt(1))].into(),
+    )]));
+    schema.fields.push(field);
+    refused(&dir, || SaveRequest {
+        config: project.config.clone(),
+        ops: vec![FileOp {
+            schema: Some(schema.clone()),
+            raw: None,
+            ..op(OpKind::Upsert, "orders", "orders.schema.yml", None, "")
+        }],
+        skip: Vec::new(),
+        identity: None,
+    });
+    std::fs::remove_dir_all(&dir).ok();
+}

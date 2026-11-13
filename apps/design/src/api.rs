@@ -1435,7 +1435,10 @@ fn is_zero(n: &usize) -> bool {
 }
 
 /// Render one op's file content: the raw escape hatch wins, else the schema
-/// written into its base (the op's own, else `on_disk`).
+/// written into its base (the op's own, else `on_disk`). A schema whose file
+/// would not load as that schema is refused, so a diff shows nothing and a
+/// save writes nothing: `keep` falls back to the canonical form when the
+/// patched file does not read back, and that form fails the same way.
 fn render_op(op: &FileOp, on_disk: Option<&str>) -> Result<Saved> {
     match &op.raw {
         Some(raw) => Ok(Saved {
@@ -1448,7 +1451,16 @@ fn render_op(op: &FileOp, on_disk: Option<&str>) -> Result<Saved> {
                 .schema
                 .as_ref()
                 .context("upsert/move op needs a schema or raw content")?;
-            keep::schema_yaml(op.base.as_deref().or(on_disk), schema, op.identity.as_ref())
+            let saved =
+                keep::schema_yaml(op.base.as_deref().or(on_disk), schema, op.identity.as_ref())?;
+            let read = SchemaYaml::try_parse(&saved.text)
+                .map_err(anyhow::Error::from)
+                .and_then(|entity| IndexSchema::try_from(entity).map_err(anyhow::Error::from))
+                .context("the schema does not load, so it is not saved")?;
+            if let Some(at) = first_difference(schema, &read) {
+                bail!("the schema reads back differently at `{at}`, so it is not saved");
+            }
+            Ok(saved)
         }
     }
 }

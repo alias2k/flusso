@@ -2,6 +2,7 @@
 // action funnels through one of these; each returns a fresh `IndexSchema`.
 
 import type { Column, Field, FlussoType, IndexSchema } from "../api";
+import type { Generic } from "./generic";
 import { columnField, defaultField, retypeOptions, typeOptions } from "../fields";
 import { childFields, withChildFields } from "./containers";
 import { cloneJson } from "./exact";
@@ -49,6 +50,13 @@ export function includeColumns(
     .filter((c) => !present.has(c.name))
     .map((c) => columnField(c.name, catalogColumn(c.name, c.ty ?? "keyword", c.nullable ?? true, c.sqlType)));
   return withNodeFields(schema, path, [...fields, ...added]);
+}
+
+/// Whether a `default` (in its `GenericValue` form) is a list holding a list
+/// or an object, which only a `json` array's default may.
+export function listsStructured(def: Generic): boolean {
+  if (!isRecord(def) || !Array.isArray(def.Array)) return false;
+  return def.Array.some((e) => isRecord(e) && ("Array" in e || "Map" in e));
 }
 
 /// Whether a catalog type (as `format_type` spells it) is an array: `text[]`.
@@ -180,6 +188,7 @@ export function retypeField(field: Field, column: Column, ty: FlussoType): Field
   if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
   if (ty !== "json") delete next.indexed;
   if (ty === "json" && next.array) delete next.transforms;
+  if (ty !== "json" && next.array && listsStructured(next.default)) delete next.default;
   const retyped: Field = { ...field, source: { column: next } };
   // An option `ty` would add that is already there was set by the user.
   const userSet = Object.keys(typeOptions(ty)).filter((k) => field.options && k in field.options);

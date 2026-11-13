@@ -1084,7 +1084,7 @@ function RequiredDefault({
         <>
           <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
             <GenericInput
-              slot={column.array ? "array_default" : "default"}
+              slot={column.array ? (column.ty === "json" ? "json_array_default" : "array_default") : "default"}
               invalid={defaultMissing}
               value={column.default}
               onChange={(def) => setCol({ ...column, default: def === "Null" ? undefined : def })}

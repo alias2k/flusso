@@ -352,6 +352,8 @@ export const en: Record<string, string> = {
   "value.notScalar": "A default takes a single value: text, a number, true, false or null, not a list or an object.",
   "value.notAList": 'An array field\'s default is a list, like ["general"].',
   "value.nullElement": "A default list can't hold null: nulls are dropped from an array field.",
+  "value.notScalarElement":
+    "A default list holds plain values here (strings, numbers, booleans, dates): only a json array's default can list objects or lists.",
   "value.unchecked": "Could not be checked, so it is not in the schema yet. Save tries again.",
   "value.unreadSave":
     "Not saved: the value typed in {fields} could not be checked. Check that the designer is still running, then save again.",

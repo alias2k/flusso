@@ -19,8 +19,12 @@
 //!
 //! - a column `default` must be a scalar ([`ValueProblem::NotScalar`]);
 //! - an array column's `default` must be a list ([`ValueProblem::NotAList`])
-//!   with no null in it ([`ValueProblem::NullElement`]);
+//!   with no null in it ([`ValueProblem::NullElement`]), and of scalars
+//!   ([`ValueProblem::NotScalarElement`]) unless the field is `json`;
 //! - a `constant` and an option take any value.
+//!
+//! The parser is the authority: each refusal is the conversion error the
+//! saved file would hit, read back in a carrier field of the slot's kind.
 //!
 //! The result is the value after one real round trip in its slot
 //! (codegen, then the parser), so the preview and the content hash are computed
@@ -41,7 +45,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use config::yaml::SchemaYaml;
+use config::yaml::{ConversionError, DefaultElement, SchemaYaml};
 use kernel::{FieldSource, GenericValue, IndexSchema, ParseFrom};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -64,8 +68,10 @@ pub enum ValueSlot {
     Constant,
     /// A column's `default`: a scalar or `null`.
     Default,
-    /// An array column's `default`: a list of non-null values.
+    /// An array column's `default`: a list of non-null scalars.
     ArrayDefault,
+    /// A `json` array column's `default`: a list of non-null values.
+    JsonArrayDefault,
     /// A field's `options` entry: any value.
     Option,
 }
@@ -100,6 +106,9 @@ pub enum ValueProblem {
     NotAList,
     /// A `null` inside an array column's `default`.
     NullElement,
+    /// A list or object inside the `default` of an array column that is not
+    /// `json`.
+    NotScalarElement,
     /// The value would read back as something else (a codegen defect).
     ReadsBackDifferently,
 }
@@ -165,18 +174,6 @@ fn spelled(value: &GenericValue) -> Option<String> {
 /// `value` written in `slot` and parsed back; refused if the parser rejects it
 /// there or it changes.
 fn read_back(value: &GenericValue, slot: ValueSlot) -> Result<GenericValue, ValueProblem> {
-    if slot == ValueSlot::Default && matches!(value, GenericValue::Array(_) | GenericValue::Map(_))
-    {
-        return Err(ValueProblem::NotScalar);
-    }
-    if slot == ValueSlot::ArrayDefault {
-        let GenericValue::Array(items) = value else {
-            return Err(ValueProblem::NotAList);
-        };
-        if items.iter().any(|item| matches!(item, GenericValue::Null)) {
-            return Err(ValueProblem::NullElement);
-        }
-    }
     let mut schema = carrier(slot).ok_or(ValueProblem::ReadsBackDifferently)?;
     let field = schema
         .fields
@@ -184,14 +181,30 @@ fn read_back(value: &GenericValue, slot: ValueSlot) -> Result<GenericValue, Valu
         .ok_or(ValueProblem::ReadsBackDifferently)?;
     put(field, slot, value.clone());
     let yaml = codegen::schema_to_yaml(&schema).map_err(|_| ValueProblem::ReadsBackDifferently)?;
-    let back = SchemaYaml::try_parse(&yaml)
-        .ok()
-        .and_then(|entity| IndexSchema::try_from(entity).ok())
-        .and_then(|reparsed| reparsed.fields.into_iter().next())
+    let entity = SchemaYaml::try_parse(&yaml).map_err(|_| ValueProblem::ReadsBackDifferently)?;
+    let back = IndexSchema::try_from(entity)
+        .map_err(|error| refusal(&error))?
+        .fields
+        .into_iter()
+        .next()
         .and_then(|field| get(field, slot));
     match back {
         Some(back) if same(&back, value) => Ok(back),
         _ => Err(ValueProblem::ReadsBackDifferently),
+    }
+}
+
+/// What the parser's refusal of a value in its slot means to the inspector.
+fn refusal(error: &ConversionError) -> ValueProblem {
+    match error {
+        ConversionError::NonScalarDefault { .. } => ValueProblem::NotScalar,
+        ConversionError::ScalarArrayDefault { .. } => ValueProblem::NotAList,
+        ConversionError::ArrayDefaultElement {
+            got: DefaultElement::Null,
+            ..
+        } => ValueProblem::NullElement,
+        ConversionError::ArrayDefaultElement { .. } => ValueProblem::NotScalarElement,
+        _ => ValueProblem::ReadsBackDifferently,
     }
 }
 
@@ -203,7 +216,8 @@ fn carrier(slot: ValueSlot) -> Option<IndexSchema> {
     let field = match slot {
         ValueSlot::Constant => "- constant: c\n  value: null\n",
         ValueSlot::Default | ValueSlot::Option => "- boolean: c\n  required: false\n",
-        ValueSlot::ArrayDefault => "- json: c\n  required: false\n  array: true\n",
+        ValueSlot::ArrayDefault => "- keyword: c\n  required: false\n  array: true\n",
+        ValueSlot::JsonArrayDefault => "- json: c\n  required: false\n  array: true\n",
     };
     let yaml = format!("version: 1\ntable: t\nprimary_key: id\nfields:\n{field}");
     IndexSchema::try_from(SchemaYaml::try_parse(&yaml).ok()?).ok()
@@ -212,10 +226,13 @@ fn carrier(slot: ValueSlot) -> Option<IndexSchema> {
 fn put(field: &mut kernel::Field, slot: ValueSlot, value: GenericValue) {
     match (slot, &mut field.source) {
         (ValueSlot::Constant, source) => *source = FieldSource::Constant(value),
-        (ValueSlot::Default | ValueSlot::ArrayDefault, FieldSource::Column(column)) => {
+        (
+            ValueSlot::Default | ValueSlot::ArrayDefault | ValueSlot::JsonArrayDefault,
+            FieldSource::Column(column),
+        ) => {
             column.default = Some(value);
         }
-        (ValueSlot::Default | ValueSlot::ArrayDefault, _) => {}
+        (ValueSlot::Default | ValueSlot::ArrayDefault | ValueSlot::JsonArrayDefault, _) => {}
         (ValueSlot::Option, _) => {
             field.options.insert(OPTION_KEY.to_owned(), value);
         }
@@ -225,9 +242,10 @@ fn put(field: &mut kernel::Field, slot: ValueSlot, value: GenericValue) {
 fn get(mut field: kernel::Field, slot: ValueSlot) -> Option<GenericValue> {
     match (slot, field.source) {
         (ValueSlot::Constant, FieldSource::Constant(value)) => Some(value),
-        (ValueSlot::Default | ValueSlot::ArrayDefault, FieldSource::Column(column)) => {
-            Some(column.default.unwrap_or(GenericValue::Null))
-        }
+        (
+            ValueSlot::Default | ValueSlot::ArrayDefault | ValueSlot::JsonArrayDefault,
+            FieldSource::Column(column),
+        ) => Some(column.default.unwrap_or(GenericValue::Null)),
         (ValueSlot::Option, _) => field.options.remove(OPTION_KEY),
         _ => None,
     }
@@ -753,6 +771,18 @@ mod tests {
             ]))
         );
         assert_eq!(default("[]"), Ok(GenericValue::Array(Vec::new())));
+    }
+
+    #[test]
+    fn only_a_json_array_default_lists_structured_values() {
+        let default = |text: &str| super::read_typed(text, ValueSlot::ArrayDefault);
+        let json = |text: &str| super::read_typed(text, ValueSlot::JsonArrayDefault);
+        for text in [r#"[{"a": 1}, ["b"]]"#, r#"["a", {"b": 1}]"#, "[[1]]"] {
+            assert_eq!(default(text), Err(ValueProblem::NotScalarElement), "{text}");
+            assert!(json(text).is_ok(), "{text}: {:?}", json(text));
+        }
+        assert_eq!(json("5"), Err(ValueProblem::NotAList));
+        assert_eq!(json(r#"[{"a": 1}, null]"#), Err(ValueProblem::NullElement));
     }
 
     #[test]

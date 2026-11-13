@@ -364,6 +364,8 @@ export const it: Record<string, string> = {
     "Un default accetta un solo valore: testo, un numero, true, false o null, non una lista né un oggetto.",
   "value.notAList": 'Il default di un campo array è una lista, come ["general"].',
   "value.nullElement": "Una lista di default non può contenere null: i null vengono scartati da un campo array.",
+  "value.notScalarElement":
+    "Qui una lista di default contiene valori semplici (stringhe, numeri, booleani, date): solo il default di un array json può elencare oggetti o liste.",
   "value.unchecked": "Non è stato possibile verificarlo, quindi non è ancora nello schema. Il salvataggio riprova.",
   "value.unreadSave":
     "Non salvato: non è stato possibile verificare il valore inserito in {fields}. Controlla che il designer sia ancora in esecuzione, poi salva di nuovo.",
