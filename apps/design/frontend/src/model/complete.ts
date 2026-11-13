@@ -6,6 +6,7 @@
 // live preview.
 
 import type { Aggregate, AggregateKey, ColumnPair, Field } from "../api";
+import { trimmed } from "./names";
 import { scriptIncomplete } from "./scripts";
 import { joinOf } from "./tree";
 
@@ -15,7 +16,7 @@ const FIELD_NAME_MAX_CHARS = 63;
 
 /// Is this a name the backend's `FieldName` refuses (blank included)?
 export function nameInvalid(raw: string): boolean {
-  const name = raw.trim();
+  const name = trimmed(raw);
   return !FIELD_NAME.test(name) || [...name].length > FIELD_NAME_MAX_CHARS;
 }
 

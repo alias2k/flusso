@@ -8,7 +8,8 @@ import { cn } from "@/lib/utils";
 import { useAdapters } from "../model/adapters";
 import { defaultSchemaPath, indexName } from "../model/indexRows";
 import { useUiStore } from "../store/ui";
-import { useNameRefusal } from "./nameRefusal";
+import { identifier, identifierProblem } from "../model/names";
+import { type NameKind, useNameRefusal } from "./nameRefusal";
 import { AdapterForm, KindBadge, KindToggle } from "./AdapterForm";
 import { Check, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
 import {
@@ -41,14 +42,26 @@ function splitEntry(entry: Record<string, unknown> | undefined): { kind: string;
 // identically in the header grid and each row grid, keeping the labels aligned.
 const INDEX_COLS = "grid grid-cols-[minmax(6rem,1fr)_minmax(9rem,1.6fr)_8.5rem_6rem_2rem_2rem] items-center gap-x-2";
 
-/// An index name input that applies the name once the box is left (or on
-/// Enter), so a rename settles once. A name flusso would refuse (another row
-/// has it, compared as flusso reads names; or it isn't a valid index name) is
-/// marked with the reason and never applied: leaving the box keeps the row's
-/// name. Save is refused while it shows.
-function IndexNameField({ value, taken, onChange }: { value: string; taken: string[]; onChange: (v: string) => void }) {
+/// An index or sink name input that applies the name, as flusso reads it, once
+/// the box is left (or on Enter), so a rename settles once. A name flusso
+/// would refuse (another index or sink has it, compared as flusso reads names;
+/// or it isn't a valid name) is marked with the reason and never applied:
+/// leaving the box keeps the old name. Save is refused while it shows.
+function NameField({
+  kind,
+  value,
+  taken,
+  onChange,
+  className,
+}: {
+  kind: NameKind;
+  value: string;
+  taken: string[];
+  onChange: (v: string) => void;
+  className?: string;
+}) {
   const { t } = useT();
-  const refusal = useNameRefusal();
+  const refusal = useNameRefusal(kind);
   const [draft, setDraft] = useState<string | null>(null);
   const setNameDraft = useUiStore((s) => s.setNameDraft);
   const typing = useRef(false);
@@ -60,7 +73,7 @@ function IndexNameField({ value, taken, onChange }: { value: string; taken: stri
   );
   const reason = draft === null ? null : refusal(draft, taken);
   const settle = () => {
-    const name = draft === null ? "" : indexName(draft);
+    const name = draft === null ? "" : identifier(draft);
     if (name && !reason && name !== value) onChange(name);
     typing.current = false;
     setDraft(null);
@@ -71,10 +84,11 @@ function IndexNameField({ value, taken, onChange }: { value: string; taken: stri
       <Text
         value={draft ?? value}
         invalid={!!reason}
+        className={className}
         onChange={(v) => {
           typing.current = true;
           setDraft(v);
-          setNameDraft({ row: value, name: v, refused: refusal(v, taken) });
+          setNameDraft({ kind, row: value, name: v, refused: refusal(v, taken) });
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") e.currentTarget.blur();
@@ -157,12 +171,13 @@ export function ConfigPanel({
     else delete next[sink];
     setEntry(i, { ...e, sinks: Object.keys(next).length ? next : undefined });
   };
-  // Rename a sink (a config-map key) in place, preserving declaration order. A
-  // no-op on empty / unchanged / colliding names, so the editor can commit
-  // freely on blur without clobbering another sink.
+  // Rename a sink (a config-map key) in place, preserving declaration order,
+  // under its name as flusso reads it. A no-op on a name flusso would refuse,
+  // so a refused name never reaches the config or the save's identity.
   const renameSink = (from: string, to: string) => {
-    const name = to.trim();
-    if (!name || name === from || name in sinks) return;
+    const name = identifier(to);
+    const others = Object.keys(sinks).filter((n) => n !== from);
+    if (!name || name === from || identifierProblem(name, others)) return;
     const next: Record<string, Sink> = {};
     for (const [k, v] of Object.entries(sinks)) next[k === from ? name : k] = v;
     const sinkIds: Record<string, string> = {};
@@ -308,7 +323,8 @@ export function ConfigPanel({
             return (
               <Fragment key={e.id ?? i}>
                 <div className={cn(INDEX_COLS, "px-3 py-1.5")}>
-                  <IndexNameField
+                  <NameField
+                    kind="index"
                     value={e.name}
                     taken={index.filter((_, j) => j !== i).map((x) => indexName(x.name))}
                     onChange={(name) => setEntry(i, { ...e, name })}
@@ -400,7 +416,7 @@ export function ConfigPanel({
           label={t("config.sink")}
           onClick={() => {
             const first = sinkAdapters[0];
-            setSink(`sink${Object.keys(sinks).length + 1}`, first ? { type: first.kind, ...first.example } : {});
+            setSink(freeSinkName(Object.keys(sinks)), first ? { type: first.kind, ...first.example } : {});
           }}
         />
       </Stage>
@@ -437,6 +453,14 @@ export function ConfigPanel({
       </Dialog>
     </div>
   );
+}
+
+/// The first of `sink1`, `sink2`, … no sink has, as flusso reads names.
+function freeSinkName(taken: string[]): string {
+  for (let n = taken.length + 1; ; n++) {
+    const name = `sink${n}`;
+    if (!identifierProblem(name, taken)) return name;
+  }
 }
 
 /// The prominent full-width dashed "add a row" button under a stage's list.
@@ -513,16 +537,6 @@ function SinkEditor({
   const withBackfill = (next: Record<string, unknown>, on: boolean) => (on ? next : { ...next, backfill: false });
   const description = adapters.find((a) => a.kind === kind);
 
-  // Local draft so a half-typed name doesn't rename the config-map key on every
-  // keystroke (which would remount this card and drop focus). Commit on blur /
-  // Enter; revert to the current name on an empty / duplicate entry.
-  const [draft, setDraft] = useState(name);
-  const commitName = () => {
-    const v = draft.trim();
-    if (!v || v === name || taken.includes(v)) setDraft(name);
-    else onRename(v);
-  };
-
   return (
     <div
       className={cn(
@@ -530,16 +544,8 @@ function SinkEditor({
         description ? "border-l-primary" : "border-l-slate",
       )}
     >
-      <div className="sink-head flex items-center gap-2.5">
-        <Text
-          value={draft}
-          onChange={setDraft}
-          onBlur={commitName}
-          onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-          invalid={taken.includes(draft.trim()) && draft.trim() !== name}
-          placeholder={t("config.name")}
-          className="w-40 font-semibold"
-        />
+      <div className="sink-head flex items-start gap-2.5">
+        <NameField kind="sink" value={name} taken={taken} onChange={onRename} className="w-40 font-semibold" />
         <KindToggle
           kinds={adapters.map((a) => a.kind)}
           value={kind}

@@ -19,6 +19,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { trimmed } from "../model/names";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant", "script"] as const;
 const AGG_KINDS = ["count", "exists", "sum", "avg", "min", "max", "ids"] as const;
@@ -50,7 +51,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
   };
   const commitRename = () => {
     setRenaming(false);
-    const name = draft.trim();
+    const name = trimmed(draft);
     if (!name || name === node.name) return;
     apply((s) => {
       const f = fieldAtPath(s, node.path);

@@ -62,8 +62,9 @@ interface UiState {
   autoFormat: boolean;
   diffs: OpDiff[] | null;
   browseCatalog: boolean;
-  /// An index name being typed in the Deployment panel, not applied until the
-  /// box is left: `row` is the row's name, `refused` says why it can't be applied.
+  /// An index or sink name being typed in the Deployment panel, not applied
+  /// until the box is left: `row` is its current name, `refused` says why the
+  /// typed one can't be applied.
   nameDraft: NameDraft | null;
 
   toggleTheme: () => void;
@@ -85,6 +86,7 @@ interface UiState {
 }
 
 export interface NameDraft {
+  kind: "index" | "sink";
   row: string;
   name: string;
   /// Why the name can't be applied, in words; `null` when it can.

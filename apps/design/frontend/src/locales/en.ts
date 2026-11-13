@@ -48,6 +48,7 @@ export const en: Record<string, string> = {
   "toast.unloadedSchemaMoved":
     'The schema of index "{name}" could not be loaded, so it cannot move from {from} to {path}: fix the file first, or put the path back.',
   "toast.nameRefusedSave": 'Index "{row}": {reason}. Change the name, or leave the box to keep "{row}".',
+  "toast.sinkNameRefusedSave": 'Sink "{row}": {reason}. Change the name, or leave the box to keep "{row}".',
   "toast.sharedSchemaClash":
     'Indexes "{a}" and "{b}" share one schema file but their schemas differ: give one of them its own file.',
   "toast.dbNotReachableErr": "Database not reachable: {err}",
@@ -447,6 +448,10 @@ export const en: Record<string, string> = {
   "config.namePattern":
     '"{name}" is not a valid index name: use lowercase letters a–z, digits and _, starting with a letter or _',
   "config.nameLength": "An index name has at most 63 characters",
+  "config.sinkNameTaken": 'Another sink is already named "{name}"',
+  "config.sinkNamePattern":
+    '"{name}" is not a valid sink name: use lowercase letters a–z, digits and _, starting with a letter or _',
+  "config.sinkNameLength": "A sink name has at most 63 characters",
   "config.connection": "connection",
   "config.stream": "Stream",
   "config.streamHint": "between the source and the sinks",

@@ -8,7 +8,9 @@
 //! never reach the schema; they only say which is which.
 //!
 //! Sinks are keyed by name, so their identity is a map: every sink being
-//! saved, by its new name, to its name in the file.
+//! saved, by its new name, to its name in the file. Both sides are read as
+//! flusso reads a sink name (trimmed and lowercased), so another spelling of
+//! the same names still pairs.
 //!
 //! Without them, or when the file no longer reads as the before (it changed on
 //! disk), or when they are malformed (an empty or repeated id, a position or a
@@ -18,6 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use kernel::common::SinkName;
 use kernel::{Field, FieldSource, Relation};
 use serde::Deserialize;
 
@@ -74,8 +77,9 @@ pub(super) fn sinks(
     old: &[String],
     new: &[String],
 ) -> SinkNames {
-    match identity.and_then(|i| i.sinks.as_ref()) {
-        Some(map) if describes_sinks(map, old, new) => {
+    let map = identity.and_then(|i| i.sinks.as_ref()).and_then(sink_names);
+    match map {
+        Some(map) if describes_sinks(&map, old, new) => {
             let mut renames: HashMap<String, String> = map
                 .iter()
                 .filter_map(|(is, was)| Some((was.clone()?, is.clone())))
@@ -110,6 +114,23 @@ pub(super) fn sinks(
             }
         }
     }
+}
+
+/// `map` with every name read as flusso reads a sink name, or `None` when a
+/// name is not one or two keys read as the same name.
+fn sink_names(map: &BTreeMap<String, Option<String>>) -> Option<BTreeMap<String, Option<String>>> {
+    let read = |name: &str| SinkName::try_new(name).ok().map(|n| n.to_string());
+    let names: BTreeMap<String, Option<String>> = map
+        .iter()
+        .map(|(is, was)| {
+            let was = match was {
+                Some(was) => Some(read(was)?),
+                None => None,
+            };
+            Some((read(is)?, was))
+        })
+        .collect::<Option<_>>()?;
+    (names.len() == map.len()).then_some(names)
 }
 
 /// Whether `map` names every new sink once and only old sinks, each once.
@@ -214,10 +235,12 @@ fn children(field: &Field) -> &[Field] {
     }
 }
 
+/// Whether `ids` names `fields`, each name read as flusso reads a field name
+/// (trimmed).
 fn describes(ids: &[FieldId], fields: &[Field]) -> bool {
     ids.len() == fields.len()
         && ids.iter().zip(fields).all(|(id, field)| {
-            id.name == field.field.as_ref() && describes(&id.fields, children(field))
+            id.name.trim() == field.field.as_ref() && describes(&id.fields, children(field))
         })
 }
 

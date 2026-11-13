@@ -12,27 +12,14 @@
 // ```
 
 import type { IndexEntry } from "../api";
-
-// Rust's `str::trim` set (Unicode White_Space), which JS `trim` doesn't match:
-// U+0085 is trimmed there and not here, U+FEFF the other way round.
-const SPACE = "\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000";
-const EDGE_SPACE = new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "g");
+import { identifier, identifierProblem } from "./names";
 
 /// An index name as flusso reads it: trimmed and lowercased.
-export const indexName = (name: string): string => name.replace(EDGE_SPACE, "").toLowerCase();
+export const indexName = identifier;
 
-/// Why flusso would refuse `name` for an index (another index has it, it isn't
-/// lowercase letters, digits and `_` not starting with a digit, or it is
-/// longer than 63 characters), or `null` when it is free and valid. An empty
-/// name is `null`: leaving the box keeps the row's name.
-export function nameProblem(name: string, taken: string[]): "taken" | "pattern" | "length" | null {
-  const norm = indexName(name);
-  if (!norm) return null;
-  if (taken.some((n) => indexName(n) === norm)) return "taken";
-  if (!/^[a-z_][a-z0-9_]*$/.test(norm)) return "pattern";
-  if (norm.length > 63) return "length";
-  return null;
-}
+/// Why flusso would refuse `name` for an index, or `null` (see
+/// `identifierProblem`).
+export const nameProblem = identifierProblem;
 
 /// `path` as the server saves it: `.` segments, doubled and trailing slashes
 /// dropped, `..` kept.

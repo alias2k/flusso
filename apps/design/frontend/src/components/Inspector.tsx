@@ -39,6 +39,7 @@ import { cn } from "@/lib/utils";
 import { Hint } from "./Hint";
 import { ValueTargetContext } from "./valueTarget";
 import { Filters } from "./Filters";
+import { trimmed } from "../model/names";
 import {
   AddButton,
   Block,
@@ -704,7 +705,15 @@ function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
   return (
     <div className="field mb-2 flex flex-col gap-1">
       <span className={cn("field-label", LABEL)}>{t("inspector.fieldName")}</span>
-      <Text value={field.field} invalid={badName} onChange={(name) => set({ ...field, field: name })} />
+      <Text
+        value={field.field}
+        invalid={badName}
+        onChange={(name) => set({ ...field, field: name })}
+        onBlur={() => {
+          const name = trimmed(field.field);
+          if (name !== field.field) set({ ...field, field: name });
+        }}
+      />
       {badName && <p className="error-hint mt-0.5 text-xs text-destructive">{t("inspector.fieldNameInvalid")}</p>}
       {chips.length > 0 && (
         <div className="rename-chips mt-1.5 flex flex-wrap items-center gap-1.5">
