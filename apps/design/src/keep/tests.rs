@@ -1072,3 +1072,331 @@ fn an_item_moved_to_the_top_of_its_list_leaves_its_blank_line_behind() {
         saved.text
     );
 }
+
+// Line endings (issue #273).
+
+/// The lines of `text`, each with its own line ending.
+fn raw_lines(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n').collect()
+}
+
+/// Whether every line of `text` ends in CRLF (a last line with no ending
+/// aside).
+fn all_crlf(text: &str) -> bool {
+    raw_lines(text)
+        .iter()
+        .all(|l| !l.ends_with('\n') || l.ends_with("\r\n"))
+}
+
+/// `text` with every line ending in CRLF.
+fn to_crlf(text: &str) -> String {
+    text.replace('\n', "\r\n")
+}
+
+/// The raw lines (endings included) only `a` has and only `b` has.
+fn changed_raw(a: &str, b: &str) -> (Vec<String>, Vec<String>) {
+    let mark = |t: &str| {
+        raw_lines(t)
+            .iter()
+            .map(|l| l.replace('\r', "\u{240d}").replace('\n', "\u{2424}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (removed, added) = changed(&mark(a), &mark(b));
+    let unmark = |v: Vec<String>| {
+        v.into_iter()
+            .map(|l| l.replace('\u{240d}', "\r").replace('\u{2424}', "\n"))
+            .collect()
+    };
+    (unmark(removed), unmark(added))
+}
+
+fn set_option(config: &mut ConfigToml, name: &str, key: &str, value: &str) {
+    config
+        .sinks
+        .get_mut(&sink(name))
+        .unwrap()
+        .port
+        .options
+        .insert(key, value);
+}
+
+#[test]
+fn a_crlf_config_changes_exactly_the_edited_line() {
+    let base = to_crlf(CONFIG);
+    let text = save_config(&base, |c| set_option(c, "primary", "url", "http://os:9200"));
+    assert_eq!(
+        changed_raw(&base, &text),
+        (
+            vec!["url = \"http://127.0.0.1:9200\"\r\n".into()],
+            vec!["url = \"http://os:9200\"\r\n".into()]
+        )
+    );
+    assert_eq!(raw_lines(&text).len(), raw_lines(&base).len());
+}
+
+#[test]
+fn a_crlf_config_writes_every_line_it_adds_or_moves_in_crlf() {
+    let base = to_crlf(&format!("{CONFIG}# end of file\n"));
+    let check = |saved: &Saved| {
+        assert!(all_crlf(&saved.text), "{:?}", saved.text);
+        assert!(saved.text.contains("# end of file\r\n"), "{:?}", saved.text);
+    };
+    check(&save_sinks(&base, &[], |c| {
+        set_option(c, "audit", "note", "two\nlines");
+    }));
+    check(&save_sinks(&base, &[], |c| {
+        let mut entry = c.index[0].clone();
+        entry.name = kernel::common::IndexName::try_new("extra").unwrap();
+        c.index.push(entry);
+        c.sinks
+            .insert(sink("third"), config::toml::SinkEntry::new("stdout"));
+        c.index[1]
+            .sinks
+            .insert(sink("third"), kernel::Options::empty());
+    }));
+    let saved = save_sinks(&base, &[("main", "primary")], |c| {
+        rename_sink(c, "primary", "main")
+    });
+    check(&saved);
+    assert!(
+        saved.text.contains("\r\n[sinks.main]\r\n"),
+        "{:?}",
+        saved.text
+    );
+    let saved = save_config_as(&base, Some(vec![Some(2), Some(0), Some(1)]), |c| {
+        let orders = c.index.pop().unwrap();
+        c.index.insert(0, orders);
+    });
+    check(&saved);
+    let saved = save_sinks(&base, &[], |c| {
+        c.sinks.remove(&sink("primary"));
+    });
+    check(&saved);
+    assert!(!saved.text.contains("number_of_shards"), "{:?}", saved.text);
+}
+
+#[test]
+fn a_mixed_config_keeps_each_untouched_line_and_writes_new_ones_in_the_dominant_ending() {
+    let base = to_crlf(CONFIG)
+        .replace("tls_verify = false\r\n", "tls_verify = false\n")
+        .replace(
+            "# Three indexes built from the same store, each a different root table.\r\n",
+            "# Three indexes built from the same store, each a different root table.\n",
+        );
+    let text = save_config(&base, |c| {
+        let mut entry = c.index[0].clone();
+        entry.name = kernel::common::IndexName::try_new("extra").unwrap();
+        c.index.push(entry);
+    });
+    let (removed, added) = changed_raw(&base, &text);
+    assert!(removed.is_empty(), "{removed:?}");
+    assert!(added.iter().all(|l| l.ends_with("\r\n")), "{added:?}");
+    assert!(
+        added.contains(&"name = \"extra\"\r\n".to_owned()),
+        "{added:?}"
+    );
+}
+
+#[test]
+fn a_multi_line_string_keeps_its_own_line_breaks() {
+    let base = "[source]\r\ntype = \"postgres\"\r\nconnection_url = \"postgres://x\"\r\n\r\n[sinks.audit]\r\ntype = \"stdout\"\r\nnote = \"\"\"\nkept\nas is\"\"\"\r\nwin = \"\"\"\r\nkept\r\nhere\"\"\"\r\n";
+    let text = save_config(base, |c| set_option(c, "audit", "pretty", "yes"));
+    assert_eq!(text, format!("{base}pretty = \"yes\"\r\n"));
+}
+
+#[test]
+fn an_lf_config_holding_the_stand_in_character_is_patched_in_place() {
+    let base = "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n\n# \u{e00d} kept\n[sinks.audit]\ntype = \"stdout\"\nnote = \"a\u{e00d}b\"\n";
+    let text = save_config(base, |c| set_option(c, "audit", "pretty", "yes"));
+    assert_eq!(text, format!("{base}pretty = \"yes\"\n"));
+}
+
+#[test]
+fn a_crlf_config_without_a_final_line_ending_keeps_it_that_way() {
+    let base = to_crlf(CONFIG);
+    let base = base.strip_suffix("\r\n").unwrap();
+    let text = save_config(base, |c| c.index[0].enabled = false);
+    assert!(all_crlf(&text), "{text:?}");
+    let text = save_config(&format!("{base}\r\n# end"), |c| {
+        c.index.pop();
+    });
+    assert!(all_crlf(&text), "{text:?}");
+}
+
+#[test]
+fn a_crlf_config_written_in_the_designers_form_keeps_crlf() {
+    let base = "x = 1\r\n";
+    let config = ConfigToml::try_parse(&to_crlf(CONFIG)).unwrap();
+    let saved = config_toml(Some(base), &config, None).unwrap();
+    assert_eq!(saved.notice, Some(Notice::LayoutReset));
+    assert_eq!(
+        saved.text,
+        to_crlf(&codegen::config_to_toml(&config).unwrap())
+    );
+}
+
+#[test]
+fn a_crlf_schema_keeps_crlf_through_an_added_deleted_or_moved_field() {
+    let base = to_crlf(ORDERS);
+    let edits: [&dyn Fn(&mut IndexSchema); 3] = [
+        &|s| {
+            let mut extra = s.fields[1].clone();
+            rename(&mut extra, "otherId");
+            s.fields.insert(2, extra);
+        },
+        &|s| s.fields.retain(|f| f.field.as_ref() != "timeline"),
+        &|s| s.fields.swap(0, 3),
+    ];
+    for edit in edits {
+        let text = save(&base, edit);
+        assert!(all_crlf(&text), "{text:?}");
+        let (removed, added) = changed_raw(&base, &text);
+        assert!(removed.iter().chain(&added).all(|l| l.ends_with("\r\n")));
+    }
+}
+
+#[test]
+fn a_crlf_block_scalar_keeps_crlf() {
+    let base = "version: 1\r\ntable: t\r\nprimary_key: a\r\nfields:\r\n  - text: b\r\n    column: a\r\n    required: true\r\n    options:\r\n      k:\r\n      - |\r\n        x\r\n        y\r\n  - integer: c # c\r\n    required: true\r\n";
+    let text = save(base, |s| {
+        rename(&mut s.fields[1], "d");
+        s.fields.swap(0, 1);
+    });
+    assert!(all_crlf(&text), "{text:?}");
+    assert!(
+        text.contains("      - |\r\n        x\r\n        y\r\n"),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn a_crlf_schema_written_in_the_designers_form_keeps_crlf() {
+    let base = "{version: 1, table: t, primary_key: id, fields: [{integer: id, required: true}]} # flow\r\n";
+    let mut schema = parse(base);
+    rename(&mut schema.fields[0], "key");
+    let saved = schema_yaml(Some(base), &schema, None).unwrap();
+    assert_eq!(saved.notice, Some(Notice::LayoutReset));
+    assert_eq!(
+        saved.text,
+        to_crlf(&codegen::schema_to_yaml(&schema).unwrap())
+    );
+}
+
+// Names the loader normalizes (issue #273).
+
+const SPELLED: &str = "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n\n# the primary\n[sinks.Primary]\ntype = \"stdout\"\npretty = true\n# below the primary\n\n[sinks.b]\ntype = \"stdout\"\n\n[[index]]\nname = \" Users \"\nschema = \"users.schema.yml\"\nenabled = true\n# users in Primary\n[index.sinks.PRIMARY]\nshards = 2\n\n[[index]]\nname = \"Orders\"\nschema = \"orders.schema.yml\"\nenabled = true\nsinks.Primary.shards = 3 # three\n\n[[index]]\nname = \"items\"\nschema = \"items.schema.yml\"\nenabled = true\nsinks = { Primary = { shards = 4 } }\n";
+
+fn set_shards(config: &mut ConfigToml, index: usize, shards: i64) {
+    config.index[index]
+        .sinks
+        .get_mut(&sink("primary"))
+        .unwrap()
+        .insert("shards", shards);
+}
+
+#[test]
+fn a_sink_spelled_in_another_case_is_edited_where_it_stands() {
+    let text = save_config(SPELLED, |c| {
+        c.sinks
+            .get_mut(&sink("primary"))
+            .unwrap()
+            .port
+            .options
+            .insert("pretty", false);
+        set_shards(c, 0, 5);
+        set_shards(c, 1, 6);
+        set_shards(c, 2, 7);
+    });
+    assert_eq!(
+        text,
+        SPELLED
+            .replace("pretty = true", "pretty = false")
+            .replace("shards = 2", "shards = 5")
+            .replace("shards = 3", "shards = 6")
+            .replace("shards = 4", "shards = 7")
+    );
+}
+
+#[test]
+fn a_sink_spelled_in_another_case_is_renamed_where_it_stands() {
+    let saved = save_sinks(SPELLED, &[("main", "primary")], |c| {
+        rename_sink(c, "primary", "main")
+    });
+    assert_eq!(
+        saved.text,
+        SPELLED
+            .replace("[sinks.Primary]", "[sinks.main]")
+            .replace("[index.sinks.PRIMARY]", "[index.sinks.main]")
+            .replace("sinks.Primary.shards", "sinks.main.shards")
+            .replace("{ Primary =", "{ main =")
+    );
+    assert_eq!(saved.dropped, 0);
+}
+
+#[test]
+fn a_sink_spelled_in_another_case_is_removed_with_its_comments() {
+    let saved = save_sinks(SPELLED, &[], |c| {
+        c.sinks.remove(&sink("primary"));
+        for index in &mut c.index {
+            index.sinks.remove(&sink("primary"));
+        }
+    });
+    let text = &saved.text;
+    assert!(!text.to_lowercase().contains("primary"), "{text}");
+    assert!(text.contains("\n[sinks.b]\n"), "{text}");
+    assert_eq!(saved.dropped, 0);
+}
+
+#[test]
+fn an_index_named_in_another_spelling_is_patched_in_place() {
+    let text = save_config(SPELLED, |c| c.index[1].enabled = false);
+    assert_eq!(
+        changed(SPELLED, &text),
+        (
+            vec!["enabled = true".into()],
+            vec!["enabled = false".into()]
+        )
+    );
+    let text = save_config(SPELLED, |c| {
+        c.index.remove(0);
+    });
+    assert!(!text.contains("Users"), "{text}");
+    assert!(text.contains("name = \"Orders\""), "{text}");
+    let text = save_config_as(SPELLED, Some(vec![Some(1), Some(0), Some(2)]), |c| {
+        c.index.swap(0, 1)
+    })
+    .text;
+    assert!(
+        text.find("\"Orders\"").unwrap() < text.find("\" Users \"").unwrap(),
+        "{text}"
+    );
+    assert!(text.contains("name = \" Users \"\nschema"), "{text}");
+}
+
+#[test]
+fn a_sink_spelled_twice_is_written_in_the_designers_form() {
+    for base in [
+        SPELLED.replace("[sinks.b]", "[sinks.primary]"),
+        SPELLED.replace(
+            "sinks.Primary.shards = 3",
+            "sinks.Primary.shards = 3\nsinks.primary.replicas = 1",
+        ),
+    ] {
+        // The loader takes the later table and drops the earlier one.
+        let mut config = ConfigToml::try_parse(&base).unwrap();
+        config.index[2].enabled = false;
+        let saved = config_toml(Some(&base), &config, None).unwrap();
+        assert_eq!(saved.notice, Some(Notice::LayoutReset), "{}", saved.text);
+    }
+}
+
+#[test]
+fn a_mixed_schema_is_written_in_its_dominant_ending() {
+    let base = to_crlf(ORDERS).replacen("\r\n", "\n", 3);
+    let text = save(&base, |s| rename(&mut s.fields[0], "key"));
+    assert!(all_crlf(&text), "{text:?}");
+    let base = ORDERS.replacen('\n', "\r\n", 3);
+    let text = save(&base, |s| rename(&mut s.fields[0], "key"));
+    assert!(!text.contains('\r'), "{text:?}");
+}

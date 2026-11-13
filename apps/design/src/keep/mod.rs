@@ -21,6 +21,10 @@
 //!   never from its slot;
 //! - a value that changed is re-rendered in place in the canonical style, and a
 //!   key the edit adds is written after the key before it.
+//! - every line the save writes ends the way most of the file's lines do
+//!   (CRLF or LF); `flusso.toml` keeps each line it leaves alone as it was,
+//!   while a `*.schema.yml` is written in that one ending throughout. The
+//!   canonical form written over a CRLF file is CRLF too.
 //!
 //! The result is re-parsed and must read back as exactly the model being saved.
 //! When it does not, or the base has a layout the patcher does not follow, the
@@ -124,7 +128,12 @@ pub fn schema_yaml(
                 dropped,
             }
         }
-        _ => Saved::generated(canonical, base),
+        _ => {
+            let crlf = canonical.replace('\n', "\r\n");
+            let keeps_crlf =
+                dominant_ending(text) == "\r\n" && reads_as(parse_schema(&crlf).as_ref(), schema);
+            Saved::generated(if keeps_crlf { crlf } else { canonical }, base)
+        }
     })
 }
 
@@ -159,7 +168,11 @@ pub fn config_toml(
                 dropped,
             }
         }
-        _ => Saved::generated(canonical, base),
+        _ => {
+            let crlf = toml_doc::with_ending(&canonical, dominant_ending(text))
+                .filter(|crlf| reads_as(ConfigToml::try_parse(crlf).ok().as_ref(), config));
+            Saved::generated(crlf.unwrap_or(canonical), base)
+        }
     })
 }
 
@@ -177,6 +190,14 @@ pub fn index_pairs(
             pairing::Pairing::matching(&old.index, &new.index, |was, is| was.name == is.name).pairs
         }
     }
+}
+
+/// The line ending most of `text`'s lines end with: `"\r\n"` when CRLF lines
+/// outnumber LF ones, else `"\n"`.
+fn dominant_ending(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    if crlf > lf { "\r\n" } else { "\n" }
 }
 
 fn parse_schema(text: &str) -> Option<IndexSchema> {

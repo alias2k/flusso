@@ -1407,18 +1407,25 @@ struct Deployment {
 enum TomlEdit {
     RenameSink(usize),
     RemoveSink(usize),
+    /// Remove a sink and add a new one under its name.
+    ReplaceSink(usize),
     RenameIndex(usize),
     RemoveIndex(usize),
     MoveIndex(usize, usize),
+    /// Add an index entry at this slot, using the sinks the flags pick.
+    AddIndex(usize, Vec<bool>),
 }
 
 fn toml_edit() -> impl Strategy<Value = TomlEdit> {
     prop_oneof![
         (0..8usize).prop_map(TomlEdit::RenameSink),
         (0..8usize).prop_map(TomlEdit::RemoveSink),
+        (0..8usize).prop_map(TomlEdit::ReplaceSink),
         (0..8usize).prop_map(TomlEdit::RenameIndex),
         (0..8usize).prop_map(TomlEdit::RemoveIndex),
         (0..8usize, 0..8usize).prop_map(|(a, b)| TomlEdit::MoveIndex(a, b)),
+        (0..8usize, prop::collection::vec(any::<bool>(), 3))
+            .prop_map(|(at, uses)| TomlEdit::AddIndex(at, uses)),
     ]
 }
 
@@ -1446,18 +1453,77 @@ fn deployment() -> impl Strategy<Value = Deployment> {
         })
 }
 
+/// How the hand-written file spells everything around the deployment.
+#[derive(Debug, Clone)]
+struct TomlLayout {
+    crlf: bool,
+    /// Per sink (by position), how its key is spelled: as named, capitalized
+    /// or upper case. The loader reads all three as the name.
+    spellings: Vec<u8>,
+    end: EndComment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EndComment {
+    None,
+    /// Directly below the last table: that table's.
+    Owned,
+    /// A blank line below the last table: nobody's, stays last.
+    Free,
+}
+
+fn toml_layout() -> impl Strategy<Value = TomlLayout> {
+    (
+        any::<bool>(),
+        prop::collection::vec(0..3u8, 3),
+        prop::sample::select(vec![EndComment::None, EndComment::Owned, EndComment::Free]),
+    )
+        .prop_map(|(crlf, spellings, end)| TomlLayout {
+            crlf,
+            spellings,
+            end,
+        })
+}
+
+fn spell(name: &str, spelling: u8) -> String {
+    match spelling {
+        1 => {
+            let mut chars = name.chars();
+            chars
+                .next()
+                .map_or(String::new(), |c| c.to_uppercase().chain(chars).collect())
+        }
+        2 => name.to_uppercase(),
+        _ => name.to_owned(),
+    }
+}
+
 impl Deployment {
     fn sink_name(&self, uid: &str) -> &str {
         &self.sinks.iter().find(|(u, _)| u == uid).unwrap().1
     }
 
+    fn base_name(&self, uid: &str) -> Option<&str> {
+        self.sinks
+            .iter()
+            .find(|(u, _)| u == uid)
+            .map(|(_, n)| n.as_str())
+    }
+
     fn apply(&mut self, edit: &TomlEdit) {
         self.next += 1;
         let (s, i) = (self.sinks.len(), self.indexes.len());
-        match *edit {
+        match edit {
             TomlEdit::RenameSink(k) => self.sinks[k % s].1 = format!("r{}", self.next),
             TomlEdit::RemoveSink(k) if s > 1 => {
                 let (uid, _) = self.sinks.remove(k % s);
+                for index in &mut self.indexes {
+                    index.2.retain(|u| *u != uid);
+                }
+            }
+            TomlEdit::ReplaceSink(k) => {
+                let (uid, name) = self.sinks[k % s].clone();
+                self.sinks[k % s] = (format!("f{}", self.next), name);
                 for index in &mut self.indexes {
                     index.2.retain(|u| *u != uid);
                 }
@@ -1470,22 +1536,40 @@ impl Deployment {
                 let index = self.indexes.remove(a % i);
                 self.indexes.insert(b % i, index);
             }
+            TomlEdit::AddIndex(at, uses) => {
+                let used = self
+                    .sinks
+                    .iter()
+                    .zip(uses)
+                    .filter(|(_, used)| **used)
+                    .map(|((uid, _), _)| uid.clone())
+                    .collect();
+                let uid = format!("a{}", self.next);
+                self.indexes.insert(at % (i + 1), (uid.clone(), uid, used));
+            }
             _ => {}
         }
     }
 
     /// The file, commented (every sink, entry and per-index table has a
-    /// comment naming its id above it; sinks one below too) or bare.
-    fn text(&self, comments: bool) -> String {
+    /// comment naming its id above it; sinks one below too) and spelled as
+    /// `layout` says, or bare.
+    fn text(&self, layout: Option<&TomlLayout>) -> String {
+        let comments = layout.is_some();
+        let spelled = |uid: &str| {
+            let at = self.sinks.iter().position(|(u, _)| u == uid).unwrap();
+            let spelling = layout.map_or(0, |l| l.spellings[at % l.spellings.len()]);
+            spell(self.sink_name(uid), spelling)
+        };
         let mut out = String::from(
             "# A header.\n\n[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n",
         );
-        for (uid, name) in &self.sinks {
+        for (uid, _) in &self.sinks {
             out.push('\n');
             if comments {
                 out.push_str(&format!("# about sink {uid}\n"));
             }
-            out.push_str(&format!("[sinks.{name}]\ntype = \"stdout\"\n"));
+            out.push_str(&format!("[sinks.{}]\ntype = \"stdout\"\n", spelled(uid)));
             if comments {
                 out.push_str(&format!("# below sink {uid}\n"));
             }
@@ -1502,11 +1586,16 @@ impl Deployment {
                 if comments {
                     out.push_str(&format!("# about {uid} in {sink}\n"));
                 }
-                out.push_str(&format!(
-                    "[index.sinks.{}]\nshards = 1\n",
-                    self.sink_name(sink)
-                ));
+                out.push_str(&format!("[index.sinks.{}]\nshards = 1\n", spelled(sink)));
             }
+        }
+        match layout.map(|l| l.end) {
+            Some(EndComment::Owned) => out.push_str("# end owned\n"),
+            Some(EndComment::Free) => out.push_str("\n# end free\n"),
+            _ => {}
+        }
+        if layout.is_some_and(|l| l.crlf) {
+            out = out.replace('\n', "\r\n");
         }
         out
     }
@@ -1515,20 +1604,23 @@ impl Deployment {
 proptest! {
     #![proptest_config(config())]
 
-    /// Sink and `[[index]]` renames, removals and reorders saved with
-    /// identity: every surviving table keeps exactly its own comments, a
-    /// removed one's are gone, and nothing else is lost.
+    /// Sink and `[[index]]` renames, removals, replacements, additions and
+    /// reorders saved with identity, into a file in either line ending with
+    /// sink keys in any case: every surviving table keeps exactly its own
+    /// comments and its key as spelled, a removed one's are gone, nothing
+    /// else is lost, and every line ends the way the file's lines do.
     #[test]
     fn each_toml_comment_stays_with_its_table_through_a_save(
         base in deployment(),
+        layout in toml_layout(),
         edits in prop::collection::vec(toml_edit(), 1..=5),
     ) {
-        let text = base.text(true);
+        let text = base.text(Some(&layout));
         let mut edited = base.clone();
         for edit in &edits {
             edited.apply(edit);
         }
-        let config = ConfigToml::try_parse(&edited.text(false)).unwrap();
+        let config = ConfigToml::try_parse(&edited.text(None)).unwrap();
         let identity = ConfigIdentity {
             before: base.indexes.iter().map(|i| i.1.clone()).collect(),
             after: edited
@@ -1540,25 +1632,52 @@ proptest! {
                 edited
                     .sinks
                     .iter()
-                    .map(|(uid, name)| (name.clone(), Some(base.sink_name(uid).to_owned())))
+                    .map(|(uid, name)| (name.clone(), base.base_name(uid).map(str::to_owned)))
                     .collect(),
             ),
         };
         let saved = design::keep::config_toml(Some(&text), &config, Some(&identity)).unwrap();
-        let ctx = format!("\n--- saved ---\n{}\n--- base ---\n{text}\n--- edits ---\n{edits:?}", saved.text);
+        let ctx = format!("\n--- saved ---\n{}\n--- base ---\n{text}\n--- edits ---\n{edits:?}\n--- layout ---\n{layout:?}", saved.text);
         prop_assert!(saved.notice.is_none(), "fell back{}", ctx);
         prop_assert_eq!(saved.dropped, 0, "{}", ctx);
+
+        let eol = if layout.crlf { "\r\n" } else { "\n" };
+        for line in saved.text.split_inclusive('\n') {
+            prop_assert!(line.ends_with(eol) && !line[..line.len() - eol.len()].contains('\r'), "{:?} does not end in {:?}{}", line, eol, ctx);
+        }
+        let raw: Vec<&str> = saved.text.split_inclusive('\n').collect();
+        let kept = |line: &str| raw.contains(&format!("{line}{eol}").as_str());
+
         let lines: Vec<&str> = saved.text.lines().collect();
         let at = |needle: &str| -> Vec<usize> { lines.iter().enumerate().filter(|(_, l)| **l == needle).map(|(i, _)| i).collect() };
         prop_assert_eq!(at("# A header.").len(), 1, "{}", ctx);
+        prop_assert!(kept("# A header."), "{}", ctx);
+        // The key a sink's tables are written under now: as the file spelled
+        // it while the sink keeps its name, else its new name.
+        let header_of = |uid: &str| -> String {
+            let name = edited.sink_name(uid);
+            match base.sinks.iter().position(|(u, n)| u == uid && n == name) {
+                Some(at) => spell(name, layout.spellings[at % layout.spellings.len()]),
+                None => name.to_owned(),
+            }
+        };
+        for (uid, name) in &edited.sinks {
+            let headers = lines
+                .iter()
+                .filter(|l| l.to_lowercase() == format!("[sinks.{name}]"))
+                .count();
+            prop_assert_eq!(headers, 1, "sink {} written {} times{}", name, headers, ctx);
+            prop_assert!(kept(&format!("[sinks.{}]", header_of(uid))), "{}{}", uid, ctx);
+        }
         for (uid, _) in &base.sinks {
             let about = at(&format!("# about sink {uid}"));
             let below = at(&format!("# below sink {uid}"));
             match edited.sinks.iter().find(|(u, _)| u == uid) {
                 None => prop_assert!(about.is_empty() && below.is_empty(), "removed {}{}", uid, ctx),
-                Some((_, name)) => {
+                Some(_) => {
                     prop_assert_eq!(about.len(), 1, "{}{}", uid, ctx);
-                    prop_assert_eq!(lines.get(about[0] + 1).map(|l| l.to_string()), Some(format!("[sinks.{name}]")), "{}", ctx);
+                    prop_assert!(kept(&format!("# about sink {uid}")), "{}", ctx);
+                    prop_assert_eq!(lines.get(about[0] + 1).map(|l| l.to_string()), Some(format!("[sinks.{}]", header_of(uid))), "{}", ctx);
                     prop_assert_eq!(below, vec![about[0] + 3], "{}{}", uid, ctx);
                 }
             }
@@ -1579,9 +1698,41 @@ proptest! {
                     None => prop_assert!(own.is_empty(), "{} in {}{}", uid, sink, ctx),
                     Some(_) => {
                         prop_assert_eq!(own.len(), 1, "{} in {}{}", uid, sink, ctx);
-                        let header = format!("[index.sinks.{}]", edited.sink_name(sink));
+                        let header = format!("[index.sinks.{}]", header_of(sink));
                         prop_assert_eq!(lines.get(own[0] + 1).copied(), Some(header.as_str()), "{}", ctx);
                     }
+                }
+            }
+        }
+        for (uid, name, _) in edited.indexes.iter().filter(|i| i.0.starts_with('a')) {
+            prop_assert_eq!(at(&format!("name = \"{name}\"")).len(), 1, "added {}{}", uid, ctx);
+        }
+
+        let free = at("# end free");
+        let owned = at("# end owned");
+        match layout.end {
+            EndComment::None => prop_assert!(free.is_empty() && owned.is_empty(), "{}", ctx),
+            EndComment::Free => {
+                prop_assert_eq!(free.len(), 1, "{}", ctx);
+                prop_assert_eq!(free[0], lines.len() - 1, "a free comment stays last{}", ctx);
+            }
+            EndComment::Owned => {
+                let (uid, _, used) = base.indexes.last().unwrap();
+                let now = edited.indexes.iter().find(|i| i.0 == *uid);
+                let owner_lives = match used.last() {
+                    Some(sink) => now.is_some_and(|i| i.2.contains(sink)),
+                    None => now.is_some(),
+                };
+                if owner_lives {
+                    prop_assert_eq!(owned.len(), 1, "{}", ctx);
+                    let last_key = if used.is_empty() { "enabled = true" } else { "shards = 1" };
+                    prop_assert_eq!(lines.get(owned[0] - 1).copied(), Some(last_key), "{}", ctx);
+                    if let Some(sink) = used.last() {
+                        let header = format!("[index.sinks.{}]", header_of(sink));
+                        prop_assert_eq!(lines.get(owned[0] - 2).copied(), Some(header.as_str()), "{}", ctx);
+                    }
+                } else {
+                    prop_assert!(owned.is_empty(), "the comment goes with its table{}", ctx);
                 }
             }
         }
