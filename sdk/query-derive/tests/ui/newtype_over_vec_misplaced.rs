@@ -223,12 +223,4 @@ struct FromVecOfWrappedStatus {
     orders: VecOfWrappedStatus,
 }
 
-/// A wrapper around the `Vec` is not looked through.
-#[derive(serde::Deserialize, FlussoRoot)]
-#[flusso(index = "users")]
-struct UserBoxed {
-    id: i32,
-    orders: Box<Vec<Order>>,
-}
-
 fn main() {}

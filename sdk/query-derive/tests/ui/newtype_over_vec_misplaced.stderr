@@ -4,12 +4,6 @@ error: field `orders` is `nested` in the schema — expected a `Vec<…>` of a s
 188 |     orders: Vec<String>,
     |             ^^^
 
-error: field `orders` is `nested` in the schema — expected a `Vec<…>` (a nested array)
-   --> tests/ui/newtype_over_vec_misplaced.rs:231:13
-    |
-231 |     orders: Box<Vec<Order>>,
-    |             ^^^
-
 error[E0080]: evaluation panicked: field `billingAddress` in index `users` is an `object`, not an array — `Addresses` is a newtype over a `Vec<…>`; declare a struct for it
   --> tests/ui/newtype_over_vec_misplaced.rs:29:22
    |
@@ -141,50 +135,3 @@ note: inside `VecOfWrappedStatus::__flusso_check`
     |
 215 |     orders: Vec<WrappedStatus>,
     |             ^^^ the failure occurred here
-
-error[E0277]: `Box<Vec<Order>>` cannot be used as a document field type
-   --> tests/ui/newtype_over_vec_misplaced.rs:231:13
-    |
-231 |     orders: Box<Vec<Order>>,
-    |             ^^^^^^^^^^^^^^^ needs a flusso derive
-    |
-    = help: the trait `FlussoValueMeta` is not implemented for `Box<Vec<Order>>`
-    = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it; a hand-written `FlussoValue` implements `FlussoValueMeta` and calls `flusso_query::embeddable!`
-    = help: the following other types implement trait `FlussoValueMeta`:
-              Address
-              Addresses
-              Batches
-              Billing
-              FromArraysFragment
-              FromFragment
-              FromOrderFragment
-              FromVecOfMaybe
-            and $N others
-
-error[E0599]: no associated item named `__flusso_check` found for struct `Box<Vec<Order>>` in the current scope
-   --> tests/ui/newtype_over_vec_misplaced.rs:231:13
-    |
-231 |     orders: Box<Vec<Order>>,
-    |             ^^^ associated item not found in `Box<Vec<Order>>`
-    |
-note: if you're trying to build a new `Box<Vec<Order>>` consider using one of the following associated functions:
-      Box::<T>::new
-      Box::<T>::try_new
-      Box::<T>::map
-      Box::<T, A>::new_in
-      and $N others
-   --> $RUST/alloc/src/boxed.rs
-    |
-    |       pub fn new(x: T) -> Self {
-    |       ^^^^^^^^^^^^^^^^^^^^^^^^
-...
-    |       pub fn try_new(x: T) -> Result<Self, AllocError> {
-    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-...
-    |       pub fn map<U>(this: Self, f: impl FnOnce(T) -> U) -> Box<U> {
-    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-...
-    | /     pub fn new_in(x: T, alloc: A) -> Self
-    | |     where
-    | |         A: Allocator,
-    | |_____________________^
