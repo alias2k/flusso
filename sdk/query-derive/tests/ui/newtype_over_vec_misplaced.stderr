@@ -1,7 +1,7 @@
 error: field `orders` is `nested` in the schema — expected a `Vec<…>` (a nested array)
-   --> tests/ui/newtype_over_vec_misplaced.rs:133:13
+   --> tests/ui/newtype_over_vec_misplaced.rs:181:13
     |
-133 |     orders: Box<Vec<Order>>,
+181 |     orders: Box<Vec<Order>>,
     |             ^^^
 
 error[E0080]: evaluation panicked: field `billingAddress` in index `users` is an `object`, not an array — `Addresses` is a newtype over a `Vec<…>`; declare a struct for it
@@ -76,10 +76,40 @@ error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested`
 125 |     orders: Statuses,
     |             ^^^^^^^^ evaluation of `_` failed here
 
-error[E0277]: `Box<Vec<Order>>` cannot be used as a document field type
-   --> tests/ui/newtype_over_vec_misplaced.rs:133:13
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array — `Triple` does not read one; declare it `Vec<…>`, or make `Triple` a `#[serde(transparent)]` `FlussoFragment` newtype over a `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:137:13
     |
-133 |     orders: Box<Vec<Order>>,
+137 |     orders: Triple,
+    |             ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is `Vec<Wrapped>`, an array of arrays — `Wrapped` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:148:13
+    |
+148 |     orders: Vec<Wrapped>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `VecOfMaybe`: field `orders` is `Vec<MaybeOrders>`, an array of arrays — `MaybeOrders` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:161:13
+    |
+161 |     orders: VecOfMaybe,
+    |             ^^^^^^^^^^ evaluation of `_` failed inside this call
+    |
+note: inside `VecOfMaybe::__flusso_check`
+   --> tests/ui/newtype_over_vec_misplaced.rs:153:13
+    |
+153 |     orders: Vec<MaybeOrders>,
+    |             ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is `Vec<WrappedStatuses>`, an array of arrays — `WrappedStatuses` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:173:13
+    |
+173 |     orders: Vec<WrappedStatuses>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0277]: `Box<Vec<Order>>` cannot be used as a document field type
+   --> tests/ui/newtype_over_vec_misplaced.rs:181:13
+    |
+181 |     orders: Box<Vec<Order>>,
     |             ^^^^^^^^^^^^^^^ needs a flusso derive
     |
     = help: the trait `FlussoValueMeta` is not implemented for `Box<Vec<Order>>`
@@ -92,13 +122,13 @@ error[E0277]: `Box<Vec<Order>>` cannot be used as a document field type
               FromArraysFragment
               FromFragment
               FromOrderFragment
-              ManyOrders
+              FromVecOfMaybe
             and $N others
 
 error[E0599]: no associated item named `__flusso_check` found for struct `Box<Vec<Order>>` in the current scope
-   --> tests/ui/newtype_over_vec_misplaced.rs:133:13
+   --> tests/ui/newtype_over_vec_misplaced.rs:181:13
     |
-133 |     orders: Box<Vec<Order>>,
+181 |     orders: Box<Vec<Order>>,
     |             ^^^ associated item not found in `Box<Vec<Order>>`
     |
 note: if you're trying to build a new `Box<Vec<Order>>` consider using one of the following associated functions:

@@ -1662,7 +1662,7 @@ fn array_newtype_check(
             {
                 #[allow(unused_imports)]
                 use ::flusso_query::OpaqueWithoutMeta as _;
-                assert!(!::flusso_query::OpaqueProbe::<#ty>::ARRAY, #message);
+                assert!(!::flusso_query::OpaqueProbe::<#ty>::READS_ARRAY, #message);
             }
         });
     }

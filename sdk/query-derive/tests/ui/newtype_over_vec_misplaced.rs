@@ -125,6 +125,54 @@ struct UserStatuses {
     orders: Statuses,
 }
 
+/// Nor does a third level, a newtype in between, or a nullable array.
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct Triple(Vec<Batches>);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserTriple {
+    id: i32,
+    orders: Triple,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct Wrapped(Batches);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserVecOfWrapped {
+    id: i32,
+    orders: Vec<Wrapped>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct VecOfMaybe {
+    orders: Vec<MaybeOrders>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct FromVecOfMaybe {
+    id: i32,
+    #[serde(flatten)]
+    orders: VecOfMaybe,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct WrappedStatuses(Statuses);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserVecOfStatuses {
+    id: i32,
+    #[flusso(opaque)]
+    orders: Vec<WrappedStatuses>,
+}
+
 /// A wrapper around the `Vec` is not looked through.
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]

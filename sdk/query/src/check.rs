@@ -493,6 +493,12 @@ pub trait FlussoValueMeta {
     /// `#[derive(FlussoFragment)]` sets it; leave it unset in a hand-written
     /// impl, where nothing checks it against what the type reads.
     const ARRAY: bool = false;
+
+    /// Whether the type reads a JSON array at all: a newtype over a `Vec<…>`,
+    /// or over a type that does, through any `Option`. A `Vec<…>` of such a
+    /// type is an array of arrays, which no schema field is. Off by default;
+    /// `#[derive(FlussoFragment)]` sets it.
+    const READS_ARRAY: bool = false;
 }
 
 /// Lets a type with a hand-written [`FlussoValueMeta`] sit in a
@@ -567,6 +573,8 @@ pub trait OpaqueWithoutMeta {
     const ARRAY: bool = false;
     /// No metadata, so not known to be a sub-document.
     const ARRAY_ELEMENT: bool = false;
+    /// No metadata, so not known to read an array.
+    const READS_ARRAY: bool = false;
 }
 
 impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
@@ -584,7 +592,10 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const ARRAY: bool = T::ARRAY;
     /// Whether a `Vec` of the type reads one array of sub-documents: the type
     /// is a sub-document and reads no array itself.
-    pub const ARRAY_ELEMENT: bool = !T::ARRAY && contains_nested(T::KINDS);
+    pub const ARRAY_ELEMENT: bool = !T::READS_ARRAY && contains_nested(T::KINDS);
+    /// Whether the type reads a JSON array at all (see
+    /// [`FlussoValueMeta::READS_ARRAY`]).
+    pub const READS_ARRAY: bool = T::READS_ARRAY;
 }
 
 const fn contains_nested(kinds: &[KindTag]) -> bool {

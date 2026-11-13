@@ -166,21 +166,42 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
 /// sub-document to walk. The element has to be a sub-document that reads no
 /// array itself (`OpaqueProbe::ARRAY_ELEMENT`): a `Vec` of an array newtype is
 /// an array of arrays, and a `Vec` of a value type reads no sub-document.
+///
+/// `READS_ARRAY` is the wider fact a `Vec<…>` of the newtype is refused on:
+/// an array anywhere down the chain of newtypes, `Option` or not.
 fn newtype_array(field: &DocField) -> Option<TokenStream> {
-    if field.ident.is_some() || field.skip || option_inner(field.ty).is_some() {
+    if field.ident.is_some() || field.skip {
         return None;
     }
-    let ty = checked_type(field, false)?;
-    let reads = if vec_inner(field.ty).is_some() {
-        quote! { ARRAY_ELEMENT }
+    let nullable = option_inner(field.ty).is_some();
+    let inner = strip_option(field.ty);
+    let in_vec = vec_inner(inner).is_some();
+    let Some(ty) = checked_type(field, false) else {
+        return in_vec.then(|| quote! { const READS_ARRAY: bool = true; });
+    };
+    let (array, reads) = if in_vec {
+        (quote! { ARRAY_ELEMENT }, quote! { true })
     } else {
-        quote! { ARRAY }
+        (
+            quote! { ARRAY },
+            quote! { ::flusso_query::OpaqueProbe::<#ty>::READS_ARRAY },
+        )
+    };
+    let array = if nullable {
+        quote! { false }
+    } else {
+        quote! { ::flusso_query::OpaqueProbe::<#ty>::#array }
     };
     Some(quote! {
         const ARRAY: bool = {
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
-            ::flusso_query::OpaqueProbe::<#ty>::#reads
+            #array
+        };
+        const READS_ARRAY: bool = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            #reads
         };
     })
 }
@@ -367,7 +388,7 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
                     // crate (`clippy::assertions_on_constants`).
                     assert!(
                         !(::flusso_query::exists(level, #key)
-                            && ::flusso_query::OpaqueProbe::<#element>::ARRAY),
+                            && ::flusso_query::OpaqueProbe::<#element>::READS_ARRAY),
                         #nested_msg
                     );
                 }
