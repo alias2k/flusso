@@ -220,8 +220,14 @@ fn split_end(trailing: &str) -> Split {
     let lines: Vec<&str> = trailing.split_inclusive('\n').collect();
     let below_len = lines.iter().take_while(|l| !l.trim().is_empty()).count();
     let (below, free) = lines.split_at(below_len);
+    let mut below = below.concat();
+    // A file with no final newline: the comment still ends its line, so the
+    // table that comes after it starts on its own.
+    if !below.is_empty() && !below.ends_with('\n') {
+        below.push('\n');
+    }
     Split {
-        below: below.concat(),
+        below,
         free: free.concat(),
         lead: String::new(),
     }
@@ -586,6 +592,7 @@ impl Patcher<'_> {
         for &id in was {
             parts.insert(id, split(stash.get(id)?.as_deref().unwrap_or("")));
         }
+        let end_trailing = trailing;
         let end = split_end(trailing);
         let end_free = end.free;
         // What follows a table's last key and is its own.
@@ -662,6 +669,10 @@ impl Patcher<'_> {
         let mut trailing = own_trailing.get(&prev).cloned().unwrap_or_default();
         trailing.push_str(&pending);
         trailing.push_str(&end_free);
+        let unterminated = !end_trailing.is_empty() && !end_trailing.ends_with('\n');
+        if unterminated && trailing.ends_with('\n') {
+            trailing.pop();
+        }
         Some(Prefixes { headers, trailing })
     }
 }

@@ -924,6 +924,41 @@ fn a_comment_ending_the_file_below_the_last_table_is_that_tables() {
     );
 }
 
+#[test]
+fn a_comment_ending_a_file_with_no_final_newline_stays_its_tables() {
+    let base = format!("{CONFIG}# end of file comment");
+    let moved = save_config_as(&base, Some(vec![Some(2), Some(0), Some(1)]), |c| {
+        let orders = c.index.pop().unwrap();
+        c.index.insert(0, orders);
+    });
+    assert!(
+        moved
+            .text
+            .contains("enabled = true\n# end of file comment\n\n"),
+        "{}",
+        moved.text
+    );
+    let removed = save_config_as(&moved.text, Some(vec![Some(0), Some(1)]), |c| {
+        c.index.pop();
+    });
+    assert!(
+        removed.text.contains("# end of file comment"),
+        "{}",
+        removed.text
+    );
+    assert_eq!(removed.dropped, 0);
+    let unchanged = save_config_as(&base, Some(vec![Some(0), Some(1), Some(2)]), |c| {
+        c.index[0].enabled = !c.index[0].enabled;
+    });
+    assert!(
+        unchanged
+            .text
+            .ends_with("enabled = true\n# end of file comment"),
+        "{}",
+        unchanged.text
+    );
+}
+
 // A malformed identity is no identity: it pairs by name.
 
 #[test]

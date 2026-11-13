@@ -141,6 +141,7 @@ A field moved into another list (a different join or object, which only Code mod
 
 - **Comments that could not be kept.** A comment inside a value that had to be rewritten (a flow list `[…]` with a comment in it, an item the save can't follow line by line), on a field moved into another list, or on a field, entry or sink matched by name that may have been renamed, is dropped. Matched by name, a removed one and a renamed one look the same, so both count. The review marks the file and says above its diff how many comments it loses.
 - **A file written in the designer's own form.** A file whose layout the save can't follow (a top level written as a flow mapping `{…}`, for instance), or whose result wouldn't read back as exactly the schema being saved, is written in the designer's own form instead, without its comments. The review marks it and says so above its diff.
+- **Windows line endings.** A `flusso.toml` saved with CRLF line endings is written back with LF, comments kept. A CRLF `*.schema.yml` keeps its line endings through a value edit; renaming a field writes it in the designer's own form, and the review says so.
 
 Both show before anything is written. A file the designer creates is written in its own form.
 
