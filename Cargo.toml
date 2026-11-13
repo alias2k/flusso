@@ -107,6 +107,7 @@ serde_yaml = { version = "0.9.*" }
 thiserror = { version = "2.0.*" }
 anyhow = { version = "1.0.*", features = ["backtrace"] }
 toml = { version = "1.2.*", features = ["preserve_order"] }
+toml_edit = { version = "0.25.*" }
 nutype = { version = "0.8.*", features = ["serde", "regex"] }
 regex = { version = "1.13.*" }
 bon = { version = "3.*" }

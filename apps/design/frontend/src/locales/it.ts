@@ -118,6 +118,10 @@ export const it: Record<string, string> = {
   "diff.opDelete": "Elimina",
   "diff.movedFrom": "Spostato da {path}",
   "diff.warnOutside": "Questo percorso è fuori dalla cartella di configurazione.",
+  "diff.layoutReset":
+    "Non è stato possibile mantenere l'impaginazione di questo file: viene scritto nella forma del designer, senza i suoi commenti.",
+  "diff.commentsDropped":
+    "{n, plural, one {Non è stato possibile mantenere # commento di questo file: ciò che descrive esiste ancora, ma è stato riscritto nella forma del designer.} other {Non è stato possibile mantenere # commenti di questo file: ciò che descrivono esiste ancora, ma è stato riscritto nella forma del designer.}}",
   "diff.write": "{n, plural, one {Scrivi # file} other {Scrivi # file}}",
   "diff.unchanged": "{n, plural, one {# riga invariata} other {# righe invariate}}",
   "diff.validating": "Convalida…",

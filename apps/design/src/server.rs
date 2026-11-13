@@ -184,8 +184,11 @@ async fn value(Json(request): Json<api::ValueRequest>) -> Response {
     Json(api::read_value(&request)).into_response()
 }
 
-async fn preview(Json(request): Json<api::PreviewRequest>) -> Result<Response, ApiError> {
-    let response = api::build_preview(request)?;
+async fn preview(
+    State(state): State<AppState>,
+    Json(request): Json<api::PreviewRequest>,
+) -> Result<Response, ApiError> {
+    let response = api::build_preview(&state.config_path, request)?;
     Ok(Json(response).into_response())
 }
 

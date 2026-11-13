@@ -323,6 +323,33 @@ export interface FileOp {
   /// Content for upsert/move (raw wins over schema).
   schema?: IndexSchema;
   raw?: string;
+  /// The text to write `schema` into, keeping its comments (the Code-mode
+  /// buffer); absent, the file on disk is used.
+  base?: string;
+  /// Which field of the base each field of `schema` is, so a comment follows
+  /// its field through a rename or a move.
+  identity?: SchemaIdentity;
+}
+
+/// One field's name and client-only uid, with its child fields: what the save
+/// pairs a field with its old self by (`model/ids.ts`).
+export interface FieldId {
+  name: string;
+  uid: string;
+  fields: FieldId[];
+}
+
+/// The fields of the model a base text reads as, and of the model being saved.
+export interface SchemaIdentity {
+  before: FieldId[];
+  after: FieldId[];
+}
+
+/// The `[[index]]` names of the file on disk, and for each entry being saved
+/// its position there (`null`: a new entry).
+export interface ConfigIdentity {
+  before: string[];
+  after: (number | null)[];
 }
 
 /// One op resolved against disk, for the review. `write` covers create + modify.
@@ -337,6 +364,10 @@ export interface OpDiff {
   changed: boolean;
   /// A stable warning code (e.g. "outside_base"); the UI translates it.
   warning?: string;
+  /// Set when the write could not keep the file's comments and formatting.
+  notice?: "layout_reset";
+  /// How many comments the write drops although what they describe still exists.
+  dropped?: number;
 }
 
 export interface MovedFile {
@@ -559,11 +590,17 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(stripIds(config)),
     }).then((r) => json<CatalogResponse>(r)),
-  preview: (index: string, schema: IndexSchema) =>
+  /// `file` names the schema file (config-relative) or the Code-mode text the
+  /// returned `yaml` is written into, so it shows what a save would write.
+  preview: (
+    index: string,
+    schema: IndexSchema,
+    file: { path?: string; base?: string; identity?: SchemaIdentity } = {},
+  ) =>
     fetch("/api/preview", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ index, schema: stripUids(schema) }),
+      body: JSON.stringify({ index, schema: stripUids(schema), ...file }),
     }).then((r) => json<PreviewResponse>(r)),
   validate: (config: ConfigToml, indexes: { name: string; schema: IndexSchema }[]) =>
     fetch("/api/validate", {
@@ -580,16 +617,16 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ config: stripIds(config), name, schema: stripUids(schema), id }),
     }).then((r) => json<SampleResponse>(r)),
-  diff: (config: ConfigToml, ops: FileOp[]) =>
+  diff: (config: ConfigToml, ops: FileOp[], identity?: ConfigIdentity) =>
     fetch("/api/diff", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids) }),
+      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), identity }),
     }).then((r) => json<OpDiff[]>(r)),
-  save: (config: ConfigToml, ops: FileOp[], skip: string[] = []) =>
+  save: (config: ConfigToml, ops: FileOp[], skip: string[] = [], identity?: ConfigIdentity) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), skip }),
+      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), skip, identity }),
     }).then((r) => json<SaveResult>(r)),
 };

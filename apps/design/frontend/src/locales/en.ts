@@ -114,6 +114,10 @@ export const en: Record<string, string> = {
   "diff.opDelete": "Delete",
   "diff.movedFrom": "Moved from {path}",
   "diff.warnOutside": "This path resolves outside the config directory.",
+  "diff.layoutReset":
+    "This file's layout could not be kept: it is written in the designer's own form, without its comments.",
+  "diff.commentsDropped":
+    "{n, plural, one {# comment in this file could not be kept: what it describes still exists, but was rewritten in the designer's own form.} other {# comments in this file could not be kept: what they describe still exists, but was rewritten in the designer's own form.}}",
   "diff.write": "{n, plural, one {Write # file} other {Write # files}}",
   "diff.unchanged": "{n, plural, one {# unchanged line} other {# unchanged lines}}",
   "diff.validating": "Validating…",

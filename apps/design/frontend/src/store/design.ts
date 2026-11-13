@@ -1,8 +1,17 @@
-// The edited document and everything scoped to it. Only `doc` is under undo/redo.
+// The edited document and everything scoped to it. Only `doc` and the Code-mode
+// `texts` are under undo/redo.
 
 import { create, useStore } from "zustand";
 import { temporal } from "zundo";
-import type { CatalogResponse, ConfigToml, DiagnosticDto, IndexSchema, PreviewResponse, Project } from "../api";
+import type {
+  CatalogResponse,
+  ConfigToml,
+  DiagnosticDto,
+  FieldId,
+  IndexSchema,
+  PreviewResponse,
+  Project,
+} from "../api";
 import { cloneJson, parseJson } from "../model/exact";
 import { dropPendingValues, flushPendingValues } from "../model/pending";
 import { adoptIds, stampIds, stripUids, uidSkeleton } from "../model/ids";
@@ -14,6 +23,13 @@ import type { Selection } from "../state";
 export interface Doc {
   config: ConfigToml;
   schemas: Record<string, IndexSchema>;
+}
+
+/// A Code-mode text a save writes its schema into, and the ids of the fields
+/// it reads as (so the save can tell which field each one is).
+export interface CodeText {
+  text: string;
+  ids: FieldId[];
 }
 
 export const emptySchema = (table: string, pk?: string): IndexSchema => ({
@@ -109,6 +125,11 @@ interface DesignState {
   catalog: CatalogResponse | null;
   doc: Doc | null;
   saved: string; // JSON of the last loaded/saved doc
+  /// Per index, the Code-mode text its schema was last read from, when that
+  /// is newer than the file: a save writes the schema into this text instead
+  /// of the file, so comments typed in Code mode are kept. Under undo with
+  /// `doc`, so undoing a comment typed in Code mode takes it back.
+  texts: Record<string, CodeText>;
   active: string;
   selection: Selection;
   collapsed: Set<string>;
@@ -121,6 +142,9 @@ interface DesignState {
 
   setCatalog: (catalog: CatalogResponse | null) => void;
   setSaved: (saved: string) => void;
+  setText: (index: string, text: CodeText) => void;
+  /// Forget the Code-mode texts of `indexes` (all when omitted): the file holds them now.
+  clearTexts: (indexes?: string[]) => void;
   setPreview: (preview: PreviewResponse | null) => void;
   setDiagnostics: (diagnostics: DiagnosticDto[] | null) => void;
   setActive: (active: string) => void;
@@ -153,6 +177,7 @@ export const useDesignStore = create<DesignState>()(
       catalog: null,
       doc: null,
       saved: "",
+      texts: {},
       active: "config",
       selection: null,
       collapsed: new Set<string>(),
@@ -164,6 +189,19 @@ export const useDesignStore = create<DesignState>()(
       setSaved: (saved) => {
         persistUids(saved);
         set({ saved });
+      },
+      setText: (index, text) => set((s) => ({ texts: { ...s.texts, [index]: text } })),
+      // Not an edit: the file holds the text now, so it leaves no undo step.
+      clearTexts: (indexes) => {
+        const history = useDesignStore.temporal.getState();
+        history.pause();
+        set((s) => {
+          if (!indexes) return { texts: {} };
+          const texts = { ...s.texts };
+          for (const name of indexes) delete texts[name];
+          return { texts };
+        });
+        history.resume();
       },
       setPreview: (preview) => set({ preview }),
       setDiagnostics: (diagnostics) => set({ diagnostics }),
@@ -187,6 +225,7 @@ export const useDesignStore = create<DesignState>()(
           project,
           doc,
           saved,
+          texts: {},
           ...(resetActive ? { active: project.indexes[0]?.name ?? "config" } : {}),
         });
         useDesignStore.temporal.getState().clear();
@@ -219,13 +258,21 @@ export const useDesignStore = create<DesignState>()(
 
         // Re-key renamed schemas and drop removed ones, else a renamed index's schema is lost on save.
         const schemas = { ...doc.schemas };
+        const texts = { ...get().texts };
         for (const [oldName, newName] of renames) {
           if (oldName in schemas) {
             schemas[newName] = schemas[oldName];
             delete schemas[oldName];
           }
+          if (oldName in texts) {
+            texts[newName] = texts[oldName];
+            delete texts[oldName];
+          }
         }
-        for (const name of removed) delete schemas[name];
+        for (const name of removed) {
+          delete schemas[name];
+          delete texts[name];
+        }
 
         // A renamed index whose file still tracks the default name follows the
         // rename (Create/Duplicate both derive `<name>.schema.yml`); a custom
@@ -241,7 +288,7 @@ export const useDesignStore = create<DesignState>()(
         });
 
         const active2 = renames.has(active) ? renames.get(active)! : removed.includes(active) ? "config" : active;
-        set({ doc: { config: { ...next, index }, schemas }, active: active2 });
+        set({ doc: { config: { ...next, index }, schemas }, texts, active: active2 });
       },
 
       openIndex: (name) => set({ active: name, selection: null, diagnostics: null }),
@@ -305,7 +352,7 @@ export const useDesignStore = create<DesignState>()(
           active === "config" || doc.config.index?.some((e) => e.name === active)
             ? active
             : (doc.config.index?.[0]?.name ?? "config");
-        set({ doc, selection: null, active: active2 });
+        set({ doc, texts: {}, selection: null, active: active2 });
       },
 
       loadCollapsed: (index) => {
@@ -342,10 +389,10 @@ export const useDesignStore = create<DesignState>()(
       clearFocus: () => set({ focus: null }),
     }),
     {
-      // Track only `doc`; reference equality keeps no-op edits and selection/active changes off the stack.
+      // Track only `doc` and `texts`; reference equality keeps no-op edits and selection/active changes off the stack.
       limit: HISTORY_LIMIT,
-      partialize: (s) => ({ doc: s.doc }),
-      equality: (a, b) => a.doc === b.doc,
+      partialize: (s) => ({ doc: s.doc, texts: s.texts }),
+      equality: (a, b) => a.doc === b.doc && a.texts === b.texts,
     },
   ),
 );

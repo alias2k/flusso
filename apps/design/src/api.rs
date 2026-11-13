@@ -30,7 +30,7 @@ use source_postgres::{
     PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
 };
 
-use crate::codegen;
+use crate::keep::{self, ConfigIdentity, Notice, Saved, SchemaIdentity};
 use crate::preview::{self, Preview};
 
 /// The whole project as the editor opens it: the parsed `flusso.toml` plus every
@@ -328,13 +328,26 @@ pub struct PreviewRequest {
     pub index: IndexName,
     /// The schema being authored.
     pub schema: IndexSchema,
+    /// The index's schema file, relative to the config: `yaml` is the schema
+    /// written into it, keeping its comments.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// The text to write the schema into instead of the file (see
+    /// [`FileOp::base`]).
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Which field of the base each field of `schema` is (see
+    /// [`FileOp::identity`]).
+    #[serde(default)]
+    pub identity: Option<SchemaIdentity>,
 }
 
 /// The previewed document/mapping plus the exact YAML that would be written and
 /// whether it round-trips through the parser (a self-check on codegen).
 #[derive(Debug, Serialize)]
 pub struct PreviewResponse {
-    /// The `*.schema.yml` text codegen would write.
+    /// The `*.schema.yml` text a save would write: the schema written into its
+    /// file (or `base`), else the canonical form.
     pub yaml: String,
     /// Derived mapping + document tree.
     pub preview: Preview,
@@ -404,9 +417,17 @@ fn compile_index(
     })
 }
 
-/// Build a preview for `request`.
-pub fn build_preview(request: PreviewRequest) -> Result<PreviewResponse> {
-    let yaml = codegen::schema_to_yaml(&request.schema)?;
+/// Build a preview for `request`, reading its schema file next to `config_path`.
+pub fn build_preview(config_path: &Path, request: PreviewRequest) -> Result<PreviewResponse> {
+    let on_disk = match (&request.base, &request.path) {
+        (None, Some(path)) => {
+            let base_dir = config_path.parent().unwrap_or(Path::new("."));
+            std::fs::read_to_string(resolve(base_dir, path)).ok()
+        }
+        _ => None,
+    };
+    let base = request.base.as_deref().or(on_disk.as_deref());
+    let yaml = keep::schema_yaml(base, &request.schema, request.identity.as_ref())?.text;
     let preview = preview::preview(&request.schema, &request.index);
     let (parse_error, differs_at) = match SchemaYaml::try_parse(&yaml)
         .map_err(|e| e.to_string())
@@ -507,6 +528,15 @@ pub struct FileOp {
     /// Raw YAML to write verbatim instead of rendering `schema`.
     #[serde(default)]
     pub raw: Option<String>,
+    /// The text to write `schema` into, keeping its comments: the Code-mode
+    /// buffer the schema was last read from. Absent, the file on disk is used.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Which field of the base each field of `schema` is, so a comment
+    /// follows its field through a rename or a move. Absent, or not matching
+    /// the base, fields pair by name.
+    #[serde(default)]
+    pub identity: Option<SchemaIdentity>,
 }
 
 /// A full save/diff request: the deployment config plus the schema-file ops.
@@ -521,6 +551,10 @@ pub struct SaveRequest {
     /// default (apply everything).
     #[serde(default)]
     pub skip: Vec<String>,
+    /// Which `[[index]]` entry of the file on disk each entry of `config` is.
+    /// Absent, or not matching the file, entries pair by name.
+    #[serde(default)]
+    pub identity: Option<ConfigIdentity>,
 }
 
 /// A file that was moved on save.
@@ -577,18 +611,34 @@ pub struct OpDiff {
     /// resolves outside the config directory); the client translates it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Set when the write could not keep the file's comments and formatting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<Notice>,
+    /// How many comments the write drops although what they describe still
+    /// exists (see [`Saved::dropped`]).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dropped: usize,
 }
 
-/// Render one op's file content — the raw escape hatch wins, else codegen.
-fn render_op(op: &FileOp) -> Result<String> {
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Render one op's file content: the raw escape hatch wins, else the schema
+/// written into its base (the op's own, else `on_disk`).
+fn render_op(op: &FileOp, on_disk: Option<&str>) -> Result<Saved> {
     match &op.raw {
-        Some(raw) => Ok(raw.clone()),
+        Some(raw) => Ok(Saved {
+            text: raw.clone(),
+            notice: None,
+            dropped: 0,
+        }),
         None => {
             let schema = op
                 .schema
                 .as_ref()
                 .context("upsert/move op needs a schema or raw content")?;
-            codegen::schema_to_yaml(schema)
+            keep::schema_yaml(op.base.as_deref().or(on_disk), schema, op.identity.as_ref())
         }
     }
 }
@@ -600,14 +650,25 @@ fn plan(config_path: &Path, request: &SaveRequest) -> Result<Vec<OpDiff>> {
     let base = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut plan = Vec::with_capacity(request.ops.len() + 1);
 
-    let next = codegen::config_to_toml(&request.config)?;
-    let current = std::fs::read_to_string(config_path).unwrap_or_default();
+    let on_disk = std::fs::read_to_string(config_path).ok();
+    let Saved {
+        text: next,
+        notice,
+        dropped,
+    } = keep::config_toml(
+        on_disk.as_deref(),
+        &request.config,
+        request.identity.as_ref(),
+    )?;
+    let current = on_disk.unwrap_or_default();
     plan.push(OpDiff {
         op: DiffOp::Write,
         path: config_path.display().to_string(),
         from: None,
         changed: current != next,
         warning: None,
+        notice,
+        dropped,
         current,
         next,
     });
@@ -616,12 +677,19 @@ fn plan(config_path: &Path, request: &SaveRequest) -> Result<Vec<OpDiff>> {
         match op.kind {
             OpKind::Upsert => {
                 let dest = resolve(&base, &op.path);
-                let next = render_op(op)?;
-                let current = std::fs::read_to_string(&dest).unwrap_or_default();
+                let on_disk = std::fs::read_to_string(&dest).ok();
+                let Saved {
+                    text: next,
+                    notice,
+                    dropped,
+                } = render_op(op, on_disk.as_deref())?;
+                let current = on_disk.unwrap_or_default();
                 plan.push(OpDiff {
                     op: DiffOp::Write,
                     changed: current != next,
                     warning: out_of_tree(&base, &dest),
+                    notice,
+                    dropped,
                     path: dest.display().to_string(),
                     from: None,
                     current,
@@ -634,27 +702,41 @@ fn plan(config_path: &Path, request: &SaveRequest) -> Result<Vec<OpDiff>> {
                     op.from.as_deref().context("move op needs a `from` path")?,
                 );
                 let dest = resolve(&base, &op.path);
-                let next = render_op(op)?;
                 // Source already gone (a prior save, or an external move) — there's
                 // nothing to relocate, so degrade to a plain write at the destination.
                 if from.exists() {
-                    let current = std::fs::read_to_string(&from).unwrap_or_default();
+                    let on_disk = std::fs::read_to_string(&from).ok();
+                    let Saved {
+                        text: next,
+                        notice,
+                        dropped,
+                    } = render_op(op, on_disk.as_deref())?;
                     plan.push(OpDiff {
                         op: DiffOp::Move,
                         from: Some(from.display().to_string()),
                         changed: true,
                         warning: out_of_tree(&base, &dest),
+                        notice,
+                        dropped,
                         path: dest.display().to_string(),
-                        current,
+                        current: on_disk.unwrap_or_default(),
                         next,
                     });
                 } else {
-                    let current = std::fs::read_to_string(&dest).unwrap_or_default();
+                    let on_disk = std::fs::read_to_string(&dest).ok();
+                    let Saved {
+                        text: next,
+                        notice,
+                        dropped,
+                    } = render_op(op, on_disk.as_deref())?;
+                    let current = on_disk.unwrap_or_default();
                     plan.push(OpDiff {
                         op: DiffOp::Write,
                         from: None,
                         changed: current != next,
                         warning: out_of_tree(&base, &dest),
+                        notice,
+                        dropped,
                         path: dest.display().to_string(),
                         current,
                         next,
@@ -671,6 +753,8 @@ fn plan(config_path: &Path, request: &SaveRequest) -> Result<Vec<OpDiff>> {
                         from: None,
                         changed: true,
                         warning: None,
+                        notice: None,
+                        dropped: 0,
                         current,
                         next: String::new(),
                     });
