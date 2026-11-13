@@ -82,7 +82,7 @@ fn example_value(field: &ResolvedField) -> Value {
         };
     }
     let value = example_scalar(&field.mapping.mapping_type);
-    // An `ids` aggregate is a flat array of keys.
+    // An array field (an array column, an `ids` aggregate, an array script).
     if field.array {
         Value::Array(vec![value.clone(), value])
     } else {

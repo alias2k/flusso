@@ -66,6 +66,9 @@ export interface Column {
   subfields?: boolean;
   // `false` stores a json field without indexing it; omitted means indexed.
   indexed?: boolean;
+  // `true` reads a column holding an array of `ty` (`text[]`, a json array);
+  // omitted means a single value. Its `default` is then a list.
+  array?: boolean;
 }
 
 /// The leaf types a script field may return.
@@ -624,7 +627,7 @@ export interface ExpressionCheck {
 
 /// Where a typed value goes; each has the schema parser's own rules (a
 /// `default` takes only a scalar).
-export type ValueSlot = "constant" | "default" | "option";
+export type ValueSlot = "constant" | "default" | "array_default" | "option";
 
 /// A value typed into the inspector, read the way its saved file reads it: the
 /// `GenericValue` to store, or why the text was refused.
@@ -639,6 +642,8 @@ export interface ValueCheck {
     | { code: "out_of_range"; number: string }
     | { code: "too_deep"; limit: number }
     | { code: "not_scalar" }
+    | { code: "not_a_list" }
+    | { code: "null_element" }
     | { code: "reads_back_differently" };
 }
 

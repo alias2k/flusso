@@ -239,7 +239,12 @@ export function GenericInput({
 }) {
   const { t } = useT();
   const field = useContext(ValueTargetContext);
-  const where = slot === "constant" ? "" : slot === "default" ? ".default" : `.options.${optionKey ?? ""}`;
+  const where =
+    slot === "constant"
+      ? ""
+      : slot === "default" || slot === "array_default"
+        ? ".default"
+        : `.options.${optionKey ?? ""}`;
   const target = { id: `${field.id}/${slot}/${row ?? optionKey ?? ""}`, label: `${field.label}${where}` };
   const external = value === undefined ? "" : genericText(value);
   const [text, setText] = useState(external);
@@ -426,6 +431,10 @@ function valueProblem(t: Translate, problem: ValueProblem): string {
       return t("value.tooDeep", { limit: problem.limit });
     case "not_scalar":
       return t("value.notScalar");
+    case "not_a_list":
+      return t("value.notAList");
+    case "null_element":
+      return t("value.nullElement");
     case "reads_back_differently":
       return t("value.readsBack");
     case "unchecked":

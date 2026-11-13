@@ -16,10 +16,11 @@ export function toggleColumn(
   on: boolean,
   ty: FlussoType = "keyword",
   nullable = true,
+  sqlType?: string,
 ): IndexSchema {
   const fields = nodeFields(schema, path);
   if (on) {
-    return withNodeFields(schema, path, [...fields, columnField(column, { column, ty, nullable })]);
+    return withNodeFields(schema, path, [...fields, columnField(column, catalogColumn(column, ty, nullable, sqlType))]);
   }
   const next = fields.filter(
     (f) => !("column" in f.source && typeof f.source.column.ty === "string" && f.source.column.column === column),
@@ -36,7 +37,7 @@ export function addField(schema: IndexSchema, path: number[], field: Field): Ind
 export function includeColumns(
   schema: IndexSchema,
   path: number[],
-  columns: { name: string; ty?: FlussoType; nullable?: boolean }[],
+  columns: { name: string; ty?: FlussoType; nullable?: boolean; sqlType?: string }[],
 ): IndexSchema {
   const fields = nodeFields(schema, path);
   const present = new Set(
@@ -46,8 +47,18 @@ export function includeColumns(
   );
   const added = columns
     .filter((c) => !present.has(c.name))
-    .map((c) => columnField(c.name, { column: c.name, ty: c.ty ?? "keyword", nullable: c.nullable ?? true }));
+    .map((c) => columnField(c.name, catalogColumn(c.name, c.ty ?? "keyword", c.nullable ?? true, c.sqlType)));
   return withNodeFields(schema, path, [...fields, ...added]);
+}
+
+/// Whether a catalog type (as `format_type` spells it) is an array: `text[]`.
+export function holdsArray(sqlType?: string): boolean {
+  return sqlType?.trim().endsWith("[]") ?? false;
+}
+
+/// A column included from the catalog: an array type reads as `array: true`.
+function catalogColumn(column: string, ty: FlussoType, nullable: boolean, sqlType?: string): Column {
+  return holdsArray(sqlType) ? { column, ty, nullable, array: true } : { column, ty, nullable };
 }
 
 /// Remove the given rows from the node in one pass — matches a catalog-backed

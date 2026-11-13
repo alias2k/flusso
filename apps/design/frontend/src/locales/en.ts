@@ -307,6 +307,10 @@ export const en: Record<string, string> = {
   "inspector.scriptHint":
     "Rhai. `this` is the object at this level (one element inside a has_many), `root` the whole document. Return the field's type, or () for null.",
   "inspector.scriptArray": "Returns an array",
+  "inspector.columnArray": "Array",
+  "inspector.columnArrayOn":
+    "The column holds an array (text[], a json array): every element is indexed, nulls are dropped, a lone value is wrapped. Transforms apply to each element; a default is a list.",
+  "inspector.columnArrayOff": "The column holds a single value.",
   "inspector.scriptEmpty": "Write the script that computes this field.",
   "inspector.softDelete": "soft delete",
   "inspector.documentField": "document field",
@@ -346,6 +350,8 @@ export const en: Record<string, string> = {
   "value.savedAs": "Saved as {value}",
   "value.tooDeep": "Lists and objects nest deeper than {limit} levels here, more than the schema file reads back.",
   "value.notScalar": "A default takes a single value: text, a number, true, false or null, not a list or an object.",
+  "value.notAList": 'An array field\'s default is a list, like ["general"].',
+  "value.nullElement": "A default list can't hold null: nulls are dropped from an array field.",
   "value.unchecked": "Could not be checked, so it is not in the schema yet. Save tries again.",
   "value.unreadSave":
     "Not saved: the value typed in {fields} could not be checked. Check that the designer is still running, then save again.",

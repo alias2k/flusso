@@ -100,7 +100,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
 
   const includeColumn = (c: ColumnShape) => {
     // The new scalar appends to the container, so its index is the current count.
-    apply((s) => edit.toggleColumn(s, node.path, c.name, true, c.suggested_type ?? "keyword", c.nullable));
+    apply((s) => edit.toggleColumn(s, node.path, c.name, true, c.suggested_type ?? "keyword", c.nullable, c.sql_type));
     select({ kind: "field", path: node.path, index: fields.length });
   };
   const excludeColumn = (c: ColumnShape, inc: LeafField) => {
@@ -298,7 +298,12 @@ export function DocNodeView({ data, selected }: NodeProps) {
                             : edit.includeColumns(
                                 s,
                                 node.path,
-                                cols.map((c) => ({ name: c.name, ty: c.suggested_type, nullable: c.nullable })),
+                                cols.map((c) => ({
+                                  name: c.name,
+                                  ty: c.suggested_type,
+                                  nullable: c.nullable,
+                                  sqlType: c.sql_type,
+                                })),
                               ),
                         )
                       }

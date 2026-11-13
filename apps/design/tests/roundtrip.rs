@@ -19,6 +19,7 @@
 //!  - `distinct` only on an aggregate over `through`,
 //!  - `subfields: false` only on `text`/`keyword`/`uuid`, `indexed: false` only
 //!    on `json` and joins (none of which get generated `options`),
+//!  - an `array` column's `default` is a list of non-null scalars,
 //!  - values (`constant`, `default`, `options`) are ones the parser can produce:
 //!    `Null`, `Bool`, `BigInt`, a `Decimal` read from an `f64` or an integer past
 //!    `i64`, `String` (including ones that look like another kind), and, outside
@@ -237,6 +238,19 @@ fn default() -> impl Strategy<Value = Option<GenericValue>> {
     )
 }
 
+/// An array column's default: a list of non-null scalars, as the loader
+/// accepts on any array field.
+fn array_default() -> impl Strategy<Value = Option<GenericValue>> {
+    prop::option::of(
+        prop::collection::vec(
+            scalar_value()
+                .prop_filter("a list holds no null", |v| !matches!(v, GenericValue::Null)),
+            0..=2,
+        )
+        .prop_map(GenericValue::Array),
+    )
+}
+
 fn value() -> BoxedStrategy<GenericValue> {
     scalar_value()
         .prop_recursive(2, 8, 3, |inner| {
@@ -419,15 +433,29 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
         any::<bool>(),
         any::<bool>(),
         default(),
+        any::<bool>(),
+        array_default(),
     )
         .prop_map(
-            |(ty, column, nullable, transforms, variants, bare, stored, default)| {
+            |(
+                ty,
+                column,
+                nullable,
+                transforms,
+                variants,
+                bare,
+                stored,
+                default,
+                array,
+                array_default,
+            )| {
                 // A declared order only rides an `enum`; every other type has none.
                 let enum_order = if matches!(ty, FlussoType::Enum) {
                     variants
                 } else {
                     Vec::new()
                 };
+                let default = if array { array_default } else { default };
                 FieldSource::Column(Column {
                     column,
                     nullable,
@@ -441,7 +469,7 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
                         )),
                     indexed: !(stored && matches!(ty, FlussoType::Json)),
                     ty,
-                    array: false,
+                    array,
                 })
             },
         )
@@ -514,23 +542,34 @@ fn custom_source() -> BoxedStrategy<FieldSource> {
         1..=2,
     );
     let os = prop::sample::select(vec!["keyword", "text", "integer"]);
-    (pg, os, col(), any::<bool>(), default())
-        .prop_map(|(postgres, opensearch, column, nullable, default)| {
-            FieldSource::Column(Column {
-                column,
-                ty: FlussoType::Custom {
-                    postgres: postgres.into_iter().map(String::from).collect(),
-                    opensearch: opensearch.to_string(),
-                },
-                nullable,
-                transforms: Vec::new(),
-                default,
-                enum_order: Vec::new(),
-                subfields: true,
-                indexed: true,
-                array: false,
-            })
-        })
+    (
+        pg,
+        os,
+        col(),
+        any::<bool>(),
+        default(),
+        any::<bool>(),
+        array_default(),
+    )
+        .prop_map(
+            |(postgres, opensearch, column, nullable, default, array, array_default)| {
+                let default = if array { array_default } else { default };
+                FieldSource::Column(Column {
+                    column,
+                    ty: FlussoType::Custom {
+                        postgres: postgres.into_iter().map(String::from).collect(),
+                        opensearch: opensearch.to_string(),
+                    },
+                    nullable,
+                    transforms: Vec::new(),
+                    default,
+                    enum_order: Vec::new(),
+                    subfields: true,
+                    indexed: true,
+                    array,
+                })
+            },
+        )
         .boxed()
 }
 fn constant_source() -> BoxedStrategy<FieldSource> {

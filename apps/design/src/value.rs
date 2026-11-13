@@ -16,8 +16,9 @@
 //! Nesting deeper than [`MAX_DEPTH`] is [`ValueProblem::TooDeep`].
 //!
 //! Each [`ValueSlot`] has the parser's own rules: a column `default` must be a
-//! scalar ([`ValueProblem::NotScalar`]); a `constant` and an option take any
-//! value. The result is the value after one real round trip in its slot
+//! scalar ([`ValueProblem::NotScalar`]); an array column's `default` a list
+//! ([`ValueProblem::NotAList`]) with no null in it
+//! ([`ValueProblem::NullElement`]); a `constant` and an option take any value. The result is the value after one real round trip in its slot
 //! (codegen, then the parser), so the preview and the content hash are computed
 //! from what the file reads. [`read`] also says how the file spells it, when
 //! that differs from what was typed (`1e3` is saved as `1000.0`, ` 5 ` as `5`).
@@ -59,6 +60,8 @@ pub enum ValueSlot {
     Constant,
     /// A column's `default`: a scalar or `null`.
     Default,
+    /// An array column's `default`: a list of non-null values.
+    ArrayDefault,
     /// A field's `options` entry: any value.
     Option,
 }
@@ -88,6 +91,11 @@ pub enum ValueProblem {
     TooDeep { limit: usize },
     /// A list or object where the file takes only a scalar (a `default`).
     NotScalar,
+    /// Anything but a list where the file takes a list (an array column's
+    /// `default`).
+    NotAList,
+    /// A `null` inside an array column's `default`.
+    NullElement,
     /// The value would read back as something else (a codegen defect).
     ReadsBackDifferently,
 }
@@ -157,6 +165,14 @@ fn read_back(value: &GenericValue, slot: ValueSlot) -> Result<GenericValue, Valu
     {
         return Err(ValueProblem::NotScalar);
     }
+    if slot == ValueSlot::ArrayDefault {
+        let GenericValue::Array(items) = value else {
+            return Err(ValueProblem::NotAList);
+        };
+        if items.iter().any(|item| matches!(item, GenericValue::Null)) {
+            return Err(ValueProblem::NullElement);
+        }
+    }
     let mut schema = carrier(slot).ok_or(ValueProblem::ReadsBackDifferently)?;
     let field = schema
         .fields
@@ -183,6 +199,7 @@ fn carrier(slot: ValueSlot) -> Option<IndexSchema> {
     let field = match slot {
         ValueSlot::Constant => "- constant: c\n  value: null\n",
         ValueSlot::Default | ValueSlot::Option => "- boolean: c\n  required: false\n",
+        ValueSlot::ArrayDefault => "- json: c\n  required: false\n  array: true\n",
     };
     let yaml = format!("version: 1\ntable: t\nprimary_key: id\nfields:\n{field}");
     IndexSchema::try_from(SchemaYaml::try_parse(&yaml).ok()?).ok()
@@ -191,8 +208,10 @@ fn carrier(slot: ValueSlot) -> Option<IndexSchema> {
 fn put(field: &mut kernel::Field, slot: ValueSlot, value: GenericValue) {
     match (slot, &mut field.source) {
         (ValueSlot::Constant, source) => *source = FieldSource::Constant(value),
-        (ValueSlot::Default, FieldSource::Column(column)) => column.default = Some(value),
-        (ValueSlot::Default, _) => {}
+        (ValueSlot::Default | ValueSlot::ArrayDefault, FieldSource::Column(column)) => {
+            column.default = Some(value);
+        }
+        (ValueSlot::Default | ValueSlot::ArrayDefault, _) => {}
         (ValueSlot::Option, _) => {
             field.options.insert(OPTION_KEY.to_owned(), value);
         }
@@ -202,7 +221,7 @@ fn put(field: &mut kernel::Field, slot: ValueSlot, value: GenericValue) {
 fn get(mut field: kernel::Field, slot: ValueSlot) -> Option<GenericValue> {
     match (slot, field.source) {
         (ValueSlot::Constant, FieldSource::Constant(value)) => Some(value),
-        (ValueSlot::Default, FieldSource::Column(column)) => {
+        (ValueSlot::Default | ValueSlot::ArrayDefault, FieldSource::Column(column)) => {
             Some(column.default.unwrap_or(GenericValue::Null))
         }
         (ValueSlot::Option, _) => field.options.remove(OPTION_KEY),
@@ -714,6 +733,22 @@ mod tests {
                 read_typed(text)
             );
         }
+    }
+
+    #[test]
+    fn an_array_default_takes_a_list_without_nulls() {
+        let default = |text: &str| super::read_typed(text, ValueSlot::ArrayDefault);
+        assert_eq!(default("5"), Err(ValueProblem::NotAList));
+        assert_eq!(default(r#"{"a": 1}"#), Err(ValueProblem::NotAList));
+        assert_eq!(default(r#"["a", null]"#), Err(ValueProblem::NullElement));
+        assert_eq!(
+            default(r#"["a", 1]"#),
+            Ok(GenericValue::Array(vec![
+                GenericValue::String("a".to_owned()),
+                GenericValue::BigInt(1)
+            ]))
+        );
+        assert_eq!(default("[]"), Ok(GenericValue::Array(Vec::new())));
     }
 
     #[test]

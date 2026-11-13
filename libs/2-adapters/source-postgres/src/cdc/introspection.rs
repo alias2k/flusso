@@ -226,13 +226,14 @@ fn database_schema(raw: &str) -> Result<DatabaseSchema> {
 
 /// Map a Postgres native type (as `format_type` spells it) to the flusso field
 /// type a designer would most likely pick, or `None` when the choice is
-/// genuinely the user's (`text`-vs-`keyword`, an enum, an array, an unknown
-/// user type). Array types (`[]`) and types flusso has no scalar for return
-/// `None` so the designer surfaces the decision rather than guessing wrong.
+/// genuinely the user's (an enum, an unknown user type). An array type (`[]`)
+/// suggests its element's type: the field declares `array: true` beside it.
+/// Types flusso has no scalar for return `None` so the designer surfaces the
+/// decision rather than guessing wrong.
 fn suggest_type(sql_type: &str) -> Option<FlussoType> {
     let lower = sql_type.trim().to_ascii_lowercase();
-    if lower.ends_with("[]") {
-        return None;
+    if let Some(element) = lower.strip_suffix("[]") {
+        return suggest_type(element);
     }
     // Strip a type modifier like `(255)` / `(10,2)` and any schema qualifier.
     let base = lower
@@ -289,8 +290,17 @@ mod tests {
     }
 
     #[test]
+    fn an_array_suggests_its_element_type() {
+        assert_eq!(suggest_type("integer[]"), Some(FlussoType::Integer));
+        assert_eq!(
+            suggest_type("character varying(20)[]"),
+            Some(FlussoType::Keyword)
+        );
+        assert_eq!(suggest_type("my_enum[]"), None);
+    }
+
+    #[test]
     fn leaves_ambiguous_types_unsuggested() {
-        assert_eq!(suggest_type("integer[]"), None);
         assert_eq!(suggest_type("time without time zone"), None);
         assert_eq!(suggest_type("my_enum"), None);
     }

@@ -317,6 +317,10 @@ export const it: Record<string, string> = {
   "inspector.scriptHint":
     "Rhai. `this` è l'oggetto a questo livello (un elemento dentro un has_many), `root` l'intero documento. Restituisci il tipo del campo, oppure () per null.",
   "inspector.scriptArray": "Restituisce un array",
+  "inspector.columnArray": "Array",
+  "inspector.columnArrayOn":
+    "La colonna contiene un array (text[], un array json): ogni elemento viene indicizzato, i null vengono scartati, un valore singolo viene racchiuso in un array. Le trasformazioni si applicano a ogni elemento; il default è una lista.",
+  "inspector.columnArrayOff": "La colonna contiene un solo valore.",
   "inspector.scriptEmpty": "Scrivi lo script che calcola questo campo.",
   "inspector.softDelete": "eliminazione logica",
   "inspector.documentField": "campo del documento",
@@ -358,6 +362,8 @@ export const it: Record<string, string> = {
     "Liste e oggetti sono annidati oltre {limit} livelli, più di quanti il file dello schema ne rilegga.",
   "value.notScalar":
     "Un default accetta un solo valore: testo, un numero, true, false o null, non una lista né un oggetto.",
+  "value.notAList": 'Il default di un campo array è una lista, come ["general"].',
+  "value.nullElement": "Una lista di default non può contenere null: i null vengono scartati da un campo array.",
   "value.unchecked": "Non è stato possibile verificarlo, quindi non è ancora nello schema. Il salvataggio riprova.",
   "value.unreadSave":
     "Non salvato: non è stato possibile verificare il valore inserito in {fields}. Controlla che il designer sia ancora in esecuzione, poi salva di nuovo.",
